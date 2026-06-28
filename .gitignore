@@ -1,0 +1,6 @@
+bin/
+obj/
+.portHorizon/
+*.user
+*.suo
+.DS_Store
