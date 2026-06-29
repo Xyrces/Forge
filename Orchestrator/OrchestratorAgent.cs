@@ -144,17 +144,27 @@ public sealed class OrchestratorAgent : IAgent
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AcpSessionStarted,
                 claimed.Id, $"session={newSession.SessionId} role={roleAgent.KiloAgentName}"));
             var prompt = BuildPrompt(claimedRefresh, roleAgent, worktreePath, branch, _workspaceOptions.DefaultBranch);
-            var result = await session.PromptAsync(prompt, cancellationToken);
+
+            // Capture the prompt result in metadata so the dashboard can show
+            // what the agent said even when downstream steps fail. Capture
+            // BEFORE we use `result` so the failure path doesn't lose it.
+            PromptResult result;
+            try
+            {
+                result = await session.PromptAsync(prompt, cancellationToken);
+            }
+            catch (Exception promptEx)
+            {
+                await RecordModelResponseMetadataAsync(claimed.Id, error: $"prompt-threw: {promptEx.GetType().Name}: {promptEx.Message}", ct: cancellationToken);
+                throw;
+            }
+            await RecordModelResponseMetadataAsync(claimed.Id, response: result.Response, ct: cancellationToken);
+
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AcpSessionCompleted,
                 claimed.Id, $"elapsed={session.Elapsed.TotalMilliseconds:F0}ms",
                 new Dictionary<string, object?> { ["sessionId"] = newSession.SessionId, ["elapsedMs"] = session.Elapsed.TotalMilliseconds }));
             _logger.LogInformation("ACP session for {Id} completed in {Ms}ms",
                 claimed.Id, session.Elapsed.TotalMilliseconds);
-
-            await UpdateMetadataAsync(claimed.Id, m => MergeDict(m, new Dictionary<string, object>
-            {
-                ["modelResponse"] = Truncate(result.Response ?? "", 2000),
-            }), cancellationToken);
 
             var commit = await _worktrees.CommitAllAsync(worktreePath, $"Task({claimed.Id}): {claimed.Title}", cancellationToken);
             if (!commit.HasChanges)
@@ -258,6 +268,27 @@ public sealed class OrchestratorAgent : IAgent
                 ["taskId"] = devIssueId,
             }), ct);
         _logger.LogInformation("Enqueued watch issue {Id} for PR #{PrNumber}", watch.Id, prNumber);
+    }
+
+    private async Task RecordModelResponseMetadataAsync(string id, string? response = null, string? error = null, CancellationToken ct = default)
+    {
+        try
+        {
+            var current = await _issues.GetAsync(id, ct);
+            if (current is null) return;
+            await _issues.TransitionAsync(id, current.Status,
+                error: error ?? current.GetMetadata("lastError"),
+                metadata: new Dictionary<string, object>
+                {
+                    ["modelResponse"] = Truncate(response ?? "", 2000),
+                    ["lastError"] = error ?? current.GetMetadata("lastError") ?? "",
+                },
+                ct: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to record modelResponse metadata for {Id}", id);
+        }
     }
 
     private async Task UpdateMetadataAsync(string id, Func<Dictionary<string, object>, Dictionary<string, object>> mutate, CancellationToken ct)
