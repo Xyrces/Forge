@@ -398,6 +398,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // Connection pooling handles cleanup; nothing to do explicitly.
         await ValueTask.CompletedTask;
     }
+
+    public void Dispose() { /* pooled connections */ }
 }
 
 public sealed record IssueEventRecord(

@@ -12,16 +12,16 @@ namespace PortHorizon.Agents.Dashboard;
 public sealed class DashboardHost : IAsyncDisposable
 {
     private readonly DashboardOptions _options;
-    private readonly StateStore _state;
+    private readonly IIssueStore _issues;
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
 
-    public DashboardHost(DashboardOptions options, StateStore state, InMemoryDashboardEventBus bus, ILogger<DashboardHost> logger)
+    public DashboardHost(DashboardOptions options, IIssueStore issues, InMemoryDashboardEventBus bus, ILogger<DashboardHost> logger)
     {
         _options = options;
-        _state = state;
+        _issues = issues;
         _bus = bus;
         _logger = logger;
     }
@@ -47,8 +47,29 @@ public sealed class DashboardHost : IAsyncDisposable
         {
             try
             {
-                var state = await _state.LoadStateAsync(ct);
-                return Results.Json(state, DashboardJson.Options);
+                var tasks = await _issues.ListAsync(new IssueFilter(), ct);
+                var view = new
+                {
+                    tasks = tasks.Select(t => new
+                    {
+                        id = t.Id,
+                        type = t.Type,
+                        title = t.Title,
+                        description = t.Description,
+                        status = t.Status.ToString(),
+                        priority = t.Priority,
+                        assignee = t.Assignee,
+                        createdAt = t.CreatedAt,
+                        updatedAt = t.UpdatedAt,
+                        closedAt = t.ClosedAt,
+                        parameters = ParseMetadata(t.MetadataJson)
+                    }).ToArray(),
+                    lastHeartbeat = DateTime.UtcNow,
+                    completedTasks = tasks.Count(t => t.Status == IssueStatus.Completed),
+                    failedTasks = tasks.Count(t => t.Status == IssueStatus.Failed),
+                    schemaVersion = 2
+                };
+                return Results.Json(view, DashboardJson.Options);
             }
             catch (Exception ex)
             {
@@ -110,6 +131,20 @@ public sealed class DashboardHost : IAsyncDisposable
     });
 
     private static string GetEmbeddedHtml() => _embeddedHtml.Value;
+
+    private static Dictionary<string, object> ParseMetadata(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return new();
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, object>>(json, DashboardJson.Options)
+                   ?? new();
+        }
+        catch
+        {
+            return new();
+        }
+    }
 
     public async Task StopAsync()
     {

@@ -12,7 +12,7 @@ public sealed class PRWatcher
 {
     private readonly GitHubService _gitHub;
     private readonly GitWorktreeService _worktrees;
-    private readonly StateStore _state;
+    private readonly IIssueStore _issues;
     private readonly TimeSpan _pollInterval;
     private readonly TimeSpan _staleAfter;
     private readonly ILogger<PRWatcher> _logger;
@@ -21,7 +21,7 @@ public sealed class PRWatcher
     public PRWatcher(
         GitHubService gitHub,
         GitWorktreeService worktrees,
-        StateStore state,
+        IIssueStore issues,
         TimeSpan pollInterval,
         TimeSpan staleAfter,
         IDashboardEventBus events,
@@ -29,25 +29,26 @@ public sealed class PRWatcher
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
-        _state = state;
+        _issues = issues;
         _pollInterval = pollInterval;
         _staleAfter = staleAfter;
         _events = events;
         _logger = logger;
     }
 
-    public async Task<int> ProcessWatchTaskAsync(AgentTask watchTask, CancellationToken cancellationToken)
+    public async Task<int> ProcessWatchTaskAsync(IssueRecord watchTask, CancellationToken cancellationToken)
     {
-        if (!int.TryParse(watchTask.Parameters.GetValueOrDefault("prNumber")?.ToString(), out var prNumber))
+        var prText = watchTask.GetMetadata("prNumber");
+        if (!int.TryParse(prText, out var prNumber))
         {
-            _logger.LogError("Watch task {TaskId} missing prNumber", watchTask.Id);
-            await MarkCompletedAsync(watchTask, error: "missing prNumber", cancellationToken);
+            _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
             return 1;
         }
 
-        var taskId = watchTask.Parameters.GetValueOrDefault("taskId")?.ToString() ?? watchTask.Id;
-        var branch = watchTask.Parameters.GetValueOrDefault("branch")?.ToString() ?? watchTask.Branch;
-        var worktreePath = watchTask.Parameters.GetValueOrDefault("worktreePath")?.ToString();
+        var taskId = watchTask.GetMetadata("taskId") ?? watchTask.Id;
+        var branch = watchTask.GetMetadata("branch") ?? watchTask.Title;
+        var worktreePath = watchTask.GetMetadata("worktreePath");
 
         var startedAt = DateTime.UtcNow;
         while (!cancellationToken.IsCancellationRequested)
@@ -55,8 +56,8 @@ public sealed class PRWatcher
             if (DateTime.UtcNow - startedAt > _staleAfter)
             {
                 _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
-                await MarkTaskAsync(taskId, AgentTaskStatus.Failed, "pr-stale", cancellationToken);
-                await MarkCompletedAsync(watchTask, error: "pr-stale", cancellationToken);
+                await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
+                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
                 await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
                 return 124;
             }
@@ -76,8 +77,8 @@ public sealed class PRWatcher
                     if (merged)
                     {
                         await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-                        await MarkTaskAsync(taskId, AgentTaskStatus.Completed, null, cancellationToken);
-                        await MarkCompletedAsync(watchTask, error: null, cancellationToken);
+                        await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+                        await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
                         await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
                         _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                             taskId, $"PR #{prNumber} merged and branch deleted"));
@@ -88,18 +89,16 @@ public sealed class PRWatcher
                     break;
 
                 case ReviewVerdict.GreenChangesRequested:
-                    await MarkTaskAsync(taskId, AgentTaskStatus.Blocked,
-                        "Reviewer requested changes", cancellationToken);
-                    await MarkCompletedAsync(watchTask, error: "changes-requested", cancellationToken);
+                    await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "Reviewer requested changes", ct: cancellationToken);
+                    await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "changes-requested", ct: cancellationToken);
                     _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrChangesRequested,
                         taskId, $"PR #{prNumber} marked Blocked (changes requested)"));
                     _logger.LogInformation("PR #{PrNumber} marked Blocked (changes requested)", prNumber);
                     return 0;
 
                 case ReviewVerdict.CiFailed:
-                    await MarkTaskAsync(taskId, AgentTaskStatus.Failed,
-                        $"CI failed for {sha}: {ci}", cancellationToken);
-                    await MarkCompletedAsync(watchTask, error: "ci-failed", cancellationToken);
+                    await _issues.TransitionAsync(taskId, IssueStatus.Failed, $"CI failed for {sha}: {ci}", ct: cancellationToken);
+                    await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "ci-failed", ct: cancellationToken);
                     await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
                     _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrFailed,
                         taskId, $"PR #{prNumber} CI failed ({ci})"));
@@ -135,39 +134,6 @@ public sealed class PRWatcher
             (Success, _, true) => ReviewVerdict.GreenChangesRequested,
             _ => ReviewVerdict.Pending
         };
-    }
-
-    private async Task MarkTaskAsync(string taskId, AgentTaskStatus status, string? error, CancellationToken ct)
-    {
-        var state = await _state.LoadStateAsync(ct);
-        var idx = state.Tasks.FindIndex(t => t.Id == taskId);
-        if (idx < 0) return;
-        var task = state.Tasks[idx];
-        var newTask = (status, task.CompletedAt) switch
-        {
-            (AgentTaskStatus.Completed or AgentTaskStatus.Failed or AgentTaskStatus.Blocked, _) =>
-                task with { Status = status, Error = error, UpdatedAt = DateTime.UtcNow, CompletedAt = DateTime.UtcNow },
-            _ => task with { Status = status, Error = error, UpdatedAt = DateTime.UtcNow },
-        };
-        state.Tasks[idx] = newTask;
-        if (status == AgentTaskStatus.Completed) state.CompletedTasks++;
-        if (status == AgentTaskStatus.Failed) state.FailedTasks++;
-        await _state.SaveStateAsync(state, ct);
-    }
-
-    private async Task MarkCompletedAsync(AgentTask watchTask, string? error, CancellationToken ct)
-    {
-        var state = await _state.LoadStateAsync(ct);
-        var idx = state.Tasks.FindIndex(t => t.Id == watchTask.Id);
-        if (idx < 0) return;
-        state.Tasks[idx] = watchTask with
-        {
-            Status = error is null ? AgentTaskStatus.Completed : AgentTaskStatus.Failed,
-            Error = error,
-            UpdatedAt = DateTime.UtcNow,
-            CompletedAt = DateTime.UtcNow
-        };
-        await _state.SaveStateAsync(state, ct);
     }
 
     private async Task TryRemoveWorktreeAsync(string? worktreePath, CancellationToken ct)

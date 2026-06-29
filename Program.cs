@@ -80,16 +80,17 @@ public static class Program
 
     private static async Task<int> PrintStatusAsync(AgentOptions options, ILogger logger)
     {
-        var stateStore = new StateStore();
+        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
         try
         {
-            var state = await stateStore.LoadStateAsync();
-            Console.WriteLine($"Pending: {state.Tasks.Count(t => t.Status == AgentTaskStatus.Pending)}");
-            Console.WriteLine($"InProgress: {state.Tasks.Count(t => t.Status == AgentTaskStatus.InProgress)}");
-            Console.WriteLine($"Completed: {state.Tasks.Count(t => t.Status == AgentTaskStatus.Completed)}");
-            Console.WriteLine($"Failed: {state.Tasks.Count(t => t.Status == AgentTaskStatus.Failed)}");
-            Console.WriteLine($"Blocked: {state.Tasks.Count(t => t.Status == AgentTaskStatus.Blocked)}");
-            Console.WriteLine($"Total: {state.Tasks.Count}");
+            var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+            var all = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
+            Console.WriteLine($"Pending:    {all.Count(i => i.Status == IssueStatus.Pending)}");
+            Console.WriteLine($"InProgress: {all.Count(i => i.Status == IssueStatus.InProgress)}");
+            Console.WriteLine($"Completed:  {all.Count(i => i.Status == IssueStatus.Completed)}");
+            Console.WriteLine($"Failed:     {all.Count(i => i.Status == IssueStatus.Failed)}");
+            Console.WriteLine($"Blocked:    {all.Count(i => i.Status == IssueStatus.Blocked)}");
+            Console.WriteLine($"Total:      {all.Count}");
             return 0;
         }
         catch (Exception ex)
@@ -101,41 +102,71 @@ public static class Program
 
     private static async Task<int> EnqueueTaskAsync(string[] args, AgentOptions options)
     {
-        var taskId = ParseArg(args, "--enqueue-task")
-            ?? Guid.NewGuid().ToString("N")[..12];
+        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
+        var title = ParseArg(args, "--enqueue-task")
+            ?? $"task-{Guid.NewGuid().ToString("N")[..8]}";
         var type = ParseArg(args, "--task-type") ?? "ecs";
         var description = ParseArg(args, "--task-desc") ?? "no description";
-        var branch = ParseArg(args, "--branch") ?? $"agent/{taskId}";
+        var branch = ParseArg(args, "--branch") ?? $"agent/{title}";
 
-        var stateStore = new StateStore();
-        var state = await stateStore.LoadStateAsync();
-        if (state.Tasks.Any(t => t.Id == taskId))
+        var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+
+        // Stable, caller-supplied id: prefer explicit --task-id, else slugify the title.
+        var explicitId = ParseArg(args, "--task-id");
+        var shortId = explicitId ?? Slugify(title);
+        if (string.IsNullOrEmpty(shortId)) shortId = Guid.NewGuid().ToString("N")[..8];
+
+        var metadata = new Dictionary<string, object> { ["branch"] = branch };
+
+        try
         {
-            Console.Error.WriteLine($"Task {taskId} already exists");
+            var issue = await issues.CreateAsync(new NewIssue(
+                Type: type,
+                Title: title,
+                Description: description,
+                Metadata: metadata), CancellationToken.None);
+
+            // Override the auto id with the requested short id so callers can
+            // reference their own chosen ids. Easiest is to rename the row.
+            if (issue.ShortId != shortId)
+            {
+                // IssueStore assigned task-N; we just record the requested id
+                // as an alias under task-<shortId>. For P0 we use the
+                // auto-assigned id and warn if it differs.
+                Console.Error.WriteLine($"Warning: --task-id ignored (IssueStore assigned {issue.Id}). Use the assigned id.");
+            }
+
+            Console.WriteLine($"Enqueued {issue.Id} ({type}): {title}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Enqueue failed: {ex.Message}");
             return 1;
         }
-        state.Tasks.Add(new AgentTask(
-            Id: taskId,
-            Type: type,
-            Description: description,
-            Parameters: new Dictionary<string, object>(StringComparer.Ordinal),
-            Branch: branch,
-            Status: AgentTaskStatus.Pending,
-            Error: null,
-            CreatedAt: DateTime.UtcNow));
-        await stateStore.SaveStateAsync(state);
-        Console.WriteLine($"Enqueued task {taskId} (type={type})");
-        return 0;
+    }
+
+    private static string Slugify(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var ch in s)
+            sb.Append(char.IsLetterOrDigit(ch) ? char.ToLowerInvariant(ch) : '-');
+        var cleaned = sb.ToString().Trim('-');
+        return cleaned.Length == 0 || cleaned.Length > 40 ? cleaned[..Math.Min(40, cleaned.Length)] : cleaned;
     }
 
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
-        var stateStore = new StateStore();
+        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
+        var stateStore = new StateStore(Path.Combine(workspaceDir, ".portHorizon", "state"));
+        var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
         var eventBus = new InMemoryDashboardEventBus();
         var dashboard = new DashboardHost(
-            options.Dashboard, stateStore, eventBus,
+            options.Dashboard, issues, eventBus,
             loggerFactory.CreateLogger<DashboardHost>());
+
+        _ = stateStore; // keep dead-code-elim happy; will remove in next commit
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -213,7 +244,9 @@ public static class Program
     private static async Task<int> RunOrchestratorAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
-        var stateStore = new StateStore();
+        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
+        var stateStore = new StateStore(Path.Combine(workspaceDir, ".portHorizon", "state"));
+        var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
         var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
         var gitHub = new GitHubService(options.GitHub);
         var acpManager = new AcpProcessManager(
@@ -222,16 +255,17 @@ public static class Program
         var roleRegistry = new RoleAgentRegistry();
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
-            gitHub, worktrees, stateStore,
+            gitHub, worktrees, issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30),
             eventBus,
             loggerFactory.CreateLogger<PRWatcher>());
         var orchestrator = new OrchestratorAgent(
-            acpManager, roleRegistry, worktrees, gitHub, prWatcher, stateStore, options,
+            acpManager, roleRegistry, worktrees, gitHub, prWatcher, issues,
             eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>());
+        orchestrator.BindOptions(options);
         var dashboard = new DashboardHost(
-            options.Dashboard, stateStore, eventBus,
+            options.Dashboard, issues, eventBus,
             loggerFactory.CreateLogger<DashboardHost>());
 
         using var shutdownCts = new CancellationTokenSource();
