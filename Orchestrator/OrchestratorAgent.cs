@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PortHorizon.Agents.Acp;
 using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Agents;
@@ -17,6 +17,9 @@ public sealed class OrchestratorAgent : IAgent
     private readonly GitHubService _gitHub;
     private readonly PRWatcher _prWatcher;
     private readonly IIssueStore _issues;
+    private readonly IAgentStore _agents;
+    private readonly ISprintStore _sprints;
+    private readonly AgentMessageBus _messageBus;
     private SpawnerOptions _spawnerOptions = new();
     private WorkspaceOptions _workspaceOptions = new();
     private readonly ILogger<OrchestratorAgent> _logger;
@@ -36,6 +39,9 @@ public sealed class OrchestratorAgent : IAgent
         GitHubService gitHub,
         PRWatcher prWatcher,
         IIssueStore issues,
+        IAgentStore agents,
+        ISprintStore sprints,
+        AgentMessageBus messageBus,
         IDashboardEventBus events,
         ILogger<OrchestratorAgent> logger)
     {
@@ -45,6 +51,9 @@ public sealed class OrchestratorAgent : IAgent
         _gitHub = gitHub;
         _prWatcher = prWatcher;
         _issues = issues;
+        _agents = agents;
+        _sprints = sprints;
+        _messageBus = messageBus;
         _events = events;
         _logger = logger;
         _concurrencyLimiter = new SemaphoreSlim(4);
@@ -79,7 +88,9 @@ public sealed class OrchestratorAgent : IAgent
 
     private async Task DispatchCycleAsync(CancellationToken cancellationToken)
     {
-        var ready = await _issues.ReadyAsync(_spawnerOptions.MaxConcurrentSessions, cancellationToken);
+        var activeSprint = await _sprints.GetActiveAsync(cancellationToken);
+        var sprintId = activeSprint?.Id;
+        var ready = await _issues.ReadyAsync(_spawnerOptions.MaxConcurrentSessions, sprintId, cancellationToken);
 
         var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
         foreach (var watch in watchTasks)
@@ -143,7 +154,11 @@ public sealed class OrchestratorAgent : IAgent
             var session = new AcpSession(client, newSession.SessionId, worktreePath, roleAgent.KiloAgentName);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AcpSessionStarted,
                 claimed.Id, $"session={newSession.SessionId} role={roleAgent.KiloAgentName}"));
-            var prompt = BuildPrompt(claimedRefresh, roleAgent, worktreePath, branch, _workspaceOptions.DefaultBranch);
+            var basePrompt = BuildPrompt(claimedRefresh, roleAgent, worktreePath, branch, _workspaceOptions.DefaultBranch);
+            var queued = _messageBus.Drain(roleAgent.KiloAgentName);
+            var prompt = string.IsNullOrEmpty(queued)
+                ? basePrompt
+                : basePrompt + "\n\n## Operator messages\n" + queued + "\n\nAddress these messages before working on the task.";
 
             // Capture the prompt result in metadata so the dashboard can show
             // what the agent said even when downstream steps fail. Capture
@@ -376,3 +391,9 @@ public sealed class OrchestratorAgent : IAgent
         => string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max] + "...";
 
 }
+
+
+
+
+
+

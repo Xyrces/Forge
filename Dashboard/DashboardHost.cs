@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.StaticFiles;
@@ -6,6 +6,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PortHorizon.Agents.Configuration;
 using PortHorizon.Agents.Core;
+using PortHorizon.Agents.Orchestrator;
 
 namespace PortHorizon.Agents.Dashboard;
 
@@ -13,15 +14,23 @@ public sealed class DashboardHost : IAsyncDisposable
 {
     private readonly DashboardOptions _options;
     private readonly IIssueStore _issues;
+    private readonly IAgentStore _agents;
+    private readonly ISkillStore _skills;
+    private readonly ISprintStore _sprints;
+    private readonly AgentMessageBus _messageBus;
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
 
-    public DashboardHost(DashboardOptions options, IIssueStore issues, InMemoryDashboardEventBus bus, ILogger<DashboardHost> logger)
+    public DashboardHost(DashboardOptions options, IIssueStore issues, IAgentStore agents, ISkillStore skills, ISprintStore sprints, AgentMessageBus messageBus, InMemoryDashboardEventBus bus, ILogger<DashboardHost> logger)
     {
         _options = options;
         _issues = issues;
+        _agents = agents;
+        _skills = skills;
+        _sprints = sprints;
+        _messageBus = messageBus;
         _bus = bus;
         _logger = logger;
     }
@@ -170,3 +179,5 @@ internal static class DashboardJson
         Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
     };
 }
+
+

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PortHorizon.Agents.Acp;
 using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Agents;
@@ -161,9 +161,13 @@ public static class Program
         var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
         var stateStore = new StateStore(Path.Combine(workspaceDir, ".portHorizon", "state"));
         var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+        var agents = new AgentStore(issues);
+        var skills = new SkillStore(issues);
+        var sprints = new SprintStore(issues);
+        var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
         var dashboard = new DashboardHost(
-            options.Dashboard, issues, eventBus,
+            options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>());
 
         _ = stateStore; // keep dead-code-elim happy; will remove in next commit
@@ -247,6 +251,10 @@ public static class Program
         var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
         var stateStore = new StateStore(Path.Combine(workspaceDir, ".portHorizon", "state"));
         var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+        var agents = new AgentStore(issues);
+        var skills = new SkillStore(issues);
+        var sprints = new SprintStore(issues);
+        var messageBus = new AgentMessageBus();
         var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
         var gitHub = new GitHubService(options.GitHub);
         var acpManager = new AcpProcessManager(
@@ -261,11 +269,12 @@ public static class Program
             loggerFactory.CreateLogger<PRWatcher>());
         var orchestrator = new OrchestratorAgent(
             acpManager, roleRegistry, worktrees, gitHub, prWatcher, issues,
+            agents, sprints, messageBus,
             eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>());
         orchestrator.BindOptions(options);
         var dashboard = new DashboardHost(
-            options.Dashboard, issues, eventBus,
+            options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>());
 
         using var shutdownCts = new CancellationTokenSource();
@@ -317,3 +326,4 @@ public static class Program
         }
     }
 }
+

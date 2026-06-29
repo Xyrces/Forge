@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+﻿using Microsoft.Data.Sqlite;
 using System.Text.Json;
 
 namespace PortHorizon.Agents.Core;
@@ -62,6 +62,7 @@ public interface IIssueStore
     Task<IssueRecord> CreateAsync(NewIssue spec, CancellationToken ct = default);
     Task<IReadOnlyList<IssueRecord>> ListAsync(IssueFilter filter, CancellationToken ct = default);
     Task<IReadOnlyList<IssueRecord>> ReadyAsync(int limit, CancellationToken ct = default);
+    Task<IReadOnlyList<IssueRecord>> ReadyAsync(int limit, string? sprintId, CancellationToken ct = default);
     Task<IssueRecord?> ClaimAsync(string id, string assignee, CancellationToken ct = default);
     Task<IssueRecord> TransitionAsync(string id, IssueStatus to, string? error, IDictionary<string, object>? metadata = null, CancellationToken ct = default);
     Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default);
@@ -79,7 +80,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -147,6 +148,55 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 applied_at TEXT NOT NULL
             );
 
+            
+            -- v2 tables: agent, skill, sprint, sprint_issue
+            CREATE TABLE IF NOT EXISTS agent (
+                id           TEXT PRIMARY KEY,
+                kilo_name    TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                scope        TEXT NOT NULL DEFAULT '',
+                description  TEXT,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                config_json  TEXT NOT NULL DEFAULT '{}',
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS skill (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                description  TEXT,
+                body         TEXT NOT NULL,
+                agent_id     TEXT REFERENCES agent(id) ON DELETE CASCADE,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL,
+                UNIQUE (name, agent_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_skill_agent ON skill(agent_id);
+
+            CREATE TABLE IF NOT EXISTS sprint (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                goal         TEXT NOT NULL,
+                start_date   TEXT NOT NULL,
+                end_date     TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'active',
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_sprint_status ON sprint(status);
+
+            CREATE TABLE IF NOT EXISTS sprint_issue (
+                sprint_id   TEXT NOT NULL REFERENCES sprint(id) ON DELETE CASCADE,
+                issue_id    TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+                added_at    TEXT NOT NULL,
+                PRIMARY KEY (sprint_id, issue_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_sprint_issue_sprint ON sprint_issue(sprint_id);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_sprint_active
+                ON sprint(status) WHERE status = 'active';
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);
             """;
@@ -226,10 +276,36 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     }
 
     public async Task<IReadOnlyList<IssueRecord>> ReadyAsync(int limit, CancellationToken ct = default)
+        => await ReadyAsync(limit, sprintId: null, ct);
+
+    /// <summary>
+    /// Returns Pending issues, optionally filtered to those in a sprint.
+    /// Pass null for sprintId to fall back to "all Pending" (no sprint filter).
+    /// </summary>
+    public async Task<IReadOnlyList<IssueRecord>> ReadyAsync(int limit, string? sprintId, CancellationToken ct = default)
     {
-        // No dependency graph yet (phase 1) — every Pending issue is ready.
-        var pending = await ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
-        return limit > 0 ? pending.Take(limit).ToList() : pending;
+        if (sprintId is null)
+        {
+            var pending = await ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
+            return limit > 0 ? pending.Take(limit).ToList() : pending;
+        }
+
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT i.id, i.short_id, i.type, i.title, i.description, i.status, i.priority, i.assignee,
+                   i.created_at, i.updated_at, i.closed_at, i.metadata_json
+            FROM issue i
+            INNER JOIN sprint_issue si ON i.id = si.issue_id
+            WHERE i.status = 'Pending' AND si.sprint_id = $sid
+            ORDER BY i.priority ASC, i.created_at ASC
+            """;
+        cmd.Parameters.AddWithValue("$sid", sprintId);
+        var list = new List<IssueRecord>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct)) list.Add(ReadIssue(rd));
+        return limit > 0 ? list.Take(limit).ToList() : list;
     }
 
     public async Task<IssueRecord?> ClaimAsync(string id, string assignee, CancellationToken ct = default)
@@ -393,6 +469,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         return JsonSerializer.Serialize(merged);
     }
 
+    public string ConnectionString => _connectionString;
+
+    public static string DateFormatTime(DateTime dt) => dt.ToString(DateFormat, System.Globalization.CultureInfo.InvariantCulture);
+    public static DateTime ParseTime(string s) => DateTime.ParseExact(s, DateFormat, System.Globalization.CultureInfo.InvariantCulture);
+
     public async ValueTask DisposeAsync()
     {
         // Connection pooling handles cleanup; nothing to do explicitly.
@@ -409,3 +490,13 @@ public sealed record IssueEventRecord(
     string Actor,
     string Kind,
     string? Detail);
+
+
+
+
+
+
+
+
+
+
