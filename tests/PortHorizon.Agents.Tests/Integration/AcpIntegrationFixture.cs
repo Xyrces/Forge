@@ -1,7 +1,5 @@
 using System.Diagnostics;
 using System.Net;
-using System.Net.Sockets;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PortHorizon.Agents.Acp;
 using Xunit;
@@ -9,14 +7,14 @@ using Xunit;
 namespace PortHorizon.Agents.Tests.Integration;
 
 /// <summary>
-/// xUnit fixture that spawns a real <c>kilo acp</c> server on an ephemeral port and
+/// xUnit fixture that spawns a real <c>kilo serve</c> on an ephemeral port and
 /// hands out fresh <see cref="AcpClient"/> connections on demand. Skips gracefully
-/// (marks tests inconclusive) if <c>kilo</c> is not on PATH.
+/// if <c>kilo</c> is not on PATH or if the server fails to bind.
 /// </summary>
 public sealed class AcpIntegrationFixture : IAsyncLifetime
 {
     private const string KiloExecutable = "kilo";
-    private const int WaitForBindTimeoutMs = 15_000;
+    private const int WaitForReadyTimeoutMs = 25_000;
 
     private Process? _server;
     private string? _kiloPath;
@@ -40,6 +38,7 @@ public sealed class AcpIntegrationFixture : IAsyncLifetime
             return;
         }
 
+        _port = PickEphemeralPort();
         var (fileName, args) = ResolveKiloInvocation(_kiloPath);
 
         var psi = new ProcessStartInfo
@@ -53,47 +52,39 @@ public sealed class AcpIntegrationFixture : IAsyncLifetime
         };
 
         _server = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start kilo acp server");
+            ?? throw new InvalidOperationException("Failed to start kilo serve");
         _server.EnableRaisingEvents = true;
 
-        var stderrTask = _server.StandardError.ReadToEndAsync();
         var stdoutTask = _server.StandardOutput.ReadToEndAsync();
+        var stderrTask = _server.StandardError.ReadToEndAsync();
         _server.Exited += (_, _) =>
         {
             ServerOutput =
                 $"exit-code={_server.ExitCode}\n" +
-                $"stdout:\n{(stdoutTask.IsCompleted ? stdoutTask.Result : "(not flushed)")}\n" +
-                $"stderr:\n{stderrTask.Result}";
+                $"stdout (truncated):\n{(stdoutTask.IsCompleted ? stdoutTask.Result : "(not flushed)")}\n" +
+                $"stderr (truncated):\n{(stderrTask.IsCompleted ? stderrTask.Result.Substring(0, Math.Min(800, stderrTask.Result.Length)) : "(not flushed)")}";
         };
 
-        if (!await WaitForBindAsync(TimeSpan.FromMilliseconds(WaitForBindTimeoutMs)))
+        if (!await WaitForReadyAsync(TimeSpan.FromMilliseconds(WaitForReadyTimeoutMs)))
         {
-            // kilo is installed and the process launched, but it never produced
-            // a TCP LISTEN entry on the requested port. Possible causes:
-            //   - This kilo build does not implement StreamJsonRpc-over-TCP for acp;
-            //     it may use a different transport (unix socket, stdio, mDNS-only).
-            //   - kilo acp on Windows defaults to a TUI/CLI interface and doesn't
-            //     listen on TCP unless --mdns / an upstream consumer is connected first.
-            // We capture stdout/stderr for diagnosis but do NOT mark KiloMissing —
-            // the binary is present, the transport is wrong.
             try { _server.Kill(entireProcessTree: true); } catch { }
-            await Task.WhenAny(stderrTask, Task.Delay(500));
             ServerBindFailed = true;
-            SkipReason = $"kilo acp spawned but did not bind TCP {_port} within {WaitForBindTimeoutMs / 1000}s " +
-                         $"(see ServerOutput). The kilo ACP transport on this build may not be StreamJsonRpc-over-TCP.";
+            SkipReason = $"kilo serve started but did not become healthy at {Endpoint} within {WaitForReadyTimeoutMs / 1000}s. " +
+                         $"ServerOutput: {ServerOutput}";
         }
     }
 
     public async Task<AcpClient> ConnectAsync(CancellationToken cancellationToken = default)
     {
         if (KiloMissing || ServerBindFailed)
-            throw new InvalidOperationException($"kilo acp unavailable: {SkipReason}");
+            throw new InvalidOperationException($"kilo serve unavailable: {SkipReason}");
 
-        var tcp = new TcpClient { NoDelay = true };
-        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        connectCts.CancelAfter(TimeSpan.FromSeconds(5));
-        await tcp.ConnectAsync(IPAddress.Loopback, _port, connectCts.Token);
-        return new AcpClient(tcp, NullLogger<AcpClient>.Instance);
+        var http = new HttpClient
+        {
+            BaseAddress = new Uri(Endpoint + "/"),
+            Timeout = TimeSpan.FromMinutes(5)
+        };
+        return new AcpClient(http, NullLogger<AcpClient>.Instance);
     }
 
     public Task DisposeAsync()
@@ -111,29 +102,28 @@ public sealed class AcpIntegrationFixture : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    private async Task<bool> WaitForBindAsync(TimeSpan timeout)
+    private async Task<bool> WaitForReadyAsync(TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
+        using var probe = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
         while (DateTime.UtcNow < deadline)
         {
             try
             {
-                using var probe = new TcpClient { NoDelay = true };
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-                await probe.ConnectAsync(IPAddress.Loopback, _port, cts.Token);
-                return true;
+                var resp = await probe.GetAsync(Endpoint + "/global/health");
+                // kilo v7.3.54 returns 200 once ready (sometimes 404 if /global/health doesn't exist);
+                // any non-5xx response means the server is accepting connections.
+                if ((int)resp.StatusCode < 500) return true;
             }
-            catch
-            {
-                await Task.Delay(100);
-            }
+            catch { /* not yet */ }
+            await Task.Delay(250);
         }
         return false;
     }
 
     private static int PickEphemeralPort()
     {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
@@ -142,8 +132,9 @@ public sealed class AcpIntegrationFixture : IAsyncLifetime
 
     private (string fileName, string args) ResolveKiloInvocation(string kiloPath)
     {
-        _port = PickEphemeralPort();
-        var arguments = $"acp --port {_port} --hostname 127.0.0.1 --log-level INFO";
+        // kilo serve does NOT accept --cwd (only kilo acp does). The CWD
+        // for the spawned process is inherited from the parent shell.
+        var arguments = $"serve --port {_port} --hostname 127.0.0.1 --log-level INFO";
         if (kiloPath.EndsWith(".CMD", StringComparison.OrdinalIgnoreCase)
             || kiloPath.EndsWith(".BAT", StringComparison.OrdinalIgnoreCase))
         {

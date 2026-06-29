@@ -27,7 +27,6 @@
 
   <ItemGroup>
     <PackageReference Include="Octokit" Version="13.0.1" />
-    <PackageReference Include="StreamJsonRpc" Version="2.2.34" />
   </ItemGroup>
 
 </Project>

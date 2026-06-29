@@ -4,8 +4,8 @@ A long-lived .NET orchestrator that drives Kilo agents over the Agent Client Pro
 
 ```
 PortHorizon.Agents (.NET orchestrator, long-lived)
-├── AcpProcessManager       starts/stops `kilo acp --port 4096`
-├── AcpClient (StreamJsonRpc)  JSON-RPC client to ACP per task
+├── AcpProcessManager       starts `kilo serve --port 4096` (HTTP+JSON)
+├── AcpClient (HttpClient)    REST client: POST /session, POST /session/{id}/message
 ├── RoleAgentRegistry        maps AgentType → Kilo agent name + role config
 ├── GitWorktreeService       per-task `git worktree add` lifecycle
 ├── GitHubService            PR open / status polling / merge
@@ -13,9 +13,9 @@ PortHorizon.Agents (.NET orchestrator, long-lived)
 └── PRWatcher                polls PR state, triggers merge on approve+green
 
 External (Kilo)
-├── `kilo acp` server         JSON-RPC over TCP, one per orchestrator
-├── `kilo github` App         webhook-driven PR reviewer on PortHorizon repo
-└── Kilo agent definitions    .kilo/agents/{coredev,clientdev,qa,reviewer}.md
+├── `kilo serve` server      HTTP+JSON API on a single TCP port, multiplexed by session
+├── `kilo github` App        webhook-driven PR reviewer on PortHorizon repo
+└── Kilo agent definitions   .kilo/agents/{coredev,clientdev,qa,reviewer}.md
 ```
 
 ## Prerequisites
@@ -177,7 +177,7 @@ Set `Logging__LogLevel__Default=Debug` for verbose output (poll internals, raw J
 
 - **Cross-process safety.** The state store uses an in-process `SemaphoreSlim`. Run only one orchestrator per state directory.
 - **Windows path quirks.** All `git` invocations centralize path composition in `GitWorktreeService`. Path with spaces (e.g. `C:\Users\jtn50\repos\gamedev\PortHorizon`) are quoted at the single point of use.
-- **Kilo ACP per-session cwd.** The orchestrator passes the worktree path on `session/new`. If your kilo version rejects the per-session cwd, the orchestrator's `AcpProcessManager` is the only thing to change — call sites use `AcpClient.NewSessionAsync(cwd, agent)` so a per-task process model is a one-method swap.
+- **Kilo per-session cwd.** `kilo serve` does not accept `--cwd` (only `kilo acp` does). The orchestrator's `AcpProcessManager` sets `WorkingDirectory = workspaceRoot` for the spawned kilo process; sessions created via `POST /session` inherit that CWD. To dispatch against a per-task worktree, the simpler approach is to spawn one `kilo serve --port <unique> --cwd <worktree>` per task. That swap is a 30-line change to `AcpProcessManager.StartProcessAsync`.
 - **Stale tasks.** A `InProgress` task whose `UpdatedAt` is older than `Spawner.StaleMinutes` is reset to `Pending` (one retry) or `Failed` (budget exhausted) on the next orchestrator start.
 
 ## Out of scope (deferred)
