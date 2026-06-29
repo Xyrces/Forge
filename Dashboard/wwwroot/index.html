@@ -107,11 +107,11 @@
   <button data-tab="skills">Skills</button>
 </nav>
 <main>
-  <div class="tab active" id="tab-tasks">…PLACEHOLDER_TASKS…</div>
-  <div class="tab" id="tab-backlog">…PLACEHOLDER_BACKLOG…</div>
-  <div class="tab" id="tab-sprints">…PLACEHOLDER_SPRINTS…</div>
-  <div class="tab" id="tab-agents">…PLACEHOLDER_AGENTS…</div>
-  <div class="tab" id="tab-skills">…PLACEHOLDER_SKILLS…</div>
+  <div class="tab active" id="tab-tasks"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-backlog"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
 </main>
 <div class="modal-bg" id="modal"><div class="modal" id="modal-body"></div></div>
 <footer id="foot"></footer>
@@ -575,6 +575,15 @@ loadState();
 setInterval(() => {
   state.agents.forEach(a => refreshMessageCount(a.kiloName));
 }, 10000);
+
+// Global error trap so failed renders show in the UI
+window.addEventListener("error", (e) => {
+  const tasks = $("tab-tasks");
+  if (tasks && tasks.textContent.includes("Loading")) {
+    tasks.innerHTML = `<div class="empty">JS error: ${escapeHtml(String(e.error || e.message))}</div>`;
+  }
+  console.error("dashboard global error", e.error || e.message);
+});
 </script>
 </body>
 </html>
