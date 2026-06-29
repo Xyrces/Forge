@@ -66,10 +66,11 @@ public sealed class StateStore
             var tempPath = filePath + ".tmp";
             await File.WriteAllTextAsync(tempPath, json, cancellationToken);
 
-            if (File.Exists(filePath))
-                File.Replace(tempPath, filePath, destinationBackupFileName: null);
-            else
-                File.Move(tempPath, filePath);
+            // File.Move(overwrite: true) is atomic on .NET 5+ on the same NTFS
+            // volume and avoids the flaky Win32 ReplaceFile path that throws
+            // "Unable to remove the file to be replaced" intermittently when
+            // AV or indexer has a transient handle on the destination.
+            File.Move(tempPath, filePath, overwrite: true);
         }
         finally
         {
@@ -90,11 +91,7 @@ public sealed class StateStore
 
             var tempPath = filePath + ".tmp";
             await File.WriteAllTextAsync(tempPath, json, cancellationToken);
-
-            if (File.Exists(filePath))
-                File.Replace(tempPath, filePath, destinationBackupFileName: null);
-            else
-                File.Move(tempPath, filePath);
+            File.Move(tempPath, filePath, overwrite: true);
         }
         finally
         {
