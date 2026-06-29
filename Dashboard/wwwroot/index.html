@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -8,6 +8,7 @@
   :root {
     --bg: #0e1116;
     --panel: #161b22;
+    --panel-2: #1c2129;
     --border: #30363d;
     --fg: #e6edf3;
     --muted: #8b949e;
@@ -15,180 +16,560 @@
     --green: #3fb950;
     --red: #f85149;
     --yellow: #d29922;
-    --blue: #58a6ff;
     --purple: #bc8cff;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
-  header { padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 14px; }
   header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   header .pill { padding: 2px 8px; border-radius: 10px; background: var(--border); color: var(--muted); font-size: 11px; }
   header .pill.live { background: var(--green); color: #000; }
-  main { display: grid; grid-template-columns: 1fr 380px; gap: 16px; padding: 16px; }
-  section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-  section > h2 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border); }
+  nav { padding: 0 20px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; gap: 4px; }
+  nav button { background: transparent; color: var(--muted); border: 0; padding: 10px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; }
+  nav button.active { color: var(--fg); border-bottom-color: var(--accent); }
+  nav button:hover { color: var(--fg); }
+  main { padding: 16px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-bottom: 16px; }
+  section > h2 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  section > h2 .actions { margin-left: auto; }
+  section > h2 button { background: var(--accent); color: #000; border: 0; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+  section > h2 button.secondary { background: var(--border); color: var(--fg); }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
   th { font-weight: 600; color: var(--muted); background: rgba(255,255,255,0.02); position: sticky; top: 0; }
-  td.id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); }
+  td.id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); cursor: pointer; }
   td.diag-cell { white-space: normal; max-width: 480px; min-width: 240px; }
   .err-cell { display: block; color: var(--red); font-weight: 600; max-width: 460px; overflow: hidden; text-overflow: ellipsis; }
   .resp-cell { display: block; color: var(--muted); font-style: italic; font-size: 11px; max-width: 460px; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .status { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; display: inline-block; }
+  .status.pending { background: rgba(139, 148, 158, 0.15); color: var(--muted); }
+  .status.inprogress { background: rgba(88, 166, 255, 0.15); color: var(--blue, #58a6ff); }
+  .status.completed { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+  .status.failed { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+  .status.blocked { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .status.archived { background: rgba(139, 148, 158, 0.15); color: var(--muted); }
   .counts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; padding: 12px 14px; }
   .count { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; }
   .count .n { font-size: 20px; font-weight: 600; }
   .count .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-  .status { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-  .status.pending { background: rgba(139, 148, 158, 0.15); color: var(--muted); }
-  .status.inprogress { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
-  .status.completed { background: rgba(63, 185, 80, 0.15); color: var(--green); }
-  .status.failed { background: rgba(248, 81, 73, 0.15); color: var(--red); }
-  .status.blocked { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
-  .events { height: calc(100vh - 220px); overflow-y: auto; padding: 8px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
-  .ev { padding: 3px 0; border-bottom: 1px dotted var(--border); display: grid; grid-template-columns: 90px 130px 1fr; gap: 8px; }
+  .events { height: 280px; overflow-y: auto; padding: 8px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+  .ev { padding: 3px 0; border-bottom: 1px dotted var(--border); display: grid; grid-template-columns: 90px 140px 1fr; gap: 8px; }
   .ev .t { color: var(--muted); }
   .ev .k { font-weight: 600; }
-  .ev.task-transition .k { color: var(--blue); }
+  .ev.task-transition .k { color: var(--accent); }
   .ev.acp-session-completed .k, .ev.pr-merged .k { color: var(--green); }
   .ev.acp-session-failed .k, .ev.pr-failed .k { color: var(--red); }
   .ev.pr-changes-requested .k { color: var(--yellow); }
   .ev.pr-opened .k { color: var(--purple); }
   .ev .d { color: var(--fg); white-space: pre-wrap; word-break: break-word; }
-  .err { color: var(--red); font-style: italic; }
   .empty { color: var(--muted); padding: 12px 14px; font-style: italic; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
+  .modal-bg.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 20px; min-width: 400px; max-width: 600px; }
+  .modal h3 { margin: 0 0 12px; font-size: 14px; }
+  .modal label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 4px; }
+  .modal input, .modal textarea, .modal select { background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 6px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; width: 100%; box-sizing: border-box; }
+  .modal textarea { min-height: 80px; resize: vertical; }
+  .modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  .modal button { background: var(--accent); color: #000; border: 0; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .modal button.secondary { background: var(--border); color: var(--fg); }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 3px; background: var(--border); color: var(--muted); font-size: 10px; margin-right: 4px; }
+  .tag.active { background: var(--green); color: #000; }
   footer { padding: 6px 16px; color: var(--muted); font-size: 11px; text-align: right; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .toolbar { padding: 10px 14px; display: flex; gap: 8px; border-bottom: 1px solid var(--border); align-items: center; }
+  .toolbar input, .toolbar select { background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 5px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+  .toolbar input { flex: 1; max-width: 360px; }
+  .toolbar button { background: var(--accent); color: #000; border: 0; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .toolbar button.secondary { background: var(--border); color: var(--fg); }
+  .sprint-goal { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .sprint-goal h3 { margin: 0 0 4px; font-size: 13px; }
+  .sprint-goal .goal { color: var(--muted); margin-bottom: 4px; font-style: italic; }
+  .progress { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+  .progress .bar { height: 100%; background: var(--accent); }
 </style>
 </head>
 <body>
 <header>
   <h1>PortHorizon.Agents</h1>
   <span class="pill live" id="conn">● live</span>
-  <span class="pill" id="lastupdate"></span>
+  <span class="pill" id="active-sprint"></span>
   <span style="flex:1"></span>
   <a class="pill" href="/api/state" target="_blank">/api/state</a>
 </header>
+<nav id="tabs">
+  <button data-tab="tasks" class="active">Tasks</button>
+  <button data-tab="backlog">Backlog</button>
+  <button data-tab="sprints">Sprints</button>
+  <button data-tab="agents">Agents</button>
+  <button data-tab="skills">Skills</button>
+</nav>
 <main>
-  <section>
-    <h2>Tasks</h2>
-    <div class="counts">
-      <div class="count"><div class="n" id="cnt-pending">–</div><div class="label">Pending</div></div>
-      <div class="count"><div class="n" id="cnt-inprogress">–</div><div class="label">In progress</div></div>
-      <div class="count"><div class="n" id="cnt-completed">–</div><div class="label">Completed</div></div>
-      <div class="count"><div class="n" id="cnt-failed">–</div><div class="label">Failed</div></div>
-      <div class="count"><div class="n" id="cnt-blocked">–</div><div class="label">Blocked</div></div>
-    </div>
-    <div style="max-height: calc(100vh - 280px); overflow-y: auto;">
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th><th>Type</th><th>Status</th><th>Branch</th><th>Role</th>
-            <th>PR</th><th>Updated</th><th>Error</th>
-          </tr>
-        </thead>
-        <tbody id="tasks"></tbody>
-      </table>
-      <div class="empty" id="empty-tasks" style="display:none;">No tasks yet. Enqueue one with <code>--enqueue-task</code>.</div>
-    </div>
-  </section>
-  <section>
-    <h2>Live events</h2>
-    <div class="events" id="events"></div>
-  </section>
+  <div class="tab active" id="tab-tasks">…PLACEHOLDER_TASKS…</div>
+  <div class="tab" id="tab-backlog">…PLACEHOLDER_BACKLOG…</div>
+  <div class="tab" id="tab-sprints">…PLACEHOLDER_SPRINTS…</div>
+  <div class="tab" id="tab-agents">…PLACEHOLDER_AGENTS…</div>
+  <div class="tab" id="tab-skills">…PLACEHOLDER_SKILLS…</div>
 </main>
+<div class="modal-bg" id="modal"><div class="modal" id="modal-body"></div></div>
 <footer id="foot"></footer>
-
 <script>
 const $ = (id) => document.getElementById(id);
+const escapeHtml = (s) => (s ?? "").replace(/[<>&"']/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;",""":"&quot;","'":"&#39;"}[c]));
+const trunc = (s, n) => s.length > n ? s.slice(0, n) + "..." : s;
 
-async function refreshState() {
+let state = { tasks: [], agents: [], skills: [], sprints: [], activeSprintId: null };
+
+async function loadState() {
   try {
-    const r = await fetch('/api/state');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const r = await fetch("/api/state");
+    if (!r.ok) throw new Error("HTTP " + r.status);
     const s = await r.json();
-    render(s);
-    $('lastupdate').textContent = 'state @ ' + new Date().toLocaleTimeString();
+    state.tasks = s.tasks || [];
+    state.activeSprintId = s.activeSprintId || null;
+    state.completedTasks = s.completedTasks;
+    state.failedTasks = s.failedTasks;
+    $("active-sprint").textContent = s.activeSprintId ? "sprint: " + s.activeSprintId : "no active sprint";
+    await refreshState();
   } catch (e) {
-    $('conn').className = 'pill';
-    $('conn').textContent = '✕ offline';
+    $("conn").className = "pill";
+    $("conn").textContent = "OFFLINE";
   }
 }
 
-function render(s) {
-  const tasks = s.tasks || [];
-  const counts = { Pending: 0, InProgress: 0, Completed: 0, Failed: 0, Blocked: 0 };
-  tasks.forEach(t => counts[t.status] = (counts[t.status] || 0) + 1);
-  $('cnt-pending').textContent = counts.Pending || 0;
-  $('cnt-inprogress').textContent = counts.InProgress || 0;
-  $('cnt-completed').textContent = counts.Completed || 0;
-  $('cnt-failed').textContent = counts.Failed || 0;
-  $('cnt-blocked').textContent = counts.Blocked || 0;
-  $('foot').textContent = `total: ${tasks.length} • schema: v${s.schemaVersion}`;
+async function refreshState() {
+  await renderAgents();
+  await renderSprints();
+  await renderSkills();
+  renderTasks();
+  renderBacklog();
+  $("foot").textContent = "tasks: " + state.tasks.length + " agents: " + state.agents.length + " skills: " + state.skills.length + " sprints: " + state.sprints.length;
+}
 
-  const tbody = $('tasks');
-  if (tasks.length === 0) {
-    tbody.innerHTML = '';
-    $('empty-tasks').style.display = 'block';
-    return;
-  }
-  $('empty-tasks').style.display = 'none';
-  const sorted = [...tasks].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
-  tbody.innerHTML = sorted.map(t => {
-    const role = (t.parameters && t.parameters.roleAgent) || '';
-    const pr = (t.parameters && t.parameters.prNumber) || '';
-    const updated = t.updatedAt ? new Date(t.updatedAt).toLocaleTimeString() : (t.createdAt ? new Date(t.createdAt).toLocaleTimeString() : '');
-    const escapeHtml = (s) => (s || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-    const escapeAttr = (s) => (s || '').replace(/[<>"'&]/g, c => ({'<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','&':'&amp;'}[c]));
+function renderTasks() {
+  const counts = { Pending: 0, InProgress: 0, Completed: 0, Failed: 0, Blocked: 0 };
+  state.tasks.forEach(t => counts[t.status] = (counts[t.status] || 0) + 1);
+  const rows = state.tasks.map(t => {
+    const role = (t.parameters && t.parameters.roleAgent) || "";
+    const pr = (t.parameters && t.parameters.prNumber) || "";
+    const updated = t.updatedAt ? new Date(t.updatedAt).toLocaleTimeString() : "";
     const err = escapeHtml(t.error);
     const resp = escapeHtml(t.parameters && t.parameters.modelResponse);
-    const errShort = err.length > 80 ? err.slice(0, 80) + '…' : err;
-    const respShort = resp.length > 80 ? resp.slice(0, 80) + '…' : resp;
-    const fullErrorTooltip = escapeAttr(t.error || '');
-    const fullResponseTooltip = escapeAttr(t.parameters && t.parameters.modelResponse || '');
-    const errCell = err ? `<span class="err-cell" title="${fullErrorTooltip}">${errShort}</span>` : '';
-    const respCell = (resp && (!err || resp !== err)) ? `<div class="resp-cell" title="${fullResponseTooltip}">↳ ${respShort}</div>` : '';
+    const fullErr = escapeHtml(t.error || "");
+    const fullResp = escapeHtml(t.parameters && t.parameters.modelResponse || "");
+    const errShort = trunc(err, 80);
+    const respShort = trunc(resp, 80);
+    const errCell = err ? `<span class="err-cell" title="${fullErr}">${errShort}</span>` : "";
+    const respCell = (resp && (!err || resp !== err)) ? `<div class="resp-cell" title="${fullResp}">↳ ${respShort}</div>` : "";
     return `<tr>
-      <td class="id">${t.id}</td>
+      <td class="id" onclick="showIssue('${t.id}')">${t.id}</td>
       <td>${t.type}</td>
       <td><span class="status ${t.status.toLowerCase()}">${t.status}</span></td>
-      <td><code>${t.branch || ''}</code></td>
+      <td><code>${t.branch || ""}</code></td>
       <td>${role}</td>
-      <td>${pr ? '#' + pr : ''}</td>
+      <td>${pr ? "#" + pr : ""}</td>
       <td>${updated}</td>
       <td class="diag-cell">${errCell}${respCell}</td>
     </tr>`;
-  }).join('');
+  }).join("");
+  $("tab-tasks").innerHTML = `
+    <section>
+      <h2>Tasks
+        <span class="actions">
+          <button class="secondary" onclick="refreshState()">Refresh</button>
+          <button onclick="openNewTask()">+ New issue</button>
+        </span>
+      </h2>
+      <div class="counts">
+        ${["Pending","InProgress","Completed","Failed","Blocked"].map(s => `<div class="count"><div class="n">${counts[s]||0}</div><div class="label">${s}</div></div>`).join("")}
+      </div>
+      <div style="max-height: 60vh; overflow-y: auto;">
+        <table>
+          <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Branch</th><th>Role</th><th>PR</th><th>Updated</th><th>Error</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="8" class="empty">No tasks yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+    <section><h2>Live events</h2><div class="events" id="events"></div></section>
+  `;
 }
 
+function renderBacklog() {
+  $("tab-backlog").innerHTML = `
+    <section>
+      <h2>Backlog
+        <span class="actions">
+          <button class="secondary" onclick="refreshState()">Refresh</button>
+          <button onclick="openNewTask()">+ New issue</button>
+        </span>
+      </h2>
+      <div class="toolbar">
+        <input id="backlog-filter" placeholder="filter id / type / title" oninput="filterBacklog()" />
+        <select id="backlog-status" onchange="filterBacklog()">
+          <option value="">All statuses</option>
+          ${["Pending","InProgress","Completed","Failed","Blocked","Closed"].map(s => `<option>${s}</option>`).join("")}
+        </select>
+      </div>
+      <table>
+        <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Priority</th><th>Assignee</th><th>Title</th><th>Sprint</th><th>Updated</th></tr></thead>
+        <tbody id="backlog-tbody"></tbody>
+      </table>
+    </section>
+  `;
+  filterBacklog();
+}
+
+function filterBacklog() {
+  const q = ($("backlog-filter")?.value || "").toLowerCase();
+  const st = $("backlog-status")?.value || "";
+  const rows = state.tasks.filter(t =>
+    (!q || (t.id + " " + t.type + " " + t.title).toLowerCase().includes(q)) &&
+    (!st || t.status === st)
+  );
+  $("backlog-tbody").innerHTML = rows.length === 0
+    ? `<tr><td colspan="8" class="empty">No matches.</td></tr>`
+    : rows.map(t => {
+        const updated = t.updatedAt ? new Date(t.updatedAt).toLocaleTimeString() : "";
+        return `<tr>
+          <td class="id" onclick="showIssue('${t.id}')">${t.id}</td>
+          <td>${t.type}</td>
+          <td><span class="status ${t.status.toLowerCase()}">${t.status}</span></td>
+          <td>${t.priority}</td>
+          <td>${t.assignee || ""}</td>
+          <td>${escapeHtml(t.title)}</td>
+          <td>${t.parameters && t.parameters.sprintId ? t.parameters.sprintId : "—"}</td>
+          <td>${updated}</td>
+        </tr>`;
+      }).join("");
+}
+
+async function renderSprints() {
+  try {
+    const r = await fetch("/api/sprints");
+    state.sprints = await r.json();
+  } catch (e) { state.sprints = []; }
+  const body = state.sprints.length === 0
+    ? '<div class="empty">No sprints yet.</div>'
+    : state.sprints.map(sprintHtml).join("");
+  $("tab-sprints").innerHTML = `
+    <section>
+      <h2>Sprints
+        <span class="actions">
+          <button class="secondary" onclick="refreshState()">Refresh</button>
+          <button onclick="openNewSprint()">+ New sprint</button>
+        </span>
+      </h2>
+      ${body}
+    </section>
+  `;
+}
+
+function sprintHtml(s) {
+  const isActive = state.activeSprintId === s.id;
+  const tag = isActive ? `<span class="tag active">active</span>` : `<span class="tag">${s.status}</span>`;
+  const dates = new Date(s.startDate).toLocaleDateString() + " → " + new Date(s.endDate).toLocaleDateString();
+  return `<div class="sprint-goal">
+    <h3>${escapeHtml(s.name)} ${tag}</h3>
+    <div class="goal">${escapeHtml(s.goal)}</div>
+    <div style="color: var(--muted); font-size: 11px; margin-bottom: 6px;">${dates}</div>
+    <div style="display: flex; gap: 8px;">
+      ${isActive ? "" : `<button class="secondary" onclick="setActiveSprint('${s.id}')">Set active</button>`}
+      <button class="secondary" onclick="addIssueToSprint('${s.id}')">+ Add issue</button>
+      <button class="secondary" onclick="deleteSprint('${s.id}')">Delete</button>
+    </div>
+  </div>`;
+}
+
+async function renderAgents() {
+  try {
+    const r = await fetch("/api/agents/db");
+    state.agents = await r.json();
+  } catch (e) { state.agents = []; }
+  const rows = state.agents.map(a => {
+    const updated = a.updatedAt ? new Date(a.updatedAt).toLocaleTimeString() : "";
+    return `<tr>
+      <td class="id">${a.id}</td>
+      <td><code>${a.kiloName}</code></td>
+      <td>${escapeHtml(a.displayName)}</td>
+      <td>${escapeHtml(a.scope)}</td>
+      <td>${a.enabled ? "✓" : "—"}</td>
+      <td><span id="msg-count-${a.kiloName}">…</span></td>
+      <td>${updated}</td>
+      <td><button class="secondary" onclick="sendMessageToAgent('${a.kiloName}','${escapeHtml(a.displayName).replace(/'/g, "&#39;")}')">Send msg</button></td>
+    </tr>`;
+  }).join("");
+  $("tab-agents").innerHTML = `
+    <section>
+      <h2>Agents
+        <span class="actions">
+          <button class="secondary" onclick="refreshState()">Refresh</button>
+          <button onclick="openNewAgent()">+ New agent</button>
+        </span>
+      </h2>
+      <table>
+        <thead><tr><th>ID</th><th>kilo</th><th>Display</th><th>Scope</th><th>Enabled</th><th>Pending msgs</th><th>Updated</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="8" class="empty">No agents yet.</td></tr>'}</tbody>
+      </table>
+    </section>
+  `;
+  state.agents.forEach(a => refreshMessageCount(a.kiloName));
+}
+
+async function renderSkills() {
+  try {
+    const r = await fetch("/api/skills");
+    state.skills = await r.json();
+  } catch (e) { state.skills = []; }
+  const rows = state.skills.map(s => {
+    const updated = s.updatedAt ? new Date(s.updatedAt).toLocaleTimeString() : "";
+    return `<tr>
+      <td class="id">${s.id}</td>
+      <td>${escapeHtml(s.name)}</td>
+      <td>${s.agentId ? `<code>${s.agentId}</code>` : "<em>global</em>"}</td>
+      <td><code>${trunc(escapeHtml(s.body), 60)}</code></td>
+      <td>${s.enabled ? "✓" : "—"}</td>
+      <td>${updated}</td>
+    </tr>`;
+  }).join("");
+  $("tab-skills").innerHTML = `
+    <section>
+      <h2>Skills
+        <span class="actions">
+          <button class="secondary" onclick="refreshState()">Refresh</button>
+          <button onclick="openNewSkill()">+ New skill</button>
+        </span>
+      </h2>
+      <table>
+        <thead><tr><th>ID</th><th>Name</th><th>Agent</th><th>Body</th><th>Enabled</th><th>Updated</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="empty">No skills yet.</td></tr>'}</tbody>
+      </table>
+    </section>
+  `;
+}
+
+async function refreshMessageCount(kiloName) {
+  try {
+    const r = await fetch(`/api/agents/${kiloName}/messages`);
+    if (!r.ok) return;
+    const j = await r.json();
+    const el = $(`msg-count-${kiloName}`);
+    if (el) el.textContent = j.pending;
+  } catch (e) {}
+}
+
+function showModal(title, body) {
+  $("modal-body").innerHTML = `<h3>${title}</h3>${body}`;
+  $("modal").classList.add("open");
+}
+function closeModal() { $("modal").classList.remove("open"); }
+
+function openNewTask() {
+  showModal("New issue", `
+    <label>Title</label><input id="m-title" />
+    <label>Type</label>
+    <select id="m-type">
+      <option value="ecs">ecs</option>
+      <option value="client">client</option>
+      <option value="test">test</option>
+      <option value="review">review</option>
+      <option value="docs">docs</option>
+    </select>
+    <label>Description</label><textarea id="m-desc"></textarea>
+    <label>Priority (0=highest)</label><input id="m-priority" type="number" value="2" min="0" max="3" />
+    <div class="row">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button onclick="submitNewTask()">Create</button>
+    </div>
+  `);
+}
+async function submitNewTask() {
+  const body = {
+    type: $("m-type").value,
+    title: $("m-title").value,
+    description: $("m-desc").value || null,
+    priority: parseInt($("m-priority").value || "2"),
+  };
+  if (!body.title) return alert("Title required");
+  const r = await fetch("/api/state/issues", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  if (r.ok) { closeModal(); loadState(); } else alert(await r.text());
+}
+
+function openNewSprint() {
+  showModal("New sprint", `
+    <label>Name</label><input id="sp-name" />
+    <label>Goal</label><textarea id="sp-goal"></textarea>
+    <label>Start</label><input id="sp-start" type="date" />
+    <label>End</label><input id="sp-end" type="date" />
+    <div class="row">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button onclick="submitNewSprint()">Create</button>
+    </div>
+  `);
+}
+async function submitNewSprint() {
+  const body = {
+    name: $("sp-name").value,
+    goal: $("sp-goal").value,
+    startDate: new Date($("sp-start").value).toISOString(),
+    endDate: new Date($("sp-end").value).toISOString(),
+  };
+  if (!body.name || !body.goal) return alert("Name and goal required");
+  const r = await fetch("/api/sprints", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  if (r.ok) { closeModal(); await renderSprints(); } else alert(await r.text());
+}
+
+async function setActiveSprint(id) {
+  const r = await fetch(`/api/sprints/${id}`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ status: "active" }) });
+  if (r.ok) loadState(); else alert(await r.text());
+}
+
+async function deleteSprint(id) {
+  if (!confirm("Delete sprint " + id + "?")) return;
+  const r = await fetch(`/api/sprints/${id}`, { method: "DELETE" });
+  if (r.ok) await renderSprints();
+}
+
+function addIssueToSprint(sprintId) {
+  showModal("Add issue to sprint", `
+    <label>Issue ID (e.g. client-1, pr-watch-2)</label><input id="ai-iid" />
+    <div class="row">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button onclick="submitAddIssueToSprint('${sprintId}')">Add</button>
+    </div>
+  `);
+}
+async function submitAddIssueToSprint(sprintId) {
+  const iid = $("ai-iid").value;
+  if (!iid) return alert("Issue ID required");
+  const r = await fetch(`/api/sprints/${sprintId}/issues`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ issueId: iid }) });
+  if (r.ok) { closeModal(); await renderSprints(); } else alert(await r.text());
+}
+
+function openNewAgent() {
+  showModal("New agent", `
+    <label>kilo name (matches .kilo/agents/&lt;name&gt;.md)</label><input id="ag-kilo" />
+    <label>Display name</label><input id="ag-display" />
+    <label>Scope (project subdirectory)</label><input id="ag-scope" />
+    <label>Description</label><textarea id="ag-desc"></textarea>
+    <div class="row">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button onclick="submitNewAgent()">Create</button>
+    </div>
+  `);
+}
+async function submitNewAgent() {
+  const body = {
+    kiloName: $("ag-kilo").value,
+    displayName: $("ag-display").value,
+    scope: $("ag-scope").value || "",
+    description: $("ag-desc").value || null,
+  };
+  if (!body.kiloName || !body.displayName) return alert("kilo and display name required");
+  const r = await fetch("/api/agents/db", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  if (r.ok) { closeModal(); await renderAgents(); } else alert(await r.text());
+}
+
+function openNewSkill() {
+  const opts = state.agents.map(a => `<option value="${a.id}">${a.kiloName}</option>`).join("");
+  showModal("New skill", `
+    <label>Name</label><input id="sk-name" />
+    <label>Body</label><textarea id="sk-body" style="min-height: 140px"></textarea>
+    <label>Agent (blank for global)</label>
+    <select id="sk-agent">
+      <option value="">— global —</option>
+      ${opts}
+    </select>
+    <div class="row">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button onclick="submitNewSkill()">Create</button>
+    </div>
+  `);
+}
+async function submitNewSkill() {
+  const body = {
+    name: $("sk-name").value,
+    body: $("sk-body").value,
+    agentId: $("sk-agent").value || null,
+  };
+  if (!body.name || !body.body) return alert("Name and body required");
+  const r = await fetch("/api/skills", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+  if (r.ok) { closeModal(); await renderSkills(); } else alert(await r.text());
+}
+
+function sendMessageToAgent(kiloName, displayName) {
+  showModal(`Send message to ${displayName || kiloName}`, `
+    <p style="color: var(--muted); font-size: 11px;">This message will be appended to the agent's inbox and prepended to the next prompt sent by the orchestrator.</p>
+    <label>Message</label>
+    <textarea id="msg-text" style="min-height: 140px" placeholder="What do you want to tell the agent?"></textarea>
+    <div class="row">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button onclick="submitMessageToAgent('${kiloName}')">Send</button>
+    </div>
+  `);
+}
+async function submitMessageToAgent(kiloName) {
+  const text = $("msg-text").value;
+  if (!text) return alert("Message required");
+  const r = await fetch(`/api/agents/${kiloName}/messages`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ text }) });
+  if (r.ok) { closeModal(); refreshMessageCount(kiloName); } else alert(await r.text());
+}
+
+function showIssue(id) {
+  const t = state.tasks.find(x => x.id === id);
+  if (!t) return;
+  const meta = t.parameters || {};
+  showModal("Issue " + t.id, `
+    <label>Title</label><div>${escapeHtml(t.title)}</div>
+    <label>Status</label><div><span class="status ${t.status.toLowerCase()}">${t.status}</span></div>
+    <label>Description</label><div>${escapeHtml(t.description || "(none)")}</div>
+    <label>Parameters (raw)</label><pre style="background: var(--bg); padding: 6px; border-radius: 4px; max-height: 240px; overflow: auto; font-size: 11px;">${escapeHtml(JSON.stringify(meta, null, 2))}</pre>
+    <div class="row">
+      <button class="secondary" onclick="closeModal()">Close</button>
+    </div>
+  `);
+}
+
+document.querySelectorAll("#tabs button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#tabs button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+  });
+});
+$("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
+
+(function connectEvents() {
+  if (!window.EventSource) return;
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("conn").className = "pill live"; $("conn").textContent = "● live"; };
+  es.onerror = () => { $("conn").className = "pill"; $("conn").textContent = "✕ reconnecting"; };
+  es.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      addEvent(ev);
+    } catch {}
+  };
+})();
+
 function addEvent(ev) {
-  const el = document.createElement('div');
-  const cls = ev.kind.replace(/\./g, '-');
-  el.className = 'ev ' + cls;
-  const t = new Date(ev.timestamp).toLocaleTimeString();
-  const detail = ev.detail || '';
-  const data = ev.data ? ' ' + JSON.stringify(ev.data) : '';
-  el.innerHTML = `<span class="t">${t}</span><span class="k">${ev.kind}</span><span class="d">${detail}${data}</span>`;
-  const box = $('events');
+  const box = $("events");
+  if (!box) return;
+  const el = document.createElement("div");
+  el.className = "ev " + (ev.kind || "").replace(/[.\/]/g, "-");
+  el.innerHTML = `<span class="t">${new Date(ev.timestamp).toLocaleTimeString()}</span><span class="k">${escapeHtml(ev.kind)}</span><span class="d">${escapeHtml(ev.detail || "")}</span>`;
   box.appendChild(el);
   while (box.children.length > 200) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 }
 
-(function connectEvents() {
-  const es = new EventSource('/api/events');
-  const kinds = [
-    'task-transition','acp-session-started','acp-session-completed','acp-session-failed',
-    'pr-opened','pr-merged','pr-changes-requested','pr-failed','log'
-  ];
-  es.onopen = () => { $('conn').className = 'pill live'; $('conn').textContent = '● live'; };
-  es.onerror = () => { $('conn').className = 'pill'; $('conn').textContent = '✕ reconnecting'; };
-  kinds.forEach(k => es.addEventListener(k, e => {
-    try { addEvent(JSON.parse(e.data)); } catch {}
-  }));
-})();
-
-refreshState();
-setInterval(refreshState, 2000);
+loadState();
+setInterval(() => {
+  state.agents.forEach(a => refreshMessageCount(a.kiloName));
+}, 10000);
 </script>
 </body>
 </html>
+
