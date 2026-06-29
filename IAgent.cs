@@ -28,6 +28,11 @@ public enum AgentStatus
     Stopped
 }
 
+public static class AgentTaskTypes
+{
+    public const string PrWatch = "pr-watch";
+}
+
 public record Result(bool Success, string Message, IEnumerable<string>? Artifacts = null);
 
 public record AgentTask(
@@ -39,6 +44,7 @@ public record AgentTask(
     AgentTaskStatus Status = AgentTaskStatus.Pending,
     string? Error = null,
     DateTime CreatedAt = default,
+    DateTime? UpdatedAt = null,
     DateTime? CompletedAt = null
 );
 

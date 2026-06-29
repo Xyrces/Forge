@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PortHorizon.Agents dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --border: #30363d;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+  header { padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header .pill { padding: 2px 8px; border-radius: 10px; background: var(--border); color: var(--muted); font-size: 11px; }
+  header .pill.live { background: var(--green); color: #000; }
+  main { display: grid; grid-template-columns: 1fr 380px; gap: 16px; padding: 16px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  section > h2 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+  th { font-weight: 600; color: var(--muted); background: rgba(255,255,255,0.02); position: sticky; top: 0; }
+  td.id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); }
+  .counts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; padding: 12px 14px; }
+  .count { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; }
+  .count .n { font-size: 20px; font-weight: 600; }
+  .count .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .status { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .status.pending { background: rgba(139, 148, 158, 0.15); color: var(--muted); }
+  .status.inprogress { background: rgba(88, 166, 255, 0.15); color: var(--blue); }
+  .status.completed { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+  .status.failed { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+  .status.blocked { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .events { height: calc(100vh - 220px); overflow-y: auto; padding: 8px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+  .ev { padding: 3px 0; border-bottom: 1px dotted var(--border); display: grid; grid-template-columns: 90px 130px 1fr; gap: 8px; }
+  .ev .t { color: var(--muted); }
+  .ev .k { font-weight: 600; }
+  .ev.task-transition .k { color: var(--blue); }
+  .ev.acp-session-completed .k, .ev.pr-merged .k { color: var(--green); }
+  .ev.acp-session-failed .k, .ev.pr-failed .k { color: var(--red); }
+  .ev.pr-changes-requested .k { color: var(--yellow); }
+  .ev.pr-opened .k { color: var(--purple); }
+  .ev .d { color: var(--fg); white-space: pre-wrap; word-break: break-word; }
+  .err { color: var(--red); font-style: italic; }
+  .empty { color: var(--muted); padding: 12px 14px; font-style: italic; }
+  footer { padding: 6px 16px; color: var(--muted); font-size: 11px; text-align: right; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PortHorizon.Agents</h1>
+  <span class="pill live" id="conn">● live</span>
+  <span class="pill" id="lastupdate"></span>
+  <span style="flex:1"></span>
+  <a class="pill" href="/api/state" target="_blank">/api/state</a>
+</header>
+<main>
+  <section>
+    <h2>Tasks</h2>
+    <div class="counts">
+      <div class="count"><div class="n" id="cnt-pending">–</div><div class="label">Pending</div></div>
+      <div class="count"><div class="n" id="cnt-inprogress">–</div><div class="label">In progress</div></div>
+      <div class="count"><div class="n" id="cnt-completed">–</div><div class="label">Completed</div></div>
+      <div class="count"><div class="n" id="cnt-failed">–</div><div class="label">Failed</div></div>
+      <div class="count"><div class="n" id="cnt-blocked">–</div><div class="label">Blocked</div></div>
+    </div>
+    <div style="max-height: calc(100vh - 280px); overflow-y: auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th><th>Type</th><th>Status</th><th>Branch</th><th>Role</th>
+            <th>PR</th><th>Updated</th><th>Error</th>
+          </tr>
+        </thead>
+        <tbody id="tasks"></tbody>
+      </table>
+      <div class="empty" id="empty-tasks" style="display:none;">No tasks yet. Enqueue one with <code>--enqueue-task</code>.</div>
+    </div>
+  </section>
+  <section>
+    <h2>Live events</h2>
+    <div class="events" id="events"></div>
+  </section>
+</main>
+<footer id="foot"></footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const s = await r.json();
+    render(s);
+    $('lastupdate').textContent = 'state @ ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('conn').className = 'pill';
+    $('conn').textContent = '✕ offline';
+  }
+}
+
+function render(s) {
+  const tasks = s.tasks || [];
+  const counts = { Pending: 0, InProgress: 0, Completed: 0, Failed: 0, Blocked: 0 };
+  tasks.forEach(t => counts[t.status] = (counts[t.status] || 0) + 1);
+  $('cnt-pending').textContent = counts.Pending || 0;
+  $('cnt-inprogress').textContent = counts.InProgress || 0;
+  $('cnt-completed').textContent = counts.Completed || 0;
+  $('cnt-failed').textContent = counts.Failed || 0;
+  $('cnt-blocked').textContent = counts.Blocked || 0;
+  $('foot').textContent = `total: ${tasks.length} • schema: v${s.schemaVersion}`;
+
+  const tbody = $('tasks');
+  if (tasks.length === 0) {
+    tbody.innerHTML = '';
+    $('empty-tasks').style.display = 'block';
+    return;
+  }
+  $('empty-tasks').style.display = 'none';
+  const sorted = [...tasks].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  tbody.innerHTML = sorted.map(t => {
+    const role = (t.parameters && t.parameters.roleAgent) || '';
+    const pr = (t.parameters && t.parameters.prNumber) || '';
+    const updated = t.updatedAt ? new Date(t.updatedAt).toLocaleTimeString() : (t.createdAt ? new Date(t.createdAt).toLocaleTimeString() : '');
+    const err = (t.error || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    return `<tr>
+      <td class="id">${t.id}</td>
+      <td>${t.type}</td>
+      <td><span class="status ${t.status.toLowerCase()}">${t.status}</span></td>
+      <td><code>${t.branch || ''}</code></td>
+      <td>${role}</td>
+      <td>${pr ? '#' + pr : ''}</td>
+      <td>${updated}</td>
+      <td title="${err}">${err}</td>
+    </tr>`;
+  }).join('');
+}
+
+function addEvent(ev) {
+  const el = document.createElement('div');
+  const cls = ev.kind.replace(/\./g, '-');
+  el.className = 'ev ' + cls;
+  const t = new Date(ev.timestamp).toLocaleTimeString();
+  const detail = ev.detail || '';
+  const data = ev.data ? ' ' + JSON.stringify(ev.data) : '';
+  el.innerHTML = `<span class="t">${t}</span><span class="k">${ev.kind}</span><span class="d">${detail}${data}</span>`;
+  const box = $('events');
+  box.appendChild(el);
+  while (box.children.length > 200) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+(function connectEvents() {
+  const es = new EventSource('/api/events');
+  const kinds = [
+    'task-transition','acp-session-started','acp-session-completed','acp-session-failed',
+    'pr-opened','pr-merged','pr-changes-requested','pr-failed','log'
+  ];
+  es.onopen = () => { $('conn').className = 'pill live'; $('conn').textContent = '● live'; };
+  es.onerror = () => { $('conn').className = 'pill'; $('conn').textContent = '✕ reconnecting'; };
+  kinds.forEach(k => es.addEventListener(k, e => {
+    try { addEvent(JSON.parse(e.data)); } catch {}
+  }));
+})();
+
+refreshState();
+setInterval(refreshState, 2000);
+</script>
+</body>
+</html>

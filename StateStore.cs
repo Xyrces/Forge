@@ -5,6 +5,8 @@ namespace PortHorizon.Agents.Core;
 
 public sealed class StateStore
 {
+    public const int CurrentSchemaVersion = 2;
+
     private readonly string _statePath;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly SemaphoreSlim _lock = new(1, 1);
@@ -31,11 +33,18 @@ public sealed class StateStore
         try
         {
             var json = await File.ReadAllTextAsync(filePath, cancellationToken);
-            return JsonSerializer.Deserialize<OrchestratorState>(json, _jsonOptions) ?? new OrchestratorState();
+            var state = JsonSerializer.Deserialize<OrchestratorState>(json, _jsonOptions);
+            if (state is null)
+                return new OrchestratorState();
+            if (state.SchemaVersion != CurrentSchemaVersion)
+                throw new StateSchemaException(
+                    $"State file schema version {state.SchemaVersion} is not supported " +
+                    $"(expected {CurrentSchemaVersion}). Migrate or delete {filePath}.");
+            return state;
         }
-        catch
+        catch (JsonException ex)
         {
-            return new OrchestratorState();
+            throw new StateCorruptException($"State file {filePath} is corrupt: {ex.Message}", ex);
         }
         finally
         {
@@ -46,12 +55,21 @@ public sealed class StateStore
     public async Task SaveStateAsync(OrchestratorState state, CancellationToken cancellationToken = default)
     {
         var filePath = Path.Combine(_statePath, "orchestrator-state.json");
+        var dir = Path.GetDirectoryName(filePath)!;
 
         await _lock.WaitAsync(cancellationToken);
         try
         {
+            Directory.CreateDirectory(dir);
             var json = JsonSerializer.Serialize(state, _jsonOptions);
-            await File.WriteAllTextAsync(filePath, json, cancellationToken);
+
+            var tempPath = filePath + ".tmp";
+            await File.WriteAllTextAsync(tempPath, json, cancellationToken);
+
+            if (File.Exists(filePath))
+                File.Replace(tempPath, filePath, destinationBackupFileName: null);
+            else
+                File.Move(tempPath, filePath);
         }
         finally
         {
@@ -62,12 +80,21 @@ public sealed class StateStore
     public async Task SaveHeartbeatAsync(AgentHeartbeat heartbeat, CancellationToken cancellationToken = default)
     {
         var filePath = Path.Combine(_statePath, $"heartbeat-{heartbeat.AgentId}.json");
+        var dir = Path.GetDirectoryName(filePath)!;
 
         await _lock.WaitAsync(cancellationToken);
         try
         {
+            Directory.CreateDirectory(dir);
             var json = JsonSerializer.Serialize(heartbeat, _jsonOptions);
-            await File.WriteAllTextAsync(filePath, json, cancellationToken);
+
+            var tempPath = filePath + ".tmp";
+            await File.WriteAllTextAsync(tempPath, json, cancellationToken);
+
+            if (File.Exists(filePath))
+                File.Replace(tempPath, filePath, destinationBackupFileName: null);
+            else
+                File.Move(tempPath, filePath);
         }
         finally
         {
@@ -76,22 +103,45 @@ public sealed class StateStore
     }
 }
 
-public record OrchestratorState(
-    List<AgentTask> Tasks,
-    Dictionary<string, AgentTaskStatus> TaskStatuses,
-    Dictionary<string, string> ActiveAgents,
-    DateTime LastHeartbeat,
-    int CompletedTasks,
-    int FailedTasks
-)
+public sealed class StateCorruptException : Exception
 {
+    public StateCorruptException(string message) : base(message) { }
+    public StateCorruptException(string message, Exception inner) : base(message, inner) { }
+}
+
+public sealed class StateSchemaException : Exception
+{
+    public StateSchemaException(string message) : base(message) { }
+}
+
+public record OrchestratorState
+{
+    public List<AgentTask> Tasks { get; init; }
+    public DateTime LastHeartbeat { get; init; }
+    public int CompletedTasks { get; set; }
+    public int FailedTasks { get; set; }
+    public int SchemaVersion { get; init; } = StateStore.CurrentSchemaVersion;
+
+    public OrchestratorState(
+        List<AgentTask> tasks,
+        DateTime lastHeartbeat,
+        int completedTasks,
+        int failedTasks,
+        int schemaVersion = StateStore.CurrentSchemaVersion)
+    {
+        Tasks = tasks;
+        LastHeartbeat = lastHeartbeat;
+        CompletedTasks = completedTasks;
+        FailedTasks = failedTasks;
+        SchemaVersion = schemaVersion;
+    }
+
     public OrchestratorState() : this(
         new List<AgentTask>(),
-        new Dictionary<string, AgentTaskStatus>(),
-        new Dictionary<string, string>(),
         DateTime.MinValue,
         0,
-        0
+        0,
+        StateStore.CurrentSchemaVersion
     ) { }
 }
 
@@ -103,3 +153,63 @@ public record AgentHeartbeat(
     int MemoryUsageMB,
     bool IsHealthy
 );
+
+public static class StateReaper
+{
+    public static OrchestratorState ReapStaleTasks(
+        OrchestratorState state,
+        TimeSpan staleAfter,
+        int maxRetryCount,
+        Func<string, string?>? worktreeExists)
+    {
+        var now = DateTime.UtcNow;
+        var swept = new List<AgentTask>(state.Tasks.Count);
+
+        foreach (var task in state.Tasks)
+        {
+            if (task.Status != AgentTaskStatus.InProgress)
+            {
+                swept.Add(task);
+                continue;
+            }
+
+            var lastUpdate = task.UpdatedAt ?? task.CreatedAt;
+            if (now - lastUpdate < staleAfter)
+            {
+                swept.Add(task);
+                continue;
+            }
+
+            var retryCount = task.Parameters.GetValueOrDefault("retryCount") as int? ?? 0;
+            var newStatus = retryCount >= maxRetryCount
+                ? AgentTaskStatus.Failed
+                : AgentTaskStatus.Pending;
+
+            var newParams = new Dictionary<string, object>(task.Parameters, StringComparer.Ordinal)
+            {
+                ["retryCount"] = retryCount + 1
+            };
+            var reason = newStatus == AgentTaskStatus.Failed
+                ? $"Reaper: stale after {staleAfter.TotalMinutes:F0}m and retry budget exhausted"
+                : $"Reaper: stale after {staleAfter.TotalMinutes:F0}m, will retry";
+
+            swept.Add(task with
+            {
+                Status = newStatus,
+                Error = task.Error is null ? reason : $"{task.Error}; {reason}",
+                Parameters = newParams
+            });
+
+            if (worktreeExists is not null)
+            {
+                var worktreePath = task.Parameters.GetValueOrDefault("worktreePath") as string;
+                if (worktreePath is not null && worktreeExists(worktreePath) is null)
+                {
+                    // worktree already gone; nothing to do
+                }
+            }
+        }
+
+        return state with { Tasks = swept };
+    }
+}

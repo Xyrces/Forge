@@ -1,4 +1,5 @@
 using Octokit;
+using PortHorizon.Agents.Configuration;
 
 namespace PortHorizon.Agents;
 
@@ -7,6 +8,9 @@ public sealed class GitHubService
     private readonly GitHubClient _client;
     private readonly string _owner;
     private readonly string _repo;
+
+    public GitHubService(GitHubOptions options)
+        : this(options.Owner, options.Repo, options.Token) { }
 
     public GitHubService(string owner, string repo, string? token = null)
     {
@@ -52,4 +56,18 @@ public sealed class GitHubService
 
     public async Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
         => await _client.PullRequest.Review.GetAll(_owner, _repo, prNumber);
+
+    public async Task<PullRequest> GetPullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+        => await _client.PullRequest.Get(_owner, _repo, prNumber);
+
+    public async Task<bool> DeleteBranchAsync(string branchName, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _client.Git.Reference.Delete(_owner, _repo, $"refs/heads/{branchName}");
+            return true;
+        }
+        catch (NotFoundException) { return true; }
+        catch { return false; }
+    }
 }
