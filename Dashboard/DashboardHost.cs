@@ -52,11 +52,12 @@ public sealed class DashboardHost : IAsyncDisposable
         _app.Urls.Clear();
         _app.Urls.Add($"http://{_options.Hostname}:{_options.Port}");
 
-        _app.MapGet("/api/state", async (CancellationToken ct) =>
+_app.MapGet("/api/state", async (CancellationToken ct) =>
         {
             try
             {
                 var tasks = await _issues.ListAsync(new IssueFilter(), ct);
+                var activeSprint = await _sprints.GetActiveAsync(ct);
                 var view = new
                 {
                     tasks = tasks.Select(t => new
@@ -76,7 +77,8 @@ public sealed class DashboardHost : IAsyncDisposable
                     lastHeartbeat = DateTime.UtcNow,
                     completedTasks = tasks.Count(t => t.Status == IssueStatus.Completed),
                     failedTasks = tasks.Count(t => t.Status == IssueStatus.Failed),
-                    schemaVersion = 2
+                    schemaVersion = 2,
+                    activeSprintId = activeSprint?.Id
                 };
                 return Results.Json(view, DashboardJson.Options);
             }
@@ -85,6 +87,8 @@ public sealed class DashboardHost : IAsyncDisposable
                 return Results.Problem(detail: ex.Message, statusCode: 503);
             }
         });
+
+        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger);
 
         _app.MapGet("/api/agents", () =>
         {
