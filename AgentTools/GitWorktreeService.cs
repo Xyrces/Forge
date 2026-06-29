@@ -73,7 +73,7 @@ public sealed class GitWorktreeService
         return new DiffStats(result.Stdout, summary);
     }
 
-    public async Task<string> CommitAllAsync(string worktreePath, string message, CancellationToken cancellationToken = default)
+    public async Task<CommitResult> CommitAllAsync(string worktreePath, string message, CancellationToken cancellationToken = default)
     {
         await RunGitInAsync(worktreePath, "add -A", cancellationToken);
         var msgPath = Path.Combine(Path.GetTempPath(), $"commit-msg-{Guid.NewGuid():N}.txt");
@@ -81,9 +81,15 @@ public sealed class GitWorktreeService
         try
         {
             var result = await RunGitInAsync(worktreePath, $"commit -F \"{msgPath}\"", cancellationToken);
-            if (result.ExitCode != 0 && !result.Stderr.Contains("nothing to commit"))
-                throw new InvalidOperationException($"git commit failed (exit={result.ExitCode}): {result.Stderr}");
-            return result.Stdout.Trim();
+            if (result.ExitCode == 0)
+                return CommitResult.Created(result.Stdout.Trim());
+
+            // "nothing to commit" is a normal no-op, not an error.
+            if (result.Stderr.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase)
+                || result.Stdout.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase))
+                return CommitResult.NoChanges(result.Stdout.Trim());
+
+            throw new InvalidOperationException($"git commit failed (exit={result.ExitCode}): {result.Stderr}");
         }
         finally
         {
@@ -166,3 +172,12 @@ public sealed class GitWorktreeService
 }
 
 public readonly record struct DiffStats(string Raw, string Summary);
+
+public enum CommitOutcome { Created, NoChanges }
+
+public sealed record CommitResult(CommitOutcome Outcome, string Message)
+{
+    public bool HasChanges => Outcome == CommitOutcome.Created;
+    public static CommitResult Created(string m) => new(CommitOutcome.Created, m);
+    public static CommitResult NoChanges(string m) => new(CommitOutcome.NoChanges, m);
+}

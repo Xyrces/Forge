@@ -151,7 +151,21 @@ public sealed class OrchestratorAgent : IAgent
             _logger.LogInformation("ACP session for {Id} completed in {Ms}ms",
                 claimed.Id, session.Elapsed.TotalMilliseconds);
 
-            await _worktrees.CommitAllAsync(worktreePath, $"Task({claimed.Id}): {claimed.Title}", cancellationToken);
+            await UpdateMetadataAsync(claimed.Id, m => MergeDict(m, new Dictionary<string, object>
+            {
+                ["modelResponse"] = Truncate(result.Response ?? "", 2000),
+            }), cancellationToken);
+
+            var commit = await _worktrees.CommitAllAsync(worktreePath, $"Task({claimed.Id}): {claimed.Title}", cancellationToken);
+            if (!commit.HasChanges)
+            {
+                _logger.LogWarning("Issue {Id}: model produced no diff (no files committed). Marking Completed with lastResponse captured.", claimed.Id);
+                await _issues.TransitionAsync(claimed.Id, IssueStatus.Completed, "no changes (agent made 0 edits)", ct: cancellationToken);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                    claimed.Id, "Completed (no-op)", new Dictionary<string, object?> { ["response"] = Truncate(result.Response ?? "", 400) }));
+                return new Result(true, "completed with no diff");
+            }
+
             await _worktrees.PushAsync(worktreePath, branch, cancellationToken);
             var headSha = await _worktrees.GetHeadShaAsync(worktreePath, cancellationToken);
 

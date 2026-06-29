@@ -219,8 +219,8 @@ public static class Program
             Console.WriteLine("[4/5] Writing + committing a marker file...");
             var marker = Path.Combine(path, ".ph-smoke");
             await File.WriteAllTextAsync(marker, $"smoke at {DateTime.UtcNow:O}");
-            var commitMsg = await worktrees.CommitAllAsync(path, $"smoke({taskId}): worktree smoke");
-            Console.WriteLine($"      -> {commitMsg.Split('\n').First()}");
+            var commit = await worktrees.CommitAllAsync(path, $"smoke({taskId}): worktree smoke");
+            Console.WriteLine($"      -> outcome={commit.Outcome} msg={commit.Message.Split('\n').First()}");
 
             Console.WriteLine("[5/5] Push dry-run (no actual push; verifies config + remote)...");
             var headSha = await worktrees.GetHeadShaAsync(path);

@@ -31,6 +31,9 @@
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
   th { font-weight: 600; color: var(--muted); background: rgba(255,255,255,0.02); position: sticky; top: 0; }
   td.id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); }
+  td.diag-cell { white-space: normal; max-width: 480px; min-width: 240px; }
+  .err-cell { display: block; color: var(--red); font-weight: 600; max-width: 460px; overflow: hidden; text-overflow: ellipsis; }
+  .resp-cell { display: block; color: var(--muted); font-style: italic; font-size: 11px; max-width: 460px; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
   .counts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; padding: 12px 14px; }
   .count { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; }
   .count .n { font-size: 20px; font-weight: 600; }
@@ -134,7 +137,16 @@ function render(s) {
     const role = (t.parameters && t.parameters.roleAgent) || '';
     const pr = (t.parameters && t.parameters.prNumber) || '';
     const updated = t.updatedAt ? new Date(t.updatedAt).toLocaleTimeString() : (t.createdAt ? new Date(t.createdAt).toLocaleTimeString() : '');
-    const err = (t.error || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const escapeHtml = (s) => (s || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const escapeAttr = (s) => (s || '').replace(/[<>"'&]/g, c => ({'<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','&':'&amp;'}[c]));
+    const err = escapeHtml(t.error);
+    const resp = escapeHtml(t.parameters && t.parameters.modelResponse);
+    const errShort = err.length > 80 ? err.slice(0, 80) + '…' : err;
+    const respShort = resp.length > 80 ? resp.slice(0, 80) + '…' : resp;
+    const fullErrorTooltip = escapeAttr(t.error || '');
+    const fullResponseTooltip = escapeAttr(t.parameters && t.parameters.modelResponse || '');
+    const errCell = err ? `<span class="err-cell" title="${fullErrorTooltip}">${errShort}</span>` : '';
+    const respCell = (resp && (!err || resp !== err)) ? `<div class="resp-cell" title="${fullResponseTooltip}">↳ ${respShort}</div>` : '';
     return `<tr>
       <td class="id">${t.id}</td>
       <td>${t.type}</td>
@@ -143,7 +155,7 @@ function render(s) {
       <td>${role}</td>
       <td>${pr ? '#' + pr : ''}</td>
       <td>${updated}</td>
-      <td title="${err}">${err}</td>
+      <td class="diag-cell">${errCell}${respCell}</td>
     </tr>`;
   }).join('');
 }
