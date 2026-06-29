@@ -117,7 +117,7 @@
 <footer id="foot"></footer>
 <script>
 const $ = (id) => document.getElementById(id);
-const escapeHtml = (s) => (s ?? "").replace(/[<>&"']/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;",""":"&quot;","'":"&#39;"}[c]));
+const escapeHtml = (s) => (s ?? "").replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
 const trunc = (s, n) => s.length > n ? s.slice(0, n) + "..." : s;
 
 let state = { tasks: [], agents: [], skills: [], sprints: [], activeSprintId: null };
