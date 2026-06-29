@@ -128,14 +128,20 @@ async function loadState() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     const s = await r.json();
     state.tasks = s.tasks || [];
+    state.agents = s.agents || [];
+    state.skills = s.skills || [];
+    state.sprints = s.sprints || [];
     state.activeSprintId = s.activeSprintId || null;
-    state.completedTasks = s.completedTasks;
-    state.failedTasks = s.failedTasks;
+    state.completedTasks = s.completedTasks || 0;
+    state.failedTasks = s.failedTasks || 0;
     $("active-sprint").textContent = s.activeSprintId ? "sprint: " + s.activeSprintId : "no active sprint";
-    await refreshState();
+    $("conn").className = "pill live";
+    $("conn").textContent = "● live";
+    refreshState();
   } catch (e) {
     $("conn").className = "pill";
-    $("conn").textContent = "OFFLINE";
+    $("conn").textContent = "OFFLINE (" + (e.message || e) + ")";
+    console.error("loadState failed", e);
   }
 }
 

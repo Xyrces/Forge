@@ -58,6 +58,9 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             {
                 var tasks = await _issues.ListAsync(new IssueFilter(), ct);
                 var activeSprint = await _sprints.GetActiveAsync(ct);
+                var agents = await _agents.ListAsync(ct);
+                var skills = await _skills.ListAsync(null, globalOnly: false, ct);
+                var sprints = await _sprints.ListAsync(activeOnly: false, ct);
                 var view = new
                 {
                     tasks = tasks.Select(t => new
@@ -73,6 +76,40 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
                         updatedAt = t.UpdatedAt,
                         closedAt = t.ClosedAt,
                         parameters = ParseMetadata(t.MetadataJson)
+                    }).ToArray(),
+                    agents = agents.Select(a => new
+                    {
+                        id = a.Id,
+                        kiloName = a.KiloName,
+                        displayName = a.DisplayName,
+                        scope = a.Scope,
+                        description = a.Description,
+                        enabled = a.Enabled,
+                        configJson = a.ConfigJson,
+                        createdAt = a.CreatedAt,
+                        updatedAt = a.UpdatedAt
+                    }).ToArray(),
+                    skills = skills.Select(s => new
+                    {
+                        id = s.Id,
+                        name = s.Name,
+                        description = s.Description,
+                        body = s.Body,
+                        agentId = s.AgentId,
+                        enabled = s.Enabled,
+                        createdAt = s.CreatedAt,
+                        updatedAt = s.UpdatedAt
+                    }).ToArray(),
+                    sprints = sprints.Select(s => new
+                    {
+                        id = s.Id,
+                        name = s.Name,
+                        goal = s.Goal,
+                        startDate = s.StartDate,
+                        endDate = s.EndDate,
+                        status = s.Status.ToString(),
+                        createdAt = s.CreatedAt,
+                        updatedAt = s.UpdatedAt
                     }).ToArray(),
                     lastHeartbeat = DateTime.UtcNow,
                     completedTasks = tasks.Count(t => t.Status == IssueStatus.Completed),
