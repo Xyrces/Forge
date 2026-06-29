@@ -239,6 +239,240 @@ These are reads-only-from-the-issue's perspective. Writes happen at the phase bo
 10. **DurableTask container dependency.** Phase 4 requires either Azure-hosted Durable Functions, docker run mcr.microsoft.com/dts/dts-emulator, or a self-hosted DTS. There is no in-process DTS. Accepting Phase 4 means accepting a Docker-or-Azure dependency in the deploy story. The current PortHorizon.Agents binary has no such dependency. Phase 4 is opt-in; the orchestrator can ship P0..P3 without it.
 11. **Naming.** The old RoleAgentRegistry + .kilo/agents/*.md model has the word kilo in several places (e.g. the kiloName column on AgentStore). The MAF migration is the natural point to rename to provider/displayName. We do this as part of Phase 0 to avoid carrying the wrong name into the MAF era.
 
+
+## Cross-functional agents (product, design, artist, groomer)
+
+The migration is not only about replacing the engineering agent runtime. It also brings product, design, and art into the same agentic plane. The shape of this work was set by the user:
+
+- **Product agent is a pre-step before engineering.** When a new feature is requested (or the vision doc changes), product designs the spec, then engineering picks it up. Engineering is downstream of product.
+- **Designer agent is a workflow node that runs alongside product.** Designer hands off a finished visual to artist; artist hands off to engineering. Specs flow product -> design -> art -> engineering.
+- **Artist agent uses Meshy.ai as its tool** for 3D-asset generation (text-to-3D, image-to-3D, retexture, animation).
+- **Issue groomer is automatic** and runs on a schedule. It reads `VISION.md` plus the existing issues plus recent PR comments, then rewrites, adds, or retires issues to match the vision.
+
+### Data model additions (all in the same SQLite DB)
+
+```sql
+-- vision: top-level product document. One row per major version; groomer reads/writes this.
+CREATE TABLE vision (
+    id            TEXT PRIMARY KEY,
+    title         TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    goal          TEXT,
+    non_goals     TEXT,
+    success_metrics TEXT,
+    author        TEXT NOT NULL,
+    version       INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+-- spec: per-feature spec written by the product agent.
+CREATE TABLE spec (
+    id            TEXT PRIMARY KEY,
+    vision_id     TEXT REFERENCES vision(id),
+    feature_name  TEXT NOT NULL,
+    problem       TEXT NOT NULL,
+    solution      TEXT NOT NULL,
+    acceptance    TEXT NOT NULL,
+    out_of_scope  TEXT,
+    design_ref    TEXT,
+    art_ref       TEXT,
+    status        TEXT NOT NULL DEFAULT ''draft'',
+    author        TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX ix_spec_status ON spec(status);
+CREATE INDEX ix_spec_vision ON spec(vision_id);
+
+-- design_artifact: visual assets produced by the designer agent.
+CREATE TABLE design_artifact (
+    id            TEXT PRIMARY KEY,
+    spec_id       TEXT REFERENCES spec(id),
+    kind          TEXT NOT NULL,
+    storage_path  TEXT NOT NULL,
+    format        TEXT NOT NULL,
+    description   TEXT,
+    author        TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+-- artist_output: 3D assets produced via Meshy.ai.
+CREATE TABLE artist_output (
+    id                TEXT PRIMARY KEY,
+    spec_id           TEXT REFERENCES spec(id),
+    design_ref        TEXT,
+    meshy_task_id     TEXT NOT NULL,
+    meshy_endpoint    TEXT NOT NULL,
+    meshy_status      TEXT NOT NULL,
+    preview_url       TEXT,
+    model_url         TEXT,
+    texture_urls_json TEXT,
+    credits_used      INTEGER,
+    prompt            TEXT,
+    negative_prompt   TEXT,
+    author            TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    completed_at      TEXT
+);
+CREATE INDEX ix_artist_status ON artist_output(meshy_status);
+CREATE INDEX ix_artist_spec ON artist_output(spec_id);
+
+-- issue_groomer_run: audit log of every groomer pass.
+CREATE TABLE issue_groomer_run (
+    id              TEXT PRIMARY KEY,
+    vision_id       TEXT REFERENCES vision(id),
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,
+    issues_created  INTEGER NOT NULL DEFAULT 0,
+    issues_closed   INTEGER NOT NULL DEFAULT 0,
+    issues_updated  INTEGER NOT NULL DEFAULT 0,
+    rationale       TEXT,
+    status         TEXT NOT NULL DEFAULT ''running''
+);
+```
+
+`IssueStore` (the existing one) gets a new column: `issue.spec_id TEXT REFERENCES spec(id)`. An issue is the engineering-side breakdown of a spec.
+
+
+
+### MeshyClient (a new Tools/ class)
+
+Encapsulates the Meshy HTTP API. The artist agent gets these as `AIFunction`s:
+
+| `AIFunction` name | Wraps | Async? | When called |
+|---|---|---|---|
+| `meshy_text_to_3d_preview` | `POST /openapi/v2/text-to-3d` (mode=preview) | yes (returns task id immediately) | Start a model. |
+| `meshy_text_to_3d_refine` | `POST /openapi/v2/text-to-3d` (mode=refine) | yes | Apply texture after preview is SUCCEEDED. |
+| `meshy_image_to_3d` | `POST /openapi/v1/image-to-3d` | yes | Render from a design mockup. |
+| `meshy_get_task` | `GET /openapi/v2/text-to-3d/:id` | sync (poll) | Check status. |
+| `meshy_subscribe_task` | `GET /:id/stream` (SSE) | async stream | Webhook-equivalent; subscribe to completion. |
+| `meshy_remesh` / `meshy_retexture` / `meshy_rig` / `meshy_animate` | one each | per endpoint | Post-processing. |
+| `meshy_text_to_image` / `meshy_image_to_image` | one each | per endpoint | Concept / iteration images that feed the 3D pipeline. |
+
+**Wire details** (from the Meshy API docs):
+- Auth: `Authorization: Bearer <MESHY_API_KEY>` header. Key from `https://www.meshy.ai/settings/api`.
+- Async model: POST returns a task id. Status is `PENDING` -> `IN_PROGRESS` -> `SUCCEEDED` / `FAILED` / `CANCELED`.
+- Output: GLB / FBX / USDZ / OBJ / STL / 3MF. **Default generates all formats except 3MF;** pass `target_formats` to restrict.
+- Costs (verified against `docs.meshy.ai/api/pricing.md`): Text-to-3D Preview 20cr (Meshy 6) / 5cr (other); Refine 10cr; Image-to-3D 20cr without texture / 30cr with texture (Meshy 6) or 5/15cr (other); Multi-Image-to-3D same as Image-to-3D; Remesh 5cr; Auto-Rigging 5cr; Animation 3cr; Convert 1cr; Resize 1cr; Retexture 10cr. **Failed tasks are refunded** (`consumed_credits` returns 0); success/failure must be reconciled against `consumed_credits` from the response, not assumed.
+- Asset retention: 3 days for Pro / Studio, longer for Enterprise. **Asset URLs in the response are signed and expire** (the response example shows `?Expires=...`). The artist must download the GLB to `.portHorizon/artifacts/<spec_id>/<artist_output_id>.glb` **promptly after SUCCEEDED**, not lazily.
+- Rate limits: Pro/Studio = 20 req/s. **Pro tier queue depth = 10 tasks;** Studio = 20. The artist must respect `Meshy:MaxConcurrent` to avoid filling the queue and timing out on `429`.
+- Billing endpoint: `GET /openapi/v1/balance` returns `{"balance": <integer>}` - current remaining credits, **not** a per-month ledger. Monthly budget enforcement is done client-side by summing `consumed_credits` from each `artist_output` row.
+- Webhooks: real, configured in the dashboard, up to 5 active per account, HTTPS-only, require `<400` response, auto-disable on repeated failures. **Webhooks are Meshy recommended primary completion signal** (better than polling/SSE at scale per their docs).
+- SSE fallback: `GET /<endpoint>/:id/stream` returns NDJSON-style events. We use this as a fallback when the webhook endpoint is unavailable.
+
+
+### New MAF agents and their AIFunction set
+
+**Product agent** (`ProductAgent : ChatClientAgent`)
+- Instructions: structured prompt that says "you are a product manager; given VISION.md and the current sprint, write a `spec` row in the database; do not write code."
+- AIFunctions: `db_get_vision`, `db_list_specs`, `db_save_spec`, `db_list_recent_pr_comments`.
+- One product agent instance per vision-bump; output is one or more `spec` rows.
+- Does **not** run inside a sprint workflow. Runs on a trigger: vision change OR explicit `/api/vision/replan` request OR schedule (every N hours). It writes specs but does not enqueue issues.
+
+**Designer agent** (`DesignerAgent : ChatClientAgent`)
+- Instructions: given a `spec` row, produce a visual: wireframe (low-fidelity), mockup (high-fidelity), or component spec. Output goes to `design_artifact` rows.
+- AIFunctions: `db_get_spec`, `db_save_design_artifact`, `render_html_wireframe` (returns HTML the dashboard renders inline), `render_svg` (returns inline SVG).
+- Runs after a spec is created. Output is one or more `design_artifact` rows.
+
+**Artist agent** (`ArtistAgent : ChatClientAgent`)
+- Instructions: given a `spec` (and optional `design_artifact` reference), decide what 3D assets are needed. For each, pick the Meshy endpoint + parameters, kick off the job, and persist the resulting `artist_output` row.
+- AIFunctions: the full MeshyClient set above + `db_save_artist_output`, `db_get_design_artifact`, `db_persist_artifact_file` (downloads the GLB to disk).
+- Runs after a design is approved. Can run multiple parallel Meshy tasks per spec.
+- **Important:** Meshy tasks are long (preview ~1-2 min, refine another 1-2 min). The artist agent must NOT block the engineering dispatch on a Meshy task. It writes the `artist_output` row in `PENDING` / `IN_PROGRESS` state and engineering can pick up the issue in parallel. When Meshy''s `/stream` endpoint emits completion, the artist agent (a background subscriber) updates the row to `SUCCEEDED`.
+
+**Issue groomer** (`GroomerAgent : ChatClientAgent`)
+- Instructions: given `VISION.md`, the current `spec` set, and recent PR comments, propose additions / changes to `issue` and `spec` rows. Never touches code.
+- AIFunctions: `db_read_vision`, `db_list_specs`, `db_list_open_issues`, `db_create_issue`, `db_close_issue`, `db_update_issue`, `db_log_groomer_run`.
+- Trigger: every N hours (configurable, default 6) OR on `VISION.md` change OR on explicit `/api/groom` request.
+- Idempotency: writes a `issue_groomer_run` row with counts and rationale. Re-runs are safe; the agent diffs state before proposing changes.
+
+
+
+### Workflow shape: product -> design -> artist -> engineering
+
+A single `WorkflowBuilder` per vision-change event:
+
+```
+                  vision-bump event
+                         |
+                  product agent
+                  (writes spec rows)
+                         |
+              spec:status=ready
+                         |
+                  designer agent
+                  (writes design_artifact rows)
+                         |
+         design_artifact:kind in {mockup, wireframe, component-spec}
+                         |
+                  artist agent
+                  (writes artist_output rows, kicks off Meshy)
+                         |
+              artist_output:status=SUCCEEDED
+                         |
+                  product agent (or operator)
+                  flips spec:status -> claimed
+                         |
+                  engineering dispatch loop
+                  (existing in-process orchestrator)
+```
+
+Implementation: separate `WorkflowBuilder` instances, NOT one big workflow. The product/design/artist phases are **fan-out fan-in** for a single spec; engineering dispatch is a separate per-sprint loop. The handoffs are database rows, not workflow edges. This is intentional:
+- A spec can be in `draft` for days before design starts. Don''t pin a workflow that long.
+- Engineering dispatch is already a continuous loop; we don''t want to interleave it with the long-running artist phase.
+- If Meshy is down, the spec is blocked; if the engineering loop is down, the spec is not blocked. Independent failure domains.
+
+### How the dashboard surfaces the new shape
+
+| Tab | Now | P1 P1.5 (this work) |
+|---|---|---|
+| Tasks | Issue list | Unchanged. Issues get a `spec_id` link. |
+| Backlog | Same | Same. |
+| Sprints | Same | Same. |
+| Agents | `coredev` etc. | `coredev` + `product`, `designer`, `artist`, `groomer` rows. Operator can pin one to send a message. |
+| Skills | Per-agent + global | Same. Product/Designer/Artist all have their own skills. |
+
+| New tab | Surface |
+|---|---|
+| **Vision** | Latest vision doc, with diff vs. previous. "Replan" button to trigger product agent. History of replans. |
+| **Specs** | List of specs with status. Click into one to see: problem, solution, acceptance, design artifacts (image grid), artist output thumbnails (Meshy GLB previews). |
+| **Design** | Image grid of all `design_artifact` rows, filter by spec. |
+| **Art** | List of `artist_output` rows with status pills (PENDING / IN_PROGRESS / SUCCEEDED / FAILED), credits used, preview GLB. Click to download. |
+| **Groomer** | Timeline of `issue_groomer_run` rows. Click to see the diff (which issues created / closed / updated). Manual "Re-run" button. |
+
+### Phased delivery (extends the existing P0..P4)
+
+| Phase | Scope | Why this order |
+|---|---|---|
+| **P0.5** | Add `Vision` table + `vision.md` import; UI tab "Vision"; existing engineering loop reads `vision.md` once at startup. | Cheap. Validates the storage path. |
+| **P1** (existing) | Skills loading works. | Already designed. |
+| **P1.5.a** | `Spec` table + UI tab "Specs" (read-only). | Validate the spec model before giving product agent write access. |
+| **P1.5.b** | Product agent writes `spec` rows via AIFunctions. Operator approves via dashboard. | Loop is closed but human-gated. |
+| **P2.a** | `design_artifact` table + UI tab "Design" + Designer agent. | Designer is a synchronous workflow node. |
+| **P2.b** | `artist_output` table + MeshyClient + UI tab "Art" + Artist agent. | Meshy is the long pole; isolate its failures. |
+| **P3** (existing) | Engineering dispatch becomes a MAF workflow. | Already designed. |
+| **P3.5** | `issue_groomer_run` table + Groomer agent on schedule. | Auto-groomer. |
+| **P4** (existing) | DurableTask. | Already designed. |
+
+P1.5 is a sub-plan inserted between P1 and P2. The P2 / P3 / P4 numbering is preserved.
+
+### New risks (additive to the 11 already documented)
+
+12. **Meshy credit budget.** Every artist run costs credits. We must (a) cap per-spec credits in `spec.acceptance` or a separate config, (b) show running cost in the UI, (c) have a soft cap (warn at 80%) and hard cap (fail at 100%) so a runaway prompt does not drain the account. **Action:** expose `Meshy:Budget:MonthlyCredits` and `Meshy:Budget:PerSpecCredits` in `appsettings.json`; read the current month usage from `GET /openapi/v1/billing` (or a separate endpoint if one exists - **verify before P2.b**).
+13. **Meshy async blocking.** Preview + refine takes minutes. We MUST NOT block engineering on Meshy. The artist agent''s `subscribe_task` uses SSE, but we also need a fallback: if SSE drops, the artist row goes to `PENDING_POLL` and a background poll re-activates it. Plus: engineering can start work as soon as the spec is ready, even if the artist is still rendering.
+14. **Vision drift.** The product agent can write specs that contradict VISION.md. The groomer should run as a guardrail after every product-agent pass. If a spec deviates from VISION.md, the groomer marks it `needs-review` and surfaces in the UI; the human decides.
+15. **Asset retention vs vendor lock-in.** Meshy retains assets for some period. We download final GLBs to `.portHorizon/artifacts/` so we are not coupled. **Action:** P2.b ships with a "rehydrate from disk" path that prefers local files over Meshy re-fetch.
+16. **Designer agent quality.** Designer output is HTML/SVG that the dashboard renders. Bad HTML breaks the dashboard tab. The designer AIFunction suite must constrain output to a small DSL (markdown with fenced code blocks, or a strict JSON schema) and the renderer must sanitize.
+17. **Groomer cost.** Groomer runs on a schedule; each pass costs LLM tokens. With 100 open issues and 50 PR comments per pass, the token spend adds up. **Action:** make the schedule + per-pass token budget configurable; cap issues processed per pass.
+
+### Updated "Out of scope"
+
+Remove "Switching to Microsoft''s Python Agent Framework" (we never were going to). Add:
+- **Replacing Meshy with another 3D provider.** P2.b assumes Meshy; if we need to swap, the `MeshyClient` interface is the only thing to replace.
+- **Real-time collaboration between multiple human operators.** Single-operator assumption; multiple-operator support is a future concern.
+
+
 ## Open questions
 
 
@@ -250,12 +484,49 @@ These are reads-only-from-the-issue's perspective. Writes happen at the phase bo
 6. **Observability.** MAF has built-in OpenTelemetry. We should pipe to the same OTLP endpoint we configured for the orchestrator and add dashboard tabs for traces.
 7. **What happens to `docs/embedded-issues.md` and the IssueStore schema?** Nothing changes. The P0 plan lives on as the storage layer for MAF's run-time needs.
 
+
+### Open questions (additive)
+
+8. **Artist output policy.** Does every spec need a 3D asset, or only some specs (gameplay-affecting ones)? A `spec.requires_3d` boolean toggles whether the artist phase runs. Default: false.
+9. **Vision source of truth.** Is `VISION.md` the only source, or can product revisions come from PR comments, user feedback files, or operator prompts? P1.5.b only commits to VISION.md; the rest is future.
+10. **Credit allocation per role.** Do we want a "spend on art" toggle in the dashboard so the operator can pause Meshy calls during a tight month? Default: yes, with a per-month cap.
+
+
+
+## Open issues from third-party review (to address before implementation)
+
+The plan was stress-tested by an independent reviewer who found 17 items, of which the high-priority remaining ones are recorded here. They are not factual errors but design refinements; track these in P0 implementation.
+
+1. **Workflow shape.** The current "separate `WorkflowBuilder` instances, handoffs as database rows" is overcomplicated. Recommended: one `WorkflowBuilder` per spec with four executors (product, designer, artist, engineer-handoff), `WaitForExternalEvent` for human-approval gates. **Re-evaluate during P1.5.b implementation.**
+2. **Operator-inbox UX consistency.** The engineering `agent-message` endpoint on line 215 is not extended to product/designer/artist/groomer. Define the unified surface (e.g. `/api/agents/{kilo-or-display-name}/messages`) and which agents have inboxes vs which have workflow-embedded input only.
+3. **P1.5.a fold into P1.5.b.** The read-only "spec" UI phase is over-engineering at 2-person-team scale. Drop the separate phase; have product agent land directly in P1.5 with a human-approval gate as the safety net.
+4. **`MeshyTaskWorker` background service.** Replace the "background subscriber" inside the agent with a non-agent `IHostedService` that consumes Meshy webhooks (or SSE fallback) and writes `artist_output` rows. The artist agent's job ends at "POST the task and write the PENDING row."
+5. **Designer AIFunction shape.** Replace `render_html_wireframe` (raw HTML) with a structured-DSL primitive: `render_wireframe(structured_data)` returning typed JSON that a known-good renderer expands to HTML. Same for SVG. Pick a renderer (DOMPurify for HTML) and configure it to strip SVG event handlers.
+6. **Groomer idempotency.** Add an AIFunction `db_get_prior_groomer_rationale` so subsequent runs see what they decided last time. Without it, the idempotency claim is a lie.
+7. **Designer/artist AIFunction set.** Add `db_get_design_artifact` to designer tools (iterative design references previous artifacts). Add `db_persist_artifact_file` to artist tools (downloads GLB to disk promptly after SUCCEEDED, racing the signed-URL expiry).
+8. **Meshy:MaxConcurrent config.** Add a config knob + SemaphoreSlim so the artist agent can''t fire more than Pro-tier queue depth (10) at once.
+9. **Spec.status gating.** Currently "design_artifact:kind in {mockup, wireframe, component-spec}" gates the artist phase — but wireframes don''t imply 3D. Make the rule explicit: artist runs only on `kind in {mockup, component-spec}` AND `spec.requires_3d=true`.
+10. **`UPDATE TABLE ADD COLUMN` migration story.** `IssueStore` gets a new `spec_id` column; document the SQLite `ALTER TABLE` migration path. Five tables added in P0.5..P3.5; each needs an explicit migration step.
+11. **Test plan expansion for new agents.** Add P1.5/P2.a/P2.b/P3.5 integration tests to the test strategy (line 165-170). Currently only the engineering phase has tests.
+12. **Meshy cost actually verified.** The doc''s flat credit-cost table is now correct. The implementation must reconcile `consumed_credits` from each task against this table, not assume.
+13. **Operator-inbox routing across the four new agents.** Pick a single rule: "every agent has an inbox and the operator can pin one to send a message to it" vs "messages are tied to the issue they relate to, not the agent." Decide before P1.5.b.
+14. **"Spec in draft for days" is fine for a workflow.** The review correctly points out that pausing a workflow for an operator review is MAF''s explicit pattern (`WaitForExternalEvent`). Don''t use the "long draft" argument to justify avoiding workflows.
+15. **Negative_prompt is deprecated.** Meshy docs say it has no functional impact. Drop any copy that says it influences output.
+16. **Content safety for downloaded 3D models.** GLB is binary; if rendered in a webview, model parser exploits are possible. Threat model: malicious VISION.md -> malicious Meshy prompt -> malicious GLB. Out of scope for v1 but flag for security review.
+17. **Rollback flags for new agents.** Phase flags from line 147 need extension: `Orchestrator:ProductAgent=On|Off`, `Orchestrator:DesignerAgent=On|Off`, `Orchestrator:ArtistAgent=On|Off`, `Orchestrator:Groomer=On|Off`. Without these, a bad product-agent pass can''t be turned off without disabling the engineering agent.
+
 ## Out of scope
 
 - Switching to Microsoft's Python Agent Framework (we're .NET-only).
 - Replacing the dashboard UI with Microsoft's DevUI.
 - Building custom Durable entities before validating the in-process path.
 - Migrating kilo's per-role .md frontmatter to MAF's `SKILL.md` schema in this phase. That's a follow-up after we know the shape is stable.
+
+
+
+
+
+
 
 
 
