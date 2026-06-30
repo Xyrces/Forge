@@ -275,11 +275,15 @@ public static class Program
         var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
         var gitHub = new GitHubService(options.GitHub);
         var roleRegistry = new RoleAgentRegistry();
+        var agentsStore = new Core.AgentStore(issues);
+        var skillsStore = new Core.SkillStore(issues);
+        var skillSource = new SqliteSkillSource(agentsStore, skillsStore, roleRegistry);
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
+            skills: skillSource,
             kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents"));
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(

@@ -11,12 +11,15 @@ namespace PortHorizon.Agents.Agents;
 /// MAF-based implementation of <see cref="IAgentRunner"/>. Phase 0:
 /// wraps <see cref="ChatClientAgent"/>, instantiated fresh per call with
 /// the role's instructions loaded from the .kilo/agents/<role>.md
-/// frontmatter <c>description</c> field.
+/// frontmatter <c>description</c> field. Phase 1: skills from
+/// <see cref="ISkillSource"/> (global + role-scoped) are appended to the
+/// agent's instructions.
 ///
 /// <para>
 /// The runner does NOT itself manage worktrees, commits, pushes, or PRs.
-/// Those are AIFunctions the agent invokes (P2). Phase 0 runs the
-/// agent in plain text mode (no tools) and asserts the response shape.
+/// Those are AIFunctions the agent invokes (P2). Phase 1 still runs the
+/// agent in plain text mode (no tools) but the agent now sees the
+/// project's skill catalog in its system context.
 /// </para>
 /// </summary>
 public sealed class MafAgentRunner : IAgentRunner
@@ -26,18 +29,21 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly RoleAgentRegistry _roles;
     private readonly ILogger<MafAgentRunner> _logger;
     private readonly string _kiloAgentsRoot;
+    private readonly ISkillSource? _skills;
 
     public MafAgentRunner(
         IChatClientFactory chatClientFactory,
         LlmConfig config,
         RoleAgentRegistry roles,
         ILogger<MafAgentRunner> logger,
+        ISkillSource? skills = null,
         string kiloAgentsRoot = ".kilo/agents")
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
         _roles = roles;
         _logger = logger;
+        _skills = skills;
         _kiloAgentsRoot = kiloAgentsRoot;
     }
 
@@ -45,8 +51,17 @@ public sealed class MafAgentRunner : IAgentRunner
         AgentType role, string prompt, string? sessionId, CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
-        var instructions = LoadRoleInstructions(roleDef.KiloAgentName);
-        var fullPrompt = instructions + "\n\n" + prompt;
+        var roleInstructions = LoadRoleInstructions(roleDef.KiloAgentName);
+        var skillInstructions = _skills is null
+            ? string.Empty
+            : await BuildSkillInstructionsAsync(role, ct);
+        var instructions = string.IsNullOrEmpty(skillInstructions)
+            ? roleInstructions
+            : roleInstructions + "\n\n" + skillInstructions;
+        // P1 fix: instructions go to the agent's instructions: parameter,
+        // NOT into the user message. The user prompt is the operator's
+        // task text; the system prompt is the role + skills context.
+        var fullPrompt = prompt;
 
         var chatClient = _chatClientFactory.Create(_config, role);
         var agent = new ChatClientAgent(
@@ -86,6 +101,44 @@ public sealed class MafAgentRunner : IAgentRunner
             // connection pools.
             if (chatClient is IDisposable d) d.Dispose();
         }
+    }
+
+    private async Task<string> BuildSkillInstructionsAsync(AgentType role, CancellationToken ct)
+    {
+        IReadOnlyList<SkillContent> skills;
+        try
+        {
+            skills = await _skills!.LoadForRoleAsync(role, ct);
+        }
+        catch (Exception ex)
+        {
+            // Skill loading must never break a dispatch. The role prompt
+            // (without skills) still reaches the agent, and the error is
+            // surfaced via the dashboard event log.
+            _logger.LogWarning(ex, "Failed to load skills for role {Role}; continuing without skills", role);
+            return string.Empty;
+        }
+        if (skills.Count == 0) return string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## Project skills");
+        sb.AppendLine();
+        sb.AppendLine(
+            "The following skills are available in this project. Apply them where relevant; " +
+            "do not quote them verbatim unless the task asks for it.");
+        sb.AppendLine();
+        foreach (var s in skills)
+        {
+            sb.Append("### ").Append(s.Name).AppendLine();
+            if (!string.IsNullOrEmpty(s.Description))
+            {
+                sb.AppendLine(s.Description);
+            }
+            sb.AppendLine();
+            sb.AppendLine(s.Body);
+            sb.AppendLine();
+        }
+        return sb.ToString().TrimEnd();
     }
 
     private string LoadRoleInstructions(string kiloAgentName)
