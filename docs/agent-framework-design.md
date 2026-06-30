@@ -80,7 +80,7 @@ Note on Microsoft.Agents.AI.GitHub.Copilot: if we pick this for dev, it is *not*
 | Tool execution | Agent calls `bash`/`edit`/`read` via kilo's tool protocol | `AIFunction` delegates attached to agent; framework invokes them directly |
 | Skills storage | SQLite `skill` table, populated by UI | Same SQLite `skill` table, exposed via `SqliteAgentSkillsSource` |
 | Skill loading | None (skills are metadata only today) | `AgentSkillsProvider` reads skills, exposes `load_skill` / `read_skill_resource` / `run_skill_script` to model |
-| Sprint dispatch | `ReadyAsync` filtered by sprint; one process per task | `WorkflowBuilder` per sprint, `AddFanOutEdge` over `ChatClientAgent` instances, one durable entity per issue (future) |
+| Sprint dispatch | ReadyAsync filtered by sprint; one process per task | WorkflowBuilder per sprint; issue.sprint_id join + in-progress cap enforced by the claim path. Engineering claims return null when the sprint's in-progress count has hit sprint.in_progress_cap. |
 | Operator inbox | Prepend string to next prompt | `MessageInjectingChatClient` (per `ChatClientAgent`, in-process) OR `RaiseEvent` against a Durable orchestration (DurableTask). Two different semantics; pick per phase. |
 | PR creation | `Octokit` directly via `GitHubService` | `open_pull_request` `AIFunction` wrapping the same `Octokit` |
 | PR merge watching | 30s polling by `PRWatcher` | External event raised by a GitHub App webhook (DurableTask) or in-memory signal (in-process) |
@@ -152,7 +152,7 @@ Each phase is behind a feature flag (`Orchestrator:Runtime=Kilo|Maf`, `Orchestra
 1. **Skills surface is public but evolving.** As of dotnet 1.11.x the shipped surface includes AgentSkillsSource, AgentFileSkillsSource, AgentInMemorySkillsSource, AgentSkillsProvider, AgentSkillsProviderBuilder, plus decorator types (FilteringAgentSkillsSource, CachingAgentSkillsSource, AggregatingAgentSkillsSource, DeduplicatingAgentSkillsSource). We can subclass AgentSkillsSource directly. The design doc at docs/decisions/0021-agent-skills-design.md is dated 2026-03-23 and labeled proposed - pin a prerelease version, watch for breaking changes between minors, and contribute any improvements we make back upstream.
 2. **`AgentSession` and untrusted store.** `AgentSession`'s xmldoc explicitly warns: "Treat restoring a session from an untrusted source as equivalent to accepting untrusted input. A compromised storage backend could alter message roles to escalate trust, or inject adversarial content that influences LLM behavior." For us: when we load `AgentSession` from the issue's `metadata_json`, sanitize role tags, and never accept session blobs from outside the orchestrator process.
 3. **`AgentSession` not reusable across agents.** The same xmldoc says "an AgentSession may not be reusable across different agents." Our agent instances are constructed per-issue with the same factory shape; we need to keep that invariant or reload the session under a new agent.
-4. **Experimental attributes.** MAF prerelease packages (e.g. Microsoft.Agents.AI.Harness, parts of Microsoft.Agents.AI.Tools.Shell) are tagged [Experimental(DiagnosticIds.Experiments.AgentsAIExperiments)]. We are not adopting HarnessAgent (per the explicit decision above), but other experimental surface may land in our dependency graph. Pin a version, vendor it, or budget for breaking changes every minor. Add <NoWarn>AGENTS_AI_EXPERIMENTS</NoWarn> for now.
+4. **Experimental attributes + HarnessAgent IS adopted (intake role only).** HarnessAgent and parts of Microsoft.Agents.AI.Tools.Shell are tagged [Experimental(DiagnosticIds.Experiments.AgentsAIExperiments)]. We adopt HarnessAgent **only for the intake role** (single persistent project-aware conversation that needs HarnessAgent's bundled todo / file-memory / hosted-web-search / loop conveniences). Engineering, designer, artist, and groomer agents use plain ChatClientAgent + AIFunctions. Pin the HarnessAgent prerelease version; treat the API as frozen between minor upgrades. Add <NoWarn>AGENTS_AI_EXPERIMENTS</NoWarn> for now.
 5. **DurableTask on a vanilla `IHost`.** The README and `Workflows/` folder are opaque on whether `Microsoft.Agents.AI.DurableTask` works in a console host with the in-process DTS sidecar. Validate with `dotnet/samples/04-hosting` before designing around it.
 6. **Skills `SKILL.md` schema mismatch.** The MAF skills design uses YAML frontmatter with `name`, `description`, `license?`, `compatibility?`, `allowedTools?`. Our existing `.kilo/agents/*.md` files don't match this. We either (a) rewrite the files to match, (b) write a custom `AgentFileSkillsSource` subclass that reads our schema, or (c) keep skills in SQLite and use the in-memory provider.
 7. **No ACP.** kilo's wire protocol is gone. Anything in our codebase that referenced `AcpClient`, `AcpSession`, or the kilo JSON shape becomes dead code (kept behind an interface for the rollback window).
@@ -363,6 +363,15 @@ Encapsulates the Meshy HTTP API. The artist agent gets these as `AIFunction`s:
 
 ### New MAF agents and their AIFunction set
 
+**Intake agent** (IntakeAgent : HarnessAgent - one instance per project, persistent)
+- Instructions: structured prompt saying you are a project-aware intake agent for PortHorizon; you help the user turn rough ideas into well-scoped epics.
+- AIFunctions: db_read_vision, db_list_specs, db_list_open_issues, db_read_active_sprint, db_list_recent_pr_comments, db_create_epic_draft (writes an issue row with type=epic, status=Draft, parent_id NULL, sprint_id pointing at the active sprint), db_promote_epic (transitions draft to Pending, emits a sprint-issue row plus an SSE event).
+- One intake agent instance per project (single persistent conversation). Survives orchestrator restarts via AgentSession.SerializeSessionAsync. Intake is the ONLY role where the long-running session matters; engineering, designer, artist, and groomer agents get a fresh short-lived session per turn.
+- Uses HarnessAgent: TodoProvider for tracking the conversation through multi-turn shaping, FileMemoryProvider for noting follow-ups across turns, hosted web search for ADRs and external docs, LoopAgent so the agent can iterate on its own draft before responding.
+- Trigger: the user types in the Intake tab. Not scheduled, not on a trigger. The user is the trigger. The conversation pauses between turns via WaitForExternalEvent of the operator-message event and resumes on the next send.
+- Output is an epic issue (a row in issue with type=epic, parent_id NULL, sprint_id pointing at the active sprint, status=Pending). Not a spec. The groomer in P3.5 reads open epics and decomposes them into engineering tasks.
+
+
 **Product agent** (`ProductAgent : ChatClientAgent`)
 - Instructions: structured prompt that says "you are a product manager; given VISION.md and the current sprint, write a `spec` row in the database; do not write code."
 - AIFunctions: `db_get_vision`, `db_list_specs`, `db_save_spec`, `db_list_recent_pr_comments`.
@@ -381,14 +390,14 @@ Encapsulates the Meshy HTTP API. The artist agent gets these as `AIFunction`s:
 - **Important:** Meshy tasks are long (preview ~1-2 min, refine another 1-2 min). The artist agent must NOT block the engineering dispatch on a Meshy task. It writes the `artist_output` row in `PENDING` / `IN_PROGRESS` state and engineering can pick up the issue in parallel. When Meshy''s `/stream` endpoint emits completion, the artist agent (a background subscriber) updates the row to `SUCCEEDED`.
 
 **Issue groomer** (`GroomerAgent : ChatClientAgent`)
-- Instructions: given `VISION.md`, the current `spec` set, and recent PR comments, propose additions / changes to `issue` and `spec` rows. Never touches code.
-- AIFunctions: `db_read_vision`, `db_list_specs`, `db_list_open_issues`, `db_create_issue`, `db_close_issue`, `db_update_issue`, `db_log_groomer_run`.
+- Instructions: given VISION.md, open epics (issue.type='epic' with status='Pending'), and recent PR comments, decompose each epic into a sprint_issue row plus one or more engineering tasks (rows in issue with 	ype='task' and parent_id pointing at the epic). Closes completed-but-on-the-sprint issues that are no longer relevant. Never touches code.
+- AIFunctions: db_read_vision, db_list_open_epics, db_list_specs, db_list_open_issues, db_create_task, db_close_issue, db_update_issue, db_log_groomer_run.
 - Trigger: every N hours (configurable, default 6) OR on `VISION.md` change OR on explicit `/api/groom` request.
 - Idempotency: writes a `issue_groomer_run` row with counts and rationale. Re-runs are safe; the agent diffs state before proposing changes.
 
 
 
-### Workflow shape: product -> design -> artist -> engineering
+### Workflow shape: intake -> epic -> groomer -> engineering (with designer and artist as opt-in sidecars)
 
 A single `WorkflowBuilder` per vision-change event:
 
@@ -416,132 +425,4 @@ A single `WorkflowBuilder` per vision-change event:
                   engineering dispatch loop
                   (existing in-process orchestrator)
 ```
-
-Implementation: separate `WorkflowBuilder` instances, NOT one big workflow. The product/design/artist phases are **fan-out fan-in** for a single spec; engineering dispatch is a separate per-sprint loop. The handoffs are database rows, not workflow edges. This is intentional:
-- The cross-functional flow is itself a WorkflowBuilder (one workflow per spec) with WaitForExternalEvent for human-approval gates; this is the explicit MAF pattern for long-paused workflows. Engineering dispatch stays a separate continuous loop; cross-functional handoffs land in the spec table, and the engineering loop polls/issues picks them up. If Meshy is down, the artist branch of the spec workflow is blocked; the spec itself is 
-eeds-artist and the engineering branch can still proceed if spec.requires_3d=false. Independent failure domains.
-
-### How the dashboard surfaces the new shape
-
-| Tab | Now | P1 P1.5 (this work) |
-|---|---|---|
-| Tasks | Issue list | Unchanged. Issues get a `spec_id` link. |
-| Backlog | Same | Same. |
-| Sprints | Same | Same. |
-| Agents | `coredev` etc. | `coredev` + `product`, `designer`, `artist`, `groomer` rows. Operator can pin one to send a message. |
-| Skills | Per-agent + global | Same. Product/Designer/Artist all have their own skills. |
-
-| New tab | Surface |
-|---|---|
-| **Vision** | Latest vision doc, with diff vs. previous. "Replan" button to trigger product agent. History of replans. |
-| **Specs** | List of specs with status. Click into one to see: problem, solution, acceptance, design artifacts (image grid), artist output thumbnails (Meshy GLB previews). |
-| **Design** | Image grid of all `design_artifact` rows, filter by spec. |
-| **Art** | List of `artist_output` rows with status pills (PENDING / IN_PROGRESS / SUCCEEDED / FAILED), credits used, preview GLB. Click to download. |
-| **Groomer** | Timeline of `issue_groomer_run` rows. Click to see the diff (which issues created / closed / updated). Manual "Re-run" button. |
-
-### Phased delivery (extends the existing P0..P4)
-
-| Phase | Scope | Why this order |
-|---|---|---|
-| **P0.5** | Add `Vision` table + `vision.md` import; UI tab "Vision"; existing engineering loop reads `vision.md` once at startup. | Cheap. Validates the storage path. |
-| **P1** (existing) | Skills loading works. | Already designed. |
-| **P1.5.a** | `Spec` table + UI tab "Specs" (read-only). | Validate the spec model before giving product agent write access. |
-| **P1.5.b** | Product agent writes `spec` rows via AIFunctions. Operator approves via dashboard. | Loop is closed but human-gated. |
-| **P2.a** | `design_artifact` table + UI tab "Design" + Designer agent. | Designer is a synchronous workflow node. |
-| **P2.b** | `artist_output` table + MeshyClient + UI tab "Art" + Artist agent. | Meshy is the long pole; isolate its failures. |
-| **P3** (existing) | Engineering dispatch becomes a MAF workflow. | Already designed. |
-| **P3.5** | `issue_groomer_run` table + Groomer agent on schedule. | Auto-groomer. |
-| **P4** (existing) | DurableTask. | Already designed. |
-
-P1.5 is a sub-plan inserted between P1 and P2. The P2 / P3 / P4 numbering is preserved.
-
-
-### Spec-to-issue handoff (the missing piece)
-
-The schema links specs to issues via issue.spec_id. The **process** for that link, which neither the schema nor the workflow shape documents, is:
-
-1. The product agent writes a spec row. It does NOT create issue rows. The spec is in draft or 
-eady.
-2. An operator (or the future P3.5 groomer) reads the spec, decides which parts are engineering work, and creates one or more issue rows with issue.spec_id pointing at the spec. The spec transitions to claimed at this point.
-3. The engineering dispatch loop picks up issue rows by status = Pending (existing). It does NOT filter by spec_id - sprint + status remain the canonical filter. The spec_id is metadata the agent reads when it picks up the task, so the prompt includes the spec's problem, solution, acceptance, and any design artifacts.
-4. If the operator created a pr-watch follow-up issue (existing pattern), PRWatcher eventually transitions both the watch issue and the dev issue to Completed.
-
-This means the operator stays in the loop for spec-to-issue conversion in P1.5. The P3.5 groomer is the only path that does this automatically; until P3.5 ships, the operator does the conversion. P1.5.b and P2 add a Spec -> Issues button on the Specs tab to make this one click.
-### New risks (additive to the 11 already documented)
-
-12. **Meshy credit budget.** Every artist run costs credits. We must (a) cap per-spec credits in spec.acceptance or a separate config, (b) show running cost in the UI, (c) have a soft cap (warn at 80%) and hard cap (fail at 100%) so a runaway prompt does not drain the account. **Action:** expose Meshy:Budget:MonthlyCredits and Meshy:Budget:PerSpecCredits in ppsettings.json. **There is no per-month Meshy ledger endpoint** - we enforce budget by summing consumed_credits from each rtist_output row, and by checking GET /openapi/v1/balance before each POST to refuse low-balance calls. Failed tasks are refunded (consumed_credits returns 0) - reconcile per task, do not assume monotonic spend.
-13. **Meshy async blocking.** Preview + refine takes minutes. We MUST NOT block engineering on Meshy. The artist agent''s `subscribe_task` uses SSE, but we also need a fallback: if SSE drops, the artist row goes to `PENDING_POLL` and a background poll re-activates it. Plus: engineering can start work as soon as the spec is ready, even if the artist is still rendering.
-14. **Vision drift.** The product agent can write specs that contradict VISION.md. The groomer should run as a guardrail after every product-agent pass. If a spec deviates from VISION.md, the groomer marks it `needs-review` and surfaces in the UI; the human decides.
-15. **Asset retention vs vendor lock-in.** Meshy retains assets for some period. We download final GLBs to `.portHorizon/artifacts/` so we are not coupled. **Action:** P2.b ships with a "rehydrate from disk" path that prefers local files over Meshy re-fetch.
-16. **Designer agent quality.** Designer output is HTML/SVG that the dashboard renders. Bad HTML breaks the dashboard tab. The designer AIFunction suite must constrain output to a small DSL (markdown with fenced code blocks, or a strict JSON schema) and the renderer must sanitize.
-17. **Groomer cost.** Groomer runs on a schedule; each pass costs LLM tokens. With 100 open issues and 50 PR comments per pass, the token spend adds up. **Action:** make the schedule + per-pass token budget configurable; cap issues processed per pass.
-
-### Updated "Out of scope"
-
-Remove "Switching to Microsoft''s Python Agent Framework" (we never were going to). Add:
-- **Replacing Meshy with another 3D provider.** P2.b assumes Meshy; if we need to swap, the `MeshyClient` interface is the only thing to replace.
-- **Real-time collaboration between multiple human operators.** Single-operator assumption; multiple-operator support is a future concern.
-
-
-## Open questions
-
-
-1. **Provider.** GitHub Copilot SDK for dev (closest parity with current kilo setup), or Microsoft Foundry all the way? We need to verify which one works on this host without bringing in `az login` friction.
-2. **Dashboard integration depth.** Do we (a) keep `:4097` as the only UI and expose agent messages via a thin faÃ§ade, or (b) lean on MAF's `Hosting.AspNetCore` and A2A bridge so the dashboard becomes a thin client? (a) keeps the existing dashboard untouched; (b) is the long-term MAF-shaped path.
-3. **LocalShellExecutor vs our hand-rolled bash tool.** MAF ships a shell executor in `Microsoft.Agents.AI.Tools.Shell` (`.NET`-only, `#if NET`). If our shell needs are narrow (run `dotnet`, `git`, `gh`), we may not need it. If we need richer sandboxing (DockerShellExecutor), we adopt it.
-4. **PR merge signal in in-process mode.** Without DurableTask, how do we signal "PR merged"? Polling (status quo), GitHub Actions workflow that pushes to our HTTP webhook (clean but requires GH-side config), or a local file watcher (hacky). Decision depends on whether we ever skip Phase 4.
-5. **Performance / cost.** MAF eliminates the kilo round-trip but adds the cost of in-process agent invocations. We need to model: tokens per dispatch, wall time per dispatch, max concurrent dispatches. We don't have numbers yet.
-6. **Observability.** *(Resolved: addressed in the Observability section above; Trace + Token-usage tabs are P3 work; OpenTelemetry wiring is Phase 0.)*
-7. **IssueStore schema drift across phases.** **Decision: additive only.** The issue table gets a new spec_id TEXT REFERENCES spec(id) column in P1.5.b via SQLite ALTER TABLE ADD COLUMN; no other table is renamed, dropped, or has its primary key changed. The P0 plan at docs/embedded-issues.md lives on as the storage layer for MAF runtime needs. We do not migrate the existing data.
-
-
-### Open questions (additive)
-
-8. **Artist output policy.** Does every spec need a 3D asset, or only some specs (gameplay-affecting ones)? A `spec.requires_3d` boolean toggles whether the artist phase runs. Default: false.
-9. **Vision source of truth.** Is `VISION.md` the only source, or can product revisions come from PR comments, user feedback files, or operator prompts? P1.5.b only commits to VISION.md; the rest is future.
-10. **Credit allocation per role.** Do we want a "spend on art" toggle in the dashboard so the operator can pause Meshy calls during a tight month? Default: yes, with a per-month cap.
-
-
-
-## Open issues from third-party review (to address before implementation)
-
-The plan was stress-tested by an independent reviewer who found 17 items, of which the high-priority remaining ones are recorded here. They are not factual errors but design refinements; track these in P0 implementation.
-
-1. **Workflow shape.** The current "separate `WorkflowBuilder` instances, handoffs as database rows" is overcomplicated. Recommended: one `WorkflowBuilder` per spec with four executors (product, designer, artist, engineer-handoff), `WaitForExternalEvent` for human-approval gates. **Re-evaluate during P1.5.b implementation.**
-2. **Operator-inbox UX consistency.** The engineering `agent-message` endpoint on line 215 is not extended to product/designer/artist/groomer. Define the unified surface (e.g. `/api/agents/{kilo-or-display-name}/messages`) and which agents have inboxes vs which have workflow-embedded input only.
-3. **P1.5.a fold into P1.5.b.** The read-only "spec" UI phase is over-engineering at 2-person-team scale. Drop the separate phase; have product agent land directly in P1.5 with a human-approval gate as the safety net.
-4. **`MeshyTaskWorker` background service.** Replace the "background subscriber" inside the agent with a non-agent `IHostedService` that consumes Meshy webhooks (or SSE fallback) and writes `artist_output` rows. The artist agent's job ends at "POST the task and write the PENDING row."
-5. **Designer AIFunction shape.** Replace `render_html_wireframe` (raw HTML) with a structured-DSL primitive: `render_wireframe(structured_data)` returning typed JSON that a known-good renderer expands to HTML. Same for SVG. Pick a renderer (DOMPurify for HTML) and configure it to strip SVG event handlers.
-6. **Groomer idempotency.** Add an AIFunction `db_get_prior_groomer_rationale` so subsequent runs see what they decided last time. Without it, the idempotency claim is a lie.
-7. **Designer/artist AIFunction set.** Add `db_get_design_artifact` to designer tools (iterative design references previous artifacts). Add `db_persist_artifact_file` to artist tools (downloads GLB to disk promptly after SUCCEEDED, racing the signed-URL expiry).
-8. **Meshy:MaxConcurrent config.** Add a config knob + SemaphoreSlim so the artist agent can''t fire more than Pro-tier queue depth (10) at once.
-9. **Spec.status gating.** Currently "design_artifact:kind in {mockup, wireframe, component-spec}" gates the artist phase — but wireframes don''t imply 3D. Make the rule explicit: artist runs only on `kind in {mockup, component-spec}` AND `spec.requires_3d=true`.
-10. **`UPDATE TABLE ADD COLUMN` migration story.** `IssueStore` gets a new `spec_id` column; document the SQLite `ALTER TABLE` migration path. Five tables added in P0.5..P3.5; each needs an explicit migration step.
-11. **Test plan expansion for new agents.** Add P1.5/P2.a/P2.b/P3.5 integration tests to the test strategy (line 165-170). Currently only the engineering phase has tests.
-12. **Meshy cost actually verified.** The doc''s flat credit-cost table is now correct. The implementation must reconcile `consumed_credits` from each task against this table, not assume.
-13. **Operator-inbox routing across the four new agents.** Pick a single rule: "every agent has an inbox and the operator can pin one to send a message to it" vs "messages are tied to the issue they relate to, not the agent." Decide before P1.5.b.
-14. **"Spec in draft for days" is fine for a workflow.** The review correctly points out that pausing a workflow for an operator review is MAF''s explicit pattern (`WaitForExternalEvent`). Don''t use the "long draft" argument to justify avoiding workflows.
-15. **Negative_prompt is deprecated.** Meshy docs say it has no functional impact. Drop any copy that says it influences output.
-16. **Content safety for downloaded 3D models.** GLB is binary; if rendered in a webview, model parser exploits are possible. Threat model: malicious VISION.md -> malicious Meshy prompt -> malicious GLB. Out of scope for v1 but flag for security review.
-17. *(Resolved: per-agent rollback flags are now in the Rollback strategy section above; see Orchestrator:ProductAgent=On|Off etc. Old text removed.)*
-
-## Out of scope
-
-- Switching to Microsoft's Python Agent Framework (we're .NET-only).
-- Replacing the dashboard UI with Microsoft's DevUI.
-- Building custom Durable entities before validating the in-process path.
-- Migrating kilo's per-role .md frontmatter to MAF's `SKILL.md` schema in this phase. That's a follow-up after we know the shape is stable.
-
-
-
-
-
-
-
-
-
-
-
-
-
 
