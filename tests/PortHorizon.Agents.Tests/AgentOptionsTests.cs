@@ -38,7 +38,7 @@ public class AgentOptionsTests
             Llm = new LlmOptions
             {
                 DefaultProvider = "kilo-gateway",
-                Providers = new[]
+                Providers = new List<LlmProviderOptions>
                 {
                     new LlmProviderOptions
                     {
@@ -102,7 +102,7 @@ public class LlmConfigAdapterTests
         var options = new LlmOptions
         {
             DefaultProvider = "kilo-gateway",
-            Providers = new[]
+            Providers = new List<LlmProviderOptions>
             {
                 new LlmProviderOptions
                 {
@@ -126,7 +126,7 @@ public class LlmConfigAdapterTests
         var options = new LlmOptions
         {
             DefaultProvider = "kilo-gateway",
-            Providers = new[]
+            Providers = new List<LlmProviderOptions>
             {
                 new LlmProviderOptions
                 {
@@ -164,7 +164,7 @@ public class LlmConfigAdapterTests
         var options = new LlmOptions
         {
             DefaultProvider = "kilo-gateway",
-            Providers = new[] { new LlmProviderOptions { Name = "kilo-gateway", DefaultModel = "minimax-m2" } },
+            Providers = new List<LlmProviderOptions> { new LlmProviderOptions { Name = "kilo-gateway", DefaultModel = "minimax-m2" } },
             Roles = new Dictionary<string, LlmRoleModelOptions>
             {
                 ["NotARole"] = new() { ProviderName = "kilo-gateway", Model = "minimax-m2" },
@@ -179,7 +179,7 @@ public class LlmConfigAdapterTests
         var options = new LlmOptions
         {
             DefaultProvider = "kilo-gateway",
-            Providers = new[] { new LlmProviderOptions { Name = "kilo-gateway", DefaultModel = "minimax-m2" } },
+            Providers = new List<LlmProviderOptions> { new LlmProviderOptions { Name = "kilo-gateway", DefaultModel = "minimax-m2" } },
             Roles = new Dictionary<string, LlmRoleModelOptions>
             {
                 ["CoreDev"] = new() { ProviderName = "missing", Model = "x" },

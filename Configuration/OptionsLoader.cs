@@ -11,7 +11,14 @@ public static class OptionsLoader
         if (configPath is not null && File.Exists(configPath))
             builder.AddJsonFile(configPath, optional: true, reloadOnChange: false);
 
-        builder.AddJsonFile("appsettings.json", optional: true, reloadOnChange: false);
+        // Resolve appsettings.json against the current working directory,
+        // not the host's base directory. AddJsonFile's default base
+        // directory is the AppContext.BaseDirectory (the bin/ folder when
+        // launched via `dotnet run`), so a relative path silently misses
+        // the project's source-side appsettings.json. Use the absolute
+        // path so the file is found regardless of how the host is launched.
+        var appsettingsPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+        builder.AddJsonFile(appsettingsPath, optional: true, reloadOnChange: false);
         builder.AddEnvironmentVariables();
 
         var config = builder.Build();
@@ -49,20 +56,15 @@ public static class OptionsLoader
             };
             if (idx >= 0) existing[idx] = newProvider;
             else existing.Add(newProvider);
-            options = options with
-            {
-                Llm = options.Llm with
-                {
-                    Providers = existing,
-                    DefaultProvider = string.IsNullOrEmpty(options.Llm.DefaultProvider) ? llmProviderName : options.Llm.DefaultProvider,
-                }
-            };
+            options.Llm.Providers = existing;
+            if (string.IsNullOrEmpty(options.Llm.DefaultProvider))
+                options.Llm.DefaultProvider = llmProviderName;
         }
 
         var ghToken = Environment.GetEnvironmentVariable("GitHub__Token")
             ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
         if (!string.IsNullOrEmpty(ghToken))
-            options = options with { GitHub = options.GitHub with { Token = ghToken } };
+            options.GitHub.Token = ghToken;
     }
 
     private static void Validate(AgentOptions options)
