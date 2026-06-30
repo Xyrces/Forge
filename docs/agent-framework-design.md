@@ -16,7 +16,6 @@ It also offers primitives we currently lack and would otherwise have to build:
 
 - `AIAgent` + `AgentSession` with explicit serialize/deserialize for restart-safety.
 - `Workflows` (graph-based fan-out / fan-in) that replace our hand-rolled `DispatchCycleAsync`.
-- `Microsoft.Agents.AI.Harness` (`HarnessAgent` + `HarnessAgentOptions`) â€” a higher-level wrapper that already covers ~70% of what our `OrchestratorAgent` does.
 - `Microsoft.Agents.AI.DurableTask` â€” orchestrations backed by Durable Functions; restarts do not lose in-flight work; external events replace PR polling.
 - `AgentSkillsSource` / `AgentSkillsProvider` â€” a uniform abstraction for filesystem-, DB-, or class-defined skills (see `docs/decisions/0021-agent-skills-design.md`).
 - Provider portability via `Microsoft.Extensions.AI.IChatClient`: OpenAI, Azure OpenAI, Microsoft Foundry, Anthropic, GitHub Copilot SDK, Ollama.
@@ -118,7 +117,7 @@ Add the MAF NuGet packages as prerelease. Wire `IChatClient` into a new `Agents/
 
 Reuse `RoleAgentRegistry` to build the `ChatClientAgent` per role. The "kilo .md" file content becomes the `instructions:` parameter. Roles that don't have an LLM provider (dev) still log the prompt.
 
-Deliverable: one existing scenario (e.g., the `ecs-1` task we used during live testing) runs end-to-end through MAF, with the dashboard still showing the result.
+Deliverable: one existing scenario (e.g., the ecs-1 task) runs end-to-end through MAF, with the dashboard still showing the result. **Test outline:** the integration test under 	ests/PortHorizon.Agents.Tests/Integration/Phase0Tests.cs enqueues a fixture issue with a stubbed IChatClient that returns a scripted ChatResponse; asserts (a) MafAgentRunner.RunAsync(session, prompt) returns a non-empty response, (b) the dashboard /api/state shows the issue with status Completed and the response text in parameters.modelResponse, (c) the integration test runs without kilo installed. We do NOT exercise git worktree creation, PR creation, or any real LLM in Phase 0 - those are Phase 2.
 
 ### Phase 1 â€” Skills actually do something
 
@@ -150,10 +149,10 @@ Each phase is behind a feature flag (`Orchestrator:Runtime=Kilo|Maf`, `Orchestra
 
 ## Risks
 
-1. **Skills surface is unstable.** `docs/decisions/0021-agent-skills-design.md` is dated 2026-03-23 and marked `proposed`. The decision-outcome section says "All agent-skill-related classes are made internal to minimize the public API surface while the feature matures. This leaves two public entry points: AgentSkillsProvider and AgentSkillsProviderBuilder." Before building `SqliteAgentSkillsSource` on top of this, we need to confirm the shipped NuGet surface â€” if `AgentSkillsSource` is internal, we either (a) put our source in the same assembly or (b) contribute a PR upstream.
+1. **Skills surface is public but evolving.** As of dotnet 1.11.x the shipped surface includes AgentSkillsSource, AgentFileSkillsSource, AgentInMemorySkillsSource, AgentSkillsProvider, AgentSkillsProviderBuilder, plus decorator types (FilteringAgentSkillsSource, CachingAgentSkillsSource, AggregatingAgentSkillsSource, DeduplicatingAgentSkillsSource). We can subclass AgentSkillsSource directly. The design doc at docs/decisions/0021-agent-skills-design.md is dated 2026-03-23 and labeled proposed - pin a prerelease version, watch for breaking changes between minors, and contribute any improvements we make back upstream.
 2. **`AgentSession` and untrusted store.** `AgentSession`'s xmldoc explicitly warns: "Treat restoring a session from an untrusted source as equivalent to accepting untrusted input. A compromised storage backend could alter message roles to escalate trust, or inject adversarial content that influences LLM behavior." For us: when we load `AgentSession` from the issue's `metadata_json`, sanitize role tags, and never accept session blobs from outside the orchestrator process.
 3. **`AgentSession` not reusable across agents.** The same xmldoc says "an AgentSession may not be reusable across different agents." Our agent instances are constructed per-issue with the same factory shape; we need to keep that invariant or reload the session under a new agent.
-4. **Experimental attributes.** `HarnessAgent` and the Tools.Shell package are tagged `[Experimental(DiagnosticIds.Experiments.AgentsAIExperiments)]`. Pin a version, vendor it, or budget for breaking changes every minor. Add `<NoWarn>AGENTS_AI_EXPERIMENTS</NoWarn>` for now.
+4. **Experimental attributes.** MAF prerelease packages (e.g. Microsoft.Agents.AI.Harness, parts of Microsoft.Agents.AI.Tools.Shell) are tagged [Experimental(DiagnosticIds.Experiments.AgentsAIExperiments)]. We are not adopting HarnessAgent (per the explicit decision above), but other experimental surface may land in our dependency graph. Pin a version, vendor it, or budget for breaking changes every minor. Add <NoWarn>AGENTS_AI_EXPERIMENTS</NoWarn> for now.
 5. **DurableTask on a vanilla `IHost`.** The README and `Workflows/` folder are opaque on whether `Microsoft.Agents.AI.DurableTask` works in a console host with the in-process DTS sidecar. Validate with `dotnet/samples/04-hosting` before designing around it.
 6. **Skills `SKILL.md` schema mismatch.** The MAF skills design uses YAML frontmatter with `name`, `description`, `license?`, `compatibility?`, `allowedTools?`. Our existing `.kilo/agents/*.md` files don't match this. We either (a) rewrite the files to match, (b) write a custom `AgentFileSkillsSource` subclass that reads our schema, or (c) keep skills in SQLite and use the in-memory provider.
 7. **No ACP.** kilo's wire protocol is gone. Anything in our codebase that referenced `AcpClient`, `AcpSession`, or the kilo JSON shape becomes dead code (kept behind an interface for the rollback window).
@@ -419,9 +418,8 @@ A single `WorkflowBuilder` per vision-change event:
 ```
 
 Implementation: separate `WorkflowBuilder` instances, NOT one big workflow. The product/design/artist phases are **fan-out fan-in** for a single spec; engineering dispatch is a separate per-sprint loop. The handoffs are database rows, not workflow edges. This is intentional:
-- A spec can be in `draft` for days before design starts. Don''t pin a workflow that long.
-- Engineering dispatch is already a continuous loop; we don''t want to interleave it with the long-running artist phase.
-- If Meshy is down, the spec is blocked; if the engineering loop is down, the spec is not blocked. Independent failure domains.
+- The cross-functional flow is itself a WorkflowBuilder (one workflow per spec) with WaitForExternalEvent for human-approval gates; this is the explicit MAF pattern for long-paused workflows. Engineering dispatch stays a separate continuous loop; cross-functional handoffs land in the spec table, and the engineering loop polls/issues picks them up. If Meshy is down, the artist branch of the spec workflow is blocked; the spec itself is 
+eeds-artist and the engineering branch can still proceed if spec.requires_3d=false. Independent failure domains.
 
 ### How the dashboard surfaces the new shape
 
@@ -457,9 +455,21 @@ Implementation: separate `WorkflowBuilder` instances, NOT one big workflow. The 
 
 P1.5 is a sub-plan inserted between P1 and P2. The P2 / P3 / P4 numbering is preserved.
 
+
+### Spec-to-issue handoff (the missing piece)
+
+The schema links specs to issues via issue.spec_id. The **process** for that link, which neither the schema nor the workflow shape documents, is:
+
+1. The product agent writes a spec row. It does NOT create issue rows. The spec is in draft or 
+eady.
+2. An operator (or the future P3.5 groomer) reads the spec, decides which parts are engineering work, and creates one or more issue rows with issue.spec_id pointing at the spec. The spec transitions to claimed at this point.
+3. The engineering dispatch loop picks up issue rows by status = Pending (existing). It does NOT filter by spec_id - sprint + status remain the canonical filter. The spec_id is metadata the agent reads when it picks up the task, so the prompt includes the spec's problem, solution, acceptance, and any design artifacts.
+4. If the operator created a pr-watch follow-up issue (existing pattern), PRWatcher eventually transitions both the watch issue and the dev issue to Completed.
+
+This means the operator stays in the loop for spec-to-issue conversion in P1.5. The P3.5 groomer is the only path that does this automatically; until P3.5 ships, the operator does the conversion. P1.5.b and P2 add a Spec -> Issues button on the Specs tab to make this one click.
 ### New risks (additive to the 11 already documented)
 
-12. **Meshy credit budget.** Every artist run costs credits. We must (a) cap per-spec credits in `spec.acceptance` or a separate config, (b) show running cost in the UI, (c) have a soft cap (warn at 80%) and hard cap (fail at 100%) so a runaway prompt does not drain the account. **Action:** expose `Meshy:Budget:MonthlyCredits` and `Meshy:Budget:PerSpecCredits` in `appsettings.json`; read the current month usage from `GET /openapi/v1/billing` (or a separate endpoint if one exists - **verify before P2.b**).
+12. **Meshy credit budget.** Every artist run costs credits. We must (a) cap per-spec credits in spec.acceptance or a separate config, (b) show running cost in the UI, (c) have a soft cap (warn at 80%) and hard cap (fail at 100%) so a runaway prompt does not drain the account. **Action:** expose Meshy:Budget:MonthlyCredits and Meshy:Budget:PerSpecCredits in ppsettings.json. **There is no per-month Meshy ledger endpoint** - we enforce budget by summing consumed_credits from each rtist_output row, and by checking GET /openapi/v1/balance before each POST to refuse low-balance calls. Failed tasks are refunded (consumed_credits returns 0) - reconcile per task, do not assume monotonic spend.
 13. **Meshy async blocking.** Preview + refine takes minutes. We MUST NOT block engineering on Meshy. The artist agent''s `subscribe_task` uses SSE, but we also need a fallback: if SSE drops, the artist row goes to `PENDING_POLL` and a background poll re-activates it. Plus: engineering can start work as soon as the spec is ready, even if the artist is still rendering.
 14. **Vision drift.** The product agent can write specs that contradict VISION.md. The groomer should run as a guardrail after every product-agent pass. If a spec deviates from VISION.md, the groomer marks it `needs-review` and surfaces in the UI; the human decides.
 15. **Asset retention vs vendor lock-in.** Meshy retains assets for some period. We download final GLBs to `.portHorizon/artifacts/` so we are not coupled. **Action:** P2.b ships with a "rehydrate from disk" path that prefers local files over Meshy re-fetch.
@@ -481,8 +491,8 @@ Remove "Switching to Microsoft''s Python Agent Framework" (we never were going t
 3. **LocalShellExecutor vs our hand-rolled bash tool.** MAF ships a shell executor in `Microsoft.Agents.AI.Tools.Shell` (`.NET`-only, `#if NET`). If our shell needs are narrow (run `dotnet`, `git`, `gh`), we may not need it. If we need richer sandboxing (DockerShellExecutor), we adopt it.
 4. **PR merge signal in in-process mode.** Without DurableTask, how do we signal "PR merged"? Polling (status quo), GitHub Actions workflow that pushes to our HTTP webhook (clean but requires GH-side config), or a local file watcher (hacky). Decision depends on whether we ever skip Phase 4.
 5. **Performance / cost.** MAF eliminates the kilo round-trip but adds the cost of in-process agent invocations. We need to model: tokens per dispatch, wall time per dispatch, max concurrent dispatches. We don't have numbers yet.
-6. **Observability.** MAF has built-in OpenTelemetry. We should pipe to the same OTLP endpoint we configured for the orchestrator and add dashboard tabs for traces.
-7. **What happens to `docs/embedded-issues.md` and the IssueStore schema?** Nothing changes. The P0 plan lives on as the storage layer for MAF's run-time needs.
+6. **Observability.** *(Resolved: addressed in the Observability section above; Trace + Token-usage tabs are P3 work; OpenTelemetry wiring is Phase 0.)*
+7. **IssueStore schema drift across phases.** **Decision: additive only.** The issue table gets a new spec_id TEXT REFERENCES spec(id) column in P1.5.b via SQLite ALTER TABLE ADD COLUMN; no other table is renamed, dropped, or has its primary key changed. The P0 plan at docs/embedded-issues.md lives on as the storage layer for MAF runtime needs. We do not migrate the existing data.
 
 
 ### Open questions (additive)
@@ -513,7 +523,7 @@ The plan was stress-tested by an independent reviewer who found 17 items, of whi
 14. **"Spec in draft for days" is fine for a workflow.** The review correctly points out that pausing a workflow for an operator review is MAF''s explicit pattern (`WaitForExternalEvent`). Don''t use the "long draft" argument to justify avoiding workflows.
 15. **Negative_prompt is deprecated.** Meshy docs say it has no functional impact. Drop any copy that says it influences output.
 16. **Content safety for downloaded 3D models.** GLB is binary; if rendered in a webview, model parser exploits are possible. Threat model: malicious VISION.md -> malicious Meshy prompt -> malicious GLB. Out of scope for v1 but flag for security review.
-17. **Rollback flags for new agents.** Phase flags from line 147 need extension: `Orchestrator:ProductAgent=On|Off`, `Orchestrator:DesignerAgent=On|Off`, `Orchestrator:ArtistAgent=On|Off`, `Orchestrator:Groomer=On|Off`. Without these, a bad product-agent pass can''t be turned off without disabling the engineering agent.
+17. *(Resolved: per-agent rollback flags are now in the Rollback strategy section above; see Orchestrator:ProductAgent=On|Off etc. Old text removed.)*
 
 ## Out of scope
 
@@ -521,6 +531,8 @@ The plan was stress-tested by an independent reviewer who found 17 items, of whi
 - Replacing the dashboard UI with Microsoft's DevUI.
 - Building custom Durable entities before validating the in-process path.
 - Migrating kilo's per-role .md frontmatter to MAF's `SKILL.md` schema in this phase. That's a follow-up after we know the shape is stable.
+
+
 
 
 
