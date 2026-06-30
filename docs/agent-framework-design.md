@@ -111,6 +111,22 @@ Note on Microsoft.Agents.AI.GitHub.Copilot: if we pick this for dev, it is *not*
 
 Five phases. Each phase is independently shippable and reversible.
 
+| Phase | Scope | Why this order |
+|---|---|---|
+| **P0** | Add the MAF NuGet packages as prerelease. Wire IChatClient into a new Agents/ project. Replace AcpClient with a MafAgentRunner that wraps AIAgent.RunAsync(session, prompt) (in-process, no HTTP). IAgentRunner interface (Task-oriented, with a DrainInbox and a Probe method) keeps the orchestrator unchanged. | Foundations; all later phases depend on this. |
+| **P0.5** | Add Vision table + ision.md import; UI tab Vision; existing engineering loop reads ision.md once at startup. | Cheap. Validates the storage path. |
+| **P1** (existing) | Skills loading works. | Already designed. |
+| **P1.4** | Intake agent: one persistent HarnessAgent per project. UI: Intake tab with chat stream + Accept epic button. Operator-driven conversation; agent writes epics (issue.type='epic') into the active sprint. Uses HarnessAgent bundled TodoProvider / FileMemoryProvider / hosted web search / LoopAgent. | The intake path is the first end-user-facing agent. We get it in before the rest of the cross-functional work so the operator can start using the system. |
+| **P1.5.a** | Spec table + UI tab Specs (read-only). | Validate the spec model before giving product agent write access. |
+| **P1.5.b** | Product agent writes spec rows via AIFunctions. Operator approves via dashboard. | Loop is closed but human-gated. |
+| **P2.a** | design_artifact table + UI tab Design + Designer agent. | Designer is a synchronous workflow node. |
+| **P2.b** | rtist_output table + MeshyClient + UI tab Art + Artist agent. | Meshy is the long pole; isolate its failures. |
+| **P3** (existing) | Engineering dispatch becomes a MAF workflow. | Already designed. |
+| **P3.5** | issue_groomer_run table + Groomer agent on schedule. | Auto-groomer decomposes open epics. |
+| **P4** (existing) | DurableTask. | Already designed. |
+
+P1.5 is a sub-plan inserted between P1 and P2. The P2 / P3 / P4 numbering is preserved.
+
 ### Phase 0 â€” Package & skeleton
 
 Add the MAF NuGet packages as prerelease. Wire `IChatClient` into a new `Agents/` project. Replace `AcpClient` with a `MafAgentRunner` that wraps `AIAgent.RunAsync(session, prompt)` (in-process, no HTTP). `IAgentRunner` interface (Task-oriented, with a `DrainInbox` and a `Probe` method) keeps the orchestrator unchanged.
@@ -245,8 +261,27 @@ The migration is not only about replacing the engineering agent runtime. It also
 
 - **Product agent is a pre-step before engineering.** When a new feature is requested (or the vision doc changes), product designs the spec, then engineering picks it up. Engineering is downstream of product.
 - **Designer agent is a workflow node that runs alongside product.** Designer hands off a finished visual to artist; artist hands off to engineering. Specs flow product -> design -> art -> engineering.
+- **Intake agent is the entry point.** The user types in the Intake tab. The agent uses project context (vision, sprint, issues, agent defs) to help shape an idea into a well-scoped epic. The user clicks Accept epic and the workflow emits a sprint-issue row plus an issue of 	ype='epic'. The intake workflow is the only one that uses HarnessAgent.
 - **Artist agent uses Meshy.ai as its tool** for 3D-asset generation (text-to-3D, image-to-3D, retexture, animation).
 - **Issue groomer is automatic** and runs on a schedule. It reads `VISION.md` plus the existing issues plus recent PR comments, then rewrites, adds, or retires issues to match the vision.
+
+### Dashboard tabs (full enumeration, post-P1.4)
+
+| Tab | What | Phase |
+|---|---|---|
+| Tasks | Issue list, filterable. Issue detail modal shows modelResponse and tool-call history once P2 lands. | P0 |
+| Backlog | Same as Tasks but unfiltered. | P0 |
+| Sprints | List of sprints with goal + in-progress-count vs cap. Set-active + archive + add-issue controls. | P0 |
+| Agents | One row per agent (coredev, product, designer, rtist, groomer, plus the project-specific intake). Send-message modal per row. | P0 (engineering) / P1.4 (intake) / P1.5.b (product) / P2.a (designer) / P2.b (artist) / P3.5 (groomer) |
+| Skills | Global + per-agent skill catalog. | P0 |
+| **Intake** | Chat window with the intake agent. Persistent conversation; operator types here; agent uses project context to help shape an idea. When the operator clicks Accept epic, the agent calls db_create_epic_draft and emits a sprint-issue row plus an issue of 	ype='epic'. Drafts are visible to the operator before commit. | **P1.4** |
+| Vision | Latest vision doc, with diff vs. previous. Replan button to trigger product agent. History of replans. | P0.5 |
+| Specs | List of specs with status. Click into one to see: problem, solution, acceptance, design artifacts (image grid), artist output thumbnails (Meshy GLB previews). | P1.5.a |
+| Design | Image grid of all design_artifact rows, filter by spec. | P2.a |
+| Art | List of rtist_output rows with status pills (PENDING / IN_PROGRESS / SUCCEEDED / FAILED), credits used, preview GLB. Click to download. | P2.b |
+| Groomer | Timeline of issue_groomer_run rows. Click to see the diff (which issues / epics were created / closed / updated and how epic-to-task decomposition was partitioned). Manual Re-run button. | P3.5 |
+| Traces | Recent OpenTelemetry spans, filter by issue / agent. | P3 |
+| Token usage | Per-day, per-role, per-issue cost rollup. | P3 |
 
 ### Data model additions (all in the same SQLite DB)
 
