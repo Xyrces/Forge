@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Logging;
 using PortHorizon.Agents.Acp;
+#pragma warning disable CS0618 // AcpProcessManager is obsolete (kilo path, staged removal)
 using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Agents;
 using PortHorizon.Agents.Configuration;
@@ -261,6 +262,14 @@ public static class Program
             options.AcpServer, options.Workspace.Root,
             loggerFactory.CreateLogger<AcpProcessManager>());
         var roleRegistry = new RoleAgentRegistry();
+        var llmConfig = new LlmConfig(options.Llm.Provider, options.Llm.Model,
+            string.IsNullOrEmpty(options.Llm.ApiKey) ? null : options.Llm.ApiKey,
+            string.IsNullOrEmpty(options.Llm.OrgId) ? null : options.Llm.OrgId);
+        var chatClientFactory = new StubbedChatClientFactory();
+        var agentRunner = new MafAgentRunner(
+            chatClientFactory, llmConfig, roleRegistry,
+            loggerFactory.CreateLogger<MafAgentRunner>(),
+            kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents"));
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
@@ -268,7 +277,7 @@ public static class Program
             eventBus,
             loggerFactory.CreateLogger<PRWatcher>());
         var orchestrator = new OrchestratorAgent(
-            acpManager, roleRegistry, worktrees, gitHub, prWatcher, issues,
+            acpManager, agentRunner, roleRegistry, worktrees, gitHub, prWatcher, issues,
             agents, sprints, messageBus,
             eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>());

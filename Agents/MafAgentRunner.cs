@@ -60,9 +60,11 @@ public sealed class MafAgentRunner : IAgentRunner
 
         try
         {
+            var startedAt = DateTime.UtcNow;
             var response = session is null
                 ? await agent.RunAsync(message, cancellationToken: ct)
                 : await agent.RunAsync(message, session, cancellationToken: ct);
+            var elapsed = DateTime.UtcNow - startedAt;
 
             var text = string.Concat(response.Messages
                 .Where(m => m.Role == ChatRole.Assistant)
@@ -70,10 +72,11 @@ public sealed class MafAgentRunner : IAgentRunner
             var newSessionId = await SerializeSessionAsync(response, agent, session, ct);
 
             return new AgentRunResult(
-                Text: text,
-                SessionId: newSessionId,
-                InputTokens: 0,
-                OutputTokens: 0);
+    Text: text,
+    SessionId: newSessionId,
+    InputTokens: 0,
+    OutputTokens: 0,
+    Elapsed: elapsed);
         }
         finally
         {
@@ -147,3 +150,4 @@ public sealed class MafAgentRunner : IAgentRunner
         return null;
     }
 }
+

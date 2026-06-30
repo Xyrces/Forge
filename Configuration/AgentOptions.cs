@@ -8,6 +8,8 @@ public sealed record AgentOptions
     public AcpServerOptions AcpServer { get; init; } = new();
     public SpawnerOptions Spawner { get; init; } = new();
     public DashboardOptions Dashboard { get; init; } = new();
+    public OrchestratorOptions Orchestrator { get; init; } = new();
+    public LlmOptions Llm { get; init; } = new();
 }
 
 public sealed record KiloOptions
@@ -50,4 +52,22 @@ public sealed record DashboardOptions
     public bool Enabled { get; init; } = true;
     public int Port { get; init; } = 4097;
     public string Hostname { get; init; } = "127.0.0.1";
+}
+
+public sealed record OrchestratorOptions
+{
+    /// <summary>
+    /// Runtime for the agent step.
+    /// <c>Acp</c> = legacy kilo/ACP path (default; staged removal).
+    /// <c>Maf</c> = Microsoft Agent Framework runner.
+    /// </summary>
+    public string Runtime { get; init; } = "Acp";
+}
+
+public sealed record LlmOptions
+{
+    public string Provider { get; init; } = "Stub";
+    public string Model { get; init; } = "stub-model";
+    public string ApiKey { get; init; } = string.Empty;
+    public string OrgId { get; init; } = string.Empty;
 }

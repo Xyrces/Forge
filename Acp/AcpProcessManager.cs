@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using Microsoft.Extensions.Logging;
 using PortHorizon.Agents.Configuration;
@@ -16,7 +16,7 @@ namespace PortHorizon.Agents.Acp;
 /// valid fallback. To enable it, swap the <see cref="StartProcessArgs"/>
 /// override here.
 /// </summary>
-public sealed class AcpProcessManager : IAsyncDisposable
+[Obsolete("Kilo path - retained for staged removal.")] public sealed class AcpProcessManager : IAsyncDisposable
 {
     private readonly AcpServerOptions _options;
     private readonly ILogger<AcpProcessManager> _logger;
@@ -204,3 +204,4 @@ public sealed class AcpProcessManager : IAsyncDisposable
         return null;
     }
 }
+

@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace PortHorizon.Agents.Acp;
 
@@ -57,3 +57,4 @@ public sealed record MessagePart(
 /// </summary>
 public sealed record UserMessage(
     [property: JsonPropertyName("parts")] IReadOnlyList<MessagePart> Parts);
+

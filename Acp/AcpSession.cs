@@ -1,8 +1,8 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 
 namespace PortHorizon.Agents.Acp;
 
-public sealed class AcpSession
+[Obsolete("Kilo path - retained for staged removal.")] public sealed class AcpSession
 {
     private readonly AcpClient _client;
     private readonly ILogger<AcpSession>? _logger;
@@ -65,3 +65,4 @@ public sealed class AcpSession
         }
     }
 }
+

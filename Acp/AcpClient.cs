@@ -1,4 +1,4 @@
-using System.Net.Http.Json;
+﻿using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -16,7 +16,7 @@ namespace PortHorizon.Agents.Acp;
 /// Wire-level behavior for <see cref="PromptAsync"/>:
 ///
 ///   1. POST /session/{id}/message with the user message. The response is
-///      the *initial* assistant turn — but on this build it is the agent's
+///      the *initial* assistant turn â€” but on this build it is the agent's
 ///      first step only; if the agent decides to make more tool calls or
 ///      keep thinking, the response stream is NOT closed. We register the
 ///      prompt and then start polling.
@@ -44,7 +44,7 @@ namespace PortHorizon.Agents.Acp;
 ///   GET  /session/{id}                  -> session metadata (poll target)
 ///   GET  /session/{id}/messages         -> SSE event stream (text harvest)
 /// </summary>
-public sealed class AcpClient : IAcpClient
+[Obsolete("Kilo path - retained for staged removal; new code must use IAgentRunner in PortHorizon.Agents.Agents.")] public sealed class AcpClient : IAcpClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -94,7 +94,7 @@ public sealed class AcpClient : IAcpClient
         //   - a poller that watches GET /session/{id} and cancels the POST as
         //     soon as the session is stable for CompletionStableSeconds
         //
-        // This gives us prompt completion detection in ~5–30 s instead of 5 min
+        // This gives us prompt completion detection in ~5â€“30 s instead of 5 min
         // hard timeout, and we still get the assistant's first-turn text from
         // the POST response if it ever arrives.
 

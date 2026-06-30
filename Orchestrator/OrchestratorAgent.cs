@@ -9,9 +9,11 @@ using PortHorizon.Agents.Reviewer;
 
 namespace PortHorizon.Agents.Orchestrator;
 
+#pragma warning disable CS0618 // AcpProcessManager / AcpSession are obsolete (kilo path, staged removal)
 public sealed class OrchestratorAgent : IAgent
 {
     private readonly AcpProcessManager _acpManager;
+    private readonly IAgentRunner _runner;
     private readonly RoleAgentRegistry _roleRegistry;
     private readonly GitWorktreeService _worktrees;
     private readonly GitHubService _gitHub;
@@ -34,6 +36,7 @@ public sealed class OrchestratorAgent : IAgent
 
     public OrchestratorAgent(
         AcpProcessManager acpManager,
+        IAgentRunner runner,
         RoleAgentRegistry roleRegistry,
         GitWorktreeService worktrees,
         GitHubService gitHub,
@@ -46,6 +49,7 @@ public sealed class OrchestratorAgent : IAgent
         ILogger<OrchestratorAgent> logger)
     {
         _acpManager = acpManager;
+        _runner = runner;
         _roleRegistry = roleRegistry;
         _worktrees = worktrees;
         _gitHub = gitHub;
@@ -142,44 +146,44 @@ public sealed class OrchestratorAgent : IAgent
                 ["roleAgent"] = roleAgent.KiloAgentName,
             }), cancellationToken);
 
-            var client = _acpManager.GetClient();
-            var newSession = await client.NewSessionAsync(
-                new NewSessionParams(worktreePath, roleAgent.KiloAgentName), cancellationToken);
-            await UpdateMetadataAsync(claimed.Id, m => MergeDict(m, new Dictionary<string, object>
-            {
-                ["acpSessionId"] = newSession.SessionId,
-            }), cancellationToken);
-
             var claimedRefresh = (await _issues.GetAsync(claimed.Id, cancellationToken))!;
-            var session = new AcpSession(client, newSession.SessionId, worktreePath, roleAgent.KiloAgentName);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AcpSessionStarted,
-                claimed.Id, $"session={newSession.SessionId} role={roleAgent.KiloAgentName}"));
+                claimed.Id, $"role={roleAgent.KiloAgentName} worktree={worktreePath}"));
             var basePrompt = BuildPrompt(claimedRefresh, roleAgent, worktreePath, branch, _workspaceOptions.DefaultBranch);
             var queued = _messageBus.Drain(roleAgent.KiloAgentName);
             var prompt = string.IsNullOrEmpty(queued)
                 ? basePrompt
                 : basePrompt + "\n\n## Operator messages\n" + queued + "\n\nAddress these messages before working on the task.";
 
-            // Capture the prompt result in metadata so the dashboard can show
+            // Capture the agent result in metadata so the dashboard can show
             // what the agent said even when downstream steps fail. Capture
             // BEFORE we use `result` so the failure path doesn't lose it.
-            PromptResult result;
+            AgentRunResult result;
             try
             {
-                result = await session.PromptAsync(prompt, cancellationToken);
+                result = await _runner.RunAsync(
+                    RoleAgentRegistry.FromTaskType(claimed.Type),
+                    prompt,
+                    sessionId: claimedRefresh.GetMetadata("agentSessionId"),
+                    cancellationToken);
             }
             catch (Exception promptEx)
             {
                 await RecordModelResponseMetadataAsync(claimed.Id, error: $"prompt-threw: {promptEx.GetType().Name}: {promptEx.Message}", ct: cancellationToken);
                 throw;
             }
-            await RecordModelResponseMetadataAsync(claimed.Id, response: result.Response, ct: cancellationToken);
+            await RecordModelResponseMetadataAsync(claimed.Id, response: result.Text, ct: cancellationToken);
+            await UpdateMetadataAsync(claimed.Id, m => MergeDict(m, new Dictionary<string, object>
+            {
+                ["agentSessionId"] = result.SessionId ?? string.Empty,
+            }), cancellationToken);
+
 
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AcpSessionCompleted,
-                claimed.Id, $"elapsed={session.Elapsed.TotalMilliseconds:F0}ms",
-                new Dictionary<string, object?> { ["sessionId"] = newSession.SessionId, ["elapsedMs"] = session.Elapsed.TotalMilliseconds }));
-            _logger.LogInformation("ACP session for {Id} completed in {Ms}ms",
-                claimed.Id, session.Elapsed.TotalMilliseconds);
+                claimed.Id, $"elapsed={result.Elapsed.TotalMilliseconds:F0}ms",
+                new Dictionary<string, object?> { ["sessionId"] = result.SessionId ?? "", ["elapsedMs"] = result.Elapsed.TotalMilliseconds }));
+            _logger.LogInformation("Agent session for {Id} completed in {Ms}ms",
+                claimed.Id, result.Elapsed.TotalMilliseconds);
 
             var commit = await _worktrees.CommitAllAsync(worktreePath, $"Task({claimed.Id}): {claimed.Title}", cancellationToken);
             if (!commit.HasChanges)
@@ -187,7 +191,7 @@ public sealed class OrchestratorAgent : IAgent
                 _logger.LogWarning("Issue {Id}: model produced no diff (no files committed). Marking Completed with lastResponse captured.", claimed.Id);
                 await _issues.TransitionAsync(claimed.Id, IssueStatus.Completed, "no changes (agent made 0 edits)", ct: cancellationToken);
                 _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                    claimed.Id, "Completed (no-op)", new Dictionary<string, object?> { ["response"] = Truncate(result.Response ?? "", 400) }));
+                    claimed.Id, "Completed (no-op)", new Dictionary<string, object?> { ["response"] = Truncate(result.Text ?? "", 400) }));
                 return new Result(true, "completed with no diff");
             }
 
@@ -196,7 +200,7 @@ public sealed class OrchestratorAgent : IAgent
 
             var pr = await _gitHub.CreatePullRequestAsync(
                 title: $"[{claimed.Type}] {claimed.Title}",
-                body: BuildPrBody(claimed, roleAgent, headSha, result),
+                body: BuildPrBody(claimed, roleAgent, headSha, result.Text),
                 headBranch: branch,
                 baseBranch: _workspaceOptions.DefaultBranch,
                 cancellationToken: cancellationToken);
@@ -372,7 +376,7 @@ public sealed class OrchestratorAgent : IAgent
             - Do NOT touch files outside your project subdirectory ({role.ProjectSubdir}).
             """;
 
-    private static string BuildPrBody(IssueRecord issue, RoleAgent role, string sha, PromptResult result)
+    private static string BuildPrBody(IssueRecord issue, RoleAgent role, string sha, string response)
         => $"""
             ## Summary
             Automated change for issue `{issue.Id}` (type: {issue.Type}, role: {role.KiloAgentName}).
@@ -382,7 +386,7 @@ public sealed class OrchestratorAgent : IAgent
 
             ## Verification
             - HEAD SHA: `{sha}`
-            - ACP session result (truncated): `{Truncate(result.Response, 400)}`
+            - ACP session result (truncated): `{Truncate(response, 400)}`
 
             Closes `{issue.Id}`.
             """;
