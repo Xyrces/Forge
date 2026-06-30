@@ -1,16 +1,18 @@
 ﻿
 # Microsoft Agent Framework migration
 
-Status: design draft (2026-06-29). Goal: replace the kilo-based runtime in PortHorizon.Agents with Microsoft Agent Framework (MAF) as the agent runtime, while keeping the SQLite-backed issue/agent/skill/sprint store and the Kestrel dashboard.
+Status: P0 closed 2026-06-30. Goal: replace the kilo-based runtime in PortHorizon.Agents with Microsoft Agent Framework (MAF) as the agent runtime, while keeping the SQLite-backed issue/agent/skill/sprint store and the Kestrel dashboard.
+
+**P0 outcome (2026-06-30):** the MAF runner is the only agent runtime. The `AcpClient`/`AcpProcessManager`/`AcpSession`/`AcpProtocol` files and their integration tests are deleted. `IAgentRunner` (Microsoft.Agents.AI 1.11.1) is wired into `OrchestratorAgent`; `MafAgentRunner` wraps `ChatClientAgent` with the role's `.kilo/agents/<role>.md` frontmatter as `instructions:`. 89/89 tests pass. P0.5+ phases (real LLM providers, git/PR tools, intake via HarnessAgent) proceed per the table below.
 
 ## Why we are doing this
 
-The current orchestrator (P0 + P1) drives agents by shelling out to `kilo serve` and talking its bespoke HTTP+JSON protocol. Two failure modes:
+The P0-P1 orchestrator drove agents by shelling out to `kilo serve` and talking its bespoke HTTP+JSON protocol. Two failure modes:
 
-1. **Wire fragility.** kilo's POST `/session/<id>/message` does not return until the agent finishes. We side-stepped this with a parallel poll-and-cancel harness in `AcpClient.PromptAsync`. The fix works but is a workaround for a quirk of a tool that is not our problem to fix.
-2. **Provider coupling.** We are locked into `kilo acp`'s tool protocol, prompt shapes, and session IDs. Switching to a different LLM provider today means writing a parallel `AcpClient` for each one.
+1. **Wire fragility.** kilo's POST `/session/<id>/message` does not return until the agent finishes. We side-stepped this with a parallel poll-and-cancel harness in `AcpClient.PromptAsync`. The fix worked but was a workaround for a quirk of a tool that is not our problem to fix.
+2. **Provider coupling.** We were locked into `kilo acp`'s tool protocol, prompt shapes, and session IDs. Switching to a different LLM provider meant writing a parallel `AcpClient` for each one.
 
-MAF removes both. It is the direct successor to both Semantic Kernel and AutoGen, designed by the same Microsoft teams to consolidate the two. It is open-source (.NET + Python), production-graded (1.x at dotnet 1.11.1 on 2026-06-25; 11.8k stars), and has explicit migration documentation for both SK and AutoGen.
+MAF removes both. It is the direct successor to both Semantic Kernel and AutoGen, designed by the same Microsoft teams to consolidate the two. It is open-source (.NET + Python), production-graded (1.x at dotnet 1.11.1; 11.8k stars), and has explicit migration documentation for both SK and AutoGen.
 
 It also offers primitives we currently lack and would otherwise have to build:
 
@@ -113,7 +115,7 @@ Five phases. Each phase is independently shippable and reversible.
 
 | Phase | Scope | Why this order |
 |---|---|---|
-| **P0** | Add the MAF NuGet packages as prerelease. Wire IChatClient into a new Agents/ project. Replace AcpClient with a MafAgentRunner that wraps AIAgent.RunAsync(session, prompt) (in-process, no HTTP). IAgentRunner interface (Task-oriented, with a DrainInbox and a Probe method) keeps the orchestrator unchanged. | Foundations; all later phases depend on this. |
+| **P0** (closed 2026-06-30) | Add the MAF NuGet packages as prerelease. Wire IChatClient into a new Agents/ project. Replace AcpClient with a MafAgentRunner that wraps `AIAgent.RunAsync(session, prompt)` (in-process, no HTTP). IAgentRunner interface (`Task<AgentRunResult>`) keeps the orchestrator unchanged. | Foundations; all later phases depend on this. |
 | **P0.5** | Add Vision table + ision.md import; UI tab Vision; existing engineering loop reads ision.md once at startup. | Cheap. Validates the storage path. |
 | **P1** (existing) | Skills loading works. | Already designed. |
 | **P1.4** | Intake agent: one persistent HarnessAgent per project. UI: Intake tab with chat stream + Accept epic button. Operator-driven conversation; agent writes epics (issue.type='epic') into the active sprint. Uses HarnessAgent bundled TodoProvider / FileMemoryProvider / hosted web search / LoopAgent. | The intake path is the first end-user-facing agent. We get it in before the rest of the cross-functional work so the operator can start using the system. |
@@ -127,13 +129,15 @@ Five phases. Each phase is independently shippable and reversible.
 
 P1.5 is a sub-plan inserted between P1 and P2. The P2 / P3 / P4 numbering is preserved.
 
-### Phase 0 â€” Package & skeleton
+### Phase 0 — Package & skeleton (closed 2026-06-30)
 
-Add the MAF NuGet packages as prerelease. Wire `IChatClient` into a new `Agents/` project. Replace `AcpClient` with a `MafAgentRunner` that wraps `AIAgent.RunAsync(session, prompt)` (in-process, no HTTP). `IAgentRunner` interface (Task-oriented, with a `DrainInbox` and a `Probe` method) keeps the orchestrator unchanged.
+Add the MAF NuGet packages as prerelease. Wire `IChatClient` into a new `Agents/` project. Replace `AcpClient` with a `MafAgentRunner` that wraps `ChatClientAgent.RunAsync(message, session?)` (in-process, no HTTP). `IAgentRunner` interface (`Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, CancellationToken ct)`) keeps the orchestrator unchanged.
 
 Reuse `RoleAgentRegistry` to build the `ChatClientAgent` per role. The "kilo .md" file content becomes the `instructions:` parameter. Roles that don't have an LLM provider (dev) still log the prompt.
 
-Deliverable: one existing scenario (e.g., the ecs-1 task) runs end-to-end through MAF, with the dashboard still showing the result. **Test outline:** the integration test under 	ests/PortHorizon.Agents.Tests/Integration/Phase0Tests.cs enqueues a fixture issue with a stubbed IChatClient that returns a scripted ChatResponse; asserts (a) MafAgentRunner.RunAsync(session, prompt) returns a non-empty response, (b) the dashboard /api/state shows the issue with status Completed and the response text in parameters.modelResponse, (c) the integration test runs without kilo installed. We do NOT exercise git worktree creation, PR creation, or any real LLM in Phase 0 - those are Phase 2.
+**Outcome (2026-06-30):** `OrchestratorAgent` calls `IAgentRunner.RunAsync(...)` and no longer references `AcpClient`/`AcpProcessManager`. The kilo/ACP files are deleted. The no-op commit branch captures `modelResponse` metadata; the runner's `Elapsed` TimeSpan flows through to the dashboard `AcpSessionCompleted` event. 89/89 tests pass. P0.5+ proceeds.
+
+Deliverable: one existing scenario (e.g., the ecs-1 task) runs end-to-end through MAF, with the dashboard still showing the result. **Test outline:** the integration test under tests/PortHorizon.Agents.Tests/Integration/Phase0Tests.cs enqueues a fixture issue with a stubbed IChatClient that returns a scripted ChatResponse; asserts (a) MafAgentRunner.RunAsync returns a non-empty response, (b) the orchestrator's no-op branch transitions the issue to `Completed` with the response text in `modelResponse` metadata, (c) the integration test runs without kilo installed. We do NOT exercise git worktree creation, PR creation, or any real LLM in Phase 0 - those are Phase 2.
 
 ### Phase 1 â€” Skills actually do something
 
