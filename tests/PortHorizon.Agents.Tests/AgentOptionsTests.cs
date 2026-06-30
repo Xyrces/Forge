@@ -7,16 +7,6 @@ namespace PortHorizon.Agents.Tests;
 public class AgentOptionsTests
 {
     [Fact]
-    public void Default_OrchestratorRuntime_IsMaf()
-    {
-        // The default Runtime is Maf because the kilo/ACP path is staged
-        // for removal. Users who flip it back to "Acp" get a clear runtime
-        // error from OrchestratorAgent at the dispatch site.
-        var options = new AgentOptions();
-        Assert.Equal("Maf", options.Orchestrator.Runtime);
-    }
-
-    [Fact]
     public void Default_LlmOptions_AreStub()
     {
         // Default Provider=Stub keeps a fresh orchestrator from accidentally
@@ -26,6 +16,20 @@ public class AgentOptionsTests
         Assert.Equal("stub-model", options.Llm.Model);
         Assert.Equal(string.Empty, options.Llm.ApiKey);
         Assert.Equal(string.Empty, options.Llm.OrgId);
+    }
+
+    [Fact]
+    public void Default_AgentOptions_AreSafe()
+    {
+        // No required fields are null; an orchestrator with all defaults
+        // boots without throwing (a real config would set Workspace.Root
+        // and GitHub.* via appsettings.json).
+        var options = new AgentOptions();
+        Assert.NotNull(options.Workspace);
+        Assert.NotNull(options.GitHub);
+        Assert.NotNull(options.Spawner);
+        Assert.NotNull(options.Dashboard);
+        Assert.NotNull(options.Llm);
     }
 
     [Fact]
@@ -45,16 +49,6 @@ public class AgentOptionsTests
         Assert.Equal("gpt-5", options.Llm.Model);
         Assert.Equal("sk-abc", options.Llm.ApiKey);
         Assert.Equal("org-1", options.Llm.OrgId);
-    }
-
-    [Fact]
-    public void AgentOptions_OverrideOrchestratorRuntimeToAcp()
-    {
-        var options = new AgentOptions
-        {
-            Orchestrator = new OrchestratorOptions { Runtime = "Acp" },
-        };
-        Assert.Equal("Acp", options.Orchestrator.Runtime);
     }
 
     [Fact]

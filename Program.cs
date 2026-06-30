@@ -1,6 +1,4 @@
 ﻿using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Acp;
-#pragma warning disable CS0618 // AcpProcessManager is obsolete (kilo path, staged removal)
 using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Agents;
 using PortHorizon.Agents.Configuration;
@@ -258,9 +256,6 @@ public static class Program
         var messageBus = new AgentMessageBus();
         var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
         var gitHub = new GitHubService(options.GitHub);
-        var acpManager = new AcpProcessManager(
-            options.AcpServer, options.Workspace.Root,
-            loggerFactory.CreateLogger<AcpProcessManager>());
         var roleRegistry = new RoleAgentRegistry();
         var llmConfig = new LlmConfig(options.Llm.Provider, options.Llm.Model,
             string.IsNullOrEmpty(options.Llm.ApiKey) ? null : options.Llm.ApiKey,
@@ -277,7 +272,7 @@ public static class Program
             eventBus,
             loggerFactory.CreateLogger<PRWatcher>());
         var orchestrator = new OrchestratorAgent(
-            acpManager, agentRunner, roleRegistry, worktrees, gitHub, prWatcher, issues,
+            agentRunner, roleRegistry, worktrees, gitHub, prWatcher, issues,
             agents, sprints, messageBus,
             eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>());
@@ -304,9 +299,6 @@ public static class Program
             logger.LogInformation("Starting dashboard");
             await dashboard.StartAsync(shutdownCts.Token);
 
-            logger.LogInformation("Starting ACP server");
-            await acpManager.StartAsync(shutdownCts.Token);
-
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);
             return 0;
@@ -323,8 +315,6 @@ public static class Program
         }
         finally
         {
-            logger.LogInformation("Stopping ACP server");
-            try { await acpManager.DisposeAsync(); } catch { }
             try { await dashboard.StopAsync(); } catch { }
             try
             {

@@ -1,5 +1,4 @@
 ﻿using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Acp;
 using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Agents;
 using PortHorizon.Agents.Configuration;
@@ -9,10 +8,8 @@ using PortHorizon.Agents.Reviewer;
 
 namespace PortHorizon.Agents.Orchestrator;
 
-#pragma warning disable CS0618 // AcpProcessManager / AcpSession are obsolete (kilo path, staged removal)
 public sealed class OrchestratorAgent : IAgent
 {
-    private readonly AcpProcessManager _acpManager;
     private readonly IAgentRunner _runner;
     private readonly RoleAgentRegistry _roleRegistry;
     private readonly GitWorktreeService _worktrees;
@@ -28,7 +25,6 @@ public sealed class OrchestratorAgent : IAgent
     private readonly IDashboardEventBus _events;
     private SemaphoreSlim _concurrencyLimiter = new(4);
     private readonly int _maxRetryCount;
-    private string _runtime = "Maf";
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -36,7 +32,6 @@ public sealed class OrchestratorAgent : IAgent
     public AgentStatus Status { get; private set; } = AgentStatus.Idle;
 
     public OrchestratorAgent(
-        AcpProcessManager acpManager,
         IAgentRunner runner,
         RoleAgentRegistry roleRegistry,
         GitWorktreeService worktrees,
@@ -49,7 +44,6 @@ public sealed class OrchestratorAgent : IAgent
         IDashboardEventBus events,
         ILogger<OrchestratorAgent> logger)
     {
-        _acpManager = acpManager;
         _runner = runner;
         _roleRegistry = roleRegistry;
         _worktrees = worktrees;
@@ -148,7 +142,7 @@ public sealed class OrchestratorAgent : IAgent
             }), cancellationToken);
 
             var claimedRefresh = (await _issues.GetAsync(claimed.Id, cancellationToken))!;
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AcpSessionStarted,
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AgentSessionStarted,
                 claimed.Id, $"role={roleAgent.KiloAgentName} worktree={worktreePath}"));
             var basePrompt = BuildPrompt(claimedRefresh, roleAgent, worktreePath, branch, _workspaceOptions.DefaultBranch);
             var queued = _messageBus.Drain(roleAgent.KiloAgentName);
@@ -162,12 +156,6 @@ public sealed class OrchestratorAgent : IAgent
             AgentRunResult result;
             try
             {
-                if (!string.Equals(_runtime, "Maf", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new NotSupportedException(
-                        $"Runtime '{_runtime}' is not supported in P0. The kilo/ACP path is staged for removal; " +
-                        "set Orchestrator:Runtime=Maf to use the MAF runner.");
-                }
                 result = await _runner.RunAsync(
                     RoleAgentRegistry.FromTaskType(claimed.Type),
                     prompt,
@@ -186,7 +174,7 @@ public sealed class OrchestratorAgent : IAgent
             }), cancellationToken);
 
 
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AcpSessionCompleted,
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AgentSessionCompleted,
                 claimed.Id, $"elapsed={result.Elapsed.TotalMilliseconds:F0}ms",
                 new Dictionary<string, object?> { ["sessionId"] = result.SessionId ?? "", ["elapsedMs"] = result.Elapsed.TotalMilliseconds }));
             _logger.LogInformation("Agent session for {Id} completed in {Ms}ms",
@@ -250,7 +238,6 @@ public sealed class OrchestratorAgent : IAgent
         _workspaceOptions = options.Workspace;
         _concurrencyLimiter.Dispose();
         _concurrencyLimiter = new SemaphoreSlim(Math.Max(1, options.Spawner.MaxConcurrentSessions));
-        _runtime = string.IsNullOrEmpty(options.Orchestrator?.Runtime) ? "Maf" : options.Orchestrator.Runtime;
     }
 
     private async Task HandleFailureAsync(IssueRecord issue, Exception ex, CancellationToken cancellationToken)

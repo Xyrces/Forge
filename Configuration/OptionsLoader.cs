@@ -25,17 +25,21 @@ public static class OptionsLoader
 
     private static void ApplyEnvOverrides(AgentOptions options)
     {
-        var kiloProvider = Environment.GetEnvironmentVariable("KILO_PROVIDER");
-        if (!string.IsNullOrEmpty(kiloProvider))
-            options = options with { Kilo = options.Kilo with { Provider = kiloProvider } };
+        var llmProvider = Environment.GetEnvironmentVariable("LLM_PROVIDER");
+        if (!string.IsNullOrEmpty(llmProvider))
+            options = options with { Llm = options.Llm with { Provider = llmProvider } };
 
-        var kiloModel = Environment.GetEnvironmentVariable("KILO_MODEL");
-        if (!string.IsNullOrEmpty(kiloModel))
-            options = options with { Kilo = options.Kilo with { Model = kiloModel } };
+        var llmModel = Environment.GetEnvironmentVariable("LLM_MODEL");
+        if (!string.IsNullOrEmpty(llmModel))
+            options = options with { Llm = options.Llm with { Model = llmModel } };
 
-        var kiloOrg = Environment.GetEnvironmentVariable("KILO_ORG_ID");
-        if (!string.IsNullOrEmpty(kiloOrg))
-            options = options with { Kilo = options.Kilo with { OrgId = kiloOrg } };
+        var llmApiKey = Environment.GetEnvironmentVariable("LLM_API_KEY");
+        if (!string.IsNullOrEmpty(llmApiKey))
+            options = options with { Llm = options.Llm with { ApiKey = llmApiKey } };
+
+        var llmOrgId = Environment.GetEnvironmentVariable("LLM_ORG_ID");
+        if (!string.IsNullOrEmpty(llmOrgId))
+            options = options with { Llm = options.Llm with { OrgId = llmOrgId } };
 
         var ghToken = Environment.GetEnvironmentVariable("GitHub__Token")
             ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
@@ -54,8 +58,6 @@ public static class OptionsLoader
             errors.Add("GitHub.Repo is required");
         if (options.Spawner.MaxConcurrentSessions <= 0)
             errors.Add("Spawner.MaxConcurrentSessions must be > 0");
-        if (options.AcpServer.Port <= 0 || options.AcpServer.Port > 65535)
-            errors.Add($"AcpServer.Port {options.AcpServer.Port} is out of range");
 
         if (errors.Count > 0)
             throw new InvalidOperationException("Invalid agent configuration: " + string.Join("; ", errors));

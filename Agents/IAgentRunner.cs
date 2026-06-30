@@ -4,14 +4,14 @@ namespace PortHorizon.Agents.Agents;
 
 /// <summary>
 /// Abstraction over the agent runtime. Phase 0: in-process Microsoft Agent
-/// Framework (MAF) via <see cref="MafAgentRunner"/>. The kilo-based
-/// <c>AcpClient</c> continues to work behind the same interface during the
-/// P0..P3 rollback window.
+/// Framework (MAF) via <see cref="MafAgentRunner"/>. The kilo/ACP path was
+/// removed in P0 once the MAF runner proved the contract.
 ///
-/// Implementations are picked per the <c>Orchestrator:Runtime</c> config
-/// flag (Kilo or Maf). The runner is stateless across tasks: each call
-/// instantiates a fresh <c>AIAgent</c> (or, in P1.4, the intake path may
-/// reuse a persistent <c>AgentSession</c>).
+/// <para>
+/// The runner is stateless across tasks: each call instantiates a fresh
+/// <c>AIAgent</c> (or, in P1.4, the intake path may reuse a persistent
+/// <c>AgentSession</c>).
+/// </para>
 /// </summary>
 public interface IAgentRunner
 {

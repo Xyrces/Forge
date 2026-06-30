@@ -41,7 +41,6 @@ public sealed class OrchestratorAgentTests : IDisposable
     private readonly GitWorktreeService _worktrees;
     private readonly GitHubService _github;
     private readonly PRWatcher _prWatcher;
-    private readonly Acp.AcpProcessManager _acp;
     private readonly string _originalCwd;
 
     public OrchestratorAgentTests()
@@ -64,12 +63,6 @@ public sealed class OrchestratorAgentTests : IDisposable
             _github, _worktrees, _issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30), _events,
             NullLogger<PRWatcher>.Instance);
-#pragma warning disable CS0618
-        _acp = new Acp.AcpProcessManager(
-            new AcpServerOptions { ExecutablePath = "kilo", Port = 4096, Hostname = "127.0.0.1" },
-            _workDir,
-            NullLogger<Acp.AcpProcessManager>.Instance);
-#pragma warning restore CS0618
 
         _originalCwd = Directory.GetCurrentDirectory();
     }
@@ -81,9 +74,7 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     private OrchestratorAgent BuildOrchestrator(IAgentRunner runner)
-#pragma warning disable CS0618
         => new OrchestratorAgent(
-            _acp,
             runner,
             _roleRegistry,
             _worktrees,
@@ -95,23 +86,11 @@ public sealed class OrchestratorAgentTests : IDisposable
             _messageBus,
             _events,
             NullLogger<OrchestratorAgent>.Instance);
-#pragma warning restore CS0618
 
     private void BindMaf(OrchestratorAgent orch)
     {
         orch.BindOptions(new AgentOptions
         {
-            Orchestrator = new OrchestratorOptions { Runtime = "Maf" },
-            Workspace = new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
-            Spawner = new SpawnerOptions { MaxConcurrentSessions = 1, PollIntervalSeconds = 1 },
-        });
-    }
-
-    private void BindAcp(OrchestratorAgent orch)
-    {
-        orch.BindOptions(new AgentOptions
-        {
-            Orchestrator = new OrchestratorOptions { Runtime = "Acp" },
             Workspace = new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
             Spawner = new SpawnerOptions { MaxConcurrentSessions = 1, PollIntervalSeconds = 1 },
         });
@@ -132,49 +111,6 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.True(result.Success, $"expected success, got: {result.Message}");
         var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
         Assert.Equal(IssueStatus.Completed, after.Status);
-        Assert.Equal(scripted, after.GetMetadata("modelResponse"));
-    }
-
-    [Fact]
-    public async Task DispatchSingleTask_AcpPath_LogsNotSupportedAndRetries()
-    {
-        // DispatchSingleTaskAsync swallows exceptions and converts them to
-        // a failed Result. The Acp path is rejected with a clear
-        // "Runtime 'Acp' is not supported" message captured in lastError.
-        var orch = BuildOrchestrator(new ScriptedRunner("anything"));
-        BindAcp(orch);
-
-        var issue = await _issues.CreateAsync(new NewIssue(
-            Type: DevTaskType, Title: "Add a feature", Description: "x"));
-
-        var result = await orch.DispatchSingleTaskAsync(issue, CancellationToken.None);
-        Assert.False(result.Success);
-        Assert.Contains("not supported", result.Message, StringComparison.OrdinalIgnoreCase);
-
-        var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
-        // First failure: retry (Pending). retryCount=1 after this run.
-        Assert.Equal(IssueStatus.Pending, after.Status);
-        Assert.Equal("1", after.GetMetadata("retryCount"));
-        Assert.Contains("not supported", after.GetMetadata("lastError")!, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task DispatchSingleTask_DefaultRuntime_IsMaf()
-    {
-        const string scripted = "ack";
-        var orch = BuildOrchestrator(new ScriptedRunner(scripted));
-        orch.BindOptions(new AgentOptions
-        {
-            Workspace = new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
-            Spawner = new SpawnerOptions { MaxConcurrentSessions = 1, PollIntervalSeconds = 1 },
-        });
-
-        var issue = await _issues.CreateAsync(new NewIssue(
-            Type: DevTaskType, Title: "x", Description: "y"));
-
-        var result = await orch.DispatchSingleTaskAsync(issue, CancellationToken.None);
-        Assert.True(result.Success);
-        var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
         Assert.Equal(scripted, after.GetMetadata("modelResponse"));
     }
 
@@ -228,8 +164,8 @@ public sealed class OrchestratorAgentTests : IDisposable
         var snapshot = _events.GetHistorySnapshot();
         var kinds = snapshot.Select(e => e.Kind).ToList();
         Assert.Contains(DashboardEventKind.TaskTransition, kinds);
-        Assert.Contains(DashboardEventKind.AcpSessionStarted, kinds);
-        Assert.Contains(DashboardEventKind.AcpSessionCompleted, kinds);
+        Assert.Contains(DashboardEventKind.AgentSessionStarted, kinds);
+        Assert.Contains(DashboardEventKind.AgentSessionCompleted, kinds);
     }
 
     [Fact]
