@@ -16,7 +16,8 @@ public enum AgentType
     CoreDev,
     ClientDev,
     QA,
-    Reviewer
+    Reviewer,
+    Intake,
 }
 
 public enum AgentStatus

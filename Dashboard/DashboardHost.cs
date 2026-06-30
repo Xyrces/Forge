@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PortHorizon.Agents.Agents;
 using PortHorizon.Agents.Configuration;
 using PortHorizon.Agents.Core;
 using PortHorizon.Agents.Orchestrator;
@@ -17,19 +18,33 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly IAgentStore _agents;
     private readonly ISkillStore _skills;
     private readonly ISprintStore _sprints;
+    private readonly IIntakeStore _intakeStore;
+    private readonly IntakeAgentRegistry? _intakeRegistry;
     private readonly AgentMessageBus _messageBus;
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
 
-    public DashboardHost(DashboardOptions options, IIssueStore issues, IAgentStore agents, ISkillStore skills, ISprintStore sprints, AgentMessageBus messageBus, InMemoryDashboardEventBus bus, ILogger<DashboardHost> logger)
+    public DashboardHost(
+        DashboardOptions options,
+        IIssueStore issues,
+        IAgentStore agents,
+        ISkillStore skills,
+        ISprintStore sprints,
+        AgentMessageBus messageBus,
+        InMemoryDashboardEventBus bus,
+        ILogger<DashboardHost> logger,
+        IIntakeStore? intakeStore = null,
+        IntakeAgentRegistry? intakeRegistry = null)
     {
         _options = options;
         _issues = issues;
         _agents = agents;
         _skills = skills;
         _sprints = sprints;
+        _intakeStore = intakeStore ?? new NullIntakeStore();
+        _intakeRegistry = intakeRegistry;
         _messageBus = messageBus;
         _bus = bus;
         _logger = logger;
@@ -126,6 +141,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         });
 
         DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger);
+
+        if (_intakeRegistry is not null)
+        {
+            IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
+        }
 
         _app.MapGet("/api/agents", () =>
         {

@@ -297,9 +297,25 @@ public static class Program
             eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>());
         orchestrator.BindOptions(options);
+        var intakeStore = new Core.IntakeStore(issues);
+        var intakeRegistry = new IntakeAgentRegistry(projectId =>
+            new IntakeAgent(
+                projectId,
+                intakeStore,
+                issues,
+                sprints,
+                chatClientFactory,
+                llmConfig,
+                roleRegistry,
+                eventBus,
+                loggerFactory.CreateLogger<IntakeAgent>(),
+                skills: skillSource,
+                kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents")));
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
-            loggerFactory.CreateLogger<DashboardHost>());
+            loggerFactory.CreateLogger<DashboardHost>(),
+            intakeStore: intakeStore,
+            intakeRegistry: intakeRegistry);
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>

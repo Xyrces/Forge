@@ -89,6 +89,30 @@
   .sprint-goal .goal { color: var(--muted); margin-bottom: 4px; font-style: italic; }
   .progress { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
   .progress .bar { height: 100%; background: var(--accent); }
+  .intake-grid { display: grid; grid-template-columns: 260px 1fr; height: calc(100vh - 200px); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .intake-sidebar { background: var(--bg); border-right: 1px solid var(--border); overflow-y: auto; }
+  .intake-sidebar .actions { padding: 8px; border-bottom: 1px solid var(--border); }
+  .intake-session-list { list-style: none; padding: 0; margin: 0; }
+  .intake-session-list li { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .intake-session-list li:hover { background: var(--panel); }
+  .intake-session-list li.active { background: var(--accent); color: #000; }
+  .intake-session-list li.active .meta { color: rgba(0,0,0,0.7); }
+  .intake-session-list .title { font-weight: 600; font-size: 12px; }
+  .intake-session-list .meta { color: var(--muted); font-size: 10px; margin-top: 2px; }
+  .intake-thread { display: flex; flex-direction: column; height: 100%; background: var(--panel); }
+  .intake-messages { flex: 1; overflow-y: auto; padding: 12px; }
+  .intake-msg { margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; }
+  .intake-msg .role { font-size: 10px; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; letter-spacing: 0.5px; }
+  .intake-msg .content { white-space: pre-wrap; }
+  .intake-msg.role-user { background: var(--bg); border: 1px solid var(--border); }
+  .intake-msg.role-assistant { background: rgba(80, 200, 120, 0.08); border: 1px solid rgba(80, 200, 120, 0.3); }
+  .intake-msg.role-system { background: rgba(200, 200, 200, 0.06); border: 1px solid var(--border); font-style: italic; font-size: 12px; }
+  .epic-proposal { margin-top: 8px; padding: 6px 10px; background: rgba(80, 160, 240, 0.12); border: 1px solid rgba(80, 160, 240, 0.4); border-radius: 4px; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+  .epic-proposal button { margin-left: auto; }
+  .intake-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
+  .intake-input input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 8px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; }
+  .intake-input button { background: var(--accent); color: #000; border: 0; padding: 8px 18px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .intake-input button:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -102,6 +126,7 @@
 <nav id="tabs">
   <button data-tab="tasks" class="active">Tasks</button>
   <button data-tab="backlog">Backlog</button>
+  <button data-tab="intake">Intake</button>
   <button data-tab="sprints">Sprints</button>
   <button data-tab="agents">Agents</button>
   <button data-tab="skills">Skills</button>
@@ -109,6 +134,7 @@
 <main>
   <div class="tab active" id="tab-tasks"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-backlog"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-intake"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
@@ -149,6 +175,7 @@ async function refreshState() {
   await renderAgents();
   await renderSprints();
   await renderSkills();
+  await renderIntake();
   renderTasks();
   renderBacklog();
   $("foot").textContent = "tasks: " + state.tasks.length + " agents: " + state.agents.length + " skills: " + state.skills.length + " sprints: " + state.sprints.length;
@@ -353,6 +380,125 @@ async function renderSkills() {
       </table>
     </section>
   `;
+}
+
+// --- Intake tab ---
+
+let intakeSessions = [];
+let activeIntakeSessionId = null;
+
+async function renderIntake() {
+  try {
+    const r = await fetch("/api/intake/sessions");
+    if (r.status === 404) { intakeSessions = []; }
+    else if (!r.ok) throw new Error("HTTP " + r.status);
+    else intakeSessions = await r.json();
+  } catch (e) {
+    intakeSessions = [];
+  }
+  // Auto-select the most recent session if none active.
+  if (!activeIntakeSessionId && intakeSessions.length > 0) {
+    activeIntakeSessionId = intakeSessions[0].id;
+  }
+  const left = `
+    <div class="intake-sidebar">
+      <div class="actions">
+        <button onclick="openNewIntakeSession()">+ New intake</button>
+      </div>
+      ${intakeSessions.length === 0
+        ? '<div class="empty">No intake sessions yet.</div>'
+        : '<ul class="intake-session-list">' + intakeSessions.map(s => `
+            <li class="${s.id === activeIntakeSessionId ? 'active' : ''}" onclick="selectIntakeSession('${s.id}')">
+              <div class="title">${escapeHtml(s.title)}</div>
+              <div class="meta">${s.projectId} · ${new Date(s.updatedAt).toLocaleString()}</div>
+            </li>
+          `).join("") + '</ul>'}
+    </div>`;
+  let right = '<div class="intake-thread"><div class="empty">Select or create an intake session.</div></div>';
+  if (activeIntakeSessionId) {
+    const session = intakeSessions.find(s => s.id === activeIntakeSessionId);
+    if (session) {
+      right = renderIntakeThread(session);
+    }
+  }
+  $("tab-intake").innerHTML = `<div class="intake-grid">${left}${right}</div>`;
+}
+
+function renderIntakeThread(session) {
+  const msgHtml = session.messages.map(m => {
+    const epicLink = m.proposedEpicId
+      ? `<div class="epic-proposal">
+           <code>${escapeHtml(m.proposedEpicId)}</code>: ${escapeHtml(m.proposedEpicTitle || m.proposedEpicId)}
+           <button class="secondary" onclick="acceptEpic('${session.id}', ${m.id})">Accept</button>
+         </div>`
+      : "";
+    return `<div class="intake-msg role-${m.role.toLowerCase()}">
+      <div class="role">${m.role}</div>
+      <div class="content">${escapeHtml(m.content)}</div>
+      ${epicLink}
+    </div>`;
+  }).join("");
+  return `
+    <div class="intake-thread">
+      <div class="intake-messages" id="intake-messages">${msgHtml || '<div class="empty">No messages yet — say hi below.</div>'}</div>
+      <form class="intake-input" onsubmit="sendIntakeMessage(event)">
+        <input id="intake-text" placeholder="Describe what you want to build..." autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+    </div>`;
+}
+
+async function selectIntakeSession(id) {
+  activeIntakeSessionId = id;
+  await renderIntake();
+}
+
+async function openNewIntakeSession() {
+  const projectId = prompt("Project id (e.g. 'PortHorizon'):");
+  if (!projectId) return;
+  const title = prompt("Title (optional):") || null;
+  const r = await fetch("/api/intake/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId, title }),
+  });
+  if (!r.ok) { alert(await r.text()); return; }
+  const session = await r.json();
+  activeIntakeSessionId = session.id;
+  await renderIntake();
+}
+
+async function sendIntakeMessage(ev) {
+  ev.preventDefault();
+  const text = $("intake-text").value.trim();
+  if (!text || !activeIntakeSessionId) return;
+  $("intake-text").value = "";
+  $("intake-text").disabled = true;
+  try {
+    const r = await fetch(`/api/intake/sessions/${activeIntakeSessionId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) {
+      alert("Send failed: " + (await r.text()));
+      return;
+    }
+    // Refresh from /api/intake/sessions to get the new messages.
+    await renderIntake();
+  } finally {
+    $("intake-text").disabled = false;
+    $("intake-text").focus();
+  }
+}
+
+async function acceptEpic(sessionId, messageId) {
+  const r = await fetch(`/api/intake/sessions/${sessionId}/accept-epic/${messageId}`, {
+    method: "POST",
+  });
+  if (!r.ok) { alert("Accept failed: " + (await r.text())); return; }
+  await renderIntake();
+  await refreshState();
 }
 
 async function refreshMessageCount(kiloName) {

@@ -80,7 +80,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -197,6 +197,28 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             CREATE UNIQUE INDEX IF NOT EXISTS uq_sprint_active
                 ON sprint(status) WHERE status = 'active';
+
+            -- v3 tables: intake_session, intake_message
+            CREATE TABLE IF NOT EXISTS intake_session (
+                id         TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                title      TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_intake_session_project ON intake_session(project_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS intake_message (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id           TEXT NOT NULL REFERENCES intake_session(id) ON DELETE CASCADE,
+                role                 TEXT NOT NULL,
+                content              TEXT NOT NULL,
+                ts                   TEXT NOT NULL,
+                proposed_epic_id     TEXT,
+                proposed_epic_title  TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_intake_message_session ON intake_message(session_id, id);
+
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);
             """;
