@@ -39,8 +39,37 @@ public sealed record DashboardOptions
 
 public sealed record LlmOptions
 {
-    public string Provider { get; init; } = "Stub";
-    public string Model { get; init; } = "stub-model";
+    /// <summary>
+    /// List of LLM providers. The orchestrator picks one per role based on
+    /// the <c>Roles</c> dict; falls back to <see cref="DefaultProvider"/>.
+    /// </summary>
+    public IReadOnlyList<LlmProviderOptions> Providers { get; init; } = Array.Empty<LlmProviderOptions>();
+
+    /// <summary>
+    /// Name of the provider in <see cref="Providers"/> to use when a role
+    /// has no explicit entry in <see cref="Roles"/>.
+    /// </summary>
+    public string DefaultProvider { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Per-role model assignment. Key is the role (CoreDev, ClientDev, QA,
+    /// Reviewer); value is the (provider, model) pair to use.
+    /// </summary>
+    public IReadOnlyDictionary<string, LlmRoleModelOptions> Roles { get; init; } =
+        new Dictionary<string, LlmRoleModelOptions>();
+}
+
+public sealed record LlmProviderOptions
+{
+    public string Name { get; init; } = string.Empty;
+    public string BaseUrl { get; init; } = string.Empty;
     public string ApiKey { get; init; } = string.Empty;
     public string OrgId { get; init; } = string.Empty;
+    public string DefaultModel { get; init; } = string.Empty;
+}
+
+public sealed record LlmRoleModelOptions
+{
+    public string ProviderName { get; init; } = string.Empty;
+    public string Model { get; init; } = string.Empty;
 }

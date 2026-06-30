@@ -28,13 +28,13 @@ public class Phase0Tests
     {
         const string expectedText = "Hello from stub. I will edit Program.cs.";
         var factory = new StubbedChatClientFactory();
-        var scripted = (ScriptedChatClient)factory.Create(new LlmConfig(LlmProviders.Stub, "stub-model", null, null));
+        var scripted = (ScriptedChatClient)factory.Create(        new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")), AgentType.CoreDev);
         scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, expectedText)));
 
         var roles = new RoleAgentRegistry();
         var runner = new MafAgentRunner(
             chatClientFactory: new ScriptingFactory(scripted),
-            config: new LlmConfig(LlmProviders.Stub, "stub-model", null, null),
+            config:         new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
             roles: roles,
             logger: NullLogger<MafAgentRunner>.Instance);
 
@@ -56,12 +56,12 @@ public class Phase0Tests
         // covered in Phase0InstructionsContentTests below.
         const string expectedText = "ack";
         var scripted = (ScriptedChatClient)new StubbedChatClientFactory()
-            .Create(new LlmConfig(LlmProviders.Stub, "stub-model", null, null));
+            .Create(        new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")), AgentType.CoreDev);
         scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, expectedText)));
 
         var runner = new MafAgentRunner(
             chatClientFactory: new ScriptingFactory(scripted),
-            config: new LlmConfig(LlmProviders.Stub, "stub-model", null, null),
+            config:         new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance);
 
@@ -93,14 +93,6 @@ public class Phase0Tests
     }
 
     [Fact]
-    public void StubbedChatClientFactory_NonStubProvider_Throws()
-    {
-        var factory = new StubbedChatClientFactory();
-        Assert.Throws<InvalidOperationException>(
-            () => factory.Create(new LlmConfig(LlmProviders.OpenAI, "gpt-5", "fake-key", null)));
-    }
-
-    [Fact]
     public async Task RunAsync_WithSessionId_PassesSessionToAgent()
     {
         // When sessionId is non-empty, MafAgentRunner attempts to deserialize
@@ -109,12 +101,12 @@ public class Phase0Tests
         // path doesn't lose a turn on a corrupt checkpoint.
         const string expectedText = "resumed";
         var scripted = (ScriptedChatClient)new StubbedChatClientFactory()
-            .Create(new LlmConfig(LlmProviders.Stub, "stub-model", null, null));
+            .Create(        new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")), AgentType.CoreDev);
         scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, expectedText)));
 
         var runner = new MafAgentRunner(
             chatClientFactory: new ScriptingFactory(scripted),
-            config: new LlmConfig(LlmProviders.Stub, "stub-model", null, null),
+            config:         new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance);
 
@@ -132,12 +124,12 @@ public class Phase0Tests
         // resilient when a role's .md is missing.
         const string expectedText = "ok";
         var scripted = (ScriptedChatClient)new StubbedChatClientFactory()
-            .Create(new LlmConfig(LlmProviders.Stub, "stub-model", null, null));
+            .Create(        new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")), AgentType.CoreDev);
         scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, expectedText)));
 
         var runner = new MafAgentRunner(
             chatClientFactory: new ScriptingFactory(scripted),
-            config: new LlmConfig(LlmProviders.Stub, "stub-model", null, null),
+            config:         new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-agents-{Guid.NewGuid():N}"));
@@ -157,6 +149,6 @@ public class Phase0Tests
     {
         private readonly ScriptedChatClient _inner;
         public ScriptingFactory(ScriptedChatClient inner) { _inner = inner; }
-        public IChatClient Create(LlmConfig config) => _inner;
+        public IChatClient Create(LlmConfig config, AgentType role) => _inner;
     }
 }

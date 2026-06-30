@@ -1,6 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
+using PortHorizon.Agents.Core;
 
 namespace PortHorizon.Agents.Agents;
 
@@ -74,14 +75,13 @@ public sealed class ScriptedChatClient : IChatClient
 
 public sealed class StubbedChatClientFactory : IChatClientFactory
 {
-    public IChatClient Create(LlmConfig config)
+    public IChatClient Create(LlmConfig config, AgentType role)
     {
-        if (config.Provider != LlmProviders.Stub)
-        {
-            throw new InvalidOperationException(
-                $"StubbedChatClientFactory only supports Provider={LlmProviders.Stub}. " +
-                $"Got Provider={config.Provider}. Real providers land in P0.5+.");
-        }
+        // The stub factory ignores role + provider config and always returns
+        // a fresh ScriptedChatClient. Tests pre-enqueue scripted responses
+        // on the returned client via (ScriptedChatClient)factory.Create(...).
+        _ = config;
+        _ = role;
         return new ScriptedChatClient(
             new ChatMessage(ChatRole.Assistant,
                 "[stub] ScriptedChatClient has no scripted responses; tests must Enqueue() at least one."));

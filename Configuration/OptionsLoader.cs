@@ -25,21 +25,39 @@ public static class OptionsLoader
 
     private static void ApplyEnvOverrides(AgentOptions options)
     {
-        var llmProvider = Environment.GetEnvironmentVariable("LLM_PROVIDER");
-        if (!string.IsNullOrEmpty(llmProvider))
-            options = options with { Llm = options.Llm with { Provider = llmProvider } };
-
-        var llmModel = Environment.GetEnvironmentVariable("LLM_MODEL");
-        if (!string.IsNullOrEmpty(llmModel))
-            options = options with { Llm = options.Llm with { Model = llmModel } };
-
+        // LLM provider env-var override. The kilo gateway (and OpenAI,
+        // Anthropic, etc.) need an API key. We inject a single-provider
+        // entry so tests can run against the real gateway without
+        // committing secrets to appsettings.json.
+        var llmBaseUrl = Environment.GetEnvironmentVariable("LLM_BASE_URL");
         var llmApiKey = Environment.GetEnvironmentVariable("LLM_API_KEY");
-        if (!string.IsNullOrEmpty(llmApiKey))
-            options = options with { Llm = options.Llm with { ApiKey = llmApiKey } };
+        var llmModel = Environment.GetEnvironmentVariable("LLM_MODEL");
+        var llmProviderName = Environment.GetEnvironmentVariable("LLM_PROVIDER_NAME")
+            ?? Agents.LlmProviders.KiloGateway;
 
-        var llmOrgId = Environment.GetEnvironmentVariable("LLM_ORG_ID");
-        if (!string.IsNullOrEmpty(llmOrgId))
-            options = options with { Llm = options.Llm with { OrgId = llmOrgId } };
+        if (!string.IsNullOrEmpty(llmApiKey))
+        {
+            var existing = options.Llm.Providers.ToList();
+            var idx = existing.FindIndex(p => string.Equals(p.Name, llmProviderName, StringComparison.OrdinalIgnoreCase));
+            var newProvider = new LlmProviderOptions
+            {
+                Name = llmProviderName,
+                BaseUrl = !string.IsNullOrEmpty(llmBaseUrl) ? llmBaseUrl : "http://127.0.0.1:4096",
+                ApiKey = llmApiKey,
+                OrgId = Environment.GetEnvironmentVariable("LLM_ORG_ID") ?? string.Empty,
+                DefaultModel = !string.IsNullOrEmpty(llmModel) ? llmModel : "stub-model",
+            };
+            if (idx >= 0) existing[idx] = newProvider;
+            else existing.Add(newProvider);
+            options = options with
+            {
+                Llm = options.Llm with
+                {
+                    Providers = existing,
+                    DefaultProvider = string.IsNullOrEmpty(options.Llm.DefaultProvider) ? llmProviderName : options.Llm.DefaultProvider,
+                }
+            };
+        }
 
         var ghToken = Environment.GetEnvironmentVariable("GitHub__Token")
             ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");

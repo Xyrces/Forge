@@ -244,6 +244,24 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// Pick the <see cref="IChatClientFactory"/> based on the configured
+    /// providers. Stub config (no providers with a non-Empty ApiKey) yields
+    /// the in-process <see cref="StubbedChatClientFactory"/>; everything else
+    /// uses the OpenAI-compatible factory.
+    /// </summary>
+    private static IChatClientFactory SelectChatClientFactory(LlmConfig llmConfig, LlmOptions options)
+    {
+        var hasRealKey = llmConfig.Providers.Any(p => !string.IsNullOrEmpty(p.ApiKey));
+        if (!hasRealKey)
+        {
+            Console.Error.WriteLine("No LLM provider with an API key configured; using StubbedChatClientFactory.");
+            return new StubbedChatClientFactory();
+        }
+        return new OpenAICompatibleChatClientFactory();
+    }
+
+
     private static async Task<int> RunOrchestratorAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
@@ -257,10 +275,8 @@ public static class Program
         var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
         var gitHub = new GitHubService(options.GitHub);
         var roleRegistry = new RoleAgentRegistry();
-        var llmConfig = new LlmConfig(options.Llm.Provider, options.Llm.Model,
-            string.IsNullOrEmpty(options.Llm.ApiKey) ? null : options.Llm.ApiKey,
-            string.IsNullOrEmpty(options.Llm.OrgId) ? null : options.Llm.OrgId);
-        var chatClientFactory = new StubbedChatClientFactory();
+        var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
+        var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),

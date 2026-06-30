@@ -48,7 +48,7 @@ public sealed class MafAgentRunner : IAgentRunner
         var instructions = LoadRoleInstructions(roleDef.KiloAgentName);
         var fullPrompt = instructions + "\n\n" + prompt;
 
-        var chatClient = _chatClientFactory.Create(_config);
+        var chatClient = _chatClientFactory.Create(_config, role);
         var agent = new ChatClientAgent(
             chatClient,
             instructions: instructions,
