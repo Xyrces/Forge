@@ -100,6 +100,53 @@ public class Phase0Tests
             () => factory.Create(new LlmConfig(LlmProviders.OpenAI, "gpt-5", "fake-key", null)));
     }
 
+    [Fact]
+    public async Task RunAsync_WithSessionId_PassesSessionToAgent()
+    {
+        // When sessionId is non-empty, MafAgentRunner attempts to deserialize
+        // it. With a garbage sessionId the runner should fail soft (return
+        // a fresh session) rather than throw, so the orchestrator's claim
+        // path doesn't lose a turn on a corrupt checkpoint.
+        const string expectedText = "resumed";
+        var scripted = (ScriptedChatClient)new StubbedChatClientFactory()
+            .Create(new LlmConfig(LlmProviders.Stub, "stub-model", null, null));
+        scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, expectedText)));
+
+        var runner = new MafAgentRunner(
+            chatClientFactory: new ScriptingFactory(scripted),
+            config: new LlmConfig(LlmProviders.Stub, "stub-model", null, null),
+            roles: new RoleAgentRegistry(),
+            logger: NullLogger<MafAgentRunner>.Instance);
+
+        var result = await runner.RunAsync(AgentType.CoreDev, "continue", sessionId: "{not-valid-json}", ct: default);
+
+        Assert.Equal(expectedText, result.Text);
+    }
+
+    [Fact]
+    public async Task RunAsync_MissingAgentFile_UsesFallbackInstructions()
+    {
+        // kiloAgentsRoot points at an empty temp directory; the runner
+        // should fall back to a generic "you are the X agent" string
+        // rather than throw FileNotFoundException. This keeps dispatch
+        // resilient when a role's .md is missing.
+        const string expectedText = "ok";
+        var scripted = (ScriptedChatClient)new StubbedChatClientFactory()
+            .Create(new LlmConfig(LlmProviders.Stub, "stub-model", null, null));
+        scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, expectedText)));
+
+        var runner = new MafAgentRunner(
+            chatClientFactory: new ScriptingFactory(scripted),
+            config: new LlmConfig(LlmProviders.Stub, "stub-model", null, null),
+            roles: new RoleAgentRegistry(),
+            logger: NullLogger<MafAgentRunner>.Instance,
+            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-agents-{Guid.NewGuid():N}"));
+
+        var result = await runner.RunAsync(AgentType.QA, "do thing", sessionId: null, ct: default);
+
+        Assert.Equal(expectedText, result.Text);
+    }
+
     /// <summary>
     /// Wraps a pre-built <see cref="ScriptedChatClient"/> so we can
     /// pre-enqueue scripted responses. <see cref="StubbedChatClientFactory"/>

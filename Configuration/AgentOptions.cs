@@ -58,10 +58,10 @@ public sealed record OrchestratorOptions
 {
     /// <summary>
     /// Runtime for the agent step.
-    /// <c>Acp</c> = legacy kilo/ACP path (default; staged removal).
-    /// <c>Maf</c> = Microsoft Agent Framework runner.
+    /// <c>Acp</c> = legacy kilo/ACP path (staged removal; no longer wired in P0).
+    /// <c>Maf</c> = Microsoft Agent Framework runner (default).
     /// </summary>
-    public string Runtime { get; init; } = "Acp";
+    public string Runtime { get; init; } = "Maf";
 }
 
 public sealed record LlmOptions

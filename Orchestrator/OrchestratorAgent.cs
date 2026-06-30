@@ -28,6 +28,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly IDashboardEventBus _events;
     private SemaphoreSlim _concurrencyLimiter = new(4);
     private readonly int _maxRetryCount;
+    private string _runtime = "Maf";
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -161,6 +162,12 @@ public sealed class OrchestratorAgent : IAgent
             AgentRunResult result;
             try
             {
+                if (!string.Equals(_runtime, "Maf", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new NotSupportedException(
+                        $"Runtime '{_runtime}' is not supported in P0. The kilo/ACP path is staged for removal; " +
+                        "set Orchestrator:Runtime=Maf to use the MAF runner.");
+                }
                 result = await _runner.RunAsync(
                     RoleAgentRegistry.FromTaskType(claimed.Type),
                     prompt,
@@ -243,6 +250,7 @@ public sealed class OrchestratorAgent : IAgent
         _workspaceOptions = options.Workspace;
         _concurrencyLimiter.Dispose();
         _concurrencyLimiter = new SemaphoreSlim(Math.Max(1, options.Spawner.MaxConcurrentSessions));
+        _runtime = string.IsNullOrEmpty(options.Orchestrator?.Runtime) ? "Maf" : options.Orchestrator.Runtime;
     }
 
     private async Task HandleFailureAsync(IssueRecord issue, Exception ex, CancellationToken cancellationToken)
@@ -353,7 +361,7 @@ public sealed class OrchestratorAgent : IAgent
         return merged;
     }
 
-    private static string BuildPrompt(IssueRecord issue, RoleAgent role, string worktreePath, string branch, string? defaultBranch)
+    internal static string BuildPrompt(IssueRecord issue, RoleAgent role, string worktreePath, string branch, string? defaultBranch)
         => $"""
             You are acting as the **{role.KiloAgentName}** agent for the PortHorizon project.
             Working directory: {worktreePath}
@@ -376,7 +384,7 @@ public sealed class OrchestratorAgent : IAgent
             - Do NOT touch files outside your project subdirectory ({role.ProjectSubdir}).
             """;
 
-    private static string BuildPrBody(IssueRecord issue, RoleAgent role, string sha, string response)
+    internal static string BuildPrBody(IssueRecord issue, RoleAgent role, string sha, string response)
         => $"""
             ## Summary
             Automated change for issue `{issue.Id}` (type: {issue.Type}, role: {role.KiloAgentName}).
@@ -391,7 +399,7 @@ public sealed class OrchestratorAgent : IAgent
             Closes `{issue.Id}`.
             """;
 
-    private static string Truncate(string s, int max)
+    internal static string Truncate(string s, int max)
         => string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max] + "...";
 
 }
