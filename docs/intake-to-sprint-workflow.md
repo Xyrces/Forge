@@ -70,15 +70,47 @@ solve that here.
 There are four distinct phases that look like a waterfall but actually
 cycle:
 
-```
-   INTAKE                  PRODUCT                GROOMING                  SPRINT CYCLE
-┌──────────────┐         ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
-│ IntakeAgent  │────────>│ ProductAgent │────────>│ GroomerAgent │────────>│ ScrumMaster  │
-│              │         │              │         │              │         │              │
-│ Per-feature  │         │ Per-epic     │         │ Per-spec     │         │ Per-cycle    │
-│ Conversational│        │ Authoring    │         │ Decomposition│        │ (theme+goal) │
-└──────────────┘         └──────────────┘         └──────────────┘         └──────────────┘
-  output: proposal      output: approved spec     output: stories+tasks    output: active sprint
+```mermaid
+flowchart LR
+  subgraph INTAKE["INTAKE"]
+    direction TB
+    I1["IntakeAgent"]
+    I2["Per-feature"]
+    I3["Conversational"]
+    I4["output: proposal"]
+    I1 --- I2 --- I3 --- I4
+  end
+
+  subgraph PRODUCT["PRODUCT"]
+    direction TB
+    P1["ProductAgent"]
+    P2["Per-epic"]
+    P3["Authoring"]
+    P4["output: approved spec"]
+    P1 --- P2 --- P3 --- P4
+  end
+
+  subgraph GROOMING["GROOMING"]
+    direction TB
+    G1["GroomerAgent"]
+    G2["Per-spec"]
+    G3["Decomposition"]
+    G4["output: stories+tasks"]
+    G1 --- G2 --- G3 --- G4
+  end
+
+  subgraph SPRINT["SPRINT CYCLE"]
+    direction TB
+    S1["ScrumMaster"]
+    S2["Per-cycle"]
+    S3["(theme+goal)"]
+    S4["output: active sprint"]
+    S1 --- S2 --- S3 --- S4
+  end
+
+  INTAKE  --> PRODUCT
+  PRODUCT --> GROOMING
+  GROOMING --> SPRINT
 ```
 
 A single operator session typically produces multiple intake
@@ -199,11 +231,15 @@ until ALL children have been accepted (see section 5).
 
 ### 5.1 Spec tree
 
-```
-spec (master, parent_spec_id = NULL)
-├── spec (child, parent_spec_id = master)
-├── spec (child, parent_spec_id = master)
-└── spec (child, parent_spec_id = master)
+```mermaid
+graph TD
+  M["spec (master)<br/>parent_spec_id = NULL"]
+  C1["spec (child)<br/>parent_spec_id = master"]
+  C2["spec (child)<br/>parent_spec_id = master"]
+  C3["spec (child)<br/>parent_spec_id = master"]
+  M --> C1
+  M --> C2
+  M --> C3
 ```
 
 Schema-wise, this is already supported: `spec.parent_spec_id`
@@ -212,26 +248,21 @@ contract** of the master.
 
 ### 5.2 Master status lifecycle
 
-```
-Draft ────────> Proposed ────────> Approved ─────────> Grooming ─────────> Shipped
-  │                │                 │                    │                │
-  │                │                 │                    │                └─ all child
-  │                │                 │                    │                   epics Completed
-  │                │                 │                    └─ GroomerAgent decomposes
-  │                │                 │                       each Approved child spec
-  │                │                 │                       into stories + tasks
-  │                │                 │
-  │                │                 └─ operator clicks
-  │                │                    Approve (or Reject-
-  │                │                    with-feedback loops back
-  │                │                    to Draft)
-  │                │
-  │                └─ operator clicks "Ready for review" on
-  │                   each child spec; once all children are
-  │                   non-Draft, the master auto-transitions
-  │                   to Proposed
-  │
-  └─ intake session still active, agent proposing children
+```mermaid
+stateDiagram-v2
+  [*] --> Draft
+
+  Draft --> Draft: intake session still active<br/>agent proposing children
+  Draft --> Proposed: all child specs authored<br/>by product agent<br/>AND all children in<br/>{Approved, Superseded}
+
+  Proposed --> Draft: operator rejects<br/>(with feedback)
+  Proposed --> Approved: operator clicks<br/>"Approve master spec"
+
+  Approved --> Grooming: GroomerAgent starts<br/>decomposing child specs<br/>into stories + tasks
+
+  Grooming --> Shipped: all child epics<br/>Completed
+
+  Shipped --> [*]
 ```
 
 Master transitions to `Proposed` when:
@@ -343,16 +374,26 @@ Once a child spec is `Approved`, the GroomerAgent runs.
 
 ### 6.2 Output
 
-```
-spec (Approved) ── grooming ──> stories + tasks (in IssueStore)
-                                  ├── issue (type=story)
-                                  │   ├── task (Acceptance: ...)
-                                  │   ├── task (Acceptance: ...)
-                                  │   └── task (Acceptance: ...)
-                                  ├── issue (type=story)
-                                  │   └── task x2
-                                  └── issue (type=task, optional)
-                                      └── (e.g. cross-cutting infra)
+```mermaid
+graph TD
+  S["spec (Approved)"]
+  S1["issue (type=story)<br/>parent_id = spec.id"]
+  T1["task (Acceptance: ...)<br/>parent_id = story-1"]
+  T2["task (Acceptance: ...)<br/>parent_id = story-1"]
+  T3["task (Acceptance: ...)<br/>parent_id = story-1"]
+  S2["issue (type=story)<br/>parent_id = spec.id"]
+  T4["task x2<br/>parent_id = story-2"]
+  S3["issue (type=task)<br/>cross-cutting<br/>e.g. infra rename"]
+  T5["(e.g. cross-cutting infra)<br/>parent_id = task-3"]
+
+  S  --> S1
+  S  --> S2
+  S  --> S3
+  S1 --> T1
+  S1 --> T2
+  S1 --> T3
+  S2 --> T4
+  S3 --> T5
 ```
 
 Each story has `parent_id = spec.id`. Each task has `parent_id =
@@ -374,19 +415,24 @@ Issue `type` is enriched:
 The spec's `## Acceptance criteria` checkboxes become the task
 titles in the order they appear. Example:
 
-```
-Spec: "Dark mode: in-app toggle"
-## Acceptance criteria
-- [ ] "System" option follows OS preference
-- [ ] Choice persists across page navigation
-- [ ] Theme switch animates over 200ms
+> Spec: "Dark mode: in-app toggle"
+>
+> Acceptance criteria:
+> - "System" option follows OS preference
+> - Choice persists across page navigation
+> - Theme switch animates over 200ms
 
 Becomes:
-Issue type=story, title "Dark mode: in-app toggle"
-  metadata.parent_spec_id = spec.id
-  ├── task "System option follows OS preference"
-  ├── task "Choice persists across page navigation"
-  └── task "Theme switch animates over 200ms"
+
+```mermaid
+graph TD
+  S["issue (type=story)<br/>title: Dark mode: in-app toggle<br/>parent_id = spec.id"]
+  T1["task:<br/>System option follows OS preference"]
+  T2["task:<br/>Choice persists across page navigation"]
+  T3["task:<br/>Theme switch animates over 200ms"]
+  S --> T1
+  S --> T2
+  S --> T3
 ```
 
 > **OPEN Q3:** What if the spec has 12 acceptance criteria and the
@@ -434,31 +480,15 @@ opinions, let's make sure we agree before coding.
 After grooming, the backlog has Approved/Grooming specs with
 Pending tasks. The cycle is:
 
-```
-        selected sprint scope
-              │
-              ▼
-   ┌────────────────────────┐
-   │ Sprint N starts        │
-   │ kick off pending tasks │
-   └────────────┬───────────┘
-                │
-                ▼
-       Engineering runs
-       tasks complete
-                │
-                ▼
-    All tasks done / sprint
-    ends / operator reviews
-                │
-                ▼
-   ┌────────────────────────┐
-   │ NEXT SPRINT            │──────> back to top
-   │ Operator picks:        │
-   │ - theme                │
-   │ - goal                 │
-   │ - N tasks (default 5)  │
-   └────────────────────────┘
+```mermaid
+flowchart TD
+  N0["operator picks<br/>theme / goal / N cards"]
+  N1["Sprint N starts<br/>kick off selected pending tasks"]
+  N2["Engineering runs<br/>tasks complete"]
+  N3["all tasks done<br/>sprint ends<br/>operator reviews"]
+  N4["NEXT SPRINT<br/>back to planning"]
+
+  N0 --> N1 --> N2 --> N3 --> N4 --> N0
 ```
 
 A "sprint" already exists in the data model as `sprint` +
