@@ -80,7 +80,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -218,6 +218,31 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 proposed_epic_title  TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_intake_message_session ON intake_message(session_id, id);
+
+            -- v4 tables: spec, spec_version
+            CREATE TABLE IF NOT EXISTS spec (
+                id              TEXT PRIMARY KEY,
+                project_id      TEXT NOT NULL,
+                title           TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                parent_issue_id TEXT,
+                parent_spec_id  TEXT,
+                current_version INTEGER NOT NULL DEFAULT 1,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_spec_project ON spec(project_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS ix_spec_status ON spec(status);
+
+            CREATE TABLE IF NOT EXISTS spec_version (
+                spec_id     TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+                version     INTEGER NOT NULL,
+                body        TEXT NOT NULL,
+                author      TEXT,
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (spec_id, version)
+            );
+            CREATE INDEX IF NOT EXISTS ix_spec_version_spec ON spec_version(spec_id, version DESC);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

@@ -1,0 +1,325 @@
+using Microsoft.Data.Sqlite;
+
+namespace PortHorizon.Agents.Core;
+
+public enum SpecStatus
+{
+    Draft,
+    Approved,
+    Superseded,
+    Archived,
+}
+
+/// <summary>
+/// A spec is a living document owned by the Product agent. Specs are
+/// versioned: every <c>UpdateAsync</c> on the body appends a new
+/// <see cref="SpecVersionRecord"/> and bumps
+/// <see cref="SpecRecord.CurrentVersion"/>. Status changes
+/// (Draft -> Approved, etc.) do not create a new version.
+///
+/// <para>
+/// A spec optionally links to a parent issue (an epic from intake) via
+/// <see cref="SpecRecord.ParentIssueId"/>, and to a parent spec via
+/// <see cref="SpecRecord.ParentSpecId"/> (for child sub-specs).
+/// </para>
+/// </summary>
+public sealed record SpecRecord(
+    string Id,
+    string ProjectId,
+    string Title,
+    SpecStatus Status,
+    string? ParentIssueId,
+    string? ParentSpecId,
+    int CurrentVersion,
+    DateTime CreatedAt,
+    DateTime UpdatedAt,
+    string Body,
+    string? Author);
+
+public sealed record SpecVersionRecord(
+    string SpecId,
+    int Version,
+    string Body,
+    string? Author,
+    DateTime CreatedAt);
+
+public sealed record NewSpec(
+    string ProjectId,
+    string Title,
+    string Body,
+    string? Author = null,
+    string? ParentIssueId = null,
+    string? ParentSpecId = null);
+
+public sealed record UpdateSpecBody(
+    string Body,
+    string? Author = null);
+
+public interface ISpecStore
+{
+    Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default);
+    Task<SpecRecord?> GetAsync(string id, CancellationToken ct = default);
+    Task<IReadOnlyList<SpecRecord>> ListAsync(string? projectId, SpecStatus? status, CancellationToken ct = default);
+    /// <summary>Append a new body version; bumps <c>CurrentVersion</c> + updated_at.</summary>
+    Task<SpecRecord> UpdateBodyAsync(string id, UpdateSpecBody update, CancellationToken ct = default);
+    /// <summary>Move a spec to a new status. Does NOT create a new version.</summary>
+    Task<SpecRecord> SetStatusAsync(string id, SpecStatus status, CancellationToken ct = default);
+    Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default);
+    Task DeleteAsync(string id, CancellationToken ct = default);
+}
+
+public sealed class SpecStore : ISpecStore, IAsyncDisposable
+{
+    private readonly IssueStore _issues;
+    public SpecStore(IssueStore issues) { _issues = issues; }
+
+    public async Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(spec.ProjectId))
+            throw new ArgumentException("projectId is required", nameof(spec));
+        if (string.IsNullOrWhiteSpace(spec.Title))
+            throw new ArgumentException("title is required", nameof(spec));
+
+        var now = DateTime.UtcNow;
+        var id = $"spec-{Guid.NewGuid():N}";
+
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = @"INSERT INTO spec
+                (id, project_id, title, status, parent_issue_id, parent_spec_id, current_version, created_at, updated_at)
+                VALUES ($id, $proj, $title, $status, $pIssue, $pSpec, 1, $now, $now)";
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.Parameters.AddWithValue("$proj", spec.ProjectId);
+            cmd.Parameters.AddWithValue("$title", spec.Title);
+            cmd.Parameters.AddWithValue("$status", SpecStatus.Draft.ToString());
+            cmd.Parameters.AddWithValue("$pIssue", (object?)spec.ParentIssueId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$pSpec", (object?)spec.ParentSpecId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = @"INSERT INTO spec_version
+                (spec_id, version, body, author, created_at)
+                VALUES ($sid, 1, $body, $author, $now)";
+            cmd.Parameters.AddWithValue("$sid", id);
+            cmd.Parameters.AddWithValue("$body", spec.Body);
+            cmd.Parameters.AddWithValue("$author", (object?)spec.Author ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return new SpecRecord(
+            Id: id, ProjectId: spec.ProjectId, Title: spec.Title,
+            Status: SpecStatus.Draft,
+            ParentIssueId: spec.ParentIssueId, ParentSpecId: spec.ParentSpecId,
+            CurrentVersion: 1, CreatedAt: now, UpdatedAt: now,
+            Body: spec.Body, Author: spec.Author);
+    }
+
+    public async Task<SpecRecord?> GetAsync(string id, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+
+        SpecRecord? spec = null;
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = @"SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
+                s.current_version, s.created_at, s.updated_at,
+                v.body, v.author
+                FROM spec s
+                JOIN spec_version v ON v.spec_id = s.id AND v.version = s.current_version
+                WHERE s.id = $id";
+            cmd.Parameters.AddWithValue("$id", id);
+            await using var rd = await cmd.ExecuteReaderAsync(ct);
+            if (!await rd.ReadAsync(ct)) return null;
+            spec = new SpecRecord(
+                Id: rd.GetString(0),
+                ProjectId: rd.GetString(1),
+                Title: rd.GetString(2),
+                Status: Enum.Parse<SpecStatus>(rd.GetString(3)),
+                ParentIssueId: rd.IsDBNull(4) ? null : rd.GetString(4),
+                ParentSpecId: rd.IsDBNull(5) ? null : rd.GetString(5),
+                CurrentVersion: rd.GetInt32(6),
+                CreatedAt: IssueStore.ParseTime(rd.GetString(7)),
+                UpdatedAt: IssueStore.ParseTime(rd.GetString(8)),
+                Body: rd.GetString(9),
+                Author: rd.IsDBNull(10) ? null : rd.GetString(10));
+        }
+        return spec;
+    }
+
+    public async Task<IReadOnlyList<SpecRecord>> ListAsync(
+        string? projectId, SpecStatus? status, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+
+        var list = new List<SpecRecord>();
+        await using var cmd = conn.CreateCommand();
+        var sql = @"SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
+            s.current_version, s.created_at, s.updated_at,
+            v.body, v.author
+            FROM spec s
+            JOIN spec_version v ON v.spec_id = s.id AND v.version = s.current_version
+            WHERE 1=1";
+        if (projectId is not null) sql += " AND s.project_id = $proj";
+        if (status is not null) sql += " AND s.status = $status";
+        sql += " ORDER BY s.updated_at DESC";
+        cmd.CommandText = sql;
+        if (projectId is not null) cmd.Parameters.AddWithValue("$proj", projectId);
+        if (status is not null) cmd.Parameters.AddWithValue("$status", status.Value.ToString());
+
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct))
+        {
+            list.Add(new SpecRecord(
+                Id: rd.GetString(0),
+                ProjectId: rd.GetString(1),
+                Title: rd.GetString(2),
+                Status: Enum.Parse<SpecStatus>(rd.GetString(3)),
+                ParentIssueId: rd.IsDBNull(4) ? null : rd.GetString(4),
+                ParentSpecId: rd.IsDBNull(5) ? null : rd.GetString(5),
+                CurrentVersion: rd.GetInt32(6),
+                CreatedAt: IssueStore.ParseTime(rd.GetString(7)),
+                UpdatedAt: IssueStore.ParseTime(rd.GetString(8)),
+                Body: rd.GetString(9),
+                Author: rd.IsDBNull(10) ? null : rd.GetString(10)));
+        }
+        return list;
+    }
+
+    public async Task<SpecRecord> UpdateBodyAsync(string id, UpdateSpecBody update, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            throw new ArgumentException("id is required", nameof(id));
+        if (string.IsNullOrWhiteSpace(update.Body))
+            throw new ArgumentException("body is required", nameof(update));
+
+        var now = DateTime.UtcNow;
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+
+        int nextVersion;
+        await using (var cur = conn.CreateCommand())
+        {
+            cur.Transaction = tx;
+            cur.CommandText = "SELECT current_version FROM spec WHERE id = $id";
+            cur.Parameters.AddWithValue("$id", id);
+            var hit = await cur.ExecuteScalarAsync(ct);
+            if (hit is null) throw new InvalidOperationException($"Spec {id} not found");
+            nextVersion = Convert.ToInt32(hit) + 1;
+        }
+
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = @"INSERT INTO spec_version (spec_id, version, body, author, created_at)
+                VALUES ($sid, $v, $body, $author, $now)";
+            cmd.Parameters.AddWithValue("$sid", id);
+            cmd.Parameters.AddWithValue("$v", nextVersion);
+            cmd.Parameters.AddWithValue("$body", update.Body);
+            cmd.Parameters.AddWithValue("$author", (object?)update.Author ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "UPDATE spec SET current_version = $v, updated_at = $now WHERE id = $id";
+            cmd.Parameters.AddWithValue("$v", nextVersion);
+            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            cmd.Parameters.AddWithValue("$id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        var refreshed = await GetAsync(id, ct)
+            ?? throw new InvalidOperationException($"Spec {id} not found after update");
+        return refreshed;
+    }
+
+    public async Task<SpecRecord> SetStatusAsync(string id, SpecStatus status, CancellationToken ct = default)
+    {
+        var now = DateTime.UtcNow;
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE spec SET status = $status, updated_at = $now WHERE id = $id";
+        cmd.Parameters.AddWithValue("$status", status.ToString());
+        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+        cmd.Parameters.AddWithValue("$id", id);
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (rows == 0) throw new InvalidOperationException($"Spec {id} not found");
+        return (await GetAsync(id, ct))!;
+    }
+
+    public async Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+        var list = new List<SpecVersionRecord>();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"SELECT spec_id, version, body, author, created_at
+                            FROM spec_version WHERE spec_id = $id ORDER BY version DESC";
+        cmd.Parameters.AddWithValue("$id", id);
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct))
+        {
+            list.Add(new SpecVersionRecord(
+                SpecId: rd.GetString(0),
+                Version: rd.GetInt32(1),
+                Body: rd.GetString(2),
+                Author: rd.IsDBNull(3) ? null : rd.GetString(3),
+                CreatedAt: IssueStore.ParseTime(rd.GetString(4))));
+        }
+        return list;
+    }
+
+    public async Task DeleteAsync(string id, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM spec WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", id);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public void Dispose() { }
+}
+
+/// <summary>
+/// No-op spec store used when the dashboard is run without a real
+/// SpecStore. All read methods return empty; write methods throw
+/// <see cref="NotSupportedException"/>.
+/// </summary>
+public sealed class NullSpecStore : ISpecStore
+{
+    public Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default)
+        => throw new NotSupportedException("Specs are not configured on this dashboard instance.");
+    public Task<SpecRecord?> GetAsync(string id, CancellationToken ct = default)
+        => Task.FromResult<SpecRecord?>(null);
+    public Task<IReadOnlyList<SpecRecord>> ListAsync(string? projectId, SpecStatus? status, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<SpecRecord>>(Array.Empty<SpecRecord>());
+    public Task<SpecRecord> UpdateBodyAsync(string id, UpdateSpecBody update, CancellationToken ct = default)
+        => throw new NotSupportedException("Specs are not configured on this dashboard instance.");
+    public Task<SpecRecord> SetStatusAsync(string id, SpecStatus status, CancellationToken ct = default)
+        => throw new NotSupportedException("Specs are not configured on this dashboard instance.");
+    public Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<SpecVersionRecord>>(Array.Empty<SpecVersionRecord>());
+    public Task DeleteAsync(string id, CancellationToken ct = default)
+        => throw new NotSupportedException("Specs are not configured on this dashboard instance.");
+}

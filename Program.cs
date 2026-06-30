@@ -311,11 +311,13 @@ public static class Program
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
                 kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents")));
+        var specStore = new Core.SpecStore(issues);
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
             intakeStore: intakeStore,
-            intakeRegistry: intakeRegistry);
+            intakeRegistry: intakeRegistry,
+            specs: specStore);
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>

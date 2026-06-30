@@ -113,6 +113,28 @@
   .intake-input input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 8px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; }
   .intake-input button { background: var(--accent); color: #000; border: 0; padding: 8px 18px; border-radius: 4px; cursor: pointer; font-size: 13px; }
   .intake-input button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .specs-grid { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 200px); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .specs-sidebar { background: var(--bg); border-right: 1px solid var(--border); overflow-y: auto; }
+  .specs-sidebar .toolbar { padding: 8px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
+  .specs-sidebar .toolbar input, .specs-sidebar .toolbar select { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 5px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+  .specs-list { list-style: none; padding: 0; margin: 0; }
+  .specs-list li { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .specs-list li:hover { background: var(--panel); }
+  .specs-list li.active { background: var(--accent); color: #000; }
+  .specs-list li.active .meta { color: rgba(0,0,0,0.7); }
+  .specs-list .title { font-weight: 600; font-size: 12px; }
+  .specs-list .meta { color: var(--muted); font-size: 10px; margin-top: 4px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .status-tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+  .status-tag.status-draft { background: rgba(200, 200, 200, 0.15); color: var(--muted); }
+  .status-tag.status-approved { background: rgba(80, 200, 120, 0.2); color: rgb(80, 200, 120); }
+  .status-tag.status-superseded { background: rgba(200, 160, 80, 0.2); color: rgb(200, 160, 80); }
+  .status-tag.status-archived { background: rgba(200, 200, 200, 0.08); color: var(--muted); text-decoration: line-through; }
+  .specs-detail { padding: 16px; overflow-y: auto; }
+  .spec-head h2 { margin: 0 0 6px; font-size: 16px; display: flex; gap: 8px; align-items: center; }
+  .spec-meta { color: var(--muted); font-size: 11px; margin-bottom: 16px; }
+  .spec-body, .version-body { background: var(--bg); border: 1px solid var(--border); padding: 12px; border-radius: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-x: auto; max-height: 360px; overflow-y: auto; }
+  .spec-version { margin-bottom: 14px; }
+  .version-head { font-size: 11px; color: var(--muted); margin-bottom: 4px; display: flex; gap: 6px; align-items: center; }
 </style>
 </head>
 <body>
@@ -127,6 +149,7 @@
   <button data-tab="tasks" class="active">Tasks</button>
   <button data-tab="backlog">Backlog</button>
   <button data-tab="intake">Intake</button>
+  <button data-tab="specs">Specs</button>
   <button data-tab="sprints">Sprints</button>
   <button data-tab="agents">Agents</button>
   <button data-tab="skills">Skills</button>
@@ -135,6 +158,7 @@
   <div class="tab active" id="tab-tasks"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-backlog"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-intake"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-specs"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
@@ -176,6 +200,7 @@ async function refreshState() {
   await renderSprints();
   await renderSkills();
   await renderIntake();
+  await renderSpecs();
   renderTasks();
   renderBacklog();
   $("foot").textContent = "tasks: " + state.tasks.length + " agents: " + state.agents.length + " skills: " + state.skills.length + " sprints: " + state.sprints.length;
@@ -499,6 +524,97 @@ async function acceptEpic(sessionId, messageId) {
   if (!r.ok) { alert("Accept failed: " + (await r.text())); return; }
   await renderIntake();
   await refreshState();
+}
+
+// --- Specs tab (P1.5.a: read-only) ---
+
+let activeSpecId = null;
+
+async function renderSpecs() {
+  let specs = [];
+  try {
+    const r = await fetch("/api/specs");
+    if (r.ok) specs = await r.json();
+  } catch (e) { specs = []; }
+  if (!activeSpecId && specs.length > 0) activeSpecId = specs[0].id;
+  const left = `
+    <div class="specs-sidebar">
+      <div class="toolbar">
+        <input id="specs-filter" placeholder="filter by project / title" oninput="filterSpecs()" />
+        <select id="specs-status" onchange="filterSpecs()">
+          <option value="">all statuses</option>
+          <option value="Draft">Draft</option>
+          <option value="Approved">Approved</option>
+          <option value="Superseded">Superseded</option>
+          <option value="Archived">Archived</option>
+        </select>
+      </div>
+      ${specs.length === 0
+        ? '<div class="empty">No specs yet. The Product agent (P1.5.b) will create them.</div>'
+        : '<ul class="specs-list">' + specs.map(s => `
+            <li class="${s.id === activeSpecId ? 'active' : ''}" onclick="selectSpec('${s.id}')">
+              <div class="title">${escapeHtml(s.title)}</div>
+              <div class="meta">
+                <span class="status-tag status-${s.status.toLowerCase()}">${s.status}</span>
+                ${s.projectId} · v${s.currentVersion} · ${new Date(s.updatedAt).toLocaleString()}
+              </div>
+            </li>
+          `).join("") + '</ul>'}
+    </div>`;
+  let right = '<div class="specs-detail"><div class="empty">Select a spec to view.</div></div>';
+  if (activeSpecId) {
+    const spec = specs.find(s => s.id === activeSpecId);
+    if (spec) right = await renderSpecDetail(spec);
+  }
+  $("tab-specs").innerHTML = `<div class="specs-grid">${left}${right}</div>`;
+}
+
+function filterSpecs() {
+  // The dashboard's lightweight implementation: just re-render. The
+  // list is bounded (low hundreds of specs typical), so a client-side
+  // filter isn't worth the complexity yet.
+  renderSpecs();
+}
+
+async function selectSpec(id) {
+  activeSpecId = id;
+  await renderSpecs();
+}
+
+async function renderSpecDetail(spec) {
+  let versions = [];
+  try {
+    const r = await fetch(`/api/specs/${spec.id}/versions`);
+    if (r.ok) versions = await r.json();
+  } catch (e) { versions = []; }
+  const versionLinks = versions.map(v => `
+    <div class="spec-version">
+      <div class="version-head">
+        v${v.version} · ${new Date(v.createdAt).toLocaleString()}${v.author ? ' · ' + escapeHtml(v.author) : ''}
+        ${v.version === spec.currentVersion ? '<span class="tag active">current</span>' : ''}
+      </div>
+      <pre class="version-body">${escapeHtml(v.body)}</pre>
+    </div>
+  `).join("");
+  return `
+    <div class="specs-detail">
+      <div class="spec-head">
+        <h2>${escapeHtml(spec.title)}
+          <span class="status-tag status-${spec.status.toLowerCase()}">${spec.status}</span>
+        </h2>
+        <div class="spec-meta">
+          project: <code>${escapeHtml(spec.projectId)}</code> ·
+          current version: <code>v${spec.currentVersion}</code> ·
+          ${versions.length} version${versions.length === 1 ? '' : 's'}
+          ${spec.parentIssueId ? ' · parent issue: <code>' + escapeHtml(spec.parentIssueId) + '</code>' : ''}
+          ${spec.author ? ' · author: ' + escapeHtml(spec.author) : ''}
+        </div>
+      </div>
+      <h3>Body</h3>
+      <pre class="spec-body">${escapeHtml(spec.body)}</pre>
+      <h3>Version history</h3>
+      ${versionLinks || '<div class="empty">No versions.</div>'}
+    </div>`;
 }
 
 async function refreshMessageCount(kiloName) {
