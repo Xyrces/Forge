@@ -1,14 +1,18 @@
 # Intake -> Sprint workflow
 
-> Status: **DRAFT for review.** Nothing in this document is implemented
-> yet. Sections marked `OPEN` need a decision before we build. Sections
-> marked `PROPOSED` are my recommendation but yours to overrule.
+> Status: **DRAFT for review, all 12 open questions RESOLVED.**
+> Nothing in this document is implemented yet. Sections marked
+> `OPEN` need a decision before we build. Sections marked `PROPOSED`
+> are my recommendation but yours to overrule.
 >
-> **Last revision:** expanded for the **A++ model** (rich spec body
-> with embedded Mermaid + extracted dependency/touches graph +
-> side-panel visualization in the Intake tab). Q1 is now RESOLVED.
-> Added Q9-Q12 (granularity, layout, Mermaid requirement,
-> auto-detected spec_dep).
+> **Last revision (2026-07-01):** reframed the sprint cycle as
+> **operator-hands-off, agent-driven**. ScrumMasterAgent is now an
+> LLM agent that runs at sprint-end, picks the next sprint
+> autonomously, and kicks off. The deterministic scorer is a
+> signal the agent can use, not the picker itself. The "Plan next
+> sprint" operator modal is gone — the agent plans. Operator
+> observability + an "auto-pause" toggle are the only intervention
+> points. All 12 open questions resolved.
 
 Companion to `agent-framework-design.md`, which covers the agent
 runtime itself. This document covers **what the agents do together**
@@ -52,18 +56,22 @@ where the human owns the *what* and the agents do the *how*.
 
 | Role | Human/AI | Owns | Example concerns |
 |---|---|---|---|
-| **Operator** | Human | Product intent. Accepts epics. Approves master specs. Steers sprint scope each cycle. | "we need to support dark mode", "this epic is too big, split it" |
+| **Operator** | Human | Product intent. Accepts epics. Approves master specs. Observes sprint outcomes. Stays hands-off post-intake. | "we need to support dark mode", "this epic is too big, split it" |
 | **IntakeAgent** | AI (MAF) | Conversational intake of a new feature idea into a structured proposal. | "ask the operator clarifying questions until the spec is unambiguous" |
 | **ProductAgent** | AI (MAF) | Once an intake is approved, expand a single epic into a full spec (acceptance criteria, scope, non-goals, open questions). | "here's exactly what success looks like; here's what we're NOT doing" |
 | **GroomerAgent** | AI (MAF) | Decompose approved specs into stories + tasks sized for the engineering loop. | "a story is 1-3 tasks; each task has a clear Done" |
-| **ScrumMasterAgent** | AI (rule-based, not LLM-driven) | The sprint cycle: theme/goal selection, card count, sprint kick-off. | "given the backlog, what should the next sprint be?" |
+| **ScrumMasterAgent** | AI (MAF) | The autonomous sprint cycle. Reads the just-completed sprint, picks the next sprint's theme + goal + maxParallelTasks + task list, kicks off. Operator is hands-off. | "given the just-completed sprint, what should the next sprint be?" |
 | **OrchestratorAgent** | AI (existing) | Engineering dispatch. Owns the worktree/commit/push/PR pipeline. | "claim the next Pending task, run CoreDev, open PR" |
 
-For Phases 2-3, the **ScrumMasterAgent** is a deterministic rules
-engine (a single `ScrumMaster` class that scores backlog candidates
-by priority + age + dependency order). It is NOT an LLM agent and
-deliberately does not have agency. The LLM agent that proposes
-sprint scope is deferred — see OPEN question Q3 below.
+The ScrumMasterAgent IS an LLM agent (Phase 3). It uses a
+deterministic scoring function as one *signal* among many
+(priority, theme-match, age, dependency penalty). The agent's
+free-form `Rationale` is the primary explainability artifact
+— the score breakdown is the structured component, the
+rationale is the prose component. Both land in `sprint_selection`.
+
+For Phase 4, all five agents run inside a DurableTask orchestration
+so a single agent crash doesn't lose the operator's work. We do not
 
 For Phase 4, all five agents run inside a DurableTask orchestration
 so a single agent crash doesn't lose the operator's work. We do not
@@ -215,11 +223,9 @@ cache lives at `.portHorizon/codebase-graph/<repo-sha>.json`. We
 do not rebuild from scratch unless the operator asks for a
 "full re-scan" or the repo hash changes (a fetch + merge).
 
-> **OPEN Q9 (NEW):** granularity. Per-file or per-class? PROPOSED:
-> per-file for the import graph (smaller, faster), per-class for
-> the spec-overlay (UI looks better with class names than file
-> paths). The graph is per-file; the overlay translates as
-> needed.
+> **RESOLVED Q9:** granularity. Per-file for the import graph
+> (smaller, faster), per-class names in the spec overlay. The
+> graph is per-file; the overlay translates as needed.
 
 ### 4.3 The chat
 
@@ -297,7 +303,7 @@ truth. The issue is the durable work-tracking artifact derived
 from the spec via `spec.parent_issue_id`. Both are created in
 the same `create_epic` AIFunction call. See section 5.1.
 
-> **OPEN Q1 (RESOLVED):** spec-first. Confirmed.
+> **RESOLVED Q1:** spec-first proposal output. Confirmed.
 
 1. Operator says "we need to support dark mode."
 2. Agent asks clarifying questions (sessions, themes, persistence,
@@ -368,10 +374,10 @@ Master transitions to `Approved` when the operator clicks
 `Proposed -> Approved` other than the operator clicking the
 button.
 
-> **OPEN Q2:** Should we require operator approval of the master,
-> or auto-approve when all children are Approved? I lean
-> approval-required because the master is the durable record and
-> the operator is the product owner. But this is friction.
+> **RESOLVED Q2:** Operator approval of the master is required.
+> The master is the durable record; the operator is the product
+> owner. Friction is acceptable; auto-approve would silently
+> skip the last checkpoint.
 
 ### 5.3 Child spec authoring (Phase 2-3)
 
@@ -389,15 +395,9 @@ When the operator clicks Accept on a child epic:
    operator-approved-as-part-of-intake -> Draft again as product
    refines it, then Draft -> Approved by operator).
 
-> **OPEN Q2.5:** Is this status churn too much? Alternatives:
-> (a) skip the operator approve on intake; product refines
-> directly to Draft and operator approves once at the master level;
-> (b) keep intake-body, have product append a "refined scope"
-> section instead of rewriting.
-
-I lean (a). The operator's "Accept" button is then strictly about
-"yes we will work on this epic" (an issue-level decision), not
-about spec content. The spec gets one review at the master level.
+> **RESOLVED Q2.5:** Status churn = (a). Operator Accept approves
+> the epic, not the spec. Product refines directly to Draft.
+> Single review per spec at the master level.
 
 ### 5.4 Spec structure (default + override)
 
@@ -584,10 +584,10 @@ graph TD
   S --> T3
 ```
 
-> **OPEN Q3:** What if the spec has 12 acceptance criteria and the
-> story should be 3 tasks? PROPOSED: split into 3 stories with 4
-> criteria each, then 1 task per story. Stories preserve the
-> "epic-size" meaning. Tasks are 1:1 with criteria, bounded 1-3.
+> **RESOLVED Q3:** Multiple stories, 1 task per criterion. If a
+> spec has 12 acceptance criteria, split into N stories of ≤3
+> criteria each. Each story has 1 task per criterion. Stories
+> preserve the "epic-size" unit; tasks are 1:1 with criteria.
 
 ### 6.5 GroomingAgent prompt shape
 
@@ -624,37 +624,106 @@ in the Tasks tab if the decomposition is wrong).
 This is the part that is least defined. I have a proposal, you have
 opinions, let's make sure we agree before coding.
 
-### 7.1 The cycle
+### 7.1 The cycle (operator hands-off, agent-driven)
 
-After grooming, the backlog has Approved/Grooming specs with
-Pending tasks. The cycle is:
+After intake, the operator is hands-off. Sprints build themselves.
+A "sprint" already exists in the data model as `sprint` +
+`sprint_issue` (P0). What is NEW in Phase 3 is the **agent-driven
+selection ritual** that runs at sprint end.
 
 ```mermaid
 flowchart TD
-  N0["operator picks<br/>theme / goal / N cards"]
-  N1["Sprint N starts<br/>kick off selected pending tasks"]
-  N2["Engineering runs<br/>tasks complete"]
-  N3["all tasks done<br/>sprint ends<br/>operator reviews"]
-  N4["NEXT SPRINT<br/>back to planning"]
+  N0["sprint N running<br/>tasks in progress"]
+  N1["all sprint N tasks done<br/>or sprint manually ended"]
+  N2["ScrumMasterAgent runs<br/>(LLM-driven)"]
+  N3["ScrumMasterAgent picks:<br/>theme + goal + maxParallelTasks + task list"]
+  N4["Sprint N+1 starts<br/>selected tasks dispatched to Orchestrator"]
+  N5["operator can pause auto-sprint<br/>or manually edit before kickoff<br/>(see 7.2)"]
 
   N0 --> N1 --> N2 --> N3 --> N4 --> N0
+  N3 -. "operator override" .-> N5
 ```
 
-A "sprint" already exists in the data model as `sprint` +
-`sprint_issue` (P0). What is NEW is the **selection ritual**.
+The operator's main interaction post-intake is **observability**:
+the Sprints tab shows what just finished, what was picked for
+next, and why. Intervention is via a per-sprint toggle:
+
+- **Auto-pause**: stop the agent from kicking off the picked
+  sprint; operator reviews before start.
+- **Manual edit**: drag-and-drop the picked tasks before kickoff.
+- **Force kickoff**: skip review entirely (the default).
+
+These interventions exist but are not the happy path. The
+happy path is fully autonomous.
 
 ### 7.2 Sprint selection (the scrum loop)
 
-The operator opens the Sprints tab and clicks "Plan next sprint".
-A modal asks:
-- **Theme** (one-line label): e.g. "Auth polish"
-- **Goal** (one paragraph): e.g. "Ship the claims middleware
-  migration and deprecate the legacy session table"
-- **N cards** (number, default 5): how many tasks to fill this
-  sprint
+The ScrumMasterAgent runs at sprint-end with this context:
 
-The ScrumMasterAgent (deterministic rules, see Section 2) then
-selects N pending tasks per this scoring:
+- The just-completed sprint: `sprint`, all its `sprint_issue`
+  rows, each task's final status (Completed / Failed /
+  Cancelled), and the agent's final `lastResponse` for each
+  task.
+- The current full backlog: pending tasks grouped by parent
+  spec, ordered by priority + age.
+- Recent specs: the last N (default 10) spec updates.
+- Operator-set global policy: `ScrumMasterOptions` from
+  `appsettings.json`:
+  - `DefaultMaxParallelTasks` (default 4)
+  - `DefaultSprintLengthDays` (default 14)
+  - `MaxThemeSwitchCount` (default 2) — how many consecutive
+    sprints on the same theme before forcing a pivot
+  - `MinTasksPerSprint` (default 1) — don't kick off a sprint
+    with fewer tasks; sprint ends and waits.
+
+The agent has four tools:
+
+```
+class ScrumMasterAgent
+{
+    [Tool] IReadOnlyList<IssueRecord> QueryBacklog(
+        IssueStatus status = Pending,
+        int? parentSpecId = null,
+        int? priorityMax = null,
+        int limit = 100);
+
+    [Tool] SpecRecord GetSpec(string specId);
+
+    [Tool] SprintRecord GetJustCompletedSprint();
+
+    [Tool] void PickSprint(PickSprintSpec pick);
+}
+
+record PickSprintSpec(
+    string Theme,
+    string Goal,
+    int MaxParallelTasks,
+    int SprintLengthDays,
+    string[] TaskIds,
+    string Rationale);    // free-form: why these tasks?
+```
+
+The agent's prompt instructs it to:
+
+1. Look at the just-completed sprint. What themes were in flight?
+   What worked? What failed?
+2. Decide: continue the same theme (carry momentum) or pivot
+   to fresh work (avoid stalling on a stuck area).
+3. Honor `MaxThemeSwitchCount` — if the last N sprints were on
+   theme X, force a pivot.
+4. Score tasks mentally using the rules below as one signal.
+   The agent is free to overrule.
+5. Pick up to `DefaultMaxParallelTasks` tasks. If fewer are
+   available, pick fewer — `MinTasksPerSprint` is the floor.
+6. Commit the pick via `PickSprintSpec` with a rationale.
+
+> **RESOLVED Q4 (formerly "rules vs LLM"):** LLM-driven in P3.
+> The deterministic scoring is provided as a TOOL the agent can
+> call, not the picker itself. Rule-based scoring lives on for
+> the agent to use as a signal; agent's free-form `Rationale`
+> becomes the breakdown field in `sprint_selection`.
+
+**Scoring formula (the agent's signal, not its decision):**
 
 ```
 score(task) =
@@ -670,38 +739,51 @@ score(task) =
     +0  otherwise
 ```
 
-PROPOSED: this is a starting point. PROPOSED to expose the score
-in a "Why this task?" tooltip on each card in the modal so the
-operator can see the reasoning and override.
-
-> **OPEN Q4:** Is the deterministic scoring enough? My take: yes
-> for Phase 3 because it's explainable and the operator can
-> always add/remove cards. An LLM-driven "propose sprint scope"
-> is a Phase 4 ask. If you disagree, let's add it to Phase 2.
-
-> **OPEN Q5:** What does the dashboard show when the user picks
-> "N=5 cards" but the backlog only has 3? PROPOSED: show "only
-> 3 tasks available; plan 3?" with an OK button.
+The agent's `PickSprintSpec.Rationale` field is the
+explainability story. The score breakdown (each `+N component`)
+goes into `sprint_selection.score_breakdown` alongside the
+agent's prose rationale. Operator reads both in the dashboard:
+"Why this task? score: +10 priority=1, +5 theme match.
+Rationale: continuing the auth rework because sprint 5's two
+auth tasks both failed retry-able."
 
 ### 7.3 Sprint kick-off
 
-When the operator clicks "Start sprint":
-1. Set `sprint.status = "active"`, `start_date = now`,
-   `end_date = now + sprint.length_days` (PROPOSED default: 14).
-2. For each of the N selected tasks: dispatch to
-   `OrchestratorAgent` (the existing claim -> run -> worktree
-   pipeline). The orchestrator dispatches in parallel up to
-   `SpawnerOptions.MaxConcurrentSessions` (default 4).
-3. The dashboard moves tasks to `InProgress` as they're claimed.
+When the ScrumMasterAgent's `PickSprintSpec` is committed:
+
+1. Insert `sprint` row: `status = "active"`, `start_date = now`,
+   `end_date = now + sprint_length_days`.
+2. For each picked task: insert `sprint_issue` row with
+   `score_breakdown` populated.
+3. For each task: dispatch to `OrchestratorAgent` (the existing
+   claim → run → worktree pipeline). The orchestrator dispatches
+   in parallel up to `sprint.max_parallel_tasks`.
+4. Dashboard moves tasks to `InProgress` as they're claimed.
 
 ### 7.4 Sprint end
 
 When all the sprint's tasks are Completed (or the operator
-manually ends the sprint):
+manually ends the sprint, or `MinTasksPerSprint` was hit):
+
 1. Sprint moves to `status = "completed"`.
 2. The Specs tab moves all `Grooming` specs whose tasks are
    now done to `Shipped`.
-3. Operator can click "Plan next sprint" and the cycle repeats.
+3. Trigger ScrumMasterAgent run for the next sprint.
+4. Loop forever (or until operator pauses auto-sprint).
+
+> **RESOLVED Q5 (formerly "backlog < N cards"):** The agent
+> picks `maxParallelTasks` per its own judgment. The
+> `MinTasksPerSprint` floor means a sprint won't kick off with
+> fewer than 1 task; if the backlog is empty, the system waits.
+> No modal-confirmation UX is needed.
+
+> **RESOLVED Q7 (formerly "Sprint Planning state"):** The
+> `Planning` state is internal to the ScrumMasterAgent run.
+> Operator doesn't see it as a UI state — they see the picked
+> sprint appear in the dashboard with theme + goal + tasks
+> listed, briefly tagged as "proposed" before auto-start. The
+> auto-pause toggle (§7.1) is the operator's intervention
+> point.
 
 ---
 
@@ -936,23 +1018,69 @@ sealed class GroomerAgent : SpecLifecycleAgent
 }
 ```
 
-### 9.3 ScrumMaster (Phase 3, deterministic)
+### 9.3 ScrumMasterAgent (Phase 3, LLM-driven)
 
-NOT an LLM agent. A pure C# class:
+The ScrumMasterAgent is an LLM agent that runs at sprint-end and
+picks the next sprint autonomously. It is built on the same
+ChatClientAgent abstraction as the IntakeAgent / ProductAgent /
+GroomerAgent.
 
 ```
-sealed class ScrumMaster
+namespace PortHorizon.Agents.Agents;
+
+public sealed class ScrumMasterAgent
 {
-    public SprintPlan Propose(IReadOnlyList<IssueRecord> backlog,
-                              SprintSelectionCriteria criteria);
+    public ScrumMasterAgent(
+        IChatClientFactory chatClientFactory,
+        LlmConfig config,
+        ISprintStore sprints,
+        IIssueStore issues,
+        ISpecStore specs,
+        AgentMessageBus messageBus,
+        IDashboardEventBus events,
+        ISkillSource? skills,
+        ILogger<ScrumMasterAgent> logger,
+        string kiloAgentsRoot = ".kilo/agents");
+
+    /// <summary>
+    /// Run the scrum loop: read the just-completed sprint, pick
+    /// the next sprint's task list, commit via PickSprintSpec.
+    /// </summary>
+    public async Task<SprintRecord?> RunAsync(
+        string completedSprintId,
+        CancellationToken ct);
 }
-
-sealed record SprintPlan(SprintRecord Sprint,
-                          IReadOnlyList<TaskCandidate> Selected);
-
-sealed record TaskCandidate(IssueRecord Task, int Score,
-                            IReadOnlyList<string> ScoreBreakdown);
 ```
+
+The agent's tool set (registered as AIFunctions on the
+ChatClientAgent) includes:
+
+- `QueryBacklog(status, parentSpecId?, priorityMax?, limit)`:
+  paginated read of pending tasks.
+- `GetSpec(specId)`: pull a spec body + version metadata.
+- `GetJustCompletedSprint()`: sprint + tasks + outcomes.
+- `GetGlobalPolicy()`: read `ScrumMasterOptions` from config.
+- `PickSprint(PickSprintSpec)`: commit the pick. Writes
+  `sprint` + `sprint_issue` + `sprint_selection` rows atomically.
+
+The `ScrumMasterOptions` config:
+
+```json
+{
+  "scrumMaster": {
+    "defaultMaxParallelTasks": 4,
+    "defaultSprintLengthDays": 14,
+    "maxThemeSwitchCount": 2,
+    "minTasksPerSprint": 1
+  }
+}
+```
+
+A `DeterministicScorer` class is still implemented (used by the
+agent as a *signal*, not a decision). It returns the same
+`+10 priority / +5 theme match / -20 dep penalty` breakdown
+described in §7.2. The agent reads the scored list and applies
+its own judgment on top.
 
 ### 9.4 Dashboard additions
 
@@ -962,7 +1090,11 @@ sealed record TaskCandidate(IssueRecord Task, int Score,
   breadcrumb. Render Mermaid blocks in the detail view.
 - **Tasks tab**: show spec/story chain on hover; show
   `parent_id` chain in the row tooltip.
-- **Sprints tab**: add "Plan next sprint" button (P3).
+- **Sprints tab** (P3): show just-completed sprint's outcome +
+  ScrumMasterAgent's picked next-sprint. Two cards: "Last sprint"
+  (closed) and "Next sprint" (just-picked, dispatching). Per-task
+  tooltip shows score + agent's rationale. Per-sprint toggle:
+  "auto-pause next sprint" (operator override).
 - **Intake tab** refinement (P2): SSE streaming output so the
   operator sees tokens land as the agent produces them; per-message
   Accept for child epics; "Accept all proposed epics" button.
@@ -1197,10 +1329,23 @@ Tests for all of the above.
 
 ### Phase 3
 - `GroomerAgent` with `create_story` / `create_task` tools.
-- `ScrumMaster` deterministic scorer.
-- Sprints tab "Plan next sprint" modal.
-- `sprint_selection` audit table.
-- Tests for the above.
+- `ScrumMasterAgent` (LLM-driven; ChatClientAgent with
+  `QueryBacklog`/`GetSpec`/`GetJustCompletedSprint`/`PickSprint`
+  tools). Runs at sprint-end, fully autonomous (operator is
+  hands-off post-intake).
+- `DeterministicScorer` class — used by ScrumMasterAgent as one
+  signal among many, not as the picker itself.
+- `ScrumMasterOptions` config (defaultMaxParallelTasks,
+  defaultSprintLengthDays, maxThemeSwitchCount, minTasksPerSprint).
+- Sprints tab redesign: "Last sprint" + "Next sprint" cards
+  with per-task score breakdown + agent rationale.
+- "Auto-pause next sprint" toggle (operator override).
+- `sprint_selection` audit table (already specced in §8.7).
+- `pick_sprint` event emitted to the dashboard event bus so the
+  Sprints tab updates live.
+- Tests: ScrumMasterAgent with scripted chat client returning a
+  canned `PickSprintSpec`; sprint-end → next-sprint cycle test
+  using real IssueStore + SprintStore + scripted agent.
 
 ### Phase 4
 - DurableTask for crash recovery.
@@ -1213,44 +1358,61 @@ Tests for all of the above.
 
 ## 12. Open questions (must answer before code)
 
-Listed by section so we can resolve them in order.
+All 12 questions are RESOLVED as of 2026-07-01. The agent-driven
+sprint cycle is the late-breaking addition; see the operator-hands-off
+reframing in §7.
 
-**RESOLVED:**
-- **Q1** (4.5): Spec-first proposal output. **RESOLVED: spec-first.**
+**Q1 (4.5):** Spec-first vs issue-first proposal output.
+**RESOLVED: spec-first.**
 
-**Still open:**
-- **Q2** (5.2): Operator approval of master required, or
-  auto-approve? **My pick: required.**
-- **Q2.5** (5.3): Status churn during product refinement. **My
-  pick: simplify — operator Accept only approves the epic, not
-  the spec; product refines directly to Draft.**
-- **Q3** (6.4): How to split >3 acceptance criteria. **My pick:
-  multiple stories, 1 task per criterion.**
-- **Q4** (7.2): Deterministic scorer sufficient, or LLM-driven?
-  **My pick: deterministic for P3, LLM-driven for P4.**
-- **Q5** (7.2): Backlog smaller than N. **My pick: confirm with
-  operator, "plan N-1?"**
-- **Q6** (8.7): Per-task sprint score breakdown as a separate
-  table? **My pick: yes, makes explainability free.**
-- **Q7** (8.9): Sprint `Planning` state before `Active`? **My
-  pick: yes.**
-- **Q8** (10.4): Optimistic locking on spec edits? **My pick:
-  skip for P2, add if it actually becomes a problem.**
+**Q2 (5.2):** Operator approval of master required, or auto-approve?
+**RESOLVED: required.**
 
-**NEW (added after A++ decision):**
-- **Q9** (4.2a): Per-file or per-class graph granularity? **My
-  pick: per-file for the import graph (smaller, faster), per-class
-  names in the spec overlay.**
-- **Q10** (4.3a): Side-panel layout — split 50/50 or 60/40? **My
-  pick: 50/50 for spec drafting (graph is secondary); grows to
-  30/70 if the operator wants the graph larger.**
-- **Q11** (4.4): Required Mermaid per child spec, or
-  recommended? **My pick: at least one `flowchart` or
-  `sequenceDiagram` per non-trivial child spec; agent is told
-  this as a soft requirement with examples.**
-- **Q12** (8.5): Auto-detect spec_dep from prose? **My pick: NO
-  in P2 (causes spurious edges); yes in P4 once we have a
-  spec-relationship model.**
+**Q2.5 (5.3):** Status churn during product refinement.
+**RESOLVED: (a) — operator Accept only approves the epic, not the
+spec; product refines directly to Draft.**
+
+**Q3 (6.4):** How to split >3 acceptance criteria.
+**RESOLVED: multiple stories, 1 task per criterion.**
+
+**Q4 (7.2):** Deterministic scorer sufficient, or LLM-driven?
+**RESOLVED: LLM-driven in P3.** The agent IS the scorer. The
+deterministic scoring function becomes a TOOL the agent can call,
+not the picker itself.
+
+**Q5 (7.2):** Backlog smaller than N cards.
+**RESOLVED: N/A in new model.** Operator picks theme + maxParallelTasks
+during sprint planning; ScrumMasterAgent picks up to that cap.
+If fewer are available, the sprint starts smaller; if zero,
+the system waits.
+
+**Q6 (8.7):** Per-task sprint score breakdown as a separate table?
+**RESOLVED: yes.** `sprint_selection.score_breakdown` carries
+structured score components; `PickSprintSpec.Rationale` carries
+the agent's free-form reasoning. Both land in the same row.
+
+**Q7 (8.9):** Sprint `Planning` state before `Active`?
+**RESOLVED: internal-only.** The `Planning` state is internal to
+the ScrumMasterAgent run. Operator doesn't see a "Planning" UI
+state — they see the picked sprint appear briefly tagged as
+"proposed" before auto-start.
+
+**Q8 (10.4):** Optimistic locking on spec edits?
+**RESOLVED: skip for P2, add if it actually becomes a problem.**
+
+**Q9 (4.2a):** Per-file or per-class graph granularity?
+**RESOLVED: per-file for the import graph (smaller, faster),
+per-class names in the spec overlay.**
+
+**Q10 (4.3a):** Side-panel layout — split 50/50 or 60/40?
+**RESOLVED: 50/50 default, resizable later.**
+
+**Q11 (4.4):** Required Mermaid per child spec, or recommended?
+**RESOLVED: soft prompt in P2, hard taxonomy deferred.**
+
+**Q12 (8.5):** Auto-detect spec_dep from prose?
+**RESOLVED: NO in P2 (causes spurious edges); YES with operator
+confirm in P4 once we have a spec-relationship model.**
 
 ---
 
