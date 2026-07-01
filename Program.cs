@@ -315,6 +315,15 @@ public static class Program
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
         var codebaseGraphBuilder = new Codebase.DotnetCodebaseGraphBuilder();
+        var projectContextSource = new Core.FilesystemProjectContextSource(
+            issues, agents, specStore, skills, options.Workspace.Root);
+        var productAgentFactory = new Agents.ProductAgentFactory(
+            specStore, issues, projectContextSource, chatClientFactory, llmConfig,
+            roleRegistry, eventBus, skillSource, loggerFactory,
+            Path.Combine(options.Workspace.Root, ".kilo", "agents"));
+        var productRefinementQueue = new Agents.ProductRefinementQueue(
+            productAgentFactory, specStore, eventBus,
+            loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
