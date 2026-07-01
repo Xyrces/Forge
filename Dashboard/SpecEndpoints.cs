@@ -21,7 +21,9 @@ public static class SpecEndpoints
     public static void MapSpecEndpoints(
         WebApplication app,
         ISpecStore specs,
-        ILogger logger)
+        ISpecExtractionReader extractor,
+        ILogger logger,
+        PortHorizon.Agents.Core.IIntakeStore? intakeStore = null)
     {
         app.MapGet("/api/specs", async (string? project, string? status, CancellationToken ct) =>
         {
@@ -44,6 +46,71 @@ public static class SpecEndpoints
         {
             var versions = await specs.ListVersionsAsync(id, ct);
             return Results.Json(versions.Select(ToVersionView).ToArray(), DashboardJson.Options);
+        });
+
+        // Phase 2b: extracted-tables reads. The dashboard's Spec
+        // side-panel renders diagrams from spec_diagram; the Graph
+        // tab reads spec_touches; the Deps tab reads spec_dep.
+        app.MapGet("/api/specs/{id}/diagrams", async (string id, CancellationToken ct) =>
+        {
+            var diagrams = await extractor.GetDiagramsAsync(id, ct);
+            return Results.Json(diagrams.Select(d => new
+            {
+                specId = d.SpecId,
+                ordinal = d.Ordinal,
+                kind = d.Kind,
+                source = d.Source,
+                title = d.Title
+            }).ToArray(), DashboardJson.Options);
+        });
+
+        app.MapGet("/api/specs/{id}/touches", async (string id, CancellationToken ct) =>
+        {
+            var touches = await extractor.GetTouchesAsync(id, ct);
+            return Results.Json(touches.Select(t => new
+            {
+                specId = t.SpecId,
+                moduleId = t.ModuleId,
+                source = t.Source,
+                rationale = t.Rationale,
+                createdAt = t.CreatedAt
+            }).ToArray(), DashboardJson.Options);
+        });
+
+        app.MapGet("/api/specs/{id}/deps", async (string id, CancellationToken ct) =>
+        {
+            var deps = await extractor.GetDepsAsync(id, ct);
+            return Results.Json(deps.Select(d => new
+            {
+                fromSpecId = d.FromSpecId,
+                toSpecId = d.ToSpecId,
+                kind = d.Kind,
+                rationale = d.Rationale,
+                source = d.Source,
+                createdAt = d.CreatedAt
+            }).ToArray(), DashboardJson.Options);
+        });
+
+        // Phase 2b: lookup specs produced by a specific intake
+        // session. Used by the intake tab side-panel to render the
+        // master + children of an in-progress intake.
+        app.MapGet("/api/intake/sessions/{sessionId}/specs", async (string sessionId, CancellationToken ct) =>
+        {
+            if (intakeStore is null) return Results.Json(Array.Empty<object>(), DashboardJson.Options);
+            var session = await intakeStore.GetAsync(sessionId, ct);
+            if (session is null) return Results.NotFound();
+            var proposed = session.Messages
+                .Where(m => m.ProposedEpicId is not null)
+                .Select(m => m.ProposedEpicId!)
+                .Distinct()
+                .ToList();
+            var allSpecs = new List<SpecRecord>();
+            foreach (var pid in proposed)
+            {
+                var match = await extractor.ListByParentIssueIdAsync(pid, ct);
+                allSpecs.AddRange(match);
+            }
+            return Results.Json(allSpecs.Select(ToSpecView).ToArray(), DashboardJson.Options);
         });
 
         app.MapPost("/api/specs", async (HttpContext ctx) =>

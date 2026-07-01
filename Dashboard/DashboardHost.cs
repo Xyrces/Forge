@@ -21,6 +21,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly IIntakeStore _intakeStore;
     private readonly IntakeAgentRegistry? _intakeRegistry;
     private readonly ISpecStore _specs;
+    private readonly ISpecExtractionReader? _extractorOverride;
     private readonly AgentMessageBus _messageBus;
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ILogger<DashboardHost> _logger;
@@ -38,7 +39,8 @@ public sealed class DashboardHost : IAsyncDisposable
         ILogger<DashboardHost> logger,
         IIntakeStore? intakeStore = null,
         IntakeAgentRegistry? intakeRegistry = null,
-        ISpecStore? specs = null)
+        ISpecStore? specs = null,
+        ISpecExtractionReader? extractor = null)
     {
         _options = options;
         _issues = issues;
@@ -48,6 +50,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _intakeStore = intakeStore ?? new NullIntakeStore();
         _intakeRegistry = intakeRegistry;
         _specs = specs ?? new NullSpecStore();
+        _extractorOverride = extractor;
         _messageBus = messageBus;
         _bus = bus;
         _logger = logger;
@@ -150,7 +153,7 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _logger);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore);
 
         _app.MapGet("/api/agents", () =>
         {

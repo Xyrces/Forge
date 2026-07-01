@@ -312,13 +312,15 @@ public static class Program
                 skills: skillSource,
                 kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents")));
         var specStore = new Core.SpecStore(issues);
+        var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
             intakeStore: intakeStore,
             intakeRegistry: intakeRegistry,
-            specs: specStore);
+            specs: specStore,
+            extractor: specExtractionReader);
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>

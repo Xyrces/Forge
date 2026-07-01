@@ -54,7 +54,7 @@ public class SpecDashboardTests : IDisposable
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         var app = builder.Build();
 
-        SpecEndpoints.MapSpecEndpoints(app, _specs, NullLogger<DashboardHost>.Instance);
+        SpecEndpoints.MapSpecEndpoints(app, _specs, new SpecExtractionReader(_issues), NullLogger<DashboardHost>.Instance, new Core.IntakeStore(_issues));
         return app;
     }
 
@@ -192,5 +192,120 @@ public class SpecDashboardTests : IDisposable
 
         var all = await _client.GetFromJsonAsync<JsonElement>("/api/specs");
         Assert.Equal(3, all.GetArrayLength());
+    }
+
+    [Fact]
+    public async Task DiagramsEndpoint_ReturnsExtractedDiagrams()
+    {
+        var created = await _client.PostAsJsonAsync("/api/specs",
+            new { projectId = "P", title = "T", body = """
+                ## Diagrams
+                ```mermaid
+                flowchart LR
+                  A --> B
+                ```
+                ```mermaid
+                sequenceDiagram
+                  A->>B: hi
+                ```
+                """ });
+        var spec = await created.Content.ReadFromJsonAsync<JsonElement>();
+        var id = spec.GetProperty("id").GetString()!;
+
+        var resp = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}/diagrams");
+        Assert.Equal(2, resp.GetArrayLength());
+        Assert.Equal(0, resp[0].GetProperty("ordinal").GetInt32());
+        Assert.Equal("flowchart", resp[0].GetProperty("kind").GetString());
+        Assert.Equal(1, resp[1].GetProperty("ordinal").GetInt32());
+        Assert.Equal("sequencediagram", resp[1].GetProperty("kind").GetString());
+    }
+
+    [Fact]
+    public async Task TouchesEndpoint_ReturnsExtractedTouches()
+    {
+        var created = await _client.PostAsJsonAsync("/api/specs",
+            new { projectId = "P", title = "T", body = """
+                ## Touches
+                - PortHorizon.Core.Auth
+                - PortHorizon.Dashboard.Theming
+                """ });
+        var spec = await created.Content.ReadFromJsonAsync<JsonElement>();
+        var id = spec.GetProperty("id").GetString()!;
+
+        var resp = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}/touches");
+        Assert.Equal(2, resp.GetArrayLength());
+        Assert.Contains(resp.EnumerateArray(),
+            t => t.GetProperty("moduleId").GetString() == "PortHorizon.Core.Auth");
+        Assert.Contains(resp.EnumerateArray(),
+            t => t.GetProperty("moduleId").GetString() == "PortHorizon.Dashboard.Theming");
+        // The extraction populates source='auto'.
+        Assert.All(resp.EnumerateArray(),
+            t => Assert.Equal("auto", t.GetProperty("source").GetString()));
+    }
+
+    [Fact]
+    public async Task DepsEndpoint_ReturnsExtractedDeps()
+    {
+        var created = await _client.PostAsJsonAsync("/api/specs",
+            new { projectId = "P", title = "T", body = """
+                ## Dependencies
+                - blocks spec-portal-redirect
+                - depends_on spec-auth-claims
+                """ });
+        var spec = await created.Content.ReadFromJsonAsync<JsonElement>();
+        var id = spec.GetProperty("id").GetString()!;
+
+        var resp = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}/deps");
+        Assert.Equal(2, resp.GetArrayLength());
+        Assert.Contains(resp.EnumerateArray(),
+            d => d.GetProperty("kind").GetString() == "blocks"
+              && d.GetProperty("toSpecId").GetString() == "spec-portal-redirect");
+        Assert.Contains(resp.EnumerateArray(),
+            d => d.GetProperty("kind").GetString() == "depends_on"
+              && d.GetProperty("toSpecId").GetString() == "spec-auth-claims");
+    }
+
+    [Fact]
+    public async Task DiagramsEndpoint_MissingSpec_ReturnsEmptyArray()
+    {
+        var resp = await _client.GetFromJsonAsync<JsonElement>("/api/specs/spec-missing/diagrams");
+        Assert.Equal(0, resp.GetArrayLength());
+    }
+
+    [Fact]
+    public async Task SessionSpecsEndpoint_ReturnsSpecsProducedByIntake()
+    {
+        // Simulate an intake session with a proposed epic + spec
+        // linked back via parent_issue_id. We use IssueStore directly
+        // for setup since this is a low-level test.
+        var issue = await _issues.CreateAsync(new NewIssue(
+            Type: "epic", Title: "Demo epic", Description: "x"));
+        var intake = new Core.IntakeStore(_issues);
+        var session = await intake.CreateAsync("PortHorizon", "demo", default);
+        await intake.AppendMessageAsync(session.Id,
+            new NewIntakeMessage(IntakeMessageRole.User, "demo"), default);
+        await intake.AppendMessageAsync(session.Id,
+            new NewIntakeMessage(IntakeMessageRole.System,
+                $"Proposed epic: {issue.Id} - Demo epic",
+                ProposedEpicId: issue.Id, ProposedEpicTitle: "Demo epic"), default);
+
+        // Spec whose parent_issue_id = our issue.
+        var specStore = new SpecStore(_issues);
+        await specStore.CreateAsync(new NewSpec(
+            ProjectId: "PortHorizon", Title: "Demo spec",
+            Body: "## Touches\n- DemoModule", ParentIssueId: issue.Id));
+
+        var resp = await _client.GetFromJsonAsync<JsonElement>(
+            $"/api/intake/sessions/{session.Id}/specs");
+        Assert.Equal(1, resp.GetArrayLength());
+        Assert.Equal("Demo spec", resp[0].GetProperty("title").GetString());
+        Assert.Equal(issue.Id, resp[0].GetProperty("parentIssueId").GetString());
+    }
+
+    [Fact]
+    public async Task SessionSpecsEndpoint_MissingSession_Returns404()
+    {
+        var resp = await _client.GetAsync("/api/intake/sessions/intake-missing/specs");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 }
