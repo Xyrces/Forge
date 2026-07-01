@@ -3,6 +3,8 @@
 
 Status: P0 closed 2026-06-30. Goal: replace the kilo-based runtime in PortHorizon.Agents with Microsoft Agent Framework (MAF) as the agent runtime, while keeping the SQLite-backed issue/agent/skill/sprint store and the Kestrel dashboard.
 
+**Forward-looking design:** see [`intake-to-sprint-workflow.md`](./intake-to-sprint-workflow.md) for the multi-agent workflow that turns operator intent into shipped increments (Phases 2-4). The two docs are siblings: this one covers the runtime, the other covers what the agents do together.
+
 **P0 outcome (2026-06-30):** the MAF runner is the only agent runtime. The `AcpClient`/`AcpProcessManager`/`AcpSession`/`AcpProtocol` files and their integration tests are deleted. `IAgentRunner` (Microsoft.Agents.AI 1.11.1) is wired into `OrchestratorAgent`; `MafAgentRunner` wraps `ChatClientAgent` with the role's `.kilo/agents/<role>.md` frontmatter as `instructions:`. 89/89 tests pass. P0.5+ phases (real LLM providers, git/PR tools, intake via HarnessAgent) proceed per the table below.
 
 ## Why we are doing this

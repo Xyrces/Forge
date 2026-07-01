@@ -3,6 +3,12 @@
 > Status: **DRAFT for review.** Nothing in this document is implemented
 > yet. Sections marked `OPEN` need a decision before we build. Sections
 > marked `PROPOSED` are my recommendation but yours to overrule.
+>
+> **Last revision:** expanded for the **A++ model** (rich spec body
+> with embedded Mermaid + extracted dependency/touches graph +
+> side-panel visualization in the Intake tab). Q1 is now RESOLVED.
+> Added Q9-Q12 (granularity, layout, Mermaid requirement,
+> auto-detected spec_dep).
 
 Companion to `agent-framework-design.md`, which covers the agent
 runtime itself. This document covers **what the agents do together**
@@ -127,8 +133,15 @@ Already implemented in P1.4 (`IntakeStore`, schema v3). A session is
 a per-project conversation between the operator and the
 `IntakeAgent`. The agent has project skills loaded via the
 `SqliteSkillSource` (P1), has access to the codebase + in-progress
-work via a new `IProjectContextSource` (Phase 2, NEW), and proposes
+work via a new `IProjectContextSource` (Phase 2, NEW) and the
+codebase's file-level import graph (Phase 2, NEW), and proposes
 epics via the `create_epic` AIFunction.
+
+The IntakeAgent is the *author* of the spec bodies, not just an
+issue-creator. It writes the spec body in real time as the operator
+talks — including **diagrams** (sequence, flowchart, dependency)
+rendered in a side-panel next to the chat thread. This is the
+key addition for Phase 2 (see section 5 below).
 
 ### 4.2 Project context source (NEW, Phase 2)
 
@@ -157,22 +170,135 @@ directory. Cache on disk. Re-walk on demand (operator click
 "refresh project context"). We are NOT doing RAG embeddings yet —
 this is a hand-curated snapshot, fast and explainable.
 
+### 4.2a Codebase import graph (NEW, Phase 2)
+
+The intake agent also needs the **actual dependency structure** of
+the code: which classes touch which, which modules depend on
+which, which planned work is downstream of which. We build this
+with a new abstraction:
+
+```
+interface ICodebaseGraphBuilder
+{
+    Task<CodebaseGraph> BuildAsync(string repoRoot,
+                                   CodebaseGraphCache? priorCache,
+                                   CancellationToken ct);
+
+    /// Result carries enough info to diff against the prior cache
+    /// and to give the operator a "graph has changed, refresh?"
+    /// prompt.
+    record CodebaseGraph(
+        string RepoRoot,
+        DateTime BuiltAt,
+        IReadOnlyList<FileNode> Files,
+        IReadOnlyList<ImportEdge> Imports,
+        IReadOnlyList<ProjectEdge> Projects);
+
+    record FileNode(string Path, string Language, string Module);
+    record ImportEdge(string From, string To);
+    record ProjectEdge(string FromProject, string ToProject);
+}
+
+record CodebaseGraphCache(DateTime BuiltAt, string Hash);
+```
+
+**Implementation: `DotnetCodebaseGraphBuilder` for v1.** It parses
+`.csproj` ProjectReferences and `using` directives inside `.cs`
+files. Modular: a future `TypeScriptCodebaseGraphBuilder` slots in
+by implementing the same interface.
+
+**Incremental / differential.** PROPOSED: the builder takes the
+prior cache + its content hash. If `git status` is clean against
+the prior cache, returns the prior graph unchanged. If files
+changed, only re-parses the changed files and emits a diff. The
+cache lives at `.portHorizon/codebase-graph/<repo-sha>.json`. We
+do not rebuild from scratch unless the operator asks for a
+"full re-scan" or the repo hash changes (a fetch + merge).
+
+> **OPEN Q9 (NEW):** granularity. Per-file or per-class? PROPOSED:
+> per-file for the import graph (smaller, faster), per-class for
+> the spec-overlay (UI looks better with class names than file
+> paths). The graph is per-file; the overlay translates as
+> needed.
+
 ### 4.3 The chat
 
 The chat is already implemented. The intake agent is told:
-- "You are the IntakeAgent for project {projectId}. The codebase and
-  open issues are described below. Help the operator refine their
-  idea into a series of epics. Use create_epic when an idea is
-  shaped enough; ask questions when it isn't."
+- "You are the IntakeAgent for project {projectId}. The codebase,
+  open issues, and dependency graph are described below. Help the
+  operator refine their idea into a series of structured epics.
+  Use `create_epic` when an idea is shaped enough; ask questions
+  when it isn't. Use `add_dependency` to declare that an epic
+  blocks or depends on another spec. Use embedded Mermaid in the
+  spec body to capture domain-level sequence diagrams, flowcharts,
+  and dependency graphs — those render live in the side-panel."
 
 The chat session persists in `intake_session` + `intake_message`.
 The agent's "memory" of the conversation is the persisted history.
 
+### 4.3a Side-panel visualization (NEW, Phase 2)
+
+The Intake tab gets a layout change: the chat thread moves to the
+left (~50% width), a live visualization pane on the right (~50%).
+The right pane has three tabs:
+
+- **Spec** — the currently-being-authored spec body, with each
+  Mermaid block rendered inline as the agent produces it. This is
+  the operator's reading view while the chat scrolls.
+- **Graph** — a node-edge view of the current intake's spec tree
+  plus the relevant slice of the codebase. Services and modules are
+  nodes. Specs are nodes. Spec -> module edges are overlaid on top
+  of the codebase edges. Mermaid `flowchart` for the codebase,
+  `graph TD` for the spec tree. The operator can pan + zoom + click
+  a node to drill in.
+- **Deps** — the spec_dep edges declared by the agent via
+  `add_dependency` + the auto-detected ones. Bidirectional: blocks
+  vs depends_on. Sorted by impact (what's downstream of what).
+
+All three tabs update live as the agent produces output (SSE
+streaming; see section 10 race-condition notes). The operator can
+click a node in any tab to jump to the underlying spec in the
+Specs tab.
+
 ### 4.4 Multi-epic proposal
 
-**PROPOSED**: the current `create_epic` AIFunction is unchanged at
-the action level, but the operator now thinks of an intake session
-as producing *N* epics, not one. The intake flow:
+**PROPOSED**: the current `create_epic` AIFunction is enriched. The
+intake flow:
+1. Operator says "we need to support dark mode."
+2. Agent asks clarifying questions (sessions, themes, persistence,
+   system preferences vs in-app toggle, etc.).
+3. Agent calls `create_epic("Dark mode: settings persistence",
+   body="## Summary\n... ## Acceptance criteria\n... ## Diagrams\n"
+   + (mermaid block),
+   parent_spec_id=null /*master*/, priority=2)`.
+4. Agent calls `create_epic("Dark mode: theme variables", ...,
+   parent_spec_id=master)`.
+5. Agent calls `create_epic("Dark mode: in-app toggle", ...,
+   parent_spec_id=master)`.
+6. Each call produces a system message in the session linking
+   back to the proposed issue id + spec id.
+
+The operator sees three Accept buttons in the chat (one per
+proposed epic), plus an "Accept all" affordance. The dashboard
+intake tab becomes denser.
+
+The `body` parameter is structured markdown (see section 5.4) so
+that the side-panel's Spec and Graph tabs can render properly. The
+agent is required to include at least one Mermaid block per child
+spec when its scope is non-trivial (sequence diagrams for
+flows, flowcharts for state changes, dependency graphs for
+service-to-service interactions).
+
+### 4.5 Spec-first vs issue-first for proposal output
+
+**RESOLVED.** The intake agent always emits a spec (master +
+children) when proposing a feature. The spec is the source of
+truth. The issue is the durable work-tracking artifact derived
+from the spec via `spec.parent_issue_id`. Both are created in
+the same `create_epic` AIFunction call. See section 5.1.
+
+> **OPEN Q1 (RESOLVED):** spec-first. Confirmed.
+
 1. Operator says "we need to support dark mode."
 2. Agent asks clarifying questions (sessions, themes, persistence,
    system preferences vs in-app toggle, etc.).
@@ -192,40 +318,6 @@ as producing *N* epics, not one. The intake flow:
 The operator sees three Accept buttons in the chat (one per
 proposed epic), plus an "Accept all" affordance. The dashboard
 intake tab becomes denser.
-
-### 4.5 Spec-first vs issue-first for proposal output
-
-`Open / PROPOSED:` Should the agent create a `spec` (master) FIRST
-and reference it from each `create_epic`, or should the agent
-continue to create bare epics and the product authoring happens in
-a separate phase?
-
-**Recommendation: spec-first.** Two reasons:
-- The agent's job is to be authoritative about *what we're going
-  to ship*. An issue alone ("fix the auth flow") is too thin.
-- The spec becomes the durable record of intent, durable across
-  grooming, durable across re-orgs.
-
-Refined flow for the dark-mode example:
-1. Agent creates `spec` "Dark mode" — master with current
-   discussion summary, scope, non-goals, open questions. Status
-   `Draft`. `parent_spec_id = NULL`.
-2. Agent creates `spec` "Dark mode: settings persistence" — child,
-   `parent_spec_id = <master>`. Status `Draft`. Calls
-   `propose_epic(parent_spec_id, title, body)` which creates the
-   epic AND records `parent_issue_id` for the spec.
-3. Agent repeats for each child.
-
-The Accept button on a *child* epic in the chat now accepts a
-child spec + epic as a unit. The master spec stays in `Draft`
-until ALL children have been accepted (see section 5).
-
-> **OPEN Q1:** Is the master-spec gating the right shape, or
-> should the operator accept each child independently with no
-> master-approval gate? I lean master-gated because it forces
-> alignment before grooming starts.
-
----
 
 ## 5. Master + child spec authoring
 
@@ -309,15 +401,38 @@ about spec content. The spec gets one review at the master level.
 
 ### 5.4 Spec structure (default + override)
 
-The product agent writes specs in this shape (markdown):
+The intake agent and product agent write specs in this shape
+(markdown). The IntakeAgent writes the **initial draft** during
+conversation (with the operator's clarifications folded in),
+then the ProductAgent rewrites into the **fully-structured form**
+below once the epic is Accepted.
 
 ```
 ## Summary
-One-paragraph restatement of the epic in operator's own words.
+One-paragraph restatement of the epic in the operator's own words.
 
 ## Acceptance criteria
 - [ ] concrete, testable behavior...
 - [ ] concrete, testable behavior...
+
+## Diagrams
+<!-- one or more Mermaid blocks, rendered live in the Intake tab's
+     side-panel "Spec" view and on the Specs tab. Diagram types the
+     agent is encouraged to use:
+       - sequenceDiagram   for service-to-service flows
+       - flowchart         for state machines and decision flows
+       - graph LR / TD     for domain-level dependency graphs
+       - classDiagram      sparingly, only when OO structure matters
+     At least one diagram per non-trivial child spec. -->
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Settings
+    participant Prefs
+    User->>Settings: toggle theme
+    Settings->>Prefs: persist
+```
 
 ## Out of scope
 - explicit non-goal...
@@ -327,24 +442,58 @@ One-paragraph restatement of the epic in operator's own words.
 - question still to answer?...
 - question still to answer?...
 
+## Touches
+<!-- declared by the IntakeAgent via the touches() AIFunction and
+     auto-extracted from diagrams + spec body. Operator sees a
+     list of modules / services this spec affects. Example:
+       - PortHorizon.Core.Auth
+       - PortHorizon.Dashboard.Theming
+     Used to render the side-panel "Graph" tab. -->
+
+## Dependencies
+<!-- declared via add_dependency(). Example:
+       - blocks: spec-portal-redirect
+       - depends_on: spec-auth-claims
+     Used to render the side-panel "Deps" tab. -->
+
 ## Notes
-(optional) technical notes, dependencies on other specs, etc.
+(optional) technical notes, anything that didn't fit above.
 ```
 
-The Specs tab renders this with a section-style layout:
-"Summary" + "Acceptance criteria" + "Out of scope" + "Open
-questions" + "Notes" each in their own card. If a section is
-missing, it's not rendered (freeform override). Plain `body`
-without section headings is rendered as a single code block,
-preserving formatting.
+The Specs tab renders this with a section-style layout: each
+## section in its own card. If a section is missing, it's not
+rendered (freeform override). Plain `body` without section headings
+is rendered as a single code block, preserving formatting.
 
-Freeform override means: the agent is *encouraged* to use the
-template but isn't required. The agent's instructions say "if you
-have a good reason to skip a section (e.g. an exploratory spec
-with only Open Questions), skip it." Operator-facing reads stay
-uncluttered.
+Diagrams are extracted from ```mermaid``` blocks via a markdown
+parser and stored in a derived `spec_diagram` table (see section
+8) so the UI doesn't have to re-parse on every render. When a
+spec body is updated, the diagrams are re-extracted.
 
-### 5.5 Versions
+### 5.5 Body extraction pipeline
+
+On every `create_spec` / `update_spec_body` / `set_status`, we run
+an extraction pass:
+
+```mermaid
+flowchart LR
+  Body["spec body<br/>(markdown)"] -->|"markdown parser"| M["Mermaid blocks[]"]
+  Body -->|"reference parser<br/>(## Touches section)"| T["spec_touches[]"]
+  Body -->|"dependency parser<br/>(## Dependencies section)"| D["spec_dep[]"]
+  Body -->|"section parser"| S["section metadata<br/>(summary, criteria, etc.)"]
+
+  M --> Render["side-panel Spec tab<br/>+ Specs tab inline"]
+  T --> Overlay["side-panel Graph tab<br/>overlaid on codebase graph"]
+  D --> DepView["side-panel Deps tab"]
+```
+
+The extraction is deterministic and cheap; we keep the derived
+tables (8.3, 8.4, 8.5) so the UI doesn't re-parse on every load.
+The body remains the source of truth; the derived tables get
+overwritten by the next extraction. Reconciliation: there is no
+write API on the derived tables other than this extraction pass.
+
+### 5.6 Versions
 
 Already implemented in P1.5.a: every spec body update appends a
 new `spec_version` and bumps `spec.current_version`. The
@@ -570,23 +719,122 @@ What we need to add or change to support the above:
 > The chain `spec -> story -> task` is `parent_id` only. We do
 > not need new columns for the chain itself.
 
-### 8.2 Specs (schema v4, additive)
+### 8.2 Specs (schema v5, additive)
+
+Schema v5 adds:
 
 | Column | Type | Default | Purpose |
 |---|---|---|---|
-| `author` (already exists) | TEXT NULL | NULL | Already set. New convention: `"product:<run_id>"` for product-authored, `"human"` or `NULL` for operator-authored. |
+| `extracted_at` | TEXT NULL | NULL | Timestamp of the last body extraction. NULL = not yet extracted. |
 
-We do NOT add new columns. `parent_spec_id`, `current_version`,
-`status` cover everything.
+We do NOT add other columns. `parent_spec_id`, `current_version`,
+`status`, `body`, `author` cover everything else. Diagrams,
+touches, and deps live in derived tables below — the body remains
+the source of truth.
 
-### 8.3 New table: sprint_selection
+### 8.3 New table: spec_diagram (derived from body)
+
+Each Mermaid block in the spec body becomes a row. The UI uses
+this instead of re-parsing the body on every render.
+
+```sql
+CREATE TABLE spec_diagram (
+    spec_id   TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+    ordinal   INTEGER NOT NULL,    -- 0-based order in the body
+    kind      TEXT NOT NULL,        -- 'sequenceDiagram'|'flowchart'|'graph'|'classDiagram'|'other'
+    source    TEXT NOT NULL,        -- raw Mermaid source
+    title     TEXT,                 -- optional ## heading above the block
+    PRIMARY KEY (spec_id, ordinal)
+);
+```
+
+Repopulated on every body update by the extraction pipeline
+(section 5.5). No manual edits.
+
+### 8.4 New table: spec_touches (declared + auto-extracted)
+
+Modules or services that this spec affects. Two sources:
+
+- **Declared:** the IntakeAgent calls `touches(module_id,
+  rationale)` during the chat.
+- **Auto-extracted:** the extraction pipeline parses the spec
+  body (the `## Touches` section + any module mentions in
+  Diagrams or Notes).
+
+```sql
+CREATE TABLE spec_touches (
+    spec_id      TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+    module_id    TEXT NOT NULL,         -- e.g. 'PortHorizon.Core.Auth'
+    source       TEXT NOT NULL,         -- 'declared' | 'auto'
+    rationale    TEXT,                  -- the agent's one-line justification
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (spec_id, module_id, source)
+);
+CREATE INDEX ix_spec_touches_module ON spec_touches(module_id);
+```
+
+Used by the side-panel Graph tab to overlay spec-affected
+modules on top of the codebase import graph. PROPOSED UI:
+hovering a module in the graph highlights every spec that
+touches it.
+
+### 8.5 New table: spec_dep (declared by agent)
+
+Edges between specs. Bidirectional in the data model so the UI
+can render "what depends on me?" without joining:
+
+```sql
+CREATE TABLE spec_dep (
+    from_spec_id   TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+    to_spec_id     TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL,    -- 'blocks' | 'depends_on' | 'related'
+    rationale      TEXT,
+    source         TEXT NOT NULL,    -- 'declared' | 'auto'
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (from_spec_id, to_spec_id, kind)
+);
+CREATE INDEX ix_spec_dep_to ON spec_dep(to_spec_id);
+```
+
+`blocks`: source must complete before target can start.
+`depends_on`: source waits for target. `related`: informational,
+no ordering implication.
+
+PROPOSED: `add_dependency(from, to, kind, rationale)` AIFunction
+is the single way these rows are created. The extraction
+pipeline does NOT auto-create spec_dep rows from prose; the agent
+must declare them explicitly. (Auto-detection of spec-to-spec
+deps from the codebase is a Phase 4 ask.)
+
+### 8.6 New table: codebase_graph_cache (incremental)
+
+The import graph from §4.2a is cached on disk, with a small
+SQLite index to speed up lookup:
+
+```sql
+CREATE TABLE codebase_graph_cache (
+    repo_sha    TEXT PRIMARY KEY,
+    built_at    TEXT NOT NULL,
+    file_count  INTEGER NOT NULL,
+    edge_count  INTEGER NOT NULL
+);
+```
+
+The actual graph files live in
+`.portHorizon/codebase-graph/<repo-sha>.json` on disk; the SQLite
+entry is just a manifest. The incremental builder consults
+`git rev-parse HEAD` to determine the current sha, and
+`git diff <prior-sha>..HEAD --name-only` to know which files
+changed.
+
+### 8.7 New table: sprint_selection
 
 A new table to record the scrum-loop audit trail. Why this needs
 to be its own table: the user wants to see "why was this task
 included?" in the dashboard, and the answer depends on the
 scoring context at sprint-plan time (which tasks existed, which
 were in other sprints, etc.) — we can't reconstruct it from the
-sprint_issue table alone.
+`sprint_issue` table alone.
 
 ```sql
 CREATE TABLE sprint_selection (
@@ -605,7 +853,7 @@ CREATE TABLE sprint_selection (
 > and gives the operator a paper trail of decisions. If you don't
 > care about this, we can derive it later from a log.
 
-### 8.4 New table: intake_session_master
+### 8.8 New table: intake_session_master
 
 To make the "intake produces a master spec" link clean. Each
 intake session optionally owns one master spec (or none if the
@@ -620,7 +868,7 @@ Alternatively, store this as metadata on the spec: `spec.author
 = "intake:<session_id>"`. PROPOSED: use metadata (matches existing
 conventions; no new schema change needed).
 
-### 8.5 Sprint status
+### 8.9 Sprint status
 
 PROPOSED: add `status = "Planning"` to the sprint lifecycle:
 `Planning -> Active -> Completed`. The current schema has
@@ -711,13 +959,122 @@ sealed record TaskCandidate(IssueRecord Task, int Score,
 - **Specs tab** (P1.5.a, done): read-only list + detail.
 - **Specs tab** (P2): add "Approve master" + "Start grooming"
   buttons (operator actions). Also show `parent_spec_id` as a
-  breadcrumb.
+  breadcrumb. Render Mermaid blocks in the detail view.
 - **Tasks tab**: show spec/story chain on hover; show
   `parent_id` chain in the row tooltip.
 - **Sprints tab**: add "Plan next sprint" button (P3).
 - **Intake tab** refinement (P2): SSE streaming output so the
   operator sees tokens land as the agent produces them; per-message
   Accept for child epics; "Accept all proposed epics" button.
+- **Intake tab** side-panel (P2, NEW): three tabs (Spec, Graph,
+  Deps) described in §4.3a. Renders Mermaid blocks live; the Graph
+  tab overlays `spec_touches` on top of the codebase import graph;
+  the Deps tab shows `spec_dep` edges. Pan + zoom + click-to-drill
+  is in scope; the Mermaid library provides this for free, we just
+  need to embed it.
+
+### 9.5 ICodebaseGraphBuilder (Phase 2, NEW)
+
+The incremental graph builder. See §4.2a for the interface:
+
+```
+namespace PortHorizon.Agents.Codebase;
+
+public interface ICodebaseGraphBuilder
+{
+    Task<CodebaseGraph> BuildAsync(
+        string repoRoot,
+        CodebaseGraphCache? priorCache,
+        CancellationToken ct);
+
+    bool SupportsLanguage(string language);
+}
+
+public sealed record CodebaseGraph(
+    string RepoRoot,
+    DateTime BuiltAt,
+    string RepoSha,                   // git rev-parse HEAD
+    IReadOnlyList<FileNode> Files,
+    IReadOnlyList<ImportEdge> Imports,
+    IReadOnlyList<ProjectEdge> Projects);
+
+public sealed record FileNode(string Path, string Language, string Module);
+public sealed record ImportEdge(string From, string To);
+public sealed record ProjectEdge(string FromProject, string ToProject);
+
+public sealed record CodebaseGraphCache(
+    DateTime BuiltAt,
+    string RepoSha,
+    int FileCount,
+    int EdgeCount,
+    string DiskPath);                 // .portHorizon/codebase-graph/<sha>.json
+```
+
+**Implementation: `DotnetCodebaseGraphBuilder`** for v1.
+Parses `.csproj` ProjectReferences and `using` directives inside
+`.cs` files. Lives behind the interface so we can swap in
+`TypeScriptCodebaseGraphBuilder` later without changing callers.
+
+**Incremental behavior:**
+
+```mermaid
+flowchart TD
+  start["BuildAsync(repoRoot, priorCache)"] --> sha["git rev-parse HEAD<br/>→ currentSha"]
+  sha --> cold{"priorCache == null<br/>OR sha changed?"}
+  cold -- "yes (cold)" --> walk["walk entire repo<br/>parse every .cs / .csproj"]
+  cold -- "no (warm, same sha)" --> noop["return prior graph"]
+  walk --> persist["write .portHorizon/codebase-graph/<sha>.json"]
+  sha -- "yes (warm, sha changed)" --> diff["git diff --name-only<br/>priorSha..currentSha"]
+  diff --> reproc["re-parse only changed files;<br/>swap their edges in cache"]
+  reproc --> persist
+  persist --> row["upsert codebase_graph_cache row"]
+  row --> done["return merged graph"]
+```
+
+1. Compute `git rev-parse HEAD` -> `currentSha`.
+2. If `priorCache == null` (cold) **OR** `currentSha != priorSha`
+   (warm but changed): go to step 3 or 4 respectively.
+3. Cold: walk entire repo, parse every `.cs` / `.csproj`.
+4. Warm: `git diff --name-only <prior>..HEAD` -> changed files.
+   Re-parse just those; swap their edges in the cached graph.
+5. Write new `.portHorizon/codebase-graph/<currentSha>.json`.
+6. Update `codebase_graph_cache` row.
+7. Return the merged graph.
+
+If `priorCache == null`, the very first build also walks the
+whole tree and stores under a `.full-initial.json` slot, then
+seeds `codebase_graph_cache` with the current HEAD sha.
+
+### 9.6 SpecBodyExtractor (Phase 2, NEW)
+
+Pure-function pipeline that produces the derived tables
+(`spec_diagram`, `spec_touches`, `spec_dep`) from the spec body.
+
+```
+namespace PortHorizon.Agents.Specs;
+
+public sealed class SpecBodyExtractor
+{
+    public SpecExtraction Extract(string body);
+
+    // Hand-written markdown subset parser. NOT a general markdown
+    // lib — we only handle the ## sections we care about + the
+    // ```mermaid``` blocks. Intentional: we want the body to remain
+    // portable markdown, not the C# extractor dictating body shape.
+}
+
+public sealed record SpecExtraction(
+    IReadOnlyList<MermaidBlock> Diagrams,
+    IReadOnlyList<string> Touches,        // module ids declared in ## Touches
+    IReadOnlyList<SpecDepEdge> Deps);     // declared in ## Dependencies section
+
+public sealed record MermaidBlock(int Ordinal, string Kind, string Source, string? Title);
+public sealed record SpecDepEdge(string ToSpecId, string Kind, string? Rationale);
+```
+
+The extractor is called by `SpecStore.UpdateBodyAsync` (inserts
+into the derived tables inside the same transaction). The body
+itself is not modified by the extractor.
 
 ---
 
@@ -729,7 +1086,9 @@ Things that can go wrong, and what we do:
 
 The intake session + message history is in SQLite, durable. On
 reopen, the next message resumes the conversation with the
-existing history. No special handling.
+existing history. The side-panel's Spec/Graph/Deps tabs read
+from `GET /api/specs/{id}` + `GET /api/specs/{id}/versions` +
+`GET /api/sessions/{id}/extract` (extraction cache) on tab open.
 
 ### 10.2 Intake agent crash mid-proposal
 
@@ -767,21 +1126,74 @@ in the dashboard. The operator decides:
 We surface this as a Sprints-tab banner; we don't take an
 automatic action.
 
+### 10.7 SSE streaming of agent output
+
+PROPOSED: the side-panel updates live as the agent produces
+output. The contract:
+- Server pushes `intake.run.delta` events with a stream token
+  + the partial body (already updated).
+- Client's Spec tab re-fetches `GET /api/specs/{id}` on each delta
+  event (debounced ~250ms to avoid thrash).
+- The Graph + Deps tabs re-fetch on delta too, but only if the
+  extraction cache is older than the delta.
+
+If the SSE connection drops, the next render is a full refetch
+from `/api/specs/{id}` (no streaming). Lossy on slow networks is
+acceptable for v1.
+
+### 10.8 Operator edits spec body directly while intake is active
+
+Operator edits via the Specs tab (`PATCH op=update_body`) while
+the IntakeAgent is mid-conversation. Two races:
+- Agent's next `add_dependency` call references a spec id the
+  operator just deleted. We resolve by checking existence and
+  silently dropping the call.
+- Agent's body is a fresh draft; operator's body is a refined
+  version. The merge strategy is operator-wins: a fresh agent
+  call appends a new `spec_version`; the operator's edits remain
+  the current version until the next agent call bumps it.
+
 ---
 
 ## 11. What we ship in each phase
 
 ### Phase 2 (next)
-- `IProjectContextSource` + `FilesystemProjectContextSource`.
-- `ProductAgent` with `propose_spec` / `propose_epic` /
-  `update_spec` tools.
-- Intake tab refinement: SSE streaming output, per-message
-  Accept-all, accept child-epic-as-unit.
+The A++ expansion adds the visualization + extraction pipeline
+work that wasn't in the original Phase 2 plan. Phase 2 splits
+into 2a (foundation) and 2b (UI).
+
+**Phase 2a (foundation):**
+- Schema v5: `spec_diagram`, `spec_touches`, `spec_dep`,
+  `codebase_graph_cache` tables + `extracted_at` on `spec`.
+- `SpecBodyExtractor` (hand-written markdown subset parser).
+- `SpecStore.ExtractAndPersistAsync` extension point.
+- `ICodebaseGraphBuilder` interface + `DotnetCodebaseGraphBuilder`
+  (incremental via `git rev-parse HEAD` + `git diff`).
+- `touches` and `add_dependency` AIFunctions.
+- Tests for the above (unit tests on the extractor, integration
+  test on the graph builder using a fixture repo).
+
+**Phase 2b (UI):**
+- Intake tab side-panel: three tabs (Spec, Graph, Deps).
+- Mermaid renderer in the Spec tab (already supported by browser;
+  we just embed it).
+- Codebase graph rendered via Mermaid `flowchart` with `spec_touches`
+  as overlaid edges; the Deps tab uses `graph LR` with red/blue
+  edges for blocks/depends_on.
+- SSE streaming of agent output (delta events). Re-fetch Specs tab
+  on each delta (debounced 250ms).
 - Refined `create_epic` flow that produces a child spec alongside
-  the issue.
+  the issue, with structured body (sections + Mermaid).
 - Master-spec gating logic: "Proposed when all children authored
   + Approved-or-Superseded."
-- Tests for the above.
+
+**Phase 2c (product refinement):**
+- `ProductAgent` with `update_spec` tool.
+- On operator Accept of a child epic, queue the ProductAgent run.
+- Runs in the background (not in the intake chat response cycle).
+- Writes the fully-structured spec body (replaces intake draft).
+
+Tests for all of the above.
 
 ### Phase 3
 - `GroomerAgent` with `create_story` / `create_task` tools.
@@ -801,10 +1213,12 @@ automatic action.
 
 ## 12. Open questions (must answer before code)
 
-Listed by section so we can resolve them in order:
+Listed by section so we can resolve them in order.
 
-- **Q1** (4.5): Spec-first vs issue-first proposal output. **My
-  pick: spec-first.**
+**RESOLVED:**
+- **Q1** (4.5): Spec-first proposal output. **RESOLVED: spec-first.**
+
+**Still open:**
 - **Q2** (5.2): Operator approval of master required, or
   auto-approve? **My pick: required.**
 - **Q2.5** (5.3): Status churn during product refinement. **My
@@ -816,12 +1230,27 @@ Listed by section so we can resolve them in order:
   **My pick: deterministic for P3, LLM-driven for P4.**
 - **Q5** (7.2): Backlog smaller than N. **My pick: confirm with
   operator, "plan N-1?"**
-- **Q6** (8.3): Per-task sprint score breakdown as a separate
+- **Q6** (8.7): Per-task sprint score breakdown as a separate
   table? **My pick: yes, makes explainability free.**
-- **Q7** (8.5): Sprint `Planning` state before `Active`? **My
+- **Q7** (8.9): Sprint `Planning` state before `Active`? **My
   pick: yes.**
 - **Q8** (10.4): Optimistic locking on spec edits? **My pick:
   skip for P2, add if it actually becomes a problem.**
+
+**NEW (added after A++ decision):**
+- **Q9** (4.2a): Per-file or per-class graph granularity? **My
+  pick: per-file for the import graph (smaller, faster), per-class
+  names in the spec overlay.**
+- **Q10** (4.3a): Side-panel layout — split 50/50 or 60/40? **My
+  pick: 50/50 for spec drafting (graph is secondary); grows to
+  30/70 if the operator wants the graph larger.**
+- **Q11** (4.4): Required Mermaid per child spec, or
+  recommended? **My pick: at least one `flowchart` or
+  `sequenceDiagram` per non-trivial child spec; agent is told
+  this as a soft requirement with examples.**
+- **Q12** (8.5): Auto-detect spec_dep from prose? **My pick: NO
+  in P2 (causes spurious edges); yes in P4 once we have a
+  spec-relationship model.**
 
 ---
 
@@ -837,7 +1266,14 @@ For follow-up docs as we build:
 - **Agent memory across runs**: the IntakeAgent's context is
   reconstructed from the session history + project context on
   each run. There is no agent-to-agent memory. Phase 4 ask.
-- **Evaluation harness**: how do we know the ProductAgent
-  wrote a good spec? Do we unit-test with mock LLMs (like we
-  do today) or do we eventually need a few real LLM evals with
-  the operator scoring them? Defer.
+- **Evaluation harness**: how do we know the IntakeAgent /
+  ProductAgent wrote a good spec? Do we unit-test with mock
+  LLMs (like we do today) or do we eventually need a few real
+  LLM evals with the operator scoring them? Defer.
+- **Real-time multi-user collaboration on intake**: today the
+  intake session is single-operator. Phase 4 ask.
+- **Auto-detect new modules/services from intake text**:
+  the IntakeAgent might say "we'll add a NotificationsService"
+  that doesn't exist yet. Today we don't track this. Phase 4
+  ask — likely the scope is "tell me what new components this
+  epic creates" as a new AIFunction.
