@@ -113,6 +113,38 @@
   .intake-input input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 8px 12px; border-radius: 4px; font-family: inherit; font-size: 13px; }
   .intake-input button { background: var(--accent); color: #000; border: 0; padding: 8px 18px; border-radius: 4px; cursor: pointer; font-size: 13px; }
   .intake-input button:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* Phase 2b.3: three-column intake grid (sidebar + chat + side-panel). */
+  .intake-grid-3 { display: grid; grid-template-columns: 220px 1fr 1fr; height: calc(100vh - 200px); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .intake-panel { display: flex; flex-direction: column; height: 100%; background: var(--panel); border-left: 1px solid var(--border); overflow: hidden; }
+  .intake-panel-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .intake-panel-tabs button { flex: 1; background: transparent; color: var(--muted); border: 0; padding: 8px; cursor: pointer; font-family: inherit; font-size: 12px; border-bottom: 2px solid transparent; }
+  .intake-panel-tabs button.active { color: var(--fg); border-bottom-color: var(--accent); background: var(--panel); }
+  .intake-panel-body { flex: 1; overflow-y: auto; padding: 12px; }
+  .spec-card { background: var(--bg); border: 1px solid var(--border); padding: 10px; border-radius: 4px; margin-bottom: 14px; }
+  .spec-card h4 { margin: 0 0 6px; font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  .spec-card h5 { margin: 10px 0 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .spec-card .version-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: rgba(200,200,200,0.15); color: var(--muted); }
+  .spec-body { background: var(--panel); border: 1px solid var(--border); padding: 8px; border-radius: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; line-height: 1.4; white-space: pre-wrap; max-height: 240px; overflow-y: auto; }
+  .spec-diagrams pre.mermaid { background: var(--panel); border: 1px solid var(--border); padding: 12px; border-radius: 4px; margin: 8px 0; }
+  .graph-toolbar { display: flex; gap: 6px; margin-bottom: 10px; }
+  .graph-toolbar input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 5px 8px; border-radius: 4px; font-family: inherit; font-size: 11px; }
+  .graph-toolbar button { background: var(--accent); color: #000; border: 0; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+  .graph-meta { color: var(--muted); font-size: 10px; margin-bottom: 8px; }
+  .graph-meta code { background: var(--bg); padding: 1px 4px; border-radius: 3px; }
+  .touches-list { margin-top: 14px; }
+  .touches-list h5 { margin: 0 0 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .touches-list ul { list-style: none; padding: 0; margin: 0; }
+  .touches-list li { padding: 4px 0; font-size: 11px; border-bottom: 1px dotted var(--border); }
+  .touches-list code { background: var(--bg); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+  .deps-list h5 { margin: 0 0 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .deps-list .deps-ul { list-style: none; padding: 0; margin: 0; }
+  .deps-list .deps-ul li { padding: 6px 0; font-size: 11px; border-bottom: 1px dotted var(--border); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .deps-list .kind-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(80, 160, 240, 0.2); color: rgb(80, 160, 240); font-weight: 600; }
+  .deps-list .kind-blocks { background: rgba(220, 80, 80, 0.2); color: rgb(220, 80, 80); }
+  .deps-list .kind-depends_on { background: rgba(220, 160, 80, 0.2); color: rgb(220, 160, 80); }
+  .deps-list .kind-related { background: rgba(160, 160, 160, 0.2); color: var(--muted); }
+  .deps-list .dep-rationale { color: var(--muted); font-style: italic; }
+  pre.mermaid-error { background: rgba(220, 80, 80, 0.1); border: 1px solid rgba(220, 80, 80, 0.4); color: rgb(220, 80, 80); padding: 8px; border-radius: 4px; font-size: 11px; }
   .specs-grid { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 200px); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
   .specs-sidebar { background: var(--bg); border-right: 1px solid var(--border); overflow-y: auto; }
   .specs-sidebar .toolbar { padding: 8px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
@@ -165,6 +197,7 @@
 </main>
 <div class="modal-bg" id="modal"><div class="modal" id="modal-body"></div></div>
 <footer id="foot"></footer>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (s) => (s ?? "").replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
@@ -411,6 +444,9 @@ async function renderSkills() {
 
 let intakeSessions = [];
 let activeIntakeSessionId = null;
+let activeIntakeTab = "spec";   // "spec" | "graph" | "deps"
+let intakePanelCache = {};       // sessionId -> {specs[], diagrams{}[], touches{}[], deps{}[]}
+let codebaseGraph = null;         // last-built graph for the project
 
 async function renderIntake() {
   try {
@@ -440,13 +476,17 @@ async function renderIntake() {
           `).join("") + '</ul>'}
     </div>`;
   let right = '<div class="intake-thread"><div class="empty">Select or create an intake session.</div></div>';
+  let panel = '<div class="intake-panel"><div class="empty">Select an intake session to see its spec.</div></div>';
   if (activeIntakeSessionId) {
     const session = intakeSessions.find(s => s.id === activeIntakeSessionId);
     if (session) {
       right = renderIntakeThread(session);
+      panel = renderIntakePanel(session);
     }
   }
-  $("tab-intake").innerHTML = `<div class="intake-grid">${left}${right}</div>`;
+  $("tab-intake").innerHTML = `<div class="intake-grid-3">${left}${right}${panel}</div>`;
+  // Render any Mermaid blocks that just landed in the DOM.
+  setTimeout(rerenderMermaid, 0);
 }
 
 function renderIntakeThread(session) {
@@ -524,6 +564,197 @@ async function acceptEpic(sessionId, messageId) {
   if (!r.ok) { alert("Accept failed: " + (await r.text())); return; }
   await renderIntake();
   await refreshState();
+}
+
+// --- Intake side-panel (Phase 2b.3) ---
+
+async function renderIntakePanel(session) {
+  // Lazily fetch the specs for this session + their extracted tables.
+  const cached = intakePanelCache[session.id];
+  if (!cached || cached.specs.length === 0) {
+    await refreshIntakePanelCache(session.id);
+  }
+  const data = intakePanelCache[session.id] || { specs: [], diagrams: {}, touches: {}, deps: {} };
+
+  const tabs = `
+    <div class="intake-panel-tabs">
+      <button class="${activeIntakeTab === 'spec' ? 'active' : ''}" onclick="setIntakeTab('spec', '${session.id}')">Spec</button>
+      <button class="${activeIntakeTab === 'graph' ? 'active' : ''}" onclick="setIntakeTab('graph', '${session.id}')">Graph</button>
+      <button class="${activeIntakeTab === 'deps' ? 'active' : ''}" onclick="setIntakeTab('deps', '${session.id}')">Deps</button>
+    </div>`;
+
+  const body = activeIntakeTab === 'spec' ? renderSpecTab(session, data)
+              : activeIntakeTab === 'graph' ? renderGraphTab(session, data)
+              : renderDepsTab(session, data);
+
+  return `<div class="intake-panel">${tabs}<div class="intake-panel-body">${body}</div></div>`;
+}
+
+function setIntakeTab(tab, sessionId) {
+  activeIntakeTab = tab;
+  if (sessionId) renderIntake();
+}
+
+async function refreshIntakePanelCache(sessionId) {
+  const specsResp = await fetch(`/api/intake/sessions/${sessionId}/specs`);
+  if (!specsResp.ok) {
+    intakePanelCache[sessionId] = { specs: [], diagrams: {}, touches: {}, deps: {} };
+    return;
+  }
+  const specs = await specsResp.json();
+  const diagrams = {};
+  const touches = {};
+  const deps = {};
+  for (const s of specs) {
+    const [d, t, dp] = await Promise.all([
+      fetch(`/api/specs/${s.id}/diagrams`).then(r => r.ok ? r.json() : []),
+      fetch(`/api/specs/${s.id}/touches`).then(r => r.ok ? r.json() : []),
+      fetch(`/api/specs/${s.id}/deps`).then(r => r.ok ? r.json() : []),
+    ]);
+    diagrams[s.id] = d;
+    touches[s.id] = t;
+    deps[s.id] = dp;
+  }
+  intakePanelCache[sessionId] = { specs, diagrams, touches, deps };
+}
+
+function renderSpecTab(session, data) {
+  if (!data.specs.length) {
+    return '<div class="empty">No specs yet. The agent will produce them as the conversation progresses.</div>';
+  }
+  // Render each spec with its body + extracted diagrams.
+  const blocks = data.specs.map(s => {
+    const d = data.diagrams[s.id] || [];
+    const diagramsHtml = d.length
+      ? `<div class="spec-diagrams">${d.map(di => `<pre class="mermaid">${escapeHtml(di.source)}</pre>`).join("")}</div>`
+      : '<div class="empty">No diagrams.</div>';
+    return `
+      <div class="spec-card">
+        <div class="spec-head">
+          <h4>${escapeHtml(s.title)}
+            <span class="status-tag status-${s.status.toLowerCase()}">${s.status}</span>
+            <span class="version-tag">v${s.currentVersion}</span>
+          </h4>
+        </div>
+        <pre class="spec-body">${escapeHtml(s.body)}</pre>
+        <h5>Diagrams (${d.length})</h5>
+        ${diagramsHtml}
+      </div>`;
+  }).join("");
+  return blocks;
+}
+
+function renderGraphTab(session, data) {
+  // The Graph tab shows: the codebase import graph (rendered via
+  // mermaid) + the spec_touches overlay.
+  const touchesAll = data.specs.flatMap(s => (data.touches[s.id] || []).map(t => ({ ...t, spec: s.title })));
+  const buttonRow = `
+    <div class="graph-toolbar">
+      <input id="graph-repo" placeholder="repoRoot (e.g. C:\\path\\to\\repo)" size="40" />
+      <button onclick="buildCodebaseGraph()">Build / refresh</button>
+    </div>`;
+
+  if (!codebaseGraph) {
+    return buttonRow + '<div class="empty">No codebase graph built yet. Click Build / refresh above.</div>';
+  }
+
+  // Build a small mermaid flowchart of the codebase. Mermaid's
+  // syntax limits node-id characters to alphanumerics + underscore;
+  // we sanitize paths to filenames.
+  const lines = ["flowchart LR"];
+  for (const f of codebaseGraph.files.slice(0, 80)) {
+    const id = sanitizeMermaidId("file_" + f.path);
+    lines.push(`  ${id}["${escapeHtml(f.path)}"]`);
+  }
+  for (const e of codebaseGraph.imports.slice(0, 120)) {
+    const a = sanitizeMermaidId("file_" + e.from);
+    const b = sanitizeMermaidId("ns_" + e.to);
+    lines.push(`  ${a} --> ${b}["${escapeHtml(e.to)}"]`);
+  }
+  const mermaidSrc = lines.join("\n");
+
+  // Spec touches overlay: highlight each module touched.
+  const touchesHtml = touchesAll.length
+    ? `<div class="touches-list"><h5>Spec touches (${touchesAll.length})</h5>
+        <ul>${touchesAll.map(t => `<li><code>${escapeHtml(t.moduleId)}</code> (from <i>${escapeHtml(t.spec)}</i>)${t.rationale ? ' — ' + escapeHtml(t.rationale) : ''}</li>`).join("")}</ul></div>`
+    : '';
+
+  return buttonRow + `
+    <div class="graph-meta">
+      Repo: <code>${escapeHtml(codebaseGraph.repoRoot)}</code> ·
+      sha: <code>${codebaseGraph.repoSha.slice(0, 8)}</code> ·
+      built: ${new Date(codebaseGraph.builtAt).toLocaleString()} ·
+      files: ${codebaseGraph.fileCount} ·
+      imports: ${codebaseGraph.importCount} ·
+      projects: ${codebaseGraph.projectEdgeCount}
+    </div>
+    <pre class="mermaid">${escapeHtml(mermaidSrc)}</pre>
+    ${touchesHtml}
+    <p class="empty">Graph renders the first 80 files / 120 imports for performance. The full graph lives at <code>.portHorizon/codebase-graph/${codebaseGraph.repoSha.slice(0, 8)}.json</code>.</p>
+  `;
+}
+
+function renderDepsTab(session, data) {
+  const all = data.specs.flatMap(s =>
+    (data.deps[s.id] || []).map(d => ({ ...d, fromTitle: s.title })));
+  if (!all.length) {
+    return '<div class="empty">No declared dependencies yet.</div>';
+  }
+  // Group by direction.
+  const outgoing = all.filter(d => d.fromSpecId);
+  const incoming = all.filter(d => !d.fromSpecId);
+  const render = (d) => `
+    <li>
+      <code>${escapeHtml(d.fromSpecId)}</code>
+      <span class="kind-tag kind-${d.kind}">${d.kind}</span>
+      <code>${escapeHtml(d.toSpecId)}</code>
+      ${d.rationale ? '<span class="dep-rationale">— ' + escapeHtml(d.rationale) + '</span>' : ''}
+    </li>`;
+  return `
+    <div class="deps-list">
+      <h5>Declared edges (${all.length})</h5>
+      <ul class="deps-ul">${all.map(render).join("")}</ul>
+    </div>
+  `;
+}
+
+async function buildCodebaseGraph() {
+  const repoRoot = $("graph-repo").value.trim();
+  if (!repoRoot) {
+    alert("Enter a repoRoot path");
+    return;
+  }
+  const r = await fetch(`/api/codebase-graph?repoRoot=${encodeURIComponent(repoRoot)}`);
+  if (!r.ok) {
+    alert("Build failed: " + (await r.text()));
+    return;
+  }
+  codebaseGraph = await r.json();
+  // Re-render whichever tab is active so the new graph appears.
+  if (activeIntakeSessionId) renderIntake();
+  // Mermaid rendering happens via mermaid.run() on next idle tick.
+  if (typeof mermaid !== "undefined") mermaid.run();
+}
+
+function sanitizeMermaidId(s) {
+  // Mermaid node ids: alphanumerics + underscore. Replace others.
+  return s.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+// Render any .mermaid pre blocks that just landed in the DOM.
+function rerenderMermaid() {
+  if (typeof mermaid === "undefined") return;
+  const blocks = document.querySelectorAll("pre.mermaid:not([data-rendered])");
+  blocks.forEach(async (el) => {
+    try {
+      const id = "mermaid-" + Math.random().toString(36).slice(2, 8);
+      const svg = await mermaid.render(id, el.textContent);
+      el.innerHTML = svg.svg;
+      el.setAttribute("data-rendered", "1");
+    } catch (ex) {
+      el.innerHTML = "<pre class=\"mermaid-error\">" + escapeHtml(String(ex)) + "</pre>";
+    }
+  });
 }
 
 // --- Specs tab (P1.5.a: read-only) ---
@@ -818,6 +1049,13 @@ $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") close
     try {
       const ev = JSON.parse(e.data);
       addEvent(ev);
+      // Phase 2b.3: when an intake run completes, refresh the
+      // side-panel cache for the active session so new specs +
+      // extracted diagrams/touches/deps show up live.
+      if (ev.kind === "intake.run.completed" && activeIntakeSessionId) {
+        intakePanelCache[activeIntakeSessionId] = null;
+        renderIntake();
+      }
     } catch {}
   };
 })();
