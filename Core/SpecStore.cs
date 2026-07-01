@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using PortHorizon.Agents.Specs;
 
 namespace PortHorizon.Agents.Core;
 
@@ -71,7 +72,12 @@ public interface ISpecStore
 public sealed class SpecStore : ISpecStore, IAsyncDisposable
 {
     private readonly IssueStore _issues;
-    public SpecStore(IssueStore issues) { _issues = issues; }
+    private readonly SpecBodyExtractor _extractor;
+    public SpecStore(IssueStore issues, SpecBodyExtractor? extractor = null)
+    {
+        _issues = issues;
+        _extractor = extractor ?? new SpecBodyExtractor();
+    }
 
     public async Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default)
     {
@@ -115,6 +121,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
         }
+
+        await PersistExtractionAsync(conn, tx, id, spec.Body, ct);
 
         await tx.CommitAsync(ct);
         return new SpecRecord(
@@ -244,6 +252,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
+        await PersistExtractionAsync(conn, tx, id, update.Body, ct);
+
         await tx.CommitAsync(ct);
         var refreshed = await GetAsync(id, ct)
             ?? throw new InvalidOperationException($"Spec {id} not found after update");
@@ -295,6 +305,105 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         cmd.CommandText = "DELETE FROM spec WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", id);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Re-extract the spec body and replace the derived tables
+    /// (spec_diagram, spec_touches, spec_dep) atomically. Called
+    /// from CreateAsync and UpdateBodyAsync inside the same
+    /// transaction as the body write. spec_dep rows whose
+    /// to_spec_id does not exist are skipped silently — the spec
+    /// body may mention a future spec by name.
+    /// </summary>
+    private async Task PersistExtractionAsync(
+        SqliteConnection conn,
+        SqliteTransaction tx,
+        string specId,
+        string body,
+        CancellationToken ct)
+    {
+        var extracted = _extractor.Extract(body);
+
+        // Diagrams: full replace (delete + insert).
+        await using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM spec_diagram WHERE spec_id = $id";
+            del.Parameters.AddWithValue("$id", specId);
+            await del.ExecuteNonQueryAsync(ct);
+        }
+        foreach (var d in extracted.Diagrams)
+        {
+            await using var ins = conn.CreateCommand();
+            ins.Transaction = tx;
+            ins.CommandText = @"INSERT INTO spec_diagram
+                (spec_id, ordinal, kind, source, title)
+                VALUES ($sid, $ord, $kind, $src, $title)";
+            ins.Parameters.AddWithValue("$sid", specId);
+            ins.Parameters.AddWithValue("$ord", d.Ordinal);
+            ins.Parameters.AddWithValue("$kind", d.Kind);
+            ins.Parameters.AddWithValue("$src", d.Source);
+            ins.Parameters.AddWithValue("$title", (object?)d.Title ?? DBNull.Value);
+            await ins.ExecuteNonQueryAsync(ct);
+        }
+
+        // Touches: full replace.
+        await using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM spec_touches WHERE spec_id = $id";
+            del.Parameters.AddWithValue("$id", specId);
+            await del.ExecuteNonQueryAsync(ct);
+        }
+        foreach (var t in extracted.Touches)
+        {
+            await using var ins = conn.CreateCommand();
+            ins.Transaction = tx;
+            ins.CommandText = @"INSERT INTO spec_touches
+                (spec_id, module_id, source, rationale, created_at)
+                VALUES ($sid, $mod, 'auto', $rat, $now)";
+            ins.Parameters.AddWithValue("$sid", specId);
+            ins.Parameters.AddWithValue("$mod", t.ModuleId);
+            ins.Parameters.AddWithValue("$rat", (object?)t.Rationale ?? DBNull.Value);
+            ins.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            await ins.ExecuteNonQueryAsync(ct);
+        }
+
+        // Deps: full replace. spec_dep is bidirectional in the data
+        // model but the agent only declares from->to; we insert
+        // exactly the declared rows. spec_diagram rows whose
+        // to_spec_id does not exist are silently skipped.
+        await using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM spec_dep WHERE from_spec_id = $id";
+            del.Parameters.AddWithValue("$id", specId);
+            await del.ExecuteNonQueryAsync(ct);
+        }
+        foreach (var d in extracted.Deps)
+        {
+            await using var ins = conn.CreateCommand();
+            ins.Transaction = tx;
+            ins.CommandText = @"INSERT INTO spec_dep
+                (from_spec_id, to_spec_id, kind, rationale, source, created_at)
+                VALUES ($from, $to, $kind, $rat, 'auto', $now)";
+            ins.Parameters.AddWithValue("$from", specId);
+            ins.Parameters.AddWithValue("$to", d.TargetSpecId);
+            ins.Parameters.AddWithValue("$kind", d.Kind);
+            ins.Parameters.AddWithValue("$rat", (object?)d.Rationale ?? DBNull.Value);
+            ins.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            await ins.ExecuteNonQueryAsync(ct);
+        }
+
+        // Bump extracted_at on spec.
+        await using (var upd = conn.CreateCommand())
+        {
+            upd.Transaction = tx;
+            upd.CommandText = "UPDATE spec SET extracted_at = $now WHERE id = $id";
+            upd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            upd.Parameters.AddWithValue("$id", specId);
+            await upd.ExecuteNonQueryAsync(ct);
+        }
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

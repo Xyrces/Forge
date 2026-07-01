@@ -80,7 +80,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 4;
+    public const int CurrentSchemaVersion = 5;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -243,6 +243,49 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 PRIMARY KEY (spec_id, version)
             );
             CREATE INDEX IF NOT EXISTS ix_spec_version_spec ON spec_version(spec_id, version DESC);
+
+            -- v5 tables: spec_diagram, spec_touches, spec_dep (derived
+            -- from the spec body by SpecBodyExtractor). Plus the
+            -- extracted_at column on spec itself.
+            ALTER TABLE spec ADD COLUMN extracted_at TEXT;
+            CREATE TABLE IF NOT EXISTS spec_diagram (
+                spec_id  TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+                ordinal  INTEGER NOT NULL,
+                kind     TEXT NOT NULL,
+                source   TEXT NOT NULL,
+                title    TEXT,
+                PRIMARY KEY (spec_id, ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS spec_touches (
+                spec_id     TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+                module_id   TEXT NOT NULL,
+                source      TEXT NOT NULL,
+                rationale   TEXT,
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (spec_id, module_id, source)
+            );
+            CREATE INDEX IF NOT EXISTS ix_spec_touches_module ON spec_touches(module_id);
+            CREATE TABLE IF NOT EXISTS spec_dep (
+                from_spec_id  TEXT NOT NULL REFERENCES spec(id) ON DELETE CASCADE,
+                to_spec_id    TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                rationale     TEXT,
+                source        TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                PRIMARY KEY (from_spec_id, to_spec_id, kind)
+            );
+            -- Note: to_spec_id has NO foreign key. Spec bodies may
+            -- reference future specs that don't exist yet. The
+            -- dashboard's Deps tab renders the spec id even if the
+            -- target isn't in the catalog; cleanup runs when the target
+            -- is deleted (see spec_dep_cascade_cleanup trigger below).
+            CREATE INDEX IF NOT EXISTS ix_spec_dep_to ON spec_dep(to_spec_id);
+            CREATE TABLE IF NOT EXISTS codebase_graph_cache (
+                repo_sha    TEXT PRIMARY KEY,
+                built_at    TEXT NOT NULL,
+                file_count  INTEGER NOT NULL,
+                edge_count  INTEGER NOT NULL
+            );
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

@@ -6,6 +6,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using PortHorizon.Agents.Core;
 using PortHorizon.Agents.Dashboard;
+using PortHorizon.Agents.Specs;
 
 namespace PortHorizon.Agents.Agents;
 
@@ -49,6 +50,7 @@ public sealed class IntakeAgent
     private readonly IIntakeStore _intakeStore;
     private readonly IIssueStore _issues;
     private readonly ISprintStore _sprints;
+    private readonly ISpecStore? _specs;
     private readonly IChatClientFactory _chatClientFactory;
     private readonly LlmConfig _config;
     private readonly RoleAgentRegistry _roles;
@@ -68,6 +70,7 @@ public sealed class IntakeAgent
         RoleAgentRegistry roles,
         IDashboardEventBus events,
         ILogger<IntakeAgent> logger,
+        ISpecStore? specs = null,
         ISkillSource? skills = null,
         string kiloAgentsRoot = ".kilo/agents",
         string defaultModel = "minimax-m2")
@@ -76,6 +79,7 @@ public sealed class IntakeAgent
         _intakeStore = intakeStore;
         _issues = issues;
         _sprints = sprints;
+        _specs = specs;
         _chatClientFactory = chatClientFactory;
         _config = config;
         _roles = roles;
@@ -146,12 +150,43 @@ public sealed class IntakeAgent
                          "large enough to be a multi-task epic (vs. a single dev task). " +
                          "Returns the new epic's issue id.");
 
+        // Phase 2a tools: touches + add_dependency. Both require
+        // SpecStore. We expose them as AIFunctions only when a
+        // SpecStore was injected; otherwise the agent is told (via
+        // its instructions) that these tools are unavailable.
+        var tools = new List<AITool> { createEpicTool };
+        if (_specs is not null)
+        {
+            var activeSpecIdRef = sessionId;
+            var touchesTool = AIFunctionFactory.Create(
+                ([Description("Module or service this spec touches, e.g. 'PortHorizon.Core.Auth'.")] string moduleId,
+                 [Description("Why this spec affects the module.")] string rationale) =>
+                    TouchesAsync(activeSpecIdRef, moduleId, rationale, ct),
+                name: "touches",
+                description: "Declare that the current spec (the most recently proposed epic) " +
+                             "touches a module or service. Use for each module the spec " +
+                             "would change. Returns 'ok' on success.");
+            tools.Add(touchesTool);
+
+            var addDependencyTool = AIFunctionFactory.Create(
+                ([Description("Target spec id, e.g. 'spec-abc123'.")] string targetSpecId,
+                 [Description("Edge kind: 'blocks', 'depends_on', or 'related'.")] string kind,
+                 [Description("One-line reason for the edge.")] string? rationale) =>
+                    AddDependencyAsync(activeSpecIdRef, targetSpecId, kind, rationale, ct),
+                name: "add_dependency",
+                description: "Declare that the current spec has a dependency on another spec. " +
+                             "Use 'blocks' if this spec must finish before target can start. " +
+                             "Use 'depends_on' if this spec waits for target. " +
+                             "Use 'related' for informational links. Returns 'ok' on success.");
+            tools.Add(addDependencyTool);
+        }
+
         var agent = new ChatClientAgent(
             chatClient,
             instructions: BuildIntakeInstructions(),
             name: "intake",
             description: $"Intake agent for project {_projectId}",
-            tools: new[] { createEpicTool });
+            tools: tools);
 
         _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.run.started",
             sessionId, $"project={_projectId}",
@@ -294,6 +329,101 @@ public sealed class IntakeAgent
             }));
 
         return issue.Id;
+    }
+
+    /// <summary>
+    /// Look up the spec most recently proposed by this session.
+    /// Used by the touches/add_dependency tools to find which spec
+    /// to attribute the call to.
+    /// </summary>
+    private async Task<SpecRecord?> MostRecentSpecAsync(string sessionId, CancellationToken ct)
+    {
+        var session = await _intakeStore.GetAsync(sessionId, ct);
+        if (session is null) return null;
+        // The last system message with a ProposedEpicId is the most recent
+        // proposed spec. (SpecStore has it by id, but we recorded the
+        // issue id at propose-time, not the spec id. Re-link via issue.)
+        var lastProposal = session.Messages
+            .Where(m => m.ProposedEpicId is not null)
+            .OrderByDescending(m => m.Id)
+            .FirstOrDefault();
+        if (lastProposal?.ProposedEpicId is null) return null;
+        // The spec was created from the same epic; find the spec whose
+        // parent_issue_id matches.
+        var issue = await _issues.GetAsync(lastProposal.ProposedEpicId, ct);
+        if (issue is null) return null;
+        var specs = await _specs!.ListAsync(_projectId, status: null, ct);
+        return specs.FirstOrDefault(s => s.ParentIssueId == issue.Id);
+    }
+
+    private async Task<string> TouchesAsync(
+        string sessionId, string moduleId, string rationale, CancellationToken ct)
+    {
+        if (_specs is null) return "spec_store_unavailable";
+        if (string.IsNullOrWhiteSpace(moduleId))
+            return "module_id_required";
+        var spec = await MostRecentSpecAsync(sessionId, ct);
+        if (spec is null) return "no_recent_spec";
+        // Read existing touches (declare or auto) and add this one.
+        // SpecStore.PersistExtractionAsync will overwrite on next body
+        // update; for runtime additions we need a separate path. To
+        // keep this scope limited, we append a section to the spec
+        // body via UpdateBodyAsync and let the extractor pick it up.
+        // That's "extra work" but stays consistent with the source-
+        // of-truth-is-body contract.
+        await _specs.UpdateBodyAsync(spec.Id,
+            new UpdateSpecBody(spec.Body + $"\n\n## Touches\n- {moduleId}{(string.IsNullOrWhiteSpace(rationale) ? "" : "  \n    - " + rationale)}\n", spec.Author),
+            ct);
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.spec.touched",
+            sessionId, $"spec={spec.Id} module={moduleId}",
+            new Dictionary<string, object?>
+            {
+                ["sessionId"] = sessionId,
+                ["specId"] = spec.Id,
+                ["moduleId"] = moduleId,
+            }));
+        return "ok";
+    }
+
+    private async Task<string> AddDependencyAsync(
+        string sessionId, string targetSpecId, string kind, string? rationale, CancellationToken ct)
+    {
+        if (_specs is null) return "spec_store_unavailable";
+        if (string.IsNullOrWhiteSpace(targetSpecId)) return "target_spec_required";
+        if (kind is not ("blocks" or "depends_on" or "related"))
+            return "kind_must_be_blocks_depends_on_or_related";
+        var spec = await MostRecentSpecAsync(sessionId, ct);
+        if (spec is null) return "no_recent_spec";
+        var targetExists = await _specs.GetAsync(targetSpecId, ct);
+        if (targetExists is null) return "target_spec_not_found";
+        // Same pattern as TouchesAsync: append a section to the body
+        // and let the extractor populate spec_dep.
+        var newSection = $"## Dependencies\n- {kind} {targetSpecId}{(string.IsNullOrWhiteSpace(rationale) ? "" : " — " + rationale)}\n";
+        var newBody = AppendSectionIfMissing(spec.Body, "Dependencies", newSection.TrimEnd('\n'));
+        await _specs.UpdateBodyAsync(spec.Id, new UpdateSpecBody(newBody, spec.Author), ct);
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.spec.dep_added",
+            sessionId, $"from={spec.Id} to={targetSpecId} kind={kind}",
+            new Dictionary<string, object?>
+            {
+                ["sessionId"] = sessionId,
+                ["fromSpecId"] = spec.Id,
+                ["toSpecId"] = targetSpecId,
+                ["kind"] = kind,
+            }));
+        return "ok";
+    }
+
+    /// <summary>
+    /// Append a section to the body if it isn't already present.
+    /// If present, append an extra bullet to the existing section
+    /// rather than duplicating the heading.
+    /// </summary>
+    private static string AppendSectionIfMissing(string body, string headingName, string fullSection)
+    {
+        var marker = "## " + headingName;
+        if (body.Contains(marker, StringComparison.Ordinal))
+            return body.TrimEnd() + "\n\n" + fullSection.Substring(fullSection.IndexOf('\n') + 1);
+        return body.TrimEnd() + "\n\n" + fullSection;
     }
 
     private string BuildIntakeInstructions()

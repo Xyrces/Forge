@@ -312,6 +312,7 @@ public static class Program
                 skills: skillSource,
                 kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents")));
         var specStore = new Core.SpecStore(issues);
+        var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
