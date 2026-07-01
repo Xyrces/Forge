@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PortHorizon.Agents.Agents;
+using PortHorizon.Agents.Codebase;
 using PortHorizon.Agents.Configuration;
 using PortHorizon.Agents.Core;
 using PortHorizon.Agents.Orchestrator;
@@ -22,6 +23,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly IntakeAgentRegistry? _intakeRegistry;
     private readonly ISpecStore _specs;
     private readonly ISpecExtractionReader? _extractorOverride;
+    private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
+    private readonly ICodebaseGraphCacheStore? _codebaseCacheOverride;
     private readonly AgentMessageBus _messageBus;
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ILogger<DashboardHost> _logger;
@@ -40,7 +43,9 @@ public sealed class DashboardHost : IAsyncDisposable
         IIntakeStore? intakeStore = null,
         IntakeAgentRegistry? intakeRegistry = null,
         ISpecStore? specs = null,
-        ISpecExtractionReader? extractor = null)
+        ISpecExtractionReader? extractor = null,
+        ICodebaseGraphBuilder? codebaseBuilder = null,
+        ICodebaseGraphCacheStore? codebaseCache = null)
     {
         _options = options;
         _issues = issues;
@@ -51,6 +56,8 @@ public sealed class DashboardHost : IAsyncDisposable
         _intakeRegistry = intakeRegistry;
         _specs = specs ?? new NullSpecStore();
         _extractorOverride = extractor;
+        _codebaseBuilderOverride = codebaseBuilder;
+        _codebaseCacheOverride = codebaseCache;
         _messageBus = messageBus;
         _bus = bus;
         _logger = logger;
@@ -154,6 +161,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         }
 
         SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore);
+
+        if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
+        {
+            CodebaseGraphEndpoints.MapCodebaseGraphEndpoints(_app, _codebaseBuilderOverride, _codebaseCacheOverride, _issues, _logger);
+        }
 
         _app.MapGet("/api/agents", () =>
         {

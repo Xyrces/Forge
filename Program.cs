@@ -314,13 +314,16 @@ public static class Program
         var specStore = new Core.SpecStore(issues);
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
+        var codebaseGraphBuilder = new Codebase.DotnetCodebaseGraphBuilder();
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
             intakeStore: intakeStore,
             intakeRegistry: intakeRegistry,
             specs: specStore,
-            extractor: specExtractionReader);
+            extractor: specExtractionReader,
+            codebaseBuilder: codebaseGraphBuilder,
+            codebaseCache: codebaseGraphCache);
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
