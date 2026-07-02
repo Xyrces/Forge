@@ -278,7 +278,13 @@ public static class Program
         var agentsStore = new Core.AgentStore(issues);
         var skillsStore = new Core.SkillStore(issues);
         var skillSource = new SqliteSkillSource(agentsStore, skillsStore, roleRegistry);
-        var memoryStore = new MemoryStore(Path.Combine(workspaceDir, ".portHorizon", "state", "memory.db"));
+        // The memory table lives in IssueStore's schema (v7). Construct an
+        // IssueStore against the memory DB once at startup so the schema
+        // (and any future migrations) run before MemoryStore touches it.
+        // MemoryStore itself does not own migrations.
+        var memoryDbPath = Path.Combine(workspaceDir, ".portHorizon", "state", "memory.db");
+        var memoryBootstrap = new Core.IssueStore(memoryDbPath);
+        var memoryStore = new MemoryStore(memoryDbPath);
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
         var agentRunner = new MafAgentRunner(

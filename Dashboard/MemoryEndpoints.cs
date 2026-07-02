@@ -21,8 +21,16 @@ public static class MemoryEndpoints
     {
         app.MapGet("/api/memory", async (string? prefix, CancellationToken ct) =>
         {
-            var list = await memory.RecallAsync(prefix, ct);
-            return Results.Json(list.Select(ToMemoryView).ToArray(), DashboardJson.Options);
+            try
+            {
+                var list = await memory.RecallAsync(prefix, ct);
+                return Results.Json(list.Select(ToMemoryView).ToArray(), DashboardJson.Options);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "GET /api/memory failed");
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
         });
 
         app.MapPost("/api/memory", async (HttpContext ctx) =>
