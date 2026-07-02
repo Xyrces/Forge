@@ -285,6 +285,12 @@ public static class Program
         var memoryDbPath = Path.Combine(workspaceDir, ".portHorizon", "state", "memory.db");
         var memoryBootstrap = new Core.IssueStore(memoryDbPath);
         var memoryStore = new MemoryStore(memoryDbPath);
+
+        // Phase 4: JSONL mirror of the issue store. Background service
+        // rewrites the file every 5s so it's safe to tail -f.
+        var issuesJsonlPath = Path.Combine(workspaceDir, ".portHorizon", "state", "issues.jsonl");
+        var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
+            loggerFactory.CreateLogger<IssuesJsonlMirror>());
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
         var agentRunner = new MafAgentRunner(
@@ -342,6 +348,7 @@ public static class Program
             specs: specStore,
             groomerFactory: groomerFactory,
             memory: memoryStore,
+            issuesJsonlPath: issuesJsonlPath,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);
@@ -363,6 +370,10 @@ public static class Program
         {
             logger.LogInformation("Starting dashboard");
             await dashboard.StartAsync(shutdownCts.Token);
+
+            // JSONL mirror is a fire-and-forget background task; it
+            // cancels itself when shutdownCts fires.
+            _ = jsonlMirror.StartAsync(shutdownCts.Token);
 
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);

@@ -24,6 +24,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ISpecStore _specs;
     private readonly Agents.GroomerAgentFactory? _groomerFactory;
     private readonly MemoryStore? _memory;
+    private readonly string? _issuesJsonlPath;
     private readonly ISpecExtractionReader? _extractorOverride;
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
     private readonly ICodebaseGraphCacheStore? _codebaseCacheOverride;
@@ -47,6 +48,7 @@ public sealed class DashboardHost : IAsyncDisposable
         ISpecStore? specs = null,
         Agents.GroomerAgentFactory? groomerFactory = null,
         MemoryStore? memory = null,
+        string? issuesJsonlPath = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
         ICodebaseGraphCacheStore? codebaseCache = null)
@@ -61,6 +63,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _specs = specs ?? new NullSpecStore();
         _groomerFactory = groomerFactory;
         _memory = memory;
+        _issuesJsonlPath = issuesJsonlPath;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
         _codebaseCacheOverride = codebaseCache;
@@ -171,6 +174,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         if (_memory is not null)
         {
             MemoryEndpoints.MapMemoryEndpoints(_app, _memory, _logger);
+        }
+
+        if (_issuesJsonlPath is not null)
+        {
+            IssuesJsonlEndpoints.MapIssuesJsonlEndpoints(_app, _issuesJsonlPath, _logger);
         }
 
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
