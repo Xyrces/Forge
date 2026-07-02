@@ -70,7 +70,7 @@ public class WorktreeExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
 
         var result = await WorktreeExecutor.HandleAsync(
-            claimed, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         Assert.Equal(WorktreeResult.Ok, result.Result);
         Assert.NotNull(result.WorktreePath);
@@ -89,7 +89,7 @@ public class WorktreeExecutorTests : IDisposable
             claimedOk.Issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
 
         var result = await WorktreeExecutor.HandleAsync(
-            claimedDup, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+            claimedDup, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         Assert.Equal(WorktreeResult.AlreadyClaimed, result.Result);
         Assert.Null(result.WorktreePath);

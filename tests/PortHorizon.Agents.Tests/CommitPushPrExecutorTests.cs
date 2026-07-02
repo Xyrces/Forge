@@ -96,7 +96,7 @@ public class CommitPushPrExecutorTests : IDisposable
         var claimed = await ClaimExecutor.HandleAsync(
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
-            claimed, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
         // No file edits in the worktree -> CommitAllAsync returns no changes.
         var agent = new AgentCompleted(worktree, AgentResult.Ok, "I did nothing.", null);
 

@@ -98,7 +98,7 @@ public class RunAgentExecutorTests : IDisposable
         var claimed = await ClaimExecutor.HandleAsync(
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
-            claimed, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         var runner = RunnerWithScriptedClient();
         var result = await RunAgentExecutor.HandleAsync(

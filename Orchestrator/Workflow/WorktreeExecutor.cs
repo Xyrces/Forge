@@ -7,27 +7,31 @@ namespace PortHorizon.Agents.Orchestrator.Workflow;
 
 /// <summary>
 /// Second executor in the engineering dispatch workflow. Creates a
-/// git worktree on a per-issue branch under the workspace, then
+/// git worktree on a per-issue branch under the workspace, persists
+/// the worktree path / branch / role in the issue's metadata, then
 /// returns a <see cref="WorktreeReady"/> with the worktree path +
 /// branch + base branch (for the eventual PR's base).
 /// </summary>
 public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeReady>
 {
+    private readonly IIssueStore _issues;
     private readonly GitWorktreeService _worktrees;
     private readonly string _defaultBranch;
     private readonly ILogger<WorktreeExecutor> _logger;
 
     public WorktreeExecutor(
+        IIssueStore issues,
         GitWorktreeService worktrees,
         string defaultBranch,
         ILogger<WorktreeExecutor> logger)
         : base(
             "worktree",
-            (input, ctx, ct) => HandleAsync(input, worktrees, defaultBranch, logger, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, worktrees, defaultBranch, logger, ct),
             null,
             new[] { typeof(ClaimedIssue) },
             new[] { typeof(WorktreeReady) })
     {
+        _issues = issues;
         _worktrees = worktrees;
         _defaultBranch = defaultBranch;
         _logger = logger;
@@ -35,6 +39,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
 
     public static async ValueTask<WorktreeReady> HandleAsync(
         ClaimedIssue input,
+        IIssueStore issues,
         GitWorktreeService worktrees,
         string defaultBranch,
         ILogger logger,
@@ -42,14 +47,39 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
     {
         if (input.Result == ClaimResult.AlreadyClaimed)
         {
-            // The workflow edge should route AlreadyClaimed to a sink,
-            // so reaching here means someone wired the workflow wrong.
-            // Don't throw — log and return a sentinel.
             logger.LogWarning("WorktreeExecutor received AlreadyClaimed for {Id}", input.Issue.Id);
             return new WorktreeReady(input, WorktreeResult.AlreadyClaimed, null, defaultBranch);
         }
         var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct);
+        // Persist the path/branch in metadata so the dashboard can
+        // surface them even before the agent has run.
+        var issue = await issues.GetAsync(input.Issue.Id, ct);
+        if (issue is not null)
+        {
+            var branch = input.Branch ?? $"agent/{input.Issue.Id}";
+            var currentMetadata = ParseMetadata(issue.MetadataJson);
+            currentMetadata["worktreePath"] = worktreePath;
+            currentMetadata["branch"] = branch;
+            await issues.TransitionAsync(input.Issue.Id, issue.Status, error: null,
+                metadata: currentMetadata, ct: ct);
+        }
         return new WorktreeReady(input, WorktreeResult.Ok, worktreePath, defaultBranch);
+    }
+
+    private static Dictionary<string, object> ParseMetadata(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new();
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+                return new();
+            var d = new Dictionary<string, object>();
+            foreach (var p in doc.RootElement.EnumerateObject())
+                d[p.Name] = System.Text.Json.JsonSerializer.Deserialize<object>(p.Value.GetRawText())!;
+            return d;
+        }
+        catch { return new(); }
     }
 }
 
