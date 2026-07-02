@@ -3,7 +3,7 @@ using PortHorizon.Agents.Configuration;
 
 namespace PortHorizon.Agents;
 
-public sealed class GitHubService
+public class GitHubService
 {
     private readonly GitHubClient _client;
     private readonly string _owner;
@@ -29,7 +29,7 @@ public sealed class GitHubService
         return result.Ref;
     }
 
-    public async Task<PullRequest> CreatePullRequestAsync(
+    public virtual async Task<PullRequest> CreatePullRequestAsync(
         string title, string body, string headBranch, string baseBranch = "main",
         CancellationToken cancellationToken = default)
     {
