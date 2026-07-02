@@ -167,6 +167,8 @@
   .spec-body, .version-body { background: var(--bg); border: 1px solid var(--border); padding: 12px; border-radius: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-x: auto; max-height: 360px; overflow-y: auto; }
   .spec-version { margin-bottom: 14px; }
   .version-head { font-size: 11px; color: var(--muted); margin-bottom: 4px; display: flex; gap: 6px; align-items: center; }
+  .spec-actions { display: flex; gap: 10px; align-items: center; margin: 8px 0 16px; }
+  .spec-actions .muted { color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -840,12 +842,45 @@ async function renderSpecDetail(spec) {
           ${spec.parentIssueId ? ' · parent issue: <code>' + escapeHtml(spec.parentIssueId) + '</code>' : ''}
           ${spec.author ? ' · author: ' + escapeHtml(spec.author) : ''}
         </div>
+        ${spec.status === 'Approved' ? `
+          <div class="spec-actions">
+            <button id="btn-groom" class="primary" onclick="startGrooming('${spec.id}')">Start grooming</button>
+            <span id="groom-status" class="muted"></span>
+          </div>
+        ` : ''}
       </div>
       <h3>Body</h3>
       <pre class="spec-body">${escapeHtml(spec.body)}</pre>
       <h3>Version history</h3>
       ${versionLinks || '<div class="empty">No versions.</div>'}
     </div>`;
+}
+
+async function startGrooming(specId) {
+  const status = $("groom-status");
+  const btn = $("btn-groom");
+  if (!btn || !status) return;
+  btn.disabled = true;
+  status.textContent = "Starting…";
+  try {
+    const r = await fetch(`/api/specs/${specId}/groom`, { method: "POST" });
+    if (r.status === 202) {
+      status.textContent = "Agent running. Watch the live event log.";
+    } else if (r.status === 400) {
+      const j = await r.json().catch(() => ({}));
+      status.textContent = `Cannot groom: ${j.error || "spec not approved"}`;
+      btn.disabled = false;
+    } else if (r.status === 404) {
+      status.textContent = "Spec not found.";
+      btn.disabled = false;
+    } else {
+      status.textContent = `Unexpected response ${r.status}`;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    status.textContent = `Error: ${e}`;
+    btn.disabled = false;
+  }
 }
 
 async function refreshMessageCount(kiloName) {
