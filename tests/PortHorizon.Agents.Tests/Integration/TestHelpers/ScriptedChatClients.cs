@@ -54,3 +54,42 @@ public sealed class ScriptingChatClientFactory : IChatClientFactory
     public ScriptingChatClientFactory(IChatClient client) { _client = client; }
     public IChatClient Create(LlmConfig config, AgentType role) => _client;
 }
+
+/// <summary>
+/// Test-only chat client that returns a sequence of function calls
+/// (one per <see cref="GetResponseAsync"/> invocation) and a final
+/// plain-text response. Drives multi-step AIFunction invocations
+/// per <c>ChatClientAgent.RunAsync</c>.
+/// </summary>
+public sealed class MultiToolCallingChatClient : IChatClient
+{
+    private readonly FunctionCallContent[] _functionCalls;
+    private readonly string _followUpText;
+    private int _callIndex;
+    public MultiToolCallingChatClient(FunctionCallContent[] functionCalls, string followUpText)
+    {
+        _functionCalls = functionCalls;
+        _followUpText = followUpText;
+    }
+    public Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (_callIndex < _functionCalls.Length)
+        {
+            var call = _functionCalls[_callIndex];
+            _callIndex++;
+            var msg = new ChatMessage(ChatRole.Assistant, new[] { (AIContent)call });
+            return Task.FromResult(new ChatResponse(msg));
+        }
+        return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _followUpText)));
+    }
+    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await Task.Yield();
+        yield break;
+    }
+    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+    public void Dispose() { }
+}
