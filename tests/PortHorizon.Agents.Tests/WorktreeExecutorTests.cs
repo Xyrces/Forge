@@ -81,15 +81,27 @@ public class WorktreeExecutorTests : IDisposable
     [Fact]
     public async Task Create_AlreadyClaimed_ReturnsAlreadyClaimed()
     {
+        // After P3 wired the orchestrator pre-claims, the workflow
+        // no longer double-claims. ClaimExecutor's pre-claim-aware
+        // path treats an already-InProgress issue with assignee=kilo
+        // as Ok (pass-through). To test the AlreadyClaimed sentinel,
+        // we use a different assignee on the first claim so the
+        // second ClaimExecutor call falls into the standalone path
+        // and returns AlreadyClaimed.
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        await _issues.ClaimAsync(issue.Id, "someone-else");
         var claimedOk = await ClaimExecutor.HandleAsync(
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
-        // Second claim attempt:
-        var claimedDup = await ClaimExecutor.HandleAsync(
+        // The issue is InProgress with assignee=someone-else, so the
+        // pre-claim path is skipped and the standalone claim attempt
+        // fails (Status=InProgress). Returns AlreadyClaimed.
+        Assert.Equal(ClaimResult.AlreadyClaimed, claimedOk.Result);
+        var secondClaim = await ClaimExecutor.HandleAsync(
             claimedOk.Issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        Assert.Equal(ClaimResult.AlreadyClaimed, secondClaim.Result);
 
         var result = await WorktreeExecutor.HandleAsync(
-            claimedDup, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+            secondClaim, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         Assert.Equal(WorktreeResult.AlreadyClaimed, result.Result);
         Assert.Null(result.WorktreePath);

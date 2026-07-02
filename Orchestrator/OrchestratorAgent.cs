@@ -117,117 +117,78 @@ public sealed class OrchestratorAgent : IAgent
         var startedAt = DateTime.UtcNow;
         try
         {
-            // Atomic claim so two orchestrators can't grab the same issue.
+            // P3 (final wiring): dispatch is now driven by the MAF
+            // Workflows pipeline. ClaimExecutor detects the
+            // pre-claim (InProgress + assignee=kilo) and passes
+            // through; otherwise it claims itself.
             var claimed = await _issues.ClaimAsync(issue.Id, "kilo", cancellationToken);
             if (claimed is null)
             {
                 _logger.LogDebug("Issue {Id} already claimed elsewhere", issue.Id);
                 return new Result(false, "already-claimed");
             }
-
             await PublishTransition(claimed, IssueStatus.Pending, IssueStatus.InProgress, null, cancellationToken);
 
-            var roleAgent = _roleRegistry.ForType(RoleAgentRegistry.FromTaskType(claimed.Type));
-            var branch = claimed.GetMetadata("branch") ?? $"agent/{claimed.Id}";
-            var worktreePath = await _worktrees.CreateAsync(claimed.Id, _workspaceOptions.DefaultBranch, cancellationToken);
+            // Re-fetch after the claim/transition so the workflow's
+            // input has InProgress + assignee=kilo (ClaimExecutor
+            // short-circuits on that combination).
+            var preClaimed = (await _issues.GetAsync(claimed.Id, cancellationToken))!;
 
-            await UpdateMetadataAsync(claimed.Id, m => MergeDict(m, new Dictionary<string, object>
-            {
-                ["worktreePath"] = worktreePath,
-                ["branch"] = branch,
-                ["roleAgent"] = roleAgent.KiloAgentName,
-            }), cancellationToken);
+            var workflow = new Workflow.EngineeringDispatchWorkflow(
+                issues: _issues,
+                agentRunner: _runner,
+                worktrees: _worktrees,
+                gitHub: _gitHub,
+                roleRegistry: _roleRegistry,
+                workspaceOptions: _workspaceOptions,
+                events: _events,
+                drainMessageBus: agent => _messageBus.Drain(agent),
+                logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<Workflow.EngineeringDispatchWorkflow>.Instance);
 
-            var claimedRefresh = (await _issues.GetAsync(claimed.Id, cancellationToken))!;
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AgentSessionStarted,
-                claimed.Id, $"role={roleAgent.KiloAgentName} worktree={worktreePath}"));
-            var basePrompt = BuildPrompt(claimedRefresh, roleAgent, worktreePath, branch, _workspaceOptions.DefaultBranch);
-            var queued = _messageBus.Drain(roleAgent.KiloAgentName);
-            var prompt = string.IsNullOrEmpty(queued)
-                ? basePrompt
-                : basePrompt + "\n\n## Operator messages\n" + queued + "\n\nAddress these messages before working on the task.";
-
-            // Capture the agent result in metadata so the dashboard can show
-            // what the agent said even when downstream steps fail. Capture
-            // BEFORE we use `result` so the failure path doesn't lose it.
-            AgentRunResult result;
+            // MAF's RunAsync may swallow executor exceptions and let
+            // the run complete "successfully". Detect failure by
+            // re-fetching the issue: if lastError is set, the
+            // workflow's run surfaced an exception.
             try
             {
-                result = await _runner.RunAsync(
-                    RoleAgentRegistry.FromTaskType(claimed.Type),
-                    prompt,
-                    sessionId: claimedRefresh.GetMetadata("agentSessionId"),
-                    context: new Dictionary<string, object>
-                    {
-                        ["worktreePath"] = worktreePath,
-                        ["branch"] = branch,
-                        ["issueId"] = claimed.Id,
-                    },
-                    cancellationToken);
+                await workflow.RunAsync(preClaimed, cancellationToken);
             }
-            catch (Exception promptEx)
+            catch (Exception ex)
             {
-                await RecordModelResponseMetadataAsync(claimed.Id, error: $"prompt-threw: {promptEx.GetType().Name}: {promptEx.Message}", ct: cancellationToken);
-                throw;
+                _logger.LogError(ex, "Workflow dispatch for {Id} threw", preClaimed.Id);
+                await HandleFailureAsync(preClaimed, ex, cancellationToken);
+                return new Result(false, ex.Message);
             }
-            await RecordModelResponseMetadataAsync(claimed.Id, response: result.Text, ct: cancellationToken);
-            await UpdateMetadataAsync(claimed.Id, m => MergeDict(m, new Dictionary<string, object>
+
+            // Inspect the issue post-workflow to construct the
+            // Result message (preserves the old sequential contract).
+            var after = await _issues.GetAsync(preClaimed.Id, cancellationToken);
+            var lastError = after?.GetMetadata("lastError");
+            if (!string.IsNullOrEmpty(lastError))
             {
-                ["agentSessionId"] = result.SessionId ?? string.Empty,
-            }), cancellationToken);
-
-
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.AgentSessionCompleted,
-                claimed.Id, $"elapsed={result.Elapsed.TotalMilliseconds:F0}ms",
-                new Dictionary<string, object?> { ["sessionId"] = result.SessionId ?? "", ["elapsedMs"] = result.Elapsed.TotalMilliseconds }));
-            _logger.LogInformation("Agent session for {Id} completed in {Ms}ms",
-                claimed.Id, result.Elapsed.TotalMilliseconds);
-
-            var commit = await _worktrees.CommitAllAsync(worktreePath, $"Task({claimed.Id}): {claimed.Title}", cancellationToken);
-            if (!commit.HasChanges)
+                _logger.LogWarning("Workflow dispatch for {Id} reported failure: {Err}",
+                    preClaimed.Id, lastError);
+                var ex = new InvalidOperationException(lastError);
+                await HandleFailureAsync(preClaimed, ex, cancellationToken);
+                return new Result(false, lastError);
+            }
+            var prNumber = after?.GetMetadata("prNumber");
+            _logger.LogInformation("Workflow dispatch for {Id} completed in {Ms}ms (status={Status} prNumber={Pr})",
+                preClaimed.Id, (DateTime.UtcNow - startedAt).TotalMilliseconds, after?.Status, prNumber);
+            if (!string.IsNullOrEmpty(prNumber))
             {
-                _logger.LogWarning("Issue {Id}: model produced no diff (no files committed). Marking Completed with lastResponse captured.", claimed.Id);
-                await _issues.TransitionAsync(claimed.Id, IssueStatus.Completed, "no changes (agent made 0 edits)", ct: cancellationToken);
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                    claimed.Id, "Completed (no-op)", new Dictionary<string, object?> { ["response"] = Truncate(result.Text ?? "", 400) }));
+                return new Result(true, $"PR #{prNumber} opened");
+            }
+            if (after?.Status == IssueStatus.Completed)
+            {
                 return new Result(true, "completed with no diff");
             }
-
-            await _worktrees.PushAsync(worktreePath, branch, cancellationToken);
-            var headSha = await _worktrees.GetHeadShaAsync(worktreePath, cancellationToken);
-
-            var pr = await _gitHub.CreatePullRequestAsync(
-                title: $"[{claimed.Type}] {claimed.Title}",
-                body: BuildPrBody(claimed, roleAgent, headSha, result.Text),
-                headBranch: branch,
-                baseBranch: _workspaceOptions.DefaultBranch,
-                cancellationToken: cancellationToken);
-
-            await UpdateMetadataAsync(claimed.Id, m => MergeDict(m, new Dictionary<string, object>
-            {
-                ["prNumber"] = pr.Number,
-                ["branchSha"] = headSha,
-            }), cancellationToken);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrOpened,
-                claimed.Id, $"PR #{pr.Number} -> {branch}",
-                new Dictionary<string, object?> { ["prNumber"] = pr.Number, ["branch"] = branch, ["sha"] = headSha }));
-            _logger.LogInformation("Opened PR #{PrNumber} for {Id}", pr.Number, claimed.Id);
-
-            await EnqueueWatchIssueAsync(claimed.Id, pr.Number, branch, worktreePath, cancellationToken);
-            _logger.LogInformation("Task {Id} dispatched to PR #{PrNumber} (duration {Ms}ms)",
-                claimed.Id, pr.Number, (DateTime.UtcNow - startedAt).TotalMilliseconds);
-            return new Result(true, $"PR #{pr.Number} opened");
+            return new Result(true, "workflow completed");
         }
         catch (OperationCanceledException)
         {
             await SafeTransitionAsync(issue.Id, IssueStatus.Failed, "cancelled", cancellationToken);
             return new Result(false, "cancelled");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Task {Id} failed", issue.Id);
-            await HandleFailureAsync(issue, ex, cancellationToken);
-            return new Result(false, ex.Message);
         }
         finally
         {
