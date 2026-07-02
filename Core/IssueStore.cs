@@ -140,7 +140,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 8;
+    public const int CurrentSchemaVersion = 9;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -404,6 +404,51 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             );
             CREATE INDEX IF NOT EXISTS ix_issue_groomer_run_spec ON issue_groomer_run(spec_id, ts);
             CREATE INDEX IF NOT EXISTS ix_issue_groomer_run_ts ON issue_groomer_run(ts);
+
+            -- v9: design_artifact + designer_run tables. The
+            -- Designer agent runs after Product and before Groomer.
+            -- design_artifact: visual artifacts (HTML wireframes,
+            -- SVG mockups, markdown component specs, visual rules)
+            -- attached to a spec. The dashboard renders them inline.
+            -- designer_run: one row per Designer run with the hygiene
+            -- verdict + the design_artifact ids it produced. The
+            -- dashboard's Design tab shows the timeline.
+            --
+            -- Same FK-loose pattern as issue_groomer_run: spec_id
+            -- references spec.id, but no SQL FK; the
+            -- DesignArtifactStore + SpecStore + Designer agent are
+            -- the source of truth for the relationship.
+            CREATE TABLE IF NOT EXISTS design_artifact (
+                id                  TEXT PRIMARY KEY,
+                spec_id             TEXT NOT NULL,
+                kind                TEXT NOT NULL,    -- 'wireframe' | 'mockup' | 'component-spec' | 'visual-rule'
+                title               TEXT NOT NULL,
+                body                TEXT NOT NULL,
+                body_kind           TEXT NOT NULL,    -- 'html' | 'svg' | 'markdown'
+                references          TEXT,             -- JSON array of {designArtifactId, why}
+                parent_artifact_id  TEXT,
+                status              TEXT NOT NULL DEFAULT 'draft',  -- 'draft' | 'approved' | 'superseded'
+                author              TEXT NOT NULL,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_design_artifact_spec
+                ON design_artifact(spec_id, status);
+
+            CREATE TABLE IF NOT EXISTS designer_run (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                  TEXT NOT NULL,
+                spec_id             TEXT NOT NULL,
+                trigger_kind        TEXT NOT NULL,    -- 'manual' | 'scheduled'
+                status              TEXT NOT NULL,    -- 'started' | 'succeeded' | 'hygiene_failed' | 'llm_failed'
+                new_spec_status     TEXT,             -- the spec status the designer set: 'designed' | 'approved' | 'needs_revision'
+                design_artifact_ids TEXT,             -- JSON array of design_artifact.id
+                hygiene_report      TEXT,             -- JSON: {passed, findings: [{rule, severity, message, fixSuggestion}]}
+                error               TEXT,
+                duration_ms         INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS ix_designer_run_spec ON designer_run(spec_id, ts);
+            CREATE INDEX IF NOT EXISTS ix_designer_run_ts ON designer_run(ts);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

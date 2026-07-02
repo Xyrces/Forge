@@ -6,11 +6,109 @@ namespace PortHorizon.Agents.Core;
 public enum SpecStatus
 {
     Draft,
+    ReadyForDesign,
+    Designed,
+    NeedsRevision,
     Approved,
+    Grooming,
+    Groomed,
+    Shipped,
     Superseded,
     Archived,
-    Grooming,
-    Shipped,
+}
+
+/// <summary>
+/// Validates <see cref="SpecStatus"/> transitions. Enforced by
+/// <see cref="ISpecStore.SetStatusAsync"/>; rejected transitions
+/// throw <see cref="InvalidOperationException"/> so the call site
+/// fails fast. New here for P2.a: the Designer step adds
+/// ReadyForDesign / Designed / NeedsRevision and a terminal
+/// Groomed state so the Groomer gate has a single, clear predicate.
+/// </summary>
+public static class SpecStatusTransitions
+{
+    private static readonly Dictionary<SpecStatus, HashSet<SpecStatus>> Allowed = new()
+    {
+        [SpecStatus.Draft] = new()
+        {
+            SpecStatus.ReadyForDesign,
+            SpecStatus.Approved,
+            SpecStatus.NeedsRevision,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.ReadyForDesign] = new()
+        {
+            SpecStatus.Designed,
+            SpecStatus.NeedsRevision,
+            SpecStatus.Approved,
+            SpecStatus.Draft,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.Designed] = new()
+        {
+            SpecStatus.Grooming,
+            SpecStatus.NeedsRevision,
+            SpecStatus.Draft,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.NeedsRevision] = new()
+        {
+            SpecStatus.Draft,
+            SpecStatus.ReadyForDesign,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.Approved] = new()
+        {
+            SpecStatus.Grooming,
+            SpecStatus.Draft,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.Grooming] = new()
+        {
+            SpecStatus.Groomed,
+            SpecStatus.Draft,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.Groomed] = new()
+        {
+            SpecStatus.Shipped,
+            SpecStatus.Approved,        // operator: "re-decompose"
+            SpecStatus.Draft,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.Shipped] = new()
+        {
+            SpecStatus.Archived,
+        },
+        [SpecStatus.Superseded] = new()
+        {
+            SpecStatus.Archived,
+        },
+        [SpecStatus.Archived] = new(),
+    };
+
+    public static bool IsAllowed(SpecStatus from, SpecStatus to)
+    {
+        if (from == to) return true; // idempotent
+        return Allowed.TryGetValue(from, out var set) && set.Contains(to);
+    }
+
+    public static void EnsureAllowed(SpecStatus from, SpecStatus to)
+    {
+        if (!IsAllowed(from, to))
+        {
+            throw new InvalidOperationException(
+                $"Invalid spec status transition: {from} -> {to}. " +
+                $"Allowed from {from}: {string.Join(", ", Allowed.GetValueOrDefault(from) ?? new HashSet<SpecStatus>())}");
+        }
+    }
 }
 
 /// <summary>
@@ -265,6 +363,9 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
     public async Task<SpecRecord> SetStatusAsync(string id, SpecStatus status, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
+        var current = await GetAsync(id, ct)
+            ?? throw new InvalidOperationException($"Spec {id} not found");
+        SpecStatusTransitions.EnsureAllowed(current.Status, status);
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
