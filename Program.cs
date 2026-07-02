@@ -324,12 +324,15 @@ public static class Program
         var productRefinementQueue = new Agents.ProductRefinementQueue(
             productAgentFactory, specStore, eventBus,
             loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
+        var groomerFactory = new Agents.GroomerAgentFactory(
+            issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory);
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
             intakeStore: intakeStore,
             intakeRegistry: intakeRegistry,
             specs: specStore,
+            groomerFactory: groomerFactory,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);

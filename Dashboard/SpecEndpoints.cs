@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using PortHorizon.Agents.Agents;
 using PortHorizon.Agents.Core;
 
 namespace PortHorizon.Agents.Dashboard;
@@ -23,7 +24,8 @@ public static class SpecEndpoints
         ISpecStore specs,
         ISpecExtractionReader extractor,
         ILogger logger,
-        PortHorizon.Agents.Core.IIntakeStore? intakeStore = null)
+        PortHorizon.Agents.Core.IIntakeStore? intakeStore = null,
+        GroomerAgentFactory? groomerFactory = null)
     {
         app.MapGet("/api/specs", async (string? project, string? status, CancellationToken ct) =>
         {
@@ -169,6 +171,39 @@ public static class SpecEndpoints
             await specs.DeleteAsync(id, ct);
             return Results.NoContent();
         });
+
+        // Phase 3.5: operator-triggered grooming. Returns immediately;
+        // the agent runs on a worker thread and emits dashboard events
+        // (groomer.run.started / completed / failed) as it works.
+        if (groomerFactory is not null)
+        {
+            app.MapPost("/api/specs/{id}/groom", async (string id, CancellationToken ct) =>
+            {
+                var spec = await specs.GetAsync(id, ct);
+                if (spec is null)
+                    return Results.NotFound(new { error = "spec_not_found" });
+                if (spec.Status != SpecStatus.Approved)
+                    return Results.BadRequest(new
+                    {
+                        error = "spec_not_approved",
+                        detail = $"spec status is {spec.Status}; expected Approved"
+                    });
+
+                // Fire-and-forget on a background task. The HTTP
+                // request returns immediately so the UI can refresh
+                // and watch the event stream.
+                var agent = groomerFactory.Create();
+                _ = Task.Run(async () =>
+                {
+                    try { await agent.GroomAsync(id); }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Background groom failed for spec {Id}", id);
+                    }
+                });
+                return Results.Accepted($"/api/specs/{id}", new { status = "started" });
+            });
+        }
     }
 
     private static object ToSpecView(SpecRecord s) => new

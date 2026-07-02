@@ -3,12 +3,15 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using PortHorizon.Agents.Agents;
 using PortHorizon.Agents.Core;
 using PortHorizon.Agents.Dashboard;
+using PortHorizon.Agents.Tests.Integration.TestHelpers;
 using Xunit;
 
 namespace PortHorizon.Agents.Tests.Integration;
@@ -26,12 +29,17 @@ public class SpecDashboardTests : IDisposable
     private readonly SpecStore _specs;
     private readonly IHost _host;
     private readonly HttpClient _client;
+    private readonly GroomerAgentFactory? _groomerFactory;
 
     public SpecDashboardTests()
+        : this(groomerFactory: null) { }
+
+    private SpecDashboardTests(GroomerAgentFactory? groomerFactory)
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"ph-spec-api-{Guid.NewGuid():N}.db");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
+        _groomerFactory = groomerFactory;
         _host = BuildHost();
         _host.Start();
         _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_host.GetPort()}/") };
@@ -54,7 +62,10 @@ public class SpecDashboardTests : IDisposable
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         var app = builder.Build();
 
-        SpecEndpoints.MapSpecEndpoints(app, _specs, new SpecExtractionReader(_issues), NullLogger<DashboardHost>.Instance, new Core.IntakeStore(_issues));
+        SpecEndpoints.MapSpecEndpoints(
+            app, _specs, new SpecExtractionReader(_issues),
+            NullLogger<DashboardHost>.Instance, new Core.IntakeStore(_issues),
+            _groomerFactory);
         return app;
     }
 
@@ -306,6 +317,142 @@ public class SpecDashboardTests : IDisposable
     public async Task SessionSpecsEndpoint_MissingSession_Returns404()
     {
         var resp = await _client.GetAsync("/api/intake/sessions/intake-missing/specs");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+}
+
+/// <summary>
+/// Phase 3.5: POST /api/specs/{id}/groom triggers the GroomerAgent.
+/// Uses a scripted chat client so the test doesn't need a real LLM.
+/// </summary>
+public class SpecGroomerEndpointTests : IDisposable
+{
+    private readonly string _dbPath;
+    private readonly IssueStore _issues;
+    private readonly SpecStore _specs;
+    private readonly IHost _host;
+    private readonly HttpClient _client;
+    private readonly InMemoryDashboardEventBus _events;
+
+    public SpecGroomerEndpointTests()
+    {
+        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-spec-groom-{Guid.NewGuid():N}.db");
+        _issues = new IssueStore(_dbPath);
+        _specs = new SpecStore(_issues);
+        _events = new InMemoryDashboardEventBus();
+        var scripted = new MultiToolCallingChatClient(new[]
+        {
+            new FunctionCallContent("c1", "create_story",
+                new Dictionary<string, object?> { ["title"] = "Story A" }),
+            new FunctionCallContent("c2", "create_task",
+                new Dictionary<string, object?>
+                {
+                    ["title"] = "Task A1",
+                    ["storyId"] = "ignored-by-scripted-client",
+                }),
+            new FunctionCallContent("c3", "set_spec_status",
+                new Dictionary<string, object?> { ["status"] = "Grooming" }),
+        }, "Done.");
+        var factory = new ScriptingChatClientFactory(scripted);
+        var config = new LlmConfig(new ProviderConfig("test", "", null, null, "test-model"));
+        var loggerFactory = LoggerFactory.Create(b => b.AddProvider(NullLoggerProvider.Instance));
+        var groomerFactory = new GroomerAgentFactory(
+            _issues, _specs, _events, factory, config, loggerFactory);
+
+        _host = BuildHost(groomerFactory);
+        _host.Start();
+        _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_host.GetPort()}/") };
+    }
+
+    public void Dispose()
+    {
+        _client.Dispose();
+        _host.Dispose();
+        try { _issues.Dispose(); } catch { }
+        try { File.Delete(_dbPath); } catch { }
+    }
+
+    private IHost BuildHost(GroomerAgentFactory groomerFactory)
+    {
+        var port = GetEphemeralPort();
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(NullLoggerProvider.Instance);
+        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        var app = builder.Build();
+
+        SpecEndpoints.MapSpecEndpoints(
+            app, _specs, new SpecExtractionReader(_issues),
+            NullLogger<DashboardHost>.Instance, new Core.IntakeStore(_issues),
+            groomerFactory);
+        return app;
+    }
+
+    private static int GetEphemeralPort()
+    {
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    private async Task<string> CreateApprovedSpecAsync()
+    {
+        var created = await _client.PostAsJsonAsync("/api/specs",
+            new { projectId = "P", title = "GroomTarget",
+                  body = "## Acceptance criteria\n- [ ] do the thing" });
+        var spec = await created.Content.ReadFromJsonAsync<JsonElement>();
+        var id = spec.GetProperty("id").GetString()!;
+        var approved = await _client.PatchAsJsonAsync($"/api/specs/{id}",
+            new { op = "set_status", status = "Approved" });
+        Assert.Equal(HttpStatusCode.OK, approved.StatusCode);
+        return id;
+    }
+
+    [Fact]
+    public async Task Groom_ApprovedSpec_Returns202_AndRunsAgent()
+    {
+        var id = await CreateApprovedSpecAsync();
+
+        var resp = await _client.PostAsync($"/api/specs/{id}/groom", content: null);
+        Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
+
+        // The agent runs on a background task; poll the spec until it
+        // moves to Grooming (or give up after a few seconds).
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        SpecStatus? finalStatus = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            var fetched = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}");
+            finalStatus = Enum.Parse<SpecStatus>(fetched.GetProperty("status").GetString()!);
+            if (finalStatus == SpecStatus.Grooming) break;
+            await Task.Delay(100);
+        }
+        Assert.Equal(SpecStatus.Grooming, finalStatus);
+
+        // At least one story was created and linked to the spec.
+        var issues = await _issues.ListAsync(new IssueFilter { Type = "story" });
+        Assert.Single(issues);
+        Assert.Equal(id, issues[0].ParentIssueId);
+    }
+
+    [Fact]
+    public async Task Groom_DraftSpec_Returns400()
+    {
+        var created = await _client.PostAsJsonAsync("/api/specs",
+            new { projectId = "P", title = "Draft", body = "x" });
+        var spec = await created.Content.ReadFromJsonAsync<JsonElement>();
+        var id = spec.GetProperty("id").GetString()!;
+
+        var resp = await _client.PostAsync($"/api/specs/{id}/groom", content: null);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Groom_MissingSpec_Returns404()
+    {
+        var resp = await _client.PostAsync("/api/specs/spec-missing/groom", content: null);
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 }
