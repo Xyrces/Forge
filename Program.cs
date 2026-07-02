@@ -335,6 +335,7 @@ public static class Program
             intakeRegistry: intakeRegistry,
             specs: specStore,
             groomerFactory: groomerFactory,
+            memory: memoryStore,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);
