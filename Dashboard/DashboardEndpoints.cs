@@ -33,7 +33,7 @@ public static class DashboardEndpoints
             return Results.Json(ToIssueView(created), DashboardJson.Options, statusCode: 201);
         });
 
-        app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
+app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         {
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
@@ -48,6 +48,70 @@ public static class DashboardEndpoints
                 return Results.Json(ToIssueView(updated), DashboardJson.Options);
             }
             return Results.BadRequest(new { error = "unsupported patch" });
+        });
+
+        // ---- Issue dependency graph (Phase 2 of docs/embedded-issues.md) ----
+        app.MapGet("/api/state/issues/{id}/deps", async (string id, CancellationToken ct) =>
+        {
+            var existing = await issues.GetAsync(id, ct);
+            if (existing is null) return Results.NotFound();
+            var deps = await issues.DependenciesAsync(id, ct);
+            var blocked = await issues.IsBlockedAsync(id, ct);
+            return Results.Json(new
+            {
+                issueId = id,
+                blocked,
+                edges = deps.Select(d => new
+                {
+                    blockerId = d.BlockerId,
+                    blockedId = d.BlockedId,
+                    kind = d.Kind.ToString().ToLowerInvariant(),
+                    createdAt = d.CreatedAt,
+                }).ToArray(),
+            }, DashboardJson.Options);
+        });
+
+        app.MapPost("/api/state/issues/{id}/deps", async (string id, HttpContext ctx) =>
+        {
+            var body = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(
+                ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
+            if (body is null) return Results.BadRequest(new { error = "empty body" });
+            if (!body.TryGetValue("blockerId", out var blockerObj) || blockerObj is null)
+                return Results.BadRequest(new { error = "blockerId required" });
+            if (!body.TryGetValue("kind", out var kindObj) || kindObj is null)
+                return Results.BadRequest(new { error = "kind required (blocks | related | duplicates)" });
+            var blockerId = blockerObj.ToString() ?? "";
+            var kindStr = kindObj.ToString() ?? "";
+            if (!IssueDepKindExtensions.TryParseDb(kindStr, out var kind))
+                return Results.BadRequest(new { error = $"unknown kind '{kindStr}'" });
+
+            try
+            {
+                var edge = await issues.AddDependencyAsync(blockerId, id, kind, ctx.RequestAborted);
+                return Results.Json(new
+                {
+                    blockerId = edge.BlockerId,
+                    blockedId = edge.BlockedId,
+                    kind = edge.Kind.ToString().ToLowerInvariant(),
+                    createdAt = edge.CreatedAt,
+                }, DashboardJson.Options, statusCode: 201);
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.NotFound(new { error = ex.Message });
+            }
+        });
+
+        app.MapDelete("/api/state/issues/{id}/deps/{blockerId}/{kind}", async (string id, string blockerId, string kind, CancellationToken ct) =>
+        {
+            if (!IssueDepKindExtensions.TryParseDb(kind, out var kindEnum))
+                return Results.BadRequest(new { error = $"unknown kind '{kind}'" });
+            var removed = await issues.RemoveDependencyAsync(blockerId, id, kindEnum, ct);
+            return removed ? Results.NoContent() : Results.NotFound();
         });
 
         // ---- Agents ----
