@@ -227,17 +227,27 @@ public sealed class OrchestratorAgentTests : IDisposable
     {
         private readonly string _text;
         public ScriptedRunner(string text) { _text = text; }
-        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, CancellationToken ct)
-            => Task.FromResult(new AgentRunResult(Text: _text, SessionId: null, InputTokens: 0, OutputTokens: 0, Elapsed: TimeSpan.FromMilliseconds(1)));
+public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, CancellationToken ct)
+            => RunAsync(role, prompt, sessionId, context: null, ct);
+        public Task<AgentRunResult> RunAsync(
+            AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+            => Task.FromResult(new AgentRunResult(Text: _text, SessionId: null, InputTokens: 0, OutputTokens: 0, Elapsed: TimeSpan.Zero));
     }
 
     private sealed class CapturingRunner : IAgentRunner
     {
         private readonly string _text;
+        public IReadOnlyDictionary<string, object>? LastContext { get; private set; }
         public string? LastPrompt { get; private set; }
         public CapturingRunner(string text) { _text = text; }
         public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, CancellationToken ct)
+            => RunAsync(role, prompt, sessionId, context: null, ct);
+        public Task<AgentRunResult> RunAsync(
+            AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
         {
+            LastContext = context;
             LastPrompt = prompt;
             return Task.FromResult(new AgentRunResult(Text: _text, SessionId: null, InputTokens: 0, OutputTokens: 0, Elapsed: TimeSpan.FromMilliseconds(1)));
         }
@@ -248,6 +258,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         private readonly Exception _ex;
         public ThrowingRunner(Exception ex) { _ex = ex; }
         public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, CancellationToken ct)
+            => throw _ex;
+        public Task<AgentRunResult> RunAsync(
+            AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
             => throw _ex;
     }
 }

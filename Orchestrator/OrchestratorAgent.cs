@@ -160,6 +160,12 @@ public sealed class OrchestratorAgent : IAgent
                     RoleAgentRegistry.FromTaskType(claimed.Type),
                     prompt,
                     sessionId: claimedRefresh.GetMetadata("agentSessionId"),
+                    context: new Dictionary<string, object>
+                    {
+                        ["worktreePath"] = worktreePath,
+                        ["branch"] = branch,
+                        ["issueId"] = claimed.Id,
+                    },
                     cancellationToken);
             }
             catch (Exception promptEx)

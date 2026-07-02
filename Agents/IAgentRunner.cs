@@ -20,9 +20,22 @@ public interface IAgentRunner
     /// the prompt, return the response text and a sessionId for restart
     /// safety (may be null for short-lived invocations).
     /// </summary>
-    /// <param name="role">Which role agent to instantiate (CoreDev, ClientDev, QA, Reviewer).</param>
+/// <param name="role">Which role agent to instantiate (CoreDev, ClientDev, QA, Reviewer).</param>
     /// <param name="prompt">The full prompt text including any system instructions, issue context, and operator message bus content.</param>
     /// <param name="sessionId">Optional session id to resume. Implementations may use it for restart safety (MAF: deserialize into <c>AgentSession</c>).</param>
+    /// <param name="context">Optional run context (worktree path, branch, etc.). Implementations use this to bind tools (e.g. <c>bash</c>'s working directory) to the per-task environment.</param>
     /// <param name="ct">Cancellation token. Honors SIGINT propagation.</param>
-    Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, CancellationToken ct);
+    Task<AgentRunResult> RunAsync(
+        AgentType role,
+        string prompt,
+        string? sessionId,
+        IReadOnlyDictionary<string, object>? context,
+        CancellationToken ct);
+
+    /// <summary>
+    /// Convenience overload for callers that don't have a context dict.
+    /// Equivalent to passing <c>context: null</c>.
+    /// </summary>
+    Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, CancellationToken ct)
+        => RunAsync(role, prompt, sessionId, context: null, ct);
 }

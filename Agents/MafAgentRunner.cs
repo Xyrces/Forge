@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Core;
 
 namespace PortHorizon.Agents.Agents;
@@ -47,8 +48,16 @@ public sealed class MafAgentRunner : IAgentRunner
         _kiloAgentsRoot = kiloAgentsRoot;
     }
 
-    public async Task<AgentRunResult> RunAsync(
+public async Task<AgentRunResult> RunAsync(
         AgentType role, string prompt, string? sessionId, CancellationToken ct)
+        => await RunAsync(role, prompt, sessionId, context: null, ct);
+
+    public async Task<AgentRunResult> RunAsync(
+        AgentType role,
+        string prompt,
+        string? sessionId,
+        IReadOnlyDictionary<string, object>? context,
+        CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
         var roleInstructions = LoadRoleInstructions(roleDef.KiloAgentName);
@@ -63,12 +72,31 @@ public sealed class MafAgentRunner : IAgentRunner
         // task text; the system prompt is the role + skills context.
         var fullPrompt = prompt;
 
+        // P3 in progress: surface a real `bash` AIFunction so the model
+        // emits structured tool_calls instead of XML fallback. The
+        // workingDirectory defaults to the task's worktree if the
+        // orchestrator passes one in `context["worktreePath"]`.
+        var tools = new List<AITool>();
+        var bashWorkingDir = ResolveWorktreePath(context);
+        if (!string.IsNullOrWhiteSpace(bashWorkingDir))
+        {
+            tools.Add(new BashTool(bashWorkingDir, logger: null).AsAIFunction());
+        }
+
         var chatClient = _chatClientFactory.Create(_config, role);
+        // Wrap with function invocation so MAF actually executes the
+        // tools the model calls (instead of just leaving them in the
+        // response).
+        var chatClientWithTools = tools.Count > 0
+            ? new ChatClientBuilder(chatClient).UseFunctionInvocation().Build()
+            : chatClient;
+
         var agent = new ChatClientAgent(
-            chatClient,
+            chatClientWithTools,
             instructions: instructions,
             name: roleDef.KiloAgentName,
-            description: roleDef.ProjectSubdir);
+            description: roleDef.ProjectSubdir,
+            tools: tools);
 
         var message = new ChatMessage(ChatRole.User, fullPrompt);
         var session = await DeserializeSessionAsync(agent, sessionId, ct);
@@ -93,14 +121,23 @@ public sealed class MafAgentRunner : IAgentRunner
     OutputTokens: 0,
     Elapsed: elapsed);
         }
-        finally
+finally
         {
             // MAF ChatClientAgent does not implement IDisposable; chatClient is the
             // resource, and our stubbed IChatClient (Microsoft.Extensions.AI) is
             // IDisposable. Best-effort dispose; real providers handle their own
-            // connection pools.
-            if (chatClient is IDisposable d) d.Dispose();
+            // connection pools. When function invocation is in play, the
+            // ChatClientBuilder wrapper is what holds the underlying client.
+            var disposable = chatClientWithTools as IDisposable ?? chatClient;
+            if (disposable is IDisposable d) d.Dispose();
         }
+    }
+
+    private static string? ResolveWorktreePath(IReadOnlyDictionary<string, object>? context)
+    {
+        if (context is null) return null;
+        if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
+        return raw.ToString();
     }
 
     private async Task<string> BuildSkillInstructionsAsync(AgentType role, CancellationToken ct)
