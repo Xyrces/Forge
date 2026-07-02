@@ -1,28 +1,31 @@
 # PortHorizon.Agents
 
-A long-lived .NET orchestrator that drives Kilo agents over the Agent Client Protocol (ACP) to build [Xyrces/PortHorizon](https://github.com/Xyrces/PortHorizon). The orchestrator owns the task queue, git worktrees, GitHub PR lifecycle, and review-gated merge; **Kilo owns the code**.
+A long-lived .NET 10 orchestrator that drives AI coding agents (M3 by default) against the [Xyrces/PortHorizon](https://github.com/Xyrces/PortHorizon) game repo. The orchestrator owns the task queue, git worktrees, GitHub PR lifecycle, and review-gated merge. **The model owns the code.**
+
+The runtime uses the [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) 1.12.0 with [`Microsoft.Agents.AI.Workflows`](https://www.nuget.org/packages/Microsoft.Agents.AI.Workflows) for the dispatch pipeline. Agents are powered by the [kilo gateway](https://kilo.ai/docs/gateway) — an OpenAI-compatible HTTP endpoint. No separate `kilo serve` subprocess, no ACP, no per-session worktree cwd gymnastics.
 
 ```
 PortHorizon.Agents (.NET orchestrator, long-lived)
-├── AcpProcessManager       starts `kilo serve --port 4096` (HTTP+JSON)
-├── AcpClient (HttpClient)    REST client: POST /session, POST /session/{id}/message
-├── RoleAgentRegistry        maps AgentType → Kilo agent name + role config
-├── GitWorktreeService       per-task `git worktree add` lifecycle
-├── GitHubService            PR open / status polling / merge
-├── OrchestratorAgent        queue + dispatch loop
-└── PRWatcher                polls PR state, triggers merge on approve+green
+├── IssueStore (SQLite)         task queue + dep graph + memory + event log
+├── MemoryStore (SQLite)         persistent project memory (bd remember/prime)
+├── IssuesJsonlMirror            background tail -f mirror of the issue store
+├── GitWorktreeService           per-task `git worktree add` lifecycle
+├── GitHubService                PR open / status polling / merge
+├── OrchestratorAgent            dispatch loop (claim → run → commit → PR)
+├── MafAgentRunner               MAF ChatClientAgent + bash AIFunction
+├── PRWatcher                    monitors PRs until CI+review gate passes
+└── DashboardHost                http://127.0.0.1:4097 (Kestrel, static HTML)
 
-External (Kilo)
-├── `kilo serve` server      HTTP+JSON API on a single TCP port, multiplexed by session
-├── `kilo github` App        webhook-driven PR reviewer on PortHorizon repo
-└── Kilo agent definitions   .kilo/agents/{coredev,clientdev,qa,reviewer}.md
+External
+├── kilo gateway (HTTPS)         LLM inference (OpenAI-compatible)
+└── GitHub.com                   PRs, status checks, merges
 ```
 
 ## Prerequisites
 
 1. **.NET 10 SDK** — `dotnet --version` should print `10.0.x`.
-2. **kilo CLI** — see [`install-kilo.md`](install-kilo.md) for the host checklist.
-3. **Kilo GitHub App installed** on `Xyrces/PortHorizon` — see [`docs/install-kilo-github.md`](docs/install-kilo-github.md).
+2. **kilo gateway API key** — see [`install-kilo.md`](install-kilo.md). JWT from <https://kilo.ai>.
+3. **GitHub PAT** with `repo` scope on the target repo — `gh auth token` or <https://github.com/settings/tokens>.
 4. **Git** with worktree support (any modern Git for Windows).
 
 ## Build
@@ -39,12 +42,14 @@ dotnet build PortHorizon.Agents.sln
 dotnet test PortHorizon.Agents.sln
 ```
 
-Minimum viable coverage:
+Current coverage: **294 passing, 2 skipped** (real-LLM tests gated on having a kilo gateway key configured). Test infrastructure includes:
 
-- `StateStoreTests` — round-trip, corrupt JSON, schema-version rejection, atomic write.
-- `StateReaperTests` — stale-task sweep, retry-budget exhaustion, no-op cases.
-- `PRWatcherTests` — full CI × review verdict table.
-- `RoleAgentRegistryTests` — task-type → role mapping and tool permissions.
+- `IssueStoreTests`, `IssueDepTests`, `IssuesJsonlMirrorTests` — SQLite store
+- `MemoryStoreTests`, `MemoryEndpointTests` — memory table + HTTP
+- `BashToolTests`, `MafAgentRunnerBashToolTests` — MAF tool-call plumbing
+- `ClaimExecutorTests` → `EnqueueWatchExecutorTests` — P3 workflow executors
+- `EngineeringDispatchWorkflowTests` — end-to-end workflow against a real temp git repo
+- `OrchestratorAgentTests`, `PRWatcherTests`, `RoleAgentRegistryTests` — integration
 
 ## Configuration
 
@@ -52,96 +57,133 @@ Copy `appsettings.example.json` to `appsettings.json` and fill in:
 
 ```jsonc
 {
-  "kilo": { "provider": "kilocode", "model": "kilocode/minimax-m3", "orgId": "" },
-  "github": { "owner": "Xyrces", "repo": "PortHorizon", "token": "" },
-  "workspace": { "root": "C:\\Users\\jtn50\\repos\\gamedev\\PortHorizon", "worktreeRoot": ".portHorizon\\worktrees", "defaultBranch": "main" },
-  "acpServer": { "executablePath": "kilo", "port": 4096, "hostname": "127.0.0.1" },
-  "spawner": { "maxConcurrentSessions": 4, "pollIntervalSeconds": 3, "staleMinutes": 30 }
+  "llm": {
+    "defaultProvider": "kilo-gateway",
+    "providers": [
+      {
+        "name": "kilo-gateway",
+        "baseUrl": "https://api.kilo.ai/api/gateway",
+        "apiKey": "KILO_GATEWAY_API_KEY",
+        "defaultModel": "minimax/minimax-m3"
+      }
+    ],
+    "roles": {
+      "CoreDev":   { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
+      "ClientDev": { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
+      "QA":        { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
+      "Reviewer":  { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
+      "Intake":    { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" }
+    }
+  },
+  "github":    { "owner": "Xyrces", "repo": "PortHorizon", "token": "GITHUB_TOKEN" },
+  "workspace": { "root": "C:\\path\\to\\PortHorizon", "worktreeRoot": ".portHorizon\\worktrees", "defaultBranch": "main" },
+  "spawner":   { "maxConcurrentSessions": 4, "pollIntervalSeconds": 3, "staleMinutes": 30 },
+  "dashboard":  { "enabled": true, "port": 4097, "hostname": "127.0.0.1" }
 }
 ```
 
-Environment variables override any field (see `Configuration/OptionsLoader.cs`):
+Environment variables override any field (use `__` for nested keys):
 
 | Var | Maps to |
 |---|---|
-| `KILO_PROVIDER`, `KILO_MODEL`, `KILO_ORG_ID` | `kilo.*` |
-| `GitHub__Token`, `GITHUB_TOKEN` | `github.token` |
-| `Workspace__Root`, etc. (double-underscore for nested keys) | `workspace.*` |
+| `KILO_GATEWAY_API_KEY` | `llm.providers[0].apiKey` |
+| `KILO_MODEL` | `llm.providers[0].defaultModel` |
+| `GITHUB_TOKEN` | `github.token` |
+| `Workspace__Root` | `workspace.root` |
+
+Use the env-var path for CI / shared hosts; use `appsettings.json` for local dev (the file is gitignored).
 
 ## CLI
 
 ```bash
-# Long-running orchestrator (default; Ctrl+C to stop)
+# Long-running orchestrator + dashboard
 dotnet run --project PortHorizon.Agents
 
 # One shot: process the queue once and exit
 dotnet run --project PortHorizon.Agents -- --once
 
-# Dashboard only — host the UI without starting ACP or the orchestrator
+# Dashboard only — host the UI without dispatching
 dotnet run --project PortHorizon.Agents -- --dashboard-only
 
 # Print queue summary and exit
 dotnet run --project PortHorizon.Agents -- --status
 
-# Enqueue a task without editing the state file by hand
+# Enqueue a task
 dotnet run --project PortHorizon.Agents -- \
-  --enqueue-task t-123 \
+  --enqueue-task "Add Position ECS component" \
   --task-type ecs \
-  --task-desc "Add Position ECS component to PortHorizon.Core"
+  --task-desc "..." \
+  --branch "agent/positions"
 ```
 
-`--once` runs a single dispatch cycle and exits — useful for cron-driven or trigger-driven dispatch.
+`--once` runs a single dispatch cycle and exits. Use it for cron-driven or trigger-driven dispatch. `--dashboard-only` is convenient for inspecting state without taking dispatch slots.
 
 ## Dashboard
 
-The orchestrator hosts a local read-only web UI on `http://127.0.0.1:4097` (configurable via `dashboard.*`). It shows:
+The orchestrator hosts a local web UI on `http://127.0.0.1:4097` (configurable via `dashboard.*`).
 
-- **Task table** — id, type, status, branch, role agent, PR number, last update, error.
-- **Status counts** — pending / in-progress / completed / failed / blocked.
-- **Live event log** — Server-Sent Events stream of state transitions, ACP session lifecycle, PR opened/merged/changes-requested/failed.
+Tabs:
+
+| Tab | What it shows |
+|---|---|
+| **Tasks** | every issue in the store, filterable by status / type / assignee |
+| **Spec** | specs + the Groomer agent for converting Approved specs into stories |
+| **Intake** | OperatorAgent inbox, session list, AI-extracted tables |
+| **Events** | live SSE stream of state transitions, agent runs, PR lifecycle |
+| **Memory** | the `bd remember` / `prime` analog — list, add, delete persistent insights |
 
 Endpoints:
 
 | Path | Purpose |
 |---|---|
-| `GET /` (or `/index.html`) | The dashboard HTML page |
-| `GET /api/state` | Current `OrchestratorState` as JSON |
-| `GET /api/agents` | Registered role agents and their tool permissions |
-| `GET /api/events` | SSE stream of `DashboardEvent` records (kind = `task.transition`, `acp.session.*`, `pr.*`, `log`) |
+| `GET /` (or `/index.html`) | the dashboard HTML page |
+| `GET /api/state` | current task + agent + skill + sprint + heartbeat rollup |
+| `GET /api/state/issues` | full issue list with metadata |
+| `POST /api/state/issues` | enqueue a new task |
+| `PATCH /api/state/issues/{id}` | transition status (e.g. set status=Failed) |
+| `GET /api/state/issues/{id}/deps` | this issue's dependency edges + blocked flag |
+| `POST /api/state/issues/{id}/deps` | add a blocks/related edge |
+| `DELETE /api/state/issues/{id}/deps/{blockerId}/{kind}` | remove an edge |
+| `GET /api/specs` | spec CRUD + version history |
+| `POST /api/specs/{id}/groom` | trigger the GroomerAgent to decompose an Approved spec |
+| `GET /api/memory[?prefix=...]` | list project memory (optionally filtered by key prefix) |
+| `POST /api/memory` | add a memory |
+| `DELETE /api/memory/{key}` | remove a memory |
+| `GET /api/issues.jsonl` | stream the JSONL mirror of the issue store (`tail -f` equivalent) |
+| `GET /api/issues.jsonl/path` | the absolute file path the mirror writes to |
+| `GET /api/events` | SSE stream of `DashboardEvent` records (last ~1024 replayed on connect) |
 
-The page polls `/api/state` every 2 s and subscribes to `/api/events` for instant updates. The SSE stream replays the last ~1024 events on connect so reconnecting clients don't lose context.
+The page polls `/api/state` every 2s and subscribes to `/api/events` for instant updates. The JSONL endpoint is safe to `curl` / `tail` from outside the orchestrator host.
 
 ## How a task flows
 
-1. Operator enqueues a task (via `--enqueue-task`, or by editing `.portHorizon/state/orchestrator-state.json`).
-2. Orchestrator picks it up on its next poll cycle (`Spawner.PollIntervalSeconds`, default 3 s).
-3. Orchestrator takes one slot from the `MaxConcurrentSessions` semaphore (default 4).
-4. `GitWorktreeService` creates `agent/<taskId>` from `main` and a worktree at `.portHorizon/worktrees/<taskId>`.
-5. `AcpProcessManager` opens a new ACP `session/new` (cwd = worktree path, agent name = role).
-6. Orchestrator prompts the role agent with the task description and the role's rules.
-7. Kilo edits files, runs `dotnet build`, runs tests, commits, pushes the branch.
-8. Orchestrator opens a GitHub PR (head `agent/<taskId>` → `main`) and enqueues a `pr-watch` follow-up.
-9. `kilo github` App reviews the PR (approve or request changes).
-10. `PRWatcher` polls GitHub every 30 s. On green CI + approval, it merges, deletes the branch, removes the worktree, and marks the dev task `Completed`. On `REQUEST_CHANGES`, it marks the dev task `Blocked`. On red CI, it marks `Failed`.
-11. Stale `InProgress` tasks are reaped at startup (`Spawner.StaleMinutes`, default 30 m); one retry is permitted before `Failed`.
+1. Operator enqueues a task (via the CLI, the dashboard, or `POST /api/state/issues`).
+2. Orchestrator's `DispatchSingleTaskAsync` claims it (`IssueStore.ClaimAsync` is atomic — `Pending` → `InProgress`).
+3. `GitWorktreeService` creates `agent/<id>` from `main` and a worktree at `.portHorizon/worktrees/<id>`.
+4. The orchestrator builds a prompt: role's instructions + memory recall + task description + worktree path + operator-message-bus drain.
+5. `MafAgentRunner` constructs a `ChatClientAgent` with the `bash` AIFunction and runs the MAF agent loop. The model emits structured `tool_calls`; MAF invokes bash, stdout flows back, the model iterates.
+6. `MafAgentRunner` captures the model response in issue metadata (`modelResponse`).
+7. `GitWorktreeService.CommitAllAsync` + `PushAsync` commit + push the branch.
+8. `GitHubService.CreatePullRequestAsync` opens the PR (`[type] title`).
+9. `OrchestratorAgent` enqueues a `pr-watch` follow-up issue.
+10. `PRWatcher` polls GitHub every 30s. On green CI + approval, it merges, deletes the branch, removes the worktree, and marks the dev task `Completed`. On `REQUEST_CHANGES`, it marks `Blocked`. On red CI, it marks `Failed`.
+11. Stale `InProgress` tasks (no `UpdatedAt` for `Spawner.StaleMinutes`, default 30m) are reaped at startup; one retry before `Failed`.
+
+Optional: a `DependencyGraph` exists in `IssueStore` (`blocks` / `related` / `duplicates` edges). `ReadyAsync` excludes issues with an open `blocks` edge whose blocker is not `Completed`/`Closed`. `Failed` blockers are **not** auto-cleared — the operator must explicitly close them or remove the edge.
 
 ## Role agents
 
-Defined as Kilo custom-mode files in `.kilo/agents/`:
+Configured in `Agents/RoleAgentRegistry.cs`:
 
-| File | Project scope | Tools | Purpose |
+| Role | Project scope | Tools (allowed) | Purpose |
 |---|---|---|---|
-| `coredev.md` | `PortHorizon.Core/` | bash, read, edit, grep, glob, webfetch | ECS components, systems, atmospherics, pathfinding |
-| `clientdev.md` | `PortHorizon.Client/` | bash, read, edit, grep, glob, webfetch | Godot 4.x scenes, scripts, UI, SyncBridge |
-| `qa.md` | (read-only) | bash, read, grep, glob | Build + test verification, no edits |
-| `reviewer.md` | (read-only) | read, grep, glob, webfetch | Architecture-compliance review on GitHub |
+| `CoreDev`   | `PortHorizon.Core/`   | bash, read, edit, grep, glob, webfetch | ECS components, systems, atmospherics, pathfinding |
+| `ClientDev` | `PortHorizon.Client/` | bash, read, edit, grep, glob, webfetch | Godot 4.x scenes, scripts, UI, SyncBridge |
+| `QA`        | (read-only)            | bash, read, grep, glob | Build + test verification, no edits |
+| `Reviewer`  | (read-only)            | read, grep, glob, webfetch | Architecture-compliance review on GitHub |
+| `Intake`    | (interactive)          | chat + tool emits | operator inbox → proposed spec + epic |
 
-Register them locally with:
-
-```bash
-./scripts/install-agents.sh    # bash
-pwsh ./scripts/install-agents.ps1    # PowerShell
-```
+The system prompt for each role is loaded from `<workspace>/.kilo/agents/<role>.md` (YAML frontmatter's `description:` field). Missing files get a generic fallback and a warning log.
 
 ## State files
 
@@ -150,43 +192,55 @@ Persisted under `.portHorizon/`:
 ```
 .portHorizon/
 ├── state/
-│   ├── orchestrator-state.json    # task queue (SchemaVersion = 2)
-│   └── heartbeat-<agentId>.json   # per-agent heartbeats
-└── worktrees/                     # one subdir per task
+│   ├── issues.db              # IssueStore (SQLite, schema v7)
+│   ├── issues.jsonl           # IssuesJsonlMirror tail -f mirror
+│   ├── memory.db              # MemoryStore (SQLite, schema v7)
+│   ├── orchestrator-state.json  # heartbeat + counters (schema v3)
+│   └── *.jsonl (transient)    # schema-migration tmp files
+└── worktrees/                  # one subdir per task
+    └── <id>/                   # agent/<id> branch + checkout
 ```
 
-The orchestrator refuses to start if the state file is corrupt (`StateCorruptException`) or has an unknown schema version (`StateSchemaException`). Delete or migrate the file to recover.
+The orchestrator refuses to start if any state file is corrupt or has an unknown schema version. The migration between schema versions is automatic on startup (the issue store reads the current `schema_version` row and applies any missing blocks).
 
 ## Logs
 
 Structured single-line console logs:
 
 ```
-13:42:01.102 [INFO] Starting ACP server: kilo acp --port 4096 ...
-13:42:01.731 [INFO] ACP server: kilo-cli v0.7.4 (proto=1)
-13:42:01.750 [INFO] Orchestrator starting
-13:42:05.221 [INFO] Task t-123 transition Pending -> InProgress (agent=CoreDev)
-13:42:48.901 [INFO] ACP session for t-123 completed in 43680ms
-13:42:48.940 [INFO] Opened PR #42 for t-123
-13:42:48.965 [INFO] Task t-123 dispatched to PR #42 (duration 43743ms)
+13:42:01.102 info: PortHorizon.Agents[0] Starting dashboard
+13:42:01.731 info: PortHorizon.Agents.Dashboard.DashboardHost[0] Dashboard listening on http://127.0.0.1:4097
+13:42:01.750 info: PortHorizon.Agents[0] Orchestrator starting
+13:42:05.221 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Issue task-1 transition Pending -> InProgress (type=task)
+13:42:48.901 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Agent session for task-1 completed in 43680ms
+13:42:48.940 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Opened PR #42 for task-1
+13:42:48.965 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Task task-1 dispatched to PR #42 (duration 43743ms)
 ```
 
-Set `Logging__LogLevel__Default=Debug` for verbose output (poll internals, raw JSON-RPC payloads).
+Set `Logging__LogLevel__Default=Debug` for verbose output (raw LLM requests, executor trace).
 
 ## Operational notes
 
-- **Cross-process safety.** The state store uses an in-process `SemaphoreSlim`. Run only one orchestrator per state directory.
-- **Windows path quirks.** All `git` invocations centralize path composition in `GitWorktreeService`. Path with spaces (e.g. `C:\Users\jtn50\repos\gamedev\PortHorizon`) are quoted at the single point of use.
-- **Kilo per-session cwd.** `kilo serve` does not accept `--cwd` (only `kilo acp` does). The orchestrator's `AcpProcessManager` sets `WorkingDirectory = workspaceRoot` for the spawned kilo process; sessions created via `POST /session` inherit that CWD. To dispatch against a per-task worktree, the simpler approach is to spawn one `kilo serve --port <unique> --cwd <worktree>` per task. That swap is a 30-line change to `AcpProcessManager.StartProcessAsync`.
-- **Stale tasks.** A `InProgress` task whose `UpdatedAt` is older than `Spawner.StaleMinutes` is reset to `Pending` (one retry) or `Failed` (budget exhausted) on the next orchestrator start.
+- **Cross-process safety.** The issue store uses SQLite WAL mode. Run only one orchestrator per state directory.
+- **Concurrency.** `Spawner.MaxConcurrentSessions` (default 4) is the upper bound on simultaneous in-flight agent runs.
+- **Retries.** Stale `InProgress` tasks are reaped at startup; one retry before `Failed`. Use the dashboard to manually re-claim a failed task.
+- **Memory.** Project memory is injected into every agent prompt. Use `POST /api/memory` to add a key like `coding-style/no-linq-in-hot-paths` with a body. The agent sees the block under "## Project memory".
+- **Spec → Groomer.** A spec with `status: Approved` can be decomposed into 1–3 stories × 1–3 tasks via `POST /api/specs/{id}/groom`. The GroomerAgent (also MAF) is fire-and-forget.
+
+## Architecture
+
+The dispatch loop is currently sequential (in `OrchestratorAgent.DispatchSingleTaskAsync`). A parallel MAF WorkflowBuilder implementation lives in `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` with the same five stages (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch) as typed `FunctionExecutor<TIn, TOut>` instances. The workflow version is exercised by `EngineeringDispatchWorkflowTests` against a real temp git repo; the orchestrator stays on the sequential code until behavioral parity on `AlreadyClaimed` / `NoDiff` short-circuits is fully verified.
+
+For the broader design intent (dep graph, JSONL, memory, durable execution, …), see `docs/embedded-issues.md`, `docs/agent-framework-design.md`, and `docs/system-flow.md`.
 
 ## Out of scope (deferred)
 
 - Per-task permission overrides beyond per-role
-- Webhook-based PRWatcher (currently 30 s polling)
+- Webhook-based `PRWatcher` (currently 30s polling)
 - Roslyn / NetArchTest architecture gates
 - MCP playtest harness
 - Godot headless smoke test
-- SQLite-backed state store with cross-process locking
-- Task dependency DAG
-- Automated `kilo github install`
+- Wire `EngineeringDispatchWorkflow` into `OrchestratorAgent` (architectural, not functional)
+- Durable execution via `Microsoft.Agents.AI.Hosting` (P4 in `agent-framework-design.md`)
+
+For the operator cookbook (common scenarios) and the system flow diagram, see `docs/operator-cookbook.md` and `docs/system-flow.md`.
