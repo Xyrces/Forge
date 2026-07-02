@@ -79,11 +79,8 @@ public sealed class OrchestratorAgent : IAgent
         {
             Status = AgentStatus.Error;
             throw;
-        }
+}
     }
-
-    public Task<Result> ProcessTaskAsync(AgentTask task, CancellationToken cancellationToken = default)
-        => Task.FromResult(new Result(false, "Direct AgentTask dispatch is deprecated; enqueue via the CLI instead"));
 
     private async Task DispatchCycleAsync(CancellationToken cancellationToken)
     {
