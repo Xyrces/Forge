@@ -184,6 +184,7 @@
   <button data-tab="backlog">Backlog</button>
   <button data-tab="intake">Intake</button>
   <button data-tab="specs">Specs</button>
+  <button data-tab="vision">Vision</button>
   <button data-tab="sprints">Sprints</button>
   <button data-tab="agents">Agents</button>
   <button data-tab="skills">Skills</button>
@@ -193,6 +194,7 @@
   <div class="tab" id="tab-backlog"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-intake"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-specs"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-vision"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
@@ -236,6 +238,7 @@ async function refreshState() {
   await renderSkills();
   await renderIntake();
   await renderSpecs();
+  await renderVision();
   renderTasks();
   renderBacklog();
   $("foot").textContent = "tasks: " + state.tasks.length + " agents: " + state.agents.length + " skills: " + state.skills.length + " sprints: " + state.sprints.length;
@@ -802,6 +805,48 @@ async function renderSpecs() {
   $("tab-specs").innerHTML = `<div class="specs-grid">${left}${right}</div>`;
 }
 
+async function renderVision() {
+  const tab = $("tab-vision");
+  tab.innerHTML = `<div class="empty">Loading…</div>`;
+  let v;
+  try {
+    const r = await fetch("/api/vision");
+    if (r.status === 404) {
+      tab.innerHTML = `<div class="empty">No vision file configured. Set <code>vision.path</code> in appsettings.json.</div>`;
+      return;
+    }
+    v = await r.json();
+  } catch (e) {
+    tab.innerHTML = `<div class="empty">Failed to load: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  if (!v.exists) {
+    tab.innerHTML = `
+      <div class="vision-missing">
+        <p>Vision file not found at <code>${escapeHtml(v.path || "")}</code></p>
+        <p>The orchestrator looks for this file at startup and injects it into every agent prompt. Create the file (default: <code>docs/MASTER_DESIGN.md</code> in the workspace) and click Refresh.</p>
+        <button onclick="refreshVision()">Refresh</button>
+      </div>`;
+    return;
+  }
+  const lastMod = v.lastModified ? new Date(v.lastModified).toLocaleString() : "—";
+  tab.innerHTML = `
+    <div class="vision-grid">
+      <div class="vision-meta">
+        <div><strong>Source:</strong> <code>${escapeHtml(v.path)}</code></div>
+        <div><strong>Last modified:</strong> ${escapeHtml(lastMod)}</div>
+        <div><strong>Size:</strong> ${v.content.length} chars</div>
+        <button onclick="refreshVision()">Refresh</button>
+      </div>
+      <pre class="vision-content">${escapeHtml(v.content)}</pre>
+    </div>`;
+}
+
+async function refreshVision() {
+  await fetch("/api/vision/refresh", { method: "POST" });
+  await renderVision();
+}
+
 function filterSpecs() {
   // The dashboard's lightweight implementation: just re-render. The
   // list is bounded (low hundreds of specs typical), so a client-side
@@ -1070,7 +1115,9 @@ document.querySelectorAll("#tabs button").forEach(btn => {
     document.querySelectorAll("#tabs button").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-    document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+    const id = "tab-" + btn.dataset.tab;
+    document.getElementById(id).classList.add("active");
+    if (btn.dataset.tab === "vision") renderVision();
   });
 });
 $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });

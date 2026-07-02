@@ -11,6 +11,23 @@ public sealed record AgentOptions
     public SpawnerOptions Spawner { get; set; } = new();
     public DashboardOptions Dashboard { get; set; } = new();
     public LlmOptions Llm { get; set; } = new();
+    public VisionOptions Vision { get; set; } = new();
+}
+
+/// <summary>
+/// P0.5: vision.md import. The orchestrator reads this file from
+/// the workspace at startup, surfaces it on a Vision tab in the
+/// dashboard, and injects it into every agent prompt.
+/// </summary>
+public sealed record VisionOptions
+{
+    /// <summary>
+    /// Path to the vision file, relative to <see cref="WorkspaceOptions.Root"/>.
+    /// Default: <c>docs/MASTER_DESIGN.md</c>. The file is read once
+    /// at startup; the operator can update it and restart the
+    /// orchestrator to pick up the new content.
+    /// </summary>
+    public string Path { get; set; } = "docs/MASTER_DESIGN.md";
 }
 
 public sealed record GitHubOptions

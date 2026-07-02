@@ -5,7 +5,7 @@ Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-
 | Phase | Goal | Status | Landed in | Notes |
 |---|---|---|---|---|
 | **P0** | MAF packages + IAgentRunner scaffolding; drop the `kilo serve` / `kilo acp` subprocess dependency | ✅ done | `6b4b459` | Closed 2026-06-30. 96 tests passing. |
-| **P0.5** | vision table + vision import + Vision UI tab | ❌ not started | — | Workaround: add a `vision/*` memory key. See [vision-validation.md](vision-validation.md). |
+| **P0.5** | vision table + vision import + Vision UI tab | ✅ done | this commit + `vision/master` memory key | `VisionStore` reads `docs/MASTER_DESIGN.md` at startup, surfaces it via `GET /api/vision` + the dashboard's Vision tab, and injects the content into memory under `vision/master` so every agent prompt includes it. Operator edits the file + clicks Refresh in the dashboard (or restarts) to update. |
 | **P1** | skills loading into MAF agent instructions | ✅ done | `598b377` | `SqliteSkillSource` reads `.kilo/agents/*.md` + the `skills` table, injects into `ChatClientAgent` instructions. |
 | **P1.4** | Intake agent (HarnessAgent, persistent per project, Intake tab UI) | ✅ done | `f8f9329` | Intake tab + IntakeAgentRegistry + session→specs lookup. |
 | **P1.5.a** | Spec tab read-only + Spec CRUD endpoints | ✅ done | `3b81ef5` | Spec tab + `/api/specs` REST API. |
@@ -28,6 +28,7 @@ Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-
 | Post-Phase 5 (StateStore.Tasks removal) | 281 | 281 | 2 | `8ed2242` |
 | Post-P3 (workflow executors) | 294 | 294 | 2 | `d677a78` |
 | Post-P3 (orchestrator wired) | 294 | 294 | 2 | `8ac63ec` |
+| Post-P0.5 (vision) | 297 | 297 | 2 | this commit |
 | Today | **294** | **294** | **2** | this commit |
 
 (The 2 skipped tests are `RealLlmIntegrationTests` — they require a kilo gateway API key + the model id to be in the JWT's org. They run as part of CI in any environment with a configured key.)
@@ -49,7 +50,7 @@ Each row maps to a phase above. The "blocker" column is who / what is preventing
 
 | Gap | Blocker | Work estimate |
 |---|---|---|
-| **P0.5** Vision import + Vision tab | — | small — half a day: read `vision.md` at startup, parse it, surface in a tab. |
+| **P0.5** Vision import + Vision tab | ~~—~~ | ~~small — half a day: read `vision.md` at startup, parse it, surface in a tab.~~ Done. |
 | **P2.a** Designer agent | depends on what "design" means for a game like PortHorizon (level layout, system architecture, gameplay mechanics). New agent code + new tool surface + new tab. | medium — needs design call first. |
 | **P2.b** Artist agent + MeshyClient | Meshy API key + integration; sprite + 3D model pipelines. | medium-to-large — 1-2 weeks for a focused builder. |
 | **P3** workflow wired in | ~~swap `DispatchSingleTaskAsync` to use `EngineeringDispatchWorkflow`.~~ Done in `8ac63ec`. | ~~small — half a day.~~ |

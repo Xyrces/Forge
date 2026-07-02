@@ -503,6 +503,26 @@ public static class Program
         var issuesJsonlPath = Path.Combine(workspaceDir, ".portHorizon", "state", "issues.jsonl");
         var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
             loggerFactory.CreateLogger<IssuesJsonlMirror>());
+
+        // P0.5: vision.md import. Build the VisionStore (loads the
+        // configured file on startup), inject it into memory as the
+        // 'vision/master' key, and pass it to the dashboard so the
+        // Vision tab can surface it.
+        var vision = new VisionStore(options.Workspace.Root, options.Vision.Path);
+        var visionSnapshot = vision.Reload();
+        if (visionSnapshot.Exists)
+        {
+            logger.LogInformation("Vision loaded from {Path} ({Len} chars)",
+                visionSnapshot.Path, visionSnapshot.Content.Length);
+            // Inject into memory so every agent prompt includes the
+            // vision. The memory block goes through the normal
+            // MemoryStore path; no special casing in the agent.
+            await memoryStore.RememberAsync("vision/master", visionSnapshot.Content, ttlDays: null, CancellationToken.None);
+        }
+        else
+        {
+            logger.LogWarning("Vision file not found at {Path}; dashboard Vision tab will be empty", visionSnapshot.Path);
+        }
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
         var agentRunner = new MafAgentRunner(
@@ -561,6 +581,7 @@ public static class Program
             groomerFactory: groomerFactory,
             memory: memoryStore,
             issuesJsonlPath: issuesJsonlPath,
+            vision: vision,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);

@@ -25,6 +25,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Agents.GroomerAgentFactory? _groomerFactory;
     private readonly MemoryStore? _memory;
     private readonly string? _issuesJsonlPath;
+    private readonly VisionStore? _vision;
     private readonly ISpecExtractionReader? _extractorOverride;
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
     private readonly ICodebaseGraphCacheStore? _codebaseCacheOverride;
@@ -49,6 +50,7 @@ public sealed class DashboardHost : IAsyncDisposable
         Agents.GroomerAgentFactory? groomerFactory = null,
         MemoryStore? memory = null,
         string? issuesJsonlPath = null,
+        VisionStore? vision = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
         ICodebaseGraphCacheStore? codebaseCache = null)
@@ -64,6 +66,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _groomerFactory = groomerFactory;
         _memory = memory;
         _issuesJsonlPath = issuesJsonlPath;
+        _vision = vision;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
         _codebaseCacheOverride = codebaseCache;
@@ -179,6 +182,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         if (_issuesJsonlPath is not null)
         {
             IssuesJsonlEndpoints.MapIssuesJsonlEndpoints(_app, _issuesJsonlPath, _logger);
+        }
+
+        if (_vision is not null)
+        {
+            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger);
         }
 
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
