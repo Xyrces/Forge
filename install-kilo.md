@@ -1,77 +1,72 @@
-# Kilo host prerequisite checklist
+# Kilo gateway prerequisite checklist
 
-The orchestrator assumes a working **kilo CLI** on the host and a populated local config. Follow these steps once per machine.
+The orchestrator uses the [kilo gateway](https://kilo.ai/docs/gateway) — an OpenAI-compatible HTTP endpoint. It does **not** require the legacy `kilo serve` / `kilo acp` CLI, agent registration, or per-task worktree cwd gymnastics. The Microsoft Agent Framework (`Microsoft.Agents.AI` 1.12.0) handles the agent loop in-process.
 
-## 1. Install the kilo CLI
+## 1. Get a kilo gateway API key
 
-Requires Node.js + npm (or bun). The machine already has `~/.config/kilo/package.json`, so npm is available.
+Sign in at <https://kilo.ai>, create a project API key. The JWT is your `KILO_GATEWAY_API_KEY`.
 
-```bash
-npm install -g @kilocode/cli
-kilo --version
-```
-
-If your CPU lacks AVX and the install crashes with a baseline-build error, install the legacy build:
+Smoke-test it with `curl` (replace `<KEY>` and `<MODEL>` — see the `models` list at <https://api.kilo.ai/api/gateway/models>):
 
 ```bash
-npm install -g @kilocode/cli --cpu=baseline
+curl.exe -sS -X POST "https://api.kilo.ai/api/gateway/v1/chat/completions" \
+  -H "Authorization: Bearer <KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"minimax/minimax-m3","messages":[{"role":"user","content":"ping"}],"max_tokens":8}'
 ```
 
-## 2. Populate the local kilo config
+You should get HTTP 200 with a `Pong!`-style reply.
 
-The file lives at `~/.config/kilo/opencode.jsonc` (Windows: `%USERPROFILE%\.config\kilo\opencode.jsonc`). At minimum:
+## 2. Get a GitHub token
 
-```jsonc
-{
-  "$schema": "https://app.kilo.ai/config.json",
-  "provider": "kilocode",
-  "model": "kilocode/minimax-m3",
-  "kilocode": {
-    "options": {
-      "apiKey": "KILO_API_KEY_HERE",
-      "orgId": "KILO_ORG_ID_HERE"
-    }
-  }
-}
-```
+The orchestrator opens and merges PRs on your behalf. Create a classic PAT (Personal Access Token) with `repo` scope at <https://github.com/settings/tokens>. Or use `gh auth token` if you have `gh` CLI installed and authenticated.
 
-Prefer environment variables over checking secrets into the config file:
+## 3. Configure the orchestrator
 
-| Env var | Purpose |
+Copy `appsettings.example.json` to `appsettings.json` and fill in the two secrets:
+
+| Key | Replaces with |
 |---|---|
-| `KILO_API_KEY` | Gateway API key. |
-| `KILO_ORG_ID` | Routes requests to a specific organization. |
-| `KILO_PROVIDER` | Overrides `provider`. |
-| `KILO_MODEL` | Overrides `model`. |
+| `llm.providers[0].apiKey` | your kilo gateway JWT |
+| `github.token` | your GitHub PAT |
 
-The orchestrator reads these and passes them to `kilo acp` on launch.
+`appsettings.json` is in `.gitignore` — secrets never enter git history.
 
-## 3. Register the role agents
+Environment variables override any field (use `__` for nested keys):
 
-From the repo root:
+| Var | Maps to |
+|---|---|
+| `llm__providers__0__apiKey` or `KILO_GATEWAY_API_KEY` | `llm.providers[0].apiKey` |
+| `llm__providers__0__defaultModel` or `KILO_MODEL` | default model id |
+| `github__token` or `GITHUB_TOKEN` | `github.token` |
+| `Workspace__Root` | `workspace.root` (your PortHorizon clone) |
 
-```bash
-# bash
-./scripts/install-agents.sh
+## 4. (Optional) Custom role agents
 
-# PowerShell
-pwsh ./scripts/install-agents.ps1
-```
+By default, every role (CoreDev, ClientDev, QA, Reviewer, Intake) uses the same model. The system prompt + tools differ per role.
 
-This calls `kilo agent create --path .kilo/agents/<name>.md --mode subagent` for each of `coredev`, `clientdev`, `qa`, `reviewer`.
+To customize the role instruction template per role, drop a Markdown file at `<workspace>/.kilo/agents/<role>.md` (e.g. `.kilo/agents/coredev.md`). The orchestrator loads the `description:` field from the YAML frontmatter as the MAF system instructions.
 
-## 4. Smoke-test the ACP server
+If the file is missing, the orchestrator logs a warning and uses a generic fallback:
+> "You are the coredev agent for the PortHorizon project."
 
-```bash
-kilo acp --port 4096 --hostname 127.0.0.1
-```
-
-You should see Kilo log that it's listening on `http://127.0.0.1:4096`. `Ctrl+C` to stop. If this fails, do not proceed — the orchestrator cannot start without it.
-
-## 5. Optional: enable OpenTelemetry export
+## 5. Smoke-test the orchestrator
 
 ```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# Long-running orchestrator + dashboard
+dotnet run --project PortHorizon.Agents
+
+# In a second terminal, enqueue a test task
+curl.exe -X POST http://127.0.0.1:4097/api/state/issues \
+  -H "Content-Type: application/json" \
+  -d '{"type":"task","title":"Smoke test: list the top-level files","priority":2}'
+
+# Open the dashboard
+start http://127.0.0.1:4097
 ```
 
-Kilo exports OTel traces for ACP sessions when this is set. The orchestrator correlates by `session.id`.
+If the task is claimed and dispatched (the dashboard's "agent session started" event fires), you're set up.
+
+## What this orchestrator no longer needs
+
+The previous generation of the orchestrator (pre-MAF) used a separate `kilo serve` subprocess and an Agent Client Protocol HTTP client. **None of that is required any more.** You can ignore the legacy install steps in `install-kilo.md` history; they documented a now-deleted architecture. If you find old docs referring to `kilo acp`, `kilo serve`, `AcpClient`, or per-session worktree cd, those are stale.
