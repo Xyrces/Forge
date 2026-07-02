@@ -25,7 +25,8 @@ public sealed record IssueRecord(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     DateTime? ClosedAt,
-    string MetadataJson)
+    string MetadataJson,
+    string? ParentIssueId = null)
 {
     public string? GetMetadata(string key)
     {
@@ -47,8 +48,8 @@ public sealed record NewIssue(
     string? Description = null,
     int Priority = 2,
     string? Assignee = null,
-    IReadOnlyDictionary<string, object>? Metadata = null
-);
+    IReadOnlyDictionary<string, object>? Metadata = null,
+    string? ParentId = null);
 
 public sealed record IssueFilter
 {
@@ -121,12 +122,14 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT NOT NULL,
                 closed_at     TEXT,
-                metadata_json TEXT NOT NULL DEFAULT '{}'
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                parent_issue_id TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_issue_status     ON issue(status);
             CREATE INDEX IF NOT EXISTS ix_issue_assignee   ON issue(assignee);
             CREATE INDEX IF NOT EXISTS ix_issue_updated_at ON issue(updated_at);
             CREATE INDEX IF NOT EXISTS ix_issue_type_short ON issue(type, short_id);
+            CREATE INDEX IF NOT EXISTS ix_issue_parent     ON issue(parent_issue_id);
 
             CREATE TABLE IF NOT EXISTS issue_event (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,6 +290,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 edge_count  INTEGER NOT NULL
             );
 
+            -- v5: issue.parent_issue_id is now part of the issue
+            -- table (see CREATE TABLE above). Stories and tasks link
+            -- to their spec via the spec's own parent_issue_id; a
+            -- task links to its story via issue.parent_issue_id.
+
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);
             """;
@@ -319,8 +327,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         {
             cmd.Transaction = tx;
             cmd.CommandText = """
-                INSERT INTO issue (id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, metadata_json)
-                VALUES ($id, $short, $type, $title, $desc, $status, $pri, $assignee, $now, $now, $meta);
+                INSERT INTO issue (id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, metadata_json, parent_issue_id)
+                VALUES ($id, $short, $type, $title, $desc, $status, $pri, $assignee, $now, $now, $meta, $parent);
                 """;
             cmd.Parameters.AddWithValue("$id", id);
             cmd.Parameters.AddWithValue("$short", shortId);
@@ -332,6 +340,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             cmd.Parameters.AddWithValue("$assignee", (object?)spec.Assignee ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
             cmd.Parameters.AddWithValue("$meta", metadataJson);
+            cmd.Parameters.AddWithValue("$parent", (object?)spec.ParentId ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -346,7 +355,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
 
-        var sql = "SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json FROM issue WHERE 1=1";
+        var sql = "SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id FROM issue WHERE 1=1";
         if (filter.Status is not null) sql += " AND status = $status";
         if (filter.Assignee is not null) sql += " AND assignee = $assignee";
         if (filter.Type is not null) sql += " AND type = $type";
@@ -385,7 +394,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT i.id, i.short_id, i.type, i.title, i.description, i.status, i.priority, i.assignee,
-                   i.created_at, i.updated_at, i.closed_at, i.metadata_json
+                   i.created_at, i.updated_at, i.closed_at, i.metadata_json, i.parent_issue_id
             FROM issue i
             INNER JOIN sprint_issue si ON i.id = si.issue_id
             WHERE i.status = 'Pending' AND si.sprint_id = $sid
@@ -467,7 +476,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json
+            SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id
             FROM issue WHERE id = $id
             """;
         cmd.Parameters.AddWithValue("$id", id);
@@ -528,7 +537,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CreatedAt: ParseDate(rd.GetString(8)),
             UpdatedAt: ParseDate(rd.GetString(9)),
             ClosedAt: rd.IsDBNull(10) ? null : ParseDate(rd.GetString(10)),
-            MetadataJson: rd.GetString(11));
+            MetadataJson: rd.GetString(11),
+            ParentIssueId: rd.IsDBNull(12) ? null : rd.GetString(12));
 
     private static DateTime ParseDate(string s) => DateTime.ParseExact(s, DateFormat, System.Globalization.CultureInfo.InvariantCulture);
 

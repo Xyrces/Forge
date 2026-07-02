@@ -9,6 +9,8 @@ public enum SpecStatus
     Approved,
     Superseded,
     Archived,
+    Grooming,
+    Shipped,
 }
 
 /// <summary>
