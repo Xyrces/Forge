@@ -12,7 +12,7 @@ Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-
 | **P1.5.b** | Product agent writes specs via AIFunctions (human-gated approval) | ✅ done | `b8a65df` | ProductAgent + `SpecStatus.Grooming` introduced; subsequent PRs added GroomerAgent that operates on Approved specs. |
 | **P2.a** | Designer agent + `design_artifact` table | ❌ not started | — | The system cannot dispatch design tasks. Largest single gap. |
 | **P2.b** | Artist agent + `art_output` table + MeshyClient integration | ❌ not started | — | The system cannot dispatch art tasks. |
-| **P3** (existing) | Engineering dispatch becomes a MAF workflow | 🟡 partial | `680c412`–`d677a78` | Executors + `EngineeringDispatchWorkflow` built and tested. Orchestrator's `DispatchSingleTaskAsync` still uses sequential code; swap is a refactor. |
+| **P3** (existing) | Engineering dispatch becomes a MAF workflow | ✅ done | `680c412`–`8ac63ec` | Executors + `EngineeringDispatchWorkflow` + orchestrator wired. Dispatch is now Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch as typed `FunctionExecutor<TIn, TOut>` instances. Live-verified with task-6 (15.6s end-to-end, modelResponse captured in metadata). |
 | **P3.5** | issue_groomer_run table + scheduled Groomer + manual Re-run button | 🟡 partial | — | GroomerAgent is on-demand via `POST /api/specs/{id}/groom`. No schedule, no `issue_groomer_run` table. |
 | **P4** | Durable execution via `Microsoft.Agents.AI.Hosting` | ❌ not started | — | In-process reaper (`Spawner.StaleMinutes`) is the safety net. |
 
@@ -27,6 +27,7 @@ Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-
 | Post-Phase 4 (JSONL) | 286 | 286 | 2 | `71f87a9` |
 | Post-Phase 5 (StateStore.Tasks removal) | 281 | 281 | 2 | `8ed2242` |
 | Post-P3 (workflow executors) | 294 | 294 | 2 | `d677a78` |
+| Post-P3 (orchestrator wired) | 294 | 294 | 2 | `8ac63ec` |
 | Today | **294** | **294** | **2** | this commit |
 
 (The 2 skipped tests are `RealLlmIntegrationTests` — they require a kilo gateway API key + the model id to be in the JWT's org. They run as part of CI in any environment with a configured key.)
@@ -51,7 +52,7 @@ Each row maps to a phase above. The "blocker" column is who / what is preventing
 | **P0.5** Vision import + Vision tab | — | small — half a day: read `vision.md` at startup, parse it, surface in a tab. |
 | **P2.a** Designer agent | depends on what "design" means for a game like PortHorizon (level layout, system architecture, gameplay mechanics). New agent code + new tool surface + new tab. | medium — needs design call first. |
 | **P2.b** Artist agent + MeshyClient | Meshy API key + integration; sprite + 3D model pipelines. | medium-to-large — 1-2 weeks for a focused builder. |
-| **P3** workflow wired in | swap `DispatchSingleTaskAsync` to use `EngineeringDispatchWorkflow`. Already 80% built; just behavioral parity on `AlreadyClaimed`. | small — half a day. |
+| **P3** workflow wired in | ~~swap `DispatchSingleTaskAsync` to use `EngineeringDispatchWorkflow`.~~ Done in `8ac63ec`. | ~~small — half a day.~~ |
 | **P3.5** scheduled Groomer + `issue_groomer_run` | the scheduler itself is small (an `IHostedService`); the table is small. | small — half a day. |
 | **P4** DurableTask | adding a new orchestrator runtime; the existing one is in-process. | medium-to-large — 1-2 weeks; major change. |
 
