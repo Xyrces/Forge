@@ -140,7 +140,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -368,6 +368,17 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             );
             CREATE INDEX IF NOT EXISTS ix_issue_dep_blocked ON issue_dep(blocked_id, kind);
             CREATE INDEX IF NOT EXISTS ix_issue_dep_blocker ON issue_dep(blocker_id, kind);
+
+            -- v7: memory table — persistent project memory (the
+            -- `bd remember` analog). Keyed by string, optional TTL.
+            CREATE TABLE IF NOT EXISTS memory (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts          TEXT NOT NULL,
+                key         TEXT NOT NULL UNIQUE,
+                body        TEXT NOT NULL,
+                ttl_days    INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS ix_memory_key ON memory(key);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);
