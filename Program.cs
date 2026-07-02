@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
+using System.Net.Http.Json;
 using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Agents;
 using PortHorizon.Agents.Configuration;
@@ -42,6 +43,9 @@ public static class Program
         if (mode == CliMode.Status)
             return await PrintStatusAsync(options, logger);
 
+        if (mode == CliMode.Check)
+            return await RunPreflightCheckAsync(options, logger);
+
         if (mode == CliMode.Enqueue)
             return await EnqueueTaskAsync(args, options);
 
@@ -54,7 +58,7 @@ public static class Program
         return await RunOrchestratorAsync(options, loggerFactory, logger);
     }
 
-    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke }
+    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check }
 
     private static CliMode ParseMode(string[] args)
     {
@@ -63,6 +67,7 @@ public static class Program
         if (args.Any(a => a == "--dashboard-only")) return CliMode.DashboardOnly;
         if (args.Any(a => a == "--worktree-smoke")) return CliMode.WorktreeSmoke;
         if (args.Any(a => a == "--once")) return CliMode.Once;
+        if (args.Any(a => a == "--check")) return CliMode.Check;
         return CliMode.Run;
     }
 
@@ -242,6 +247,213 @@ public static class Program
             Console.Error.WriteLine(ex.ToString());
             return 1;
         }
+    }
+
+    /// <summary>
+    /// Pre-flight validation: confirm config, schema, git, gateway, and
+    /// GitHub auth all work without starting dispatch. Exits non-zero on
+    /// any failure so CI / smoke jobs can gate on it.
+    /// </summary>
+    private static async Task<int> RunPreflightCheckAsync(AgentOptions options, ILogger logger)
+    {
+        var failures = new List<string>();
+        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
+        var stateDir = Path.Combine(workspaceDir, ".portHorizon", "state");
+
+        Console.WriteLine("Pre-flight check for PortHorizon.Agents");
+        Console.WriteLine($"  workspace: {options.Workspace.Root}");
+        Console.WriteLine($"  state dir: {stateDir}");
+        Console.WriteLine();
+
+        // 1. Workspace is a git repo
+        if (!Directory.Exists(options.Workspace.Root))
+        {
+            failures.Add($"workspace root does not exist: {options.Workspace.Root}");
+        }
+        else if (!Directory.Exists(Path.Combine(options.Workspace.Root, ".git")))
+        {
+            failures.Add($"workspace root is not a git repo: {options.Workspace.Root}");
+        }
+        else
+        {
+            Console.WriteLine("  [ok] workspace is a git repo");
+        }
+
+        // 2. IssueStore opens + schema version is current
+        try
+        {
+            await using var issues = new IssueStore(Path.Combine(stateDir, "issues.db"));
+            // Trigger InitializeSchema by listing (cheap read).
+            var probe = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
+            var expectedSchema = IssueStore.CurrentSchemaVersion;
+            // Read the actual schema_version from the DB.
+            int actualSchema = -1;
+            await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(issues.ConnectionString))
+            {
+                await conn.OpenAsync();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM schema_version;";
+                var result = await cmd.ExecuteScalarAsync();
+                actualSchema = Convert.ToInt32(result);
+            }
+            if (actualSchema == expectedSchema)
+            {
+                Console.WriteLine($"  [ok] issues.db schema v{actualSchema} (current)");
+            }
+            else
+            {
+                failures.Add($"issues.db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+            }
+            _ = probe;
+        }
+        catch (Exception ex)
+        {
+            failures.Add($"issues.db: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        // 3. MemoryStore opens + schema version is current
+        try
+        {
+            var memPath = Path.Combine(stateDir, "memory.db");
+            if (!File.Exists(memPath))
+            {
+                Console.WriteLine("  [skip] memory.db does not exist yet (will be created on first start)");
+            }
+            else
+            {
+                // Reuse IssueStore to bootstrap the schema, then check.
+                _ = new IssueStore(memPath);
+                await using var mem = new MemoryStore(memPath);
+                var memProbe = await mem.RecallAsync();
+                int actualSchema = -1;
+                await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(mem.ConnectionString))
+                {
+                    await conn.OpenAsync();
+                    await using var cmd = conn.CreateCommand();
+                    cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM schema_version;";
+                    var result = await cmd.ExecuteScalarAsync();
+                    actualSchema = Convert.ToInt32(result);
+                }
+                var expectedSchema = IssueStore.CurrentSchemaVersion;
+                if (actualSchema == expectedSchema)
+                {
+                    Console.WriteLine($"  [ok] memory.db schema v{actualSchema} (current)");
+                }
+                else
+                {
+                    failures.Add($"memory.db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            failures.Add($"memory.db: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        // 4. LLM provider + key configured
+        var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
+        if (string.IsNullOrEmpty(llmConfig.DefaultProvider))
+        {
+            failures.Add("llm.defaultProvider is empty");
+        }
+        else
+        {
+            var provider = llmConfig.Providers.FirstOrDefault(p => p.Name == llmConfig.DefaultProvider);
+            if (provider is null)
+            {
+                failures.Add($"llm.defaultProvider '{llmConfig.DefaultProvider}' not found in llm.providers[]");
+            }
+            else if (string.IsNullOrEmpty(provider.ApiKey) || provider.ApiKey.StartsWith("KILO_GATEWAY") || provider.ApiKey.StartsWith("GITHUB_TOKEN"))
+            {
+                failures.Add($"llm.providers['{provider.Name}'].apiKey looks unset (still a placeholder)");
+            }
+            else if (!provider.BaseUrl.StartsWith("http"))
+            {
+                failures.Add($"llm.providers['{provider.Name}'].baseUrl invalid: {provider.BaseUrl}");
+            }
+            else
+            {
+                // Ping the gateway with a minimal chat completion.
+                try
+                {
+                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                    http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", provider.ApiKey);
+                    var resp = await http.PostAsJsonAsync(
+                        provider.BaseUrl.TrimEnd('/') + "/v1/chat/completions",
+                        new
+                        {
+                            model = provider.DefaultModel,
+                            messages = new[] { new { role = "user", content = "ping" } },
+                            max_tokens = 4,
+                        });
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"  [ok] kilo gateway reachable at {provider.BaseUrl} (model={provider.DefaultModel})");
+                    }
+                    else if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                    {
+                        failures.Add($"kilo gateway auth failed (HTTP 401) — apiKey expired or invalid");
+                    }
+                    else
+                    {
+                        failures.Add($"kilo gateway returned HTTP {(int)resp.StatusCode} — {resp.ReasonPhrase}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failures.Add($"kilo gateway unreachable: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
+        // 5. GitHub token + repo
+        if (string.IsNullOrEmpty(options.GitHub.Token) || options.GitHub.Token.StartsWith("GITHUB_TOKEN"))
+        {
+            failures.Add("github.token looks unset (still a placeholder)");
+        }
+        else
+        {
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", options.GitHub.Token);
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("PortHorizon.Agents-Check");
+                var resp = await http.GetAsync($"https://api.github.com/repos/{options.GitHub.Owner}/{options.GitHub.Repo}");
+                if (resp.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"  [ok] GitHub repo {options.GitHub.Owner}/{options.GitHub.Repo} reachable");
+                }
+                else if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    failures.Add($"GitHub repo {options.GitHub.Owner}/{options.GitHub.Repo} not found (or token lacks access)");
+                }
+                else if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                {
+                    failures.Add("GitHub token rejected (HTTP 401) — token expired or wrong scope");
+                }
+                else
+                {
+                    failures.Add($"GitHub returned HTTP {(int)resp.StatusCode} — {resp.ReasonPhrase}");
+                }
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"GitHub unreachable: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        Console.WriteLine();
+        if (failures.Count == 0)
+        {
+            Console.WriteLine("All pre-flight checks passed.");
+            return 0;
+        }
+        Console.Error.WriteLine($"{failures.Count} pre-flight check(s) failed:");
+        foreach (var f in failures)
+        {
+            Console.Error.WriteLine($"  - {f}");
+        }
+        return 1;
     }
 
     /// <summary>

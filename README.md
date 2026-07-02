@@ -108,6 +108,10 @@ dotnet run --project PortHorizon.Agents -- --dashboard-only
 # Print queue summary and exit
 dotnet run --project PortHorizon.Agents -- --status
 
+# Pre-flight check: config + DB schemas + GitHub + kilo gateway auth
+# (no dispatch; exits non-zero on any failure; useful for CI/smoke)
+dotnet run --project PortHorizon.Agents -- --check
+
 # Enqueue a task
 dotnet run --project PortHorizon.Agents -- \
   --enqueue-task "Add Position ECS component" \

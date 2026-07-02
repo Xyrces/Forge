@@ -5,6 +5,10 @@ Common scenarios you'll hit while running the orchestrator. Each recipe is one f
 ## Run the orchestrator
 
 ```bash
+# 0. Pre-flight: confirm config + DB schemas + GitHub + kilo gateway auth
+# (no dispatch; exits non-zero on any failure; useful for CI/smoke)
+dotnet run --project PortHorizon.Agents -- --check
+
 # 1. Make sure appsettings.json is filled in
 cp appsettings.example.json appsettings.json
 # edit appsettings.json: set llm.providers[0].apiKey + github.token
@@ -230,6 +234,53 @@ If you need a new role beyond `CoreDev` / `ClientDev` / `QA` / `Reviewer` / `Int
 5. Update `RoleAgentRegistry.FromTaskType` to map any task types you want to use the new role.
 
 The orchestrator's startup fails fast on unknown role / unknown `llm.roles.<X>` keys, so the wiring is explicit.
+
+## Read a dispatch log line and know which stage failed
+
+Every successful dispatch produces a recognizable sequence of log lines, in order. Match what you see in the log to the stage table below.
+
+### The happy-path log sequence
+
+```
+13:42:01.102 info: PortHorizon.Agents[0] Starting dashboard
+13:42:01.731 info: PortHorizon.Agents.Dashboard.DashboardHost[0] Dashboard listening on http://127.0.0.1:4097
+13:42:01.750 info: PortHorizon.Agents[0] Orchestrator starting
+13:42:05.221 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Issue task-1 transition Pending -> InProgress (type=task)
+13:42:48.901 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Agent session for task-1 completed in 43680ms
+13:42:48.940 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Opened PR #42 for task-1
+13:42:48.965 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Task task-1 dispatched to PR #42 (duration 43743ms)
+```
+
+If you see all 4 "task" lines, dispatch succeeded. The 30s PRWatcher poll picks it up after that.
+
+### Stage table
+
+| Stage | Log line prefix | What it does | What failure looks like |
+|---|---|---|---|
+| **Claim** | `Issue <id> transition Pending -> InProgress` | `IssueStore.ClaimAsync` atomically transitions the issue. | If you see `already-claimed` in the result and the issue didn't move, two orchestrators raced. |
+| **Worktree** | (silent unless it errors) | `GitWorktreeService.CreateAsync` shells `git worktree add` to make `.portHorizon/worktrees/<id>/`. | `git worktree add` failed — usually a leftover from a previous crashed run. `git worktree prune` + delete the `.portHorizon/worktrees/<id>/` directory. |
+| **RunAgent** | `Agent session for <id> completed in <ms>ms` | `MafAgentRunner.RunAsync` calls the kilo gateway and runs the MAF agent loop with bash. | (a) HTTP 401/403 from the gateway → API key expired. (b) bash command timed out. (c) Model produced no diff → next stage transitions to Completed without a PR. |
+| **Commit** | (silent) | `GitWorktreeService.CommitAllAsync` shells `git add -A` + `git commit` on the worktree. | "no changes" warning — agent produced no diff. Issue moves to `Completed` with `"no changes (agent made 0 edits)"`. |
+| **Push** | (silent) | `GitWorktreeService.PushAsync` shells `git push -u origin agent/<id>`. | Network/auth failure. The issue stays `InProgress` until the orchestrator's next dispatch cycle retries. |
+| **PR open** | `Opened PR #<N> for <id>` | `GitHubService.CreatePullRequestAsync` calls `POST /repos/{owner}/{repo}/pulls`. | (a) GitHub token expired / wrong scope. (b) Branch already had a PR. (c) Rate limit. Issue gets `Failed` after retry budget. |
+| **Watch enqueue** | (silent) | `IssueStore.CreateAsync` enqueues a `pr-watch` follow-up. | — |
+| **PR watch** | `Watch <id> complete` (only logged on the ProcessWatchTaskAsync path) | `PRWatcher` polls GitHub PR status every 30s. | `Watch issue <id> crashed` — usually a transient GitHub API error. Re-pickup on next orchestrator start. |
+
+### Common failure shapes and what to do
+
+**`Issue <id> transition Failed: <error>`** — the agent's model call returned an error. The error string tells you why. Most common:
+
+- `HTTP 401` or `HTTP 403` from the kilo gateway → API key expired. Rotate via [the kilo gateway docs](https://kilo.ai/docs/gateway). The orchestrator keeps running; new tasks will fail the same way until you restart with a fresh key.
+- `HTTP 429` from the kilo gateway → rate limited. The orchestrator retries with backoff per the LLM config; check the `retryCount` metadata on the issue.
+- The LLM is unreachable → network/DNS issue. Check `curl https://api.kilo.ai/api/gateway/models` from the host.
+
+**`Agent session for <id> completed in <N>ms` followed by NO `Opened PR` line** — the agent produced no diff. Issue moves to `Completed` with reason `"no changes (agent made 0 edits)"`. The model's response is captured in `metadata.modelResponse`; inspect via the dashboard's Tasks tab.
+
+**`git worktree add` failed inside a stack trace** — stale worktree from a previous crash. `git worktree prune` + `Remove-Item .portHorizon/worktrees/<id> -Recurse -Force`.
+
+**`Opened PR` line present, but `pr-watch` issue not created** — bug, not operator-fixable. Check the orchestrator log for the exception.
+
+**Watch issue stuck in `InProgress` for hours** — the PRWatcher is polling but GitHub isn't returning a verdict. Check the PR URL (in the dev task's metadata) — is the PR actually open? Is CI running? Was the PR closed or merged out-of-band?
 
 ## Reset the system
 
