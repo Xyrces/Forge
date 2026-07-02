@@ -58,6 +58,53 @@ public sealed record IssueFilter
     public string? Type { get; init; }
 }
 
+/// <summary>
+/// Kind of edge in the issue dependency graph. Only <see cref="Blocks"/>
+/// gates dispatch (see <c>IssueStore.ReadyAsync</c> + <c>ClaimAsync</c>).
+/// <see cref="Related"/> and <see cref="Duplicates"/> are informational
+/// for the dashboard / graph view and do not affect the ready queue.
+/// </summary>
+public enum IssueDepKind
+{
+    Blocks,
+    Related,
+    Duplicates,
+}
+
+public static class IssueDepKindExtensions
+{
+    public static string ToDbValue(this IssueDepKind k) => k switch
+    {
+        IssueDepKind.Blocks => "blocks",
+        IssueDepKind.Related => "related",
+        IssueDepKind.Duplicates => "duplicates",
+        _ => "blocks",
+    };
+
+    public static bool TryParseDb(string s, out IssueDepKind kind)
+    {
+        switch ((s ?? "").Trim().ToLowerInvariant())
+        {
+            case "blocks": kind = IssueDepKind.Blocks; return true;
+            case "related": kind = IssueDepKind.Related; return true;
+            case "duplicates": kind = IssueDepKind.Duplicates; return true;
+            default: kind = IssueDepKind.Blocks; return false;
+        }
+    }
+}
+
+/// <summary>
+/// One edge in the issue dependency graph. <see cref="BlockerId"/> must
+/// resolve (terminal state for <c>Blocks</c>) before <see cref="BlockedId"/>
+/// can be dispatched. <see cref="Kind"/> = <c>Related</c>/<c>Duplicates</c>
+/// are advisory only.
+/// </summary>
+public sealed record IssueEdge(
+    string BlockerId,
+    string BlockedId,
+    IssueDepKind Kind,
+    DateTime CreatedAt);
+
 public interface IIssueStore
 {
     Task<IssueRecord> CreateAsync(NewIssue spec, CancellationToken ct = default);
@@ -68,6 +115,18 @@ public interface IIssueStore
     Task<IssueRecord> TransitionAsync(string id, IssueStatus to, string? error, IDictionary<string, object>? metadata = null, CancellationToken ct = default);
     Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default);
     Task<IssueEventRecord> AddEventAsync(string id, string kind, string? detail = null, CancellationToken ct = default);
+
+    // Dependency graph (Phase 2 of docs/embedded-issues.md).
+    Task<IssueEdge> AddDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
+    Task<bool> RemoveDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
+    Task<IReadOnlyList<IssueEdge>> DependenciesAsync(string id, CancellationToken ct = default);
+    /// <summary>
+    /// True iff at least one open-blocker (kind=Blocks, blocker status in
+    /// {Pending, InProgress, Blocked, Failed}) exists. <c>Completed</c> /
+    /// <c>Closed</c> blockers do not gate; <c>Failed</c> does (until the
+    /// operator clears it). Cheap: indexed lookup, single round-trip.
+    /// </summary>
+    Task<bool> IsBlockedAsync(string id, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -81,7 +140,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 5;
+    public const int CurrentSchemaVersion = 6;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -295,6 +354,21 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             -- to their spec via the spec's own parent_issue_id; a
             -- task links to its story via issue.parent_issue_id.
 
+            -- v6: issue_dep table — the dependency graph.
+            -- Edges, not columns, because one issue can block many and
+            -- be blocked by many. The 'blocks' kind is the only one
+            -- that gates dispatch (see ReadyAsync/ClaimAsync); the
+            -- others are advisory for the dashboard's graph view.
+            CREATE TABLE IF NOT EXISTS issue_dep (
+                blocker_id  TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+                blocked_id  TEXT NOT NULL REFERENCES issue(id) ON DELETE CASCADE,
+                kind        TEXT NOT NULL DEFAULT 'blocks',
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (blocker_id, blocked_id, kind)
+            );
+            CREATE INDEX IF NOT EXISTS ix_issue_dep_blocked ON issue_dep(blocked_id, kind);
+            CREATE INDEX IF NOT EXISTS ix_issue_dep_blocker ON issue_dep(blocker_id, kind);
+
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);
             """;
@@ -378,45 +452,84 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         => await ReadyAsync(limit, sprintId: null, ct);
 
     /// <summary>
-    /// Returns Pending issues, optionally filtered to those in a sprint.
-    /// Pass null for sprintId to fall back to "all Pending" (no sprint filter).
+    /// Returns Pending issues that have no open 'blocks' edges, optionally
+    /// filtered to those in a sprint. Pass null for sprintId to fall back
+    /// to "all Pending" (no sprint filter). Blocked issues are excluded
+    /// from the ready queue so the dispatcher doesn't pick them up.
     /// </summary>
     public async Task<IReadOnlyList<IssueRecord>> ReadyAsync(int limit, string? sprintId, CancellationToken ct = default)
     {
+        // Open = blocker status NOT IN ('Completed', 'Closed'). Failed
+        // is open-on-purpose: if a blocker failed, the operator must
+        // explicitly clear it before dependents can proceed.
+        const string notBlockedPredicate = """
+            NOT EXISTS (
+                SELECT 1 FROM issue_dep d
+                INNER JOIN issue b ON b.id = d.blocker_id
+                WHERE d.blocked_id = i.id
+                  AND d.kind = 'blocks'
+                  AND b.status NOT IN ('Completed', 'Closed')
+            )
+            """;
+
         if (sprintId is null)
         {
-            var pending = await ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
-            return limit > 0 ? pending.Take(limit).ToList() : pending;
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                SELECT id, short_id, type, title, description, status, priority, assignee,
+                       created_at, updated_at, closed_at, metadata_json, parent_issue_id
+                FROM issue i
+                WHERE status = 'Pending' AND {notBlockedPredicate}
+                ORDER BY priority ASC, created_at ASC
+                """;
+            var list = new List<IssueRecord>();
+            await using var rd = await cmd.ExecuteReaderAsync(ct);
+            while (await rd.ReadAsync(ct)) list.Add(ReadIssue(rd));
+            return limit > 0 ? list.Take(limit).ToList() : list;
         }
 
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        await using var conn2 = new SqliteConnection(_connectionString);
+        await conn2.OpenAsync(ct);
+        await using var cmd2 = conn2.CreateCommand();
+        cmd2.CommandText = $"""
             SELECT i.id, i.short_id, i.type, i.title, i.description, i.status, i.priority, i.assignee,
                    i.created_at, i.updated_at, i.closed_at, i.metadata_json, i.parent_issue_id
             FROM issue i
             INNER JOIN sprint_issue si ON i.id = si.issue_id
-            WHERE i.status = 'Pending' AND si.sprint_id = $sid
+            WHERE i.status = 'Pending' AND si.sprint_id = $sid AND {notBlockedPredicate}
             ORDER BY i.priority ASC, i.created_at ASC
             """;
-        cmd.Parameters.AddWithValue("$sid", sprintId);
-        var list = new List<IssueRecord>();
-        await using var rd = await cmd.ExecuteReaderAsync(ct);
-        while (await rd.ReadAsync(ct)) list.Add(ReadIssue(rd));
-        return limit > 0 ? list.Take(limit).ToList() : list;
+        cmd2.Parameters.AddWithValue("$sid", sprintId);
+        var list2 = new List<IssueRecord>();
+        await using var rd2 = await cmd2.ExecuteReaderAsync(ct);
+        while (await rd2.ReadAsync(ct)) list2.Add(ReadIssue(rd2));
+        return limit > 0 ? list2.Take(limit).ToList() : list2;
     }
 
     public async Task<IssueRecord?> ClaimAsync(string id, string assignee, CancellationToken ct = default)
     {
-        // Atomic transition: only succeeds if status is currently 'Pending'.
-        // Concurrency-safe via SQLite's WAL + the single-writer guarantee per row.
+        // Atomic transition: only succeeds if status is currently 'Pending'
+        // AND the issue is not blocked by an open 'blocks' edge. The two
+        // predicates run inside one transaction so two dispatchers on the
+        // same DB can't both claim a freshly-unblocked task in the same
+        // tick.
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+
+        if (await IsBlockedAsync(id, ct))
+        {
+            await tx.RollbackAsync(ct);
+            return null;
+        }
 
         var now = DateTime.UtcNow;
+        int rows;
         await using (var cmd = conn.CreateCommand())
         {
+            cmd.Transaction = tx;
             cmd.CommandText = """
                 UPDATE issue
                 SET status = 'InProgress', assignee = $assignee, updated_at = $now
@@ -425,11 +538,16 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             cmd.Parameters.AddWithValue("$id", id);
             cmd.Parameters.AddWithValue("$assignee", assignee);
             cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
-            var rows = await cmd.ExecuteNonQueryAsync(ct);
-            if (rows == 0) return null; // already claimed or not Pending
+            rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0)
+            {
+                await tx.RollbackAsync(ct);
+                return null; // already claimed or not Pending
+            }
         }
 
-        await InsertEventAsync(conn, null, id, "claimed", $"assignee={assignee}", ct);
+        await InsertEventAsync(conn, tx, id, "claimed", $"assignee={assignee}", ct);
+        await tx.CommitAsync(ct);
         return await GetAsync(id, ct);
     }
 
@@ -489,6 +607,121 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
         return await InsertEventAsync(conn, null, id, kind, detail, ct);
+    }
+
+    // --- Dependency graph (Phase 2 of docs/embedded-issues.md) ---
+
+    public async Task<IssueEdge> AddDependencyAsync(
+        string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(blockerId)) throw new ArgumentException("blockerId required", nameof(blockerId));
+        if (string.IsNullOrWhiteSpace(blockedId)) throw new ArgumentException("blockedId required", nameof(blockedId));
+        if (blockerId == blockedId) throw new ArgumentException("an issue cannot block itself");
+
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        // Validate both issues exist. Keeps FK violations as a 400-shaped
+        // error rather than a SQLite constraint blow-up.
+        var blocker = await GetAsync(blockerId, ct)
+            ?? throw new InvalidOperationException($"blocker issue {blockerId} not found");
+        var blocked = await GetAsync(blockedId, ct)
+            ?? throw new InvalidOperationException($"blocked issue {blockedId} not found");
+
+        var now = DateTime.UtcNow;
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO issue_dep(blocker_id, blocked_id, kind, created_at)
+            VALUES($blocker, $blocked, $kind, $now)
+            ON CONFLICT(blocker_id, blocked_id, kind) DO UPDATE SET created_at = $now
+            """;
+        cmd.Parameters.AddWithValue("$blocker", blocker.Id);
+        cmd.Parameters.AddWithValue("$blocked", blocked.Id);
+        cmd.Parameters.AddWithValue("$kind", kind.ToDbValue());
+        cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
+        await cmd.ExecuteNonQueryAsync(ct);
+
+        await InsertEventAsync(conn, null, blockedId,
+            "dep_added", $"{kind.ToDbValue()} blocker={blockerId}", ct);
+
+        return new IssueEdge(blocker.Id, blocked.Id, kind, now);
+    }
+
+    public async Task<bool> RemoveDependencyAsync(
+        string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            DELETE FROM issue_dep
+            WHERE blocker_id = $blocker AND blocked_id = $blocked AND kind = $kind
+            """;
+        cmd.Parameters.AddWithValue("$blocker", blockerId);
+        cmd.Parameters.AddWithValue("$blocked", blockedId);
+        cmd.Parameters.AddWithValue("$kind", kind.ToDbValue());
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (rows > 0)
+        {
+            await InsertEventAsync(conn, null, blockedId,
+                "dep_removed", $"{kind.ToDbValue()} blocker={blockerId}", ct);
+            return true;
+        }
+        return false;
+    }
+
+    public async Task<IReadOnlyList<IssueEdge>> DependenciesAsync(string id, CancellationToken ct = default)
+    {
+        // Returns both directions: edges where `id` is the blocker AND
+        // edges where `id` is the blocked. Caller can filter by kind or
+        // direction (this matches what a graph view needs).
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT blocker_id, blocked_id, kind, created_at
+            FROM issue_dep
+            WHERE blocker_id = $id OR blocked_id = $id
+            ORDER BY created_at ASC
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+        var list = new List<IssueEdge>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct))
+        {
+            var kindStr = rd.GetString(2);
+            IssueDepKindExtensions.TryParseDb(kindStr, out var kind);
+            list.Add(new IssueEdge(
+                BlockerId: rd.GetString(0),
+                BlockedId: rd.GetString(1),
+                Kind: kind,
+                CreatedAt: ParseDate(rd.GetString(3))));
+        }
+        return list;
+    }
+
+    public async Task<bool> IsBlockedAsync(string id, CancellationToken ct = default)
+    {
+        // Open-blocker definition: a 'blocks' edge whose blocker issue is
+        // NOT yet in a terminal-resolved state (Completed or Closed).
+        // Failed is intentionally treated as open — if the blocker
+        // failed, the operator must explicitly clear it (close or
+        // remove the edge) before dependents can proceed.
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT 1
+            FROM issue_dep d
+            INNER JOIN issue b ON b.id = d.blocker_id
+            WHERE d.blocked_id = $id
+              AND d.kind = 'blocks'
+              AND b.status NOT IN ('Completed', 'Closed')
+            LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is not null;
     }
 
     private static async Task<int> NextShortIdAsync(SqliteConnection conn, SqliteTransaction tx, string type)
