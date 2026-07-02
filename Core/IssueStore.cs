@@ -140,7 +140,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 7;
+    public const int CurrentSchemaVersion = 8;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -379,6 +379,31 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 ttl_days    INTEGER
             );
             CREATE INDEX IF NOT EXISTS ix_memory_key ON memory(key);
+
+            -- v8: issue_groomer_run table — every time the Groomer
+            -- runs against a spec (manual via POST /api/specs/{id}/groom
+            -- or scheduled via the IHostedService), a row is written
+            -- here so the dashboard's Groomer timeline can show
+            -- what happened, when, and what stories were produced.
+            -- spec_id references spec.id (NOT issue.id); we don't
+            -- enforce it as a SQL FK because the spec table is
+            -- managed by SpecStore and lives in the same DB but
+            -- has its own creation path. The GroomerRunStore + the
+            -- UI's spec lookup are the source of truth for the
+            -- referential relationship.
+            CREATE TABLE IF NOT EXISTS issue_groomer_run (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                  TEXT NOT NULL,
+                spec_id             TEXT NOT NULL,
+                trigger_kind        TEXT NOT NULL,    -- 'manual' | 'scheduled'
+                status              TEXT NOT NULL,    -- 'started' | 'succeeded' | 'failed'
+                stories_produced    INTEGER NOT NULL DEFAULT 0,
+                tasks_produced      INTEGER NOT NULL DEFAULT 0,
+                error               TEXT,
+                duration_ms         INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS ix_issue_groomer_run_spec ON issue_groomer_run(spec_id, ts);
+            CREATE INDEX IF NOT EXISTS ix_issue_groomer_run_ts ON issue_groomer_run(ts);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

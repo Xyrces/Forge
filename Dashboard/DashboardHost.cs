@@ -26,6 +26,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly MemoryStore? _memory;
     private readonly string? _issuesJsonlPath;
     private readonly VisionStore? _vision;
+    private readonly IssueGroomerRunStore? _groomerRuns;
     private readonly ISpecExtractionReader? _extractorOverride;
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
     private readonly ICodebaseGraphCacheStore? _codebaseCacheOverride;
@@ -51,6 +52,7 @@ public sealed class DashboardHost : IAsyncDisposable
         MemoryStore? memory = null,
         string? issuesJsonlPath = null,
         VisionStore? vision = null,
+        IssueGroomerRunStore? groomerRuns = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
         ICodebaseGraphCacheStore? codebaseCache = null)
@@ -66,6 +68,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _groomerFactory = groomerFactory;
         _memory = memory;
         _issuesJsonlPath = issuesJsonlPath;
+        _groomerRuns = groomerRuns;
         _vision = vision;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
@@ -172,7 +175,7 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns);
 
         if (_memory is not null)
         {
@@ -187,6 +190,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         if (_vision is not null)
         {
             VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger);
+        }
+
+        if (_groomerRuns is not null)
+        {
+            GroomerEndpoints.MapGroomerEndpoints(_app, _groomerRuns, _logger);
         }
 
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)

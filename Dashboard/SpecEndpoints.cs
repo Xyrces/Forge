@@ -25,7 +25,8 @@ public static class SpecEndpoints
         ISpecExtractionReader extractor,
         ILogger logger,
         PortHorizon.Agents.Core.IIntakeStore? intakeStore = null,
-        GroomerAgentFactory? groomerFactory = null)
+        GroomerAgentFactory? groomerFactory = null,
+        IssueGroomerRunStore? groomerRuns = null)
     {
         app.MapGet("/api/specs", async (string? project, string? status, CancellationToken ct) =>
         {
@@ -191,13 +192,38 @@ public static class SpecEndpoints
 
                 // Fire-and-forget on a background task. The HTTP
                 // request returns immediately so the UI can refresh
-                // and watch the event stream.
+                // and watch the event stream. The manual run is
+                // recorded in issue_groomer_run (P3.5) so the
+                // dashboard's Groomer timeline can show it.
                 var agent = groomerFactory.Create();
+                var runs = groomerRuns;
                 _ = Task.Run(async () =>
                 {
-                    try { await agent.GroomAsync(id); }
+                    var run = runs is not null
+                        ? await runs.StartAsync(id, GroomerTriggerKind.Manual, CancellationToken.None)
+                        : null;
+                    var startedAt = DateTime.UtcNow;
+                    try
+                    {
+                        await agent.GroomAsync(id);
+                        if (runs is not null && run is not null)
+                        {
+                            await runs.FinishAsync(run.Id, GroomerRunStatus.Succeeded,
+                                storiesProduced: 0, tasksProduced: 0, error: null,
+                                duration: DateTime.UtcNow - startedAt,
+                                ct: CancellationToken.None);
+                        }
+                    }
                     catch (Exception ex)
                     {
+                        if (runs is not null && run is not null)
+                        {
+                            await runs.FinishAsync(run.Id, GroomerRunStatus.Failed,
+                                storiesProduced: 0, tasksProduced: 0,
+                                error: $"{ex.GetType().Name}: {ex.Message}",
+                                duration: DateTime.UtcNow - startedAt,
+                                ct: CancellationToken.None);
+                        }
                         logger.LogWarning(ex, "Background groom failed for spec {Id}", id);
                     }
                 });

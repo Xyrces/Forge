@@ -504,6 +504,13 @@ public static class Program
         var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
             loggerFactory.CreateLogger<IssuesJsonlMirror>());
 
+            // P3.5: issue_groomer_run store. Shares the issues DB
+            // (the v8 migration is applied at IssueStore's ctor).
+            // The groomer_runs table has a foreign key on issue.id,
+            // so the runs must live in the same DB as the issue rows.
+            var groomerRunsDb = Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db");
+            var groomerRuns = new Core.IssueGroomerRunStore(groomerRunsDb);
+
         // P0.5: vision.md import. Build the VisionStore (loads the
         // configured file on startup), inject it into memory as the
         // 'vision/master' key, and pass it to the dashboard so the
@@ -582,6 +589,7 @@ public static class Program
             memory: memoryStore,
             issuesJsonlPath: issuesJsonlPath,
             vision: vision,
+            groomerRuns: groomerRuns,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);
@@ -607,6 +615,15 @@ public static class Program
             // JSONL mirror is a fire-and-forget background task; it
             // cancels itself when shutdownCts fires.
             _ = jsonlMirror.StartAsync(shutdownCts.Token);
+
+            // P3.5: scheduled Groomer wakes up every 5 minutes and
+            // grooms any Approved specs that haven't been groomed
+            // recently (or whose last groom failed). Fire-and-forget.
+            var scheduledGroomer = new Orchestrator.ScheduledGroomer(
+                specStore, groomerFactory, groomerRuns, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
+                interval: TimeSpan.FromMinutes(5));
+            _ = scheduledGroomer.RunAsync(shutdownCts.Token);
 
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);
