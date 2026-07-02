@@ -278,13 +278,15 @@ public static class Program
         var agentsStore = new Core.AgentStore(issues);
         var skillsStore = new Core.SkillStore(issues);
         var skillSource = new SqliteSkillSource(agentsStore, skillsStore, roleRegistry);
+        var memoryStore = new MemoryStore(Path.Combine(workspaceDir, ".portHorizon", "state", "memory.db"));
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
-            kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents"));
+            kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents"),
+            memory: memoryStore);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,

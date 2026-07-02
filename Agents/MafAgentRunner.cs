@@ -31,6 +31,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly ILogger<MafAgentRunner> _logger;
     private readonly string _kiloAgentsRoot;
     private readonly ISkillSource? _skills;
+    private readonly MemoryStore? _memory;
 
     public MafAgentRunner(
         IChatClientFactory chatClientFactory,
@@ -38,7 +39,8 @@ public sealed class MafAgentRunner : IAgentRunner
         RoleAgentRegistry roles,
         ILogger<MafAgentRunner> logger,
         ISkillSource? skills = null,
-        string kiloAgentsRoot = ".kilo/agents")
+        string kiloAgentsRoot = ".kilo/agents",
+        MemoryStore? memory = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -46,6 +48,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _logger = logger;
         _skills = skills;
         _kiloAgentsRoot = kiloAgentsRoot;
+        _memory = memory;
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -64,9 +67,15 @@ public async Task<AgentRunResult> RunAsync(
         var skillInstructions = _skills is null
             ? string.Empty
             : await BuildSkillInstructionsAsync(role, ct);
-        var instructions = string.IsNullOrEmpty(skillInstructions)
-            ? roleInstructions
-            : roleInstructions + "\n\n" + skillInstructions;
+        var memoryInstructions = _memory is null
+            ? string.Empty
+            : await BuildMemoryInstructionsAsync(ct);
+        var instructions = string.Join("\n\n", new[]
+        {
+            roleInstructions,
+            skillInstructions,
+            memoryInstructions,
+        }.Where(s => !string.IsNullOrEmpty(s)));
         // P1 fix: instructions go to the agent's instructions: parameter,
         // NOT into the user message. The user prompt is the operator's
         // task text; the system prompt is the role + skills context.
@@ -176,6 +185,23 @@ finally
             sb.AppendLine();
         }
         return sb.ToString().TrimEnd();
+    }
+
+    private async Task<string> BuildMemoryInstructionsAsync(CancellationToken ct)
+    {
+        IReadOnlyList<MemoryRecord> memories;
+        try
+        {
+            memories = await _memory!.RecallAsync(keyPrefix: null, ct);
+        }
+        catch (Exception ex)
+        {
+            // Memory recall must never break a dispatch. Errors are
+            // logged and the agent runs without the memory block.
+            _logger.LogWarning(ex, "Failed to recall project memory; continuing without it");
+            return string.Empty;
+        }
+        return MemoryStore.RenderForPrompt(memories);
     }
 
     private string LoadRoleInstructions(string kiloAgentName)
