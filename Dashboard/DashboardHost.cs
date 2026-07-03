@@ -33,6 +33,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ArtistRunStore? _artistRuns;
     private readonly ArtOutputStore? _artOutputs;
     private readonly Meshy.MeshyClient? _meshy;
+    private readonly RecoveryReportStore? _recoveryReports;
+    private readonly Orchestrator.StartupRecovery? _startupRecovery;
     private readonly IssueGroomerRunStore? _groomerRuns;
     private readonly ISpecExtractionReader? _extractorOverride;
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
@@ -66,6 +68,8 @@ public sealed class DashboardHost : IAsyncDisposable
         ArtistRunStore? artistRuns = null,
         ArtOutputStore? artOutputs = null,
         Meshy.MeshyClient? meshy = null,
+        RecoveryReportStore? recoveryReports = null,
+        Orchestrator.StartupRecovery? startupRecovery = null,
         IssueGroomerRunStore? groomerRuns = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
@@ -90,6 +94,8 @@ public sealed class DashboardHost : IAsyncDisposable
         _artistRuns = artistRuns;
         _artOutputs = artOutputs;
         _meshy = meshy;
+        _recoveryReports = recoveryReports;
+        _startupRecovery = startupRecovery;
         _vision = vision;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
@@ -225,6 +231,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             {
                 ArtistEndpoints.MapArtistEndpoints(
                     _app, _specs, _artistFactory, _artistRuns, _artOutputs, _meshy, _logger);
+            }
+            if (_recoveryReports is not null && _startupRecovery is not null)
+            {
+                RecoveryEndpoints.MapRecoveryEndpoints(
+                    _app, _issues, _recoveryReports, _startupRecovery, _logger);
             }
         }
 

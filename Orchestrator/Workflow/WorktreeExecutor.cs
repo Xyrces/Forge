@@ -51,6 +51,12 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             return new WorktreeReady(input, WorktreeResult.AlreadyClaimed, null, defaultBranch);
         }
         var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct);
+        // P4 Stage A: advance the dispatch checkpoint BEFORE we
+        // touch metadata. If we crash between CreateAsync and the
+        // TransitionAsync below, the recoverer sees
+        // worktree_acquired + a worktree directory on disk and
+        // resumes from RunAgent (the LLM re-runs).
+        await issues.SetCheckpointAsync(input.Issue.Id, DispatchCheckpoint.WorktreeAcquired, ct);
         // Persist the path/branch in metadata so the dashboard can
         // surface them even before the agent has run.
         var issue = await issues.GetAsync(input.Issue.Id, ct);

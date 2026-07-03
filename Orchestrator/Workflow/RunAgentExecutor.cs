@@ -124,6 +124,10 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         // dashboard can show what the agent said, even when
         // downstream steps fail.
         await RecordModelResponseAsync(issues, issue.Id, result.Text, ct);
+        // P4 Stage A: advance to agent_completed. From here the
+        // recoverer knows the LLM has finished; if we crash before
+        // CommitPushPr runs, the recoverer resumes from commit.
+        await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.AgentCompleted, ct);
         await UpdateMetadataAsync(issues, issue.Id, m =>
         {
             m["agentSessionId"] = result.SessionId ?? string.Empty;

@@ -20,6 +20,7 @@ public static class Program
     private static Orchestrator.ScheduledGroomer? _scheduledGroomer;
     private static Orchestrator.DesignerScheduler? _scheduledDesigner;
     private static Orchestrator.ArtistScheduler? _scheduledArtist;
+    private static Orchestrator.StartupRecovery? _startupRecovery;
     private static IssuesJsonlMirror? _issuesJsonlMirror;
 
     public static async Task<int> Main(string[] args)
@@ -59,16 +60,22 @@ public static class Program
         if (mode == CliMode.Enqueue)
             return await EnqueueTaskAsync(args, options);
 
-        if (mode == CliMode.DashboardOnly)
+if (mode == CliMode.DashboardOnly)
             return await RunDashboardOnlyAsync(options, loggerFactory, logger);
 
         if (mode == CliMode.WorktreeSmoke)
             return await RunWorktreeSmokeAsync(args, options, loggerFactory, logger);
 
+        if (mode == CliMode.RecoverDryRun)
+            return await RunRecoverAsync(options, loggerFactory, logger, dryRun: true);
+
+        if (mode == CliMode.RecoverAndStart)
+            return await RunRecoverAsync(options, loggerFactory, logger, dryRun: false);
+
         return await RunOrchestratorAsync(options, loggerFactory, logger);
     }
 
-    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check }
+    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart }
 
     private static CliMode ParseMode(string[] args)
     {
@@ -78,6 +85,8 @@ public static class Program
         if (args.Any(a => a == "--worktree-smoke")) return CliMode.WorktreeSmoke;
         if (args.Any(a => a == "--once")) return CliMode.Once;
         if (args.Any(a => a == "--check")) return CliMode.Check;
+        if (args.Any(a => a == "--recover")) return CliMode.RecoverDryRun;
+        if (args.Any(a => a == "--recover-and-start")) return CliMode.RecoverAndStart;
         return CliMode.Run;
     }
 
@@ -254,16 +263,103 @@ public static class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Smoke FAILED: {ex.GetType().Name}: {ex.Message}");
-            Console.Error.WriteLine(ex.ToString());
+Console.Error.WriteLine(ex.ToString());
             return 1;
         }
     }
 
     /// <summary>
-    /// Pre-flight validation: confirm config, schema, git, gateway, and
-    /// GitHub auth all work without starting dispatch. Exits non-zero on
-    /// any failure so CI / smoke jobs can gate on it.
+    /// P4 Stage A — StartupRecovery CLI.
+    ///
+    /// <c>--recover</c>: dry-run. Reports what the recoverer
+    /// WOULD do (issues scanned / replayed / failed) and
+    /// exits 0. No side-effects on the issue store, no PR
+    /// opens, no pushes. Use this to verify the recoverer
+    /// before running a real restart.
+    ///
+    /// <c>--recover-and-start</c>: same as <c>--recover</c> but
+    /// the side-effects run for real (push, PR open, worktree
+    /// cleanup). After the recoverer finishes, the orchestrator
+    /// continues with the normal dispatch loop.
+    ///
+    /// The full orchestrator boots in the second branch;
+    /// --recover exits as soon as the sweep is done.
     /// </summary>
+    private static async Task<int> RunRecoverAsync(
+        AgentOptions options, ILoggerFactory loggerFactory, ILogger logger, bool dryRun)
+    {
+        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
+        var stateDir = Path.Combine(workspaceDir, ".portHorizon", "state");
+        try
+        {
+            await using var issues = new IssueStore(Path.Combine(stateDir, "issues.db"));
+            var recoveryReports = new RecoveryReportStore(Path.Combine(stateDir, "issues.db"));
+            var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
+            var gitHub = new GitHubService(options.GitHub);
+            var recovery = new Orchestrator.StartupRecovery(
+                issues, recoveryReports, worktrees,
+                new Orchestrator.GitHubRecoveryAdapter(gitHub),
+                new InMemoryDashboardEventBus(),
+                loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
+
+            Console.WriteLine($"P4 StartupRecovery: {(dryRun ? "DRY-RUN" : "side-effects enabled")}");
+            Console.WriteLine($"  workspace: {options.Workspace.Root}");
+            Console.WriteLine($"  state dir: {stateDir}");
+            Console.WriteLine();
+
+            if (dryRun)
+            {
+                // Classify each candidate without writing any
+                // side-effects. We re-implement the read path
+                // here (no audit row written) so the operator
+                // can see "what would happen" without leaving
+                // a paper trail.
+                var candidates = await issues.ListInProgressForRecoveryAsync();
+                Console.WriteLine($"  scanned: {candidates.Count}");
+                int replay = 0, failed = 0, leftAlone = 0;
+                foreach (var issue in candidates)
+                {
+                    var d = recovery.Classify(issue);
+                    var line = $"    {issue.Id}: {issue.DispatchCheckpoint?.ToDbValue() ?? "(none)"} -> {d.Action} ({d.Reason})";
+                    Console.WriteLine(line);
+                    if (d.Action == RecoveryAction.Replay) replay++;
+                    else if (d.Action == RecoveryAction.Failed) failed++;
+                    else leftAlone++;
+                }
+                Console.WriteLine();
+                Console.WriteLine($"  dry-run totals: replay={replay} failed={failed} left_alone={leftAlone}");
+                return 0;
+            }
+
+            var reportId = await recovery.RunAsync();
+            var report = await recoveryReports.GetAsync(reportId);
+            Console.WriteLine($"  recovery_report id: {reportId}");
+            if (report is not null)
+            {
+                Console.WriteLine($"  scanned={report.IssuesScanned} replayed={report.IssuesReplayed} failed={report.IssuesFailed} duration={report.DurationMs}ms");
+                if (!string.IsNullOrWhiteSpace(report.ActionsJson))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(report.ActionsJson);
+                    foreach (var el in doc.RootElement.EnumerateArray())
+                    {
+                        var id = el.GetProperty("IssueId").GetString();
+                        var action = el.GetProperty("Action").GetString();
+                        var before = el.TryGetProperty("BeforeCheckpoint", out var b) && b.ValueKind != System.Text.Json.JsonValueKind.Null ? b.GetString() : "(none)";
+                        var after = el.TryGetProperty("AfterCheckpoint", out var a) && a.ValueKind != System.Text.Json.JsonValueKind.Null ? a.GetString() : "(none)";
+                        var err = el.TryGetProperty("Error", out var e) && e.ValueKind != System.Text.Json.JsonValueKind.Null ? e.GetString() : "";
+                        Console.WriteLine($"    {id}: {before} -> {after} ({action}{(string.IsNullOrEmpty(err) ? "" : $", err={err}")})");
+                    }
+                }
+            }
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex.ToString());
+            return 1;
+        }
+    }
+
     private static async Task<int> RunPreflightCheckAsync(AgentOptions options, ILogger logger)
     {
         var failures = new List<string>();
@@ -647,6 +743,16 @@ public static class Program
         var artistAgentFactory = new Orchestrator.ArtistAgentFactory(
             specStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,
             chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+        // P4 Stage A — StartupRecovery service. Constructed BEFORE
+        // the dashboard so the dashboard can expose recovery
+        // endpoints (POST /api/recovery/run + dry-run + reports).
+        // RunAsync is called later, after the dashboard starts.
+        var startupRecovery = new Orchestrator.StartupRecovery(
+            issues, recoveryReports, worktrees,
+            new Orchestrator.GitHubRecoveryAdapter(gitHub),
+            eventBus,
+            loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
+        _startupRecovery = startupRecovery;  // held against GC reaping
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
@@ -665,6 +771,8 @@ public static class Program
             artistRuns: artistRuns,
             artOutputs: artOutputs,
             meshy: meshy,
+            recoveryReports: recoveryReports,
+            startupRecovery: startupRecovery,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);
@@ -697,15 +805,12 @@ try
             // the dispatch loop entirely and --recover runs
             // recovery with no side effects and exits 0.
             //
-            // The recoverer needs the GitHub adapter. The
-            // GitHubRecoveryAdapter wraps the same GitHubService
-            // instance the workflow executors use, so we don't
-            // duplicate Octokit client state.
-            var startupRecovery = new Orchestrator.StartupRecovery(
-                issues, recoveryReports, worktrees,
-                new Orchestrator.GitHubRecoveryAdapter(gitHub),
-                eventBus,
-                loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
+            // The startupRecovery service was constructed BEFORE
+            // the dashboard so the dashboard's endpoints can
+            // expose it. Run the recovery pass now (before the
+            // dispatch loop starts) so any in-flight issues from
+            // a previous crash are replayed before the new
+            // dispatch cycle begins.
             await startupRecovery.RunAsync(ct: shutdownCts.Token);
 
             // JSONL mirror is a fire-and-forget background task; it

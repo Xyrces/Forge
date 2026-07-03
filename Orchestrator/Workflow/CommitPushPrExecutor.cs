@@ -76,7 +76,13 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             return new PrOpened(input, PrResult.NoDiff, 0, null);
         }
 
+        // P4 Stage A: advance through the dispatch checkpoints so
+        // a StartupRecovery pass can resume from push_done if we
+        // crash between push and PR-open, or from pr_opened if we
+        // crash after the PR is recorded.
+        await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
         await worktrees.PushAsync(worktreePath, branch, ct);
+        await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
         var headSha = await worktrees.GetHeadShaAsync(worktreePath, ct);
 
         var pr = await gitHub.CreatePullRequestAsync(
@@ -92,6 +98,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             m["branchSha"] = headSha;
             return m;
         }, ct);
+        await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
         events.Publish(new DashboardEvent(
             DateTime.UtcNow, DashboardEventKind.PrOpened, issue.Id,
             $"PR #{pr.Number} -> {branch}",
