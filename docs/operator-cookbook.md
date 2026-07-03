@@ -233,6 +233,65 @@ The Groomer gate widens to `Designed | AssetReady | Approved | Groomed` — both
 
 **Meshy credits:** A text-to-3d preview task is 20 credits, a refine/texture task is 10 credits, image-to-3d is 20-30 credits. The Meshy 6 model is current (set via `ai_model: "meshy-6"` in the request).
 
+## Recover from a crash mid-workflow
+
+If the orchestrator dies mid-dispatch (Ctrl-C, host reboot, OOM, SIGKILL), the in-flight issue's row is left at `status=InProgress + assignee=kilo + dispatch_checkpoint=<wherever we got to>`. Stage A of P4 (`StartupRecovery`) replays the unfinished side-effects on the next launch.
+
+**Automatic (default):** the orchestrator runs `StartupRecovery` at startup, BEFORE the dispatch loop starts. You'll see a log line like:
+
+```
+[Information] StartupRecovery: starting report 42 (specId=<all>)
+[Information] StartupRecovery: pass done in 187ms (scanned=1 replayed=1 failed=0)
+```
+
+**Manual dry-run (no side-effects):** see what recovery would do without committing:
+
+```bash
+dotnet run --project PortHorizon.Agents -- --recover
+```
+
+Output:
+
+```
+P4 StartupRecovery: DRY-RUN
+  workspace: C:\Users\jtn50\repos\gamedev\PortHorizon
+  state dir: C:\...\portHorizon\state
+
+  scanned: 2
+    task-7: commit_done -> Replay (replay from commit_done)
+    task-9: claimed -> LeftAlone (just-claimed; dispatch loop will pick up on next tick)
+
+  dry-run totals: replay=1 failed=0 left_alone=1
+```
+
+**Manual recovery with side-effects:** replay the side-effects and continue with the normal dispatch loop:
+
+```bash
+dotnet run --project PortHorizon.Agents -- --recover-and-start
+```
+
+**From the dashboard:** the Recovery tab shows the latest report's actions. Click `Run recovery now` to fire a sweep from the UI; `Dry run` for the read-only version.
+
+```bash
+# Latest 20 reports
+curl.exe "http://127.0.0.1:4097/api/recovery/reports?limit=20"
+
+# One report
+curl.exe "http://127.0.0.1:4097/api/recovery/reports/42"
+
+# Fire a recovery sweep (side-effects enabled)
+curl.exe -X POST "http://127.0.0.1:4097/api/recovery/run"
+
+# Dry-run (no side-effects)
+curl.exe -X POST "http://127.0.0.1:4097/api/recovery/dry-run"
+```
+
+**What gets replayed:** the recoverer only finishes the cheap side-effects (commit / push / PR open). The LLM run is NOT replayed — if the agent's conversation history was lost on the crash, the issue is left at `InProgress + worktree_acquired` and the dispatch loop picks it up on the next tick with a fresh LLM call. Recovering agent conversations across restarts is Stage B (DurableTask, opt-in via `Orchestrator:Execution=Durable` in `appsettings.json`).
+
+**Recovery attempts:** each successful replay increments `recovery_attempts`. After 3 attempts the issue is hard-failed with `lastError = "recovered: <reason>"`. Override via `StartupRecoveryOptions.MaxAttempts` if you want a tighter loop (the operator dashboard's Recovery tab shows the audit row + each issue's `recovery_attempts` count).
+
+**Status machine + checkpoints:** the 6 checkpoints are `claimed → worktree_acquired → agent_completed → commit_done → push_done → pr_opened`. Each executor advances the checkpoint BEFORE its side-effect. Terminal transitions (Completed / Failed / Closed / Blocked) clear the checkpoint column so the next sweep ignores them.
+
 ## Watch a PR through the review loop
 
 When a task is dispatched and a PR is opened, the orchestrator auto-enqueues a `pr-watch` follow-up. The `PRWatcher` polls every 30s. Watch it on the dashboard:

@@ -112,6 +112,12 @@ dotnet run --project PortHorizon.Agents -- --status
 # (no dispatch; exits non-zero on any failure; useful for CI/smoke)
 dotnet run --project PortHorizon.Agents -- --check
 
+# Dry-run recovery: see what StartupRecovery would do (no side-effects)
+dotnet run --project PortHorizon.Agents -- --recover
+
+# Recovery + start: replay unfinished side-effects, then start dispatch
+dotnet run --project PortHorizon.Agents -- --recover-and-start
+
 # Enqueue a task
 dotnet run --project PortHorizon.Agents -- \
   --enqueue-task "Add Position ECS component" \
@@ -171,7 +177,7 @@ The page polls `/api/state` every 2s and subscribes to `/api/events` for instant
 8. `GitHubService.CreatePullRequestAsync` opens the PR (`[type] title`).
 9. `OrchestratorAgent` enqueues a `pr-watch` follow-up issue.
 10. `PRWatcher` polls GitHub every 30s. On green CI + approval, it merges, deletes the branch, removes the worktree, and marks the dev task `Completed`. On `REQUEST_CHANGES`, it marks `Blocked`. On red CI, it marks `Failed`.
-11. Stale `InProgress` tasks (no `UpdatedAt` for `Spawner.StaleMinutes`, default 30m) are reaped at startup; one retry before `Failed`.
+11. **Restart safety**: P4 Stage A — `StartupRecovery` runs at every startup, classifies every `InProgress + assignee=kilo` issue by its `dispatch_checkpoint`, and replays unfinished side-effects (commit / push / PR open). Use `--recover` to dry-run. See `docs/p4-restart-safety.md` for the full contract + the audit row format.
 
 Optional: a `DependencyGraph` exists in `IssueStore` (`blocks` / `related` / `duplicates` edges). `ReadyAsync` excludes issues with an open `blocks` edge whose blocker is not `Completed`/`Closed`. `Failed` blockers are **not** auto-cleared — the operator must explicitly close them or remove the edge.
 
@@ -227,7 +233,7 @@ Set `Logging__LogLevel__Default=Debug` for verbose output (raw LLM requests, exe
 
 - **Cross-process safety.** The issue store uses SQLite WAL mode. Run only one orchestrator per state directory.
 - **Concurrency.** `Spawner.MaxConcurrentSessions` (default 4) is the upper bound on simultaneous in-flight agent runs.
-- **Retries.** Stale `InProgress` tasks are reaped at startup; one retry before `Failed`. Use the dashboard to manually re-claim a failed task.
+- **Retries.** `StartupRecovery` (P4 Stage A) replays unfinished side-effects at startup. After `StartupRecoveryOptions.MaxAttempts` (default 3) recoveries the issue is hard-failed. Use the dashboard's Recovery tab to inspect the audit row + run a fresh sweep.
 - **Memory.** Project memory is injected into every agent prompt. Use `POST /api/memory` to add a key like `coding-style/no-linq-in-hot-paths` with a body. The agent sees the block under "## Project memory".
 - **Spec → Groomer.** A spec with `status: Approved` can be decomposed into 1–3 stories × 1–3 tasks via `POST /api/specs/{id}/groom`. The GroomerAgent (also MAF) is fire-and-forget.
 
