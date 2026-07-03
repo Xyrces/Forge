@@ -544,6 +544,16 @@ public static class Program
         {
             logger.LogWarning("Vision file not found at {Path}; dashboard Vision tab will be empty", visionSnapshot.Path);
         }
+
+        // Bootstrap the operator-maintained playbook reference
+        // (Xyrces/godot-ecs-gamedev-playbook) into the memory layer
+        // so every agent prompt can see the repo URL + a per-role
+        // skill list. Idempotent: SeedIfMissingAsync skips writes
+        // when the key already exists, so operator edits survive
+        // orchestrator restarts.
+        var skillBootstrap = new Agents.SkillBootstrap(
+            memoryStore, loggerFactory.CreateLogger<Agents.SkillBootstrap>());
+        await skillBootstrap.SeedAsync();
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
         var agentRunner = new MafAgentRunner(

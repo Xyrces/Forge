@@ -76,6 +76,34 @@ public sealed class MemoryStore : IAsyncDisposable
     }
 
     /// <summary>
+    /// Idempotently seeds a memory key. If the key already exists
+    /// (and is not expired), the existing record is returned and
+    /// <paramref name="body"/> is NOT written. This protects
+    /// operator edits from being overwritten by orchestrator restart.
+    /// </summary>
+    public async Task<MemoryRecord> SeedIfMissingAsync(
+        string key, string body, int? ttlDays = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+            throw new ArgumentException("key required", nameof(key));
+        if (body is null)
+            throw new ArgumentNullException(nameof(body));
+
+        // LIKE match: the key column is unique, so a "playbook/repo"
+        // lookup returns either zero or one row. We do an exact match
+        // by quoting the value so '%' characters in the key don't
+        // act as wildcards.
+        var existing = await RecallAsync(keyPrefix: null, ct);
+        var hit = existing.FirstOrDefault(m =>
+            string.Equals(m.Key, key, StringComparison.Ordinal));
+        if (hit is not null)
+        {
+            return hit;
+        }
+        return await RememberAsync(key, body, ttlDays, ct);
+    }
+
+    /// <summary>
     /// Read all non-expired memories. If <paramref name="keyPrefix"/>
     /// is null, returns everything; otherwise filters by LIKE prefix.
     /// </summary>

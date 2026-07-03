@@ -22,6 +22,31 @@ public sealed class RoleAgentRegistry
         };
     }
 
+    /// <summary>
+    /// Designer is an Orchestrator-only role (no AgentType). It's
+    /// registered as a custom entry under the key "designer" so
+    /// the LLM provider / model can be configured separately in
+    /// appsettings.json (llm.roles.designer). Falls back to CoreDev's
+    /// kilo agent name when not configured.
+    /// </summary>
+    public const string DesignerKiloAgentName = "designer";
+
+    /// <summary>
+    /// Get a role by its kilo agent name. Returns null when no role
+    /// matches. Use this for the Designer (which is keyed by name
+    /// not by AgentType).
+    /// </summary>
+    public RoleAgent? ByKiloAgentName(string kiloAgentName)
+    {
+        if (string.IsNullOrWhiteSpace(kiloAgentName)) return null;
+        foreach (var r in _roles.Values)
+        {
+            if (string.Equals(r.KiloAgentName, kiloAgentName, StringComparison.Ordinal))
+                return r;
+        }
+        return null;
+    }
+
     public RoleAgent ForType(AgentType type)
         => _roles.TryGetValue(type, out var role)
             ? role

@@ -132,9 +132,15 @@ public sealed class DesignerAgent
     private async Task<DesignerResult> RunLlmAsync(
         long runId, SpecRecord spec, HygieneReport hygiene, DateTime startedAt, CancellationToken ct)
     {
-        var chatClient = _chatClientFactory.Create(_config, _roles.ForType(AgentType.CoreDev).KiloAgentName == null
-            ? _config.DefaultProvider is null ? AgentType.CoreDev : _config.DefaultProvider.Equals("designer", StringComparison.OrdinalIgnoreCase) ? AgentType.CoreDev : AgentType.CoreDev
-            : AgentType.CoreDev);
+        // Pick the chat-client factory entry. The Designer is an
+        // Orchestrator-only role; it doesn't have an AgentType, so
+        // we honor the configured "designer" role's provider +
+        // model (the kilo agent name we resolve to CoreDev's
+        // config for the factory call). Falls back to CoreDev's
+        // config when the "designer" role isn't configured.
+        var designerRole = _roles.ByKiloAgentName(RoleAgentRegistry.DesignerKiloAgentName);
+        var roleForClient = designerRole ?? _roles.ForType(AgentType.CoreDev);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
         // Function-invocation middleware: the LLM's tool_calls get
         // executed and the result feeds back into the next turn.
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
@@ -143,7 +149,7 @@ public sealed class DesignerAgent
 
         var agent = new ChatClientAgent(
             chatClient,
-            instructions: BuildInstructions(),
+            instructions: BuildInstructions(await BuildPlaybookBlockAsync(ct)),
             name: "designer",
             description: $"Designer agent for project {spec.ProjectId}",
             tools: tools);
@@ -289,6 +295,51 @@ public sealed class DesignerAgent
         }));
     }
 
+    /// <summary>
+    /// Reads the operator-editable playbook reference from memory
+    /// (playbook/repo + playbook/snapshot + playbook/skills/designer)
+    /// and returns a small block the system prompt can include.
+    /// The model can decide whether to `curl` individual skill
+    /// bodies from the repo URL. The block is short on purpose —
+    /// the prompt isn't bloated.
+    /// </summary>
+    private async Task<string> BuildPlaybookBlockAsync(CancellationToken ct)
+    {
+        try
+        {
+            var repo = await _memory.RecallAsync(keyPrefix: "playbook/repo", ct);
+            var snapshot = await _memory.RecallAsync(keyPrefix: "playbook/snapshot", ct);
+            var skills = await _memory.RecallAsync(keyPrefix: "playbook/skills/designer", ct);
+            if (repo.Count == 0 && skills.Count == 0) return "(no operator-maintained playbook configured)";
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("The operator maintains a project-specific skills reference. Use it to ground your design decisions in established best practice.");
+            sb.AppendLine();
+            if (repo.Count > 0)
+            {
+                sb.Append("Repo: ").AppendLine(repo[0].Body);
+            }
+            if (snapshot.Count > 0)
+            {
+                sb.AppendLine();
+                sb.Append("Snapshot: ").AppendLine(snapshot[0].Body);
+            }
+            if (skills.Count > 0)
+            {
+                sb.AppendLine();
+                sb.Append("Skills relevant to your role (designer): ").AppendLine(skills[0].Body);
+                sb.AppendLine();
+                sb.AppendLine("If a skill is relevant to this spec, you may `curl <repo>/skills/<name>/SKILL.md` to read its full body before deciding. Don't fetch skills that aren't relevant.");
+            }
+            return sb.ToString().TrimEnd();
+        }
+        catch (Exception ex)
+        {
+            // Memory recall failure must not block the design run.
+            _logger.LogWarning(ex, "Designer: failed to read playbook block; continuing without it");
+            return "(playbook unavailable; design from spec body alone)";
+        }
+    }
+
     private async Task<string> DbGetVisualLanguage()
     {
         var entries = await _memory.RecallAsync(keyPrefix: "design/visual-language");
@@ -371,7 +422,7 @@ public sealed class DesignerAgent
         return new DesignerResult(false, null, Array.Empty<string>(), null, error);
     }
 
-    private string BuildInstructions()
+    private string BuildInstructions(string playbookBlock)
     {
         return $"""
             You are the DesignerAgent for this project. Given a spec
@@ -422,6 +473,9 @@ public sealed class DesignerAgent
               existing applies. The dashboard's existing-artifacts
               view is the source of truth for the project's visual
               language.
+
+            ## Skills reference
+            {playbookBlock}
             """;
     }
 }
