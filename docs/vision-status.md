@@ -10,7 +10,7 @@ Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-
 | **P1.4** | Intake agent (HarnessAgent, persistent per project, Intake tab UI) | ✅ done | `f8f9329` | Intake tab + IntakeAgentRegistry + session→specs lookup. |
 | **P1.5.a** | Spec tab read-only + Spec CRUD endpoints | ✅ done | `3b81ef5` | Spec tab + `/api/specs` REST API. |
 | **P1.5.b** | Product agent writes specs via AIFunctions (human-gated approval) | ✅ done | `b8a65df` | ProductAgent + `SpecStatus.Grooming` introduced; subsequent PRs added GroomerAgent that operates on Approved specs. |
-| **P2.a** | Designer agent + `design_artifact` table | ❌ not started | — | The system cannot dispatch design tasks. Largest single gap. |
+| **P2.a** | Designer agent + `design_artifact` table + visual-language rules | ✅ done | `60e3e62`–`0c39532` | `DesignArtifact` + `DesignerRunStore` (SQLite, schema v9). `DesignHygieneChecker` runs 10 deterministic rules before the LLM. `DesignerAgent` is a MAF ChatClientAgent with 6 AIFunctions; calls `db_set_spec_status` to transition Draft → Designed/Approved/NeedsRevision. `DesignerScheduler` (background, 5-min tick). `POST /api/specs/{id}/design` (manual). `GET /api/designer/runs` + `GET /api/specs/{id}/design-artifacts` (timeline). Design tab in the dashboard. Engineering agent prompt now references `design_artifact` ids. The Groomer gate widens to `Designed | Approved | Groomed`. The Intake → Product → Designer → Groomer → Engineering pipeline is wired end-to-end (the existing `ProductRefinementQueue` was built but never started — that was the dead-code finding). Live-verified: a single Designer run against the kilo gateway produced 2 design artifacts (a wireframe + a visual-rule) and transitioned a UI spec to NeedsRevision in 2.5 min. |
 | **P2.b** | Artist agent + `art_output` table + MeshyClient integration | ❌ not started | — | The system cannot dispatch art tasks. |
 | **P3** (existing) | Engineering dispatch becomes a MAF workflow | ✅ done | `680c412`–`8ac63ec` | Executors + `EngineeringDispatchWorkflow` + orchestrator wired. Dispatch is now Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch as typed `FunctionExecutor<TIn, TOut>` instances. Live-verified with task-6 (15.6s end-to-end, modelResponse captured in metadata). |
 | **P3.5** | issue_groomer_run table + scheduled Groomer + manual Re-run button | ✅ done | this commit | `IssueGroomerRunStore` (SQLite, schema v8) + `ScheduledGroomer` (wakes up every 5 min, grooms Approved specs that haven't been groomed recently or whose last groom failed). Manual groom via `POST /api/specs/{id}/groom` writes the same table with trigger=`manual`. Dashboard reads via `GET /api/groomer/runs?specId=...&limit=...`. |
@@ -29,7 +29,8 @@ Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-
 | Post-P3 (workflow executors) | 294 | 294 | 2 | `d677a78` |
 | Post-P3 (orchestrator wired) | 294 | 294 | 2 | `8ac63ec` |
 | Post-P0.5 (vision) | 297 | 297 | 2 | `787c89a` |
-| Post-P3.5 (scheduled groomer) | 302 | 302 | 2 | this commit |
+| Post-P3.5 (scheduled groomer) | 302 | 302 | 2 | `e73f2c0` |
+| Post-P2.a (Designer pipeline, 7 steps) | 321 | 321 | 2 | `0c39532` |
 | Today | **294** | **294** | **2** | this commit |
 
 (The 2 skipped tests are `RealLlmIntegrationTests` — they require a kilo gateway API key + the model id to be in the JWT's org. They run as part of CI in any environment with a configured key.)
@@ -52,7 +53,7 @@ Each row maps to a phase above. The "blocker" column is who / what is preventing
 | Gap | Blocker | Work estimate |
 |---|---|---|
 | **P0.5** Vision import + Vision tab | ~~—~~ | ~~small — half a day: read `vision.md` at startup, parse it, surface in a tab.~~ Done. |
-| **P2.a** Designer agent | depends on what "design" means for a game like PortHorizon (level layout, system architecture, gameplay mechanics). New agent code + new tool surface + new tab. | medium — needs design call first. |
+| **P2.a** Designer agent | ~~depends on what "design" means for a game like PortHorizon~~ Done in `0c39532`. | ~~medium — needs design call first.~~ |
 | **P2.b** Artist agent + MeshyClient | Meshy API key + integration; sprite + 3D model pipelines. | medium-to-large — 1-2 weeks for a focused builder. |
 | **P3** workflow wired in | ~~swap `DispatchSingleTaskAsync` to use `EngineeringDispatchWorkflow`.~~ Done in `8ac63ec`. | ~~small — half a day.~~ |
 | **P3.5** scheduled Groomer + `issue_groomer_run` | ~~the scheduler itself is small (an `IHostedService`); the table is small.~~ Done. | ~~small — half a day.~~ |

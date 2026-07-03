@@ -98,7 +98,7 @@ Namespacing convention: `<area>/<short-name>` — `coding-style/...`, `ports/...
 
 ## Decompose a spec into engineering tasks
 
-A spec with `status: Approved` is the input to the GroomerAgent. The groomer reads the spec, infers 1–3 stories, decomposes each into 1–3 tasks, and persists the decomposition as `type=story` and `type=task` issues linked to the spec via `parent_issue_id`.
+A spec with `status: Approved` (or `Designed`, or `Groomed` for re-decompose) is the input to the GroomerAgent. The groomer reads the spec, infers 1–3 stories, decomposes each into 1–3 tasks, and persists the decomposition as `type=story` and `type=task` issues linked to the spec via `parent_issue_id`.
 
 ```bash
 # Approve a spec (via the Spec tab in the dashboard, or curl)
@@ -160,6 +160,31 @@ curl.exe -X PATCH http://127.0.0.1:4097/api/state/issues/<id> \
 ```
 
 Stale `InProgress` tasks are auto-reaped at startup if `UpdatedAt` is older than `spawner.staleMinutes` (default 30m).
+
+## Design a spec
+
+Specs in `ReadyForDesign` (or `Draft`, `NeedsRevision` for re-runs) are eligible for the Designer. The Designer runs:
+
+1. A deterministic `DesignHygieneChecker` pass on 10 rules (missing acceptance criteria, broken dep chain, undefined module, duplicate epic, no touches, body too long, stale open questions, status mismatch, etc.). If the report has any Error findings, the run is marked `HygieneFailed` and the LLM is NOT called.
+2. A MAF agent call against the kilo gateway. The agent has six AIFunctions (`db_get_spec`, `db_get_codebase_graph`, `db_get_existing_design_artifacts`, `db_get_visual_language`, `db_save_design_artifact`, `db_set_spec_status`). The system prompt is strict about always calling `db_set_spec_status` at the end.
+3. The LLM writes 1-N `design_artifact` rows (wireframe / mockup / component-spec / visual-rule) and transitions the spec to one of `Designed` (visual spec done) / `Approved` (non-visual fast-path) / `NeedsRevision` (structural problem).
+
+The Designer scheduler wakes up every 5 min and picks up `ReadyForDesign` specs. For manual runs:
+
+```bash
+# Trigger a manual design run on a spec
+curl.exe -X POST http://127.0.0.1:4097/api/specs/<spec-id>/design
+
+# Check the design timeline
+curl.exe "http://127.0.0.1:4097/api/designer/runs?specId=<spec-id>"
+
+# View the artifacts
+curl.exe "http://127.0.0.1:4097/api/specs/<spec-id>/design-artifacts"
+```
+
+The dashboard's **Design** tab renders the spec list, the per-spec artifact body (HTML in sandboxed iframe / SVG inline / markdown in `<pre>`), and the persisted `HygieneReport` JSON with per-rule findings.
+
+**Visual-language rules:** The Designer's first run produces a `kind=visual-rule` artifact. Future runs read it via `db_get_visual_language` and apply its color/typography/layout conventions. The system is self-bootstrapping: each project develops its own visual language on the first UI spec.
 
 ## Watch a PR through the review loop
 
