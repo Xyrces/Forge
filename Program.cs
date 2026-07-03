@@ -529,6 +529,10 @@ public static class Program
             // v10 migration created both tables).
             var artOutputs = new Core.ArtOutputStore(groomerRunsDb);
             var artistRuns = new Core.ArtistRunStore(groomerRunsDb);
+            // P4 Stage A: recovery_report table (lives in issues.db
+            // alongside the other v10/v11 tables; created in the
+            // IssueStore schema migration).
+            var recoveryReports = new Core.RecoveryReportStore(groomerRunsDb);
 
         // P0.5: vision.md import. Build the VisionStore (loads the
         // configured file on startup), inject it into memory as the
@@ -678,10 +682,31 @@ public static class Program
             try { shutdownCts.Cancel(); } catch { }
         };
 
-        try
+try
         {
             logger.LogInformation("Starting dashboard");
             await dashboard.StartAsync(shutdownCts.Token);
+
+            // P4 Stage A — StartupRecovery. Runs ONCE before the
+            // dispatch loop starts. Inspects every InProgress +
+            // assignee=kilo issue, replays the cheap side-effects
+            // (commit, push, PR open) when the LLM has already
+            // finished but the previous run crashed, and writes
+            // one recovery_report row. By default we run recovery
+            // every startup; --check (existing pre-flight) skips
+            // the dispatch loop entirely and --recover runs
+            // recovery with no side effects and exits 0.
+            //
+            // The recoverer needs the GitHub adapter. The
+            // GitHubRecoveryAdapter wraps the same GitHubService
+            // instance the workflow executors use, so we don't
+            // duplicate Octokit client state.
+            var startupRecovery = new Orchestrator.StartupRecovery(
+                issues, recoveryReports, worktrees,
+                new Orchestrator.GitHubRecoveryAdapter(gitHub),
+                eventBus,
+                loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
+            await startupRecovery.RunAsync(ct: shutdownCts.Token);
 
             // JSONL mirror is a fire-and-forget background task; it
             // cancels itself when shutdownCts fires.

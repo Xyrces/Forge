@@ -32,4 +32,6 @@ public static class DashboardEventKind
     public const string ArtistRunFailed = "artist.run.failed";
     public const string ArtistArtSaved = "artist.art.saved";
     public const string ArtistStatusCommitted = "artist.status.committed";
+    // P4 Stage A: recovery events emitted by StartupRecovery.
+    public const string RecoveryAction = "dispatch.recovery";
 }
