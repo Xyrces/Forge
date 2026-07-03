@@ -26,7 +26,10 @@ public sealed record IssueRecord(
     DateTime UpdatedAt,
     DateTime? ClosedAt,
     string MetadataJson,
-    string? ParentIssueId = null)
+    string? ParentIssueId = null,
+    DispatchCheckpoint? DispatchCheckpoint = null,
+    DateTime? CheckpointAt = null,
+    int RecoveryAttempts = 0)
 {
     public string? GetMetadata(string key)
     {
@@ -116,6 +119,29 @@ public interface IIssueStore
     Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default);
     Task<IssueEventRecord> AddEventAsync(string id, string kind, string? detail = null, CancellationToken ct = default);
 
+    // P4 Stage A — checkpoint-based recovery. See
+    // docs/p4-restart-safety.md.
+    /// <summary>
+    /// Advance the dispatch checkpoint on an in-flight issue.
+    /// Each engineering dispatch executor calls this BEFORE its
+    /// side-effect so a recoverer knows "this side-effect has
+    /// happened" on restart.
+    /// </summary>
+    Task SetCheckpointAsync(string id, DispatchCheckpoint checkpoint, CancellationToken ct = default);
+    /// <summary>
+    /// List every issue currently in <c>InProgress</c> with
+    /// <c>assignee=kilo</c>. These are the candidates the
+    /// StartupRecovery pass inspects on a restart.
+    /// </summary>
+    Task<IReadOnlyList<IssueRecord>> ListInProgressForRecoveryAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Increment the <c>recovery_attempts</c> counter on an
+    /// issue. Used by the StartupRecovery pass to break loops
+    /// (an issue that keeps crashing on commit is failed after
+    /// a configurable number of attempts).
+    /// </summary>
+    Task<int> IncrementRecoveryAttemptsAsync(string id, CancellationToken ct = default);
+
     // Dependency graph (Phase 2 of docs/embedded-issues.md).
     Task<IssueEdge> AddDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
     Task<bool> RemoveDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
@@ -140,7 +166,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 10;
+    public const int CurrentSchemaVersion = 11;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -498,6 +524,51 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE INDEX IF NOT EXISTS ix_artist_run_spec ON artist_run(spec_id, ts);
             CREATE INDEX IF NOT EXISTS ix_artist_run_ts ON artist_run(ts);
 
+            -- v11: P4 Stage A — checkpoint-based recovery.
+            --
+            -- The orchestrator's engineering dispatch workflow is
+            -- Claim -> Worktree -> RunAgent -> CommitPushPr
+            -- -> EnqueueWatch. On a clean shutdown every executor
+            -- commits its side-effects to issue metadata. On a
+            -- crash mid-workflow the orchestrator loses track of
+            -- which side-effects have already happened.
+            --
+            -- We add three columns on `issue` and one new table.
+            --
+            --   dispatch_checkpoint: a string from the
+            --     DispatchCheckpoint enum below. Each executor
+            --     sets it BEFORE its side-effect so a recoverer
+            --     reading the column knows "this side-effect has
+            --     happened" (vs. "we got past it").
+            --   checkpoint_at: when the checkpoint was set.
+            --   recovery_attempts: counter incremented by the
+            --     StartupRecovery pass. Used to break recovery
+            --     loops (e.g. an issue that keeps crashing the
+            --     workflow on commit is failed after N attempts).
+            --
+            -- The recovery_report table is the audit log. One row
+            -- per StartupRecovery pass. The actions_json column
+            -- is a JSON array of {issueId, beforeCheckpoint,
+            -- afterCheckpoint, action} so the operator can see
+            -- exactly what the recoverer did.
+            ALTER TABLE issue ADD COLUMN dispatch_checkpoint TEXT;
+            ALTER TABLE issue ADD COLUMN checkpoint_at TEXT;
+            ALTER TABLE issue ADD COLUMN recovery_attempts INTEGER NOT NULL DEFAULT 0;
+            CREATE INDEX IF NOT EXISTS ix_issue_checkpoint
+                ON issue(dispatch_checkpoint, status);
+
+            CREATE TABLE IF NOT EXISTS recovery_report (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              TEXT NOT NULL,
+                spec_id         TEXT,           -- null = full sweep
+                issues_scanned  INTEGER NOT NULL,
+                issues_replayed INTEGER NOT NULL,
+                issues_failed   INTEGER NOT NULL,
+                actions_json    TEXT NOT NULL,  -- JSON array of {issueId, beforeCheckpoint, afterCheckpoint, action, error?}
+                duration_ms     INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS ix_recovery_report_ts ON recovery_report(ts);
+
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);
             """;
@@ -578,7 +649,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
 
-        var sql = "SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id FROM issue WHERE 1=1";
+        var sql = "SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts FROM issue WHERE 1=1";
         if (filter.Status is not null) sql += " AND status = $status";
         if (filter.Assignee is not null) sql += " AND assignee = $assignee";
         if (filter.Type is not null) sql += " AND type = $type";
@@ -628,7 +699,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = $"""
                 SELECT id, short_id, type, title, description, status, priority, assignee,
-                       created_at, updated_at, closed_at, metadata_json, parent_issue_id
+                       created_at, updated_at, closed_at, metadata_json, parent_issue_id,
+                       dispatch_checkpoint, checkpoint_at, recovery_attempts
                 FROM issue i
                 WHERE status = 'Pending' AND {notBlockedPredicate}
                 ORDER BY priority ASC, created_at ASC
@@ -644,7 +716,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var cmd2 = conn2.CreateCommand();
         cmd2.CommandText = $"""
             SELECT i.id, i.short_id, i.type, i.title, i.description, i.status, i.priority, i.assignee,
-                   i.created_at, i.updated_at, i.closed_at, i.metadata_json, i.parent_issue_id
+                   i.created_at, i.updated_at, i.closed_at, i.metadata_json, i.parent_issue_id,
+                   i.dispatch_checkpoint, i.checkpoint_at, i.recovery_attempts
             FROM issue i
             INNER JOIN sprint_issue si ON i.id = si.issue_id
             WHERE i.status = 'Pending' AND si.sprint_id = $sid AND {notBlockedPredicate}
@@ -681,12 +754,14 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             cmd.Transaction = tx;
             cmd.CommandText = """
                 UPDATE issue
-                SET status = 'InProgress', assignee = $assignee, updated_at = $now
+                SET status = 'InProgress', assignee = $assignee, updated_at = $now,
+                    dispatch_checkpoint = $cp, checkpoint_at = $now
                 WHERE id = $id AND status = 'Pending'
                 """;
             cmd.Parameters.AddWithValue("$id", id);
             cmd.Parameters.AddWithValue("$assignee", assignee);
             cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
+            cmd.Parameters.AddWithValue("$cp", DispatchCheckpoint.Claimed.ToDbValue());
             rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0)
             {
@@ -721,8 +796,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         await using (var cmd = conn.CreateCommand())
         {
+            // Terminal transitions clear the dispatch_checkpoint so
+            // a future StartupRecovery sweep doesn't try to replay
+            // an issue that's already completed / failed / closed.
             cmd.CommandText = isTerminal
-                ? """UPDATE issue SET status=$to, updated_at=$now, closed_at=$now, metadata_json=$meta WHERE id=$id"""
+                ? """UPDATE issue SET status=$to, updated_at=$now, closed_at=$now, metadata_json=$meta, dispatch_checkpoint=NULL, checkpoint_at=NULL WHERE id=$id"""
                 : """UPDATE issue SET status=$to, updated_at=$now, metadata_json=$meta WHERE id=$id""";
             cmd.Parameters.AddWithValue("$to", to.ToString());
             cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
@@ -743,7 +821,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id
+            SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts
             FROM issue WHERE id = $id
             """;
         cmd.Parameters.AddWithValue("$id", id);
@@ -756,6 +834,61 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
         return await InsertEventAsync(conn, null, id, kind, detail, ct);
+    }
+
+    // --- P4 Stage A — checkpoint-based recovery ---
+
+    public async Task SetCheckpointAsync(string id, DispatchCheckpoint checkpoint, CancellationToken ct = default)
+    {
+        var now = DateTime.UtcNow;
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE issue
+            SET dispatch_checkpoint = $cp, checkpoint_at = $now, updated_at = $now
+            WHERE id = $id
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$cp", checkpoint.ToDbValue());
+        cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<IssueRecord>> ListInProgressForRecoveryAsync(CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        // InProgress + assignee=kilo are the dispatch candidates
+        // the recoverer inspects. Assignee is the durable marker
+        // (the kilo JWT); other agents (reviewer, manual) don't
+        // go through the EngineeringDispatchWorkflow so they
+        // don't need recovery.
+        cmd.CommandText = """
+            SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts
+            FROM issue
+            WHERE status = 'InProgress' AND assignee = 'kilo'
+            ORDER BY updated_at ASC
+            """;
+        var list = new List<IssueRecord>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct)) list.Add(ReadIssue(rd));
+        return list;
+    }
+
+    public async Task<int> IncrementRecoveryAttemptsAsync(string id, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE issue SET recovery_attempts = recovery_attempts + 1, updated_at = $now
+            WHERE id = $id
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
+        return await cmd.ExecuteNonQueryAsync(ct);
     }
 
     // --- Dependency graph (Phase 2 of docs/embedded-issues.md) ---
@@ -920,7 +1053,16 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             UpdatedAt: ParseDate(rd.GetString(9)),
             ClosedAt: rd.IsDBNull(10) ? null : ParseDate(rd.GetString(10)),
             MetadataJson: rd.GetString(11),
-            ParentIssueId: rd.IsDBNull(12) ? null : rd.GetString(12));
+            ParentIssueId: rd.IsDBNull(12) ? null : rd.GetString(12),
+            DispatchCheckpoint: rd.IsDBNull(13) ? null : ParseCheckpoint(rd.GetString(13)),
+            CheckpointAt: rd.IsDBNull(14) ? null : ParseDate(rd.GetString(14)),
+            RecoveryAttempts: rd.GetInt32(15));
+
+    private static DispatchCheckpoint? ParseCheckpoint(string s)
+    {
+        DispatchCheckpointExtensions.TryParseDb(s, out var c);
+        return c;
+    }
 
     private static DateTime ParseDate(string s) => DateTime.ParseExact(s, DateFormat, System.Globalization.CultureInfo.InvariantCulture);
 
