@@ -185,6 +185,7 @@
   <button data-tab="intake">Intake</button>
   <button data-tab="specs">Specs</button>
   <button data-tab="vision">Vision</button>
+  <button data-tab="design">Design</button>
   <button data-tab="sprints">Sprints</button>
   <button data-tab="agents">Agents</button>
   <button data-tab="skills">Skills</button>
@@ -195,6 +196,7 @@
   <div class="tab" id="tab-intake"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-specs"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-vision"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-design"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
@@ -847,6 +849,119 @@ async function refreshVision() {
   await renderVision();
 }
 
+async function renderDesign() {
+  const tab = $("tab-design");
+  tab.innerHTML = `<div class="empty">Loading…</div>`;
+  // List specs in design-related states. The dashboard groups them
+  // so the operator can see the design pipeline at a glance.
+  let specs;
+  try {
+    const r = await fetch("/api/specs");
+    if (!r.ok) {
+      tab.innerHTML = `<div class="empty">Failed to load specs (HTTP ${r.status}).</div>`;
+      return;
+    }
+    const all = await r.json();
+    specs = all.filter(s =>
+      s.status === "Designed" || s.status === "ReadyForDesign" ||
+      s.status === "NeedsRevision" || s.status === "Approved" ||
+      s.status === "Grooming" || s.status === "Groomed"
+    );
+  } catch (e) {
+    tab.innerHTML = `<div class="empty">Failed to load: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  if (specs.length === 0) {
+    tab.innerHTML = `<div class="empty">No specs in the design pipeline. Trigger a design run from the Specs tab.</div>`;
+    return;
+  }
+
+  // Group by status so the operator can scan state at a glance.
+  const order = ["ReadyForDesign", "NeedsRevision", "Designed", "Approved", "Grooming", "Groomed"];
+  const groups = {};
+  for (const s of specs) (groups[s.status] ??= []).push(s);
+  const sortedKeys = order.filter(k => groups[k]);
+  for (const k of Object.keys(groups)) if (!sortedKeys.includes(k)) sortedKeys.push(k);
+
+  const sections = sortedKeys.map(k => {
+    const rows = groups[k].map(s => `
+      <tr>
+        <td><a href="#specs" onclick="renderSpecDetail('${s.id}');return false;">${escapeHtml(s.id)}</a></td>
+        <td>${escapeHtml(s.title)}</td>
+        <td><button onclick="loadDesignArtifacts('${s.id}');return false;">View artifacts</button></td>
+      </tr>`).join("");
+    return `<h3>${k} (${groups[k].length})</h3>
+      <table>
+        <tr><th>id</th><th>title</th><th></th></tr>
+        ${rows}
+      </table>`;
+  }).join("");
+
+  tab.innerHTML = `<div class="design-grid">${sections}</div>
+    <div id="design-artifacts"></div>`;
+}
+
+async function loadDesignArtifacts(specId) {
+  const out = $("design-artifacts");
+  out.innerHTML = `<div class="empty">Loading ${escapeHtml(specId)}…</div>`;
+  let arts, runs;
+  try {
+    [arts, runs] = await Promise.all([
+      fetch(`/api/specs/${specId}/design-artifacts`).then(r => r.json()),
+      fetch(`/api/designer/runs?specId=${specId}`).then(r => r.json()),
+    ]);
+  } catch (e) {
+    out.innerHTML = `<div class="empty">Failed: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+
+  const artRows = arts.map(a => {
+    let body = "";
+    if (a.bodyKind === "html") {
+      // Iframe with the rendered HTML so a malicious body can't
+      // execute scripts. Same-origin operator can read it.
+      body = `<iframe sandbox srcdoc="${escapeHtml(a.body)}" style="width:100%;height:200px;border:1px solid var(--border)"></iframe>`;
+    } else if (a.bodyKind === "svg") {
+      body = `<div class="svg-frame">${a.body}</div>`;
+    } else {
+      body = `<pre class="vision-content">${escapeHtml(a.body)}</pre>`;
+    }
+    return `<div class="design-artifact">
+      <div class="design-artifact-head">
+        <span class="status-tag status-${a.status}">${a.status}</span>
+        <strong>${escapeHtml(a.title)}</strong>
+        <span class="muted">${escapeHtml(a.kind)} · ${a.author}</span>
+      </div>
+      ${body}
+    </div>`;
+  }).join("") || `<div class="empty">No design artifacts yet.</div>`;
+
+  const runRows = runs.map(r => {
+    const findings = r.hygieneReport ? (() => {
+      try {
+        const j = JSON.parse(r.hygieneReport);
+        if (j.findings?.length) return `<div class="hygiene-findings">${j.findings.map(f =>
+          `<div class="hygiene-finding"><strong>${escapeHtml(f.rule)}</strong> [${escapeHtml(f.severity)}] — ${escapeHtml(f.message)}</div>`
+        ).join("")}</div>`;
+        return `<div class="empty">Hygiene: passed (no findings)</div>`;
+      } catch { return ""; }
+    })() : "";
+    return `<div class="design-run">
+      <div><span class="status-tag status-${r.status}">${r.status}</span>
+        <span class="muted">${r.trigger} · ${new Date(r.ts).toLocaleString()} · ${r.durationMs}ms</span>
+      </div>
+      ${r.error ? `<div class="design-error">${escapeHtml(r.error)}</div>` : ""}
+      ${findings}
+    </div>`;
+  }).join("") || `<div class="empty">No designer runs.</div>`;
+
+  out.innerHTML = `
+    <h2>${escapeHtml(specId)} — design artifacts</h2>
+    <div>${artRows}</div>
+    <h2>designer runs</h2>
+    <div>${runRows}</div>`;
+}
+
 function filterSpecs() {
   // The dashboard's lightweight implementation: just re-render. The
   // list is bounded (low hundreds of specs typical), so a client-side
@@ -1118,6 +1233,7 @@ document.querySelectorAll("#tabs button").forEach(btn => {
     const id = "tab-" + btn.dataset.tab;
     document.getElementById(id).classList.add("active");
     if (btn.dataset.tab === "vision") renderVision();
+    if (btn.dataset.tab === "design") renderDesign();
   });
 });
 $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });

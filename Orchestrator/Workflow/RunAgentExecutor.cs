@@ -21,6 +21,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     private readonly RoleAgentRegistry _roleRegistry;
     private readonly Func<string, string?> _drainMessageBus;
     private readonly IDashboardEventBus _events;
+    private readonly DesignArtifactStore _designArtifacts;
     private readonly ILogger<RunAgentExecutor> _logger;
 
     public RunAgentExecutor(
@@ -29,10 +30,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         RoleAgentRegistry roleRegistry,
         Func<string, string?> drainMessageBus,
         IDashboardEventBus events,
+        DesignArtifactStore designArtifacts,
         ILogger<RunAgentExecutor> logger)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, logger, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, logger, ct),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -42,6 +44,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         _roleRegistry = roleRegistry;
         _drainMessageBus = drainMessageBus;
         _events = events;
+        _designArtifacts = designArtifacts;
         _logger = logger;
     }
 
@@ -52,6 +55,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         RoleAgentRegistry roleRegistry,
         Func<string, string?> drainMessageBus,
         IDashboardEventBus events,
+        DesignArtifactStore designArtifacts,
         ILogger logger,
         CancellationToken ct)
     {
@@ -69,7 +73,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             DateTime.UtcNow, DashboardEventKind.AgentSessionStarted,
             issue.Id, $"role={roleAgent.KiloAgentName} worktree={worktreePath}"));
 
-        var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch);
+        var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch,
+            await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct));
         var queued = drainMessageBus(roleAgent.KiloAgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)
             ? prompt
@@ -174,8 +179,21 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     /// </summary>
     public static string BuildPrompt(
         IssueRecord issue, AgentType role, string worktreePath,
-        string branch, string baseBranch)
+        string branch, string baseBranch,
+        IReadOnlyList<DesignArtifactRef>? designArtifacts = null)
     {
+        var designSection = "";
+        if (designArtifacts is { Count: > 0 })
+        {
+            var refs = string.Join(", ", designArtifacts.Select(a => a.Id));
+            designSection = $"""
+
+                Design artifacts (P2.a): the parent spec has {designArtifacts.Count} design artifact(s):
+                {refs}
+                Each one is at GET /api/specs/{issue.ParentIssueId ?? issue.Id}/design-artifacts. Use `curl` to fetch them BEFORE writing code. The artifact body IS the visual source of truth.
+                """;
+        }
+
         return $"""
             You are the {role} agent.
 
@@ -187,10 +205,44 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             {issue.Description ?? ""}
 
             Working directory: {worktreePath}
-            Branch: {branch} (base: {baseBranch})
+            Branch: {branch} (base: {baseBranch}){designSection}
             """;
     }
+
+    /// <summary>
+    /// Looks up the spec associated with the issue (via parent_issue_id)
+    /// and returns its design_artifact rows as refs. P2.a: the
+    /// engineering agent prompt references these so the model can
+    /// fetch the visual artifacts before writing code.
+    /// </summary>
+    private static async Task<IReadOnlyList<DesignArtifactRef>?> LoadDesignArtifactRefsAsync(
+        IIssueStore issues, DesignArtifactStore designArtifacts,
+        IssueRecord issue, CancellationToken ct)
+    {
+        // Issue's parent_issue_id is the epic; the spec that was created
+        // from that epic has parent_issue_id = epic. For stories/tasks,
+        // the spec parent_issue_id may be the story's parent epic.
+        // Try the issue itself first, then walk up the parent chain.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? current = issue.Id;
+        while (!string.IsNullOrEmpty(current) && seen.Add(current))
+        {
+            var all = await issues.ListAsync(new IssueFilter(), ct);
+            var spec = all.FirstOrDefault(s => s.ParentIssueId == current);
+            if (spec is null) break;
+            var arts = await designArtifacts.ListBySpecAsync(spec.Id, status: null, ct);
+            if (arts.Count > 0)
+            {
+                return arts.Select(a => new DesignArtifactRef(a.Id, a.Kind.ToString().ToLowerInvariant(), a.Title)).ToList();
+            }
+            current = spec.ParentIssueId;
+        }
+        return null;
+    }
 }
+
+/// <summary>Lightweight reference to a design artifact (id + kind + title).</summary>
+public sealed record DesignArtifactRef(string Id, string Kind, string Title);
 
 public enum AgentResult
 {

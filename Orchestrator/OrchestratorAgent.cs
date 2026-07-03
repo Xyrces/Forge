@@ -16,6 +16,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly GitHubService _gitHub;
     private readonly PRWatcher _prWatcher;
     private readonly IIssueStore _issues;
+    private readonly DesignArtifactStore _designArtifacts;
     private readonly IAgentStore _agents;
     private readonly ISprintStore _sprints;
     private readonly AgentMessageBus _messageBus;
@@ -42,6 +43,7 @@ public sealed class OrchestratorAgent : IAgent
         ISprintStore sprints,
         AgentMessageBus messageBus,
         IDashboardEventBus events,
+        DesignArtifactStore designArtifacts,
         ILogger<OrchestratorAgent> logger)
     {
         _runner = runner;
@@ -54,6 +56,7 @@ public sealed class OrchestratorAgent : IAgent
         _sprints = sprints;
         _messageBus = messageBus;
         _events = events;
+        _designArtifacts = designArtifacts;
         _logger = logger;
         _concurrencyLimiter = new SemaphoreSlim(4);
         _maxRetryCount = 1;
@@ -143,6 +146,7 @@ public sealed class OrchestratorAgent : IAgent
                 workspaceOptions: _workspaceOptions,
                 events: _events,
                 drainMessageBus: agent => _messageBus.Drain(agent),
+                designArtifacts: _designArtifacts,
                 logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<Workflow.EngineeringDispatchWorkflow>.Instance);
 
             // MAF's RunAsync may swallow executor exceptions and let

@@ -562,6 +562,7 @@ public static class Program
             agentRunner, roleRegistry, worktrees, gitHub, prWatcher, issues,
             agents, sprints, messageBus,
             eventBus,
+            designArtifacts,
             loggerFactory.CreateLogger<OrchestratorAgent>());
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);

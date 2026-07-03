@@ -103,6 +103,7 @@ public class RunAgentExecutorTests : IDisposable
         var runner = RunnerWithScriptedClient();
         var result = await RunAgentExecutor.HandleAsync(
             worktree, _issues, runner, _roleRegistry, _ => null, _events,
+            new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),
             NullLogger<RunAgentExecutor>.Instance, default);
 
         Assert.Equal(AgentResult.Ok, result.Result);
@@ -127,6 +128,7 @@ public class RunAgentExecutorTests : IDisposable
         var runner = RunnerWithScriptedClient();
         var result = await RunAgentExecutor.HandleAsync(
             worktreeSkipped, _issues, runner, _roleRegistry, _ => null, _events,
+            new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),
             NullLogger<RunAgentExecutor>.Instance, default);
 
         Assert.Equal(AgentResult.Skipped, result.Result);

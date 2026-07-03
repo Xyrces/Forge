@@ -132,6 +132,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             },
             events: _events,
             drainMessageBus: _ => null,
+            designArtifacts: new DesignArtifactStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
             logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
 
         await workflow.RunAsync(issue, CancellationToken.None);
@@ -160,6 +161,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             },
             events: _events,
             drainMessageBus: _ => null,
+            designArtifacts: new DesignArtifactStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
             logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
 
         await workflow.RunAsync(issue, CancellationToken.None);
