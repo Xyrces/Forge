@@ -109,6 +109,7 @@ IssueStore row updated           ──►  JSONL mirror reflects on next 5s tic
 | produced art | `art_output` + `artist_run` (SQLite, schema v10) | per-spec `.glb`/`.png`/`.mp4` paths, Meshy task list |
 | spec state machine | `spec` + `spec_status` (SQLite) | Draft → ReadyForDesign → Designed → AssetReady → ReadyForGroom → Grooming → Groomed → Shipped |
 | dispatch checkpoints + recovery | `issue.dispatch_checkpoint` + `recovery_report` (SQLite, schema v11) | each engineering dispatch executor advances the checkpoint BEFORE its side-effect; StartupRecovery replays unfinished side-effects on restart |
+| durable workflow runtime | DTS sidecar (`deploy/docker-compose.yml`) | opt-in via `Orchestrator:Execution=Durable`; persists workflow state across orchestrator crashes; replaces Stage A's StartupRecovery for engineering dispatch work |
 | event log | `issues.db.issue_event` + `IssueStore.AddEventAsync` | appended per transition, queryable for the dashboard |
 | heartbeat + counters | `orchestrator-state.json` (StateStore) | small JSON, view-only for the dashboard |
 | tail-able mirror | `issues.jsonl` (IssuesJsonlMirror) | rewritten every 5s, sorted by id, atomic rename |

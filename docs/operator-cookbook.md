@@ -292,6 +292,48 @@ curl.exe -X POST "http://127.0.0.1:4097/api/recovery/dry-run"
 
 **Status machine + checkpoints:** the 6 checkpoints are `claimed → worktree_acquired → agent_completed → commit_done → push_done → pr_opened`. Each executor advances the checkpoint BEFORE its side-effect. Terminal transitions (Completed / Failed / Closed / Blocked) clear the checkpoint column so the next sweep ignores them.
 
+## Run the orchestrator on the Durable Task Scheduler (Stage B)
+
+If your host crashes mid-workflow often enough that Stage A's `StartupRecovery` replaying the cheap side-effects isn't enough (e.g. you lose the LLM's conversation history), opt into P4 Stage B's durable runtime. Stage B persists the entire workflow state in a Durable Task Scheduler sidecar; the orchestrator can crash at any point and resume from its last durable checkpoint.
+
+**Prereq:** Docker or Podman installed. Stage B uses a vanilla OCI image (`mcr.microsoft.com/dts/dts-emulator:latest`); both `docker compose` and `podman-compose` read the same `deploy/docker-compose.yml`.
+
+```bash
+# 1. Bring up the DTS sidecar.
+docker compose -f deploy/docker-compose.yml up -d
+# or:
+podman-compose -f deploy/docker-compose.yml up -d
+
+# 2. Verify the dashboard at http://localhost:8082
+
+# 3. Set Orchestrator:Execution=Durable in appsettings.json:
+#    "orchestrator": {
+#      "execution": "Durable",
+#      "dtsConnectionString": "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None"
+#    }
+
+# 4. Start the orchestrator. The startup log will show:
+#    [Information] DurableDispatcher: worker host started. Execution=Durable, DTS=...
+```
+
+**Switch back to the in-process runtime** by setting `"orchestrator.execution": "InProcess"` (default) and restarting. The DTS sidecar can stay up — the orchestrator simply ignores it.
+
+**Operations:**
+- Dashboard for the DTS sidecar: http://localhost:8082
+- Tear down: `docker compose -f deploy/docker-compose.yml down` (or `podman-compose ... down`)
+- DTS state is in-memory in the emulator; restart wipes it. For prod, swap to the hosted Azure Durable Task Scheduler — same gRPC contract, no code changes.
+- The orchestrator's `StartupRecovery` is still useful for the Designer / Artist / Groomer schedulers (which use fresh MAF agents per run, not durable workflows).
+
+**How it differs from Stage A:**
+- Stage A: orchestrator restarts → `StartupRecovery` replays the **cheap side-effects** (commit / push / PR open) and re-runs the LLM.
+- Stage B: orchestrator restarts → DTS resumes the **entire workflow** (including the LLM conversation history) from its last durable checkpoint. No replay, no re-run.
+
+The two stages are complementary. Stage A is on by default and costs zero extra infrastructure (no Docker). Stage B is opt-in for hosts where the LLM cost on re-run is the dominant concern.
+
+**Troubleshooting:**
+- `DurableDispatcher: failed to dispatch issue ...` → DTS sidecar isn't reachable. Check `docker ps` / `podman ps` and the connection string.
+- DTS dashboard shows no orchestrations → the orchestrator never scheduled one. Check that `Orchestrator:Execution=Durable` is set (it's `"InProcess"` by default).
+
 ## Watch a PR through the review loop
 
 When a task is dispatched and a PR is opened, the orchestrator auto-enqueues a `pr-watch` follow-up. The `PRWatcher` polls every 30s. Watch it on the dashboard:

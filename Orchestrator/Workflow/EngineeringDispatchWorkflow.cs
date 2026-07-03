@@ -68,7 +68,11 @@ public sealed class EngineeringDispatchWorkflow
         wb.AddEdge(_worktree, _runAgent);
         wb.AddEdge(_runAgent, _commitPushPr);
         wb.AddEdge(_commitPushPr, _enqueueWatch);
-        return wb.Build();
+        // WithName is required for the Durable runtime's
+        // DurableWorkflowOptions.AddWorkflow validation; the
+        // InProcess runtime ignores the name. Defaulting to
+        // "engineering-dispatch" keeps both runtimes happy.
+        return wb.WithName("engineering-dispatch").Build();
     }
 
     /// <summary>

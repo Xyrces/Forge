@@ -865,6 +865,20 @@ try
             // dispatch cycle begins.
             await startupRecovery.RunAsync(ct: shutdownCts.Token);
 
+            // P4 Stage B — bring the workflow dispatcher host up.
+            // For InProcess this is a no-op. For Durable this
+            // starts the DTS worker (which connects to the DTS
+            // sidecar). Failures here are visible in the log;
+            // dispatch falls back to errors per-call.
+            try
+            {
+                await dispatcher.EnsureReadyAsync(shutdownCts.Token);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Workflow dispatcher EnsureReadyAsync failed; dispatch may fail at call time.");
+            }
+
             // JSONL mirror is a fire-and-forget background task; it
             // cancels itself when shutdownCts fires.
             _ = jsonlMirror.StartAsync(shutdownCts.Token);
