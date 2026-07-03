@@ -32,6 +32,14 @@ public sealed class RoleAgentRegistry
     public const string DesignerKiloAgentName = "designer";
 
     /// <summary>
+    /// P2.b: Artist is an Orchestrator-only role (no AgentType).
+    /// Same pattern as Designer: configured under
+    /// llm.roles.artist in appsettings.json; falls back to
+    /// CoreDev's kilo agent name when not configured.
+    /// </summary>
+    public const string ArtistKiloAgentName = "artist";
+
+    /// <summary>
     /// Get a role by its kilo agent name. Returns null when no role
     /// matches. Use this for the Designer (which is keyed by name
     /// not by AgentType).
