@@ -26,6 +26,9 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly MemoryStore? _memory;
     private readonly string? _issuesJsonlPath;
     private readonly VisionStore? _vision;
+    private readonly Orchestrator.DesignerAgentFactory? _designerFactory;
+    private readonly DesignerRunStore? _designerRuns;
+    private readonly DesignArtifactStore? _designArtifacts;
     private readonly IssueGroomerRunStore? _groomerRuns;
     private readonly ISpecExtractionReader? _extractorOverride;
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
@@ -52,6 +55,9 @@ public sealed class DashboardHost : IAsyncDisposable
         MemoryStore? memory = null,
         string? issuesJsonlPath = null,
         VisionStore? vision = null,
+        Orchestrator.DesignerAgentFactory? designerFactory = null,
+        DesignerRunStore? designerRuns = null,
+        DesignArtifactStore? designArtifacts = null,
         IssueGroomerRunStore? groomerRuns = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
@@ -69,6 +75,9 @@ public sealed class DashboardHost : IAsyncDisposable
         _memory = memory;
         _issuesJsonlPath = issuesJsonlPath;
         _groomerRuns = groomerRuns;
+        _designerFactory = designerFactory;
+        _designerRuns = designerRuns;
+        _designArtifacts = designArtifacts;
         _vision = vision;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
@@ -195,6 +204,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         if (_groomerRuns is not null)
         {
             GroomerEndpoints.MapGroomerEndpoints(_app, _groomerRuns, _logger);
+            if (_designerFactory is not null && _designerRuns is not null && _designArtifacts is not null)
+            {
+                DesignerEndpoints.MapDesignerEndpoints(
+                    _app, _specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
+            }
         }
 
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)

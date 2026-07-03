@@ -510,6 +510,11 @@ public static class Program
             // so the runs must live in the same DB as the issue rows.
             var groomerRunsDb = Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db");
             var groomerRuns = new Core.IssueGroomerRunStore(groomerRunsDb);
+            // P2.a: design_artifact + designer_run share the issues.db
+            // (the v9 migration created both tables). The IssueStore
+            // ctor already ran the migration.
+            var designArtifacts = new Core.DesignArtifactStore(groomerRunsDb);
+            var designerRuns = new Core.DesignerRunStore(groomerRunsDb);
 
         // P0.5: vision.md import. Build the VisionStore (loads the
         // configured file on startup), inject it into memory as the
@@ -579,6 +584,15 @@ public static class Program
             loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
         var groomerFactory = new Agents.GroomerAgentFactory(
             issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory);
+        // P2.a: Designer pipeline. The hygiene checker is shared
+        // between the manual endpoint, the scheduled run, and the
+        // agent's first step. The factory builds fresh DesignerAgent
+        // instances per run.
+        var designHygiene = new Orchestrator.DesignHygieneChecker(
+            specStore, codebaseGraphCache, codebaseGraphBuilder, options.Workspace.Root);
+        var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
+            specStore, designArtifacts, designerRuns, memoryStore, designHygiene,
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
@@ -590,6 +604,9 @@ public static class Program
             issuesJsonlPath: issuesJsonlPath,
             vision: vision,
             groomerRuns: groomerRuns,
+            designerFactory: designerAgentFactory,
+            designerRuns: designerRuns,
+            designArtifacts: designArtifacts,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);
@@ -624,6 +641,16 @@ public static class Program
                 loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
                 interval: TimeSpan.FromMinutes(5));
             _ = scheduledGroomer.RunAsync(shutdownCts.Token);
+
+            // P2.a: scheduled Designer wakes up every 5 minutes and
+            // designs any ReadyForDesign specs that haven't been
+            // designed recently (or whose last design failed).
+            // Fire-and-forget.
+            var scheduledDesigner = new Orchestrator.DesignerScheduler(
+                specStore, designerAgentFactory, designerRuns, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.DesignerScheduler>(),
+                interval: TimeSpan.FromMinutes(5));
+            _ = scheduledDesigner.RunAsync(shutdownCts.Token);
 
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);
