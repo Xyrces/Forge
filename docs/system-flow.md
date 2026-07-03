@@ -26,11 +26,19 @@ End-to-end view of what runs when a task is dispatched.
                 │  │ (.jsonl)   │    │  compatible)   │   │  repo  │  │
                 │  └────────────┘    └───────────────┘   └────────┘  │
                 │                                                    │
-                │  ┌────────────────────────────────────────────┐  │
-                │  │       IssueStore (SQLite, schema v7)      │  │
-                │  │  issue  issue_dep  issue_event  memory   │  │
-                │  └────────────────────────────────────────────┘  │
-                └────────────────────────────────────────────────────┘
+│  ┌────────────────────────────────────────────┐  │
+                 │  │       IssueStore (SQLite, schema v10)     │  │
+                 │  │  issue  issue_dep  issue_event  memory   │  │
+                 │  │  design_artifact  designer_run            │  │
+                 │  │  art_output       artist_run             │  │
+                 │  │  issue_groomer_run spec                  │  │
+                 │  └────────────────────────────────────────────┘  │
+                 │                                                    │
+                 │  ┌────────────────────────────────────────────┐  │
+                 │  │  Meshy REST API (text-to-3d, image-to-3d, │  │
+                 │  │  multi-image-to-3d, rigging)               │  │
+                 │  └────────────────────────────────────────────┘  │
+                 └────────────────────────────────────────────────────┘
 ```
 
 ## Data flow: dispatch one task
@@ -97,16 +105,49 @@ IssueStore row updated           ──►  JSONL mirror reflects on next 5s tic
 |---|---|---|
 | task queue + dep graph | `issues.db` (SQLite, IssueStore) | WAL, concurrent readers, single-writer orchestrator |
 | persistent memory | `memory.db` (SQLite, MemoryStore) | prime-injected into every agent prompt |
+| visual design | `design_artifact` + `designer_run` (SQLite, schema v9) | per-spec artifacts, timeline of runs |
+| produced art | `art_output` + `artist_run` (SQLite, schema v10) | per-spec `.glb`/`.png`/`.mp4` paths, Meshy task list |
+| spec state machine | `spec` + `spec_status` (SQLite) | Draft → ReadyForDesign → Designed → AssetReady → ReadyForGroom → Grooming → Groomed → Shipped |
 | event log | `issues.db.issue_event` + `IssueStore.AddEventAsync` | appended per transition, queryable for the dashboard |
 | heartbeat + counters | `orchestrator-state.json` (StateStore) | small JSON, view-only for the dashboard |
 | tail-able mirror | `issues.jsonl` (IssuesJsonlMirror) | rewritten every 5s, sorted by id, atomic rename |
 | git worktrees | `.portHorizon/worktrees/<id>/` | one per task; cleaned up by `GitWorktreeService.RemoveAsync` on merge |
 | branches | PortHorizon git repo | one `agent/<id>` per task; deleted on merge |
+| produced art files | `.portHorizon/art-output/{spec}/{art-id}.{ext}` | relative path stored in `art_output.body`; served at `/api/art-output/{id}/file` |
 | PRs | github.com/Xyrces/PortHorizon | `PRWatcher` polls; merged or closed per review |
 
 ## Why a JSONL mirror when the DB is the source of truth?
 
 The DB is the source of truth. The JSONL is a viewer artifact — a file the operator can `tail -f` from outside the orchestrator host, or `git diff` to review the project's history of tasks. It is regenerated every 5s by the `IssuesJsonlMirror` background service; if the file ever disagrees with the DB, the DB wins. This is exactly the role `bd issues.jsonl` plays in the `gastownhall/beads` design we modeled `docs/embedded-issues.md` after — adapted to in-process SQLite instead of a separate process.
+
+## Pipeline: Intake → Product → Designer → Artist → Groomer → Engineering
+
+The full pipeline for turning a user prompt into a merged PR is six stages. Each stage is an orchestrator-owned background service or agent; the orchestrator's `DispatchCycleAsync` picks up Ready issues, calls the next stage in line, and the next stage's scheduler picks up the result on its next tick.
+
+```
+   user prompt                  product refines            design artifacts
+       │                              │                            │
+       ▼                              ▼                            ▼
+   IntakeAgent ──► Spec(Draft) ──► ProductAgent ──► Spec(ReadyForDesign) ──► DesignerAgent ──► Spec(Designed)
+                                                                              │                        │
+                                                                              ▼                        ▼
+                                                                          design_artifact          ArtistAgent ──► Spec(AssetReady)
+                                                                          rows written                   │              │
+                                                                                                        ▼              ▼
+                                                                                                   Meshy REST API   art_output rows
+                                                                                                   (text-to-3d,    written
+                                                                                                    image-to-3d,
+                                                                                                    rigging) ──► .glb downloaded
+                                                                                                                       │
+       ┌────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+       ▼
+   GroomerAgent ──► Spec(Groomed) ──► Spec(Shipped on merge)
+       │
+       ▼
+   EngineeringDispatchWorkflow (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch) ──► PR opened ──► PRWatcher ──► merged
+```
+
+Each `Spec` row carries its current status; the next stage's scheduler filters by status to find candidates. Manual triggers (`POST /api/specs/{id}/design`, `POST /api/specs/{id}/design-art`, `POST /api/specs/{id}/groom`) bypass the scheduler and run the agent immediately in a background task.
 
 ## Dependency graph semantics
 

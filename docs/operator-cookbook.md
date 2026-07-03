@@ -186,6 +186,53 @@ The dashboard's **Design** tab renders the spec list, the per-spec artifact body
 
 **Visual-language rules:** The Designer's first run produces a `kind=visual-rule` artifact. Future runs read it via `db_get_visual_language` and apply its color/typography/layout conventions. The system is self-bootstrapping: each project develops its own visual language on the first UI spec.
 
+## Run the Artist on a Designed spec
+
+After the Designer transitions a spec to `Designed`, the **Artist** runs and produces the actual art assets via the [Meshy](https://docs.meshy.ai/) REST API (text-to-3d, image-to-3d, multi-image-to-3d, rigging). Set the Meshy API key in `appsettings.json`:
+
+```json
+"llm": {
+  "meshyApiKey": "msy_...",
+  "meshyBaseUrl": "https://api.meshy.ai",
+  "meshyPollIntervalSeconds": 5,
+  "meshyMaxWaitSeconds": 600,
+  "meshyMaxConcurrentJobs": 4
+}
+```
+
+The Artist runs:
+
+1. Reads the Designer's design_artifacts (wireframe HTML / visual-rule markdown) to ground its art submissions.
+2. Calls `db_submit_meshy_job` per visual element. The mode depends on the input:
+   - `text-to-3d` when the spec has a clear prompt but no reference image.
+   - `image-to-3d` when a wireframe is rendered to a 2D image (public URL or data URI).
+   - `rigging` when the spec needs a rigged model for animation (input is the `glb_url` of a prior text-to-3d / image-to-3d job).
+3. The Meshy job is polled to completion inside the tool. On `SUCCEEDED` the `.glb` is downloaded to `.portHorizon/art-output/{spec}/{art-id}.glb`.
+4. Calls `db_save_art_output` for each successful job, recording the asset path + the Meshy task id in `references_json`.
+5. Transitions the spec to `AssetReady` (or `NeedsRevision` when the visual requirements are unclear).
+
+The Artist scheduler wakes up every 5 min and picks up `Designed` specs. For manual runs:
+
+```bash
+# Trigger a manual art run on a Designed spec
+curl.exe -X POST http://127.0.0.1:4097/api/specs/<spec-id>/design-art
+
+# Check the art timeline
+curl.exe "http://127.0.0.1:4097/api/artist/runs?specId=<spec-id>"
+
+# View the produced assets
+curl.exe "http://127.0.0.1:4097/api/specs/<spec-id>/art-output"
+
+# Stream the .glb (or png / mp4) for an art output
+curl.exe "http://127.0.0.1:4097/api/art-output/<art-id>/file" --output asset.glb
+```
+
+The dashboard's **Art** tab renders the spec list, the per-spec art output body (GLB via `<model-viewer>` / PNG via `<img>` / MP4 via `<video>`), the Meshy task list with status, and the persisted `artist_run` log.
+
+The Groomer gate widens to `Designed | AssetReady | Approved | Groomed` — both visual specs (with Meshy art) and non-visual specs (operator-approved) flow into the Groomer.
+
+**Meshy credits:** A text-to-3d preview task is 20 credits, a refine/texture task is 10 credits, image-to-3d is 20-30 credits. The Meshy 6 model is current (set via `ai_model: "meshy-6"` in the request).
+
 ## Watch a PR through the review loop
 
 When a task is dispatched and a PR is opened, the orchestrator auto-enqueues a `pr-watch` follow-up. The `PRWatcher` polls every 30s. Watch it on the dashboard:
