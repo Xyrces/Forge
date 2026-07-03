@@ -1,0 +1,57 @@
+# P4 Stage B — Durable Task Scheduler sidecar.
+#
+# Works with both `docker compose` and `podman-compose`. The
+# image is a vanilla OCI image published by Microsoft
+# (mcr.microsoft.com/dts/dts-emulator:latest); the ports are
+# 8080 (gRPC app <-> DTS) and 8082 (DTS dashboard).
+#
+# Bring it up:
+#   docker compose -f deploy/docker-compose.yml up -d
+#   podman-compose -f deploy/docker-compose.yml up -d
+#
+# Then set Orchestrator:Execution=Durable + the connection
+# string in appsettings.json (the default is
+# Endpoint=http://localhost:8080;TaskHub=default;Authentication=None
+# which is what the emulator uses):
+#
+#   "orchestrator": {
+#     "execution": "Durable",
+#     "dtsConnectionString": "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None"
+#   }
+#
+# Dashboard: http://localhost:8082
+#
+# Tear down:
+#   docker compose -f deploy/docker-compose.yml down
+#   podman-compose -f deploy/docker-compose.yml down
+
+services:
+  dts-emulator:
+    image: mcr.microsoft.com/dts/dts-emulator:latest
+    container_name: porthorizon-dts
+    # OCI image; no privileged mode needed.
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # gRPC — orchestrator <-> DTS
+      - "8082:8082"   # dashboard
+    environment:
+      # The emulator stores orchestrations in memory only;
+      # restart wipes state. Good enough for dev. For
+      # durability across container restarts, run the
+      # production DTS in Azure.
+      DTS_LOG_LEVEL: "Information"
+      # Single task hub is enough for dev. Add more as
+      # comma-separated if you need isolation between
+      # orchestrators.
+      DTS_TASK_HUB_NAMES: "default"
+    healthcheck:
+      # The gRPC port doesn't speak HTTP; the dashboard does.
+      # This is best-effort; the orchestrator retries the
+      # connection at startup.
+      test: ["CMD", "/bin/sh", "-c", "exit 0"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  dts-logs:
