@@ -272,6 +272,30 @@ public sealed class IntakeAgent
         var issue = await _issues.GetAsync(msg.ProposedEpicId, ct)
             ?? throw new InvalidOperationException($"Proposed epic {msg.ProposedEpicId} no longer exists");
 
+        // P2.a wiring: create a spec for the accepted epic so the
+        // product -> designer pipeline has something to refine.
+        // The spec's parent_issue_id is the epic; the product
+        // refinement queue's "intake.epic.accepted" listener picks
+        // up this event, looks up the spec by parent_issue_id, and
+        // refines the body. We seed the spec body with the intake
+        // draft so Product has something to work with even before
+        // the LLM runs.
+        SpecRecord? specForEpic = null;
+        if (_specs is not null)
+        {
+            var existing = await _specs.ListAsync(projectId: null, status: null, ct);
+            specForEpic = existing.FirstOrDefault(s => s.ParentIssueId == issue.Id);
+            if (specForEpic is null)
+            {
+                specForEpic = await _specs.CreateAsync(new NewSpec(
+                    ProjectId: _projectId,
+                    Title: issue.Title,
+                    Body: BuildIntakeDraftBody(issue),
+                    Author: "intake",
+                    ParentIssueId: issue.Id));
+            }
+        }
+
         // Bind to active sprint (if any).
         var activeSprint = await _sprints.GetActiveAsync(ct);
         if (activeSprint is not null)
@@ -463,6 +487,28 @@ public sealed class IntakeAgent
         IntakeMessageRole.System => ChatRole.System,
         _ => ChatRole.User,
     };
+
+    /// <summary>
+    /// The intake-draft body used when a new spec is created from
+    /// an accepted epic. The Product agent refines this into the
+    /// structured form (## Summary, ## Acceptance criteria, etc).
+    /// We seed it with the issue's title + description so Product
+    /// has material to work with even before the LLM runs.
+    /// </summary>
+    private static string BuildIntakeDraftBody(IssueRecord issue)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("## Summary\n").Append(issue.Title).Append('\n');
+        if (!string.IsNullOrWhiteSpace(issue.Description))
+        {
+            sb.Append("\n## Notes\n").Append(issue.Description).Append('\n');
+        }
+        sb.Append("\n## Touches\n- TBD\n");
+        sb.Append("\n## Dependencies\n- none\n");
+        sb.Append("\n## Out of scope\n- TBD\n");
+        sb.Append("\n## Open questions\n- TBD\n");
+        return sb.ToString();
+    }
 }
 
 /// <summary>

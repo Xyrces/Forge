@@ -64,9 +64,9 @@ public sealed class ProductRefinementQueue : IAsyncDisposable
                 try
                 {
                     // Look up the spec for this epic; the operator clicked
-                    // Accept on an issue, the spec was created from that
-                    // issue via parent_issue_id. We need the spec id AND
-                    // the project id to call the agent.
+                    // Accept on an issue, IntakeAgent creates a spec
+                    // with parent_issue_id = epicId. We need the spec
+                    // id AND the project id to call the agent.
                     var specs = await _specs.ListAsync(projectId: null, status: null, ct);
                     var spec = specs.FirstOrDefault(s => s.ParentIssueId == epicId);
                     if (spec is null)
@@ -75,7 +75,22 @@ public sealed class ProductRefinementQueue : IAsyncDisposable
                         continue;
                     }
                     var agent = _factory.Create();
-                    await agent.RefineSpecAsync(spec.Id, spec.ProjectId, ct);
+                    var refined = await agent.RefineSpecAsync(spec.Id, spec.ProjectId, ct);
+                    // P2.a: hand off to the Designer. After Product
+                    // finishes, the spec is at Draft (per the design
+                    // doc). Transition to ReadyForDesign so the
+                    // Designer scheduler picks it up.
+                    if (refined is not null)
+                    {
+                        try
+                        {
+                            await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign, ct);
+                        }
+                        catch (InvalidOperationException ex)
+                        {
+                            _logger.LogWarning(ex, "ProductRefinementQueue: could not transition {Spec} to ReadyForDesign", spec.Id);
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {

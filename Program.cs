@@ -12,6 +12,15 @@ namespace PortHorizon.Agents;
 
 public static class Program
 {
+    // Held references for fire-and-forget background services so
+    // the GC doesn't reap them mid-run. The orchestrator uses
+    // top-level statements so we can't keep these as local async
+    // fields; these statics are the simplest pattern.
+    private static Agents.ProductRefinementQueue? _productRefinementQueue;
+    private static Orchestrator.ScheduledGroomer? _scheduledGroomer;
+    private static Orchestrator.DesignerScheduler? _scheduledDesigner;
+    private static IssuesJsonlMirror? _issuesJsonlMirror;
+
     public static async Task<int> Main(string[] args)
     {
         var mode = ParseMode(args);
@@ -582,6 +591,10 @@ public static class Program
         var productRefinementQueue = new Agents.ProductRefinementQueue(
             productAgentFactory, specStore, eventBus,
             loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
+        // Hold a reference: the queue self-starts in its ctor; if it
+        // goes out of scope the GC reaps the worker Task and the
+        // event subscription dies.
+        _productRefinementQueue = productRefinementQueue;
         var groomerFactory = new Agents.GroomerAgentFactory(
             issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory);
         // P2.a: Designer pipeline. The hygiene checker is shared
@@ -632,6 +645,7 @@ public static class Program
             // JSONL mirror is a fire-and-forget background task; it
             // cancels itself when shutdownCts fires.
             _ = jsonlMirror.StartAsync(shutdownCts.Token);
+            _issuesJsonlMirror = jsonlMirror;
 
             // P3.5: scheduled Groomer wakes up every 5 minutes and
             // grooms any Approved specs that haven't been groomed
@@ -641,6 +655,7 @@ public static class Program
                 loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
                 interval: TimeSpan.FromMinutes(5));
             _ = scheduledGroomer.RunAsync(shutdownCts.Token);
+            _scheduledGroomer = scheduledGroomer;
 
             // P2.a: scheduled Designer wakes up every 5 minutes and
             // designs any ReadyForDesign specs that haven't been
@@ -651,6 +666,7 @@ public static class Program
                 loggerFactory.CreateLogger<Orchestrator.DesignerScheduler>(),
                 interval: TimeSpan.FromMinutes(5));
             _ = scheduledDesigner.RunAsync(shutdownCts.Token);
+            _scheduledDesigner = scheduledDesigner;
 
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);
