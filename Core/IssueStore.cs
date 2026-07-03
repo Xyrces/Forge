@@ -140,7 +140,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 9;
+    public const int CurrentSchemaVersion = 10;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -449,6 +449,54 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             );
             CREATE INDEX IF NOT EXISTS ix_designer_run_spec ON designer_run(spec_id, ts);
             CREATE INDEX IF NOT EXISTS ix_designer_run_ts ON designer_run(ts);
+
+            -- v10: art_output + artist_run tables. The
+            -- Artist agent runs after Designer and before Groomer.
+            -- art_output: produced art assets (3D meshes from
+            -- Meshy, PNG textures, MP4 animations, rig files)
+            -- attached to a spec. The body column stores a local
+            -- relative path under .portHorizon/art-output/; the
+            -- dashboard's Art tab renders GLB/PNG inline.
+            -- artist_run: one row per Artist run with the meshy
+            -- task id + the art_output ids it produced.
+            --
+            -- Same FK-loose pattern as design_artifact /
+            -- designer_run: spec_id references spec.id, but no
+            -- SQL FK; ArtOutputStore + SpecStore + Artist agent
+            -- are the source of truth.
+            CREATE TABLE IF NOT EXISTS art_output (
+                id                  TEXT PRIMARY KEY,
+                spec_id             TEXT NOT NULL,
+                kind                TEXT NOT NULL,    -- 'mesh' | 'texture' | 'animation' | 'rig'
+                title               TEXT NOT NULL,
+                body                TEXT NOT NULL,    -- relative path under .portHorizon/art-output/
+                body_kind           TEXT NOT NULL,    -- 'glb' | 'fbx' | 'obj' | 'png' | 'mp4' | 'usdz'
+                references_json     TEXT,             -- JSON array of {designArtifactId, meshyTaskId, why}
+                parent_artifact_id  TEXT,
+                status              TEXT NOT NULL DEFAULT 'draft',  -- 'draft' | 'approved' | 'superseded'
+                author              TEXT NOT NULL,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_art_output_spec
+                ON art_output(spec_id, status);
+            CREATE INDEX IF NOT EXISTS ix_art_output_spec_kind
+                ON art_output(spec_id, kind);
+
+            CREATE TABLE IF NOT EXISTS artist_run (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                  TEXT NOT NULL,
+                spec_id             TEXT NOT NULL,
+                trigger_kind        TEXT NOT NULL,    -- 'manual' | 'scheduled'
+                status              TEXT NOT NULL,    -- 'started' | 'succeeded' | 'meshy_failed' | 'llm_failed'
+                new_spec_status     TEXT,             -- the spec status the artist set: 'asset_ready'
+                art_output_ids      TEXT,             -- JSON array of art_output.id
+                meshy_tasks         TEXT,             -- JSON array of {id, mode, status, artOutputId}
+                error               TEXT,
+                duration_ms         INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS ix_artist_run_spec ON artist_run(spec_id, ts);
+            CREATE INDEX IF NOT EXISTS ix_artist_run_ts ON artist_run(ts);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

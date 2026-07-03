@@ -8,6 +8,7 @@ public enum SpecStatus
     Draft,
     ReadyForDesign,
     Designed,
+    AssetReady,
     NeedsRevision,
     Approved,
     Grooming,
@@ -47,6 +48,15 @@ public static class SpecStatusTransitions
             SpecStatus.Archived,
         },
         [SpecStatus.Designed] = new()
+        {
+            SpecStatus.AssetReady,
+            SpecStatus.Grooming,
+            SpecStatus.NeedsRevision,
+            SpecStatus.Draft,
+            SpecStatus.Superseded,
+            SpecStatus.Archived,
+        },
+        [SpecStatus.AssetReady] = new()
         {
             SpecStatus.Grooming,
             SpecStatus.NeedsRevision,

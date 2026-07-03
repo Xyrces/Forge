@@ -188,13 +188,14 @@ public static class SpecEndpoints
                 // approved), Approved (operator non-visual fast-path),
                 // Groomed (operator re-decompose).
                 if (spec.Status is not (SpecStatus.Designed
+                    or SpecStatus.AssetReady
                     or SpecStatus.Approved
                     or SpecStatus.Groomed))
                 {
                     return Results.BadRequest(new
                     {
                         error = "spec_not_groomable",
-                        detail = $"spec status is {spec.Status}; expected Designed | Approved | Groomed"
+                        detail = $"spec status is {spec.Status}; expected Designed | AssetReady | Approved | Groomed"
                     });
                 }
 

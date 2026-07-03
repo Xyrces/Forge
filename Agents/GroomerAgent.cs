@@ -80,10 +80,11 @@ public sealed class GroomerAgent
         // ReadyForDesign / Shipped / Superseded / Archived are
         // rejected.
         if (spec.Status is not (SpecStatus.Designed
+            or SpecStatus.AssetReady
             or SpecStatus.Approved
             or SpecStatus.Groomed))
         {
-            _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} status={Status} (expected Designed | Approved | Groomed)",
+            _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} status={Status} (expected Designed | AssetReady | Approved | Groomed)",
                 specId, spec.Status);
             return null;
         }

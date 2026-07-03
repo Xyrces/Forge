@@ -83,12 +83,13 @@ public sealed class ScheduledGroomer
         IReadOnlyList<SpecRecord> candidates;
         try
         {
-            // P2.a: pull all specs and filter in C#. The Groomer
-            // gate accepts Designed | Approved | Groomed (the
-            // widening is in GroomerAgent itself; this scheduler
-            // just hands candidates to it).
+            // P2.a / P2.b: pull all specs and filter in C#. The
+            // Groomer gate accepts Designed | AssetReady | Approved
+            // | Groomed (the widening is in GroomerAgent itself;
+            // this scheduler just hands candidates to it).
             var all = await _specs.ListAsync(projectId: null, status: null, ct);
             candidates = all.Where(s => s.Status is SpecStatus.Designed
+                or SpecStatus.AssetReady
                 or SpecStatus.Approved
                 or SpecStatus.Groomed).ToList();
         }
