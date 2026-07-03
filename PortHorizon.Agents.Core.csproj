@@ -28,6 +28,9 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.12.0" />
+    <PackageReference Include="Microsoft.Agents.AI.DurableTask" Version="1.1.0-preview.260410.1" />
+    <PackageReference Include="Microsoft.DurableTask.Client.AzureManaged" Version="1.18.0" />
+    <PackageReference Include="Microsoft.DurableTask.Worker.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.AI" Version="10.7.0" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.7.0" />

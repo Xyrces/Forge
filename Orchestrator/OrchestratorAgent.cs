@@ -17,10 +17,11 @@ public sealed class OrchestratorAgent : IAgent
     private readonly PRWatcher _prWatcher;
     private readonly IIssueStore _issues;
     private readonly DesignArtifactStore _designArtifacts;
-    private readonly ArtOutputStore _artOutputs;
+private readonly ArtOutputStore _artOutputs;
     private readonly IAgentStore _agents;
     private readonly ISprintStore _sprints;
     private readonly AgentMessageBus _messageBus;
+    private readonly IWorkflowDispatcher _dispatcher;
     private SpawnerOptions _spawnerOptions = new();
     private WorkspaceOptions _workspaceOptions = new();
     private readonly ILogger<OrchestratorAgent> _logger;
@@ -46,6 +47,7 @@ public sealed class OrchestratorAgent : IAgent
         IDashboardEventBus events,
         DesignArtifactStore designArtifacts,
         ArtOutputStore artOutputs,
+        IWorkflowDispatcher dispatcher,
         ILogger<OrchestratorAgent> logger)
     {
         _runner = runner;
@@ -60,6 +62,7 @@ public sealed class OrchestratorAgent : IAgent
         _events = events;
         _designArtifacts = designArtifacts;
         _artOutputs = artOutputs;
+        _dispatcher = dispatcher;
         _logger = logger;
         _concurrencyLimiter = new SemaphoreSlim(4);
         _maxRetryCount = 1;
@@ -140,26 +143,14 @@ public sealed class OrchestratorAgent : IAgent
             // short-circuits on that combination).
             var preClaimed = (await _issues.GetAsync(claimed.Id, cancellationToken))!;
 
-            var workflow = new Workflow.EngineeringDispatchWorkflow(
-                issues: _issues,
-                agentRunner: _runner,
-                worktrees: _worktrees,
-                gitHub: _gitHub,
-                roleRegistry: _roleRegistry,
-                workspaceOptions: _workspaceOptions,
-                events: _events,
-                drainMessageBus: agent => _messageBus.Drain(agent),
-                designArtifacts: _designArtifacts,
-                artOutputs: _artOutputs,
-                logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<Workflow.EngineeringDispatchWorkflow>.Instance);
-
-            // MAF's RunAsync may swallow executor exceptions and let
-            // the run complete "successfully". Detect failure by
-            // re-fetching the issue: if lastError is set, the
-            // workflow's run surfaced an exception.
+            // P4 Stage B: the dispatcher abstracts over InProcess
+            // (current behavior) vs Durable (DTS-backed). Both
+            // block until the workflow run reaches a terminal
+            // state so the caller can keep its synchronous
+            // dispatch-then-check shape.
             try
             {
-                await workflow.RunAsync(preClaimed, cancellationToken);
+                await _dispatcher.DispatchAsync(preClaimed, cancellationToken);
             }
             catch (Exception ex)
             {

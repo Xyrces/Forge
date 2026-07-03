@@ -8,6 +8,7 @@ using PortHorizon.Agents.Core;
 using PortHorizon.Agents.Dashboard;
 using PortHorizon.Agents.Orchestrator;
 using PortHorizon.Agents.Reviewer;
+using PortHorizon.Agents.Orchestrator.Workflow;
 using Xunit;
 
 namespace PortHorizon.Agents.Tests.Integration;
@@ -87,7 +88,35 @@ public sealed class OrchestratorAgentTests : IDisposable
             _events,
             new Core.DesignArtifactStore(_dbPath),
             new Core.ArtOutputStore(_dbPath),
+            // InProcessDispatcher — reuses the existing
+            // EngineeringDispatchWorkflow + InProcessExecution
+            // path; Stage A's behavior. Stage B's DurableDispatcher
+            // has its own integration test (B.6).
+            new InProcessDispatcher(
+                (issue, ct) => RunWorkflowInProcess(runner, issue, ct),
+                NullLogger<InProcessDispatcher>.Instance),
             NullLogger<OrchestratorAgent>.Instance);
+
+    private async Task RunWorkflowInProcess(IAgentRunner runner, IssueRecord issue, CancellationToken ct)
+    {
+        var workflow = new EngineeringDispatchWorkflow(
+            issues: _issues,
+            agentRunner: runner,
+            worktrees: _worktrees,
+            gitHub: _github,
+            roleRegistry: _roleRegistry,
+            workspaceOptions: new Configuration.WorkspaceOptions
+            {
+                Root = _workDir, WorktreeRoot = ".portHorizon/worktrees",
+                DefaultBranch = "main",
+            },
+            events: _events,
+            drainMessageBus: agent => _messageBus.Drain(agent),
+            designArtifacts: new Core.DesignArtifactStore(_dbPath),
+            artOutputs: new Core.ArtOutputStore(_dbPath),
+            logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
+        await workflow.RunAsync(issue, ct);
+    }
 
     private void BindMaf(OrchestratorAgent orch)
     {

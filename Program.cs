@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
 using PortHorizon.Agents.AgentTools;
 using PortHorizon.Agents.Agents;
@@ -673,12 +674,63 @@ Console.Error.WriteLine(ex.ToString());
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30),
             eventBus,
             loggerFactory.CreateLogger<PRWatcher>());
+        // P4 Stage B — pick the workflow runtime based on
+// appsettings.json. The InProcess dispatcher (default) is a
+// thin lambda over the existing EngineeringDispatchWorkflow +
+// InProcessExecution; the Durable dispatcher registers the
+// same workflow with Microsoft.Agents.AI.DurableTask so the
+// DTS sidecar persists workflow state across orchestrator
+// crashes. The switch is controlled by Orchestrator:Execution
+// in appsettings.json. See deploy/docker-compose.yml for the
+// DTS emulator sidecar that powers Durable mode in dev.
+        IWorkflowDispatcher dispatcher;
+        if (string.Equals(options.Orchestrator.Execution, "Durable", StringComparison.OrdinalIgnoreCase))
+        {
+            // Build the workflow ONCE (the executors are stateless;
+            // they read singletons from DI at construction). The
+            // Durable runtime expects a Workflow instance, not a
+            // factory, so we share it across all orchestrations.
+            var workflow = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
+                issues, agentRunner, worktrees, gitHub, roleRegistry, options.Workspace,
+                eventBus, agent => messageBus.Drain(agent),
+                designArtifacts, artOutputs,
+                loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>())
+                .Build();
+            var services = new ServiceCollection()
+                .AddSingleton(workflow)
+                .BuildServiceProvider();
+            dispatcher = new Orchestrator.DurableDispatcher(
+                options.Orchestrator,
+                workflow,
+                loggerFactory.CreateLogger<Orchestrator.DurableDispatcher>(),
+                buildHost: () => Orchestrator.DurableDispatcher.BuildHost(
+                    services, workflow, options.Orchestrator));
+        }
+        else
+        {
+            // InProcessDispatcher (default): runs the same
+            // workflow via InProcessExecution. P4 Stage A's
+            // StartupRecovery handles crash safety.
+            dispatcher = new Orchestrator.InProcessDispatcher(
+                async (issue, ct) =>
+                {
+                    var workflow = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
+                        issues, agentRunner, worktrees, gitHub, roleRegistry, options.Workspace,
+                        eventBus, agent => messageBus.Drain(agent),
+                        designArtifacts, artOutputs,
+                        loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>());
+                    await workflow.RunAsync(issue, ct);
+                },
+                loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
+        }
+
         var orchestrator = new OrchestratorAgent(
             agentRunner, roleRegistry, worktrees, gitHub, prWatcher, issues,
             agents, sprints, messageBus,
             eventBus,
             designArtifacts,
             artOutputs,
+            dispatcher,
             loggerFactory.CreateLogger<OrchestratorAgent>());
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);

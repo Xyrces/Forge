@@ -12,6 +12,15 @@ public sealed record AgentOptions
     public DashboardOptions Dashboard { get; set; } = new();
     public LlmOptions Llm { get; set; } = new();
     public VisionOptions Vision { get; set; } = new();
+    /// <summary>
+    /// P4 Stage B — runtime selection. "InProcess" (default)
+    /// uses Microsoft.Agents.AI.Workflows InProcessExecution;
+    /// "Durable" uses Microsoft.Agents.AI.DurableTask +
+    /// DurableTask.Worker (DTS sidecar). The Durable runtime
+    /// requires <see cref="OrchestratorOptions.DtsConnectionString"/>
+    /// + a reachable DTS at the encoded endpoint.
+    /// </summary>
+    public OrchestratorOptions Orchestrator { get; set; } = new();
 }
 
 /// <summary>
@@ -56,6 +65,26 @@ public sealed record DashboardOptions
     public bool Enabled { get; set; } = true;
     public int Port { get; set; } = 4097;
     public string Hostname { get; set; } = "127.0.0.1";
+}
+
+/// <summary>
+/// P4 Stage B — runtime selection + Durable Task Scheduler
+/// connection.
+/// </summary>
+public sealed record OrchestratorOptions
+{
+    /// <summary>
+    /// Runtime: <c>InProcess</c> (default) or <c>Durable</c>.
+    /// </summary>
+    public string Execution { get; set; } = "InProcess";
+
+    /// <summary>
+    /// DTS connection string used when <see cref="Execution"/>
+    /// is <c>Durable</c>. Default matches the DTS emulator
+    /// image published by Microsoft.
+    /// </summary>
+    public string DtsConnectionString { get; set; } =
+        "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None";
 }
 
 public sealed record LlmOptions
