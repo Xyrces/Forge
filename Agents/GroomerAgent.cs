@@ -73,9 +73,17 @@ public sealed class GroomerAgent
             _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} not found", specId);
             return null;
         }
-        if (spec.Status != SpecStatus.Approved)
+        // P2.a: the Groomer gate widens. Specs in Designed
+        // (Designer approved) or Approved (operator-marked
+        // non-visual) or Groomed (operator re-decompose) all
+        // enter the Groomer. Specs in NeedsRevision / Draft /
+        // ReadyForDesign / Shipped / Superseded / Archived are
+        // rejected.
+        if (spec.Status is not (SpecStatus.Designed
+            or SpecStatus.Approved
+            or SpecStatus.Groomed))
         {
-            _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} status={Status} (expected Approved)",
+            _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} status={Status} (expected Designed | Approved | Groomed)",
                 specId, spec.Status);
             return null;
         }

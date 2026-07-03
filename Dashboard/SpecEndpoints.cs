@@ -183,12 +183,20 @@ public static class SpecEndpoints
                 var spec = await specs.GetAsync(id, ct);
                 if (spec is null)
                     return Results.NotFound(new { error = "spec_not_found" });
-                if (spec.Status != SpecStatus.Approved)
+                // P2.a: the manual groom endpoint now accepts any of
+                // the "ready to groom" statuses: Designed (Designer
+                // approved), Approved (operator non-visual fast-path),
+                // Groomed (operator re-decompose).
+                if (spec.Status is not (SpecStatus.Designed
+                    or SpecStatus.Approved
+                    or SpecStatus.Groomed))
+                {
                     return Results.BadRequest(new
                     {
-                        error = "spec_not_approved",
-                        detail = $"spec status is {spec.Status}; expected Approved"
+                        error = "spec_not_groomable",
+                        detail = $"spec status is {spec.Status}; expected Designed | Approved | Groomed"
                     });
+                }
 
                 // Fire-and-forget on a background task. The HTTP
                 // request returns immediately so the UI can refresh
