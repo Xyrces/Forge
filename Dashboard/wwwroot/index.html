@@ -187,6 +187,7 @@
   <button data-tab="vision">Vision</button>
   <button data-tab="design">Design</button>
   <button data-tab="art">Art</button>
+  <button data-tab="recovery">Recovery</button>
   <button data-tab="sprints">Sprints</button>
   <button data-tab="agents">Agents</button>
   <button data-tab="skills">Skills</button>
@@ -199,6 +200,7 @@
   <div class="tab" id="tab-vision"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-design"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-art"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-recovery"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
@@ -1082,6 +1084,106 @@ async function loadArtOutputs(specId) {
     <div>${runRows}</div>`;
 }
 
+async function renderRecovery() {
+  const tab = $("tab-recovery");
+  tab.innerHTML = `<div class="empty">Loading…</div>`;
+  let reports;
+  try {
+    const r = await fetch("/api/recovery/reports?limit=20");
+    if (!r.ok) {
+      tab.innerHTML = `<div class="empty">Failed to load reports (HTTP ${r.status}).</div>`;
+      return;
+    }
+    reports = await r.json();
+  } catch (e) {
+    tab.innerHTML = `<div class="empty">Failed to load: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+
+  // Header with the action buttons.
+  const controls = `
+    <div style="margin-bottom: 16px; display: flex; gap: 8px;">
+      <button id="recovery-run">Run recovery now</button>
+      <button id="recovery-dry-run">Dry run</button>
+      <span class="muted">Recovery inspects every InProgress + assignee=kilo issue and replays unfinished side-effects (push, PR open).</span>
+    </div>`;
+
+  if (reports.length === 0) {
+    tab.innerHTML = `${controls}<div class="empty">No recovery runs yet. The StartupRecovery pass runs automatically at every orchestrator start.</div>`;
+    wireRecoveryButtons();
+    return;
+  }
+
+  // Render the latest report's actions inline; older reports collapse.
+  const latest = reports[0];
+  let actionsHtml = `<div class="empty">No actions recorded.</div>`;
+  try {
+    const actions = JSON.parse(latest.actions || "[]");
+    if (actions.length > 0) {
+      actionsHtml = `<table>
+        <tr><th>issue</th><th>before</th><th>after</th><th>action</th><th>error</th></tr>
+        ${actions.map(a => `
+          <tr>
+            <td>${escapeHtml(a.IssueId ?? a.issueId ?? "")}</td>
+            <td>${escapeHtml(a.BeforeCheckpoint ?? a.beforeCheckpoint ?? "(none)")}</td>
+            <td>${escapeHtml(a.AfterCheckpoint ?? a.afterCheckpoint ?? "(none)")}</td>
+            <td>${escapeHtml(a.Action ?? a.action ?? "")}</td>
+            <td>${escapeHtml(a.Error ?? a.error ?? "")}</td>
+          </tr>`).join("")}
+        </table>`;
+    }
+  } catch { /* leave the empty placeholder */ }
+
+  const summary = `
+    <div class="design-run">
+      <div><strong>Report #${latest.id}</strong> · ${new Date(latest.ts).toLocaleString()}</div>
+      <div class="muted">scanned=${latest.issuesScanned} replayed=${latest.issuesReplayed} failed=${latest.issuesFailed} duration=${latest.durationMs}ms${latest.specId ? ` · specId=${escapeHtml(latest.specId)}` : ""}</div>
+      ${actionsHtml}
+    </div>`;
+
+  const older = reports.slice(1).map(r => `
+    <div class="design-run">
+      <div><strong>Report #${r.id}</strong> · ${new Date(r.ts).toLocaleString()}</div>
+      <div class="muted">scanned=${r.issuesScanned} replayed=${r.issuesReplayed} failed=${r.issuesFailed} duration=${r.durationMs}ms</div>
+    </div>`).join("");
+
+  tab.innerHTML = `${controls}<h2>latest</h2>${summary}<h2>history</h2>${older || "<div class=\"empty\">No prior reports.</div>"}`;
+  wireRecoveryButtons();
+}
+
+function wireRecoveryButtons() {
+  const runBtn = $("recovery-run");
+  const dryBtn = $("recovery-dry-run");
+  if (runBtn) {
+    runBtn.onclick = async () => {
+      runBtn.disabled = true;
+      runBtn.textContent = "Running…";
+      try {
+        await fetch("/api/recovery/run", { method: "POST" });
+        renderRecovery();
+      } catch (e) {
+        alert("Recovery run failed: " + e);
+        renderRecovery();
+      }
+    };
+  }
+  if (dryBtn) {
+    dryBtn.onclick = async () => {
+      dryBtn.disabled = true;
+      dryBtn.textContent = "Running…";
+      try {
+        const r = await fetch("/api/recovery/dry-run", { method: "POST" });
+        const j = await r.json();
+        alert(`Dry run: ${j.scanned} candidates inspected. See the recovery_reports table for details (or POST /api/recovery/run for side-effects).`);
+        renderRecovery();
+      } catch (e) {
+        alert("Dry run failed: " + e);
+        renderRecovery();
+      }
+    };
+  }
+}
+
 function filterSpecs() {
   // The dashboard's lightweight implementation: just re-render. The
   // list is bounded (low hundreds of specs typical), so a client-side
@@ -1355,6 +1457,7 @@ document.querySelectorAll("#tabs button").forEach(btn => {
     if (btn.dataset.tab === "vision") renderVision();
     if (btn.dataset.tab === "design") renderDesign();
     if (btn.dataset.tab === "art") renderArt();
+    if (btn.dataset.tab === "recovery") renderRecovery();
   });
 });
 $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
