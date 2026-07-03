@@ -133,13 +133,11 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             events: _events,
             drainMessageBus: _ => null,
             designArtifacts: new DesignArtifactStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
+            artOutputs: new ArtOutputStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
             logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
 
         await workflow.RunAsync(issue, CancellationToken.None);
 
-        // NoDiff path: the workflow ran to completion and the
-        // issue is now Completed. Worktree path was created and
-        // recorded in metadata.
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.Completed, after!.Status);
         Assert.NotNull(after.GetMetadata("worktreePath"));
@@ -162,13 +160,12 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             events: _events,
             drainMessageBus: _ => null,
             designArtifacts: new DesignArtifactStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
+            artOutputs: new ArtOutputStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
             logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
 
         await workflow.RunAsync(issue, CancellationToken.None);
 
         var after = await _issues.GetAsync(issue.Id);
-        // NoDiff path: transitioned to Completed by CommitPushPr,
-        // no prNumber recorded.
         Assert.Equal(IssueStatus.Completed, after!.Status);
         Assert.Null(after.GetMetadata("prNumber"));
     }

@@ -19,6 +19,7 @@ public static class Program
     private static Agents.ProductRefinementQueue? _productRefinementQueue;
     private static Orchestrator.ScheduledGroomer? _scheduledGroomer;
     private static Orchestrator.DesignerScheduler? _scheduledDesigner;
+    private static Orchestrator.ArtistScheduler? _scheduledArtist;
     private static IssuesJsonlMirror? _issuesJsonlMirror;
 
     public static async Task<int> Main(string[] args)
@@ -524,6 +525,10 @@ public static class Program
             // ctor already ran the migration.
             var designArtifacts = new Core.DesignArtifactStore(groomerRunsDb);
             var designerRuns = new Core.DesignerRunStore(groomerRunsDb);
+            // P2.b: art_output + artist_run share the issues.db (the
+            // v10 migration created both tables).
+            var artOutputs = new Core.ArtOutputStore(groomerRunsDb);
+            var artistRuns = new Core.ArtistRunStore(groomerRunsDb);
 
         // P0.5: vision.md import. Build the VisionStore (loads the
         // configured file on startup), inject it into memory as the
@@ -573,6 +578,7 @@ public static class Program
             agents, sprints, messageBus,
             eventBus,
             designArtifacts,
+            artOutputs,
             loggerFactory.CreateLogger<OrchestratorAgent>());
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
@@ -617,6 +623,26 @@ public static class Program
         var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
             specStore, designArtifacts, designerRuns, memoryStore, designHygiene,
             chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+        // P2.b: Meshy client + Artist pipeline. The Meshy client
+        // uses a plain SocketsHttpHandler in production; the
+        // injection seam (HttpMessageHandler) lets tests stub the
+        // upstream API.
+        var meshyOptions = Microsoft.Extensions.Options.Options.Create(new Meshy.MeshyOptions
+        {
+            ApiKey = options.Llm.MeshyApiKey,
+            BaseUrl = options.Llm.MeshyBaseUrl,
+            PollIntervalSeconds = options.Llm.MeshyPollIntervalSeconds,
+            MaxWaitSeconds = options.Llm.MeshyMaxWaitSeconds,
+            MaxConcurrentJobs = options.Llm.MeshyMaxConcurrentJobs,
+        });
+        var meshy = new Meshy.MeshyClient(
+            new SocketsHttpHandler(),
+            meshyOptions,
+            loggerFactory.CreateLogger<Meshy.MeshyClient>(),
+            artOutputRoot: Path.Combine(options.Workspace.Root, ".portHorizon", "art-output"));
+        var artistAgentFactory = new Orchestrator.ArtistAgentFactory(
+            specStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
         var dashboard = new DashboardHost(
             options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
@@ -631,6 +657,10 @@ public static class Program
             designerFactory: designerAgentFactory,
             designerRuns: designerRuns,
             designArtifacts: designArtifacts,
+            artistFactory: artistAgentFactory,
+            artistRuns: artistRuns,
+            artOutputs: artOutputs,
+            meshy: meshy,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);
@@ -678,6 +708,17 @@ public static class Program
                 interval: TimeSpan.FromMinutes(5));
             _ = scheduledDesigner.RunAsync(shutdownCts.Token);
             _scheduledDesigner = scheduledDesigner;
+
+            // P2.b: scheduled Artist wakes up every 5 minutes and
+            // produces art for any Designed specs that haven't been
+            // arted recently (or whose last art run failed).
+            // Fire-and-forget.
+            var scheduledArtist = new Orchestrator.ArtistScheduler(
+                specStore, artistAgentFactory, artistRuns, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.ArtistScheduler>(),
+                interval: TimeSpan.FromMinutes(5));
+            _ = scheduledArtist.RunAsync(shutdownCts.Token);
+            _scheduledArtist = scheduledArtist;
 
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);

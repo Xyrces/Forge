@@ -39,6 +39,7 @@ public sealed class EngineeringDispatchWorkflow
         IDashboardEventBus events,
         Func<string, string?> drainMessageBus,
         DesignArtifactStore designArtifacts,
+        ArtOutputStore artOutputs,
         ILogger<EngineeringDispatchWorkflow> logger)
     {
         var nullFactory = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
@@ -46,7 +47,7 @@ public sealed class EngineeringDispatchWorkflow
         _worktree = new WorktreeExecutor(issues, worktrees, workspaceOptions.DefaultBranch,
             nullFactory.CreateLogger<WorktreeExecutor>());
         _runAgent = new RunAgentExecutor(issues, agentRunner, roleRegistry,
-            drainMessageBus, events, designArtifacts,
+            drainMessageBus, events, designArtifacts, artOutputs,
             nullFactory.CreateLogger<RunAgentExecutor>());
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
             nullFactory.CreateLogger<CommitPushPrExecutor>());

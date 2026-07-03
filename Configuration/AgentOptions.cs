@@ -66,6 +66,18 @@ public sealed record LlmOptions
     public List<LlmProviderOptions> Providers { get; set; } = new();
     public string DefaultProvider { get; set; } = string.Empty;
     public Dictionary<string, LlmRoleModelOptions> Roles { get; set; } = new();
+
+    // P2.b: Meshy config. The Meshy REST API is a different
+    // service from the LLM providers; keep its config
+    // top-level under llm.* for ease of operator editing.
+    // Empty key is allowed (the Artist pipeline becomes a
+    // no-op against Meshy; the agent can still set
+    // AssetReady for non-visual specs).
+    public string MeshyApiKey { get; set; } = string.Empty;
+    public string MeshyBaseUrl { get; set; } = "https://api.meshy.ai";
+    public int MeshyPollIntervalSeconds { get; set; } = 5;
+    public int MeshyMaxWaitSeconds { get; set; } = 600;
+    public int MeshyMaxConcurrentJobs { get; set; } = 4;
 }
 
 public sealed record LlmProviderOptions

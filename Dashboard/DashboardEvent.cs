@@ -18,4 +18,18 @@ public static class DashboardEventKind
     public const string PrChangesRequested = "pr.changes-requested";
     public const string PrFailed = "pr.failed";
     public const string Log = "log";
+    // P2.a: Designer agent lifecycle events. Namespaced under
+    // 'designer.' so the dashboard's SSE filter can scope to them.
+    public const string DesignerRunStarted = "designer.run.started";
+    public const string DesignerRunCompleted = "designer.run.completed";
+    public const string DesignerRunFailed = "designer.run.failed";
+    public const string DesignerArtifactSaved = "designer.artifact.saved";
+    public const string DesignerStatusCommitted = "designer.status.committed";
+    // P2.b: Artist agent lifecycle events. Namespaced under
+    // 'artist.' so the dashboard's SSE filter can scope to them.
+    public const string ArtistRunStarted = "artist.run.started";
+    public const string ArtistRunCompleted = "artist.run.completed";
+    public const string ArtistRunFailed = "artist.run.failed";
+    public const string ArtistArtSaved = "artist.art.saved";
+    public const string ArtistStatusCommitted = "artist.status.committed";
 }

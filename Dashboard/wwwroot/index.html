@@ -186,6 +186,7 @@
   <button data-tab="specs">Specs</button>
   <button data-tab="vision">Vision</button>
   <button data-tab="design">Design</button>
+  <button data-tab="art">Art</button>
   <button data-tab="sprints">Sprints</button>
   <button data-tab="agents">Agents</button>
   <button data-tab="skills">Skills</button>
@@ -197,6 +198,7 @@
   <div class="tab" id="tab-specs"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-vision"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-design"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-art"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
@@ -204,6 +206,7 @@
 <div class="modal-bg" id="modal"><div class="modal" id="modal-body"></div></div>
 <footer id="foot"></footer>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (s) => (s ?? "").replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
@@ -962,6 +965,123 @@ async function loadDesignArtifacts(specId) {
     <div>${runRows}</div>`;
 }
 
+async function renderArt() {
+  const tab = $("tab-art");
+  tab.innerHTML = `<div class="empty">Loading…</div>`;
+  let specs;
+  try {
+    const r = await fetch("/api/specs");
+    if (!r.ok) {
+      tab.innerHTML = `<div class="empty">Failed to load specs (HTTP ${r.status}).</div>`;
+      return;
+    }
+    const all = await r.json();
+    // List specs in art-related states: Designed (Artist candidates),
+    // AssetReady (Artist done), NeedsRevision (Artist flagged).
+    specs = all.filter(s =>
+      s.status === "Designed" || s.status === "AssetReady" ||
+      s.status === "NeedsRevision"
+    );
+  } catch (e) {
+    tab.innerHTML = `<div class="empty">Failed to load: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  if (specs.length === 0) {
+    tab.innerHTML = `<div class="empty">No specs in the art pipeline. The Artist runs after the Designer; trigger a design run from the Specs tab.</div>`;
+    return;
+  }
+
+  const order = ["Designed", "NeedsRevision", "AssetReady"];
+  const groups = {};
+  for (const s of specs) (groups[s.status] ??= []).push(s);
+  const sortedKeys = order.filter(k => groups[k]);
+  for (const k of Object.keys(groups)) if (!sortedKeys.includes(k)) sortedKeys.push(k);
+
+  const sections = sortedKeys.map(k => {
+    const rows = groups[k].map(s => `
+      <tr>
+        <td><a href="#specs" onclick="renderSpecDetail('${s.id}');return false;">${escapeHtml(s.id)}</a></td>
+        <td>${escapeHtml(s.title)}</td>
+        <td><button onclick="loadArtOutputs('${s.id}');return false;">View art</button></td>
+      </tr>`).join("");
+    return `<h3>${k} (${groups[k].length})</h3>
+      <table>
+        <tr><th>id</th><th>title</th><th></th></tr>
+        ${rows}
+      </table>`;
+  }).join("");
+
+  tab.innerHTML = `<div class="design-grid">${sections}</div>
+    <div id="art-outputs"></div>`;
+}
+
+async function loadArtOutputs(specId) {
+  const out = $("art-outputs");
+  out.innerHTML = `<div class="empty">Loading ${escapeHtml(specId)}…</div>`;
+  let arts, runs;
+  try {
+    [arts, runs] = await Promise.all([
+      fetch(`/api/specs/${specId}/art-output`).then(r => r.json()),
+      fetch(`/api/artist/runs?specId=${specId}`).then(r => r.json()),
+    ]);
+  } catch (e) {
+    out.innerHTML = `<div class="empty">Failed: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+
+  const artRows = arts.map(a => {
+    let body = "";
+    if (a.bodyKind === "glb" || a.bodyKind === "fbx" || a.bodyKind === "obj" || a.bodyKind === "usdz") {
+      // 3D model: <model-viewer> for GLB/USDZ; binary blob for
+      // FBX/OBJ (the browser can't render those directly). The
+      // /api/art-output/{id}/file endpoint streams the body.
+      if (a.bodyKind === "glb" || a.bodyKind === "usdz") {
+        body = `<model-viewer src="${a.fileUrl}" alt="${escapeHtml(a.title)}"
+            camera-controls auto-rotate style="width:100%;height:240px;background:#111"></model-viewer>
+          <div class="muted"><a href="${a.fileUrl}" download>Download ${escapeHtml(a.bodyKind.toUpperCase())}</a></div>`;
+      } else {
+        body = `<div class="art-binary">
+          <div>${escapeHtml(a.bodyKind.toUpperCase())} (${escapeHtml(a.body)})</div>
+          <a href="${a.fileUrl}" download>Download</a>
+        </div>`;
+      }
+    } else if (a.bodyKind === "png") {
+      body = `<img src="${a.fileUrl}" alt="${escapeHtml(a.title)}" style="max-width:100%;max-height:240px;border:1px solid var(--border)"/>`;
+    } else if (a.bodyKind === "mp4") {
+      body = `<video src="${a.fileUrl}" controls style="max-width:100%;max-height:240px"></video>`;
+    } else {
+      body = `<pre class="vision-content">${escapeHtml(a.body)}</pre>`;
+    }
+    return `<div class="design-artifact">
+      <div class="design-artifact-head">
+        <span class="status-tag status-${a.status}">${a.status}</span>
+        <strong>${escapeHtml(a.title)}</strong>
+        <span class="muted">${escapeHtml(a.kind)} · ${a.author}</span>
+      </div>
+      ${body}
+    </div>`;
+  }).join("") || `<div class="empty">No art output yet.</div>`;
+
+  const runRows = runs.map(r => {
+    const tasks = r.meshyTasks?.length ? `<div class="muted">Meshy tasks: ${
+      r.meshyTasks.map(t => `${escapeHtml(t.id)} [${escapeHtml(t.status)}]`).join(", ")
+    }</div>` : "";
+    return `<div class="design-run">
+      <div><span class="status-tag status-${r.status}">${r.status}</span>
+        <span class="muted">${r.trigger} · ${new Date(r.ts).toLocaleString()} · ${r.durationMs}ms</span>
+      </div>
+      ${tasks}
+      ${r.error ? `<div class="design-error">${escapeHtml(r.error)}</div>` : ""}
+    </div>`;
+  }).join("") || `<div class="empty">No artist runs.</div>`;
+
+  out.innerHTML = `
+    <h2>${escapeHtml(specId)} — art output</h2>
+    <div>${artRows}</div>
+    <h2>artist runs</h2>
+    <div>${runRows}</div>`;
+}
+
 function filterSpecs() {
   // The dashboard's lightweight implementation: just re-render. The
   // list is bounded (low hundreds of specs typical), so a client-side
@@ -1234,6 +1354,7 @@ document.querySelectorAll("#tabs button").forEach(btn => {
     document.getElementById(id).classList.add("active");
     if (btn.dataset.tab === "vision") renderVision();
     if (btn.dataset.tab === "design") renderDesign();
+    if (btn.dataset.tab === "art") renderArt();
   });
 });
 $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });

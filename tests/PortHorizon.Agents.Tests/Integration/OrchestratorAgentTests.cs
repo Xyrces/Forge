@@ -86,6 +86,7 @@ public sealed class OrchestratorAgentTests : IDisposable
             _messageBus,
             _events,
             new Core.DesignArtifactStore(_dbPath),
+            new Core.ArtOutputStore(_dbPath),
             NullLogger<OrchestratorAgent>.Instance);
 
     private void BindMaf(OrchestratorAgent orch)

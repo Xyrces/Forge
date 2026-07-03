@@ -22,6 +22,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     private readonly Func<string, string?> _drainMessageBus;
     private readonly IDashboardEventBus _events;
     private readonly DesignArtifactStore _designArtifacts;
+    private readonly ArtOutputStore _artOutputs;
     private readonly ILogger<RunAgentExecutor> _logger;
 
     public RunAgentExecutor(
@@ -31,10 +32,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         Func<string, string?> drainMessageBus,
         IDashboardEventBus events,
         DesignArtifactStore designArtifacts,
+        ArtOutputStore artOutputs,
         ILogger<RunAgentExecutor> logger)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, logger, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, ct),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -45,6 +47,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         _drainMessageBus = drainMessageBus;
         _events = events;
         _designArtifacts = designArtifacts;
+        _artOutputs = artOutputs;
         _logger = logger;
     }
 
@@ -56,6 +59,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         Func<string, string?> drainMessageBus,
         IDashboardEventBus events,
         DesignArtifactStore designArtifacts,
+        ArtOutputStore artOutputs,
         ILogger logger,
         CancellationToken ct)
     {
@@ -73,8 +77,9 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             DateTime.UtcNow, DashboardEventKind.AgentSessionStarted,
             issue.Id, $"role={roleAgent.KiloAgentName} worktree={worktreePath}"));
 
-        var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch,
-            await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct));
+        var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
+        var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
+        var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
         var queued = drainMessageBus(roleAgent.KiloAgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)
             ? prompt
@@ -180,7 +185,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     public static string BuildPrompt(
         IssueRecord issue, AgentType role, string worktreePath,
         string branch, string baseBranch,
-        IReadOnlyList<DesignArtifactRef>? designArtifacts = null)
+        IReadOnlyList<DesignArtifactRef>? designArtifacts = null,
+        IReadOnlyList<ArtOutputRef>? artOutputs = null)
     {
         var designSection = "";
         if (designArtifacts is { Count: > 0 })
@@ -191,6 +197,19 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 Design artifacts (P2.a): the parent spec has {designArtifacts.Count} design artifact(s):
                 {refs}
                 Each one is at GET /api/specs/{issue.ParentIssueId ?? issue.Id}/design-artifacts. Use `curl` to fetch them BEFORE writing code. The artifact body IS the visual source of truth.
+                """;
+        }
+
+        var artSection = "";
+        if (artOutputs is { Count: > 0 })
+        {
+            var refs = string.Join(", ", artOutputs.Select(a => $"{a.Id} [{a.Kind}:{a.BodyKind}]"));
+            var artFileApi = $"/api/specs/{issue.ParentIssueId ?? issue.Id}/art-output";
+            artSection = $$"""
+
+                Art outputs (P2.b): the parent spec has {{artOutputs.Count}} art output(s):
+                {{refs}}
+                Each one is at GET {{artFileApi}}. The body is a relative path under .portHorizon/art-output/. The file is served at GET /api/art-output/{id}/file (use `curl` to download). Use these for the actual asset payloads in your implementation.
                 """;
         }
 
@@ -205,7 +224,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             {issue.Description ?? ""}
 
             Working directory: {worktreePath}
-            Branch: {branch} (base: {baseBranch}){designSection}
+            Branch: {branch} (base: {baseBranch}){designSection}{artSection}
             """;
     }
 
@@ -239,10 +258,43 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         }
         return null;
     }
+
+    /// <summary>
+    /// P2.b: walks the same parent chain as
+    /// <see cref="LoadDesignArtifactRefsAsync"/> and returns
+    /// the spec's <c>art_output</c> rows. Mirrors the design
+    /// ref loader; the prompt builder renders an
+    /// "Art outputs" section the engineering agent can
+    /// <c>curl</c> before writing code.
+    /// </summary>
+    private static async Task<IReadOnlyList<ArtOutputRef>?> LoadArtOutputRefsAsync(
+        IIssueStore issues, ArtOutputStore artOutputs,
+        IssueRecord issue, CancellationToken ct)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? current = issue.Id;
+        while (!string.IsNullOrEmpty(current) && seen.Add(current))
+        {
+            var all = await issues.ListAsync(new IssueFilter(), ct);
+            var spec = all.FirstOrDefault(s => s.ParentIssueId == current);
+            if (spec is null) break;
+            var arts = await artOutputs.ListBySpecAsync(spec.Id, status: null, ct);
+            if (arts.Count > 0)
+            {
+                return arts.Select(a => new ArtOutputRef(
+                    a.Id, a.Kind.ToString().ToLowerInvariant(), a.BodyKind, a.Title)).ToList();
+            }
+            current = spec.ParentIssueId;
+        }
+        return null;
+    }
 }
 
 /// <summary>Lightweight reference to a design artifact (id + kind + title).</summary>
 public sealed record DesignArtifactRef(string Id, string Kind, string Title);
+
+/// <summary>P2.b: lightweight reference to an art output (id + kind + body_kind + title).</summary>
+public sealed record ArtOutputRef(string Id, string Kind, string BodyKind, string Title);
 
 public enum AgentResult
 {

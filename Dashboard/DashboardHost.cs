@@ -29,6 +29,10 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Orchestrator.DesignerAgentFactory? _designerFactory;
     private readonly DesignerRunStore? _designerRuns;
     private readonly DesignArtifactStore? _designArtifacts;
+    private readonly Orchestrator.ArtistAgentFactory? _artistFactory;
+    private readonly ArtistRunStore? _artistRuns;
+    private readonly ArtOutputStore? _artOutputs;
+    private readonly Meshy.MeshyClient? _meshy;
     private readonly IssueGroomerRunStore? _groomerRuns;
     private readonly ISpecExtractionReader? _extractorOverride;
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
@@ -58,6 +62,10 @@ public sealed class DashboardHost : IAsyncDisposable
         Orchestrator.DesignerAgentFactory? designerFactory = null,
         DesignerRunStore? designerRuns = null,
         DesignArtifactStore? designArtifacts = null,
+        Orchestrator.ArtistAgentFactory? artistFactory = null,
+        ArtistRunStore? artistRuns = null,
+        ArtOutputStore? artOutputs = null,
+        Meshy.MeshyClient? meshy = null,
         IssueGroomerRunStore? groomerRuns = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
@@ -78,6 +86,10 @@ public sealed class DashboardHost : IAsyncDisposable
         _designerFactory = designerFactory;
         _designerRuns = designerRuns;
         _designArtifacts = designArtifacts;
+        _artistFactory = artistFactory;
+        _artistRuns = artistRuns;
+        _artOutputs = artOutputs;
+        _meshy = meshy;
         _vision = vision;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
@@ -208,6 +220,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             {
                 DesignerEndpoints.MapDesignerEndpoints(
                     _app, _specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
+            }
+            if (_artistFactory is not null && _artistRuns is not null && _artOutputs is not null && _meshy is not null)
+            {
+                ArtistEndpoints.MapArtistEndpoints(
+                    _app, _specs, _artistFactory, _artistRuns, _artOutputs, _meshy, _logger);
             }
         }
 
