@@ -307,6 +307,20 @@ If you see all 4 "task" lines, dispatch succeeded. The 30s PRWatcher poll picks 
 
 **Watch issue stuck in `InProgress` for hours** — the PRWatcher is polling but GitHub isn't returning a verdict. Check the PR URL (in the dev task's metadata) — is the PR actually open? Is CI running? Was the PR closed or merged out-of-band?
 
+## Skills + memory
+
+The orchestrator bootstraps the operator-maintained `Xyrces/godot-ecs-gamedev-playbook` into the agent memory layer at startup. Every agent prompt sees:
+
+- `playbook/repo` — the repo URL (default: `https://github.com/Xyrces/godot-ecs-gamedev-playbook`)
+- `playbook/snapshot` — a one-line description of the playbook (39 skills across 8 categories)
+- `playbook/skills/<role>` — a pipe-separated list of skill names relevant to that role (coredev, clientdev, qa, reviewer, intake, designer)
+
+The bootstrap is **idempotent** — `MemoryStore.SeedIfMissingAsync` skips writes when the key already exists, so operator edits to any of these memory keys survive orchestrator restarts. To force a re-seed, delete the relevant key (the dashboard's Memory tab lets you do this) and the next start writes the default.
+
+To update the playbook (e.g. the operator pushes new skills upstream), edit the memory keys directly. The agent's AIFunction + bash tool let it `curl <repo>/skills/<name>/SKILL.md` on demand, so the model decides which skills to actually read.
+
+**Designer-specific layout:** the Designer's system prompt includes a `## Skills reference` block listing the per-role designer skills + the repo URL, with the instruction "If a skill is relevant to this spec, you may `curl <repo>/skills/<name>/SKILL.md` to read its full body before deciding. Don't fetch skills that aren't relevant." So the prompt isn't bloated with skill bodies — just the names.
+
 ## Reset the system
 
 Sometimes you just want a clean slate. Delete `.portHorizon/` from the workspace root and re-run. The DB and JSONL are both recreated. Git worktrees in the workspace repo will be orphaned (the workspace's own worktree list shows them); `git worktree prune` cleans that up.
