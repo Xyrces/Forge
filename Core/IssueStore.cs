@@ -425,7 +425,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 title               TEXT NOT NULL,
                 body                TEXT NOT NULL,
                 body_kind           TEXT NOT NULL,    -- 'html' | 'svg' | 'markdown'
-                references          TEXT,             -- JSON array of {designArtifactId, why}
+                references_json     TEXT,             -- JSON array of {designArtifactId, why}
                 parent_artifact_id  TEXT,
                 status              TEXT NOT NULL DEFAULT 'draft',  -- 'draft' | 'approved' | 'superseded'
                 author              TEXT NOT NULL,
@@ -455,7 +455,27 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             """;
         cmd.Parameters.AddWithValue("$version", CurrentSchemaVersion);
         cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
-        cmd.ExecuteNonQuery();
+        try
+        {
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            // Diagnostic: locate the failure by character offset.
+            var msg = ex.Message;
+            var match = System.Text.RegularExpressions.Regex.Match(msg, @"at offset (\d+)");
+            if (match.Success && int.TryParse(match.Groups[1].Value, out var off))
+            {
+                var start = Math.Max(0, off - 200);
+                var len = Math.Min(400, cmd.CommandText.Length - start);
+                Console.Error.WriteLine($"[IssueStore] SQLite error near offset {off}: {cmd.CommandText.Substring(start, len)}");
+            }
+            else
+            {
+                Console.Error.WriteLine($"[IssueStore] InitializeSchema failed: {ex.GetType().Name}: {ex.Message}");
+            }
+            throw;
+        }
     }
 
     private SqliteConnection Open()

@@ -52,7 +52,7 @@ public sealed class DesignArtifactStore
         cmd.CommandText = """
             INSERT INTO design_artifact(
                 id, spec_id, kind, title, body, body_kind,
-                references, parent_artifact_id, status, author, created_at, updated_at)
+                references_json, parent_artifact_id, status, author, created_at, updated_at)
             VALUES(
                 $id, $spec, $kind, $title, $body, $body_kind,
                 $refs, $parent, $status, $author, $ts, $ts)
@@ -83,7 +83,7 @@ public sealed class DesignArtifactStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT id, spec_id, kind, title, body, body_kind,
-                   references, parent_artifact_id, status, author, created_at, updated_at
+                   references_json, parent_artifact_id, status, author, created_at, updated_at
             FROM design_artifact WHERE id = $id
             """;
         cmd.Parameters.AddWithValue("$id", id);
@@ -101,7 +101,7 @@ public sealed class DesignArtifactStore
         {
             cmd.CommandText = """
                 SELECT id, spec_id, kind, title, body, body_kind,
-                       references, parent_artifact_id, status, author, created_at, updated_at
+                       references_json, parent_artifact_id, status, author, created_at, updated_at
                 FROM design_artifact
                 WHERE spec_id = $spec
                 ORDER BY created_at ASC
@@ -111,7 +111,7 @@ public sealed class DesignArtifactStore
         {
             cmd.CommandText = """
                 SELECT id, spec_id, kind, title, body, body_kind,
-                       references, parent_artifact_id, status, author, created_at, updated_at
+                       references_json, parent_artifact_id, status, author, created_at, updated_at
                 FROM design_artifact
                 WHERE spec_id = $spec AND status = $status
                 ORDER BY created_at ASC
@@ -128,15 +128,12 @@ public sealed class DesignArtifactStore
     public async Task<IReadOnlyList<DesignArtifact>> ListByProjectAsync(
         string projectId, CancellationToken ct = default)
     {
-        // We don't have a project_id column on design_artifact; join
-        // through spec. Used by `db_get_existing_design_artifacts` in
-        // the Designer prompt.
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT da.id, da.spec_id, da.kind, da.title, da.body, da.body_kind,
-                   da.references, da.parent_artifact_id, da.status, da.author,
+                   da.references_json, da.parent_artifact_id, da.status, da.author,
                    da.created_at, da.updated_at
             FROM design_artifact da
             JOIN spec s ON s.id = da.spec_id
