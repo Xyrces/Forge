@@ -8,18 +8,14 @@ Where the docs claim, the code, the live behavior, and the original `docs/agent-
 
 | Phase | Goal | Status |
 |---|---|---|
-| **P0** (closed 2026-06-30) | MAF packages + IAgentRunner scaffolding; drop the `kilo serve` / `kilo acp` subprocess dependency | ✅ done, on master |
-| **P0.5** | vision table + vision import + Vision UI tab | ❌ not built |
-| **P1** | skills loading into MAF agent instructions | ✅ done, on master |
-| **P1.4** | Intake agent (HarnessAgent, persistent per project, Intake tab UI) | ✅ done, on master |
-| **P1.5.a / b** | Spec tab read-only → Product agent writes specs | ✅ done, on master (GroomerAgent) |
-| **P2.a** | Designer agent + design_artifact tab | ❌ not built |
-| **P2.b** | Artist agent + MeshyClient + art_output tab | ❌ not built |
-| **P3** (existing) | Engineering dispatch via MAF workflow | 🟡 partial (executors + workflow built; orchestrator still uses sequential code) |
-| **P3.5** | issue_groomer_run table + Groomer agent on schedule | 🟡 partial (GroomerAgent is on-demand via `POST /api/specs/{id}/groom`; no scheduled run, no issue_groomer_run table) |
-| **P4** | Durable execution | ❌ not built |
+| **P0** (closed 2026-06-30) | MAF packages + IAgentRunner scaffolding; drop the `kilo serve` / `kilo acp` subprocess dependency | ✅ done, on main |
+| **P1** | skills loading into MAF agent instructions | ✅ done, on main |
+| **P1.4** | Intake agent (HarnessAgent, persistent per project, Intake tab UI) | ✅ done, on main |
+| **P1.5.a / b** | Spec tab read-only → Product agent writes specs | ✅ done, on main (GroomerAgent) |
+| **P2** | Designer + Artist agents (visual + 3D asset pipeline) | ❌ not started | — |
+| **P3** | Engineering dispatch as a MAF workflow (worktree + bash + commit + PR) | ❌ not started | — |
 
-Phases P2 (designer + artist agents) are the largest gaps. They are not on master and not in any open branch.
+Phases P2 (designer + artist agents) are the largest gaps. They are not on main and not in any open branch.
 
 ## What the live system can do today
 
