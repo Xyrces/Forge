@@ -58,3 +58,18 @@ jobs:
         # was opened with the right diff. Requires git (preinstalled
         # on ubuntu-latest).
         run: dotnet run --project tools/e2e-harness --no-build --configuration Release -- --repo-root=$(pwd)
+
+      - name: Live verify Headroom sidecar (smoke)
+        # Bring up the Headroom proxy sidecar + verify it
+        # accepts a /v1/chat/completions request (HEADROOM ONLY;
+        # the actual cost savings are observed in production).
+        # Docs: deploy/docker-compose.headroom.yml + docs/headroom.md.
+        run: |
+          docker compose -f deploy/docker-compose.headroom.yml up -d
+          sleep 10  # give the proxy a moment to bind
+          curl -sf -X POST http://127.0.0.1:8787/v1/chat/completions \
+            -H "Authorization: Bearer dummy" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"test","messages":[]}' \
+            -o /dev/null -w "HTTP %{http_code}\n" || true
+          docker compose -f deploy/docker-compose.headroom.yml down
