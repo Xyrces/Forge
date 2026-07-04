@@ -36,7 +36,11 @@ public sealed class PRWatcher
         _logger = logger;
     }
 
-    public async Task<int> ProcessWatchTaskAsync(IssueRecord watchTask, CancellationToken cancellationToken)
+    public async Task<int> ProcessWatchTaskAsync(
+        IssueRecord watchTask,
+        CancellationToken cancellationToken = default,
+        Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
+        Func<PullRequest, string>? headShaOverride = null)
     {
         var prText = watchTask.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
@@ -63,10 +67,19 @@ public sealed class PRWatcher
             }
 
             var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
-            var sha = pr.Head.Sha;
+            // P4 e2e-harness seam: tests can return the SHA
+            // directly without going through Octokit's
+            // PullRequest.Head (which has a private setter).
+            var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
             var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
-            var reviews = await _gitHub.GetReviewsAsync(prNumber, cancellationToken);
-            var verdict = EvaluateVerdict(ci, reviews);
+            // P4 e2e-harness seam: tests can pre-approve reviews
+            // without going through Octokit's sealed
+            // PullRequestReview ctor. Default = real GitHub call.
+            var reviewStates = reviewsOverride is not null
+                ? reviewsOverride(prNumber)
+                : (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
+                    .Select(r => r.State.Value).ToList();
+            var verdict = EvaluateVerdictFromStates(ci, reviewStates);
 
             _logger.LogDebug("PR #{PrNumber}: CI={Ci}, ReviewVerdict={Verdict}", prNumber, ci, verdict);
 

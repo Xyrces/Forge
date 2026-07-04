@@ -92,10 +92,17 @@ public sealed class LocalGitHubService : GitHubService
     }
 
     public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
-        => Task.FromResult(false);  // harness scope is PR-open, not PR-merge
+    {
+        // P4 e2e-harness C2: when the PRWatcher reaches the
+        // GreenAndApproved verdict, the orchestrator's
+        // CommitPushPrExecutor merges the PR. We record the
+        // merge in the PR's state so the harness can assert.
+        _prStore.MarkMerged(prNumber);
+        return Task.FromResult(true);
+    }
 
     public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
-        => Task.FromResult(CommitState.Pending);  // no CI in harness scope
+        => Task.FromResult(_prStore.GetCommitStatus(sha));
 
     public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
         => Task.FromResult<IReadOnlyList<PullRequestReview>>(Array.Empty<PullRequestReview>());
@@ -120,9 +127,51 @@ public sealed class LocalPrStore
     private readonly ConcurrentDictionary<int, PullRequest> _prs = new();
     private readonly ConcurrentDictionary<string, string> _branchShas = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> _branchShaWaiters = new();
+    private readonly ConcurrentDictionary<string, CommitState> _commitStates = new();
+    private readonly ConcurrentDictionary<int, bool> _mergedFlags = new();
     private int _nextPrNumber = 1;
 
     public ICollection<PullRequest> AllPrs => _prs.Values;
+
+    /// <summary>
+    /// Mark a SHA as green (CI passed). Called by the e2e
+    /// harness before driving the PRWatcher to simulate a
+    /// green CI run. <see cref="LocalGitHubService.GetCommitStatusAsync"/>
+    /// reads from this map.
+    /// </summary>
+    public void MarkCiGreen(string sha)
+    {
+        _commitStates[sha] = CommitState.Success;
+    }
+
+    /// <summary>
+    /// Mark a SHA as failed (CI red).
+    /// </summary>
+    public void MarkCiRed(string sha)
+    {
+        _commitStates[sha] = CommitState.Failure;
+    }
+
+    public CommitState GetCommitStatus(string sha)
+        => _commitStates.TryGetValue(sha, out var s) ? s : CommitState.Pending;
+
+    /// <summary>
+    /// Mark a PR as merged. Called by
+    /// <see cref="LocalGitHubService.MergePullRequestAsync"/>
+    /// when the orchestrator's PRWatcher reaches the
+    /// GreenAndApproved verdict.
+    /// </summary>
+    public void MarkMerged(int prNumber)
+    {
+        _mergedFlags[prNumber] = true;
+    }
+
+    /// <summary>
+    /// Test query — returns true if the PR was merged via
+    /// <see cref="LocalGitHubService.MergePullRequestAsync"/>.
+    /// </summary>
+    public bool WasMerged(int prNumber)
+        => _mergedFlags.TryGetValue(prNumber, out var v) && v;
 
     public void RegisterPushedBranch(string branch, string sha)
     {

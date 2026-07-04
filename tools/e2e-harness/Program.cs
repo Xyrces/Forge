@@ -207,6 +207,19 @@ public static class Program
         var meta = gitHub.PrStore.PrInfo[pr.Number];
         Console.WriteLine($"  PR #{pr.Number}: title=\"{meta.Title}\" head={meta.HeadBranch} base={meta.BaseBranch}");
 
+        // Find the watch task the workflow enqueued. We need
+        // its head SHA + branch to drive the PRWatcher closed
+        // loop. Filter by type=pr-watch (EnqueueWatchExecutor
+        // creates the watch task with this type).
+        var watchTask = (await issues.ListAsync(new IssueFilter(), default))
+            .FirstOrDefault(i => i.Type == "pr-watch" && i.GetMetadata("prNumber") == pr.Number.ToString());
+        if (watchTask is null)
+        {
+            Console.WriteLine("  FAIL: no pr-watch task was enqueued by the workflow");
+            return 1;
+        }
+        Console.WriteLine($"  watch task {watchTask.Id} (prNumber={watchTask.GetMetadata("prNumber")})");
+
         // Read the agent's worktree (the orchestrator's
         // GitWorktreeService creates a worktree per task). The
         // branch is already checked out there; we don't need
@@ -218,6 +231,14 @@ public static class Program
             Console.WriteLine($"  FAIL: agent worktree not found at {worktree}");
             return 1;
         }
+        // Get the head SHA from the bare remote's refs/heads.
+        // We can't read pr.Head.Sha because LocalGitHubService's
+        // PR is a bare Octokit object (Head is empty); the SHA
+        // lives on the local remote ref.
+        var headSha = File.ReadAllText(Path.Combine(bare, "refs", "heads", meta.HeadBranch)).Trim();
+        Console.WriteLine($"  head SHA: {headSha}");
+
+        // Step 1: assert the PR diff is correct.
         var diff = Git.Capture($"diff --stat main..{meta.HeadBranch}", worktree);
         Console.WriteLine("  diff:\n" + diff);
 
@@ -247,7 +268,49 @@ public static class Program
             foreach (var e in errors) Console.WriteLine("    - " + e);
             return 1;
         }
-        Console.WriteLine("  PASS: PR #" + pr.Number + " contains Calculator.cs + CalculatorTests.cs with the expected symbols.");
+
+        // Step 2: drive the closed loop. Mark CI green, set up
+        // an approved review override, and let the PRWatcher
+        // poll until GreenAndApproved → merge.
+        Console.WriteLine("  driving closed loop: mark CI green + approve review + drive PRWatcher");
+        gitHub.PrStore.MarkCiGreen(headSha);
+        var prWatcher = new PRWatcher(
+            gitHub, worktrees, issues,
+            TimeSpan.FromMilliseconds(50),    // poll interval
+            TimeSpan.FromMinutes(5),          // stale after
+            eventBus,
+            NullLogger<PRWatcher>.Instance);
+        // reviewsOverride returns Approved; PRWatcher sees
+        // GreenAndApproved on its first poll.
+        var watchResult = await prWatcher.ProcessWatchTaskAsync(
+            watchTask, CancellationToken.None,
+            reviewsOverride: _ => new[] { Octokit.PullRequestReviewState.Approved },
+            headShaOverride: _ => headSha);
+        Console.WriteLine($"  PRWatcher.ProcessWatchTaskAsync exit code = {watchResult}");
+
+        // Step 3: verify the closed loop closed. The PR should
+        // have been merged; the original task + watch task should
+        // both be Completed.
+        if (!gitHub.PrStore.WasMerged(pr.Number))
+        {
+            errors.Add("PR was not merged (LocalGitHubService.MergePullRequestAsync never returned true)");
+        }
+        var finalTask = (await issues.GetAsync(task.Id))!;
+        var finalWatch = (await issues.GetAsync(watchTask.Id))!;
+        if (finalTask.Status != IssueStatus.Completed)
+            errors.Add($"original task is {finalTask.Status}, expected Completed");
+        if (finalWatch.Status != IssueStatus.Completed)
+            errors.Add($"watch task is {finalWatch.Status}, expected Completed");
+        if (finalTask.GetMetadata("prNumber") != pr.Number.ToString())
+            errors.Add($"original task has prNumber={finalTask.GetMetadata("prNumber")}, expected {pr.Number}");
+
+        if (errors.Count > 0)
+        {
+            Console.WriteLine("  FAIL:");
+            foreach (var e in errors) Console.WriteLine("    - " + e);
+            return 1;
+        }
+        Console.WriteLine("  PASS: PR #" + pr.Number + " contains Calculator.cs + CalculatorTests.cs + closed loop merged + tasks Completed.");
         return 0;
     }
 
