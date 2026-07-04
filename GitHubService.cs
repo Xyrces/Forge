@@ -21,7 +21,15 @@ public class GitHubService
             _client.Credentials = new Credentials(token);
     }
 
-    public async Task<string> CreateBranchAsync(string branchName, CancellationToken cancellationToken = default)
+    /// <summary>Owner (org/user) for this GitHubService. Read-only
+    /// in production; the e2e harness's subclass exposes it via
+    /// <see cref="LocalGitHubService"/>.</summary>
+    public string Owner => _owner;
+
+    /// <summary>Repo name for this GitHubService.</summary>
+    public string Repo => _repo;
+
+    public virtual async Task<string> CreateBranchAsync(string branchName, CancellationToken cancellationToken = default)
     {
         var mainRef = await _client.Git.Reference.Get(_owner, _repo, "heads/main");
         var newRef = new NewReference($"refs/heads/{branchName}", mainRef.Object.Sha);
@@ -37,7 +45,7 @@ public class GitHubService
         return await _client.PullRequest.Create(_owner, _repo, pr);
     }
 
-    public async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -48,19 +56,19 @@ public class GitHubService
         catch { return false; }
     }
 
-    public async Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
+    public virtual async Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
     {
         var response = await _client.Repository.Status.GetCombined(_owner, _repo, sha);
         return response.State.Value;
     }
 
-    public async Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
+    public virtual async Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
         => await _client.PullRequest.Review.GetAll(_owner, _repo, prNumber);
 
-    public async Task<PullRequest> GetPullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    public virtual async Task<PullRequest> GetPullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
         => await _client.PullRequest.Get(_owner, _repo, prNumber);
 
-    public async Task<bool> DeleteBranchAsync(string branchName, CancellationToken cancellationToken = default)
+    public virtual async Task<bool> DeleteBranchAsync(string branchName, CancellationToken cancellationToken = default)
     {
         try
         {

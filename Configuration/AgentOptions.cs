@@ -44,6 +44,21 @@ public sealed record GitHubOptions
     public string Owner { get; set; } = string.Empty;
     public string Repo { get; set; } = string.Empty;
     public string Token { get; set; } = string.Empty;
+    /// <summary>
+    /// P4 e2e-harness switch. <c>Remote</c> (default) uses the
+    /// real Octokit-backed <see cref="GitHubService"/>;
+    /// <c>Local</c> uses <see cref="LocalGitHubService"/> which
+    /// records PRs in-process against a local bare git. Only
+    /// the e2e harness binary uses <c>Local</c>.
+    /// </summary>
+    public string Mode { get; set; } = "Remote";
+    /// <summary>
+    /// When <see cref="Mode"/> = <c>Local</c>, this is the path
+    /// to the bare git repository the harness created. The
+    /// GitHubService subclass pushes branches to it as if it
+    /// were a remote.
+    /// </summary>
+    public string LocalRemotePath { get; set; } = string.Empty;
 }
 
 public sealed record WorkspaceOptions

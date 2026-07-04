@@ -286,6 +286,21 @@ Console.Error.WriteLine(ex.ToString());
     /// The full orchestrator boots in the second branch;
     /// --recover exits as soon as the sweep is done.
     /// </summary>
+    private static GitHubService BuildGitHubService(Configuration.GitHubOptions options, ILogger<GitHubService> logger)
+    {
+        if (string.Equals(options.Mode, "Local", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(options.LocalRemotePath))
+                throw new InvalidOperationException(
+                    "github.mode=Local requires github.localRemotePath to point at a bare git repository.");
+            logger.LogInformation(
+                "GitHubService: using LocalGitHubService against bare remote at {Path}",
+                options.LocalRemotePath);
+            return new LocalGitHubService(options.LocalRemotePath, options.Owner, options.Repo);
+        }
+        return new GitHubService(options);
+    }
+
     private static async Task<int> RunRecoverAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger, bool dryRun)
     {
@@ -296,7 +311,7 @@ Console.Error.WriteLine(ex.ToString());
             await using var issues = new IssueStore(Path.Combine(stateDir, "issues.db"));
             var recoveryReports = new RecoveryReportStore(Path.Combine(stateDir, "issues.db"));
             var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
-            var gitHub = new GitHubService(options.GitHub);
+            var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
             var recovery = new Orchestrator.StartupRecovery(
                 issues, recoveryReports, worktrees,
                 new Orchestrator.GitHubRecoveryAdapter(gitHub),
@@ -592,7 +607,7 @@ Console.Error.WriteLine(ex.ToString());
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
-        var gitHub = new GitHubService(options.GitHub);
+        var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
         var roleRegistry = new RoleAgentRegistry();
         var agentsStore = new Core.AgentStore(issues);
         var skillsStore = new Core.SkillStore(issues);

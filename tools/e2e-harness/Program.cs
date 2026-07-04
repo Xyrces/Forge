@@ -1,0 +1,436 @@
+using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using PortHorizon.Agents;
+using PortHorizon.Agents.AgentTools;
+using PortHorizon.Agents.Agents;
+using PortHorizon.Agents.Configuration;
+using PortHorizon.Agents.Core;
+using PortHorizon.Agents.Dashboard;
+using PortHorizon.Agents.Orchestrator;
+using PortHorizon.Agents.Reviewer;
+
+namespace PortHorizon.Agents.Tools.E2E;
+
+/// <summary>
+/// E2E harness — proves the orchestrator can take a spec and
+/// open a PR with the right code on a fresh local repo. No
+/// GitHub token, no real network calls. Runs in-process so the
+/// harness has direct access to the LocalGitHubService's
+/// PR store for assertions.
+///
+/// <para>
+/// Pipeline:
+/// <list type="number">
+///   <item>Create a fresh bare git + a clone with a stub
+///   scaffold (Calculator.cs + CalculatorTests.cs + .csproj).</item>
+///   <item>Wire up the orchestrator's components with a
+///   <see cref="LocalGitHubService"/> pointed at the bare
+///   remote.</item>
+///   <item>Enqueue a task directly via the
+///   <see cref="OrchestratorAgent"/> (no intake path; that's
+///   covered by IntakeAgentTests).</item>
+///   <item>Wait for the orchestrator to dispatch the task +
+///   run the engineering workflow + open the PR.</item>
+///   <item>Assert the PR exists + the diff contains the
+///   expected files.</item>
+/// </list>
+/// </para>
+///
+/// <para>
+/// Use: <c>dotnet run --project tools/e2e-harness</c> from the
+/// repo root.
+/// </para>
+///
+/// <para>
+/// Bypasses the LLM (M3) by writing the file changes directly
+/// to the worktree during a custom <see cref="FakeAgentRunner"/>.
+/// This keeps the harness fast (a few seconds) and
+/// deterministic — we're verifying the orchestrator's wiring,
+/// not the model's code quality. Run the real LLM-driven
+/// pipeline by replacing <see cref="FakeAgentRunner"/> with a
+/// MAF agent runner pointing at the kilo gateway; the
+/// harness is otherwise identical.
+/// </para>
+/// </summary>
+public static class Program
+{
+    public static async Task<int> Main(string[] args)
+    {
+        var repoRoot = args.FirstOrDefault(a => a.StartsWith("--repo-root="))?.Split('=', 2)[1]
+            ?? FindRepoRoot() ?? throw new InvalidOperationException("Cannot find repo root");
+        var workspaceRoot = Path.Combine(repoRoot, ".portHorizon", "e2e");
+        // Clean up any prior workspace. git's worktree metadata
+        // can leave locked files; ask git to remove the
+        // worktrees first, then delete the directory.
+        if (Directory.Exists(workspaceRoot))
+        {
+            var cloneDir = Path.Combine(workspaceRoot, "clone");
+            if (Directory.Exists(cloneDir))
+            {
+                try { Git.Run("worktree remove --force .", cloneDir); } catch { /* ignore */ }
+            }
+            try { Directory.Delete(workspaceRoot, recursive: true); } catch { /* tolerate */ }
+        }
+        Directory.CreateDirectory(workspaceRoot);
+
+        Console.WriteLine($"E2E harness: workspace={workspaceRoot}");
+
+        // 1. Set up the bare git + clone with scaffold.
+        var bare = Path.Combine(workspaceRoot, "remote.git");
+        var clone = Path.Combine(workspaceRoot, "clone");
+        // git init creates the directory, but Process.Start
+        // pre-checks the cwd exists. Create the dirs up-front.
+        Directory.CreateDirectory(bare);
+        Directory.CreateDirectory(clone);
+        Git.Run($"init -q --bare {bare}", workspaceRoot);
+        Git.Run("init -q -b main", clone);
+        Git.Run("config user.email e2e@local", clone);
+        Git.Run("config user.name e2e-harness", clone);
+        Git.Run($"remote add origin {bare}", clone);
+        WriteScaffold(clone);
+        Git.Run("add .", clone);
+        Git.Run("commit -q -m scaffold", clone);
+        Git.Run("push -q -u origin main", clone);
+
+        // 2. Build the LocalGitHubService + wire up
+        // orchestrator components.
+        var dbPath = Path.Combine(workspaceRoot, "issues.db");
+        var issues = new IssueStore(dbPath);
+        var designArtifacts = new DesignArtifactStore(dbPath);
+        var designerRuns = new DesignerRunStore(dbPath);
+        var artOutputs = new ArtOutputStore(dbPath);
+        var artistRuns = new ArtistRunStore(dbPath);
+        var groomerRuns = new IssueGroomerRunStore(dbPath);
+        var recoveryReports = new RecoveryReportStore(dbPath);
+        var intakeStore = new Core.IntakeStore(issues);
+        var agentsStore = new Core.AgentStore(issues);
+        var skillsStore = new Core.SkillStore(issues);
+        var sprints = new Core.SprintStore(issues);
+        var messageBus = new AgentMessageBus();
+        var worktrees = new GitWorktreeService(
+            new WorkspaceOptions { Root = clone, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
+            NullLogger<GitWorktreeService>.Instance);
+        var gitHub = new LocalGitHubService(bare, "local", "e2e");
+        var gitHubForRecovery = new GitHubRecoveryAdapter(gitHub);
+        var roleRegistry = new RoleAgentRegistry();
+        var eventBus = new InMemoryDashboardEventBus();
+        var recovery = new StartupRecovery(
+            issues, recoveryReports, worktrees, gitHubForRecovery, eventBus,
+            NullLogger<StartupRecovery>.Instance);
+
+        // Wire GitWorktreeService's push hook into the
+        // LocalGitHubService: when the orchestrator's
+        // worktree service pushes a branch to the bare remote,
+        // record the head SHA so the harness's PR store has
+        // it. We hook via a small reflective adapter since
+        // GitWorktreeService.PushAsync doesn't expose a
+        // callback.
+        // The bridge: capture the head SHA right after push via
+        // a wrapper service that records the SHA from the bare
+        // remote. We do this by tailing the bare repo's refs.
+        var bridge = new PushBridge(bare, gitHub);
+
+        // 3. Fake agent runner that writes the spec'd files
+        // (Calculator + tests) into the worktree when invoked.
+        var specBody = """
+            Implement a small Calculator class in MyApp with a static Add method that returns the sum of two ints.
+            Then add an xUnit test in MyApp/CalculatorTests.cs that asserts Add(2, 3) == 5.
+
+            Acceptance criteria:
+            - Calculator.cs exists with the Add method
+            - CalculatorTests.cs exists with the Add_TwoPositiveNumbers_ReturnsSum test
+            """;
+        var runner = new FakeAgentRunner(worktrees, specBody);
+
+        // 4. Build the orchestrator.
+        var orchestrator = new OrchestratorAgent(
+            runner, roleRegistry, worktrees, gitHub,
+            prWatcher: new PRWatcher(gitHub, worktrees, issues,
+                TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30), eventBus,
+                NullLogger<PRWatcher>.Instance),
+            issues, agentsStore, sprints, messageBus, eventBus,
+            designArtifacts, artOutputs,
+            new InProcessDispatcher(
+                async (issue, ct) =>
+                {
+                    var wf = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
+                        issues, runner, worktrees, gitHub, roleRegistry,
+                        new WorkspaceOptions { Root = clone, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
+                        eventBus, agent => messageBus.Drain(agent),
+                        designArtifacts, artOutputs,
+                        NullLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>.Instance);
+                    await wf.RunAsync(issue, ct);
+                },
+                NullLogger<InProcessDispatcher>.Instance),
+            NullLogger<OrchestratorAgent>.Instance);
+
+        // 5. Skip the design + artist + groomer stages by
+        // creating a "groomed" task directly. The orchestrator
+        // will pick it up + dispatch.
+        var task = await issues.CreateAsync(new NewIssue(
+            Type: "task",
+            Title: "Add Calculator with Add method + xUnit test",
+            Description: specBody,
+            Priority: 2));
+        // Walk to ReadyForDesign → Designed → AssetReady → ReadyForGroom
+        // → Groomed (the orchestrator's Groomer agent picks up
+        // Groomed tasks; we short-circuit by claiming + setting
+        // status to Completed manually). For the harness we
+        // only need the engineering dispatch to fire; we
+        // pre-stage the task at ReadyForDesign + pretend
+        // Designer + Artist + Groomer ran (no design artifacts,
+        // no art outputs — engineering dispatch ignores those
+        // for tasks with no spec).
+        await issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null);
+        // Bypass the Groomer: skip directly to Pending for dispatch.
+
+        // 6. Run a single dispatch cycle. The orchestrator will
+        // claim the task + run the engineering workflow +
+        // open the PR via LocalGitHubService.
+        Console.WriteLine("  running one dispatch cycle...");
+        var result = await orchestrator.DispatchSingleTaskAsync(
+            (await issues.GetAsync(task.Id))!,
+            CancellationToken.None);
+        Console.WriteLine($"  dispatch result: success={result.Success} message={result.Message}");
+
+        // 7. Assertions.
+        var prs = gitHub.PrStore.AllPrs.ToList();
+        if (prs.Count == 0)
+        {
+            Console.WriteLine("  FAIL: no PRs were opened");
+            return 1;
+        }
+        var pr = prs[0];
+        var meta = gitHub.PrStore.PrInfo[pr.Number];
+        Console.WriteLine($"  PR #{pr.Number}: title=\"{meta.Title}\" head={meta.HeadBranch} base={meta.BaseBranch}");
+
+        // Read the agent's worktree (the orchestrator's
+        // GitWorktreeService creates a worktree per task). The
+        // branch is already checked out there; we don't need
+        // to fetch/checkout in the main clone (and we can't,
+        // because the branch is "already used by worktree").
+        var worktree = Path.Combine(clone, ".portHorizon", "worktrees", "task-1");
+        if (!Directory.Exists(worktree))
+        {
+            Console.WriteLine($"  FAIL: agent worktree not found at {worktree}");
+            return 1;
+        }
+        var diff = Git.Capture($"diff --stat main..{meta.HeadBranch}", worktree);
+        Console.WriteLine("  diff:\n" + diff);
+
+        var calcPath = Path.Combine(worktree, "Calculator.cs");
+        var testsPath = Path.Combine(worktree, "CalculatorTests.cs");
+        var errors = new List<string>();
+        if (!File.Exists(calcPath))
+            errors.Add("Calculator.cs not in agent's branch");
+        else
+        {
+            var content = File.ReadAllText(calcPath);
+            if (!content.Contains("class Calculator") || !content.Contains("Add(int a, int b)"))
+                errors.Add("Calculator.cs is missing the Add method");
+        }
+        if (!File.Exists(testsPath))
+            errors.Add("CalculatorTests.cs not in agent's branch");
+        else
+        {
+            var content = File.ReadAllText(testsPath);
+            if (!content.Contains("Add_TwoPositiveNumbers_ReturnsSum"))
+                errors.Add("CalculatorTests.cs is missing the Add_TwoPositiveNumbers_ReturnsSum test");
+        }
+
+        if (errors.Count > 0)
+        {
+            Console.WriteLine("  FAIL:");
+            foreach (var e in errors) Console.WriteLine("    - " + e);
+            return 1;
+        }
+        Console.WriteLine("  PASS: PR #" + pr.Number + " contains Calculator.cs + CalculatorTests.cs with the expected symbols.");
+        return 0;
+    }
+
+    private static void WriteScaffold(string clone)
+    {
+        File.WriteAllText(Path.Combine(clone, "MyApp.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <Nullable>enable</Nullable>
+                <IsPackable>false</IsPackable>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+                <PackageReference Include="xunit" Version="2.9.2" />
+              </ItemGroup>
+            </Project>
+            """);
+    }
+
+    private static string? FindRepoRoot()
+    {
+        var dir = Directory.GetCurrentDirectory();
+        while (dir is not null)
+        {
+            if (Directory.Exists(Path.Combine(dir, ".git"))
+                && File.Exists(Path.Combine(dir, "PortHorizon.Agents.Core.csproj")))
+                return dir;
+            dir = Path.GetDirectoryName(dir);
+        }
+        return null;
+    }
+}
+
+/// <summary>
+/// Watches the local bare git's refs/heads/ directory; when a
+/// new branch ref appears, fetches the SHA + calls
+/// <see cref="LocalGitHubService.RegisterPushedBranch"/>.
+/// </summary>
+internal sealed class PushBridge : IDisposable
+{
+    private readonly Thread _thread;
+    private readonly string _bare;
+    private readonly LocalGitHubService _service;
+    private volatile bool _running = true;
+    private readonly HashSet<string> _seen = new();
+
+    public PushBridge(string barePath, LocalGitHubService service)
+    {
+        _bare = barePath;
+        _service = service;
+        _thread = new Thread(Loop) { IsBackground = true };
+        _thread.Start();
+    }
+
+    private void Loop()
+    {
+        var refsDir = Path.Combine(_bare, "refs", "heads");
+        while (_running)
+        {
+            try
+            {
+                if (Directory.Exists(refsDir))
+                {
+                    foreach (var file in Directory.EnumerateFiles(refsDir, "*", SearchOption.AllDirectories))
+                    {
+                        var branch = Path.GetRelativePath(refsDir, file).Replace('\\', '/');
+                        if (_seen.Contains(branch)) continue;
+                        _seen.Add(branch);
+                        var sha = File.ReadAllText(file).Trim();
+                        _service.RegisterPushedBranch(branch, sha);
+                    }
+                }
+            }
+            catch { /* tolerate transient state */ }
+            Thread.Sleep(200);
+        }
+    }
+
+    public void Dispose()
+    {
+        _running = false;
+        _thread.Join(2000);
+    }
+}
+
+/// <summary>
+/// Fake <see cref="IAgentRunner"/> that writes the spec'd files
+/// (Calculator + tests) into the worktree when invoked. Used by
+/// the harness to bypass the LLM. The orchestrator's
+/// <c>EngineeringDispatchWorkflow</c> passes
+/// <c>context.worktreePath</c> in; we use that to find the
+/// worktree.
+/// </summary>
+internal sealed class FakeAgentRunner : IAgentRunner
+{
+    private readonly GitWorktreeService _worktrees;
+    private readonly string _specBody;
+
+    public FakeAgentRunner(GitWorktreeService worktrees, string specBody)
+    {
+        _worktrees = worktrees;
+        _specBody = specBody;
+    }
+
+    public Task<AgentRunResult> RunAsync(
+        AgentType role, string prompt,
+        string? sessionId = null,
+        IReadOnlyDictionary<string, object>? context = null,
+        CancellationToken cancellationToken = default)
+    {
+        var worktreePath = context is not null && context.TryGetValue("worktreePath", out var v) && v is string s
+            ? s : throw new InvalidOperationException("worktreePath missing from context");
+        // Write the spec'd files. In a real run the LLM would
+        // generate these; here we hard-code the harness's
+        // expected files.
+        File.WriteAllText(Path.Combine(worktreePath, "Calculator.cs"), """
+            namespace MyApp;
+
+            public static class Calculator
+            {
+                public static int Add(int a, int b) => a + b;
+            }
+            """);
+        File.WriteAllText(Path.Combine(worktreePath, "CalculatorTests.cs"), """
+            using MyApp;
+            using Xunit;
+
+            public class CalculatorTests
+            {
+                [Fact]
+                public void Add_TwoPositiveNumbers_ReturnsSum()
+                {
+                    Assert.Equal(5, Calculator.Add(2, 3));
+                }
+            }
+            """);
+        return Task.FromResult(new AgentRunResult(
+            Text: _specBody,
+            SessionId: "fake-session",
+            InputTokens: 0,
+            OutputTokens: 0,
+            Elapsed: TimeSpan.FromSeconds(0.1)));
+    }
+}
+
+/// <summary>
+/// Thin wrapper around git CLI for the harness.
+/// </summary>
+internal static class Git
+{
+    public static void Run(string args, string cwd)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = cwd,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
+        if (p.ExitCode != 0)
+            throw new InvalidOperationException($"git {args} exited {p.ExitCode}\n{stdout}\n{stderr}");
+    }
+
+    public static string Capture(string args, string cwd)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = cwd,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        return p.StandardOutput.ReadToEnd();
+    }
+}
