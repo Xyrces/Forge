@@ -1,0 +1,70 @@
+# P4 Headroom — LLM cost optimization sidecar.
+#
+# Headroom is the open-source context optimization layer for LLM
+# apps. It sits between the orchestrator and the kilo gateway,
+# compressing tool outputs + aligning prompt prefixes so provider
+# KV-caches hit. Works with both `docker compose` and
+# `podman-compose` (vanilla OCI image).
+#
+# Bring it up:
+#   docker compose -f deploy/docker-compose.headroom.yml up -d
+#   podman-compose -f deploy/docker-compose.headroom.yml up -d
+#
+# Then in appsettings.json, set:
+#   "headroom": {
+#     "enabled": true,
+#     "proxyBaseUrl": "http://127.0.0.1:8787",
+#     "mode": "token",
+#     "ccrEnabled": true,
+#     "trackUsage": true
+#   }
+#
+# Dashboard for Headroom stats:
+#   GET http://127.0.0.1:8787/stats
+#   GET http://127.0.0.1:8787/v1/compress  (compression-only test)
+#
+# Tear down:
+#   docker compose -f deploy/docker-compose.headroom.yml down
+#   podman-compose -f deploy/docker-compose.headroom.yml down
+#
+# See docs/headroom.md for the operator guide.
+
+services:
+  headroom:
+    image: ghcr.io/chopratejas/headroom:latest
+    container_name: porthorizon-headroom
+    restart: unless-stopped
+    ports:
+      - "8787:8787"   # gRPC / HTTP — orchestrator talks to the proxy here
+    environment:
+      # Required: API key for the upstream provider (kilo
+      # gateway). The proxy forwards requests; the upstream
+      # provider still needs auth.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY env var required for kilo gateway auth}
+      # Optional: pin Headroom's mode.
+      HEADROOM_MODE: ${HEADROOM_MODE:-token}
+      # Optional: log level.
+      HEADROOM_LOG_LEVEL: ${HEADROOM_LOG_LEVEL:-INFO}
+      # Default upstream OpenAI-compatible endpoint = kilo
+      # gateway. The operator can override via env var.
+      # The proxy's `--openai-api-url` flag controls where
+      # forwarded requests go.
+    command:
+      - "headroom"
+      - "proxy"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8787"
+      - "--mode"
+      - "${HEADROOM_MODE:-token}"
+      - "--openai-api-url"
+      - "${KILO_BASE_URL:-https://api.kilo.ai/api/gateway}"
+    healthcheck:
+      # GET /v1/compress returns 405 (POST only) but the server
+      # is up — we use that as a cheap liveness probe.
+      test: ["CMD", "/bin/sh", "-c", "wget -qO- http://127.0.0.1:8787/stats > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

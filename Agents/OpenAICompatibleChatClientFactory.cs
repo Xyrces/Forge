@@ -31,6 +31,28 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     private readonly ConcurrentDictionary<string, IChatClient> _cache = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
 
+    /// <summary>
+    /// Optional Headroom sidecar URL. When non-null, the
+    /// factory rewrites the provider's <see cref="ProviderConfig.BaseUrl"/>
+    /// to point at the local Headroom proxy (which forwards to
+    /// the upstream). The Headroom proxy is started externally
+    /// (see <c>deploy/docker-compose.headroom.yml</c>) and is
+    /// responsible for forwarding. Our chat client doesn't know
+    /// it's talking to a proxy.
+    /// </summary>
+    public string? HeadroomProxyBaseUrl { get; set; }
+
+    /// <summary>
+    /// Optional <see cref="CostTracker"/> singleton. When set,
+    /// the factory wraps every <see cref="IChatClient"/> it
+    /// returns in a per-session <see cref="DelegatingChatClient"/>
+    /// that forwards each call's <c>UsageDetails</c> into the
+    /// shared tracker. Set by <c>Program.cs</c> when
+    /// <c>headroom.trackUsage</c> is true. The dashboard reads
+    /// the totals via <c>GET /api/cost/stats</c>.
+    /// </summary>
+    public CostTracker? CostTracker { get; set; }
+
     public IChatClient Create(LlmConfig config, AgentType role)
     {
         var (provider, model) = config.Resolve(role);
@@ -41,16 +63,46 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
                 "Set the apiKey field in appsettings.json (providers[].apiKey). " +
                 "For tests, the LLM_API_KEY env var override is read by OpenAICompatibleChatClientFactory.TryFromEnv.");
         }
-        return GetOrCreate(provider, model);
+        if (!string.IsNullOrEmpty(HeadroomProxyBaseUrl))
+        {
+            // Rewrite the baseUrl so the OpenAI client talks to
+            // Headroom. The Headroom proxy is started with the
+            // upstream URL as a CLI flag, so it knows where to
+            // forward requests.
+            provider = provider with { BaseUrl = HeadroomProxyBaseUrl };
+        }
+        var inner = GetOrCreate(provider, model);
+        if (CostTracker is null) return inner;
+        // Per-session wrapper: forwards UsageDetails into the
+        // shared CostTracker. The inner client is cached so
+        // multiple sessions share one OpenAI client; per-session
+        // wrappers are cheap (just a delegator).
+        return new UsageTrackingChatClient(inner, CostTracker, role);
     }
 
-    /// <summary>
-    /// Test-only helper: build a factory from the LLM_API_KEY env var so
-    /// the SkippableFact integration test doesn't need to write
-    /// appsettings.json. The BaseUrl defaults to <c>http://127.0.0.1:4096</c>
-    /// (the kilo serve default) but can be overridden with
-    /// <c>LLM_BASE_URL</c>.
-    /// </summary>
+/// <summary>
+/// Thin <see cref="DelegatingChatClient"/> that forwards
+/// <c>UsageDetails</c> from each response into a shared
+/// <see cref="CostTracker"/>. Constructed per-session by
+/// <see cref="OpenAICompatibleChatClientFactory.Create"/>.
+/// </summary>
+internal sealed class UsageTrackingChatClient : DelegatingChatClient
+{
+    private readonly CostTracker _tracker;
+    private readonly string _role;
+    public UsageTrackingChatClient(IChatClient inner, CostTracker tracker, AgentType role) : base(inner)
+    {
+        _tracker = tracker;
+        _role = role.ToString();
+    }
+    public override async Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        var response = await InnerClient.GetResponseAsync(messages, options, cancellationToken);
+        _tracker.Record(response.Usage, roleHint: _role);
+        return response;
+    }
+}
     public static OpenAICompatibleChatClientFactory? TryFromEnv(string defaultBaseUrl = "http://127.0.0.1:4096")
     {
         var apiKey = Environment.GetEnvironmentVariable("LLM_API_KEY");

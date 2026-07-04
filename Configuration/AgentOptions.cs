@@ -21,6 +21,56 @@ public sealed record AgentOptions
     /// + a reachable DTS at the encoded endpoint.
     /// </summary>
     public OrchestratorOptions Orchestrator { get; set; } = new();
+    /// <summary>
+    /// Headroom proxy config. When <see cref="HeadroomOptions.Enabled"/>
+    /// is true, the chat-client factory rewrites the LLM baseUrl
+    /// to point at the local Headroom sidecar (default
+    /// http://127.0.0.1:8787) and the sidecar forwards compressed
+    /// requests to the upstream provider. See
+    /// <c>docs/headroom.md</c> for the operator guide.
+    /// </summary>
+    public HeadroomOptions Headroom { get; set; } = new();
+}
+
+/// <summary>
+/// Headroom proxy config. See <c>docs/headroom.md</c>.
+/// </summary>
+public sealed record HeadroomOptions
+{
+    /// <summary>
+    /// When true, the chat-client factory rewrites the LLM
+    /// baseUrl to <see cref="ProxyBaseUrl"/>. Default false
+    /// (no rewriting; orchestrator talks to the upstream
+    /// provider directly).
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+    /// <summary>
+    /// Local URL of the Headroom sidecar proxy.
+    /// </summary>
+    public string ProxyBaseUrl { get; set; } = "http://127.0.0.1:8787";
+    /// <summary>
+    /// Mode passed to the proxy at boot. <c>token</c>
+    /// (default): maximize compression. <c>cache</c>: freeze
+    /// prior turns for provider KV-cache reuse.
+    /// </summary>
+    public string Mode { get; set; } = "token";
+    /// <summary>
+    /// When true, the proxy enables CCR — the
+    /// <c>headroom_retrieve</c> tool is injected. Default
+    /// true (we want reversibility; CCR cost is sub-millisecond).
+    /// </summary>
+    public bool CcrEnabled { get; set; } = true;
+    /// <summary>
+    /// Optional daily budget in USD. The proxy enforces this
+    /// (returns 429 when exceeded). Set 0 = no limit.
+    /// </summary>
+    public double BudgetUsd { get; set; } = 0;
+    /// <summary>
+    /// When true, the orchestrator logs per-call token
+    /// counts to a rolling <see cref="Core.CostTracker"/> +
+    /// exposes them at <c>GET /api/cost/stats</c>. Default true.
+    /// </summary>
+    public bool TrackUsage { get; set; } = true;
 }
 
 /// <summary>

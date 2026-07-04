@@ -35,6 +35,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Meshy.MeshyClient? _meshy;
     private readonly RecoveryReportStore? _recoveryReports;
     private readonly Orchestrator.StartupRecovery? _startupRecovery;
+    private readonly CostTracker? _costTracker;
     private readonly IssueGroomerRunStore? _groomerRuns;
     private readonly ISpecExtractionReader? _extractorOverride;
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
@@ -70,6 +71,7 @@ public sealed class DashboardHost : IAsyncDisposable
         Meshy.MeshyClient? meshy = null,
         RecoveryReportStore? recoveryReports = null,
         Orchestrator.StartupRecovery? startupRecovery = null,
+        CostTracker? costTracker = null,
         IssueGroomerRunStore? groomerRuns = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
@@ -96,6 +98,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _meshy = meshy;
         _recoveryReports = recoveryReports;
         _startupRecovery = startupRecovery;
+        _costTracker = costTracker;
         _vision = vision;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
@@ -236,6 +239,10 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             {
                 RecoveryEndpoints.MapRecoveryEndpoints(
                     _app, _issues, _recoveryReports, _startupRecovery, _logger);
+            }
+            if (_costTracker is not null)
+            {
+                CostEndpoints.MapCostEndpoints(_app, _costTracker, _logger);
             }
         }
 

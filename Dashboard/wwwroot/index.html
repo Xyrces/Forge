@@ -188,6 +188,7 @@
   <button data-tab="design">Design</button>
   <button data-tab="art">Art</button>
   <button data-tab="recovery">Recovery</button>
+  <button data-tab="cost">Cost</button>
   <button data-tab="sprints">Sprints</button>
   <button data-tab="agents">Agents</button>
   <button data-tab="skills">Skills</button>
@@ -201,6 +202,7 @@
   <div class="tab" id="tab-design"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-art"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-recovery"><div class="empty">Loading…</div></div>
+  <div class="tab" id="tab-cost"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-sprints"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-agents"><div class="empty">Loading…</div></div>
   <div class="tab" id="tab-skills"><div class="empty">Loading…</div></div>
@@ -1184,6 +1186,70 @@ function wireRecoveryButtons() {
   }
 }
 
+async function renderCost() {
+  const tab = $("tab-cost");
+  tab.innerHTML = `<div class="empty">Loading…</div>`;
+  let stats;
+  try {
+    const r = await fetch("/api/cost/stats");
+    if (!r.ok) {
+      tab.innerHTML = `<div class="empty">Failed to load cost stats (HTTP ${r.status}).</div>`;
+      return;
+    }
+    stats = await r.json();
+  } catch (e) {
+    tab.innerHTML = `<div class="empty">Failed to load: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  const fmt = n => (n ?? 0).toLocaleString();
+  const rows = (stats.recent ?? []).map(r => `
+    <tr>
+      <td>${new Date(r.at).toLocaleString()}</td>
+      <td>${escapeHtml(r.role)}</td>
+      <td>${fmt(r.inputTokens)}</td>
+      <td>${fmt(r.outputTokens)}</td>
+    </tr>`).join("");
+  tab.innerHTML = `
+    <div class="design-grid">
+      <div>
+        <h3>Totals (orchestrator-observed)</h3>
+        <table>
+          <tr><th>Calls</th><td>${fmt(stats.callCount)}</td></tr>
+          <tr><th>Total input tokens</th><td>${fmt(stats.totalInputTokens)}</td></tr>
+          <tr><th>Total output tokens</th><td>${fmt(stats.totalOutputTokens)}</td></tr>
+        </table>
+        <div class="muted">
+          These are the tokens billed by the provider AFTER any
+          Headroom-side compression. The Headroom proxy's own
+          <code>/stats</code> endpoint has the pre-compression
+          delta (if Headroom is enabled).
+        </div>
+        <div style="margin-top: 8px;">
+          <button id="cost-reset">Reset counters</button>
+          <button id="cost-refresh" style="margin-left: 8px;">Refresh</button>
+        </div>
+      </div>
+      <div>
+        <h3>Recent calls (last ${(stats.recent ?? []).length})</h3>
+        <table>
+          <tr><th>at</th><th>role</th><th>input</th><th>output</th></tr>
+          ${rows || "<tr><td colspan=\"4\" class=\"muted\">no calls recorded yet</td></tr>"}
+        </table>
+      </div>
+    </div>`;
+  const resetBtn = $("cost-reset");
+  if (resetBtn) {
+    resetBtn.onclick = async () => {
+      await fetch("/api/cost/reset", { method: "POST" });
+      renderCost();
+    };
+  }
+  const refreshBtn = $("cost-refresh");
+  if (refreshBtn) {
+    refreshBtn.onclick = () => renderCost();
+  }
+}
+
 function filterSpecs() {
   // The dashboard's lightweight implementation: just re-render. The
   // list is bounded (low hundreds of specs typical), so a client-side
@@ -1458,6 +1524,7 @@ document.querySelectorAll("#tabs button").forEach(btn => {
     if (btn.dataset.tab === "design") renderDesign();
     if (btn.dataset.tab === "art") renderArt();
     if (btn.dataset.tab === "recovery") renderRecovery();
+    if (btn.dataset.tab === "cost") renderCost();
   });
 });
 $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });

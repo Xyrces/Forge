@@ -584,15 +584,42 @@ Console.Error.WriteLine(ex.ToString());
     /// the in-process <see cref="StubbedChatClientFactory"/>; everything else
     /// uses the OpenAI-compatible factory.
     /// </summary>
-    private static IChatClientFactory SelectChatClientFactory(LlmConfig llmConfig, LlmOptions options)
+    private static (IChatClientFactory factory, CostTracker? costTracker) SelectChatClientFactory(
+        LlmConfig llmConfig, LlmOptions options, HeadroomOptions headroom)
     {
         var hasRealKey = llmConfig.Providers.Any(p => !string.IsNullOrEmpty(p.ApiKey));
         if (!hasRealKey)
         {
             Console.Error.WriteLine("No LLM provider with an API key configured; using StubbedChatClientFactory.");
-            return new StubbedChatClientFactory();
+            return (new StubbedChatClientFactory(), null);
         }
-        return new OpenAICompatibleChatClientFactory();
+        var factory = new OpenAICompatibleChatClientFactory();
+        CostTracker? tracker = null;
+        if (headroom.Enabled && !string.IsNullOrEmpty(headroom.ProxyBaseUrl))
+        {
+            // Rewrite the LLM baseUrl so the OpenAI client talks to
+            // Headroom. The proxy is started with the upstream URL
+            // as a CLI flag, so it knows where to forward.
+            factory.HeadroomProxyBaseUrl = headroom.ProxyBaseUrl;
+            Console.Error.WriteLine(
+                $"Headroom: enabled (proxy={headroom.ProxyBaseUrl}, mode={headroom.Mode}, ccr={headroom.CcrEnabled}); chat client talks to the proxy.");
+        }
+        if (headroom.TrackUsage)
+        {
+            // We can't construct CostTracker without an inner
+            // IChatClient; it's wired into the per-call factory
+            // chain in OpenAICompatibleChatClientFactory.Create.
+            // For the dashboard endpoint we expose the same
+            // singleton below.
+            // Note: CostTracker is a plain aggregator class
+            // now (no longer extends DelegatingChatClient). The
+            // per-session wrappers in OpenAICompatibleChatClientFactory
+            // construct their own DelegatingChatClient around
+            // the inner client.
+            tracker = new CostTracker();
+            factory.CostTracker = tracker;
+        }
+        return (factory, tracker);
     }
 
 
@@ -676,7 +703,7 @@ Console.Error.WriteLine(ex.ToString());
             memoryStore, loggerFactory.CreateLogger<Agents.SkillBootstrap>());
         await skillBootstrap.SeedAsync();
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
-        var chatClientFactory = (IChatClientFactory)SelectChatClientFactory(llmConfig, options.Llm);
+        var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
@@ -840,6 +867,7 @@ Console.Error.WriteLine(ex.ToString());
             meshy: meshy,
             recoveryReports: recoveryReports,
             startupRecovery: startupRecovery,
+            costTracker: costTracker,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache);
