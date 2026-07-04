@@ -133,8 +133,12 @@ public static class Program
         // remote. We do this by tailing the bare repo's refs.
         var bridge = new PushBridge(bare, gitHub);
 
-        // 3. Fake agent runner that writes the spec'd files
-        // (Calculator + tests) into the worktree when invoked.
+        // 3. Agent runner. By default the harness uses a
+        // FakeAgentRunner that hard-codes the expected files
+        // (fast, deterministic, no LLM cost). Pass --real-llm
+        // to swap in a real MafAgentRunner pointed at the kilo
+        // gateway. The LLM is asked to write the same files the
+        // FakeAgentRunner writes; the assertions are unchanged.
         var specBody = """
             Implement a small Calculator class in MyApp with a static Add method that returns the sum of two ints.
             Then add an xUnit test in MyApp/CalculatorTests.cs that asserts Add(2, 3) == 5.
@@ -143,7 +147,44 @@ public static class Program
             - Calculator.cs exists with the Add method
             - CalculatorTests.cs exists with the Add_TwoPositiveNumbers_ReturnsSum test
             """;
-        var runner = new FakeAgentRunner(worktrees, specBody);
+        var useRealLlm = args.Any(a => a == "--real-llm");
+        IAgentRunner runner;
+        if (useRealLlm)
+        {
+            var kiloKey = Environment.GetEnvironmentVariable("LLM_API_KEY")
+                ?? throw new InvalidOperationException("--real-llm requires LLM_API_KEY env var");
+            var kiloBase = Environment.GetEnvironmentVariable("LLM_BASE_URL") ?? "https://api.kilo.ai/api/gateway";
+            var kiloModel = Environment.GetEnvironmentVariable("LLM_MODEL") ?? "minimax/minimax-m3";
+            var llmOptions = new Configuration.LlmOptions
+            {
+                DefaultProvider = "kilo-gateway",
+                Providers = new List<Configuration.LlmProviderOptions>
+                {
+                    new()
+                    {
+                        Name = "kilo-gateway",
+                        BaseUrl = kiloBase,
+                        ApiKey = kiloKey,
+                        DefaultModel = kiloModel,
+                    },
+                },
+                Roles = new Dictionary<string, Configuration.LlmRoleModelOptions>
+                {
+                    ["CoreDev"] = new() { ProviderName = "kilo-gateway", Model = kiloModel },
+                },
+            };
+            var llmConfig = LlmConfigAdapter.FromOptions(llmOptions);
+            var chatClientFactory = new OpenAICompatibleChatClientFactory();
+            runner = new MafAgentRunner(
+                chatClientFactory, llmConfig, roleRegistry,
+                NullLogger<MafAgentRunner>.Instance);
+            Console.WriteLine("  runner = MafAgentRunner (LLM-driven)");
+        }
+        else
+        {
+            runner = new FakeAgentRunner(worktrees, specBody);
+            Console.WriteLine("  runner = FakeAgentRunner (deterministic, no LLM)");
+        }
 
         // 4. Build the orchestrator.
         var orchestrator = new OrchestratorAgent(

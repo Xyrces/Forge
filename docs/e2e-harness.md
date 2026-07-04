@@ -7,16 +7,25 @@ no real network calls. Runs in seconds.
 
 ## What it verifies
 
-The harness:
+The harness (default fake-runner mode):
 1. Creates a fresh local repo (bare `remote.git` + clone)
 2. Writes a stub scaffold (`MyApp.csproj` + `.gitignore`)
 3. Wires up the orchestrator's components in-process with a
    `LocalGitHubService` (the harness's fake GitHub)
 4. Calls `OrchestratorAgent.DispatchSingleTaskAsync` directly
-5. Verifies the `LocalGitHubService` recorded a PR
-6. Reads the agent's branch in the worktree + asserts the
+5. The workflow's `EnqueueWatchExecutor` creates a `pr-watch`
+   task; the harness finds it
+6. Verifies the `LocalGitHubService` recorded a PR
+7. Marks the head SHA green + uses an `Approved` review override
+8. Drives `PRWatcher.ProcessWatchTaskAsync` to a merge + Completed
+9. Reads the agent's branch in the worktree + asserts the
    diff contains the expected files (`Calculator.cs` +
    `CalculatorTests.cs`) with the expected symbols
+
+The harness scope is **closed-loop**: from task dispatch through
+PR opened + merged + task Completed. CI verifies the wiring; the
+`--real-llm` flag (off by default) swaps in the real LLM to
+exercise the model-driven path.
 
 ## What it does NOT verify
 
@@ -26,8 +35,6 @@ The harness:
   bypasses them by passing a pre-built task directly to
   `DispatchSingleTaskAsync`. They're covered by their own
   integration tests.
-- The PRWatcher merge / delete / final-task-Completed
-  transitions. The harness asserts "PR was opened" only.
 - Stage B (DTS). Requires Docker / Podman; covered by the
   `deploy/docker-compose.yml` flow + the live verify.
 
@@ -49,20 +56,44 @@ Expected output (last lines):
  CalculatorTests.cs | 11 +++++++++++
  2 files changed, 17 insertions(+)
 
-  PASS: PR #2 contains Calculator.cs + CalculatorTests.cs with the expected symbols.
+  PASS: PR #2 contains Calculator.cs + CalculatorTests.cs + closed loop merged + tasks Completed.
 ```
 
 Exit code is 0 on pass, 1 on fail. CI can pipe stdout / stderr
 to a log aggregator.
 
-## LLM-free by default
+## LLM-free by default (fast, deterministic)
 
 The harness's `FakeAgentRunner` writes the expected files
 into the worktree when the workflow's RunAgentExecutor invokes
 it. This bypasses the M3 LLM call and keeps the test fast
-(seconds) and deterministic. Replace the runner with a real
-`MafAgentRunner` to exercise the full model-driven path; the
-rest of the harness is unchanged.
+(seconds) and deterministic.
+
+## LLM-driven mode (slow, real cost)
+
+Pass `--real-llm` to swap in a real `MafAgentRunner` pointed
+at the kilo gateway. The agent is asked the same spec the
+fake runner receives; the assertions are unchanged.
+
+```bash
+LLM_API_KEY=msy_... \
+LLM_BASE_URL=https://api.kilo.ai/api/gateway \
+LLM_MODEL=minimax/minimax-m3 \
+dotnet run --project tools/e2e-harness -- --real-llm \
+    --repo-root=$(pwd)
+```
+
+Live-verified on this host: the agent wrote `Calculator.cs`
+(6 lines) + `CalculatorTests.cs` (12 lines), committed + pushed
++ opened PR #2; harness marked CI green + approved; PRWatcher
+merged; tasks Completed. The PR diff may include spurious
+binaries (the agent runs `dotnet test` which restores NuGet
+packages) — the assertions still pass because they only check
+for the two expected files + symbols.
+
+Cost: ~$0.50-2 in M3 tokens per run (model-driven prompt +
+bash tool calls). Use sparingly; prefer the fake runner for
+CI.
 
 ## Local bare git + `LocalGitHubService`
 
