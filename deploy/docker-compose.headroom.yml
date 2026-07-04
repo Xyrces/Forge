@@ -39,23 +39,14 @@ services:
     environment:
       # Required: API key for the upstream provider (kilo
       # gateway). The proxy forwards requests; the upstream
-      # provider still needs auth.
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY env var required for kilo gateway auth}
+      # provider still needs auth. Pass via .env or the shell:
+      #   OPENAI_API_KEY=msy_... docker compose -f deploy/docker-compose.headroom.yml up -d
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # Optional: pin Headroom's mode.
       HEADROOM_MODE: ${HEADROOM_MODE:-token}
       # Optional: log level.
       HEADROOM_LOG_LEVEL: ${HEADROOM_LOG_LEVEL:-INFO}
-      # Default upstream OpenAI-compatible endpoint = kilo
-      # gateway. The operator can override via env var.
-      # The proxy's `--openai-api-url` flag controls where
-      # forwarded requests go.
     command:
-      - "headroom"
-      - "proxy"
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8787"
       - "--mode"
       - "${HEADROOM_MODE:-token}"
       - "--openai-api-url"

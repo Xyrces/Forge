@@ -148,38 +148,55 @@ public static class Program
             - CalculatorTests.cs exists with the Add_TwoPositiveNumbers_ReturnsSum test
             """;
         var useRealLlm = args.Any(a => a == "--real-llm");
+        var useHeadroom = args.Any(a => a == "--headroom");
         IAgentRunner runner;
-        if (useRealLlm)
-        {
-            var kiloKey = Environment.GetEnvironmentVariable("LLM_API_KEY")
-                ?? throw new InvalidOperationException("--real-llm requires LLM_API_KEY env var");
-            var kiloBase = Environment.GetEnvironmentVariable("LLM_BASE_URL") ?? "https://api.kilo.ai/api/gateway";
-            var kiloModel = Environment.GetEnvironmentVariable("LLM_MODEL") ?? "minimax/minimax-m3";
-            var llmOptions = new Configuration.LlmOptions
+        CostTracker? costTracker = null;
+if (useRealLlm)
             {
-                DefaultProvider = "kilo-gateway",
-                Providers = new List<Configuration.LlmProviderOptions>
+                var kiloKey = Environment.GetEnvironmentVariable("LLM_API_KEY")
+                    ?? throw new InvalidOperationException("--real-llm requires LLM_API_KEY env var");
+                var kiloBase = Environment.GetEnvironmentVariable("LLM_BASE_URL") ?? "https://api.kilo.ai/api/gateway";
+                var kiloModel = Environment.GetEnvironmentVariable("LLM_MODEL") ?? "minimax/minimax-m3";
+                var llmOptions = new Configuration.LlmOptions
                 {
-                    new()
+                    DefaultProvider = "kilo-gateway",
+                    Providers = new List<Configuration.LlmProviderOptions>
                     {
-                        Name = "kilo-gateway",
-                        BaseUrl = kiloBase,
-                        ApiKey = kiloKey,
-                        DefaultModel = kiloModel,
+                        new()
+                        {
+                            Name = "kilo-gateway",
+                            BaseUrl = kiloBase,
+                            ApiKey = kiloKey,
+                            DefaultModel = kiloModel,
+                        },
                     },
-                },
-                Roles = new Dictionary<string, Configuration.LlmRoleModelOptions>
+                    Roles = new Dictionary<string, Configuration.LlmRoleModelOptions>
+                    {
+                        ["CoreDev"] = new() { ProviderName = "kilo-gateway", Model = kiloModel },
+                    },
+                };
+                var llmConfig = LlmConfigAdapter.FromOptions(llmOptions);
+                var chatClientFactory = new OpenAICompatibleChatClientFactory();
+                // Track usage on every --real-llm run. CostTracker is
+                // cheap (in-process dict + lock); we want both the
+                // baseline and the Headroom-enabled runs to print
+                // the same summary so they can be compared.
+                costTracker = new CostTracker();
+                chatClientFactory.CostTracker = costTracker;
+                if (useHeadroom)
                 {
-                    ["CoreDev"] = new() { ProviderName = "kilo-gateway", Model = kiloModel },
-                },
-            };
-            var llmConfig = LlmConfigAdapter.FromOptions(llmOptions);
-            var chatClientFactory = new OpenAICompatibleChatClientFactory();
-            runner = new MafAgentRunner(
-                chatClientFactory, llmConfig, roleRegistry,
-                NullLogger<MafAgentRunner>.Instance);
-            Console.WriteLine("  runner = MafAgentRunner (LLM-driven)");
-        }
+                    var headroomUrl = Environment.GetEnvironmentVariable("HEADROOM_PROXY_URL") ?? "http://127.0.0.1:8787";
+                    chatClientFactory.HeadroomProxyBaseUrl = headroomUrl;
+                    Console.WriteLine($"  runner = MafAgentRunner (LLM-driven, Headroom proxy={headroomUrl})");
+                }
+                else
+                {
+                    Console.WriteLine("  runner = MafAgentRunner (LLM-driven, no Headroom)");
+                }
+                runner = new MafAgentRunner(
+                    chatClientFactory, llmConfig, roleRegistry,
+                    NullLogger<MafAgentRunner>.Instance);
+            }
         else
         {
             runner = new FakeAgentRunner(worktrees, specBody);
@@ -352,6 +369,54 @@ public static class Program
             return 1;
         }
         Console.WriteLine("  PASS: PR #" + pr.Number + " contains Calculator.cs + CalculatorTests.cs + closed loop merged + tasks Completed.");
+
+        // Cost summary: only meaningful when --real-llm (with
+        // or without Headroom). We always print it when a real
+        // LLM was used; with --headroom we also pull the proxy's
+        // /stats for pre-compression comparison.
+        if (useRealLlm && costTracker is not null)
+        {
+            var snap = costTracker.Snapshot();
+            Console.WriteLine();
+            Console.WriteLine("  cost summary (orchestrator-observed, post-compression):");
+            Console.WriteLine($"    calls      = {snap.CallCount}");
+            Console.WriteLine($"    input tok  = {snap.TotalInputTokens:N0}");
+            Console.WriteLine($"    output tok = {snap.TotalOutputTokens:N0}");
+        }
+        if (useRealLlm && useHeadroom)
+        {
+            try
+            {
+                var headroomUrl = Environment.GetEnvironmentVariable("HEADROOM_PROXY_URL") ?? "http://127.0.0.1:8787";
+                var headroomStats = await HeadroomStats.FetchAsync(headroomUrl);
+                if (headroomStats is not null)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("  Headroom /stats (proxy-side):");
+                    Console.WriteLine($"    mode                       = {headroomStats.Mode}");
+                    Console.WriteLine($"    api requests               = {headroomStats.ApiRequests}");
+                    Console.WriteLine($"    tokens.input               = {headroomStats.InputTokens:N0}");
+                    Console.WriteLine($"    tokens.proxy_total_before   = {headroomStats.ProxyTotalBeforeCompression:N0}");
+                    Console.WriteLine($"    tokens.saved               = {headroomStats.TokensSaved:N0}");
+                    Console.WriteLine($"    tokens.savings_percent     = {headroomStats.SavingsPercent:F2}%");
+                    Console.WriteLine($"    compression.requests       = {headroomStats.RequestsCompressed}");
+                    Console.WriteLine($"    compression.avg_pct        = {headroomStats.AvgCompressionPct:F2}%");
+                    Console.WriteLine($"    cost.without_headroom_usd  = {headroomStats.CostWithoutHeadroom:F6}");
+                    Console.WriteLine($"    cost.with_headroom_usd     = {headroomStats.CostWithHeadroom:F6}");
+                    Console.WriteLine($"    cost.total_saved_usd       = {headroomStats.CostSaved:F6}");
+                    Console.WriteLine($"    latency.average_ms         = {headroomStats.LatencyAvgMs:F1}");
+                    Console.WriteLine($"    latency.max_ms             = {headroomStats.LatencyMaxMs:F1}");
+                }
+                else
+                {
+                    Console.WriteLine($"  (Headroom /stats fetch failed from {headroomUrl})");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  (Headroom /stats error: {ex.Message})");
+            }
+        }
         return 0;
     }
 
@@ -495,6 +560,65 @@ internal sealed class FakeAgentRunner : IAgentRunner
             InputTokens: 0,
             OutputTokens: 0,
             Elapsed: TimeSpan.FromSeconds(0.1)));
+    }
+}
+
+/// <summary>
+/// Reads Headroom's /stats endpoint and exposes the fields
+/// the benchmark harness cares about. Returns null on failure
+/// (the harness treats the Headroom section as best-effort).
+/// </summary>
+internal sealed record HeadroomStats(
+    string Mode,
+    long ApiRequests,
+    long InputTokens,
+    long ProxyTotalBeforeCompression,
+    long TokensSaved,
+    double SavingsPercent,
+    long RequestsCompressed,
+    double AvgCompressionPct,
+    double CostWithoutHeadroom,
+    double CostWithHeadroom,
+    double CostSaved,
+    double LatencyAvgMs,
+    double LatencyMaxMs)
+{
+    public static async Task<HeadroomStats?> FetchAsync(string proxyUrl)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var resp = await http.GetAsync($"{proxyUrl.TrimEnd('/')}/stats");
+            if (!resp.IsSuccessStatusCode) return null;
+            using var stream = await resp.Content.ReadAsStreamAsync();
+            using var doc = await System.Text.Json.JsonDocument.ParseAsync(stream);
+            var root = doc.RootElement;
+            // The Headroom /stats shape is wide; we pluck the
+            // specific fields we report on.
+            var summary = root.TryGetProperty("summary", out var s) ? s : root;
+            var tokens = root.TryGetProperty("tokens", out var t) ? t : default;
+            var compression = root.TryGetProperty("compression", out var c) ? c : default;
+            var cost = root.TryGetProperty("cost", out var k) ? k : default;
+            var latency = root.TryGetProperty("latency", out var l) ? l : default;
+            return new HeadroomStats(
+                Mode: summary.TryGetProperty("mode", out var m) ? m.GetString() ?? "" : "",
+                ApiRequests: summary.TryGetProperty("api_requests", out var ar) ? ar.GetInt64() : 0,
+                InputTokens: tokens.TryGetProperty("input", out var ti) ? ti.GetInt64() : 0,
+                ProxyTotalBeforeCompression: tokens.TryGetProperty("proxy_total_before_compression", out var ptbc) ? ptbc.GetInt64() : 0,
+                TokensSaved: tokens.TryGetProperty("saved", out var ts) ? ts.GetInt64() : 0,
+                SavingsPercent: tokens.TryGetProperty("savings_percent", out var sp) ? sp.GetDouble() : 0,
+                RequestsCompressed: compression.TryGetProperty("requests_compressed", out var rc) ? rc.GetInt64() : 0,
+                AvgCompressionPct: compression.TryGetProperty("avg_compression_pct", out var ac) ? ac.GetDouble() : 0,
+                CostWithoutHeadroom: cost.TryGetProperty("without_headroom_usd", out var cwh) ? cwh.GetDouble() : 0,
+                CostWithHeadroom: cost.TryGetProperty("with_headroom_usd", out var cwh2) ? cwh2.GetDouble() : 0,
+                CostSaved: cost.TryGetProperty("total_saved_usd", out var cs) ? cs.GetDouble() : 0,
+                LatencyAvgMs: latency.TryGetProperty("average_ms", out var lam) ? lam.GetDouble() : 0,
+                LatencyMaxMs: latency.TryGetProperty("max_ms", out var lmx) ? lmx.GetDouble() : 0);
+        }
+        catch
+        {
+            return null;
+        }
     }
 }
 
