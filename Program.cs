@@ -709,12 +709,21 @@ Console.Error.WriteLine(ex.ToString());
         await skillBootstrap.SeedAsync();
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
+        // Late-binding holder for specStore. Created before
+        // MafAgentRunner ctor, populated after specStore is
+        // constructed (the runner builds its tool list per call,
+        // so a forward-reference is enough).
+        var specStoreRef = new Core.SpecStoreHolder();
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
             kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents"),
-            memory: memoryStore);
+            memory: memoryStore,
+            handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
+            designArtifacts: () => designArtifacts,
+            specs: () => specStoreRef.Value,
+            artOutputs: () => artOutputs);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
@@ -795,6 +804,7 @@ Console.Error.WriteLine(ex.ToString());
                 skills: skillSource,
                 kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents")));
         var specStore = new Core.SpecStore(issues);
+        specStoreRef.Set(specStore);  // P5 — wire the spec store to the late-binding holder
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
         var codebaseGraphBuilder = new Codebase.DotnetCodebaseGraphBuilder();
@@ -847,7 +857,7 @@ Console.Error.WriteLine(ex.ToString());
         // endpoints (POST /api/recovery/run + dry-run + reports).
         // RunAsync is called later, after the dashboard starts.
         var startupRecovery = new Orchestrator.StartupRecovery(
-            issues, recoveryReports, worktrees,
+            issues, recoveryReports!, worktrees,
             new Orchestrator.GitHubRecoveryAdapter(gitHub),
             eventBus,
             loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());

@@ -166,7 +166,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 11;
+    public const int CurrentSchemaVersion = 12;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -185,6 +185,15 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }.ToString();
         InitializeSchema();
     }
+
+    /// <summary>
+    /// Run the schema migration. Idempotent. Called from the
+    /// constructor on first creation; also publicly callable so
+    /// that other stores (e.g. <c>ContextHandoffStore</c>) can
+    /// ensure the v12 migration is applied before they read the
+    /// table.
+    /// </summary>
+    public void EnsureSchema() => InitializeSchema();
 
     private void InitializeSchema()
     {
@@ -568,6 +577,44 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 duration_ms     INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS ix_recovery_report_ts ON recovery_report(ts);
+
+            -- v12: P5 — native SharedContext.
+            --
+            -- The context_handoff table records which artifact ids
+            -- each MAF agent (per task) actually read via
+            -- ArtifactReadTool. Used for closed-loop debugging:
+            -- "the Artist didn't see the wireframe" → look at this
+            -- table to see whether the read happened. The
+            -- ContextHandoffStore class has a separate
+            -- EnsureCreatedAsync for tests; the production schema
+            -- bootstrap covers operator runtime.
+            --
+            --   from_role / to_role: empty if the producer or
+            --     consumer doesn't have a role name (e.g. the spec
+            --     body is the source; an agent's first read might
+            --     pre-date the role binding). The columns are not
+            --     null so simple "WHERE to_role = 'designer'" works.
+            --   artifact_kind: 'design' | 'spec' | 'art'. Redundant
+            --     with artifact_id's prefix; stored for index
+            --     efficiency on dashboards.
+            --   consumed: 1 if the LLM actually read the body; 0
+            --     if the lookup was a miss (we record misses too
+            --     so we can detect "agent asked for an artifact
+            --     that doesn't exist" — usually a stale id).
+            CREATE TABLE IF NOT EXISTS context_handoff (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              TEXT NOT NULL,
+                task_id         TEXT NOT NULL,
+                from_role       TEXT NOT NULL,
+                to_role         TEXT NOT NULL,
+                artifact_id     TEXT NOT NULL,
+                artifact_kind   TEXT NOT NULL,
+                consumed        INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS ix_context_handoff_task
+                ON context_handoff(task_id, ts);
+            CREATE INDEX IF NOT EXISTS ix_context_handoff_artifact
+                ON context_handoff(artifact_id, ts);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

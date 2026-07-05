@@ -32,6 +32,10 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly string _kiloAgentsRoot;
     private readonly ISkillSource? _skills;
     private readonly MemoryStore? _memory;
+    private readonly ContextHandoffStore? _handoffs;
+    private readonly Func<DesignArtifactStore?>? _designArtifactsFactory;
+    private readonly Func<ISpecStore?>? _specsFactory;
+    private readonly Func<ArtOutputStore?>? _artOutputsFactory;
 
     public MafAgentRunner(
         IChatClientFactory chatClientFactory,
@@ -40,7 +44,15 @@ public sealed class MafAgentRunner : IAgentRunner
         ILogger<MafAgentRunner> logger,
         ISkillSource? skills = null,
         string kiloAgentsRoot = ".kilo/agents",
-        MemoryStore? memory = null)
+        MemoryStore? memory = null,
+        ContextHandoffStore? handoffs = null,
+        // P5.1 stores — passed as factories so the runner can
+        // be constructed before the stores are (avoids a Program.cs
+        // re-ordering). The factories are invoked once on first
+        // tool build; the result is cached.
+        Func<DesignArtifactStore?>? designArtifacts = null,
+        Func<ISpecStore?>? specs = null,
+        Func<ArtOutputStore?>? artOutputs = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -49,6 +61,10 @@ public sealed class MafAgentRunner : IAgentRunner
         _skills = skills;
         _kiloAgentsRoot = kiloAgentsRoot;
         _memory = memory;
+        _handoffs = handoffs;
+        _designArtifactsFactory = designArtifacts;
+        _specsFactory = specs;
+        _artOutputsFactory = artOutputs;
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -90,6 +106,22 @@ public async Task<AgentRunResult> RunAsync(
         if (!string.IsNullOrWhiteSpace(bashWorkingDir))
         {
             tools.Add(new BashTool(bashWorkingDir, logger: null).AsAIFunction());
+        }
+
+        // P5.1 — ArtifactReadTool is always available when the
+        // required stores are wired. It lets agents pull a
+        // single artifact body on demand rather than have the
+        // orchestrator inline every artifact body into every
+        // prompt. The tool's read calls are logged to
+        // context_handoff for closed-loop debugging.
+        var designArtifacts = _designArtifactsFactory?.Invoke();
+        var specs = _specsFactory?.Invoke();
+        var artOutputs = _artOutputsFactory?.Invoke();
+        if (designArtifacts is not null && specs is not null && artOutputs is not null)
+        {
+            var readTool = new ArtifactReadTool(
+                designArtifacts, specs, artOutputs, _handoffs, logger: null);
+            tools.Add(readTool.AsAIFunction());
         }
 
         var chatClient = _chatClientFactory.Create(_config, role);

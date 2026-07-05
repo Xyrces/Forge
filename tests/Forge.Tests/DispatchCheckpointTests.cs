@@ -29,9 +29,9 @@ public class DispatchCheckpointTests : IDisposable
     }
 
     [Fact]
-    public void SchemaVersion_IsEleven_AfterMigration()
+    public void SchemaVersion_IsTwelve_AfterMigration()
     {
-        Assert.Equal(11, IssueStore.CurrentSchemaVersion);
+        Assert.Equal(12, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]
