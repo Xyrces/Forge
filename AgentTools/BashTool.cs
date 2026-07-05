@@ -62,18 +62,37 @@ public sealed class BashTool
 
         var timeout = TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds ?? (int)_defaultTimeout.TotalSeconds, 1, 300));
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "cmd.exe",
-            Arguments = "/c " + command,
-            WorkingDirectory = cwd,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
+        // P4 CI: BashTool was hardcoded to cmd.exe for the Windows
+        // first-deployment. CI on ubuntu-latest needs the POSIX
+        // shell instead. /bin/sh exists on macOS, Linux, and
+        // WSL; on Windows the path doesn't exist but
+        // OperatingSystem.IsWindows() short-circuits before we
+        // get here.
+        var psi = OperatingSystem.IsWindows()
+            ? new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/c " + command,
+                WorkingDirectory = cwd,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            }
+            : new ProcessStartInfo
+            {
+                FileName = "/bin/sh",
+                Arguments = "-c \"" + command.Replace("\"", "\\\"") + "\"",
+                WorkingDirectory = cwd,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            };
 
         _logger?.LogInformation("BashTool: cwd={Cwd} cmd={Cmd} timeout={Timeout}s", cwd, command, (int)timeout.TotalSeconds);
 

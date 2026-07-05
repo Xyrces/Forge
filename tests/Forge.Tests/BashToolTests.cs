@@ -35,8 +35,10 @@ public class BashToolTests : IDisposable
     [Fact]
     public async Task Bash_FailingCommand_ReturnsNonZeroExitAndStderr()
     {
+        // P4 CI: the original test was `cmd /c exit 7` (Windows-only).
+        // Cross-platform equivalent via /bin/sh -c "exit 7".
         var tool = new BashTool(_cwd, logger: NullLogger<BashTool>.Instance);
-        var result = await tool.Bash("cmd /c exit 7");
+        var result = await tool.Bash(OperatingSystem.IsWindows() ? "cmd /c exit 7" : "exit 7");
         Assert.Contains("exit=7", result);
     }
 
@@ -92,8 +94,14 @@ public class BashToolTests : IDisposable
     {
         var tool = new BashTool(_cwd, defaultTimeout: TimeSpan.FromSeconds(2),
             logger: NullLogger<BashTool>.Instance);
-        // ping -n 10 takes ~10 seconds; timeout in 2s.
-        var result = await tool.Bash("ping -n 10 127.0.0.1", timeoutSeconds: 2);
+        // P4 CI: `ping -n 10 127.0.0.1` is Windows-only. Use the
+        // cross-platform equivalent: `ping 127.0.0.1 -c 10` (Linux)
+        // or `ping -n 10 127.0.0.1` (Windows). Both run for ~10s
+        // and timeout in 2s.
+        var cmd = OperatingSystem.IsWindows()
+            ? "ping -n 10 127.0.0.1"
+            : "ping 127.0.0.1 -c 10";
+        var result = await tool.Bash(cmd, timeoutSeconds: 2);
         Assert.Contains("exit=-1", result);
         Assert.Contains("timed out", result);
     }
