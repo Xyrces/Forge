@@ -241,7 +241,12 @@ if (mode == CliMode.DashboardOnly)
             var listed = await worktrees.WorktreeExistsAsync(path);
             Console.WriteLine($"      -> listed={listed}");
 
-            var headProbe = Path.Combine(path, "PortHorizon.sln");
+            // Probe for any *.sln in the worktree (we don't assume
+            // a particular target project name; the orchestrator
+            // is project-agnostic). First match wins.
+            var sln = Directory.EnumerateFiles(path, "*.sln", SearchOption.TopDirectoryOnly)
+                .FirstOrDefault();
+            var headProbe = sln ?? Path.Combine(path, "no-sln");
             Console.WriteLine($"[3/5] Probe: {headProbe} exists = {File.Exists(headProbe)}");
 
             Console.WriteLine("[4/5] Writing + committing a marker file...");
