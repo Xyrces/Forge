@@ -29,16 +29,32 @@ public class DotnetCodebaseGraphBuilderTests : IDisposable
 
     private static void Run(string dir, string args)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "cmd.exe",
-            Arguments = $"/c {args}",
-            WorkingDirectory = dir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
+        // P4 CI: was hardcoded to cmd.exe /c <args> (Windows-only).
+        // Bypass the shell entirely on Linux/macOS — just call
+        // git directly. The args here are always simple
+        // shell-quoted strings (e.g. "git init -q ...") that
+        // don't need shell interpretation.
+        var psi = OperatingSystem.IsWindows()
+            ? new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c {args}",
+                WorkingDirectory = dir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            }
+            : new ProcessStartInfo
+            {
+                FileName = "sh",
+                Arguments = $"-c \"{args.Replace("\"", "\\\"")}\"",
+                WorkingDirectory = dir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
         using var p = Process.Start(psi);
         p!.WaitForExit();
         if (p.ExitCode != 0)
