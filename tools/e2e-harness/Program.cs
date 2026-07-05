@@ -640,6 +640,16 @@ internal static class Git
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
+        // P4 CI: ReadToEnd on stdout/stderr blocks until the
+        // process closes its streams. On Linux, even after
+        // ReadToEnd returns, the process may be in the
+        // "exited-but-not-disposed" state, causing
+        // Process.get_ExitCode() to throw
+        // InvalidOperationException("Process must exit before
+        // requested information can be determined."). Add
+        // WaitForExit() to be explicit. The CancellationToken
+        // is not wired here because git commands are short.
+        p.WaitForExit();
         var stdout = p.StandardOutput.ReadToEnd();
         var stderr = p.StandardError.ReadToEnd();
         if (p.ExitCode != 0)
@@ -659,6 +669,9 @@ internal static class Git
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
+        // WaitForExit to ensure the process is fully disposed
+        // before reading its output (Linux: see Git.Run comment).
+        p.WaitForExit();
         return p.StandardOutput.ReadToEnd();
     }
 }
