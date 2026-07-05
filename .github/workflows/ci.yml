@@ -38,18 +38,18 @@ jobs:
             ${{ runner.os }}-nuget-
 
       - name: Restore
-        run: dotnet restore PortHorizon.Agents.sln
+        run: dotnet restore Forge.sln
 
       # The .sln includes the e2e-harness project, so this builds
       # the orchestrator + tests + harness all at once.
       - name: Build
-        run: dotnet build PortHorizon.Agents.sln --no-restore --configuration Release
+        run: dotnet build Forge.sln --no-restore --configuration Release
 
       - name: Test
         # The 2 RealLlmIntegrationTests are expected to skip on CI
-        # because the kilo JWT isn't in env. The remaining 392 tests
+        # because the kilo JWT isn't in env. The remaining 402 tests
         # should pass. Fail the job if any real test fails.
-        run: dotnet test PortHorizon.Agents.sln --no-build --configuration Release --logger "console;verbosity=normal"
+        run: dotnet test Forge.sln --no-build --configuration Release --logger "console;verbosity=normal"
 
       - name: Run e2e harness
         # The harness spins up a fresh local repo, runs the
