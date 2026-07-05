@@ -72,9 +72,12 @@ public class BashToolTests : IDisposable
     public async Task Bash_RunsInProvidedWorkingDirectory()
     {
         var tool = new BashTool(_cwd, logger: NullLogger<BashTool>.Instance);
-        var result = await tool.Bash("cd");
+        // P4 CI: 'cd' without args prints the cwd in cmd.exe (Windows)
+        // but is a no-op in /bin/sh (POSIX). Use pwd on Linux/macOS
+        // to keep the test cross-platform.
+        var cmd = OperatingSystem.IsWindows() ? "cd" : "pwd";
+        var result = await tool.Bash(cmd);
         Assert.Contains("exit=0", result);
-        // The output should contain our temp cwd (Windows prints full path).
         Assert.Contains(_cwd.TrimEnd('\\'), result);
     }
 
@@ -84,7 +87,9 @@ public class BashToolTests : IDisposable
         var subdir = Path.Combine(_cwd, "sub");
         Directory.CreateDirectory(subdir);
         var tool = new BashTool(_cwd, logger: NullLogger<BashTool>.Instance);
-        var result = await tool.Bash("cd", workingDirectory: subdir);
+        // P4 CI: same reason — use pwd on POSIX; cd on Windows.
+        var cmd = OperatingSystem.IsWindows() ? "cd" : "pwd";
+        var result = await tool.Bash(cmd, workingDirectory: subdir);
         Assert.Contains("exit=0", result);
         Assert.Contains(subdir, result);
     }

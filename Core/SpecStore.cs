@@ -235,11 +235,19 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         await PersistExtractionAsync(conn, tx, id, spec.Body, ct);
 
         await tx.CommitAsync(ct);
+        // Round 'now' to the same precision IssueStore.DateFormat
+        // (millisecond) so the in-memory UpdatedAt matches the
+        // value the DB stored. Without this, the next update
+        // would read back a truncated timestamp that could
+        // compare < the in-memory copy, breaking the
+        // "UpdatedAt >= created.UpdatedAt" assertion in
+        // SpecStoreTests.UpdateBodyAsync_AppendsNewVersion_BumpsCurrent.
+        var storedNow = IssueStore.ParseTime(IssueStore.DateFormatTime(now));
         return new SpecRecord(
             Id: id, ProjectId: spec.ProjectId, Title: spec.Title,
             Status: SpecStatus.Draft,
             ParentIssueId: spec.ParentIssueId, ParentSpecId: spec.ParentSpecId,
-            CurrentVersion: 1, CreatedAt: now, UpdatedAt: now,
+            CurrentVersion: 1, CreatedAt: storedNow, UpdatedAt: storedNow,
             Body: spec.Body, Author: spec.Author);
     }
 
