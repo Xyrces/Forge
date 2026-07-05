@@ -183,10 +183,15 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 {
     private readonly IssueStore _issues;
     private readonly SpecBodyExtractor _extractor;
-    public SpecStore(IssueStore issues, SpecBodyExtractor? extractor = null)
+    private readonly DesignArtifactStore? _designArtifacts;
+    public SpecStore(
+        IssueStore issues,
+        SpecBodyExtractor? extractor = null,
+        DesignArtifactStore? designArtifacts = null)
     {
         _issues = issues;
         _extractor = extractor ?? new SpecBodyExtractor();
+        _designArtifacts = designArtifacts;
     }
 
     public async Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default)
@@ -347,6 +352,38 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             nextVersion = Convert.ToInt32(hit) + 1;
         }
 
+        // P5.3 — spec body split. The post-processor extracts
+        // every `<!-- artifact:kind:title -->` block into a
+        // separate design_artifact row, replacing the marker
+        // with a `[read_artifact design-{id}]` placeholder. The
+        // slim header becomes the spec's body; bodies are
+        // fetched on demand by the next agent via the
+        // read_artifact tool. Idempotent: re-running on a
+        // post-processed body yields zero new artifacts
+        // (the markers are gone after the first pass).
+        var split = _extractor.ExtractForReadArtifact(id, nextVersion, update.Body);
+        var storedBody = split.NewArtifacts.Count > 0 ? split.Header : update.Body;
+
+        if (split.NewArtifacts.Count > 0 && _designArtifacts is not null)
+        {
+            foreach (var na in split.NewArtifacts)
+            {
+                // na.Id is the post-processor's deterministic id
+                // (e.g. design-task-1-2-1); it matches the
+                // placeholder text in split.Header exactly. The
+                // DesignArtifactStore.CreateAsync is idempotent
+                // for ids it sees again; if the operator runs the
+                // post-processor twice, the second pass is a no-op
+                // (the markers are gone after the first pass).
+                await _designArtifacts.CreateAsync(new NewDesignArtifact(
+                    SpecId: id,
+                    Kind: ParseKind(na.Kind),
+                    Title: na.Title,
+                    Body: na.Body,
+                    BodyKind: "markdown"));
+            }
+        }
+
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
@@ -354,7 +391,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
                 VALUES ($sid, $v, $body, $author, $now)";
             cmd.Parameters.AddWithValue("$sid", id);
             cmd.Parameters.AddWithValue("$v", nextVersion);
-            cmd.Parameters.AddWithValue("$body", update.Body);
+            cmd.Parameters.AddWithValue("$body", storedBody);
             cmd.Parameters.AddWithValue("$author", (object?)update.Author ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
@@ -529,6 +566,19 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     public void Dispose() { }
+
+    // P5.3 — converts the post-processor's lowercase kind string
+    // (the db-stored form of DesignArtifactKind) back to the
+    // enum value. Mirrors the toDbValue mapping in
+    // DesignArtifactKindExtensions.
+    private static DesignArtifactKind ParseKind(string dbValue) => dbValue switch
+    {
+        "wireframe" => DesignArtifactKind.Wireframe,
+        "mockup" => DesignArtifactKind.Mockup,
+        "component-spec" => DesignArtifactKind.ComponentSpec,
+        "visual-rule" => DesignArtifactKind.VisualRule,
+        _ => DesignArtifactKind.ComponentSpec,
+    };
 }
 
 /// <summary>

@@ -803,7 +803,7 @@ Console.Error.WriteLine(ex.ToString());
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
                 kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents")));
-        var specStore = new Core.SpecStore(issues);
+        var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
         specStoreRef.Set(specStore);  // P5 — wire the spec store to the late-binding holder
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
