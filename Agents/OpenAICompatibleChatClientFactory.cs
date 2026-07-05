@@ -1,9 +1,9 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using Microsoft.Extensions.AI;
 using OpenAI;
-using PortHorizon.Agents.Core;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// Builds <see cref="IChatClient"/> instances for OpenAI-compatible HTTP

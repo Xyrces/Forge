@@ -2,9 +2,9 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 /// <summary>
 /// HTTP endpoints for the memory store (the bd remember/prime

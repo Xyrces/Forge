@@ -1,6 +1,6 @@
-using PortHorizon.Agents.Core;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// Abstraction over the project's skill catalog. P1: backed by

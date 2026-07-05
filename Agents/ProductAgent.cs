@@ -2,11 +2,11 @@ using System.ComponentModel;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
-using PortHorizon.Agents.Specs;
+using Forge.Core;
+using Forge.Dashboard;
+using Forge.Specs;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// ProductAgent: refines an intake-draft spec into a fully

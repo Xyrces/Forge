@@ -1,11 +1,11 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Core;
+using Forge.Agents;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 /// <summary>
 /// P1.5.a endpoints: spec CRUD + version history.
@@ -24,7 +24,7 @@ public static class SpecEndpoints
         ISpecStore specs,
         ISpecExtractionReader extractor,
         ILogger logger,
-        PortHorizon.Agents.Core.IIntakeStore? intakeStore = null,
+        Forge.Core.IIntakeStore? intakeStore = null,
         GroomerAgentFactory? groomerFactory = null,
         IssueGroomerRunStore? groomerRuns = null)
     {

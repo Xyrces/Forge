@@ -4,13 +4,13 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Codebase;
-using PortHorizon.Agents.Configuration;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Orchestrator;
+using Forge.Agents;
+using Forge.Codebase;
+using Forge.Configuration;
+using Forge.Core;
+using Forge.Orchestrator;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 public sealed class DashboardHost : IAsyncDisposable
 {
@@ -298,7 +298,7 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
     private static readonly Lazy<string> _embeddedHtml = new(() =>
     {
         var asm = typeof(DashboardHost).Assembly;
-        using var stream = asm.GetManifestResourceStream("PortHorizon.Agents.Dashboard.wwwroot.index.html")
+        using var stream = asm.GetManifestResourceStream("Forge.Dashboard.wwwroot.index.html")
             ?? throw new InvalidOperationException("Embedded HTML resource missing");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();

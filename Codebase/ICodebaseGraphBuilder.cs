@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Codebase;
+namespace Forge.Codebase;
 
 /// <summary>
 /// Builds a <see cref="CodebaseGraph"/> for a repo root. The builder

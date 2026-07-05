@@ -1,4 +1,4 @@
-# Operator cookbook
+﻿# Operator cookbook
 
 Common scenarios you'll hit while running the orchestrator. Each recipe is one focused thing you can copy-paste.
 
@@ -7,14 +7,14 @@ Common scenarios you'll hit while running the orchestrator. Each recipe is one f
 ```bash
 # 0. Pre-flight: confirm config + DB schemas + GitHub + kilo gateway auth
 # (no dispatch; exits non-zero on any failure; useful for CI/smoke)
-dotnet run --project PortHorizon.Agents -- --check
+dotnet run --project Forge -- --check
 
 # 1. Make sure appsettings.json is filled in
 cp appsettings.example.json appsettings.json
 # edit appsettings.json: set llm.providers[0].apiKey + github.token
 
 # 2. Run
-dotnet run --project PortHorizon.Agents
+dotnet run --project Forge
 
 # 3. In another terminal, watch the dashboard
 start http://127.0.0.1:4097
@@ -28,7 +28,7 @@ Three ways, pick whichever fits your workflow:
 
 ```bash
 # A) CLI
-dotnet run --project PortHorizon.Agents -- \
+dotnet run --project Forge -- \
   --enqueue-task "Add Position ECS component" \
   --task-type ecs \
   --task-desc "Create a Position struct with x,y floats; add to AtmosphereSystem." \
@@ -247,7 +247,7 @@ If the orchestrator dies mid-dispatch (Ctrl-C, host reboot, OOM, SIGKILL), the i
 **Manual dry-run (no side-effects):** see what recovery would do without committing:
 
 ```bash
-dotnet run --project PortHorizon.Agents -- --recover
+dotnet run --project Forge -- --recover
 ```
 
 Output:
@@ -267,7 +267,7 @@ P4 StartupRecovery: DRY-RUN
 **Manual recovery with side-effects:** replay the side-effects and continue with the normal dispatch loop:
 
 ```bash
-dotnet run --project PortHorizon.Agents -- --recover-and-start
+dotnet run --project Forge -- --recover-and-start
 ```
 
 **From the dashboard:** the Recovery tab shows the latest report's actions. Click `Run recovery now` to fire a sweep from the UI; `Dry run` for the read-only version.
@@ -415,13 +415,13 @@ Every successful dispatch produces a recognizable sequence of log lines, in orde
 ### The happy-path log sequence
 
 ```
-13:42:01.102 info: PortHorizon.Agents[0] Starting dashboard
-13:42:01.731 info: PortHorizon.Agents.Dashboard.DashboardHost[0] Dashboard listening on http://127.0.0.1:4097
-13:42:01.750 info: PortHorizon.Agents[0] Orchestrator starting
-13:42:05.221 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Issue task-1 transition Pending -> InProgress (type=task)
-13:42:48.901 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Agent session for task-1 completed in 43680ms
-13:42:48.940 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Opened PR #42 for task-1
-13:42:48.965 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Task task-1 dispatched to PR #42 (duration 43743ms)
+13:42:01.102 info: Forge[0] Starting dashboard
+13:42:01.731 info: Forge.Dashboard.DashboardHost[0] Dashboard listening on http://127.0.0.1:4097
+13:42:01.750 info: Forge[0] Orchestrator starting
+13:42:05.221 info: Forge.Orchestrator.OrchestratorAgent[0] Issue task-1 transition Pending -> InProgress (type=task)
+13:42:48.901 info: Forge.Orchestrator.OrchestratorAgent[0] Agent session for task-1 completed in 43680ms
+13:42:48.940 info: Forge.Orchestrator.OrchestratorAgent[0] Opened PR #42 for task-1
+13:42:48.965 info: Forge.Orchestrator.OrchestratorAgent[0] Task task-1 dispatched to PR #42 (duration 43743ms)
 ```
 
 If you see all 4 "task" lines, dispatch succeeded. The 30s PRWatcher poll picks it up after that.
@@ -482,7 +482,7 @@ rm -rf .portHorizon/state
 git worktree prune
 
 # Restart
-dotnet run --project PortHorizon.Agents
+dotnet run --project Forge
 ```
 
 The workspace repo's branches (`agent/*`) and merged PRs are not affected — only the orchestrator's local state. Use `git branch -D agent/<id>` per-branch if you want to clean those up too.

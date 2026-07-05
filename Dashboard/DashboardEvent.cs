@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Dashboard;
+﻿namespace Forge.Dashboard;
 
 public sealed record DashboardEvent(
     DateTime Timestamp,

@@ -1,7 +1,7 @@
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 public enum IntakeMessageRole
 {

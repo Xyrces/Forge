@@ -1,7 +1,7 @@
 ﻿
 # Microsoft Agent Framework migration
 
-Status: P0 closed 2026-06-30. Goal: replace the kilo-based runtime in PortHorizon.Agents with Microsoft Agent Framework (MAF) as the agent runtime, while keeping the SQLite-backed issue/agent/skill/sprint store and the Kestrel dashboard.
+Status: P0 closed 2026-06-30. Goal: replace the kilo-based runtime in Forge with Microsoft Agent Framework (MAF) as the agent runtime, while keeping the SQLite-backed issue/agent/skill/sprint store and the Kestrel dashboard.
 
 **Forward-looking design:** see [`intake-to-sprint-workflow.md`](./intake-to-sprint-workflow.md) for the multi-agent workflow that turns operator intent into shipped increments (Phases 2-4). The two docs are siblings: this one covers the runtime, the other covers what the agents do together.
 
@@ -31,12 +31,12 @@ It also offers primitives we currently lack and would otherwise have to build:
 Three layers, all in-process at first, with a future option to run the orchestrator on Durable Task.
 
 ```
-PortHorizon.Agents.exe
-â”œâ”€â”€ PortHorizon.Agents.Core         SQLite + IssueStore/AgentStore/SkillStore/SprintStore (UNCHANGED)
-â”œâ”€â”€ PortHorizon.Agents.Orchestrator  Dispatches issues to MAF agents
-â”œâ”€â”€ PortHorizon.Agents.Agents        SqliteAgentSkillsSource, RoleAgentDefinitions
-â”œâ”€â”€ PortHorizon.Agents.Tools        Git tools, PR tools, shell tools (AIFunctions)
-â”œâ”€â”€ PortHorizon.Agents.Dashboard     Kestrel + dashboard (UNCHANGED)
+Forge.exe
+â”œâ”€â”€ Forge.Core         SQLite + IssueStore/AgentStore/SkillStore/SprintStore (UNCHANGED)
+â”œâ”€â”€ Forge.Orchestrator  Dispatches issues to MAF agents
+â”œâ”€â”€ Forge.Agents        SqliteAgentSkillsSource, RoleAgentDefinitions
+â”œâ”€â”€ Forge.Tools        Git tools, PR tools, shell tools (AIFunctions)
+â”œâ”€â”€ Forge.Dashboard     Kestrel + dashboard (UNCHANGED)
 â””â”€â”€ Microsoft.Agents.AI.*           MAF runtime packages (NuGet prerelease for now)
     â”œâ”€â”€ Microsoft.Agents.AI              Core AIAgent + IChatClient + AgentSession
     â”œâ”€â”€ Microsoft.Agents.AI.Harness      HarnessAgent + HarnessAgentOptions + todo/memory providers
@@ -139,7 +139,7 @@ Reuse `RoleAgentRegistry` to build the `ChatClientAgent` per role. The "kilo .md
 
 **Outcome (2026-06-30):** `OrchestratorAgent` calls `IAgentRunner.RunAsync(...)` and no longer references `AcpClient`/`AcpProcessManager`. The kilo/ACP files are deleted. The no-op commit branch captures `modelResponse` metadata; the runner's `Elapsed` TimeSpan flows through to the dashboard `AcpSessionCompleted` event. 89/89 tests pass. P0.5+ proceeds.
 
-Deliverable: one existing scenario (e.g., the ecs-1 task) runs end-to-end through MAF, with the dashboard still showing the result. **Test outline:** the integration test under tests/PortHorizon.Agents.Tests/Integration/Phase0Tests.cs enqueues a fixture issue with a stubbed IChatClient that returns a scripted ChatResponse; asserts (a) MafAgentRunner.RunAsync returns a non-empty response, (b) the orchestrator's no-op branch transitions the issue to `Completed` with the response text in `modelResponse` metadata, (c) the integration test runs without kilo installed. We do NOT exercise git worktree creation, PR creation, or any real LLM in Phase 0 - those are Phase 2.
+Deliverable: one existing scenario (e.g., the ecs-1 task) runs end-to-end through MAF, with the dashboard still showing the result. **Test outline:** the integration test under tests/Forge.Tests/Integration/Phase0Tests.cs enqueues a fixture issue with a stubbed IChatClient that returns a scripted ChatResponse; asserts (a) MafAgentRunner.RunAsync returns a non-empty response, (b) the orchestrator's no-op branch transitions the issue to `Completed` with the response text in `modelResponse` metadata, (c) the integration test runs without kilo installed. We do NOT exercise git worktree creation, PR creation, or any real LLM in Phase 0 - those are Phase 2.
 
 ### Phase 1 â€” Skills actually do something
 
@@ -185,7 +185,7 @@ Each phase is behind a feature flag (`Orchestrator:Runtime=Kilo|Maf`, `Orchestra
 
 ## Test strategy
 
-- **Unit tests on every adapter.** Continue `tests/PortHorizon.Agents.Tests/` as the home for unit tests. New components (`MafAgentRunner`, `SqliteAgentSkillsSource`, git/PR `AIFunction`s, workflow host) ship with one-off unit tests covering happy path, error path, and the "what happens if the underlying IChatClient throws mid-stream" path.
+- **Unit tests on every adapter.** Continue `tests/Forge.Tests/` as the home for unit tests. New components (`MafAgentRunner`, `SqliteAgentSkillsSource`, git/PR `AIFunction`s, workflow host) ship with one-off unit tests covering happy path, error path, and the "what happens if the underlying IChatClient throws mid-stream" path.
 - **Stubbed `IChatClient` for replay-style tests.** Microsoft has `Microsoft.Agents.AI.Testing` on NuGet (verify before adopting; if absent, roll a `TestChatClient : DelegatingChatClient` that returns scripted `ChatResponse` objects from a queue). All agent logic — skills loading, tool dispatch, prompt assembly — runs against the stub; no real LLM in unit tests.
 - **One in-process integration test per phase.** Each phase (`phase-{0..4}-integration-tests`) spins up the real workflow with a stub `IChatClient`, an in-memory `SqliteAgentSkillsSource`, and a stub `Octokit` PR client. The test asserts: issue claimed → worktree created → agent run → commit pushed → PR opened → issue marked Completed. This is the "did I wire all the pieces correctly" test.
 - **No live-model regression tests.** A 4o / Claude / Anthropic session for "regression" is not viable (non-deterministic, expensive, slow). Keep that out of CI. Live smoke tests are manual checks before each release.
@@ -257,7 +257,7 @@ These are reads-only-from-the-issue's perspective. Writes happen at the phase bo
 
 
 9. **GitHub MCP tool overlap.** If we ever use the GitHub Copilot provider or any provider that bundles the GitHub MCP server, the agent will receive *built-in* GitHub tools (PR creation, issue filing, etc.) that overlap with our hand-rolled open_pull_request AIFunction. Pick: (a) let the agent use provider-native GitHub tools and keep Octokit only for the merge-watcher; (b) disable provider-native GitHub tools in our ChatClientAgentOptions.Tools and own the GitHub surface ourselves. (b) is the default; (a) is cheaper if we trust the provider tool-set.
-10. **DurableTask container dependency.** Phase 4 requires either Azure-hosted Durable Functions, docker run mcr.microsoft.com/dts/dts-emulator, or a self-hosted DTS. There is no in-process DTS. Accepting Phase 4 means accepting a Docker-or-Azure dependency in the deploy story. The current PortHorizon.Agents binary has no such dependency. Phase 4 is opt-in; the orchestrator can ship P0..P3 without it.
+10. **DurableTask container dependency.** Phase 4 requires either Azure-hosted Durable Functions, docker run mcr.microsoft.com/dts/dts-emulator, or a self-hosted DTS. There is no in-process DTS. Accepting Phase 4 means accepting a Docker-or-Azure dependency in the deploy story. The current Forge binary has no such dependency. Phase 4 is opt-in; the orchestrator can ship P0..P3 without it.
 11. **Naming.** The old RoleAgentRegistry + .kilo/agents/*.md model has the word kilo in several places (e.g. the kiloName column on AgentStore). The MAF migration is the natural point to rename to provider/displayName. We do this as part of Phase 0 to avoid carrying the wrong name into the MAF era.
 
 

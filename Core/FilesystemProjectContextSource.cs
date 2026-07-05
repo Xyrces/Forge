@@ -1,6 +1,6 @@
 using Microsoft.Data.Sqlite;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// One read-only snippet from the codebase that the agent

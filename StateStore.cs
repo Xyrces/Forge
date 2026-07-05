@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// Slim JSON store for orchestrator heartbeats + counters. The

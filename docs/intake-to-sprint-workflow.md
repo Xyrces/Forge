@@ -1,4 +1,4 @@
-# Intake -> Sprint workflow
+﻿# Intake -> Sprint workflow
 
 > Status: **DRAFT for review, all 12 open questions RESOLVED.**
 > Nothing in this document is implemented yet. Sections marked
@@ -967,7 +967,7 @@ adjust before clicking Start.
 ### 9.1 IProjectContextSource (Phase 2)
 
 ```
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 public interface IProjectContextSource
 {
@@ -1026,7 +1026,7 @@ ChatClientAgent abstraction as the IntakeAgent / ProductAgent /
 GroomerAgent.
 
 ```
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 public sealed class ScrumMasterAgent
 {
@@ -1110,7 +1110,7 @@ its own judgment on top.
 The incremental graph builder. See §4.2a for the interface:
 
 ```
-namespace PortHorizon.Agents.Codebase;
+namespace Forge.Codebase;
 
 public interface ICodebaseGraphBuilder
 {
@@ -1183,7 +1183,7 @@ Pure-function pipeline that produces the derived tables
 (`spec_diagram`, `spec_touches`, `spec_dep`) from the spec body.
 
 ```
-namespace PortHorizon.Agents.Specs;
+namespace Forge.Specs;
 
 public sealed class SpecBodyExtractor
 {

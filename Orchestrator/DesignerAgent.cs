@@ -1,14 +1,14 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Codebase;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
+using Forge.Agents;
+using Forge.Codebase;
+using Forge.Core;
+using Forge.Dashboard;
 
-namespace PortHorizon.Agents.Orchestrator;
+namespace Forge.Orchestrator;
 
 /// <summary>
 /// The Designer agent. Given a spec in <c>ReadyForDesign</c>:

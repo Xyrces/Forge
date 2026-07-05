@@ -1,6 +1,6 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 public enum SprintStatus { Active, Completed, Archived }
 

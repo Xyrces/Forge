@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Net.Http.Headers;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 /// <summary>
 /// Streams the JSONL mirror of the issue store. Operators can

@@ -3,10 +3,10 @@ using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.AgentTools;
-using PortHorizon.Agents.Core;
+using Forge.AgentTools;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// MAF-based implementation of <see cref="IAgentRunner"/>. Phase 0:

@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Configuration;
+﻿namespace Forge.Configuration;
 
 // Note: properties use { get; set; } (not init) so the Microsoft
 // Extensions Configuration binder can populate them from appsettings.json.

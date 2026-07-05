@@ -2,7 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// Background service that mirrors the issue store to a JSONL file

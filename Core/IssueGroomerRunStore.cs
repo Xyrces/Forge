@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Text.Json;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// P3.5: append-only log of Groomer runs. One row per run

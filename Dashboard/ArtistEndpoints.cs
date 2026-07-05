@@ -2,10 +2,10 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Orchestrator;
+using Forge.Core;
+using Forge.Orchestrator;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 /// <summary>
 /// P2.b: HTTP endpoints for the Artist pipeline.

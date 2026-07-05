@@ -1,8 +1,8 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using Octokit;
 
-namespace PortHorizon.Agents;
+namespace Forge;
 
 /// <summary>
 /// E2E harness adapter — implements the same surface as

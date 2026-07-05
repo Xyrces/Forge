@@ -1,11 +1,11 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
+using Forge.Core;
+using Forge.Dashboard;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// GroomerAgent: decomposes an Approved spec into 1-3 stories

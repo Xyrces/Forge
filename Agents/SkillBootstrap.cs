@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// Bootstraps the Xyrces/godot-ecs-gamedev-playbook reference into

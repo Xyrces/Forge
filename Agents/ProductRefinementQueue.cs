@@ -1,10 +1,10 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
-using PortHorizon.Agents.Specs;
+using Forge.Core;
+using Forge.Dashboard;
+using Forge.Specs;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// Background queue that watches the dashboard event bus for

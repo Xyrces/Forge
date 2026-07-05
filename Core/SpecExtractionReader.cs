@@ -1,6 +1,6 @@
 using Microsoft.Data.Sqlite;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// One row of <c>spec_diagram</c>, in extraction order. Returned

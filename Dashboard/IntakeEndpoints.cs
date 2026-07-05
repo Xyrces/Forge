@@ -2,10 +2,10 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Core;
+using Forge.Agents;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 /// <summary>
 /// P1.4 endpoints: intake sessions (list/get/create/send-message/accept-epic).

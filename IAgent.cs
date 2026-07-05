@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 public interface IAgent
 {

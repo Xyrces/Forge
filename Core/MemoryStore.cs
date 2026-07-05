@@ -1,7 +1,7 @@
 using Microsoft.Data.Sqlite;
 using System.Text;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// Persistent project memory. Stores keyed insights that survive

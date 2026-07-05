@@ -1,18 +1,18 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using PortHorizon.Agents;
-using PortHorizon.Agents.AgentTools;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Configuration;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
-using PortHorizon.Agents.Orchestrator;
-using PortHorizon.Agents.Reviewer;
+using Forge;
+using Forge.AgentTools;
+using Forge.Agents;
+using Forge.Configuration;
+using Forge.Core;
+using Forge.Dashboard;
+using Forge.Orchestrator;
+using Forge.Reviewer;
 
-namespace PortHorizon.Agents.Tools.E2E;
+namespace Forge.Tools.E2E;
 
 /// <summary>
 /// E2E harness — proves the orchestrator can take a spec and
@@ -443,7 +443,7 @@ if (useRealLlm)
         while (dir is not null)
         {
             if (Directory.Exists(Path.Combine(dir, ".git"))
-                && File.Exists(Path.Combine(dir, "PortHorizon.Agents.Core.csproj")))
+                && File.Exists(Path.Combine(dir, "Forge.Core.csproj")))
                 return dir;
             dir = Path.GetDirectoryName(dir);
         }

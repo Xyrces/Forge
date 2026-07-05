@@ -1,9 +1,9 @@
 using System.Text.Json;
-using PortHorizon.Agents.Codebase;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Specs;
+using Forge.Codebase;
+using Forge.Core;
+using Forge.Specs;
 
-namespace PortHorizon.Agents.Orchestrator;
+namespace Forge.Orchestrator;
 
 /// <summary>
 /// Severity of a single hygiene finding. <see cref="Error"/> findings

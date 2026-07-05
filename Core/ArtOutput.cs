@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// An art output: a produced art asset (3D mesh, texture,

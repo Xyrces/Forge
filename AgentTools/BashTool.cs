@@ -3,9 +3,9 @@ using System.Diagnostics;
 using System.Text;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
+using Forge.Core;
 
-namespace PortHorizon.Agents.AgentTools;
+namespace Forge.AgentTools;
 
 /// <summary>
 /// Real <c>AIFunction</c> that runs a shell command and returns combined

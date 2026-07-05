@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace PortHorizon.Agents.Specs;
+namespace Forge.Specs;
 
 /// <summary>
 /// Hand-written markdown-subset parser that extracts the

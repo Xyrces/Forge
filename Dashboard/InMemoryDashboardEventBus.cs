@@ -1,6 +1,6 @@
-using System.Threading.Channels;
+﻿using System.Threading.Channels;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 public interface IDashboardEventBus
 {

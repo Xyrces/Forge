@@ -1,7 +1,7 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 public sealed record AgentRecord(
     string Id, string KiloName, string DisplayName, string Scope,

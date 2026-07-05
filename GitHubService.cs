@@ -1,7 +1,7 @@
-using Octokit;
-using PortHorizon.Agents.Configuration;
+﻿using Octokit;
+using Forge.Configuration;
 
-namespace PortHorizon.Agents;
+namespace Forge;
 
 public class GitHubService
 {
@@ -16,7 +16,7 @@ public class GitHubService
     {
         _owner = owner;
         _repo = repo;
-        _client = new GitHubClient(new ProductHeaderValue("PortHorizon-Agents"));
+        _client = new GitHubClient(new ProductHeaderValue("Forge"));
         if (!string.IsNullOrEmpty(token))
             _client.Credentials = new Credentials(token);
     }

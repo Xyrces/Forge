@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 /// <summary>
 /// Test-only <see cref="IProjectContextSource"/> that returns a

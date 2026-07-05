@@ -1,7 +1,7 @@
-using Microsoft.Data.Sqlite;
-using PortHorizon.Agents.Specs;
+﻿using Microsoft.Data.Sqlite;
+using Forge.Specs;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 public enum SpecStatus
 {

@@ -1,6 +1,6 @@
-﻿using System.Threading.Channels;
+using System.Threading.Channels;
 
-namespace PortHorizon.Agents.Orchestrator;
+namespace Forge.Orchestrator;
 
 /// <summary>
 /// Per-agent message inbox. Send-to-agent from the dashboard enqueues here;

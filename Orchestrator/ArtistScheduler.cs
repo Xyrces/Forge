@@ -1,10 +1,10 @@
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
-using PortHorizon.Agents.Meshy;
+using Forge.Agents;
+using Forge.Core;
+using Forge.Dashboard;
+using Forge.Meshy;
 
-namespace PortHorizon.Agents.Orchestrator;
+namespace Forge.Orchestrator;
 
 /// <summary>
 /// P2.b: scheduled Artist. Wakes up every <c>Interval</c> and

@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-namespace PortHorizon.Agents.Codebase;
+namespace Forge.Codebase;
 
 /// <summary>
 /// Builds a C# / .csproj codebase import graph for a repo root.

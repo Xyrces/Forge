@@ -1,4 +1,4 @@
-# PortHorizon.Agents — system flow
+﻿# Forge — system flow
 
 End-to-end view of what runs when a task is dispatched.
 
@@ -6,7 +6,7 @@ End-to-end view of what runs when a task is dispatched.
 
 ```
                 ┌────────────────────────────────────────────────────┐
-                │              PortHorizon.Agents.exe               │
+                │              Forge.exe               │
                 │                                                    │
    operator ──► │  ┌────────────┐    ┌──────────────┐    ┌───────┐  │
    curl / SSE   │  │  Dashboard │◄──►│ Orchestrator │◄──►│PRWatch│  │

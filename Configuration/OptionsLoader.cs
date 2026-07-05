@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Configuration;
 
-namespace PortHorizon.Agents.Configuration;
+namespace Forge.Configuration;
 
 public static class OptionsLoader
 {

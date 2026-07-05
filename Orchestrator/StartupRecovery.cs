@@ -1,11 +1,11 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Octokit;
-using PortHorizon.Agents.AgentTools;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
+using Forge.AgentTools;
+using Forge.Core;
+using Forge.Dashboard;
 
-namespace PortHorizon.Agents.Orchestrator;
+namespace Forge.Orchestrator;
 
 /// <summary>
 /// P4 Stage A — checkpoint-based recovery. Runs at startup

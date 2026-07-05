@@ -4,9 +4,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using PortHorizon.Agents.Core;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Meshy;
+namespace Forge.Meshy;
 
 /// <summary>
 /// Thin async wrapper over the Meshy REST API. Supports

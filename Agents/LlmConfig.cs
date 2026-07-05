@@ -1,6 +1,6 @@
-﻿using PortHorizon.Agents.Core;
+﻿using Forge.Core;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// Configuration for a single LLM provider. The factory matches a provider

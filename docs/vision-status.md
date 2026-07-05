@@ -1,4 +1,4 @@
-# Vision status
+﻿# Vision status
 
 Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-07-02. This is the source of truth for "what's done, what's not, what's deferred." Updated by the commit that lands the work — keep it current.
 
@@ -45,7 +45,7 @@ Where each phase of `docs/agent-framework-design.md` actually stands as of 2026-
 A new operator can, after following [README.md](../README.md) and [install-kilo.md](../install-kilo.md):
 
 1. Install — `dotnet build` + `appsettings.json`. No separate CLI install.
-2. Run — `dotnet run --project PortHorizon.Agents`.
+2. Run — `dotnet run --project Forge`.
 3. Queue a task — CLI, HTTP, or dashboard. The orchestrator claims, creates a worktree, runs the agent (with bash AIFunction + memory recall), commits, pushes, opens a PR, enqueues a watch.
 4. Observe — live dashboard with Tasks, Spec, Intake, Memory, Events tabs; JSONL mirror for `tail -f`; SSE event stream; per-issue dependency graph.
 5. Steer — add memory, add dep edges, force-transition a stuck task, approve a PR to unblock the watch.

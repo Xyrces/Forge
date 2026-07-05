@@ -1,8 +1,8 @@
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
+using Forge.Core;
+using Forge.Dashboard;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// Factory for <see cref="GroomerAgent"/> instances. Each operator

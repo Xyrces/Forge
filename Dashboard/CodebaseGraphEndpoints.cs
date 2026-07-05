@@ -2,10 +2,10 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Codebase;
-using PortHorizon.Agents.Core;
+using Forge.Codebase;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Dashboard;
+namespace Forge.Dashboard;
 
 /// <summary>
 /// Phase 2b: codebase graph endpoint. The Intake tab side-panel

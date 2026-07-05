@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Core;
+﻿namespace Forge.Core;
 
 /// <summary>
 /// A design artifact: a visual (or visual-language) document

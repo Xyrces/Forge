@@ -1,9 +1,9 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.Configuration;
+using Forge.Configuration;
 
-namespace PortHorizon.Agents.AgentTools;
+namespace Forge.AgentTools;
 
 public sealed class GitWorktreeService
 {

@@ -1,4 +1,4 @@
-# P4 Headroom — LLM cost optimization
+﻿# P4 Headroom — LLM cost optimization
 
 This doc covers how to embed [Headroom](https://headroomlabs-ai.github.io/headroom/)
 between the orchestrator and the kilo gateway to compress
@@ -85,7 +85,7 @@ curl -s http://127.0.0.1:8787/stats | jq .
 
 # 3. Start the orchestrator. The factory rewrites the kilo
 # gateway baseUrl; chat calls go through Headroom.
-dotnet run --project PortHorizon.Agents
+dotnet run --project Forge
 
 # 4. Watch the cost dashboard.
 curl http://127.0.0.1:4097/api/cost/stats | jq .

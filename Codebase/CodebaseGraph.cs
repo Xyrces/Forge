@@ -1,4 +1,4 @@
-namespace PortHorizon.Agents.Codebase;
+namespace Forge.Codebase;
 
 /// <summary>
 /// One node in the codebase import graph: a file, its language,

@@ -1,6 +1,6 @@
-﻿using Microsoft.Data.Sqlite;
+using Microsoft.Data.Sqlite;
 
-namespace PortHorizon.Agents.Core;
+namespace Forge.Core;
 
 public sealed record SkillRecord(
     string Id, string Name, string? Description, string Body,

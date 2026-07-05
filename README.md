@@ -1,11 +1,11 @@
-# PortHorizon.Agents
+# Forge
 
-A long-lived .NET 10 orchestrator that drives AI coding agents (M3 by default) against the [Xyrces/PortHorizon](https://github.com/Xyrces/PortHorizon) game repo. The orchestrator owns the task queue, git worktrees, GitHub PR lifecycle, and review-gated merge. **The model owns the code.**
+A long-lived .NET 10 orchestrator that drives AI coding agents (M3 by default) against any project that follows the conventions in `docs/agent-framework-design.md`. The first deployment targets the [Xyrces/PortHorizon](https://github.com/Xyrces/PortHorizon) Godot-ECS game repo, but `WorkspaceOptions` is fully configurable: pointing `workspace.root` at a different git repo + `github.owner`/`repo` at the corresponding GitHub project is the full deployment-time config. The orchestrator owns the task queue, git worktrees, GitHub PR lifecycle, and review-gated merge. **The model owns the code.**
 
 The runtime uses the [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) 1.12.0 with [`Microsoft.Agents.AI.Workflows`](https://www.nuget.org/packages/Microsoft.Agents.AI.Workflows) for the dispatch pipeline. Agents are powered by the [kilo gateway](https://kilo.ai/docs/gateway) — an OpenAI-compatible HTTP endpoint. No separate `kilo serve` subprocess, no ACP, no per-session worktree cwd gymnastics.
 
 ```
-PortHorizon.Agents (.NET orchestrator, long-lived)
+Forge (.NET orchestrator, long-lived)
 ├── IssueStore (SQLite)         task queue + dep graph + memory + event log
 ├── MemoryStore (SQLite)         persistent project memory (bd remember/prime)
 ├── IssuesJsonlMirror            background tail -f mirror of the issue store
@@ -31,7 +31,7 @@ External
 ## Build
 
 ```bash
-dotnet build PortHorizon.Agents.sln
+dotnet build Forge.sln
 ```
 
 `TreatWarningsAsErrors=true`; clean build expected.
@@ -39,10 +39,10 @@ dotnet build PortHorizon.Agents.sln
 ## Test
 
 ```bash
-dotnet test PortHorizon.Agents.sln
+dotnet test Forge.sln
 ```
 
-Current coverage: **294 passing, 2 skipped** (real-LLM tests gated on having a kilo gateway key configured). Test infrastructure includes:
+Current coverage: **402 passing, 2 skipped** (real-LLM tests gated on having a kilo gateway key configured). Test infrastructure includes:
 
 - `IssueStoreTests`, `IssueDepTests`, `IssuesJsonlMirrorTests` — SQLite store
 - `MemoryStoreTests`, `MemoryEndpointTests` — memory table + HTTP
@@ -97,29 +97,29 @@ Use the env-var path for CI / shared hosts; use `appsettings.json` for local dev
 
 ```bash
 # Long-running orchestrator + dashboard
-dotnet run --project PortHorizon.Agents
+dotnet run --project Forge
 
 # One shot: process the queue once and exit
-dotnet run --project PortHorizon.Agents -- --once
+dotnet run --project Forge -- --once
 
 # Dashboard only — host the UI without dispatching
-dotnet run --project PortHorizon.Agents -- --dashboard-only
+dotnet run --project Forge -- --dashboard-only
 
 # Print queue summary and exit
-dotnet run --project PortHorizon.Agents -- --status
+dotnet run --project Forge -- --status
 
 # Pre-flight check: config + DB schemas + GitHub + kilo gateway auth
 # (no dispatch; exits non-zero on any failure; useful for CI/smoke)
-dotnet run --project PortHorizon.Agents -- --check
+dotnet run --project Forge -- --check
 
 # Dry-run recovery: see what StartupRecovery would do (no side-effects)
-dotnet run --project PortHorizon.Agents -- --recover
+dotnet run --project Forge -- --recover
 
 # Recovery + start: replay unfinished side-effects, then start dispatch
-dotnet run --project PortHorizon.Agents -- --recover-and-start
+dotnet run --project Forge -- --recover-and-start
 
 # Enqueue a task
-dotnet run --project PortHorizon.Agents -- \
+dotnet run --project Forge -- \
   --enqueue-task "Add Position ECS component" \
   --task-type ecs \
   --task-desc "..." \
@@ -218,13 +218,13 @@ The orchestrator refuses to start if any state file is corrupt or has an unknown
 Structured single-line console logs:
 
 ```
-13:42:01.102 info: PortHorizon.Agents[0] Starting dashboard
-13:42:01.731 info: PortHorizon.Agents.Dashboard.DashboardHost[0] Dashboard listening on http://127.0.0.1:4097
-13:42:01.750 info: PortHorizon.Agents[0] Orchestrator starting
-13:42:05.221 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Issue task-1 transition Pending -> InProgress (type=task)
-13:42:48.901 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Agent session for task-1 completed in 43680ms
-13:42:48.940 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Opened PR #42 for task-1
-13:42:48.965 info: PortHorizon.Agents.Orchestrator.OrchestratorAgent[0] Task task-1 dispatched to PR #42 (duration 43743ms)
+13:42:01.102 info: Forge[0] Starting dashboard
+13:42:01.731 info: Forge.Dashboard.DashboardHost[0] Dashboard listening on http://127.0.0.1:4097
+13:42:01.750 info: Forge[0] Orchestrator starting
+13:42:05.221 info: Forge.Orchestrator.OrchestratorAgent[0] Issue task-1 transition Pending -> InProgress (type=task)
+13:42:48.901 info: Forge.Orchestrator.OrchestratorAgent[0] Agent session for task-1 completed in 43680ms
+13:42:48.940 info: Forge.Orchestrator.OrchestratorAgent[0] Opened PR #42 for task-1
+13:42:48.965 info: Forge.Orchestrator.OrchestratorAgent[0] Task task-1 dispatched to PR #42 (duration 43743ms)
 ```
 
 Set `Logging__LogLevel__Default=Debug` for verbose output (raw LLM requests, executor trace).

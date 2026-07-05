@@ -1,4 +1,4 @@
-﻿namespace PortHorizon.Agents.Agents;
+﻿namespace Forge.Agents;
 
 /// <summary>
 /// What <see cref="IAgentRunner.RunAsync"/> returns. Captures the response

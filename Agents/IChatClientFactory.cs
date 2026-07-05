@@ -1,7 +1,7 @@
-﻿using Microsoft.Extensions.AI;
-using PortHorizon.Agents.Core;
+using Microsoft.Extensions.AI;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// Builds an <see cref="IChatClient"/> from an <see cref="LlmConfig"/>.

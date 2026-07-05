@@ -1,7 +1,7 @@
 using Microsoft.Data.Sqlite;
-using PortHorizon.Agents.Core;
+using Forge.Core;
 
-namespace PortHorizon.Agents.Codebase;
+namespace Forge.Codebase;
 
 /// <summary>
 /// SQLite-backed manifest for the codebase graph cache. Tracks the

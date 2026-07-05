@@ -8,13 +8,13 @@ using Microsoft.DurableTask.Worker.AzureManaged;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using PortHorizon.Agents.AgentTools;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Configuration;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
+using Forge.AgentTools;
+using Forge.Agents;
+using Forge.Configuration;
+using Forge.Core;
+using Forge.Dashboard;
 
-namespace PortHorizon.Agents.Orchestrator;
+namespace Forge.Orchestrator;
 
 /// <summary>
 /// P4 Stage B — DurableDispatcher. Registers the engineering
@@ -24,7 +24,7 @@ namespace PortHorizon.Agents.Orchestrator;
 ///
 /// <para>
 /// The workflow definition itself is unchanged — it's the
-/// same <see cref="PortHorizon.Agents.Orchestrator.Workflow.EngineeringDispatchWorkflow"/>
+/// same <see cref="Forge.Orchestrator.Workflow.EngineeringDispatchWorkflow"/>
 /// the InProcess runtime uses. The DurableWorkflowOptions.AddWorkflow
 /// API takes a fully-built <see cref="Workflow"/>; since our
 /// executors take singletons from the DI container (no per-instance

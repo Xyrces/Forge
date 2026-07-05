@@ -1,15 +1,15 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
-using PortHorizon.Agents.AgentTools;
-using PortHorizon.Agents.Agents;
-using PortHorizon.Agents.Configuration;
-using PortHorizon.Agents.Core;
-using PortHorizon.Agents.Dashboard;
-using PortHorizon.Agents.Orchestrator;
-using PortHorizon.Agents.Reviewer;
+using Forge.AgentTools;
+using Forge.Agents;
+using Forge.Configuration;
+using Forge.Core;
+using Forge.Dashboard;
+using Forge.Orchestrator;
+using Forge.Reviewer;
 
-namespace PortHorizon.Agents;
+namespace Forge;
 
 public static class Program
 {
@@ -50,7 +50,7 @@ public static class Program
             });
             builder.SetMinimumLevel(LogLevel.Information);
         });
-        var logger = loggerFactory.CreateLogger("PortHorizon.Agents");
+        var logger = loggerFactory.CreateLogger("Forge");
 
         if (mode == CliMode.Status)
             return await PrintStatusAsync(options, logger);
@@ -382,7 +382,7 @@ Console.Error.WriteLine(ex.ToString());
         var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
         var stateDir = Path.Combine(workspaceDir, ".portHorizon", "state");
 
-        Console.WriteLine("Pre-flight check for PortHorizon.Agents");
+        Console.WriteLine("Pre-flight check for Forge");
         Console.WriteLine($"  workspace: {options.Workspace.Root}");
         Console.WriteLine($"  state dir: {stateDir}");
         Console.WriteLine();
@@ -539,7 +539,7 @@ Console.Error.WriteLine(ex.ToString());
             {
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
                 http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", options.GitHub.Token);
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("PortHorizon.Agents-Check");
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("Forge-Check");
                 var resp = await http.GetAsync($"https://api.github.com/repos/{options.GitHub.Owner}/{options.GitHub.Repo}");
                 if (resp.IsSuccessStatusCode)
                 {
@@ -985,4 +985,3 @@ try
         }
     }
 }
-

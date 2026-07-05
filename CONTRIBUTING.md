@@ -1,11 +1,11 @@
-# Contributing
+﻿# Contributing
 
 How the code is organized, what conventions to follow, and what to read first.
 
 ## Module layout
 
 ```
-PortHorizon.Agents/
+Forge/
 ├── Agents/                    # MAF agent implementations (Intake, Product, Groomer, Runner)
 │   ├── MafAgentRunner.cs      # MAF ChatClientAgent + tool plumbing
 │   ├── GroomerAgent.cs        # Spec -> stories+tasks decomposition
@@ -154,8 +154,8 @@ The live demo is the most thorough test. It exercises the full pipeline end-to-e
 7. `Agents/MafAgentRunner.cs` — how the agent runs
 8. `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` — the MAF-Workflows version (parallel impl, dormant)
 9. `Dashboard/DashboardHost.cs` — how the HTTP surface composes
-10. The test suite — `tests/PortHorizon.Agents.Tests/IssueStoreTests.cs` is the best entry point
+10. The test suite — `tests/Forge.Tests/IssueStoreTests.cs` is the best entry point
 
 ## Asking for help
 
-If you're stuck, the first thing to do is run `dotnet run --project PortHorizon.Agents -- --check`. If that passes, the bug is somewhere in the dispatch path. If it fails, the failure message will tell you which subsystem to investigate.
+If you're stuck, the first thing to do is run `dotnet run --project Forge -- --check`. If that passes, the bug is somewhere in the dispatch path. If it fails, the failure message will tell you which subsystem to investigate.
