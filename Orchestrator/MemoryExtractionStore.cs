@@ -91,6 +91,44 @@ public sealed class MemoryExtractionStore : IAsyncDisposable
         return list;
     }
 
+    /// <summary>
+    /// List the most recent extraction runs across all tasks,
+    /// newest first. Used by <c>GET /api/memory/extractions</c>
+    /// to feed the global Memory Core view.
+    /// </summary>
+    public async Task<IReadOnlyList<MemoryExtractionRecord>> ListAsync(
+        int limit = 100, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, ts, task_id, source_chars, extracted_count,
+                   persisted_keys_json, error
+            FROM memory_extraction
+            ORDER BY ts DESC, id DESC
+            LIMIT $limit
+            """;
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var list = new List<MemoryExtractionRecord>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct))
+        {
+            list.Add(new MemoryExtractionRecord(
+                Id: rd.GetInt64(0),
+                Timestamp: DateTime.ParseExact(
+                    rd.GetString(1), DateFormat,
+                    System.Globalization.CultureInfo.InvariantCulture),
+                TaskId: rd.GetString(2),
+                SourceChars: rd.GetInt32(3),
+                ExtractedCount: rd.GetInt32(4),
+                PersistedKeys: System.Text.Json.JsonSerializer.Deserialize<List<string>>(
+                    rd.GetString(5)) ?? new List<string>(),
+                Error: rd.IsDBNull(6) ? null : rd.GetString(6)));
+        }
+        return list;
+    }
+
     public async ValueTask DisposeAsync() => await ValueTask.CompletedTask;
     public void Dispose() { }
 }

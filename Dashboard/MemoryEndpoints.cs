@@ -92,6 +92,20 @@ public static class MemoryEndpoints
         MemoryExtractionStore extractions,
         ILogger logger)
     {
+        app.MapGet("/api/memory/extractions", async (int? limit, CancellationToken ct) =>
+        {
+            try
+            {
+                var list = await extractions.ListAsync(limit ?? 100, ct);
+                return Results.Json(list.Select(ToExtractionView).ToArray(), DashboardJson.Options);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "GET /api/memory/extractions failed");
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+
         app.MapGet("/api/memory/extractions/{taskId}", async (string taskId, CancellationToken ct) =>
         {
             try

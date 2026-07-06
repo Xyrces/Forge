@@ -190,8 +190,8 @@ if (mode == CliMode.DashboardOnly)
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
-        var dashboard = new DashboardHost(
-            options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
+var dashboard = new DashboardHost(
+            options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>());
 
         _ = stateStore; // keep dead-code-elim happy; will remove in next commit
@@ -714,7 +714,7 @@ Console.Error.WriteLine(ex.ToString());
         // response after each PR is opened. Audit log lives in
         // the same memory.db; the v13 migration in IssueStore
         // covers the table.
-        var extractionStore = new Orchestrator.MemoryExtractionStore(memoryDbPath);
+        var extractionStore = new Orchestrator.MemoryExtractionStore(groomerRunsDb);
         var memoryExtractor = new Orchestrator.MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
             loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>());
@@ -874,7 +874,7 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
         _startupRecovery = startupRecovery;  // held against GC reaping
         var dashboard = new DashboardHost(
-            options.Dashboard, issues, agents, skills, sprints, messageBus, eventBus,
+            options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
             intakeStore: intakeStore,
             intakeRegistry: intakeRegistry,
