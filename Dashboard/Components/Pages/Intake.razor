@@ -1,0 +1,180 @@
+@page "/intake"
+@inject HttpClient Http
+@implements IDisposable
+
+<PageTitle>Intake</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Intake</h1>
+        <div class="page-header__meta">@(_sessions?.Count ?? 0) sessions</div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="StartNewSession">New session</button>
+        </div>
+    </div>
+
+    <div class="intake-split">
+        <aside class="intake-sessions">
+            @if (_sessions is null)
+            {
+                <div class="page-subtitle">Loading…</div>
+            }
+            else if (_sessions.Count == 0)
+            {
+                <div class="page-subtitle">No intake sessions yet.</div>
+            }
+            else
+            {
+                @foreach (var s in _sessions)
+                {
+                    <button class="intake-session @(s.Id == _activeSessionId ? "intake-session--active" : "")"
+                            @onclick="@(() => SetActive(s.Id))">
+                        <div class="intake-session__title">@s.Title</div>
+                        <div class="intake-session__meta mono">@s.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</div>
+                    </button>
+                }
+            }
+        </aside>
+
+        <section class="intake-thread">
+            @if (_activeSessionId is null)
+            {
+                <div class="page-subtitle">Pick a session on the left, or start a new one.</div>
+            }
+            else if (_messages is null)
+            {
+                <div class="page-subtitle">Loading…</div>
+            }
+            else
+            {
+                @foreach (var m in _messages)
+                {
+                    <div class="chat-msg chat-msg--@m.Role.ToLowerInvariant()">
+                        <div class="chat-msg__role mono">@m.Role</div>
+                        <div class="chat-msg__body">@m.Content</div>
+                        @if (m.ProposedEpicId is not null)
+                        {
+                            <div class="chat-msg__card">
+                                <div class="chat-msg__card-header">Proposed Epic</div>
+                                <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
+                                <button class="btn btn--primary">Accept Epic</button>
+                            </div>
+                        }
+                    </div>
+                }
+                <div class="intake-input">
+                    <input class="intake-input__field" @bind="_draft" placeholder="Type your message..." />
+                    <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">Send</button>
+                </div>
+            }
+        </section>
+
+        <aside class="intake-context">
+            <div class="intake-context__tabs">
+                <span class="chip chip--active">Spec Draft</span>
+                <span class="chip">Architecture</span>
+                <span class="chip">Memory</span>
+            </div>
+            <div class="intake-context__body">
+                <p class="page-subtitle">Architecture tab (Stage 6) renders the Cytoscape graph from <code>/api/codebase-graph?repoRoot=…</code>. Graph payload includes nodes + project edges; modules touched by the current epic are highlighted.</p>
+                <button class="btn" @onclick="RebuildGraph">Refresh Graph</button>
+                @if (_graphFileCount.HasValue)
+                {
+                    <p class="page-subtitle">@_graphFileCount files · sha @_graphSha</p>
+                }
+            </div>
+        </aside>
+    </div>
+</div>
+
+@code {
+    private List<SessionDto>? _sessions;
+    private List<MessageDto>? _messages;
+    private string? _activeSessionId;
+    private string _draft = "";
+    private bool _sending;
+    private int? _graphFileCount;
+    private string? _graphSha;
+
+    public sealed record SessionDto(string Id, string ProjectId, string Title, DateTime CreatedAt, DateTime UpdatedAt, List<MessageDto>? Messages);
+    public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadSessions();
+    }
+
+    private async Task ReloadSessions()
+    {
+        try
+        {
+            _sessions = await Http.GetFromJsonAsync<List<SessionDto>>("/api/intake/sessions");
+            if (_sessions is { Count: > 0 } && _activeSessionId is null)
+            {
+                await SetActive(_sessions[0].Id);
+            }
+            else
+            {
+                StateHasChanged();
+            }
+        }
+        catch { _sessions = new(); }
+    }
+
+    private async Task SetActive(string id)
+    {
+        _activeSessionId = id;
+        try
+        {
+            var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{id}");
+            _messages = resp?.Messages?.ToList() ?? new();
+        }
+        catch { _messages = new(); }
+        StateHasChanged();
+    }
+
+    private async Task StartNewSession()
+    {
+        try
+        {
+            var resp = await Http.PostAsJsonAsync("/api/intake/sessions", new { projectId = "PortHorizon", title = "New session" });
+            if (resp.IsSuccessStatusCode)
+            {
+                await ReloadSessions();
+            }
+        }
+        catch { }
+    }
+
+    private async Task SendMessage()
+    {
+        if (_activeSessionId is null || string.IsNullOrWhiteSpace(_draft)) return;
+        _sending = true;
+        try
+        {
+            await Http.PostAsJsonAsync($"/api/intake/sessions/{_activeSessionId}/messages", new { text = _draft });
+            _draft = "";
+            await SetActive(_activeSessionId);
+        }
+        catch { }
+        finally { _sending = false; }
+    }
+
+    private async Task RebuildGraph()
+    {
+        try
+        {
+            await Http.PostAsync("/api/codebase-graph/rebuild?repoRoot=" + Uri.EscapeDataString("C:/Users/jtn50/repos/gamedev/PortHorizon"), null);
+            var graph = await Http.GetFromJsonAsync<GraphDto>("/api/codebase-graph?repoRoot=" + Uri.EscapeDataString("C:/Users/jtn50/repos/gamedev/PortHorizon"));
+            if (graph is not null)
+            {
+                _graphFileCount = graph.fileCount;
+                _graphSha = graph.repoSha;
+            }
+        }
+        catch { }
+    }
+
+    public sealed record GraphDto(string repoSha, int fileCount, int importCount);
+
+    public void Dispose() { }
+}

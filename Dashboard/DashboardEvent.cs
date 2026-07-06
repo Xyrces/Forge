@@ -38,4 +38,10 @@ public static class DashboardEventKind
     // CommitPushPrExecutor after the PR is opened; the data dict
     // carries extractedCount + persistedKeys.
     public const string MemoryExtracted = "memory.extracted";
+    // P6 Stage 6: intake agent lifecycle events. Promoted from raw
+    // string literals in IntakeAgent.cs so the SSE subscription and
+    // the dashboard's Live Feed don't drift apart.
+    public const string IntakeRunStarted = "intake.run.started";
+    public const string IntakeRunFailed = "intake.run.failed";
+    public const string IntakeRunCompleted = "intake.run.completed";
 }

@@ -80,6 +80,58 @@ public static class CodebaseGraphEndpoints
 
             return Results.Json(ToView(graph), DashboardJson.Options);
         });
+
+        // P6 Stage 6: force a rebuild by clearing the cache and
+        // re-running the build. Used by the Intake Architecture tab's
+        // "Refresh" button so the operator can pick up new code
+        // without restarting the dashboard.
+        app.MapPost("/api/codebase-graph/rebuild", async (string repoRoot, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(repoRoot))
+                return Results.BadRequest(new { error = "repoRoot required" });
+            if (!Directory.Exists(repoRoot))
+                return Results.NotFound(new { error = "repoRoot not found", repoRoot });
+
+            try
+            {
+                await cacheStore.ClearAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "cache clear failed");
+            }
+
+            CodebaseGraph graph;
+            try
+            {
+                graph = await builder.BuildAsync(repoRoot, priorCache: null, cacheDirectory: null, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Codebase graph rebuild failed for {RepoRoot}", repoRoot);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+
+            try
+            {
+                await cacheStore.UpsertAsync(new CodebaseGraphCache(
+                    BuiltAt: graph.BuiltAt,
+                    RepoSha: graph.RepoSha,
+                    FileCount: graph.Files.Count,
+                    EdgeCount: graph.Imports.Count + graph.Projects.Count,
+                    DiskPath: Path.Combine(repoRoot, ".portHorizon", "codebase-graph",
+                        Path.GetFileNameWithoutExtension(
+                            Directory.GetFiles(Path.Combine(repoRoot, ".portHorizon", "codebase-graph"), "*.json")
+                                .FirstOrDefault() ?? "graph") + ".json")
+                ), ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to upsert codebase_graph_cache row (continuing)");
+            }
+
+            return Results.Json(new { rebuilt = true, repoSha = graph.RepoSha, fileCount = graph.Files.Count });
+        });
     }
 
     private static object ToView(CodebaseGraph g) => new

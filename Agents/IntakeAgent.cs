@@ -188,7 +188,7 @@ public sealed class IntakeAgent
             description: $"Intake agent for project {_projectId}",
             tools: tools);
 
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.run.started",
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.IntakeRunStarted,
             sessionId, $"project={_projectId}",
             new Dictionary<string, object?> { ["sessionId"] = sessionId, ["projectId"] = _projectId }));
 
@@ -207,7 +207,7 @@ public sealed class IntakeAgent
             // The user message is already persisted; we leave it as the
             // last entry. The next user message continues the thread.
             _logger.LogError(ex, "Intake agent run failed for session {Session}", sessionId);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.run.failed",
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.IntakeRunFailed,
                 sessionId, ex.Message, new Dictionary<string, object?> { ["error"] = ex.Message }));
             throw;
         }
@@ -232,7 +232,7 @@ public sealed class IntakeAgent
                 ProposedEpicId: proposedEpicId,
                 ProposedEpicTitle: proposedEpicTitle), ct);
 
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.run.completed",
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.IntakeRunCompleted,
             sessionId, $"textLength={assistantText.Length}",
             new Dictionary<string, object?>
             {

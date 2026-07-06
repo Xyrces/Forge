@@ -15,6 +15,7 @@ public interface ICodebaseGraphCacheStore
 {
     Task<CodebaseGraphCache?> GetAsync(string repoRoot, CancellationToken ct = default);
     Task UpsertAsync(CodebaseGraphCache entry, CancellationToken ct = default);
+    Task ClearAsync(CancellationToken ct = default);
 }
 
 public sealed class CodebaseGraphCacheStore : ICodebaseGraphCacheStore, IAsyncDisposable
@@ -58,6 +59,15 @@ public sealed class CodebaseGraphCacheStore : ICodebaseGraphCacheStore, IAsyncDi
         cmd.Parameters.AddWithValue("$built", IssueStore.DateFormatTime(entry.BuiltAt));
         cmd.Parameters.AddWithValue("$files", entry.FileCount);
         cmd.Parameters.AddWithValue("$edges", entry.EdgeCount);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ClearAsync(CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM codebase_graph_cache";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
