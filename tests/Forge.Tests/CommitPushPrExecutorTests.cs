@@ -6,6 +6,7 @@ using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
 using Forge.Dashboard;
+using Forge.Orchestrator;
 using Forge.Orchestrator.Workflow;
 using Forge.Tests.Integration.TestHelpers;
 using Octokit;
@@ -102,9 +103,13 @@ public class CommitPushPrExecutorTests : IDisposable
 
         var exec = new CommitPushPrExecutor(
             _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
             NullLogger<CommitPushPrExecutor>.Instance);
         var result = await CommitPushPrExecutor.HandleAsync(
             agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
             NullLogger<CommitPushPrExecutor>.Instance, default);
 
         Assert.Equal(PrResult.NoDiff, result.Result);

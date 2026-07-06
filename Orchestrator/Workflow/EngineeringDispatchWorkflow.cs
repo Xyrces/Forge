@@ -40,6 +40,8 @@ public sealed class EngineeringDispatchWorkflow
         Func<string, string?> drainMessageBus,
         DesignArtifactStore designArtifacts,
         ArtOutputStore artOutputs,
+        IMemoryExtractor memoryExtractor,
+        MemoryExtractionStore extractionStore,
         ILogger<EngineeringDispatchWorkflow> logger)
     {
         var nullFactory = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
@@ -50,6 +52,7 @@ public sealed class EngineeringDispatchWorkflow
             drainMessageBus, events, designArtifacts, artOutputs,
             nullFactory.CreateLogger<RunAgentExecutor>());
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
+            memoryExtractor, extractionStore,
             nullFactory.CreateLogger<CommitPushPrExecutor>());
         _enqueueWatch = new EnqueueWatchExecutor(issues,
             nullFactory.CreateLogger<EnqueueWatchExecutor>());

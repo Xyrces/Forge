@@ -34,4 +34,8 @@ public static class DashboardEventKind
     public const string ArtistStatusCommitted = "artist.status.committed";
     // P4 Stage A: recovery events emitted by StartupRecovery.
     public const string RecoveryAction = "dispatch.recovery";
+    // P5.5: memory extraction events. Emitted by
+    // CommitPushPrExecutor after the PR is opened; the data dict
+    // carries extractedCount + persistedKeys.
+    public const string MemoryExtracted = "memory.extracted";
 }

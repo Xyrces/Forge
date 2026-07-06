@@ -166,7 +166,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 12;
+    public const int CurrentSchemaVersion = 13;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -615,6 +615,36 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 ON context_handoff(task_id, ts);
             CREATE INDEX IF NOT EXISTS ix_context_handoff_artifact
                 ON context_handoff(artifact_id, ts);
+
+            -- v13: P5.5 — auto-extracted project memory.
+            --
+            -- Records each extraction run so the operator can
+            -- audit what the LLM pulled from a model response
+            -- and which keys actually landed in the memory
+            -- table. The memory table itself is the store of
+            -- record; this table is the audit log.
+            --
+            --   source_chars: how many chars the model's response
+            --     contained when we asked the LLM to extract
+            --     from it. Useful for "is the model talking at
+            --     all?" sanity checks.
+            --   persisted_keys_json: JSON array of keys we wrote
+            --     to the memory table (post-sanitization). Empty
+            --     if extraction returned 0 items or errored.
+            --   error: null on success, exception summary on
+            --     failure (advisory; the engineering dispatch
+            --     continues regardless).
+            CREATE TABLE IF NOT EXISTS memory_extraction (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                  TEXT NOT NULL,
+                task_id             TEXT NOT NULL,
+                source_chars        INTEGER NOT NULL,
+                extracted_count     INTEGER NOT NULL,
+                persisted_keys_json TEXT NOT NULL,
+                error               TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_memory_extraction_task
+                ON memory_extraction(task_id, ts);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

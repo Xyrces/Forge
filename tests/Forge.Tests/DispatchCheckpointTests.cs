@@ -29,9 +29,10 @@ public class DispatchCheckpointTests : IDisposable
     }
 
     [Fact]
-    public void SchemaVersion_IsTwelve_AfterMigration()
+    public void SchemaVersion_IsCurrent_AfterMigration()
     {
-        Assert.Equal(12, IssueStore.CurrentSchemaVersion);
+        // v12 = P5 SharedContext. v13 = P5.5 memory extraction.
+        Assert.Equal(13, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

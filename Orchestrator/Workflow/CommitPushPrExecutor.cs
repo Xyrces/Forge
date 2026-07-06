@@ -20,6 +20,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
     private readonly GitWorktreeService _worktrees;
     private readonly GitHubService _gitHub;
     private readonly IDashboardEventBus _events;
+    private readonly IMemoryExtractor _memoryExtractor;
+    private readonly MemoryExtractionStore _extractionStore;
     private readonly ILogger<CommitPushPrExecutor> _logger;
 
     public CommitPushPrExecutor(
@@ -27,10 +29,12 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         GitWorktreeService worktrees,
         GitHubService gitHub,
         IDashboardEventBus events,
+        IMemoryExtractor memoryExtractor,
+        MemoryExtractionStore extractionStore,
         ILogger<CommitPushPrExecutor> logger)
         : base(
             "commit-push-pr",
-            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, logger, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, ct),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -39,6 +43,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         _worktrees = worktrees;
         _gitHub = gitHub;
         _events = events;
+        _memoryExtractor = memoryExtractor;
+        _extractionStore = extractionStore;
         _logger = logger;
     }
 
@@ -48,6 +54,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         GitWorktreeService worktrees,
         GitHubService gitHub,
         IDashboardEventBus events,
+        IMemoryExtractor memoryExtractor,
+        MemoryExtractionStore extractionStore,
         ILogger logger,
         CancellationToken ct)
     {
@@ -109,6 +117,51 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 ["sha"] = headSha,
             }));
         logger.LogInformation("Opened PR #{PrNumber} for {Id}", pr.Number, issue.Id);
+
+        // P5.5: extract durable project memory from the model's
+        // response. Advisory only; failure must not fail the
+        // dispatch. Runs after the pr_opened checkpoint so a
+        // restart from this point skips extraction (the
+        // MemoryStore upsert is also idempotent on the namespaced
+        // key, so a second pass is safe).
+        try
+        {
+            var extraction = await memoryExtractor.ExtractAsync(
+                issue.Id, input.Text, ct);
+            try
+            {
+                await extractionStore.RecordAsync(extraction, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "MemoryExtractionStore.RecordAsync failed for {Id}; continuing",
+                    issue.Id);
+            }
+            events.Publish(new DashboardEvent(
+                DateTime.UtcNow, DashboardEventKind.MemoryExtracted, issue.Id,
+                extraction.Error is null
+                    ? $"Extracted {extraction.ExtractedCount} memory(s) from {extraction.SourceChars} chars"
+                    : $"Memory extraction failed: {extraction.Error}",
+                new Dictionary<string, object?>
+                {
+                    ["sourceChars"] = extraction.SourceChars,
+                    ["extractedCount"] = extraction.ExtractedCount,
+                    ["persistedKeys"] = extraction.PersistedKeys,
+                    ["error"] = extraction.Error,
+                }));
+            if (extraction.Error is null && extraction.ExtractedCount > 0)
+            {
+                logger.LogInformation(
+                    "Extracted {N} memory(s) for {Id}", extraction.ExtractedCount, issue.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Memory extraction raised for {Id}; dispatch continues", issue.Id);
+        }
+
         return new PrOpened(input, PrResult.Ok, pr.Number, headSha);
     }
 

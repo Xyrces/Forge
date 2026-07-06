@@ -6,6 +6,7 @@ using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
 using Forge.Dashboard;
+using Forge.Orchestrator;
 using Forge.Orchestrator.Workflow;
 using Forge.Tests.Integration.TestHelpers;
 using Xunit;
@@ -134,6 +135,8 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             drainMessageBus: _ => null,
             designArtifacts: new DesignArtifactStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
             artOutputs: new ArtOutputStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
+            memoryExtractor: new NoOpMemoryExtractor(),
+            extractionStore: new MemoryExtractionStore(Path.Combine(_workDir, ".portHorizon", "state", "memory.db")),
             logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
 
         await workflow.RunAsync(issue, CancellationToken.None);
@@ -161,6 +164,8 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             drainMessageBus: _ => null,
             designArtifacts: new DesignArtifactStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
             artOutputs: new ArtOutputStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db")),
+            memoryExtractor: new NoOpMemoryExtractor(),
+            extractionStore: new MemoryExtractionStore(Path.Combine(_workDir, ".portHorizon", "state", "memory.db")),
             logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
 
         await workflow.RunAsync(issue, CancellationToken.None);

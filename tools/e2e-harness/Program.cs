@@ -102,6 +102,17 @@ public static class Program
         var designArtifacts = new DesignArtifactStore(dbPath);
         var designerRuns = new DesignerRunStore(dbPath);
         var artOutputs = new ArtOutputStore(dbPath);
+        // P5.5: harness uses a no-op extractor + ephemeral
+        // extraction store; we don't want the harness to call
+        // the real LLM. The CommitPushPrExecutor's caller is
+        // blocked by the worktree cleanup later anyway (the
+        // harness short-circuits before PR open by not
+        // configuring a real GitHubService), so this code
+        // path is only reached in the closed-loop tests.
+        var harnessExtractionStore = new Orchestrator.MemoryExtractionStore(
+            Path.Combine(workspaceRoot, "extraction.db"));
+        Orchestrator.IMemoryExtractor harnessExtractor =
+            new Orchestrator.NoOpMemoryExtractor();
         var artistRuns = new ArtistRunStore(dbPath);
         var groomerRuns = new IssueGroomerRunStore(dbPath);
         var recoveryReports = new RecoveryReportStore(dbPath);
@@ -219,6 +230,7 @@ if (useRealLlm)
                         new WorkspaceOptions { Root = clone, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
                         eventBus, agent => messageBus.Drain(agent),
                         designArtifacts, artOutputs,
+                        harnessExtractor, harnessExtractionStore,
                         NullLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>.Instance);
                     await wf.RunAsync(issue, ct);
                 },

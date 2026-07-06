@@ -709,6 +709,15 @@ Console.Error.WriteLine(ex.ToString());
         await skillBootstrap.SeedAsync();
         var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
         var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
+
+        // P5.5: auto-extract project memory from the model
+        // response after each PR is opened. Audit log lives in
+        // the same memory.db; the v13 migration in IssueStore
+        // covers the table.
+        var extractionStore = new Orchestrator.MemoryExtractionStore(memoryDbPath);
+        var memoryExtractor = new Orchestrator.MemoryExtractor(
+            chatClientFactory, llmConfig, memoryStore,
+            loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>());
         // Late-binding holder for specStore. Created before
         // MafAgentRunner ctor, populated after specStore is
         // constructed (the runner builds its tool list per call,
@@ -750,6 +759,7 @@ Console.Error.WriteLine(ex.ToString());
                 issues, agentRunner, worktrees, gitHub, roleRegistry, options.Workspace,
                 eventBus, agent => messageBus.Drain(agent),
                 designArtifacts, artOutputs,
+                memoryExtractor, extractionStore,
                 loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>())
                 .Build();
             var services = new ServiceCollection()
@@ -774,6 +784,7 @@ Console.Error.WriteLine(ex.ToString());
                         issues, agentRunner, worktrees, gitHub, roleRegistry, options.Workspace,
                         eventBus, agent => messageBus.Drain(agent),
                         designArtifacts, artOutputs,
+                        memoryExtractor, extractionStore,
                         loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>());
                     await workflow.RunAsync(issue, ct);
                 },

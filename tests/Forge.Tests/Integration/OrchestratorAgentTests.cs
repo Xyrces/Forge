@@ -114,6 +114,8 @@ public sealed class OrchestratorAgentTests : IDisposable
             drainMessageBus: agent => _messageBus.Drain(agent),
             designArtifacts: new Core.DesignArtifactStore(_dbPath),
             artOutputs: new Core.ArtOutputStore(_dbPath),
+            memoryExtractor: new Forge.Orchestrator.NoOpMemoryExtractor(),
+            extractionStore: new Forge.Orchestrator.MemoryExtractionStore(_dbPath),
             logger: NullLogger<EngineeringDispatchWorkflow>.Instance);
         await workflow.RunAsync(issue, ct);
     }
