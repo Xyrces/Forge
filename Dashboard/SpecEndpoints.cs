@@ -239,6 +239,32 @@ public static class SpecEndpoints
                 return Results.Accepted($"/api/specs/{id}", new { status = "started" });
             });
         }
+
+        // P6 Stage 4: action-state machine for the Specs matrix action
+        // bar. Returns the buttons the operator can hit on this row
+        // (Approve only on Draft, Start Grooming only on Approved |
+        // Designed, etc.) so the UI doesn't ship its own copy of the
+        // state machine.
+        app.MapGet("/api/specs/{id}/actions", async (string id, CancellationToken ct) =>
+        {
+            var spec = await specs.GetAsync(id, ct);
+            if (spec is null) return Results.NotFound();
+
+            var canApprove = spec.Status == SpecStatus.Draft;
+            var canStartGrooming = spec.Status is SpecStatus.Approved or SpecStatus.Designed or SpecStatus.AssetReady;
+            var canShip = spec.Status == SpecStatus.Groomed;
+
+            return Results.Json(new
+            {
+                canApprove,
+                canStartGrooming,
+                canShip,
+                reason = canApprove ? "draft is ready for approval"
+                    : canStartGrooming ? "designed/approved specs feed the groomer"
+                    : canShip ? "groomer has decomposed into stories/tasks"
+                    : $"status {spec.Status} has no available actions",
+            });
+        });
     }
 
     private static object ToSpecView(SpecRecord s) => new

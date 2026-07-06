@@ -1,0 +1,89 @@
+@page "/specs"
+@inject IState<Forge.Dashboard.Features.Specs.SpecsState> SpecsStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.Specs
+
+<PageTitle>Specs</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Specs</h1>
+        <div class="page-header__meta">@SpecsStore.Value.Rows.Count total</div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new LoadSpecsAction()))">Refresh</button>
+        </div>
+    </div>
+
+    <div class="filter-bar">
+        @foreach (var filter in Filters)
+        {
+            <button class="chip @(SpecsStore.Value.StatusFilter == filter ? "chip--active" : "")"
+                    @onclick="@(() => Dispatch.Dispatch(new SetStatusFilterAction(filter)))">
+                @filter
+            </button>
+        }
+    </div>
+
+    @if (SpecsStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (SpecsStore.Value.Error is not null)
+    {
+        <div class="page-subtitle">Error: @SpecsStore.Value.Error</div>
+    }
+    else
+    {
+        <table class="data-grid">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Title</th>
+                    <th>Status</th>
+                    <th>Version</th>
+                    <th>Parent Epic</th>
+                    <th>Updated</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in SpecsStore.Value.Rows.Take(50))
+                {
+                    <tr>
+                        <td class="mono">@row.Id</td>
+                        <td>@row.Title</td>
+                        <td>
+                            <span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span>
+                        </td>
+                        <td class="mono">v@row.CurrentVersion</td>
+                        <td class="mono">@(row.ParentIssueId ?? row.ParentSpecId ?? "—")</td>
+                        <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        @if (SpecsStore.Value.Rows.Count > 50)
+        {
+            <div class="page-subtitle">(Showing first 50 of @SpecsStore.Value.Rows.Count; pagination deferred.)</div>
+        }
+    }
+</div>
+
+@code {
+    private static readonly string[] Filters = { "All", "Draft", "Designed", "AssetReady", "Approved", "Groomed", "Shipped" };
+
+    protected override void OnInitialized()
+    {
+        SpecsStore.StateChanged += OnStateChanged;
+        if (SpecsStore.Value.Rows.Count == 0)
+        {
+            Dispatch.Dispatch(new LoadSpecsAction());
+        }
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        SpecsStore.StateChanged -= OnStateChanged;
+    }
+}
