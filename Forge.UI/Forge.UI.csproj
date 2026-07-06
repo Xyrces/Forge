@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <LangVersion>14</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>NU1904;NU1903;ASP0026</NoWarn>
+    <RootNamespace>Forge.Dashboard</RootNamespace>
+    <StaticWebAssetsEnabled>true</StaticWebAssetsEnabled>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fluxor" Version="6.10.0" />
+    <PackageReference Include="Fluxor.Blazor.Web" Version="6.10.0" />
+    <PackageReference Include="Fluxor.Blazor.Web.ReduxDevTools" Version="6.10.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+  </ItemGroup>
+
+</Project>
+
+

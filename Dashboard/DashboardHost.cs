@@ -1,13 +1,10 @@
 ﻿using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Components.Server;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Fluxor;
-using Fluxor.Blazor.Web.ReduxDevTools;
 using Forge.Agents;
 using Forge.Codebase;
 using Forge.Configuration;
@@ -134,7 +131,7 @@ public sealed class DashboardHost : IAsyncDisposable
             return;
         }
 
-var builder = WebApplication.CreateSlimBuilder();
+        var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.Logging.AddSimpleConsole(o =>
         {
@@ -142,16 +139,7 @@ var builder = WebApplication.CreateSlimBuilder();
             o.TimestampFormat = "HH:mm:ss.fff ";
         });
 
-        builder.Services.AddRazorComponents()
-            .AddInteractiveServerComponents();
-        builder.Services.AddRazorPages();
-        builder.Services.AddFluxor(options =>
-            options.ScanAssemblies(typeof(DashboardHost).Assembly)
-                   .UseReduxDevTools());
-        builder.Services.AddHttpClient<Forge.Dashboard.Features.AppShell.AppShellClient>();
-        builder.Services.AddHttpClient<Forge.Dashboard.Features.Specs.SpecsClient>();
-        builder.Services.AddHttpClient<Forge.Dashboard.Features.Designs.DesignsClient>();
-        builder.Services.AddHttpClient<Forge.Dashboard.Features.Art.ArtClient>();
+        builder.Services.AddForgeUI();
 
 _app = builder.Build();
         _app.Urls.Clear();
@@ -160,7 +148,6 @@ _app = builder.Build();
         _app.UseStaticFiles();
         _app.UseRouting();
         _app.UseAntiforgery();
-        _app.MapStaticAssets();
 
 _app.MapGet("/api/state", async (CancellationToken ct) =>
         {
@@ -185,6 +172,12 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
                         createdAt = t.CreatedAt,
                         updatedAt = t.UpdatedAt,
                         closedAt = t.ClosedAt,
+                        dispatchCheckpoint = t.DispatchCheckpoint?.ToString(),
+                        checkpointAt = (DateTime?)null,
+                        recoveryAttempts = t.RecoveryAttempts,
+                        prUrl = (string?)null,
+                        branch = (string?)null,
+                        worktreePath = (string?)null,
                         parameters = ParseMetadata(t.MetadataJson)
                     }).ToArray(),
                     agents = agents.Select(a => new
@@ -309,6 +302,8 @@ if (_groomerRuns is not null)
             {
                 SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger);
             }
+
+            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger);
         }
 
         _app.MapGet("/api/agents", () =>
@@ -350,10 +345,7 @@ _app.MapGet("/api/events", async (HttpContext ctx) =>
             catch (OperationCanceledException) { }
         });
 
-_app.MapRazorComponents<Forge.Dashboard.Components.App>()
-            .AddInteractiveServerRenderMode();
-        _app.MapBlazorHub();
-        _app.MapFallbackToPage("/_Host");
+_app.MapForgeUI();
 
         var runTask = _app.RunAsync(cancellationToken);
         await Task.Delay(100, cancellationToken);
@@ -364,24 +356,7 @@ _app.MapRazorComponents<Forge.Dashboard.Components.App>()
     private static string SanitizeEventName(string kind)
         => kind.Replace('.', '-').Replace('/', '-');
 
-private static readonly Lazy<string> _embeddedHtml = new(() =>
-    {
-        var asmDir = Path.GetDirectoryName(typeof(DashboardHost).Assembly.Location)!;
-        var path = Path.Combine(asmDir, "Dashboard", "wwwroot", "index.html");
-        if (File.Exists(path))
-        {
-            return File.ReadAllText(path);
-        }
-        var asm = typeof(DashboardHost).Assembly;
-        using var stream = asm.GetManifestResourceStream("Forge.Dashboard.wwwroot.index.html")
-            ?? throw new InvalidOperationException("Legacy index.html missing");
-        using var reader = new StreamReader(stream);
-        return reader.ReadToEnd();
-    });
-
-    private static string GetEmbeddedHtml() => _embeddedHtml.Value;
-
-    private static Dictionary<string, object> ParseMetadata(string? json)
+private static Dictionary<string, object> ParseMetadata(string? json)
     {
         if (string.IsNullOrEmpty(json)) return new();
         try

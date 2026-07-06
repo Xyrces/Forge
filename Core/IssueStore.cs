@@ -142,6 +142,8 @@ public interface IIssueStore
     /// </summary>
     Task<int> IncrementRecoveryAttemptsAsync(string id, CancellationToken ct = default);
 
+    Task<IReadOnlyList<IssueEventRecord>> ListEventsAsync(string issueId, int limit = 50, CancellationToken ct = default);
+
     // Dependency graph (Phase 2 of docs/embedded-issues.md).
     Task<IssueEdge> AddDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
     Task<bool> RemoveDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
@@ -998,6 +1000,36 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         cmd.Parameters.AddWithValue("$id", id);
         cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
         return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<IssueEventRecord>> ListEventsAsync(string issueId, int limit = 50, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, issue_id, ts, actor, kind, detail
+            FROM issue_event
+            WHERE issue_id = $id
+            ORDER BY ts DESC, id DESC
+            LIMIT $limit
+            """;
+        cmd.Parameters.AddWithValue("$id", issueId);
+        cmd.Parameters.AddWithValue("$limit", limit);
+        var list = new List<IssueEventRecord>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct))
+        {
+            list.Add(new IssueEventRecord(
+                rd.GetInt64(0),
+                rd.GetString(1),
+                DateTime.ParseExact(rd.GetString(2), DateFormat,
+                    System.Globalization.CultureInfo.InvariantCulture),
+                rd.GetString(3),
+                rd.GetString(4),
+                rd.IsDBNull(5) ? null : rd.GetString(5)));
+        }
+        return list;
     }
 
     // --- Dependency graph (Phase 2 of docs/embedded-issues.md) ---
