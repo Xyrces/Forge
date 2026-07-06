@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Forge.Core;
+using Forge.Orchestrator;
 
 namespace Forge.Dashboard;
 
@@ -74,4 +75,46 @@ public static class MemoryEndpoints
     };
 
     public sealed record RememberRequest(string Key, string Body, int? TtlDays);
+
+    // ---------- P5.6: extraction audit log ----------
+
+    /// <summary>
+    /// P5.6: per-task read of the memory extraction audit log
+    /// (the v13 <c>memory_extraction</c> table). Returns the
+    /// runs in chronological order so the dashboard can render
+    /// "this commit produced 2 memories; here are the keys".
+    /// Combined with the existing <c>GET /api/memory?prefix=extraction/{id}/</c>
+    /// the operator can pivot from audit log to the actual
+    /// stored values.
+    /// </summary>
+    public static void MapExtractionEndpoints(
+        WebApplication app,
+        MemoryExtractionStore extractions,
+        ILogger logger)
+    {
+        app.MapGet("/api/memory/extractions/{taskId}", async (string taskId, CancellationToken ct) =>
+        {
+            try
+            {
+                var list = await extractions.ListForTaskAsync(taskId, ct);
+                return Results.Json(list.Select(ToExtractionView).ToArray(), DashboardJson.Options);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "GET /api/memory/extractions/{Id} failed", taskId);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+    }
+
+    private static object ToExtractionView(MemoryExtractionRecord r) => new
+    {
+        id = r.Id,
+        timestamp = r.Timestamp,
+        taskId = r.TaskId,
+        sourceChars = r.SourceChars,
+        extractedCount = r.ExtractedCount,
+        persistedKeys = r.PersistedKeys,
+        error = r.Error,
+    };
 }

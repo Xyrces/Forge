@@ -881,6 +881,7 @@ Console.Error.WriteLine(ex.ToString());
             specs: specStore,
             groomerFactory: groomerFactory,
             memory: memoryStore,
+            extractions: extractionStore,
             issuesJsonlPath: issuesJsonlPath,
             vision: vision,
             groomerRuns: groomerRuns,

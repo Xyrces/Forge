@@ -24,6 +24,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ISpecStore _specs;
     private readonly Agents.GroomerAgentFactory? _groomerFactory;
     private readonly MemoryStore? _memory;
+    private readonly Orchestrator.MemoryExtractionStore? _extractions;
     private readonly string? _issuesJsonlPath;
     private readonly VisionStore? _vision;
     private readonly Orchestrator.DesignerAgentFactory? _designerFactory;
@@ -60,6 +61,7 @@ public sealed class DashboardHost : IAsyncDisposable
         ISpecStore? specs = null,
         Agents.GroomerAgentFactory? groomerFactory = null,
         MemoryStore? memory = null,
+        Orchestrator.MemoryExtractionStore? extractions = null,
         string? issuesJsonlPath = null,
         VisionStore? vision = null,
         Orchestrator.DesignerAgentFactory? designerFactory = null,
@@ -87,6 +89,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _specs = specs ?? new NullSpecStore();
         _groomerFactory = groomerFactory;
         _memory = memory;
+        _extractions = extractions;
         _issuesJsonlPath = issuesJsonlPath;
         _groomerRuns = groomerRuns;
         _designerFactory = designerFactory;
@@ -210,6 +213,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         if (_memory is not null)
         {
             MemoryEndpoints.MapMemoryEndpoints(_app, _memory, _logger);
+        }
+
+        if (_extractions is not null)
+        {
+            MemoryEndpoints.MapExtractionEndpoints(_app, _extractions, _logger);
         }
 
         if (_issuesJsonlPath is not null)
