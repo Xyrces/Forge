@@ -715,6 +715,9 @@ Console.Error.WriteLine(ex.ToString());
         // the same memory.db; the v13 migration in IssueStore
         // covers the table.
         var extractionStore = new Orchestrator.MemoryExtractionStore(groomerRunsDb);
+        var sprintProposalAudit = new Orchestrator.SprintProposalAuditStore(groomerRunsDb);
+        var scorer = new Agents.DeterministicScorer();
+        var sprintPropose = new Orchestrator.SprintProposeService(issues, sprints, scorer, sprintProposalAudit);
         var memoryExtractor = new Orchestrator.MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
             loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>());
@@ -882,6 +885,8 @@ Console.Error.WriteLine(ex.ToString());
             groomerFactory: groomerFactory,
             memory: memoryStore,
             extractions: extractionStore,
+            sprintProposalAudit: sprintProposalAudit,
+            sprintPropose: sprintPropose,
             issuesJsonlPath: issuesJsonlPath,
             vision: vision,
             groomerRuns: groomerRuns,

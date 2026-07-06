@@ -32,7 +32,8 @@ public class DispatchCheckpointTests : IDisposable
     public void SchemaVersion_IsCurrent_AfterMigration()
     {
         // v12 = P5 SharedContext. v13 = P5.5 memory extraction.
-        Assert.Equal(13, IssueStore.CurrentSchemaVersion);
+        // v14 = P6 Stage 8 sprint proposal audit.
+        Assert.Equal(14, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

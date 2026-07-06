@@ -29,7 +29,15 @@ namespace Forge.Agents;
 /// signal in its prompt, alongside its free-form reasoning.
 /// </para>
 /// </summary>
-public sealed class DeterministicScorer
+public interface IScorer
+{
+    DeterministicScorer.ScoredBacklog Score(
+        IReadOnlyList<IssueRecord> pendingTasks,
+        string? theme,
+        IReadOnlySet<string> taskIdsInOtherSprints);
+}
+
+public sealed class DeterministicScorer : IScorer
 {
     public sealed record ScoredTask(IssueRecord Task, int Score, IReadOnlyList<string> Breakdown);
     public sealed record ScoredBacklog(IReadOnlyList<ScoredTask> Items, DateTime ScoredAt);

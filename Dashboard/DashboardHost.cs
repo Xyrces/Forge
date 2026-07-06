@@ -47,6 +47,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ICodebaseGraphBuilder? _codebaseBuilderOverride;
     private readonly ICodebaseGraphCacheStore? _codebaseCacheOverride;
     private readonly AgentMessageBus _messageBus;
+    private readonly Orchestrator.SprintProposalAuditStore? _sprintProposalAudit;
+    private readonly Orchestrator.SprintProposeService? _sprintPropose;
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
@@ -83,7 +85,9 @@ public sealed class DashboardHost : IAsyncDisposable
         IssueGroomerRunStore? groomerRuns = null,
         ISpecExtractionReader? extractor = null,
         ICodebaseGraphBuilder? codebaseBuilder = null,
-        ICodebaseGraphCacheStore? codebaseCache = null)
+        ICodebaseGraphCacheStore? codebaseCache = null,
+        Orchestrator.SprintProposalAuditStore? sprintProposalAudit = null,
+        Orchestrator.SprintProposeService? sprintPropose = null)
     {
         _options = options;
         _headroom = headroom;
@@ -113,6 +117,8 @@ public sealed class DashboardHost : IAsyncDisposable
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
         _codebaseCacheOverride = codebaseCache;
+        _sprintProposalAudit = sprintProposalAudit;
+        _sprintPropose = sprintPropose;
         _messageBus = messageBus;
         _bus = bus;
         _logger = logger;
@@ -298,6 +304,11 @@ if (_groomerRuns is not null)
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
         {
             CodebaseGraphEndpoints.MapCodebaseGraphEndpoints(_app, _codebaseBuilderOverride, _codebaseCacheOverride, _issues, _logger);
+
+            if (_sprintPropose is not null && _sprintProposalAudit is not null)
+            {
+                SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger);
+            }
         }
 
         _app.MapGet("/api/agents", () =>

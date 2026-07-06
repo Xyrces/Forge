@@ -166,7 +166,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 13;
+    public const int CurrentSchemaVersion = 14;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -645,6 +645,38 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             );
             CREATE INDEX IF NOT EXISTS ix_memory_extraction_task
                 ON memory_extraction(task_id, ts);
+
+            -- v14: P6 Stage 8 — sprint proposal audit log.
+            --
+            -- Each call to /api/sprints/propose-next writes a row
+            -- before returning the score breakdown. The dashboard's
+            -- /api/sprints/{id}/scoring-audit reads these rows so
+            -- the operator can audit what the DeterministicScorer
+            -- recommended and what weights it used.
+            --
+            --   theme: optional sprint theme string (null = auto)
+            --   goal: optional goal line (null = auto)
+            --   weights_json: JSON map of the scorer weights used
+            --     (priority/theme/age/downstream). Captured at the
+            --     same time so future weight tweaks don't silently
+            --     change past audit rows.
+            --   candidates_json: JSON array of {taskId, title, score,
+            --     breakdown: string[]} for every scored task.
+            --   selected_task_ids_json: JSON array of taskIds that
+            --     were proposed (top 7 by default).
+            CREATE TABLE IF NOT EXISTS sprint_proposal_audit (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts                      TEXT NOT NULL,
+                theme                   TEXT,
+                goal                    TEXT,
+                weights_json            TEXT NOT NULL,
+                candidates_json         TEXT NOT NULL,
+                selected_task_ids_json  TEXT NOT NULL,
+                committed_sprint_id     TEXT,
+                committed_by            TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_sprint_proposal_audit_ts
+                ON sprint_proposal_audit(ts DESC);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);
