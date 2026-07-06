@@ -1,9 +1,13 @@
 ﻿using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Components.Server;
 using Microsoft.AspNetCore.StaticFiles;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Fluxor;
+using Fluxor.Blazor.Web.ReduxDevTools;
 using Forge.Agents;
 using Forge.Codebase;
 using Forge.Configuration;
@@ -15,6 +19,7 @@ namespace Forge.Dashboard;
 public sealed class DashboardHost : IAsyncDisposable
 {
     private readonly DashboardOptions _options;
+    private readonly HeadroomOptions _headroom;
     private readonly IIssueStore _issues;
     private readonly IAgentStore _agents;
     private readonly ISkillStore _skills;
@@ -49,6 +54,7 @@ public sealed class DashboardHost : IAsyncDisposable
 
     public DashboardHost(
         DashboardOptions options,
+        HeadroomOptions headroom,
         IIssueStore issues,
         IAgentStore agents,
         ISkillStore skills,
@@ -80,6 +86,7 @@ public sealed class DashboardHost : IAsyncDisposable
         ICodebaseGraphCacheStore? codebaseCache = null)
     {
         _options = options;
+        _headroom = headroom;
         _issues = issues;
         _agents = agents;
         _skills = skills;
@@ -121,12 +128,33 @@ public sealed class DashboardHost : IAsyncDisposable
             return;
         }
 
-        var builder = WebApplication.CreateSlimBuilder();
+var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
+        builder.Logging.AddSimpleConsole(o =>
+        {
+            o.SingleLine = true;
+            o.TimestampFormat = "HH:mm:ss.fff ";
+        });
 
-        _app = builder.Build();
+        builder.Services.AddRazorComponents()
+            .AddInteractiveServerComponents();
+        builder.Services.AddRazorPages();
+        builder.Services.AddFluxor(options =>
+            options.ScanAssemblies(typeof(DashboardHost).Assembly)
+                   .UseReduxDevTools());
+        builder.Services.AddHttpClient<Forge.Dashboard.Features.AppShell.AppShellClient>();
+        builder.Services.AddHttpClient<Forge.Dashboard.Features.Specs.SpecsClient>();
+        builder.Services.AddHttpClient<Forge.Dashboard.Features.Designs.DesignsClient>();
+        builder.Services.AddHttpClient<Forge.Dashboard.Features.Art.ArtClient>();
+
+_app = builder.Build();
         _app.Urls.Clear();
         _app.Urls.Add($"http://{_options.Hostname}:{_options.Port}");
+
+        _app.UseStaticFiles();
+        _app.UseRouting();
+        _app.UseAntiforgery();
+        _app.MapStaticAssets();
 
 _app.MapGet("/api/state", async (CancellationToken ct) =>
         {
@@ -203,6 +231,8 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
 
         DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger);
 
+        AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger);
+
         if (_intakeRegistry is not null)
         {
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
@@ -230,29 +260,40 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger);
         }
 
-        if (_groomerRuns is not null)
-        {
-            GroomerEndpoints.MapGroomerEndpoints(_app, _groomerRuns, _logger);
-            if (_designerFactory is not null && _designerRuns is not null && _designArtifacts is not null)
+if (_groomerRuns is not null)
             {
-                DesignerEndpoints.MapDesignerEndpoints(
-                    _app, _specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
+                GroomerEndpoints.MapGroomerEndpoints(_app, _groomerRuns, _logger);
+                if (_designerFactory is not null && _designerRuns is not null && _designArtifacts is not null)
+                {
+                    DesignerEndpoints.MapDesignerEndpoints(
+                        _app, _specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
+                }
+                if (_artistFactory is not null && _artistRuns is not null && _artOutputs is not null && _meshy is not null)
+                {
+                    ArtistEndpoints.MapArtistEndpoints(
+                        _app, _specs, _artistFactory, _artistRuns, _artOutputs, _meshy, _logger);
+                }
+                if (_recoveryReports is not null && _startupRecovery is not null)
+                {
+                    RecoveryEndpoints.MapRecoveryEndpoints(
+                        _app, _issues, _recoveryReports, _startupRecovery, _logger);
+                }
+                if (_costTracker is not null)
+                {
+                    CostEndpoints.MapCostEndpoints(_app, _costTracker, _logger);
+                    OpsEndpoints.MapOpsEndpoints(_app, _costTracker, _headroom, _logger);
+                }
+                else
+                {
+                    OpsEndpoints.MapOpsEndpoints(_app, null, _headroom, _logger);
+                }
             }
-            if (_artistFactory is not null && _artistRuns is not null && _artOutputs is not null && _meshy is not null)
+
+            if (_designArtifacts is not null && _artOutputs is not null)
             {
-                ArtistEndpoints.MapArtistEndpoints(
-                    _app, _specs, _artistFactory, _artistRuns, _artOutputs, _meshy, _logger);
+                DesignArtEndpoints.MapDesignArtEndpoints(
+                    _app, _designArtifacts, _artOutputs, _designerRuns, _artistRuns, _logger);
             }
-            if (_recoveryReports is not null && _startupRecovery is not null)
-            {
-                RecoveryEndpoints.MapRecoveryEndpoints(
-                    _app, _issues, _recoveryReports, _startupRecovery, _logger);
-            }
-            if (_costTracker is not null)
-            {
-                CostEndpoints.MapCostEndpoints(_app, _costTracker, _logger);
-            }
-        }
 
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
         {
@@ -268,7 +309,7 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             return Results.Json(roles, DashboardJson.Options);
         });
 
-        _app.MapGet("/api/events", async (HttpContext ctx) =>
+_app.MapGet("/api/events", async (HttpContext ctx) =>
         {
             ctx.Response.ContentType = "text/event-stream";
             ctx.Response.Headers.CacheControl = "no-cache";
@@ -278,21 +319,30 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             var reader = _bus.Subscribe();
             try
             {
+                var lastHeartbeat = DateTime.UtcNow;
                 await foreach (var ev in reader.ReadAllAsync(ctx.RequestAborted))
                 {
                     var json = JsonSerializer.Serialize(ev, DashboardJson.Options);
                     await ctx.Response.WriteAsync($"event: {SanitizeEventName(ev.Kind)}\n", ctx.RequestAborted);
                     await ctx.Response.WriteAsync($"data: {json}\n\n", ctx.RequestAborted);
                     await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+
+                    if ((DateTime.UtcNow - lastHeartbeat).TotalSeconds >= 25)
+                    {
+                        lastHeartbeat = DateTime.UtcNow;
+                        await ctx.Response.WriteAsync("event: heartbeat\n", ctx.RequestAborted);
+                        await ctx.Response.WriteAsync($"data: {{\"ts\":\"{lastHeartbeat:O}\"}}\n\n", ctx.RequestAborted);
+                        await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                    }
                 }
             }
             catch (OperationCanceledException) { }
         });
 
-        _app.MapGet("/", () => Results.Content(GetEmbeddedHtml(), "text/html; charset=utf-8"));
-        _app.MapGet("/index.html", () => Results.Content(GetEmbeddedHtml(), "text/html; charset=utf-8"));
-
-        _app.MapFallback(() => Results.Redirect("/index.html"));
+_app.MapRazorComponents<Forge.Dashboard.Components.App>()
+            .AddInteractiveServerRenderMode();
+        _app.MapBlazorHub();
+        _app.MapFallbackToPage("/_Host");
 
         var runTask = _app.RunAsync(cancellationToken);
         await Task.Delay(100, cancellationToken);
@@ -303,11 +353,17 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
     private static string SanitizeEventName(string kind)
         => kind.Replace('.', '-').Replace('/', '-');
 
-    private static readonly Lazy<string> _embeddedHtml = new(() =>
+private static readonly Lazy<string> _embeddedHtml = new(() =>
     {
+        var asmDir = Path.GetDirectoryName(typeof(DashboardHost).Assembly.Location)!;
+        var path = Path.Combine(asmDir, "Dashboard", "wwwroot", "index.html");
+        if (File.Exists(path))
+        {
+            return File.ReadAllText(path);
+        }
         var asm = typeof(DashboardHost).Assembly;
         using var stream = asm.GetManifestResourceStream("Forge.Dashboard.wwwroot.index.html")
-            ?? throw new InvalidOperationException("Embedded HTML resource missing");
+            ?? throw new InvalidOperationException("Legacy index.html missing");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     });
