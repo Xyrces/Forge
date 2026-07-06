@@ -1,0 +1,156 @@
+@page "/vision"
+@inject HttpClient Http
+@implements IDisposable
+
+<PageTitle>Vision</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Vision</h1>
+        @if (_snapshot is not null)
+        {
+            <div class="page-header__meta">
+                Last revised @(_snapshot.LastModifiedUtc?.ToString("yyyy-MM-dd HH:mm") ?? "—") ·
+                @_snapshot.Content?.Length.ToString("N0") chars
+            </div>
+        }
+        <div class="page-header__actions">
+            <button class="btn" @onclick="RefreshAsync" disabled="@_refreshing">Export</button>
+            <button class="btn btn--primary" @onclick="RefreshAsync" disabled="@_refreshing">Trigger Re-plan</button>
+        </div>
+    </div>
+
+    @if (_snapshot is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (!_snapshot.Exists)
+    {
+        <div class="page-subtitle">No vision file at @_snapshot.Path</div>
+    }
+    else
+    {
+        <div class="vision-split">
+            <aside class="vision-toc">
+                <div class="vision-toc__title">Sections</div>
+                @foreach (var heading in _headings)
+                {
+                    <button class="vision-toc__item @(heading == _activeHeading ? "vision-toc__item--active" : "")"
+                            @onclick="@(() => ScrollTo(heading))">
+                        @heading
+                    </button>
+                }
+            </aside>
+
+            <article class="vision-body">
+                @foreach (var block in _blocks)
+                {
+                    @if (block.Kind == "h1")
+                    {
+                        <h1 class="vision-h1">@block.Text</h1>
+                        <div class="vision-meta mono">forge/MASTER_DESIGN.md · @_snapshot.Content?.Length.ToString("N0") chars · @(_snapshot.LastModifiedUtc?.ToString("yyyy-MM-dd HH:mm") ?? "—")</div>
+                    }
+                    else if (block.Kind == "h2")
+                    {
+                        <h2 class="vision-h2">@block.Text</h2>
+                    }
+                    else if (block.Kind == "h3")
+                    {
+                        <h3 class="vision-h3">@block.Text</h3>
+                    }
+                    else if (block.Kind == "code")
+                    {
+                        <pre class="vision-code"><code>@block.Text</code></pre>
+                    }
+                    else if (block.Kind == "li")
+                    {
+                        <div class="vision-li">• @block.Text</div>
+                    }
+                    else
+                    {
+                        <p class="vision-p">@block.Text</p>
+                    }
+                }
+            </article>
+        </div>
+    }
+</div>
+
+@code {
+    private SnapshotDto? _snapshot;
+    private List<MarkdownBlock> _blocks = new();
+    private List<string> _headings = new();
+    private string? _activeHeading;
+    private bool _refreshing;
+
+    public sealed record SnapshotDto(bool Exists, string Path, string? Content, DateTime? LastModifiedUtc);
+
+    private sealed record MarkdownBlock(string Kind, string Text);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _snapshot = await Http.GetFromJsonAsync<SnapshotDto>("/api/vision");
+            Parse();
+        }
+        catch { _snapshot = new(false, "", null, null); }
+        StateHasChanged();
+    }
+
+    private async Task RefreshAsync()
+    {
+        _refreshing = true;
+        try
+        {
+            await Http.PostAsync("/api/vision/refresh", null);
+            await LoadAsync();
+        }
+        finally { _refreshing = false; }
+    }
+
+    private void Parse()
+    {
+        _blocks = new();
+        _headings = new();
+        if (_snapshot?.Content is null) return;
+
+        var lines = _snapshot.Content.Split('\n');
+        bool inCode = false;
+        var codeBuf = new List<string>();
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimEnd('\r');
+            if (line.StartsWith("```"))
+            {
+                if (inCode)
+                {
+                    _blocks.Add(new("code", string.Join("\n", codeBuf)));
+                    codeBuf.Clear();
+                    inCode = false;
+                }
+                else inCode = true;
+                continue;
+            }
+            if (inCode) { codeBuf.Add(line); continue; }
+
+            if (line.StartsWith("# ")) { var t = line[2..].Trim(); _blocks.Add(new("h1", t)); _headings.Add(t); _activeHeading ??= t; }
+            else if (line.StartsWith("## ")) { var t = line[3..].Trim(); _blocks.Add(new("h2", t)); _headings.Add(t); }
+            else if (line.StartsWith("### ")) { var t = line[4..].Trim(); _blocks.Add(new("h3", t)); }
+            else if (line.StartsWith("- ")) _blocks.Add(new("li", line[2..].Trim()));
+            else if (!string.IsNullOrWhiteSpace(line)) _blocks.Add(new("p", line));
+        }
+    }
+
+    private void ScrollTo(string heading)
+    {
+        _activeHeading = heading;
+        StateHasChanged();
+    }
+
+    public void Dispose() { }
+}
