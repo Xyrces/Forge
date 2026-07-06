@@ -1,0 +1,31 @@
+@inject IState<AppShellState> AppShellState
+@inject IDispatcher Dispatcher
+
+<section class="nav-group">
+    <div class="nav-group__label">IDEATION</div>
+    <NavLink class="nav-item" href="/intake" Match="NavLinkMatch.All"><span class="nav-item__icon">◆</span><span>Intake</span></NavLink>
+    <NavLink class="nav-item" href="/vision"><span class="nav-item__icon">◇</span><span>Vision Board</span></NavLink>
+</section>
+
+<section class="nav-group">
+    <div class="nav-group__label">PRODUCT</div>
+    <NavLink class="nav-item" href="/specs"><span class="nav-item__icon">▤</span><span>Specs</span></NavLink>
+    <NavLink class="nav-item" href="/designs"><span class="nav-item__icon">▦</span><span>Designs</span></NavLink>
+    <NavLink class="nav-item" href="/art"><span class="nav-item__icon">◈</span><span>Art</span></NavLink>
+</section>
+
+<section class="nav-group">
+    <div class="nav-group__label">EXECUTION</div>
+    <NavLink class="nav-item" href="/backlog"><span class="nav-item__icon">▢</span><span>Backlog</span></NavLink>
+    <NavLink class="nav-item" href="/sprints"><span class="nav-item__icon">▣</span><span>Sprints</span></NavLink>
+    <NavLink class="nav-item" href="/tasks"><span class="nav-item__icon">▥</span><span>Tasks</span></NavLink>
+</section>
+
+<section class="nav-group">
+    <div class="nav-group__label">OPS</div>
+    <NavLink class="nav-item" href="/agents"><span class="nav-item__icon">◉</span><span>Agents</span></NavLink>
+    <NavLink class="nav-item" href="/skills"><span class="nav-item__icon">◐</span><span>Skills</span></NavLink>
+    <NavLink class="nav-item" href="/ops/memory"><span class="nav-item__icon">▦</span><span>Memory</span></NavLink>
+    <NavLink class="nav-item" href="/ops/cost"><span class="nav-item__icon">$</span><span>Cost</span></NavLink>
+    <NavLink class="nav-item" href="/ops/recovery"><span class="nav-item__icon">↻</span><span>Recovery</span></NavLink>
+</section>

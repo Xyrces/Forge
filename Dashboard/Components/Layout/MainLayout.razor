@@ -1,0 +1,78 @@
+@inherits LayoutComponentBase
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellState
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+
+@code {
+    private System.Threading.Timer? _heartbeatTimer;
+
+    protected override void OnInitialized()
+    {
+        Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadActiveSprintAction());
+        Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.PollHeartbeatAction());
+        _heartbeatTimer = new System.Threading.Timer(_ =>
+        {
+            InvokeAsync(() => Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.PollHeartbeatAction()));
+        }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
+    }
+
+    public void Dispose()
+    {
+        _heartbeatTimer?.Dispose();
+    }
+}
+
+<div class="app-shell">
+    <header class="app-topbar">
+        <div class="app-topbar__brand">Forge</div>
+        <div class="app-topbar__search">
+            <input type="text" placeholder="Search issues, specs, memory... (⌘K)" disabled />
+        </div>
+        <div class="app-topbar__right">
+            @if (ShellState.Value.ActiveSprintName is not null)
+            {
+                <span class="pill pill--primary">@ShellState.Value.ActiveSprintName</span>
+            }
+            <span class="heartbeat">
+                <span class="heartbeat__dot heartbeat__dot--@ShellState.Value.HeartbeatStatus.ToLowerInvariant()"></span>
+                <span class="heartbeat__label">@ShellState.Value.HeartbeatStatus</span>
+            </span>
+            <div class="avatar"></div>
+        </div>
+    </header>
+
+    <nav class="app-nav">
+        <NavMenu />
+    </nav>
+
+    <main class="app-main">
+        @Body
+    </main>
+
+    @if (ShellState.Value.LiveFeedOpen)
+    {
+        <aside class="app-drawer">
+            <div class="app-drawer__header">
+                <span>Live Feed</span>
+                <button class="icon-btn" @onclick="@(() => Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.ToggleLiveFeedAction()))">×</button>
+            </div>
+            <div class="app-drawer__body">
+                @foreach (var entry in ShellState.Value.LiveFeed.TakeLast(50).Reverse())
+                {
+                    <div class="feed-entry">
+                        <span class="feed-entry__time">@entry.At.ToString("HH:mm:ss")</span>
+                        <span class="feed-entry__kind">@entry.Kind</span>
+                        @if (!string.IsNullOrEmpty(entry.Detail))
+                        {
+                            <span class="feed-entry__detail">@entry.Detail</span>
+                        }
+                    </div>
+                }
+                @if (ShellState.Value.LiveFeed.Count == 0)
+                {
+                    <div class="feed-empty">No events yet.</div>
+                }
+            </div>
+        </aside>
+    }
+</div>
