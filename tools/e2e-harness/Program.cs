@@ -652,18 +652,17 @@ internal static class Git
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
-        // P4 CI: ReadToEnd on stdout/stderr blocks until the
-        // process closes its streams. On Linux, even after
-        // ReadToEnd returns, the process may be in the
-        // "exited-but-not-disposed" state, causing
-        // Process.get_ExitCode() to throw
-        // InvalidOperationException("Process must exit before
-        // requested information can be determined."). Add
-        // WaitForExit() to be explicit. The CancellationToken
-        // is not wired here because git commands are short.
-        p.WaitForExit();
+        // P5.7: Read stdout/stderr FIRST, then WaitForExit.
+        // The previous order (WaitForExit then ReadToEnd) deadlocks
+        // on Windows once the output exceeds the ~4KB pipe buffer:
+        // the child blocks writing, the parent waits for exit,
+        // neither progresses. This is fine for small git output
+        // (e.g. a 1-line status) but breaks for `git diff --stat`
+        // when the agent commits bin/obj artifacts (109-file
+        // diffs are common with the real LLM).
         var stdout = p.StandardOutput.ReadToEnd();
         var stderr = p.StandardError.ReadToEnd();
+        p.WaitForExit();
         if (p.ExitCode != 0)
             throw new InvalidOperationException($"git {args} exited {p.ExitCode}\n{stdout}\n{stderr}");
     }
@@ -681,9 +680,12 @@ internal static class Git
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
-        // WaitForExit to ensure the process is fully disposed
-        // before reading its output (Linux: see Git.Run comment).
+        // P5.7: same fix as Git.Run — read stdout first, then
+        // WaitForExit, to avoid the Windows pipe-buffer deadlock.
+        var stdout = p.StandardOutput.ReadToEnd();
         p.WaitForExit();
-        return p.StandardOutput.ReadToEnd();
+        // Drain stderr so it doesn't fill its own buffer.
+        _ = p.StandardError.ReadToEnd();
+        return stdout;
     }
 }
