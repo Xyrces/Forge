@@ -1,0 +1,52 @@
+@page "/art"
+@inject IState<Forge.Dashboard.Features.Art.ArtState> ArtStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+
+<PageTitle>Art</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Art</h1>
+        <div class="page-header__meta">@ArtStore.Value.Rows.Count assets</div>
+    </div>
+
+    @if (ArtStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (ArtStore.Value.Error is not null)
+    {
+        <div class="page-subtitle">Error: @ArtStore.Value.Error</div>
+    }
+    else
+    {
+        <div class="art-grid">
+            @foreach (var row in ArtStore.Value.Rows)
+            {
+                <div class="art-card">
+                    <div class="art-card__thumb"></div>
+                    <div class="art-card__overlay">
+                        <span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span>
+                    </div>
+                    <div class="art-card__title">@row.Title</div>
+                    <div class="art-card__meta mono">@row.Kind · @row.BodyKind</div>
+                </div>
+            }
+            @if (ArtStore.Value.Rows.Count == 0)
+            {
+                <div class="page-subtitle">No art yet. Run the Artist agent on a spec to populate this gallery.</div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        ArtStore.StateChanged += OnStateChanged;
+        Dispatch.Dispatch(new Forge.Dashboard.Features.Art.ArtActions.LoadArtAction("PortHorizon"));
+    }
+
+    private void OnStateChanged(object? s, EventArgs e) => InvokeAsync(StateHasChanged);
+    public void Dispose() { ArtStore.StateChanged -= OnStateChanged; }
+}

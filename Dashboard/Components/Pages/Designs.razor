@@ -1,0 +1,60 @@
+@page "/designs"
+@inject IState<Forge.Dashboard.Features.Designs.DesignsState> DesignsStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+
+<PageTitle>Designs</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Designs</h1>
+        <div class="page-header__meta">@DesignsStore.Value.Rows.Count designs</div>
+    </div>
+
+    @if (DesignsStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (DesignsStore.Value.Error is not null)
+    {
+        <div class="page-subtitle">Error: @DesignsStore.Value.Error</div>
+    }
+    else
+    {
+        <div class="filter-bar">
+            <span class="chip chip--active">All</span>
+            <span class="chip">Ready For Design</span>
+            <span class="chip">Needs Revision</span>
+            <span class="chip">Designed</span>
+        </div>
+
+        <div class="design-grid">
+            @foreach (var row in DesignsStore.Value.Rows)
+            {
+                <div class="design-card">
+                    <div class="design-card__thumb"></div>
+                    <div class="design-card__id mono">@row.SpecId</div>
+                    <div class="design-card__title">@row.Title</div>
+                    <div class="design-card__meta">
+                        <span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span>
+                        <span class="mono">@row.Kind</span>
+                    </div>
+                </div>
+            }
+            @if (DesignsStore.Value.Rows.Count == 0)
+            {
+                <div class="page-subtitle">No designs yet. Run the Designer agent on a spec to populate this board.</div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        DesignsStore.StateChanged += OnStateChanged;
+        Dispatch.Dispatch(new Forge.Dashboard.Features.Designs.DesignsActions.LoadDesignsAction("PortHorizon"));
+    }
+
+    private void OnStateChanged(object? s, EventArgs e) => InvokeAsync(StateHasChanged);
+    public void Dispose() { DesignsStore.StateChanged -= OnStateChanged; }
+}

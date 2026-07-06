@@ -124,6 +124,44 @@ public sealed class ArtOutputStore
         return list;
     }
 
+    public async Task<IReadOnlyList<ArtOutput>> ListByProjectAsync(
+        string projectId, ArtOutputStatus? status = null, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        if (status is null)
+        {
+            cmd.CommandText = """
+                SELECT ao.id, ao.spec_id, ao.kind, ao.title, ao.body, ao.body_kind,
+                       ao.references_json, ao.parent_artifact_id, ao.status, ao.author,
+                       ao.created_at, ao.updated_at
+                FROM art_output ao
+                JOIN spec s ON s.id = ao.spec_id
+                WHERE s.project_id = $project
+                ORDER BY ao.created_at ASC
+                """;
+        }
+        else
+        {
+            cmd.CommandText = """
+                SELECT ao.id, ao.spec_id, ao.kind, ao.title, ao.body, ao.body_kind,
+                       ao.references_json, ao.parent_artifact_id, ao.status, ao.author,
+                       ao.created_at, ao.updated_at
+                FROM art_output ao
+                JOIN spec s ON s.id = ao.spec_id
+                WHERE s.project_id = $project AND ao.status = $status
+                ORDER BY ao.created_at ASC
+                """;
+            cmd.Parameters.AddWithValue("$status", status.Value.ToString().ToLowerInvariant());
+        }
+        cmd.Parameters.AddWithValue("$project", projectId);
+        var list = new List<ArtOutput>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct)) list.Add(ReadRow(rd));
+        return list;
+    }
+
     public async Task<int> DeleteBySpecAsync(string specId, CancellationToken ct = default)
     {
         await using var conn = new SqliteConnection(_connectionString);
