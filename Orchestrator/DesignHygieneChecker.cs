@@ -183,6 +183,61 @@ public sealed class DesignHygieneChecker
                 "Resolve or move open questions to follow-up specs; leave at most 3 here."));
         }
 
+        // 10. empty_artifact_block — the Designer emitted an
+        //     <!-- artifact:kind:title --> marker with no body
+        //     (the post-processor keeps the placeholder but
+        //     stores no design_artifact row). The next agent
+        //     would see "[read_artifact empty-N]" with nothing
+        //     to fetch. Warning, not error: the Designer may be
+        //     planning to fill it in next iteration.
+        //
+        // 11. unknown_artifact_kind — the marker kind isn't
+        //     one of wireframe | mockup | component-spec |
+        //     visual-rule. The post-processor stores the block
+        //     as component-spec as a safe default, but the
+        //     operator should know the Designer drifted.
+        var markerCheck = new System.Text.RegularExpressions.Regex(
+            @"<!--\s*artifact\s*:\s*([\w-]+)\s*:\s*([^\r\n]+?)\s*-->",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var validKinds = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "wireframe", "mockup", "component-spec", "visual-rule" };
+
+        foreach (System.Text.RegularExpressions.Match m in markerCheck.Matches(spec.Body))
+        {
+            var afterMarker = m.Index + m.Length;
+            // The "body" of this marker is everything until the
+            // next marker or end-of-document. We extract that
+            // via the post-processor's already-built split; but
+            // to keep this rule independent of the post-processor,
+            // we look at the next ~200 chars and check whether
+            // they're whitespace-only or hit another marker.
+            var windowEnd = Math.Min(afterMarker + 200, spec.Body.Length);
+            var window = spec.Body.Substring(afterMarker, windowEnd - afterMarker);
+            // If the trimmed window is empty OR the next
+            // marker appears within the window, the block is
+            // empty.
+            var empty = string.IsNullOrWhiteSpace(window)
+                || window.TrimStart().StartsWith("<!--")
+                || window.TrimStart().StartsWith("\r\n--")
+                || window.TrimStart().StartsWith("\n--");
+            if (empty)
+            {
+                findings.Add(new HygieneFinding(
+                    "empty_artifact_block", HygieneSeverity.Warning,
+                    $"Spec has an <!-- artifact:{m.Groups[1].Value}:{m.Groups[2].Value} --> marker with no body.",
+                    "Fill the artifact body or remove the marker. The post-processor keeps the placeholder but stores no row, so the next agent sees [read_artifact empty-N] with nothing to fetch."));
+            }
+
+            var kind = m.Groups[1].Value;
+            if (!validKinds.Contains(kind))
+            {
+                findings.Add(new HygieneFinding(
+                    "unknown_artifact_kind", HygieneSeverity.Warning,
+                    $"Spec has an <!-- artifact:{kind}:... --> marker with an unknown kind '{kind}'.",
+                    $"Use one of: {string.Join(", ", validKinds)}. Unknown kinds are stored as component-spec as a safe default."));
+            }
+        }
+
         // Determine pass: report passes if there are no Error findings.
         var passed = !findings.Any(f => f.Severity == HygieneSeverity.Error);
         return new HygieneReport(passed, findings);

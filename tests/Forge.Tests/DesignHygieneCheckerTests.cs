@@ -301,4 +301,89 @@ public class DesignHygieneCheckerTests : IDisposable
         var report = await NewChecker().CheckAsync(specA);
         Assert.DoesNotContain(report.Findings, f => f.Rule == "broken_dep_chain");
     }
+
+    // P5.4 — artifact marker hygiene.
+
+    [Fact]
+    public async Task EmptyArtifactBlock_ReportsWarning()
+    {
+        // HealthyBody + an empty artifact marker. The marker
+        // exists but the body is empty, so the post-processor
+        // would store no design_artifact row and the next agent
+        // would see "[read_artifact empty-N]" with nothing to
+        // fetch. Warn (not error) so the operator can clean up.
+        var body = HealthyBody + "\n\n<!-- artifact:wireframe:Empty -->\n";
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        var f = report.Findings.SingleOrDefault(x => x.Rule == "empty_artifact_block");
+        Assert.NotNull(f);
+        Assert.Equal(HygieneSeverity.Warning, f!.Severity);
+        Assert.Contains("Empty", f.Message);
+        Assert.True(report.Passed);  // warnings don't fail the report
+    }
+
+    [Fact]
+    public async Task TwoEmptyArtifactBlocksBackToBack_ReportsBoth()
+    {
+        var body = HealthyBody + "\n\n<!-- artifact:wireframe:One -->\n\n<!-- artifact:mockup:Two -->\n";
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        var findings = report.Findings.Where(x => x.Rule == "empty_artifact_block").ToList();
+        Assert.Equal(2, findings.Count);
+    }
+
+    [Fact]
+    public async Task NonEmptyArtifactBlock_DoesNotReport()
+    {
+        var body = HealthyBody + "\n\n<!-- artifact:wireframe:Login -->\n<svg>...</svg>\n";
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.DoesNotContain(report.Findings, f => f.Rule == "empty_artifact_block");
+    }
+
+    [Fact]
+    public async Task UnknownArtifactKind_ReportsWarning()
+    {
+        var body = HealthyBody + "\n\n<!-- artifact:weird-kind:Title -->\ncontent\n";
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        var f = report.Findings.SingleOrDefault(x => x.Rule == "unknown_artifact_kind");
+        Assert.NotNull(f);
+        Assert.Equal(HygieneSeverity.Warning, f!.Severity);
+        Assert.Contains("weird-kind", f.Message);
+    }
+
+    [Fact]
+    public async Task KnownArtifactKinds_DoNotReportUnknown()
+    {
+        var body = HealthyBody + """
+            <!-- artifact:wireframe:W1 -->
+            content
+            <!-- artifact:mockup:M1 -->
+            content
+            <!-- artifact:component-spec:C1 -->
+            content
+            <!-- artifact:visual-rule:V1 -->
+            content
+            """;
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.DoesNotContain(report.Findings, f => f.Rule == "unknown_artifact_kind");
+    }
+
+    [Fact]
+    public async Task MixedKnownAndUnknownKinds_OnlyUnknownFlagged()
+    {
+        var body = HealthyBody + """
+            <!-- artifact:wireframe:W1 -->
+            content
+            <!-- artifact:made-up-kind:M1 -->
+            content
+            """;
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        var findings = report.Findings.Where(x => x.Rule == "unknown_artifact_kind").ToList();
+        Assert.Single(findings);
+        Assert.Contains("made-up-kind", findings[0].Message);
+    }
 }
