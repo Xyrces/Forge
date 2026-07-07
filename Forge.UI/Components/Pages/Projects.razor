@@ -1,0 +1,94 @@
+@page "/projects"
+@inject IState<Forge.Dashboard.Features.Projects.ProjectsState> ProjectsStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.Projects
+
+<PageTitle>Projects</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Projects</h1>
+        <div class="page-header__meta">
+            @ProjectsStore.Value.Projects.Count registered
+            <span style="margin:0 6px;color:var(--outline-variant)">|</span>
+            <span style="color:var(--tertiary)">
+                @ProjectsStore.Value.Projects.Sum(p => p.InProgress) in flight
+            </span>
+        </div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction()))">Refresh</button>
+        </div>
+    </div>
+
+    @if (ProjectsStore.Value.Loading && ProjectsStore.Value.LastFetchedAt is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (ProjectsStore.Value.Error is not null && ProjectsStore.Value.LastFetchedAt is null)
+    {
+        <div class="page-subtitle">Error: @ProjectsStore.Value.Error</div>
+    }
+    else if (ProjectsStore.Value.Projects.Count == 0)
+    {
+        <div class="page-subtitle">
+            No projects registered. Configure <code>projects[]</code> in <code>appsettings.json</code> to enable multi-project concurrency caps.
+        </div>
+    }
+    else
+    {
+        <div class="project-grid">
+            @foreach (var p in ProjectsStore.Value.Projects)
+            {
+                <a class="project-card" href="@($"/projects/{p.Id}/overview")">
+                    <div class="project-card__head">
+                        <span class="project-card__id">@p.Id</span>
+                        <span class="project-card__name">@p.Name</span>
+                    </div>
+                    <div class="project-card__root" title="@p.Root">@p.Root</div>
+                    <div class="project-card__counters">
+                        <span class="pill pill--pending">@p.Pending pending</span>
+                        <span class="pill pill--inprogress">@p.InProgress in flight</span>
+                        <span class="pill pill--completed">@p.Completed done</span>
+                        @if (p.Failed > 0)
+                        {
+                            <span class="pill pill--failed">@p.Failed failed</span>
+                        }
+                    </div>
+                    <div class="project-card__slots">
+                        @foreach (var s in p.Slots)
+                        {
+                            <span class="slot-chip @(s.InFlight >= s.Max ? "slot-chip--full" : "")">
+                                @s.Role @s.InFlight/@s.Max
+                            </span>
+                        }
+                    </div>
+                </a>
+            }
+        </div>
+
+        <div class="page-subtitle page-subtitle--meta">
+            Multi-project is read-only in v1: the dashboard lists every registered project and its slot meter,
+            but the orchestrator dispatch loop still runs against <code>@ProjectsStore.Value.Projects.First().Id</code>
+            (legacy <code>workspace.root</code>). Configure <code>projects[]</code> in <code>appsettings.json</code> to add more;
+            the legacy key auto-shims to a single <code>"default"</code> project (warning logged).
+        </div>
+    }
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        ProjectsStore.StateChanged += OnStateChanged;
+        if (ProjectsStore.Value.LastFetchedAt is null)
+        {
+            Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction());
+        }
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        ProjectsStore.StateChanged -= OnStateChanged;
+    }
+}

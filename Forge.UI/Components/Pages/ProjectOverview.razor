@@ -1,0 +1,122 @@
+@page "/projects/{Id}/overview"
+@inject IState<Forge.Dashboard.Features.Projects.ProjectsState> ProjectsStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.Projects
+@inject NavigationManager Nav
+
+<PageTitle>Project · @Id</PageTitle>
+<div class="page">
+    @{
+        var proj = ProjectsStore.Value.Projects.FirstOrDefault(p => string.Equals(p.Id, Id, StringComparison.OrdinalIgnoreCase));
+    }
+
+    <div class="page-header">
+        <h1>@(proj?.Name ?? Id)</h1>
+        <div class="page-header__meta">
+            <span class="mono">@Id</span>
+            <span style="margin:0 6px;color:var(--outline-variant)">|</span>
+            <span title="@proj?.Root" class="mono">@proj?.Root</span>
+        </div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction()))">Refresh</button>
+        </div>
+    </div>
+
+    @if (proj is null)
+    {
+        <div class="page-subtitle">
+            Project <code>@Id</code> not found. <a href="/projects">Back to projects index</a>.
+        </div>
+    }
+    else
+    {
+        <div class="filter-bar">
+            <button class="chip chip--active">Overview</button>
+            <a class="chip" href="@($"/projects/{Id}/backlog")">Backlog</a>
+            <a class="chip" href="@($"/projects/{Id}/sprints")">Sprints</a>
+            <a class="chip" href="@($"/projects/{Id}/tasks")">Tasks</a>
+        </div>
+
+        <section class="overview-section">
+            <h2>Counters</h2>
+            <div class="metric-row">
+                <div class="metric">
+                    <div class="metric__label">Pending</div>
+                    <div class="metric__value">@proj.Pending</div>
+                </div>
+                <div class="metric">
+                    <div class="metric__label">In Progress</div>
+                    <div class="metric__value">@proj.InProgress</div>
+                </div>
+                <div class="metric">
+                    <div class="metric__label">Completed</div>
+                    <div class="metric__value">@proj.Completed</div>
+                </div>
+                <div class="metric">
+                    <div class="metric__label">Failed</div>
+                    <div class="metric__value">@proj.Failed</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="overview-section">
+            <h2>Concurrency slots</h2>
+            <p class="page-subtitle page-subtitle--meta">Per-project in-process semaphores. Adjust via <code>PATCH /api/projects/{Id}/slots/{role}</code> with body <code>{ "max": N }</code>.</p>
+            <div class="slot-grid">
+                @foreach (var s in proj.Slots)
+                {
+                    var utilization = s.Max == 0 ? 0 : (100 * s.InFlight / s.Max);
+                    <div class="slot-card @(s.InFlight >= s.Max ? "slot-card--full" : "")">
+                        <div class="slot-card__role">@s.Role</div>
+                        <div class="slot-card__bar">
+                            <div class="slot-card__fill" style="width: @utilization%"></div>
+                        </div>
+                        <div class="slot-card__count">
+                            <span class="@(s.InFlight >= s.Max ? "slot-card__in-flight--full" : "slot-card__in-flight")">@s.InFlight</span>
+                            <span class="slot-card__max">/ @s.Max</span>
+                        </div>
+                    </div>
+                }
+            </div>
+        </section>
+
+        <section class="overview-section">
+            <h2>Role caps (config)</h2>
+            <table class="data-grid">
+                <thead>
+                    <tr><th>Role</th><th>Max</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var roleCap in proj.Roles)
+                    {
+                        <tr><td class="mono">@roleCap.Key</td><td>@roleCap.Value</td></tr>
+                    }
+                </tbody>
+            </table>
+            <div class="page-subtitle page-subtitle--meta">
+                Edit <code>appsettings.json</code> <code>projects[].roles</code>; restart the orchestrator to pick up changes.
+            </div>
+        </section>
+    }
+</div>
+
+@code {
+    [Parameter] public string Id { get; set; } = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        ProjectsStore.StateChanged += OnStateChanged;
+        if (ProjectsStore.Value.LastFetchedAt is null)
+        {
+            Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction());
+        }
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        ProjectsStore.StateChanged -= OnStateChanged;
+    }
+}

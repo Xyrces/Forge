@@ -13,6 +13,15 @@ public sealed record AgentOptions
     public LlmOptions Llm { get; set; } = new();
     public VisionOptions Vision { get; set; } = new();
     /// <summary>
+    /// v1 multi-project registry. When non-empty, the dashboard
+    /// lists and exposes each project; when empty the legacy
+    /// <see cref="WorkspaceOptions.Root"/> is shimmed as a single
+    /// synthetic project id="default". The orchestrator dispatch
+    /// loop still runs against the legacy workspace in v1; the
+    /// multi-project surface is read-only for the dashboard.
+    /// </summary>
+    public ProjectsOptions Projects { get; set; } = new();
+    /// <summary>
     /// P4 Stage B — runtime selection. "InProcess" (default)
     /// uses Microsoft.Agents.AI.Workflows InProcessExecution;
     /// "Durable" uses Microsoft.Agents.AI.DurableTask +

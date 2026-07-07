@@ -11,6 +11,7 @@ using Forge.Dashboard.Features.Specs;
 using Forge.Dashboard.Features.Designs;
 using Forge.Dashboard.Features.Art;
 using Forge.Dashboard.Features.Tasks;
+using Forge.Dashboard.Features.Projects;
 
 namespace Forge.Dashboard;
 
@@ -31,6 +32,7 @@ public static class UIExtensions
         services.AddHttpClient<ArtClient>(c => c.BaseAddress = baseAddress);
         services.AddHttpClient<TasksClient>(c => c.BaseAddress = baseAddress);
         services.AddHttpClient<Forge.Dashboard.Features.View.ViewClient>(c => c.BaseAddress = baseAddress);
+        services.AddHttpClient<ProjectsClient>(c => c.BaseAddress = baseAddress);
         return services;
     }
 

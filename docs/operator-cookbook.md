@@ -19,6 +19,9 @@ The Blazor dashboard at `http://127.0.0.1:4097` exposes a per-area page:
 | `/agents`    | Registered agents table                                           | `GET /api/state`                                |
 | `/skills`    | Loaded skills + agent bindings                                    | `GET /api/state`                                |
 | `/vision`    | `MASTER_DESIGN.md` rendered + Re-plan button                      | `POST /api/vision/refresh`                      |
+| `/projects`  | Registered projects + per-project slot chips                      | `GET /api/projects/`                            |
+| `/projects/{id}/overview` | Per-project counters + slot utilization bars + role caps | `GET /api/projects/{id}`              |
+| `/board`     | Cross-project kanban feed (status + project filter chips)         | `GET /api/board`                                |
 | `/ops/...`   | Recovery reports · memory extractions · headroom stats            | `GET /api/recovery/policies`, `/api/memory/extractions`, `/api/cost/headroom` |
 | `/search?q=` | Built-in search across issues / specs / agents / skills            | `GET /api/search?q=`                            |
 
@@ -508,3 +511,21 @@ dotnet run --project Forge
 ```
 
 The workspace repo's branches (`agent/*`) and merged PRs are not affected — only the orchestrator's local state. Use `git branch -D agent/<id>` per-branch if you want to clean those up too.
+
+## Multi-project (v1 dashboard surface)
+
+For the full operator guide see `docs/multi-project.md`. The TL;DR:
+
+```bash
+# Inspect current registry
+curl http://127.0.0.1:4097/api/projects/
+
+# Edit appsettings.json — add entries under projects.projects[]
+# Restart the orchestrator
+
+# Live-adjust a slot cap without restart
+curl -X PATCH http://127.0.0.1:4097/api/projects/porthorizon/slots/coredev \
+     -H "Content-Type: application/json" -d '{"max":5}'
+```
+
+In v1 the multi-project registry is dashboard-readonly: the orchestrator dispatch loop still runs against the legacy `workspace.root` (synthesized as project id `default`). The cap on the number of concurrently dispatched issues *per role* is enforced by the slot semaphore pool at runtime, today used as a tunable hard-cap that callers can choose to respect or ignore.

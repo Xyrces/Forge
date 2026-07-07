@@ -8,6 +8,7 @@
 
     protected override void OnInitialized()
     {
+        ShellState.StateChanged += OnShellStateChanged;
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadActiveSprintAction());
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.PollHeartbeatAction());
         _heartbeatTimer = new System.Threading.Timer(_ =>
@@ -16,8 +17,11 @@
         }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
     }
 
+    private void OnShellStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
     public void Dispose()
     {
+        ShellState.StateChanged -= OnShellStateChanged;
         _heartbeatTimer?.Dispose();
     }
 }

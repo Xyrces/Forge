@@ -6,6 +6,8 @@ using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
 using Forge.Dashboard;
+using Forge.Orchestrator.Slots;
+using Forge.Projects;
 using Forge.Orchestrator;
 using Forge.Reviewer;
 
@@ -190,9 +192,18 @@ if (mode == CliMode.DashboardOnly)
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
+var dashboardOnlyProjects = ProjectRegistryLoader.Load(options, logger);
+        var dashboardOnlyFactory = new ProjectContextFactory(dashboardOnlyProjects);
+        var dashboardOnlySlots = new SlotTable();
+        var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
+        foreach (var pp in dashboardOnlyProjects)
+            foreach (var rr in _roleFiller)
+                dashboardOnlySlots.Configure(pp.Id, rr, DefaultProjectRoles.MaxFor(pp.Roles, rr));
 var dashboard = new DashboardHost(
             options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
-            loggerFactory.CreateLogger<DashboardHost>());
+            loggerFactory.CreateLogger<DashboardHost>(),
+            projectFactory: dashboardOnlyFactory,
+            slots: dashboardOnlySlots);
 
         _ = stateStore; // keep dead-code-elim happy; will remove in next commit
 
@@ -876,6 +887,34 @@ Console.Error.WriteLine(ex.ToString());
             eventBus,
             loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
         _startupRecovery = startupRecovery;  // held against GC reaping
+
+        // v1 multi-project: build the registry from configuration
+        // (back-compat shim to a single "default" project when only
+        // workspace.root is set), lazily construct per-project
+        // IssueStore bundles, and pre-size in-process concurrency
+        // slots per (projectId, role). The orchestrator dispatch
+        // loop still uses the legacy single-workspace path; this
+        // exposes multi-project info to the dashboard.
+        var knownProjects = ProjectRegistryLoader.Load(options, logger);
+        var projectFactory = new ProjectContextFactory(knownProjects);
+        var slots = new SlotTable();
+        var roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
+        foreach (var p in knownProjects)
+        {
+            foreach (var role in roleFiller)
+            {
+                var max = DefaultProjectRoles.MaxFor(p.Roles, role);
+                slots.Configure(p.Id, role, max);
+            }
+        }
+        if (knownProjects.Count > 0)
+        {
+            logger.LogInformation(
+                "Multi-project registry: {Count} project(s) [{Ids}]; slot caps configured per role.",
+                knownProjects.Count,
+                string.Join(",", knownProjects.Select(p => $"{p.Id}={p.Name}")));
+        }
+
         var dashboard = new DashboardHost(
             options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
@@ -902,7 +941,9 @@ Console.Error.WriteLine(ex.ToString());
             costTracker: costTracker,
             extractor: specExtractionReader,
             codebaseBuilder: codebaseGraphBuilder,
-            codebaseCache: codebaseGraphCache);
+            codebaseCache: codebaseGraphCache,
+            projectFactory: projectFactory,
+            slots: slots);
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>

@@ -108,3 +108,25 @@ The path is computed from the UI assembly location at runtime, so the same code 
 **Cause.** Some `bin/Debug/net10.0/` directories are mounting old assemblies. `dotnet build` cannot copy a new DLL over one that is open in another process.
 
 **Fix.** Kill all background `dotnet`/`MSBuild`/`VBCS`/`Forge.Core` processes before building. Use `Get-Process | Stop-Process -Force` if a build silently no-ops.
+
+## Symptom: a new page or API endpoint returns 404 even though the code is there
+
+**Cause.** `DashboardHost` was constructed without the dependencies the new
+endpoint requires (e.g. `ProjectContextFactory` + `SlotTable` for
+`/api/projects`). The endpoint is registered only when those dependencies
+are non-null. The legacy `--dashboard-only` and the long-running
+`RunOrchestratorAsync` both must pass them — if one forgets, that mode
+silently hides the endpoint.
+
+**Fix.** Make sure every call site of `new DashboardHost(...)` passes
+`projectFactory:` and `slots:` if it uses any API under `/api/projects/*`
+or `/api/board`. Hit both code paths after a UI change.
+
+## Symptom: parallel API calls return contradictory counts for the same project
+
+**Cause.** v1 wraps each registered project in its own lazy `IssueStore`
+against its own SQLite file. The factory memoizes contexts per process,
+so within one process the views are consistent — but two different
+`Forge.Core` processes pointed at the same `workspace.root` will not see
+each other's writes unless they share a DB file. Don't parallelize
+orchestrator processes against one DB.

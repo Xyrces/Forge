@@ -10,6 +10,8 @@ using Forge.Codebase;
 using Forge.Configuration;
 using Forge.Core;
 using Forge.Orchestrator;
+using Forge.Orchestrator.Slots;
+using Forge.Projects;
 
 namespace Forge.Dashboard;
 
@@ -47,6 +49,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Orchestrator.SprintProposalAuditStore? _sprintProposalAudit;
     private readonly Orchestrator.SprintProposeService? _sprintPropose;
     private readonly InMemoryDashboardEventBus _bus;
+    private readonly ProjectContextFactory? _projectFactory;
+    private readonly SlotTable? _slots;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
@@ -84,7 +88,9 @@ public sealed class DashboardHost : IAsyncDisposable
         ICodebaseGraphBuilder? codebaseBuilder = null,
         ICodebaseGraphCacheStore? codebaseCache = null,
         Orchestrator.SprintProposalAuditStore? sprintProposalAudit = null,
-        Orchestrator.SprintProposeService? sprintPropose = null)
+        Orchestrator.SprintProposeService? sprintPropose = null,
+        ProjectContextFactory? projectFactory = null,
+        SlotTable? slots = null)
     {
         _options = options;
         _headroom = headroom;
@@ -118,6 +124,8 @@ public sealed class DashboardHost : IAsyncDisposable
         _sprintPropose = sprintPropose;
         _messageBus = messageBus;
         _bus = bus;
+        _projectFactory = projectFactory;
+        _slots = slots;
         _logger = logger;
     }
 
@@ -140,6 +148,9 @@ public sealed class DashboardHost : IAsyncDisposable
         });
 
         builder.Services.AddForgeUI(new Uri($"http://{_options.Hostname}:{_options.Port}/"));
+
+        if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
+        if (_slots is not null) builder.Services.AddSingleton(_slots);
 
 _app = builder.Build();
         _app.Urls.Clear();
@@ -228,6 +239,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         });
 
         DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger);
+
+        if (_projectFactory is not null && _slots is not null)
+        {
+            ProjectsEndpoints.MapProjectsEndpoints(_app);
+        }
 
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger);
 

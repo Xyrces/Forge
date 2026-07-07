@@ -1,0 +1,129 @@
+@page "/board"
+@inject HttpClient Http
+@implements IDisposable
+@using System.Net.Http.Json
+
+<PageTitle>Board</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Cross-project board</h1>
+        <div class="page-header__meta">
+            @(_rows is null ? "Loading…" : $"{_rows.Count} issues")
+            <span style="margin:0 6px;color:var(--outline-variant)">|</span>
+            <span style="color:var(--tertiary)">@(_projects is null ? 0 : _projects.Count) projects</span>
+        </div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="ReloadAsync">Refresh</button>
+        </div>
+    </div>
+
+    <div class="filter-bar">
+        <button class="chip @(_filter == "All" ? "chip--active" : "")" @onclick="@(() => _filter = "All")">All</button>
+        <button class="chip @(_filter == "Pending" ? "chip--active" : "")" @onclick="@(() => _filter = "Pending")">Pending</button>
+        <button class="chip @(_filter == "InProgress" ? "chip--active" : "")" @onclick="@(() => _filter = "InProgress")">In Progress</button>
+        <button class="chip @(_filter == "Completed" ? "chip--active" : "")" @onclick="@(() => _filter = "Completed")">Completed</button>
+        <button class="chip @(_filter == "Failed" ? "chip--active" : "")" @onclick="@(() => _filter = "Failed")">Failed</button>
+        <span style="margin:0 8px;color:var(--outline-variant)">|</span>
+        @if (_projects is not null)
+        {
+            <button class="chip @(_projectFilter is null ? "chip--active" : "")" @onclick="@(() => _projectFilter = null)">All projects</button>
+            @foreach (var p in _projects)
+            {
+                <button class="chip @(_projectFilter == p.Id ? "chip--active" : "")" @onclick="@(() => _projectFilter = p.Id)">@p.Name</button>
+            }
+        }
+    </div>
+
+    @if (_rows is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (_rows.Count == 0)
+    {
+        <div class="page-subtitle">No issues across any project.</div>
+    }
+    else
+    {
+        <table class="data-grid">
+            <thead>
+                <tr>
+                    <th>Project</th>
+                    <th>ID</th>
+                    <th>Title</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Updated</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in FilteredRows)
+                {
+                    <tr>
+                        <td><span class="project-chip">@r.ProjectId</span></td>
+                        <td class="mono">@r.Id</td>
+                        <td>@r.Title</td>
+                        <td class="mono">@(r.Type ?? "—")</td>
+                        <td><span class="pill pill--@r.Status.ToLowerInvariant()">@r.Status</span></td>
+                        <td>@r.Priority</td>
+                        <td class="mono">@r.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private System.Threading.Timer? _timer;
+    private BoardPayload? _board;
+    private List<ProjectsListItem>? _projects;
+    private string _filter = "All";
+    private string? _projectFilter;
+
+    private IReadOnlyList<BoardIssueRow> _rows => _board?.Issues ?? (IReadOnlyList<BoardIssueRow>)Array.Empty<BoardIssueRow>();
+
+    private IReadOnlyList<BoardIssueRow> FilteredRows
+    {
+        get
+        {
+            IEnumerable<BoardIssueRow> q = _rows;
+            if (_filter != "All")
+                q = q.Where(r => string.Equals(r.Status, _filter, StringComparison.OrdinalIgnoreCase));
+            if (_projectFilter is not null)
+                q = q.Where(r => string.Equals(r.ProjectId, _projectFilter, StringComparison.OrdinalIgnoreCase));
+            return q.OrderByDescending(r => r.UpdatedAt).ToArray();
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+        _timer = new System.Threading.Timer(_ => InvokeAsync(ReloadAsync), null,
+            TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+    }
+
+    private async Task ReloadAsync()
+    {
+        try
+        {
+            _board = await Http.GetFromJsonAsync<BoardPayload>("/api/board");
+            _projects = await Http.GetFromJsonAsync<List<ProjectsListItem>>("/api/projects/");
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Board reload failed: {ex.Message}");
+        }
+    }
+
+    public void Dispose() => _timer?.Dispose();
+
+    private sealed record BoardPayload(List<BoardIssueRow> Issues, int TotalProjects);
+
+    private sealed record ProjectsListItem(string Id, string Name, string Root);
+
+    private sealed record BoardIssueRow(
+        string ProjectId, string Id, string Title, string Status,
+        int Priority, string? Type, DateTime UpdatedAt, DateTime CreatedAt);
+}
