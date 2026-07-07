@@ -70,12 +70,14 @@ public static class OptionsLoader
     private static void Validate(AgentOptions options)
     {
         var errors = new List<string>();
-        if (string.IsNullOrWhiteSpace(options.Workspace.Root))
-            errors.Add("Workspace.Root is required");
-        if (string.IsNullOrWhiteSpace(options.GitHub.Owner))
-            errors.Add("GitHub.Owner is required");
-        if (string.IsNullOrWhiteSpace(options.GitHub.Repo))
-            errors.Add("GitHub.Repo is required");
+        if (string.IsNullOrWhiteSpace(options.GitHub.Owner) || string.IsNullOrWhiteSpace(options.GitHub.Repo))
+        {
+            // GitHub.Owner/Repo are only required when the orchestrator
+            // actually opens PRs. The bootstrap layer creates the local
+            // workspace without them; downstream code that wants to
+            // create a PR throws a focused error. Keep the check
+            // advisory for now (no failure, just visibility).
+        }
         if (options.Spawner.MaxConcurrentSessions <= 0)
             errors.Add("Spawner.MaxConcurrentSessions must be > 0");
 

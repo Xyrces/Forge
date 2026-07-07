@@ -512,20 +512,74 @@ dotnet run --project Forge
 
 The workspace repo's branches (`agent/*`) and merged PRs are not affected — only the orchestrator's local state. Use `git branch -D agent/<id>` per-branch if you want to clean those up too.
 
-## Multi-project (v1 dashboard surface)
+## Multi-project + Forgesystem (v1.1)
 
-For the full operator guide see `docs/multi-project.md`. The TL;DR:
+For the full guide see `docs/multi-project.md`. The key flows:
+
+### Zero-config fresh install
+
+```bash
+# As shipped in appsettings.json — both fields empty
+{ "workspace": { "root": "" }, "forgesystem": { "dataRoot": "" } }
+
+dotnet run --project Forge -- --check
+# => Forgesystem data root: C:\Users\jtn50\AppData\Local\Forge
+# => Project 'default' root=C:\Users\jtn50\AppData\Local\Forge\projects\default
+# => state=C:\Users\jtn50\AppData\Local\Forge\projects\default\.forge\state
+# => created=True gitInit=True
+
+dotnet run --project Forge -- --dashboard-only
+# Visit http://127.0.0.1:4097/projects — one registered card; the
+# project root is freshly initialized.
+```
+
+### Point at an existing repo + override the data root
+
+```json
+{
+  "forgesystem": {
+    "dataRoot": "D:\\code\\forge-data"
+  },
+  "projects": {
+    "projects": [
+      {
+        "id": "porthorizon",
+        "name": "PortHorizon",
+        "root": "D:\\code\\portHorizon-mirror",
+        "roles": { "coredev": 2, "clientdev": 2, "reviewer": 2 }
+      }
+    ]
+  }
+}
+```
+
+The bootstrap honors `root` for git operations, uses
+`D:\code\forge-data\projects\porthorizon\.forge\state` for state, and
+sizes slots per the supplied `roles` dict.
+
+### Env override
+
+```bash
+$env:FORGE_DEFAULT_PROJECT_ROOT = "C:\Users\you\some\repo"
+dotnet run --project Forge
+# synthesized 'default' project uses the env value, ignoring
+# appsettings.json's workspace.root.
+```
+
+### Live-adjust a slot cap without restart
 
 ```bash
 # Inspect current registry
 curl http://127.0.0.1:4097/api/projects/
 
-# Edit appsettings.json — add entries under projects.projects[]
-# Restart the orchestrator
-
-# Live-adjust a slot cap without restart
+# Bump portHorizon's coredev cap to 5
 curl -X PATCH http://127.0.0.1:4097/api/projects/porthorizon/slots/coredev \
      -H "Content-Type: application/json" -d '{"max":5}'
 ```
 
-In v1 the multi-project registry is dashboard-readonly: the orchestrator dispatch loop still runs against the legacy `workspace.root` (synthesized as project id `default`). The cap on the number of concurrently dispatched issues *per role* is enforced by the slot semaphore pool at runtime, today used as a tunable hard-cap that callers can choose to respect or ignore.
+In v1.1 the multi-project registry is dashboard-readonly: the
+orchestrator dispatch loop still runs against the legacy single-workspace
+path (synthesized as project `id="default"`). The cap on the number of
+concurrently dispatched issues *per role* is enforced by the slot
+semaphore pool at runtime, today used as a tunable hard-cap that callers
+can choose to respect or ignore.

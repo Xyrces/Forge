@@ -42,11 +42,13 @@ public class ProjectRegistryLoaderTests
     }
 
     [Fact]
-    public void Load_WithEmptyProjectsAndEmptyWorkspace_ReturnsEmpty()
+    public void Load_WithEmptyProjectsAndEmptyWorkspace_SynthesizesAutoScaffoldDefault()
     {
         var options = new AgentOptions();
         var projects = ProjectRegistryLoader.Load(options, NullLogger.Instance);
-        Assert.Empty(projects);
+        var single = Assert.Single(projects);
+        Assert.Equal("default", single.Id);
+        Assert.Equal(string.Empty, single.Root);
     }
 
     [Fact]

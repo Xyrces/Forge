@@ -22,6 +22,12 @@ public sealed record AgentOptions
     /// </summary>
     public ProjectsOptions Projects { get; set; } = new();
     /// <summary>
+    /// Application-level storage root. See <see cref="ForgesystemOptions"/>
+    /// for defaults. When projects do not supply <c>workspace.root</c>,
+    /// the bootstrap creates them under this location.
+    /// </summary>
+    public ForgesystemOptions Forgesystem { get; set; } = new();
+    /// <summary>
     /// P4 Stage B — runtime selection. "InProcess" (default)
     /// uses Microsoft.Agents.AI.Workflows InProcessExecution;
     /// "Durable" uses Microsoft.Agents.AI.DurableTask +
@@ -122,9 +128,35 @@ public sealed record GitHubOptions
 
 public sealed record WorkspaceOptions
 {
+    /// <summary>
+    /// Explicit root the operator already has on disk. Required for
+    /// production (operator-managed) projects; the orchestrator will
+    /// <c>git init</c> it if it exists but is not yet a repo, and then
+    /// keep it under operator control. Used verbatim as the project's
+    /// root path; never silently re-parented.
+    /// </summary>
     public string Root { get; set; } = string.Empty;
     public string WorktreeRoot { get; set; } = ".portHorizon/worktrees";
     public string DefaultBranch { get; set; } = "main";
+}
+
+/// <summary>
+/// Application-level root location for every Forge-owned file: state
+/// DBs, worktrees, scratch output. Defaults to <c>%LOCALAPPDATA%/Forge</c>
+/// on Windows and <c>$XDG_DATA_HOME/forge</c> (or
+/// <c>~/.local/share/forge</c>) on Linux/macOS. Operators can override
+/// with a single absolute path; useful for portable / dev machine
+/// setups. When projects omit <see cref="WorkspaceOptions.Root"/>, the
+/// bootstrap creates them under this root in a per-project subdirectory.
+/// </summary>
+public sealed record ForgesystemOptions
+{
+    /// <summary>
+    /// Override the AppData-derived default. When empty, the bootstrap
+    /// picks the platform-appropriate user-local root. When non-empty,
+    /// must be an absolute path; the bootstrap uses it verbatim.
+    /// </summary>
+    public string DataRoot { get; set; } = string.Empty;
 }
 
 public sealed record SpawnerOptions

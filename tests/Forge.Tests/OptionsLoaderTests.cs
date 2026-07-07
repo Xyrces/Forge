@@ -112,17 +112,17 @@ public class OptionsLoaderTests : IDisposable
     }
 
     [Fact]
-    public void Load_MissingRequiredFields_ThrowsWithAllErrors()
+    public void Load_MissingRequiredFields_AcceptsZeroConfigAndAutoScaffolds()
     {
         WriteConfig("{}");
         var savedCwd = Directory.GetCurrentDirectory();
         try
         {
             Directory.SetCurrentDirectory(_workDir);
-            var ex = Assert.Throws<InvalidOperationException>(() => OptionsLoader.Load());
-            Assert.Contains("Workspace.Root is required", ex.Message);
-            Assert.Contains("GitHub.Owner is required", ex.Message);
-            Assert.Contains("GitHub.Repo is required", ex.Message);
+            var options = OptionsLoader.Load();
+            Assert.Equal(string.Empty, options.Workspace.Root);
+            Assert.NotNull(options.Forgesystem);
+            Assert.Equal(string.Empty, options.Forgesystem.DataRoot);
         }
         finally
         {

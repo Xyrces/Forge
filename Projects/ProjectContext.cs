@@ -43,17 +43,24 @@ public sealed class ProjectContext : IAsyncDisposable
 /// Builds <see cref="ProjectContext"/> instances lazily and caches them
 /// for the lifetime of the dashboard host. One process can hold many
 /// projects in memory simultaneously; each owns its own
-/// <see cref="IssueStore"/> backed by its own SQLite file.
+/// <see cref="IssueStore"/> backed by its own SQLite file. Accepts the
+/// full bootstrap result list so the SQLite path is whatever the
+/// bootstrap allocated (not re-derived from the operator's input).
 /// </summary>
 public sealed class ProjectContextFactory : IAsyncDisposable
 {
     private readonly IReadOnlyList<ProjectOptions> _projects;
+    private readonly IReadOnlyDictionary<string, string> _issuesDbByProject;
     private readonly ConcurrentDictionary<string, ProjectContext> _cache = new();
     private bool _disposed;
 
-    public ProjectContextFactory(IReadOnlyList<ProjectOptions> projects)
+    public ProjectContextFactory(
+        IReadOnlyList<ProjectOptions> projects,
+        IReadOnlyDictionary<string, string>? issuesDbByProject = null)
     {
         _projects = projects;
+        _issuesDbByProject = issuesDbByProject
+            ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
     public IReadOnlyList<ProjectOptions> KnownProjects => _projects;
@@ -65,9 +72,10 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         var opts = _projects.FirstOrDefault(p =>
             string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase));
         if (opts is null) return null;
-        var stateDir = ProjectStateDirs.StateDirFor(opts);
-        Directory.CreateDirectory(stateDir);
-        var dbPath = ProjectStateDirs.IssuesDbFor(opts);
+        var dbPath = _issuesDbByProject.TryGetValue(projectId, out var assigned)
+            ? assigned
+            : ProjectStateDirs.IssuesDbFor(opts);
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var ctx2 = new ProjectContext(opts, new IssueStore(dbPath));
         return _cache.GetOrAdd(projectId, ctx2);
     }
@@ -79,3 +87,4 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         _cache.Clear();
     }
 }
+

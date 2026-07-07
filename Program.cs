@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
 using Forge.AgentTools;
@@ -106,11 +106,13 @@ if (mode == CliMode.DashboardOnly)
 
     private static async Task<int> PrintStatusAsync(AgentOptions options, ILogger logger)
     {
-        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
         try
         {
-            var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+            var (projects, dbByProject, _) = BuildProjectBootstrap(options, logger);
+            var primary = projects[0];
+            await using var issues = new IssueStore(dbByProject[primary.Id]);
             var all = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
+            Console.WriteLine($"Project   : {primary.Id} ({primary.Root})");
             Console.WriteLine($"Pending:    {all.Count(i => i.Status == IssueStatus.Pending)}");
             Console.WriteLine($"InProgress: {all.Count(i => i.Status == IssueStatus.InProgress)}");
             Console.WriteLine($"Completed:  {all.Count(i => i.Status == IssueStatus.Completed)}");
@@ -128,14 +130,16 @@ if (mode == CliMode.DashboardOnly)
 
     private static async Task<int> EnqueueTaskAsync(string[] args, AgentOptions options)
     {
-        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
         var title = ParseArg(args, "--enqueue-task")
             ?? $"task-{Guid.NewGuid().ToString("N")[..8]}";
         var type = ParseArg(args, "--task-type") ?? "ecs";
         var description = ParseArg(args, "--task-desc") ?? "no description";
         var branch = ParseArg(args, "--branch") ?? $"agent/{title}";
 
-        var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+        var (projects, dbByProject, _) = BuildProjectBootstrap(options, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        var primary = projects[0];
+        var issues = new IssueStore(dbByProject[primary.Id]);
+
 
         // Stable, caller-supplied id: prefer explicit --task-id, else slugify the title.
         var explicitId = ParseArg(args, "--task-id");
@@ -181,19 +185,54 @@ if (mode == CliMode.DashboardOnly)
         return cleaned.Length == 0 || cleaned.Length > 40 ? cleaned[..Math.Min(40, cleaned.Length)] : cleaned;
     }
 
+    /// <summary>
+    /// Resolves Forgesystem options + runs the per-project bootstrap
+    /// (create root dir, init git repo, allocate state DB). Returns the
+    /// finalised project list (with Root rewritten to the bootstrap
+    /// directory) + a per-project DB path map. Idempotent.
+    /// </summary>
+    private static (IReadOnlyList<ProjectOptions> Projects,
+                    Dictionary<string, string> IssuesDbByProject,
+                    string DataRoot)
+        BuildProjectBootstrap(AgentOptions options, ILogger logger)
+    {
+        var dataRoot = ForgesystemPaths.ResolveDataRoot(options.Forgesystem.DataRoot);
+        Directory.CreateDirectory(dataRoot);
+        logger.LogInformation("Forgesystem data root: {Root}", dataRoot);
+
+        var bootstrap = new ProjectBootstrap(dataRoot, null);
+        var registry = ProjectRegistryLoader.Load(options, logger);
+
+        var finalised = new List<ProjectOptions>(registry.Count);
+        var dbByProject = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in registry)
+        {
+            var result = bootstrap.EnsureProject(p);
+            finalised.Add(result.Project);
+            dbByProject[result.Project.Id] = result.IssuesDbPath;
+            logger.LogInformation(
+                "Project '{Id}' root={Root} state={State} created={Created} gitInit={GitInit}",
+                result.Project.Id, result.Project.Root, result.StateDirectory,
+                result.Created, result.InitializedAsGitRepo);
+        }
+
+        return (finalised, dbByProject, dataRoot);
+    }
+
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
-        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
-        var stateStore = new StateStore(Path.Combine(workspaceDir, ".portHorizon", "state"));
-        var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+        var (dashboardOnlyProjects, dbByProject, _) = BuildProjectBootstrap(options, logger);
+        var defaultDb = dashboardOnlyProjects.Count > 0
+            ? dbByProject[dashboardOnlyProjects[0].Id]
+            : throw new InvalidOperationException("At least one project is required to run the dashboard.");
+        var issues = new IssueStore(defaultDb);
         var agents = new AgentStore(issues);
         var skills = new SkillStore(issues);
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
-var dashboardOnlyProjects = ProjectRegistryLoader.Load(options, logger);
-        var dashboardOnlyFactory = new ProjectContextFactory(dashboardOnlyProjects);
+        var dashboardOnlyFactory = new ProjectContextFactory(dashboardOnlyProjects, dbByProject);
         var dashboardOnlySlots = new SlotTable();
         var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
         foreach (var pp in dashboardOnlyProjects)
@@ -204,8 +243,6 @@ var dashboard = new DashboardHost(
             loggerFactory.CreateLogger<DashboardHost>(),
             projectFactory: dashboardOnlyFactory,
             slots: dashboardOnlySlots);
-
-        _ = stateStore; // keep dead-code-elim happy; will remove in next commit
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -320,13 +357,22 @@ Console.Error.WriteLine(ex.ToString());
     private static async Task<int> RunRecoverAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger, bool dryRun)
     {
-        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
-        var stateDir = Path.Combine(workspaceDir, ".portHorizon", "state");
         try
         {
-            await using var issues = new IssueStore(Path.Combine(stateDir, "issues.db"));
-            var recoveryReports = new RecoveryReportStore(Path.Combine(stateDir, "issues.db"));
-            var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
+            var (projects, dbByProject, _) = BuildProjectBootstrap(options, logger);
+            var primary = projects[0];
+            var primaryDb = dbByProject[primary.Id];
+            var stateDir = Path.GetDirectoryName(primaryDb)!;
+            await using var issues = new IssueStore(primaryDb);
+            var recoveryReports = new RecoveryReportStore(primaryDb);
+            var worktrees = new GitWorktreeService(
+                new WorkspaceOptions
+                {
+                    Root = primary.Root,
+                    WorktreeRoot = options.Workspace.WorktreeRoot,
+                    DefaultBranch = options.Workspace.DefaultBranch,
+                },
+                loggerFactory.CreateLogger<GitWorktreeService>());
             var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
             var recovery = new Orchestrator.StartupRecovery(
                 issues, recoveryReports, worktrees,
@@ -335,8 +381,8 @@ Console.Error.WriteLine(ex.ToString());
                 loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
 
             Console.WriteLine($"P4 StartupRecovery: {(dryRun ? "DRY-RUN" : "side-effects enabled")}");
-            Console.WriteLine($"  workspace: {options.Workspace.Root}");
-            Console.WriteLine($"  state dir: {stateDir}");
+            Console.WriteLine($"  project   : {primary.Id} root={primary.Root}");
+            Console.WriteLine($"  state dir : {stateDir}");
             Console.WriteLine();
 
             if (dryRun)
@@ -395,26 +441,32 @@ Console.Error.WriteLine(ex.ToString());
     private static async Task<int> RunPreflightCheckAsync(AgentOptions options, ILogger logger)
     {
         var failures = new List<string>();
-        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
-        var stateDir = Path.Combine(workspaceDir, ".portHorizon", "state");
+        var (projects, dbByProject, dataRoot) = BuildProjectBootstrap(options, logger);
+        var primary = projects[0];
+        var primaryDb = dbByProject[primary.Id];
+        var stateDir = Path.GetDirectoryName(primaryDb)!;
 
         Console.WriteLine("Pre-flight check for Forge");
-        Console.WriteLine($"  workspace: {options.Workspace.Root}");
-        Console.WriteLine($"  state dir: {stateDir}");
+        Console.WriteLine($"  data root : {dataRoot}");
+        Console.WriteLine($"  project   : {primary.Id} root={primary.Root} state={stateDir}");
         Console.WriteLine();
 
-        // 1. Workspace is a git repo
-        if (!Directory.Exists(options.Workspace.Root))
+        // 1. Workspace is now auto-scaffolded by the bootstrap; this
+        //    only surfaces it. Operators who hand-supplied an empty
+        //    workspace.root get a brand-new repo under the Forgesystem
+        //    data root; operators who supplied an existing path get
+        //    that path with a fresh git init if needed.
+        if (string.IsNullOrWhiteSpace(primary.Root) || !Directory.Exists(primary.Root))
         {
-            failures.Add($"workspace root does not exist: {options.Workspace.Root}");
+            failures.Add($"project '{primary.Id}' root is missing after bootstrap: {primary.Root}");
         }
-        else if (!Directory.Exists(Path.Combine(options.Workspace.Root, ".git")))
+        else if (!Directory.Exists(Path.Combine(primary.Root, ".git")))
         {
-            failures.Add($"workspace root is not a git repo: {options.Workspace.Root}");
+            failures.Add($"project '{primary.Id}' root is not a git repo after bootstrap: {primary.Root}");
         }
         else
         {
-            Console.WriteLine("  [ok] workspace is a git repo");
+            Console.WriteLine($"  [ok] project '{primary.Id}' is a git repo at {primary.Root}");
         }
 
         // 2. IssueStore opens + schema version is current
@@ -642,14 +694,24 @@ Console.Error.WriteLine(ex.ToString());
     private static async Task<int> RunOrchestratorAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
-        var workspaceDir = Path.GetDirectoryName(options.Workspace.Root) ?? ".";
-        var stateStore = new StateStore(Path.Combine(workspaceDir, ".portHorizon", "state"));
-        var issues = new IssueStore(Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db"));
+        var (knownProjects, orchDbByProject, orchDataRoot) = BuildProjectBootstrap(options, logger);
+        var primary = knownProjects[0];
+        var primaryDb = orchDbByProject[primary.Id];
+        var primaryStateDir = Path.GetDirectoryName(primaryDb)!;
+        var stateStore = new StateStore(primaryStateDir);
+        var issues = new IssueStore(primaryDb);
         var agents = new AgentStore(issues);
         var skills = new SkillStore(issues);
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
-        var worktrees = new GitWorktreeService(options.Workspace, loggerFactory.CreateLogger<GitWorktreeService>());
+        var worktrees = new GitWorktreeService(
+            new WorkspaceOptions
+            {
+                Root = primary.Root,
+                WorktreeRoot = options.Workspace.WorktreeRoot,
+                DefaultBranch = options.Workspace.DefaultBranch,
+            },
+            loggerFactory.CreateLogger<GitWorktreeService>());
         var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
         var roleRegistry = new RoleAgentRegistry();
         var agentsStore = new Core.AgentStore(issues);
@@ -659,13 +721,13 @@ Console.Error.WriteLine(ex.ToString());
         // IssueStore against the memory DB once at startup so the schema
         // (and any future migrations) run before MemoryStore touches it.
         // MemoryStore itself does not own migrations.
-        var memoryDbPath = Path.Combine(workspaceDir, ".portHorizon", "state", "memory.db");
+        var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
         var memoryBootstrap = new Core.IssueStore(memoryDbPath);
         var memoryStore = new MemoryStore(memoryDbPath);
 
         // Phase 4: JSONL mirror of the issue store. Background service
         // rewrites the file every 5s so it's safe to tail -f.
-        var issuesJsonlPath = Path.Combine(workspaceDir, ".portHorizon", "state", "issues.jsonl");
+        var issuesJsonlPath = Path.Combine(primaryStateDir, "issues.jsonl");
         var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
             loggerFactory.CreateLogger<IssuesJsonlMirror>());
 
@@ -673,7 +735,7 @@ Console.Error.WriteLine(ex.ToString());
             // (the v8 migration is applied at IssueStore's ctor).
             // The groomer_runs table has a foreign key on issue.id,
             // so the runs must live in the same DB as the issue rows.
-            var groomerRunsDb = Path.Combine(workspaceDir, ".portHorizon", "state", "issues.db");
+            var groomerRunsDb = primaryDb;
             var groomerRuns = new Core.IssueGroomerRunStore(groomerRunsDb);
             // P2.a: design_artifact + designer_run share the issues.db
             // (the v9 migration created both tables). The IssueStore
@@ -693,7 +755,7 @@ Console.Error.WriteLine(ex.ToString());
         // configured file on startup), inject it into memory as the
         // 'vision/master' key, and pass it to the dashboard so the
         // Vision tab can surface it.
-        var vision = new VisionStore(options.Workspace.Root, options.Vision.Path);
+        var vision = new VisionStore(primary.Root, options.Vision.Path);
         var visionSnapshot = vision.Reload();
         if (visionSnapshot.Exists)
         {
@@ -741,7 +803,7 @@ Console.Error.WriteLine(ex.ToString());
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
-            kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents"),
+            kiloAgentsRoot: Path.Combine(primary.Root, ".kilo", "agents"),
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,
@@ -827,18 +889,18 @@ Console.Error.WriteLine(ex.ToString());
                 eventBus,
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
-                kiloAgentsRoot: Path.Combine(options.Workspace.Root, ".kilo", "agents")));
+                kiloAgentsRoot: Path.Combine(primary.Root, ".kilo", "agents")));
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
         specStoreRef.Set(specStore);  // P5 — wire the spec store to the late-binding holder
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
         var codebaseGraphBuilder = new Codebase.DotnetCodebaseGraphBuilder();
         var projectContextSource = new Core.FilesystemProjectContextSource(
-            issues, agents, specStore, skills, options.Workspace.Root);
+            issues, agents, specStore, skills, primary.Root);
         var productAgentFactory = new Agents.ProductAgentFactory(
             specStore, issues, projectContextSource, chatClientFactory, llmConfig,
             roleRegistry, eventBus, skillSource, loggerFactory,
-            Path.Combine(options.Workspace.Root, ".kilo", "agents"));
+            Path.Combine(primary.Root, ".kilo", "agents"));
         var productRefinementQueue = new Agents.ProductRefinementQueue(
             productAgentFactory, specStore, eventBus,
             loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
@@ -853,7 +915,7 @@ Console.Error.WriteLine(ex.ToString());
         // agent's first step. The factory builds fresh DesignerAgent
         // instances per run.
         var designHygiene = new Orchestrator.DesignHygieneChecker(
-            specStore, codebaseGraphCache, codebaseGraphBuilder, options.Workspace.Root);
+            specStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root);
         var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
             specStore, designArtifacts, designerRuns, memoryStore, designHygiene,
             chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
@@ -873,7 +935,9 @@ Console.Error.WriteLine(ex.ToString());
             new SocketsHttpHandler(),
             meshyOptions,
             loggerFactory.CreateLogger<Meshy.MeshyClient>(),
-            artOutputRoot: Path.Combine(options.Workspace.Root, ".portHorizon", "art-output"));
+            artOutputRoot: primary.Id == "default"
+                ? Path.Combine(primary.Root, ".portHorizon", "art-output")
+                : ForgesystemPaths.ArtOutputDir(orchDataRoot, primary.Id));
         var artistAgentFactory = new Orchestrator.ArtistAgentFactory(
             specStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,
             chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
@@ -895,8 +959,7 @@ Console.Error.WriteLine(ex.ToString());
         // slots per (projectId, role). The orchestrator dispatch
         // loop still uses the legacy single-workspace path; this
         // exposes multi-project info to the dashboard.
-        var knownProjects = ProjectRegistryLoader.Load(options, logger);
-        var projectFactory = new ProjectContextFactory(knownProjects);
+        var projectFactory = new ProjectContextFactory(knownProjects, orchDbByProject);
         var slots = new SlotTable();
         var roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
         foreach (var p in knownProjects)
