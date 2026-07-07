@@ -244,6 +244,24 @@ a { color: var(--primary); text-decoration: none; }
 .pill--failed { background: var(--error); color: var(--on-primary); }
 .pill--pending { background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); }
 
+/*
+ * P8: deployment candidate status pills (DeploymentPipeline/DeploymentStore.cs
+ * DeploymentStatus). Namespaced dpill-- (not pill--) because
+ * "Approved"/"Pending" would otherwise collide with the spec-workflow
+ * pill--approved/pill--pending rules above, which use a different
+ * color scheme for the same word in a different context.
+ */
+.dpill { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: var(--radius-pill); font-size: 11px; font-weight: 500; }
+.dpill--pending { background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); }
+.dpill--buildrunning { background: var(--surface-container-highest); color: var(--on-surface); border: 1px solid var(--outline-variant); }
+.dpill--buildpassed { background: var(--surface-container-highest); color: var(--tertiary); border: 1px solid var(--tertiary); }
+.dpill--buildfailed { background: var(--error); color: var(--on-primary); }
+.dpill--approved { background: var(--primary); color: var(--on-primary); }
+.dpill--deploying { background: var(--primary); color: var(--on-primary); }
+.dpill--deployed { background: var(--tertiary); color: var(--on-primary); }
+.dpill--deployfailed { background: var(--error); color: var(--on-primary); }
+.dpill--rejected { background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); }
+
 .task-list { display: flex; flex-direction: column; gap: 12px; }
 .task-card { background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-lg); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .task-card__header { display: flex; align-items: center; gap: 12px; }

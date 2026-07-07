@@ -168,11 +168,13 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 14;
+    public const int CurrentSchemaVersion = 15;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
     private readonly string _dbPath;
+
+    public string DbPath => _dbPath;
 
     public IssueStore(string dbPath)
     {
@@ -679,6 +681,42 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             );
             CREATE INDEX IF NOT EXISTS ix_sprint_proposal_audit_ts
                 ON sprint_proposal_audit(ts DESC);
+
+            -- v15: P8 — deployment candidates. One row per operator
+            -- "deploy this commit" request against a project's
+            -- configured deployment pipeline (Configuration/DeploymentOptions.cs).
+            -- DeploymentBuildRunner transitions Pending -> BuildRunning
+            -- -> BuildPassed/BuildFailed; the /api/deployments approve
+            -- endpoint transitions BuildPassed (or Pending, when the
+            -- project skips the build gate) -> Approved -> Deploying
+            -- -> Deployed/DeployFailed via the project's configured
+            -- IDeploymentExecutor. Rejected is a terminal dead-end.
+            --
+            --   project_id: which registry entry this targets.
+            --   commit_sha: the commit the operator chose to deploy
+            --     (NOT necessarily the tip of main -- P8 intentionally
+            --     decouples "merged" from "deployed" so a burst of
+            --     merges doesn't force a redeploy on every push).
+            --   commit_summary: `git log -1 --oneline` snapshot at
+            --     request time, purely for display.
+            --   build_log / deploy_log: captured stdout+stderr from
+            --     the build check and the executor, respectively.
+            CREATE TABLE IF NOT EXISTS deployment (
+                id              TEXT PRIMARY KEY,
+                project_id      TEXT NOT NULL,
+                commit_sha      TEXT NOT NULL,
+                commit_summary  TEXT,
+                status          TEXT NOT NULL,
+                requested_at    TEXT NOT NULL,
+                requested_by    TEXT,
+                build_log       TEXT,
+                approved_at     TEXT,
+                approved_by     TEXT,
+                deployed_at     TEXT,
+                deploy_log      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_deployment_project
+                ON deployment(project_id, requested_at DESC);
 
             INSERT OR IGNORE INTO schema_version(version, applied_at)
             VALUES ($version, $now);

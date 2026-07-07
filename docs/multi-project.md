@@ -126,6 +126,7 @@ running until they release.
 | `/projects` | Card grid: project, root, counters, slot chips |
 | `/projects/{id}/overview` | Detail view: counters, slot utilization bars, role caps |
 | `/board` | Cross-project kanban feed (status filter + project filter chips) |
+| `/deployments` | P8: request/approve/reject deployment candidates per project — see `docs/deployment-pipeline.md` |
 
 The legacy routes (`/backlog`, `/sprints`, `/tasks`, `/agents`, `/skills`,
 `/specs`, `/designs`, `/art`, `/intake`, `/vision`, `/ops/{memory,cost,recovery}`)
@@ -137,27 +138,44 @@ the `default` project's data. Future (v2) work will projectify them onto
 
 Two modes:
 
-### Mode A — operator-managed project with `workspace.root`
+### Mode A — operator-managed project with an explicit `root`
 
-When the project entry has `root` set (the legacy `workspace.root` shim,
-or an explicit project in `projects[]`), state lives *inside* the
-project's existing root directory:
+**Correction (verified against `Projects/ProjectBootstrap.cs` directly,
+2026-07-07):** state does **not** live inside an operator-supplied
+`root` for anything except the legacy `id="default"` project. Every
+other project — whether its `root` was hand-set by the operator (e.g.
+`projects[].root`) or left empty for auto-scaffolding — gets its state
+centralized under the Forgesystem **data root**, keyed by project id.
+This keeps Forge-owned sqlite files out of arbitrary operator repos
+(no risk of an agent accidentally `git add`ing `issues.db`) and gives
+every project's state a single, predictable location for backup/ops
+tooling regardless of where its source tree happens to live.
 
 ```
-{root}/
-  .git/                      # operator-owned (existing or bootstrap-init'd)
-  .forge/
-    state/
-      issues.db              # Forge-owned
-      memory.db
-      issues.jsonl
-    worktrees/               # per-task worktrees (each `git worktree add`)
-    art-output/              # Meshy / Artist outputs
+{DataRoot}/projects/{id}/.forge/
+  state/
+    issues.db              # Forge-owned; deployment table lives here too (v15)
+    memory.db
+    issues.jsonl
+  worktrees/                # NOT used by the dispatch loop in v1/v1.1 (see below)
+  art-output/               # Meshy / Artist outputs
 ```
 
-**Exception:** the legacy `id="default"` project keeps the v0 layout
+`GitWorktreeService` (agent task worktrees) is the one exception that
+DOES live under the project's actual `root`, at `{root}/.forge/worktrees/`
+— it's wired from the legacy `Workspace.WorktreeRoot` config, relative
+to `primary.Root`, independent of `ProjectBootstrap`'s (currently
+unused by the dispatch loop) `WorktreeParent` field. This is what lets
+Forge maintain itself: the `forge` project's `root` points at the real
+dev clone (e.g. `C:\Users\jtn50\repos\gamedev\Forge`), agent worktrees
+land inside it as `.forge/worktrees/agent/<taskId>/` and get committed
++ PR'd normally, while the project's issues/memory/deployment state
+stays out of that repo entirely.
+
+**Exception:** the legacy `id="default"` project (synthesized when
+`projects[]` is empty and `workspace.root` is set) keeps the v0 layout
 (`{root}/.portHorizon/state/issues.db`) for full compatibility with
-existing on-disk DBs and test fixtures. New projects always use `.forge/`.
+existing on-disk DBs and test fixtures.
 
 ### Mode B — fully auto-scaffolded project (v1.1 — zero config)
 
@@ -196,6 +214,32 @@ The bootstrap is **idempotent**: a second run finds `.git/`, skips the
 `ProjectRegistryLoader`) takes precedence over `workspace.root` for the
 synthesized `default` project. Same intent as the legacy field, but
 doesn't pollute the committed `appsettings.json`.
+
+## Self-hosting: Forge as one of its own projects (P8)
+
+There's nothing project-registry-specific about Forge's own repo — it
+registers exactly like any other entry in `projects[]`:
+
+```json
+{ "id": "forge", "name": "Forge", "root": "C:\\Users\\jtn50\\repos\\gamedev\\Forge", "roles": { ... } }
+```
+
+Once registered, agents open PRs against whatever `github.owner`/`repo`
+points at for that Forge process (matters if you keep the source repo's
+own remote and the deploying instance's `github` config in sync). The
+part that's genuinely new is what happens **after** a PR merges — see
+`docs/deployment-pipeline.md` for the full deployment-approval flow
+(`/deployments` dashboard page, `DeploymentKind.SelfHostedWindowsService`,
+and the `Forge.Deployer` helper that survives the service bounce Forge
+can't survive on its own).
+
+**Ordering matters if you also list other projects.** The dispatch
+loop (as opposed to the dashboard, which is genuinely multi-project) is
+still single-workspace under the hood — it only ever runs against
+`knownProjects[0]` (see "Known v1 + v1.1 limitations" below). List
+`forge` first in `projects[]` if you want self-maintenance issues
+actually dispatched, not just visible on `/board`; every other listed
+project stays dashboard-readonly until the v2 dispatcher cutover.
 
 ## Back-pressure (deferred to v2)
 

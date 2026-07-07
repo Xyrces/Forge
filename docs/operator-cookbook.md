@@ -577,9 +577,56 @@ curl -X PATCH http://127.0.0.1:4097/api/projects/porthorizon/slots/coredev \
      -H "Content-Type: application/json" -d '{"max":5}'
 ```
 
-In v1.1 the multi-project registry is dashboard-readonly: the
-orchestrator dispatch loop still runs against the legacy single-workspace
-path (synthesized as project `id="default"`). The cap on the number of
+In v1.1 the multi-project registry is mostly dashboard-readonly: the
+orchestrator dispatch loop still only ever targets `knownProjects[0]`
+— the FIRST entry in `projects[]` (or the synthesized `id="default"`
+when `projects[]` is empty). List whichever project should actually
+receive dispatched work first. The cap on the number of
 concurrently dispatched issues *per role* is enforced by the slot
 semaphore pool at runtime, today used as a tunable hard-cap that callers
 can choose to respect or ignore.
+
+## Self-hosting Forge + deploying a new build (P8)
+
+Full design in `docs/deployment-pipeline.md`. Short version, for the
+`forge` project registered as `projects[].[0]` in your own
+`appsettings.json`:
+
+```bash
+# 1. Merge whatever PRs you want (this does NOT trigger anything by
+#    itself — merging and deploying are decoupled on purpose).
+
+# 2. Request a deployment for a specific commit (doesn't have to be
+#    the tip of main). Pick a commit from the list first:
+curl "http://127.0.0.1:4097/api/deployments/commits?projectId=forge&limit=10"
+
+curl -X POST http://127.0.0.1:4097/api/deployments/ \
+     -H "Content-Type: application/json" \
+     -d '{"projectId":"forge","commitSha":"<sha>","requestedBy":"you"}'
+# => { "id": "deploy-...", "status": "Pending", ... }
+# Build+test check kicks off automatically (RequireBuildCheck defaults
+# to true); poll until status is BuildPassed or BuildFailed:
+curl "http://127.0.0.1:4097/api/deployments/?projectId=forge"
+
+# 3. Approve. If any project has in-flight tasks, this restarts the
+#    ONE process serving every project's dispatch loop -- the API
+#    returns 409 with a warning instead of silently interrupting them.
+curl -X POST http://127.0.0.1:4097/api/deployments/deploy-xxxx/approve \
+     -H "Content-Type: application/json" -d '{"approvedBy":"you"}'
+# If blocked: -d '{"approvedBy":"you","force":true}' to proceed anyway.
+
+# 4. The service bounces (stop -> repoint `current` junction -> start).
+#    Your HTTP connection to the dashboard drops during this window --
+#    that's expected. Reconnect and check status once it's back:
+curl "http://127.0.0.1:4097/api/deployments/?projectId=forge"
+# => status: Deployed (or DeployFailed, with deploy_log populated)
+```
+
+The Blazor `/deployments` page wraps the same flow: project + commit
+pickers, a candidate table with expandable build/deploy logs, and an
+inline "Force deploy anyway" button that appears only after a blocked
+approval attempt.
+
+First-time Windows Service setup (not part of the regular deploy loop
+— run once per machine): `scripts/install-service.ps1`. See
+`docs/deployment-pipeline.md#installing-the-windows-service`.

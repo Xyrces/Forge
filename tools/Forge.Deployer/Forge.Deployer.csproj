@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Forge.Tools.Deployer</RootNamespace>
+    <AssemblyName>Forge.Deployer</AssemblyName>
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    Deliberately has ZERO ProjectReference to Forge.Core. This tool is
+    launched detached, right before (or as) the Forge Windows Service
+    process it targets is stopped; if it referenced Forge.Core's
+    assemblies, a locked file swap race becomes possible. It only
+    depends on the BCL, ServiceController, and System.Text.Json, and
+    only ever runs on Windows (self hosted deployment is a Windows
+    Service concept end to end; see docs/deployment-pipeline.md).
+  -->
+  <ItemGroup>
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="9.0.0" />
+  </ItemGroup>
+</Project>

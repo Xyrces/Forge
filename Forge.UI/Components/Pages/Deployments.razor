@@ -1,0 +1,171 @@
+@page "/deployments"
+@inject IState<Forge.Dashboard.Features.Deployments.DeploymentsState> DeployStore
+@inject IState<Forge.Dashboard.Features.Projects.ProjectsState> ProjectsStore
+@inject IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.Deployments
+@using Forge.Dashboard.Features.Projects
+
+<PageTitle>Deployments</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Deployments</h1>
+        <div class="page-header__meta">
+            @DeployStore.Value.Candidates.Count candidate(s)
+        </div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.LoadDeploymentsAction()))">Refresh</button>
+        </div>
+    </div>
+
+    <div class="page-subtitle page-subtitle--meta">
+        Deployment is decoupled from merging: picking a commit here does not require it to be the tip of any
+        branch. Nothing is redeployed automatically on push -- an operator always chooses the commit and
+        approves the result of the build/test gate (when the project requires one).
+    </div>
+
+    @if (DeployStore.Value.ActionError is not null)
+    {
+        <div class="page-subtitle" style="color:var(--error)">
+            @DeployStore.Value.ActionError
+            <button class="btn" style="margin-left:8px" @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.ClearActionErrorAction()))">Dismiss</button>
+        </div>
+    }
+
+    <div class="overview-section">
+        <h3>Request a deployment</h3>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <select @bind="_selectedProjectId" @bind:after="OnProjectChangedAsync" style="height:32px;">
+                <option value="">Select a project…</option>
+                @foreach (var p in ProjectsStore.Value.Projects)
+                {
+                    <option value="@p.Id">@p.Name (@p.Id)</option>
+                }
+            </select>
+
+            @if (DeployStore.Value.CommitsLoading)
+            {
+                <span class="page-subtitle" style="margin:0;">Loading commits…</span>
+            }
+            else if (DeployStore.Value.CommitsForProjectId == _selectedProjectId && DeployStore.Value.Commits.Count > 0)
+            {
+                <select @bind="_selectedCommitSha" style="height:32px; min-width:340px;">
+                    <option value="">Select a commit…</option>
+                    @foreach (var c in DeployStore.Value.Commits)
+                    {
+                        <option value="@c.Sha">@c.ShortSha @c.Subject</option>
+                    }
+                </select>
+            }
+
+            <button class="btn btn--primary"
+                    disabled="@(string.IsNullOrEmpty(_selectedProjectId) || string.IsNullOrEmpty(_selectedCommitSha))"
+                    @onclick="RequestDeploymentAsync">
+                Request deployment
+            </button>
+        </div>
+    </div>
+
+    @if (DeployStore.Value.Loading && DeployStore.Value.LastFetchedAt is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (DeployStore.Value.Candidates.Count == 0)
+    {
+        <div class="page-subtitle">No deployment candidates yet.</div>
+    }
+    else
+    {
+        <table class="data-grid">
+            <thead>
+                <tr>
+                    <th>Project</th>
+                    <th>Commit</th>
+                    <th>Status</th>
+                    <th>Requested</th>
+                    <th>Log</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var d in DeployStore.Value.Candidates)
+                {
+                    <tr>
+                        <td><span class="project-chip">@d.ProjectId</span></td>
+                        <td class="mono" title="@d.CommitSha">@d.CommitSha[..Math.Min(8, d.CommitSha.Length)] @d.CommitSummary</td>
+                        <td><span class="dpill dpill--@d.Status.ToLowerInvariant()">@d.Status</span></td>
+                        <td class="mono">@d.RequestedAt.ToString("yyyy-MM-dd HH:mm")@(d.RequestedBy is null ? "" : $" ({d.RequestedBy})")</td>
+                        <td>
+                            @if (!string.IsNullOrWhiteSpace(d.BuildLog) || !string.IsNullOrWhiteSpace(d.DeployLog))
+                            {
+                                <details>
+                                    <summary>view</summary>
+                                    <pre style="max-width:480px; max-height:220px; overflow:auto; font-size:11px;">@(d.DeployLog ?? d.BuildLog)</pre>
+                                </details>
+                            }
+                        </td>
+                        <td>
+                            @if (d.Status is "Pending" or "BuildPassed")
+                            {
+                                <button class="btn btn--primary" style="height:26px; padding:0 8px; font-size:12px;"
+                                        @onclick="@(() => ApproveAsync(d.Id, force: false))">Approve</button>
+                                <button class="btn btn--danger" style="height:26px; padding:0 8px; font-size:12px;"
+                                        @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id)))">Reject</button>
+                            }
+                            @if (DeployStore.Value.PendingInFlightWarning is { } warn && warn.DeploymentId == d.Id)
+                            {
+                                <div style="margin-top:6px; color:var(--error); font-size:12px; max-width:260px;">
+                                    @warn.Message
+                                    <button class="btn btn--danger" style="height:24px; padding:0 8px; font-size:11px; margin-top:4px;"
+                                            @onclick="@(() => ApproveAsync(d.Id, force: true))">
+                                        Force deploy anyway
+                                    </button>
+                                </div>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private string _selectedProjectId = string.Empty;
+    private string _selectedCommitSha = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        DeployStore.StateChanged += OnStateChanged;
+        ProjectsStore.StateChanged += OnStateChanged;
+        if (ProjectsStore.Value.LastFetchedAt is null)
+            Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction());
+        if (DeployStore.Value.LastFetchedAt is null)
+            Dispatch.Dispatch(new DeploymentsActions.LoadDeploymentsAction());
+    }
+
+    private Task OnProjectChangedAsync()
+    {
+        _selectedCommitSha = string.Empty;
+        if (!string.IsNullOrEmpty(_selectedProjectId))
+            Dispatch.Dispatch(new DeploymentsActions.LoadCommitsAction(_selectedProjectId));
+        return Task.CompletedTask;
+    }
+
+    private void RequestDeploymentAsync()
+    {
+        if (string.IsNullOrEmpty(_selectedProjectId) || string.IsNullOrEmpty(_selectedCommitSha)) return;
+        Dispatch.Dispatch(new DeploymentsActions.RequestDeploymentAction(_selectedProjectId, _selectedCommitSha, "operator"));
+    }
+
+    private void ApproveAsync(string id, bool force) =>
+        Dispatch.Dispatch(new DeploymentsActions.ApproveDeploymentAction(id, force));
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        DeployStore.StateChanged -= OnStateChanged;
+        ProjectsStore.StateChanged -= OnStateChanged;
+    }
+}

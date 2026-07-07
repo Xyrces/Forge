@@ -12,6 +12,14 @@ public sealed record ProjectOptions
     public string Root { get; set; } = string.Empty;
     public string? SkillPlaybookUrl { get; set; }
     public Dictionary<string, int> Roles { get; set; } = new();
+
+    // P8: optional deployment pipeline config. Null/omitted means the
+    // project has no configured deployment action -- it can still be
+    // enqueued for build-verification, but "approve" has nothing to
+    // execute. Each project can wire a totally different deployment
+    // strategy (a one-line git-tag script, a Docker build+push, or --
+    // Forge's own case -- a Windows Service bounce); see DeploymentKind.
+    public DeploymentOptions? Deployment { get; set; }
 }
 
 public static class DefaultProjectRoles

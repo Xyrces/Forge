@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forge.Tests", "tests\Forge.
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ph-forge-harness", "tools\e2e-harness\ph-forge-harness.csproj", "{B1C2D3E4-F5A6-7890-1234-56789ABCDEF1}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forge.Deployer", "tools\Forge.Deployer\Forge.Deployer.csproj", "{C2D3E4F5-A6B7-8901-2345-6789ABCDEF12}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,6 +28,10 @@ Global
 		{B1C2D3E4-F5A6-7890-1234-56789ABCDEF1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B1C2D3E4-F5A6-7890-1234-56789ABCDEF1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B1C2D3E4-F5A6-7890-1234-56789ABCDEF1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C2D3E4F5-A6B7-8901-2345-6789ABCDEF12}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C2D3E4F5-A6B7-8901-2345-6789ABCDEF12}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C2D3E4F5-A6B7-8901-2345-6789ABCDEF12}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C2D3E4F5-A6B7-8901-2345-6789ABCDEF12}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

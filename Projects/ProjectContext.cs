@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Deploy;
 
 namespace Forge.Projects;
 
@@ -15,15 +16,22 @@ public sealed class ProjectContext : IAsyncDisposable
     public ProjectOptions Options { get; }
 
     private readonly IssueStore _issues;
+    private readonly Lazy<DeploymentStore> _deployments;
 
     public ProjectContext(ProjectOptions options, IssueStore issues)
     {
         Options = options;
         _issues = issues;
         _issues.EnsureSchema();
+        // Deployment rows live in the same sqlite file as issues (v15
+        // migration, applied above by EnsureSchema); DeploymentStore
+        // is a thin typed layer over that table, so it's safe to
+        // construct lazily against the same path.
+        _deployments = new Lazy<DeploymentStore>(() => new DeploymentStore(_issues.DbPath));
     }
 
     public IIssueStore Issues => _issues;
+    public DeploymentStore Deployments => _deployments.Value;
 
     public async Task<int> CountByStatusAsync(IssueStatus status, CancellationToken ct)
     {

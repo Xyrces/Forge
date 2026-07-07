@@ -1,4 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
 using Forge.AgentTools;
@@ -75,7 +77,53 @@ if (mode == CliMode.DashboardOnly)
         if (mode == CliMode.RecoverAndStart)
             return await RunRecoverAsync(options, loggerFactory, logger, dryRun: false);
 
+        // Windows Service hosting. When launched by the Service
+        // Control Manager (sc.exe / New-Service / Windows Services
+        // MMC), stdin/stdout are not a console and Console.CancelKeyPress
+        // never fires on stop -- the SCM instead expects the process
+        // to honor a stop signal delivered through the generic host's
+        // IHostApplicationLifetime. WindowsServiceHelpers.IsWindowsService()
+        // returns false for `dotnet run`/interactive launches, so this
+        // is a no-op for every other invocation in this switch.
+        if (WindowsServiceHelpers.IsWindowsService())
+            return await RunAsWindowsServiceAsync(options, loggerFactory, logger);
+
         return await RunOrchestratorAsync(options, loggerFactory, logger);
+    }
+
+    // Wraps RunOrchestratorAsync in a minimal generic Host so the
+    // Service Control Manager sees a well-behaved service: SCM start
+    // is acknowledged once the host starts the hosted service, and an
+    // SCM stop request cancels stoppingToken, which we forward into
+    // RunOrchestratorAsync's own shutdown token. Everything else
+    // (dashboard, dispatch loop, schedulers) is unchanged -- this is
+    // purely a lifecycle adapter, not a parallel code path.
+    private static async Task<int> RunAsWindowsServiceAsync(
+        AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
+    {
+        var exitCode = 0;
+        var builder = Host.CreateApplicationBuilder();
+        builder.Services.AddWindowsService(o => o.ServiceName = "Forge");
+        builder.Services.AddHostedService(_ =>
+            new OrchestratorHostedService(options, loggerFactory, logger, code => exitCode = code));
+        using var host = builder.Build();
+        await host.RunAsync();
+        return exitCode;
+    }
+
+    // Adapts RunOrchestratorAsync (a plain cancellable async method,
+    // not an IHostedService) to BackgroundService so it can live
+    // inside the generic host built above. ExecuteAsync's stoppingToken
+    // is cancelled by the host when the SCM delivers a stop request.
+    private sealed class OrchestratorHostedService(
+        AgentOptions options, ILoggerFactory loggerFactory, ILogger logger, Action<int> onExit)
+        : BackgroundService
+    {
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+        {
+            var code = await RunOrchestratorAsync(options, loggerFactory, logger, stoppingToken);
+            onExit(code);
+        }
     }
 
     private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart }
@@ -692,7 +740,8 @@ Console.Error.WriteLine(ex.ToString());
 
 
     private static async Task<int> RunOrchestratorAsync(
-        AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
+        AgentOptions options, ILoggerFactory loggerFactory, ILogger logger,
+        CancellationToken externalStop = default)
     {
         var (knownProjects, orchDbByProject, orchDataRoot) = BuildProjectBootstrap(options, logger);
         var primary = knownProjects[0];
@@ -978,6 +1027,18 @@ Console.Error.WriteLine(ex.ToString());
                 string.Join(",", knownProjects.Select(p => $"{p.Id}={p.Name}")));
         }
 
+        // P8: reconcile any SelfHostedWindowsService deployment that
+        // completed (or failed) while THIS process wasn't running --
+        // the executor that kicked it off was killed by the very
+        // service stop it triggered, so the verdict could only ever
+        // be written by whichever Forge.Core process starts next.
+        var deployReconciler = new Deploy.DeploymentResultReconciler(
+            loggerFactory.CreateLogger<Deploy.DeploymentResultReconciler>());
+        await deployReconciler.ReconcileAsync(
+            knownProjects,
+            projectId => new Deploy.DeploymentStore(orchDbByProject[projectId]),
+            CancellationToken.None);
+
         var dashboard = new DashboardHost(
             options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
@@ -1008,7 +1069,12 @@ Console.Error.WriteLine(ex.ToString());
             projectFactory: projectFactory,
             slots: slots);
 
-        using var shutdownCts = new CancellationTokenSource();
+        // externalStop is the Windows Service host's stoppingToken when
+        // running under the SCM (default(CancellationToken) -- never
+        // cancels on its own -- for every other invocation). Linking it
+        // means an SCM stop request tears the orchestrator down through
+        // the exact same path as Ctrl+C.
+        using var shutdownCts = CancellationTokenSource.CreateLinkedTokenSource(externalStop);
         Console.CancelKeyPress += (_, e) =>
         {
             logger.LogWarning("SIGINT received; cancelling...");

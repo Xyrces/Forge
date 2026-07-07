@@ -151,6 +151,7 @@ public sealed class DashboardHost : IAsyncDisposable
 
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
+        if (_projectFactory is not null) builder.Services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
 
 _app = builder.Build();
         _app.Urls.Clear();
@@ -243,6 +244,7 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         if (_projectFactory is not null && _slots is not null)
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
+            DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
         }
 
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger);
