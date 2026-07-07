@@ -69,14 +69,20 @@ public class DeploymentBuildRunnerTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(_repoDir, ".forge", "deploy-checkouts", candidate.Id)));
     }
 
+    // "cmd /c exit N" only exists on Windows -- use a shell command that
+    // exists on both Windows (via cmd.exe, which OperatingSystem.IsWindows()
+    // path below still exercises) and Linux/macOS CI runners (via sh -c).
+    private static string ExitCommand(int code) =>
+        OperatingSystem.IsWindows() ? $"cmd /c exit {code}" : $"sh -c \"exit {code}\"";
+
     [Fact]
     public async Task RunAsync_PassingCommands_ChecksOutCommitAndMarksBuildPassed()
     {
         var project = ProjectWithDeployment(new DeploymentOptions
         {
             RequireBuildCheck = true,
-            BuildCommand = "cmd /c exit 0",
-            TestCommand = "cmd /c exit 0",
+            BuildCommand = ExitCommand(0),
+            TestCommand = ExitCommand(0),
         });
         var candidate = await _store.CreateAsync(project.Id, _headSha, null, null);
         var runner = new DeploymentBuildRunner(_store, NullLogger<DeploymentBuildRunner>.Instance);
@@ -95,8 +101,8 @@ public class DeploymentBuildRunnerTests : IDisposable
         var project = ProjectWithDeployment(new DeploymentOptions
         {
             RequireBuildCheck = true,
-            BuildCommand = "cmd /c exit 1",
-            TestCommand = "cmd /c exit 0",
+            BuildCommand = ExitCommand(1),
+            TestCommand = ExitCommand(0),
         });
         var candidate = await _store.CreateAsync(project.Id, _headSha, null, null);
         var runner = new DeploymentBuildRunner(_store, NullLogger<DeploymentBuildRunner>.Instance);

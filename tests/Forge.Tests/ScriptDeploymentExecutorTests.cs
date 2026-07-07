@@ -20,24 +20,37 @@ public class ScriptDeploymentExecutorTests : IDisposable
         try { Directory.Delete(_root, recursive: true); } catch { }
     }
 
+    // Deployment scripts are OS-native (cmd/batch on Windows, shell on
+    // Linux/macOS) -- ScriptDeploymentExecutor just execs whatever
+    // ScriptPath points at, so the test has to write the right kind of
+    // script for the host OS, and mark it executable on Unix (git/most
+    // deploy tooling expects the file to already carry the exec bit;
+    // ScriptDeploymentExecutor deliberately doesn't chmod anything).
+    private static readonly string DeployScriptName = OperatingSystem.IsWindows() ? "deploy.cmd" : "deploy.sh";
+
     private string WriteScript(string relativeName, string body)
     {
         var path = Path.Combine(_root, relativeName);
         File.WriteAllText(path, body);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return path;
     }
+
+    private static string SucceedingScriptBody(int exitCode) => OperatingSystem.IsWindows()
+        ? $"@echo off\r\necho project=%FORGE_DEPLOY_PROJECT_ID% commit=%FORGE_DEPLOY_COMMIT_SHA%\r\nexit /b {exitCode}"
+        : $"#!/bin/sh\necho project=$FORGE_DEPLOY_PROJECT_ID commit=$FORGE_DEPLOY_COMMIT_SHA\nexit {exitCode}";
 
     [Fact]
     public async Task ExecuteAsync_SucceedingScript_ReturnsSuccessWithEnvVarsVisible()
     {
-        WriteScript("deploy.cmd",
-            "@echo off\r\necho project=%FORGE_DEPLOY_PROJECT_ID% commit=%FORGE_DEPLOY_COMMIT_SHA%\r\nexit /b 0");
+        WriteScript(DeployScriptName, SucceedingScriptBody(0));
 
         var project = new ProjectOptions
         {
             Id = "forge",
             Root = _root,
-            Deployment = new DeploymentOptions { Kind = DeploymentKind.Script, ScriptPath = "deploy.cmd" },
+            Deployment = new DeploymentOptions { Kind = DeploymentKind.Script, ScriptPath = DeployScriptName },
         };
         var candidate = new DeploymentCandidate(
             "deploy-1", "forge", "sha123", "sha123 fix widget", DeploymentStatus.Pending,

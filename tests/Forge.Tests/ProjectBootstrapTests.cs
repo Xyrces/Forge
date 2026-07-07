@@ -34,20 +34,22 @@ public class ForgesystemPathsTests
         }
     }
 
+    // Expected paths built with Path.Combine rather than hardcoded '\'
+    // literals so this passes on both Windows and Linux CI runners.
     [Fact]
     public void ProjectDir_UnderDataRoot()
     {
-        var data = @"C:\fake\forge-data";
+        var data = Path.Combine(Path.GetPathRoot(Path.GetTempPath()) ?? "/", "fake", "forge-data");
         var dir = ForgesystemPaths.ProjectDir(data, "x");
-        Assert.Equal(@"C:\fake\forge-data\projects\x", dir);
+        Assert.Equal(Path.Combine(data, "projects", "x"), dir);
     }
 
     [Fact]
     public void IssuesDb_ForProject_NestedUnderState()
     {
-        var data = @"C:\fake\forge-data";
+        var data = Path.Combine(Path.GetPathRoot(Path.GetTempPath()) ?? "/", "fake", "forge-data");
         var db = ForgesystemPaths.IssuesDb(data, "x");
-        Assert.Equal(@"C:\fake\forge-data\projects\x\.forge\state\issues.db", db);
+        Assert.Equal(Path.Combine(data, "projects", "x", ".forge", "state", "issues.db"), db);
     }
 }
 

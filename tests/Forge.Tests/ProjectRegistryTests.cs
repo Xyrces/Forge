@@ -64,20 +64,26 @@ public class ProjectRegistryLoaderTests
 
 public class ProjectStateDirsTests
 {
+    // Expected paths are built with Path.Combine, not hardcoded '\'
+    // literals -- ProjectStateDirs itself is cross-platform (it uses
+    // Path.Combine throughout), so the test has to be too, or it fails
+    // on Linux CI runners where Path.Combine joins with '/'.
     [Fact]
     public void Default_UsesLegacyFlatLayout()
     {
-        var p = new ProjectOptions { Id = "default", Root = @"C:\ph" };
-        Assert.Equal(@"C:\ph\.portHorizon\state", ProjectStateDirs.StateDirFor(p));
-        Assert.Equal(@"C:\ph\.portHorizon\state\issues.db", ProjectStateDirs.IssuesDbFor(p));
+        var root = Path.Combine(Path.GetPathRoot(Path.GetTempPath()) ?? "/", "ph");
+        var p = new ProjectOptions { Id = "default", Root = root };
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state"), ProjectStateDirs.StateDirFor(p));
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "issues.db"), ProjectStateDirs.IssuesDbFor(p));
     }
 
     [Fact]
     public void NonDefault_GetPerProjectSubdir()
     {
-        var p = new ProjectOptions { Id = "suikoden", Root = @"C:\sdk" };
-        Assert.Equal(@"C:\sdk\.portHorizon\state\suikoden", ProjectStateDirs.StateDirFor(p));
-        Assert.Equal(@"C:\sdk\.portHorizon\state\suikoden\memory.db", ProjectStateDirs.MemoryDbFor(p));
+        var root = Path.Combine(Path.GetPathRoot(Path.GetTempPath()) ?? "/", "sdk");
+        var p = new ProjectOptions { Id = "suikoden", Root = root };
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden"), ProjectStateDirs.StateDirFor(p));
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden", "memory.db"), ProjectStateDirs.MemoryDbFor(p));
     }
 
     [Fact]
