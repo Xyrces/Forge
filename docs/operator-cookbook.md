@@ -611,9 +611,12 @@ curl "http://127.0.0.1:4097/api/deployments/?projectId=forge"
 # 3. Approve. If any project has in-flight tasks, this restarts the
 #    ONE process serving every project's dispatch loop -- the API
 #    returns 409 with a warning instead of silently interrupting them.
-curl -X POST http://127.0.0.1:4097/api/deployments/deploy-xxxx/approve \
+curl -X POST "http://127.0.0.1:4097/api/deployments/deploy-xxxx/approve?projectId=forge" \
      -H "Content-Type: application/json" -d '{"approvedBy":"you"}'
 # If blocked: -d '{"approvedBy":"you","force":true}' to proceed anyway.
+# projectId is required -- the endpoint won't approve/reject a row
+# unless it belongs to that project. A stale/already-approved id
+# (someone else beat you to it) returns 409, not a silent no-op.
 
 # 4. The service bounces (stop -> repoint `current` junction -> start).
 #    Your HTTP connection to the dashboard drops during this window --

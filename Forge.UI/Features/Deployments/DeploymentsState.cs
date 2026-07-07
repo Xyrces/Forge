@@ -53,11 +53,11 @@ public static class DeploymentsActions
     public sealed record RequestDeploymentAction(string ProjectId, string CommitSha, string? RequestedBy);
     public sealed record RequestDeploymentFailedAction(string Error);
 
-    public sealed record ApproveDeploymentAction(string Id, bool Force = false);
+    public sealed record ApproveDeploymentAction(string Id, string ProjectId, bool Force = false);
     public sealed record ApproveDeploymentBlockedAction(string Id, string Message);
     public sealed record ApproveDeploymentFailedAction(string Error);
 
-    public sealed record RejectDeploymentAction(string Id);
+    public sealed record RejectDeploymentAction(string Id, string ProjectId);
 
     public sealed record ClearActionErrorAction();
 }
@@ -88,11 +88,13 @@ public sealed class DeploymentsClient
     }
 
     // Returns (Success, BlockedMessage). BlockedMessage is set when the
-    // API returns 409 in_flight_tasks -- the caller can offer "force"
-    // as a follow-up action instead of treating it as a hard failure.
-    public async Task<(bool Success, string? BlockedMessage)> ApproveAsync(string id, bool force, CancellationToken ct)
+    // API returns 409 -- either in_flight_tasks or a lost approve race
+    // against another request -- the caller can offer "force" as a
+    // follow-up action instead of treating it as a hard failure.
+    public async Task<(bool Success, string? BlockedMessage)> ApproveAsync(string id, string projectId, bool force, CancellationToken ct)
     {
-        var resp = await _http.PostAsJsonAsync($"/api/deployments/{id}/approve", new { force }, ct);
+        var url = $"/api/deployments/{id}/approve?projectId={Uri.EscapeDataString(projectId)}";
+        var resp = await _http.PostAsJsonAsync(url, new { force }, ct);
         if (resp.StatusCode == System.Net.HttpStatusCode.Conflict)
         {
             var body = await resp.Content.ReadFromJsonAsync<ConflictBody>(cancellationToken: ct);
@@ -102,9 +104,10 @@ public sealed class DeploymentsClient
         return (true, null);
     }
 
-    public async Task RejectAsync(string id, CancellationToken ct)
+    public async Task RejectAsync(string id, string projectId, CancellationToken ct)
     {
-        var resp = await _http.PostAsync($"/api/deployments/{id}/reject", null, ct);
+        var url = $"/api/deployments/{id}/reject?projectId={Uri.EscapeDataString(projectId)}";
+        var resp = await _http.PostAsync(url, null, ct);
         resp.EnsureSuccessStatusCode();
     }
 

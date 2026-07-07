@@ -24,6 +24,13 @@
         approves the result of the build/test gate (when the project requires one).
     </div>
 
+    @if (DeployStore.Value.Error is not null)
+    {
+        <div class="page-subtitle" style="color:var(--error)">
+            Failed to load deployments: @DeployStore.Value.Error
+        </div>
+    }
+
     @if (DeployStore.Value.ActionError is not null)
     {
         <div class="page-subtitle" style="color:var(--error)">
@@ -108,16 +115,16 @@
                             @if (d.Status is "Pending" or "BuildPassed")
                             {
                                 <button class="btn btn--primary" style="height:26px; padding:0 8px; font-size:12px;"
-                                        @onclick="@(() => ApproveAsync(d.Id, force: false))">Approve</button>
+                                        @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: false))">Approve</button>
                                 <button class="btn btn--danger" style="height:26px; padding:0 8px; font-size:12px;"
-                                        @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id)))">Reject</button>
+                                        @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id, d.ProjectId)))">Reject</button>
                             }
                             @if (DeployStore.Value.PendingInFlightWarning is { } warn && warn.DeploymentId == d.Id)
                             {
                                 <div style="margin-top:6px; color:var(--error); font-size:12px; max-width:260px;">
                                     @warn.Message
                                     <button class="btn btn--danger" style="height:24px; padding:0 8px; font-size:11px; margin-top:4px;"
-                                            @onclick="@(() => ApproveAsync(d.Id, force: true))">
+                                            @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: true))">
                                         Force deploy anyway
                                     </button>
                                 </div>
@@ -158,8 +165,8 @@
         Dispatch.Dispatch(new DeploymentsActions.RequestDeploymentAction(_selectedProjectId, _selectedCommitSha, "operator"));
     }
 
-    private void ApproveAsync(string id, bool force) =>
-        Dispatch.Dispatch(new DeploymentsActions.ApproveDeploymentAction(id, force));
+    private void ApproveAsync(string id, string projectId, bool force) =>
+        Dispatch.Dispatch(new DeploymentsActions.ApproveDeploymentAction(id, projectId, force));
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
 

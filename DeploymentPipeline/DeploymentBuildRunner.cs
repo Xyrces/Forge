@@ -18,6 +18,12 @@ namespace Forge.Deploy;
 // git-tag-only deployment has nothing to compile.
 public sealed class DeploymentBuildRunner
 {
+    // Build/test output is stored as a single TEXT column read back
+    // wholesale into the UI's <pre>; cap it well below "a chatty test
+    // runner filled the disk" territory so neither the sqlite row nor
+    // the dashboard response balloons unbounded.
+    private const int MaxLogChars = 200_000;
+
     private readonly DeploymentStore _store;
     private readonly ILogger<DeploymentBuildRunner> _logger;
 
@@ -51,7 +57,7 @@ public sealed class DeploymentBuildRunner
             log.AppendLine(addResult.Output);
             if (addResult.ExitCode != 0)
             {
-                await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildFailed, log.ToString(), ct);
+                await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildFailed, Truncate(log), ct);
                 return;
             }
 
@@ -65,17 +71,17 @@ public sealed class DeploymentBuildRunner
                 if (result.ExitCode != 0)
                 {
                     _logger.LogWarning("Deployment {Id} {Label} failed (exit={Code})", candidate.Id, label, result.ExitCode);
-                    await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildFailed, log.ToString(), ct);
+                    await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildFailed, Truncate(log), ct);
                     return;
                 }
             }
 
-            await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildPassed, log.ToString(), ct);
+            await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildPassed, Truncate(log), ct);
         }
         catch (Exception ex)
         {
             log.AppendLine($"EXCEPTION: {ex}");
-            await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildFailed, log.ToString(), ct);
+            await _store.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildFailed, Truncate(log), ct);
         }
         finally
         {
@@ -89,6 +95,14 @@ public sealed class DeploymentBuildRunner
                 _logger.LogWarning(ex, "Failed to clean up deploy checkout {Dir}", checkoutDir);
             }
         }
+    }
+
+    private static string Truncate(StringBuilder log)
+    {
+        if (log.Length <= MaxLogChars) return log.ToString();
+        var full = log.ToString();
+        var tail = full[^MaxLogChars..];
+        return $"[... truncated {full.Length - MaxLogChars} earlier characters ...]\n{tail}";
     }
 
     private static (string FileName, string Arguments) SplitCommand(string command)

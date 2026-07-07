@@ -100,19 +100,56 @@ public sealed class DeploymentStore
                 c.Parameters.AddWithValue("$id", id);
             }, ct);
 
-    public Task ApproveAsync(string id, string? approvedBy, CancellationToken ct = default) =>
-        ExecAsync(
-            "UPDATE deployment SET status = $s, approved_at = $now, approved_by = $by WHERE id = $id",
-            c =>
-            {
-                c.Parameters.AddWithValue("$s", DeploymentStatus.Approved.ToString());
-                c.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
-                c.Parameters.AddWithValue("$by", (object?)approvedBy ?? DBNull.Value);
-                c.Parameters.AddWithValue("$id", id);
-            }, ct);
+    // Atomic CAS: the UPDATE's WHERE clause re-checks status at the
+    // exact moment of the write, so two concurrent approve calls for
+    // the same id can never both succeed -- the loser gets 0 affected
+    // rows back and the caller treats that as a conflict instead of
+    // launching a second executor. A separate read-then-write pattern
+    // (read the row, check status client-side, then write) cannot make
+    // this guarantee against a second request racing in between.
+    public async Task<bool> TryApproveAsync(string id, string? approvedBy, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE deployment
+            SET status = $s, approved_at = $now, approved_by = $by
+            WHERE id = $id AND status IN ($fromPending, $fromBuildPassed)
+            """;
+        cmd.Parameters.AddWithValue("$s", DeploymentStatus.Approved.ToString());
+        cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
+        cmd.Parameters.AddWithValue("$by", (object?)approvedBy ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$fromPending", DeploymentStatus.Pending.ToString());
+        cmd.Parameters.AddWithValue("$fromBuildPassed", DeploymentStatus.BuildPassed.ToString());
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        return rows > 0;
+    }
 
-    public Task RejectAsync(string id, CancellationToken ct = default) =>
-        SetStatusAsync(id, DeploymentStatus.Rejected, ct);
+    // Same CAS shape as TryApproveAsync. Rejecting is only meaningful
+    // before an operator has committed to deploying -- once a row is
+    // Approved/Deploying/Deployed/DeployFailed it would silently
+    // clobber the outcome of (or race with) the deployment executor
+    // and destroy the audit trail, so those transitions are refused.
+    public async Task<bool> TryRejectAsync(string id, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE deployment SET status = $s
+            WHERE id = $id AND status IN ($p1, $p2, $p3, $p4)
+            """;
+        cmd.Parameters.AddWithValue("$s", DeploymentStatus.Rejected.ToString());
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$p1", DeploymentStatus.Pending.ToString());
+        cmd.Parameters.AddWithValue("$p2", DeploymentStatus.BuildRunning.ToString());
+        cmd.Parameters.AddWithValue("$p3", DeploymentStatus.BuildPassed.ToString());
+        cmd.Parameters.AddWithValue("$p4", DeploymentStatus.BuildFailed.ToString());
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        return rows > 0;
+    }
 
     public Task MarkDeployedAsync(string id, string deployLog, CancellationToken ct = default) =>
         ExecAsync(

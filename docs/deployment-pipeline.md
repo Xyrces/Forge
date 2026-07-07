@@ -36,8 +36,15 @@ Status machine:
 Pending ──(build check)──> BuildRunning ──> BuildPassed ──(approve)──> Approved ──> Deploying ──> Deployed
    │                                    └──> BuildFailed                                      └──> DeployFailed
    └──(project skips build check)──────────────────────────> Approved (same as above)
-   Pending / BuildPassed ──(reject)──> Rejected  [terminal]
+   Pending / BuildRunning / BuildPassed / BuildFailed ──(reject)──> Rejected  [terminal]
 ```
+
+`Approve`/`Reject` are both atomic CAS writes (`DeploymentStore.TryApproveAsync`/
+`TryRejectAsync`): the `UPDATE`'s `WHERE status IN (...)` clause re-checks status
+at write time, not just at an earlier read, so two concurrent approve calls for
+the same row can never both succeed, and rejecting a row that has already moved
+past `BuildFailed` (e.g. `Approved`, `Deploying`, `Deployed`) is refused rather
+than silently overwriting the outcome. The loser gets `409 Conflict`.
 
 ## Requesting a candidate
 
@@ -66,8 +73,12 @@ a note explaining the skip.
 
 ## Approving a candidate
 
-`POST /api/deployments/{id}/approve` `{ approvedBy?, force? }`. Only
-`Pending` or `BuildPassed` rows are approvable.
+`POST /api/deployments/{id}/approve?projectId=<id>` `{ approvedBy?, force? }`.
+Only `Pending` or `BuildPassed` rows are approvable. `projectId` is required —
+the endpoint resolves the row within that project only and 404s otherwise, so
+a deployment can never be approved/rejected by id alone from a mismatched
+project. `POST /api/deployments/{id}/reject?projectId=<id>` follows the same
+shape and works from `Pending`/`BuildRunning`/`BuildPassed`/`BuildFailed`.
 
 **In-flight guard.** If the project's `DeploymentKind` is
 `SelfHostedWindowsService` — i.e. this deployment bounces the ONE
@@ -204,14 +215,23 @@ the deploy loop. `scripts\uninstall-service.ps1` reverses it (stops +
   project restarts that entire process, which is why the approve
   endpoint checks in-flight tasks across ALL projects, not just
   `forge`'s own slots.
-- **No concurrent-deploy guard yet.** Two `SelfHostedWindowsService`
-  approvals in quick succession would both try to publish into
-  `deployer\` and could race. In practice this requires an operator to
-  approve twice within seconds; v2 could add a per-project deploy
-  mutex if this becomes a real problem.
 - **Junction-based, Windows-only.** `Forge.Deployer` is not built or
   runnable on non-Windows platforms; `DeploymentKind.SelfHostedWindowsService`
   is a Windows Service concept end to end.
+- **No authentication on `/api/deployments` (or anywhere else in the
+  dashboard).** Mitigated today by `AgentOptions.Hostname` defaulting
+  to `127.0.0.1` — the dashboard is not reachable off-box out of the
+  box. If an operator changes `Hostname` to bind on a network
+  interface, put a reverse proxy with real authentication in front of
+  it first; there is no in-app auth to fall back on.
+- **`Forge.Deployer` dying mid-flight is detected, but only after a
+  wait.** `DeploymentResultReconciler` marks a `Deploying` row
+  `DeployFailed` once it's been stuck for 10 minutes with no result
+  file — long enough to not misfire on the ordinary "service just
+  restarted, give the helper a few seconds" case, short enough that an
+  operator isn't staring at a row that will never move. There's still
+  no automatic retry or rollback; a failed self-hosted deploy needs a
+  fresh candidate + approval to try again.
 - **Rollback is manual.** To roll back, request a deployment for an
   older commit sha and approve it — there's no dedicated "rollback to
   previous release" button yet; old `releases\<sha>` directories are

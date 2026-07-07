@@ -78,11 +78,12 @@ public class DeploymentStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ApproveAsync_SetsApprovedFieldsAndStatus()
+    public async Task TryApproveAsync_SetsApprovedFieldsAndStatus()
     {
         var candidate = await _store.CreateAsync("forge", "sha1", null, null);
-        await _store.ApproveAsync(candidate.Id, "bob");
+        var approved = await _store.TryApproveAsync(candidate.Id, "bob");
 
+        Assert.True(approved);
         var updated = await _store.GetAsync(candidate.Id);
         Assert.Equal(DeploymentStatus.Approved, updated!.Status);
         Assert.Equal("bob", updated.ApprovedBy);
@@ -90,20 +91,62 @@ public class DeploymentStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task RejectAsync_IsTerminal()
+    public async Task TryApproveAsync_SecondCallOnAlreadyApprovedRow_ReturnsFalseAndLeavesRowUnchanged()
     {
         var candidate = await _store.CreateAsync("forge", "sha1", null, null);
-        await _store.RejectAsync(candidate.Id);
+        Assert.True(await _store.TryApproveAsync(candidate.Id, "alice"));
 
+        var second = await _store.TryApproveAsync(candidate.Id, "bob");
+
+        Assert.False(second);
+        var updated = await _store.GetAsync(candidate.Id);
+        Assert.Equal("alice", updated!.ApprovedBy);
+    }
+
+    [Fact]
+    public async Task TryRejectAsync_IsTerminal()
+    {
+        var candidate = await _store.CreateAsync("forge", "sha1", null, null);
+        var rejected = await _store.TryRejectAsync(candidate.Id);
+
+        Assert.True(rejected);
         var updated = await _store.GetAsync(candidate.Id);
         Assert.Equal(DeploymentStatus.Rejected, updated!.Status);
+    }
+
+    [Fact]
+    public async Task TryRejectAsync_AfterApproval_ReturnsFalseAndLeavesRowApproved()
+    {
+        var candidate = await _store.CreateAsync("forge", "sha1", null, null);
+        await _store.TryApproveAsync(candidate.Id, "bob");
+
+        var rejected = await _store.TryRejectAsync(candidate.Id);
+
+        Assert.False(rejected);
+        var updated = await _store.GetAsync(candidate.Id);
+        Assert.Equal(DeploymentStatus.Approved, updated!.Status);
+    }
+
+    [Fact]
+    public async Task TryRejectAsync_AfterDeployed_ReturnsFalseAndLeavesRowDeployed()
+    {
+        var candidate = await _store.CreateAsync("forge", "sha1", null, null);
+        await _store.TryApproveAsync(candidate.Id, "bob");
+        await _store.SetStatusAsync(candidate.Id, DeploymentStatus.Deploying);
+        await _store.MarkDeployedAsync(candidate.Id, "deployed cleanly");
+
+        var rejected = await _store.TryRejectAsync(candidate.Id);
+
+        Assert.False(rejected);
+        var updated = await _store.GetAsync(candidate.Id);
+        Assert.Equal(DeploymentStatus.Deployed, updated!.Status);
     }
 
     [Fact]
     public async Task MarkDeployedAsync_SetsDeployedFieldsAndLog()
     {
         var candidate = await _store.CreateAsync("forge", "sha1", null, null);
-        await _store.ApproveAsync(candidate.Id, "bob");
+        await _store.TryApproveAsync(candidate.Id, "bob");
         await _store.SetStatusAsync(candidate.Id, DeploymentStatus.Deploying);
         await _store.MarkDeployedAsync(candidate.Id, "deployed cleanly");
 

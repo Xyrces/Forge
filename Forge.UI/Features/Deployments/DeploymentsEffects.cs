@@ -68,7 +68,7 @@ public sealed class ApproveDeploymentEffect : Effect<DeploymentsActions.ApproveD
     {
         try
         {
-            var (success, blockedMessage) = await _client.ApproveAsync(action.Id, action.Force, CancellationToken.None);
+            var (success, blockedMessage) = await _client.ApproveAsync(action.Id, action.ProjectId, action.Force, CancellationToken.None);
             if (!success && blockedMessage is not null)
             {
                 dispatcher.Dispatch(new DeploymentsActions.ApproveDeploymentBlockedAction(action.Id, blockedMessage));
@@ -92,7 +92,7 @@ public sealed class RejectDeploymentEffect : Effect<DeploymentsActions.RejectDep
     {
         try
         {
-            await _client.RejectAsync(action.Id, CancellationToken.None);
+            await _client.RejectAsync(action.Id, action.ProjectId, CancellationToken.None);
             dispatcher.Dispatch(new DeploymentsActions.LoadDeploymentsAction());
         }
         catch (Exception ex)

@@ -45,7 +45,7 @@ public class DeploymentResultReconcilerTests : IDisposable
         Directory.CreateDirectory(resultDir);
 
         var candidate = await _store.CreateAsync("forge", "sha1", null, null);
-        await _store.ApproveAsync(candidate.Id, "op");
+        await _store.TryApproveAsync(candidate.Id, "op");
         await _store.SetStatusAsync(candidate.Id, DeploymentStatus.Deploying);
 
         var resultFile = Path.Combine(resultDir, $"{candidate.Id}.json");
@@ -111,6 +111,65 @@ public class DeploymentResultReconcilerTests : IDisposable
         await reconciler.ReconcileAsync(new[] { ForgeProject(releasesRoot) }, _ => _store);
 
         Assert.False(File.Exists(resultFile));
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_ResultFileArrivesDuringPoll_IsPickedUpWithoutWaitingOutTheFullThreshold()
+    {
+        var releasesRoot = Path.Combine(_root, "releases");
+        var resultDir = Path.Combine(_root, "deploy-status");
+        Directory.CreateDirectory(resultDir);
+
+        var candidate = await _store.CreateAsync("forge", "sha1", null, null);
+        await _store.TryApproveAsync(candidate.Id, "op");
+        await _store.SetStatusAsync(candidate.Id, DeploymentStatus.Deploying);
+        // No result file yet -- simulates Forge.Deployer being a beat
+        // behind the new process reaching ReconcileAsync.
+
+        var writeLate = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
+            var resultFile = Path.Combine(resultDir, $"{candidate.Id}.json");
+            await File.WriteAllTextAsync(resultFile, JsonSerializer.Serialize(new
+            {
+                Success = true,
+                ReleaseDir = Path.Combine(releasesRoot, "sha1"),
+                Log = "deploy ok (arrived late)",
+                CompletedAtUtc = DateTime.UtcNow,
+            }));
+        });
+
+        var reconciler = new DeploymentResultReconciler(NullLogger<DeploymentResultReconciler>.Instance);
+        await reconciler.ReconcileAsync(
+            new[] { ForgeProject(releasesRoot) }, _ => _store,
+            pollInterval: TimeSpan.FromMilliseconds(50), pollAttempts: 5, stuckThreshold: TimeSpan.FromHours(1));
+        await writeLate;
+
+        var updated = await _store.GetAsync(candidate.Id);
+        Assert.Equal(DeploymentStatus.Deployed, updated!.Status);
+        Assert.Equal("deploy ok (arrived late)", updated.DeployLog);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_StuckDeployingPastThreshold_IsMarkedDeployFailed()
+    {
+        var releasesRoot = Path.Combine(_root, "releases");
+
+        var candidate = await _store.CreateAsync("forge", "sha1", null, null);
+        await _store.TryApproveAsync(candidate.Id, "op");
+        await _store.SetStatusAsync(candidate.Id, DeploymentStatus.Deploying);
+        // No result file ever appears -- simulates Forge.Deployer
+        // crashing (or the service failing to restart) before it could
+        // write one.
+
+        var reconciler = new DeploymentResultReconciler(NullLogger<DeploymentResultReconciler>.Instance);
+        await reconciler.ReconcileAsync(
+            new[] { ForgeProject(releasesRoot) }, _ => _store,
+            pollInterval: TimeSpan.FromMilliseconds(1), pollAttempts: 2, stuckThreshold: TimeSpan.Zero);
+
+        var updated = await _store.GetAsync(candidate.Id);
+        Assert.Equal(DeploymentStatus.DeployFailed, updated!.Status);
+        Assert.Contains("timed out", updated.DeployLog, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

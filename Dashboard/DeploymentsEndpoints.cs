@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -78,11 +79,24 @@ public static class DeploymentsEndpoints
         return Results.Ok(rows);
     }
 
+    // Full 40-char sha or any git-abbreviated prefix (git's default
+    // minimum is 4, but 7 is the practical floor before collisions
+    // become a real concern). This value is later interpolated
+    // directly into `git` command-line arguments and filesystem paths
+    // (DeploymentBuildRunner, SelfHostedWindowsServiceDeploymentExecutor,
+    // GetCommitSummaryAsync below) -- rejecting anything that isn't a
+    // plain hex string here is what keeps those call sites safe,
+    // rather than re-validating (or forgetting to) at each one.
+    private static readonly Regex CommitShaPattern = new("^[0-9a-fA-F]{7,40}$", RegexOptions.Compiled);
+
     private static async Task<IResult> CreateAsync(
         CreateDeploymentRequest? body, ProjectContextFactory factory, ILoggerFactory loggerFactory, CancellationToken ct)
     {
         if (body is null || string.IsNullOrWhiteSpace(body.ProjectId) || string.IsNullOrWhiteSpace(body.CommitSha))
             return Results.BadRequest(new { error = "projectId and commitSha are required" });
+
+        if (!CommitShaPattern.IsMatch(body.CommitSha))
+            return Results.BadRequest(new { error = "commitSha must be a 7-40 character hex string" });
 
         var ctx = factory.Find(body.ProjectId);
         if (ctx is null) return Results.NotFound(new { error = "project not found", projectId = body.ProjectId });
@@ -100,13 +114,13 @@ public static class DeploymentsEndpoints
     }
 
     private static async Task<IResult> ApproveAsync(
-        string id, ApproveDeploymentRequest? body,
+        string id, string projectId, ApproveDeploymentRequest? body,
         ProjectContextFactory factory, SlotTable slots, DeploymentExecutorFactory executors,
         CancellationToken ct)
     {
-        var (ownerCtx, candidate) = await FindOwnerAsync(id, factory, ct);
+        var (ownerCtx, candidate) = await ResolveOwnedCandidateAsync(id, projectId, factory, ct);
         if (ownerCtx is null || candidate is null)
-            return Results.NotFound(new { error = "deployment not found", id });
+            return Results.NotFound(new { error = "deployment not found", id, projectId });
 
         if (candidate.Status is not (DeploymentStatus.Pending or DeploymentStatus.BuildPassed))
             return Results.BadRequest(new { error = $"cannot approve a deployment in status {candidate.Status}" });
@@ -133,7 +147,14 @@ public static class DeploymentsEndpoints
             }
         }
 
-        await ownerCtx.Deployments.ApproveAsync(id, body?.ApprovedBy, ct);
+        // The status check above is a fast-path rejection for the
+        // common case (wrong status, no lock needed); TryApproveAsync
+        // is the real guard -- its WHERE clause re-checks status
+        // atomically at write time, so a second request that raced
+        // past the check above and lost the write gets told to back
+        // off instead of also launching a deployment executor.
+        if (!await ownerCtx.Deployments.TryApproveAsync(id, body?.ApprovedBy, ct))
+            return Results.Conflict(new { error = "already_approved", message = "This deployment was approved by another request first.", id });
 
         var executor = executors.Create(project);
         if (executor is null)
@@ -165,30 +186,33 @@ public static class DeploymentsEndpoints
         return Results.Json(new { id, status = "DeployFailed", message = result.Log }, statusCode: 500);
     }
 
-    private static async Task<IResult> RejectAsync(string id, ProjectContextFactory factory, CancellationToken ct)
+    private static async Task<IResult> RejectAsync(string id, string projectId, ProjectContextFactory factory, CancellationToken ct)
     {
-        var (ownerCtx, candidate) = await FindOwnerAsync(id, factory, ct);
+        var (ownerCtx, candidate) = await ResolveOwnedCandidateAsync(id, projectId, factory, ct);
         if (ownerCtx is null || candidate is null)
-            return Results.NotFound(new { error = "deployment not found", id });
-        await ownerCtx.Deployments.RejectAsync(id, ct);
+            return Results.NotFound(new { error = "deployment not found", id, projectId });
+
+        if (!await ownerCtx.Deployments.TryRejectAsync(id, ct))
+            return Results.BadRequest(new { error = $"cannot reject a deployment in status {candidate.Status}" });
+
         return Results.Ok(new { id, status = "Rejected" });
     }
 
-    // A deployment id doesn't carry its owning project id in the route
-    // -- scan the (typically small) known-project list for the row
-    // that has it. If this ever becomes a bottleneck, add projectId to
-    // the route instead.
-    private static async Task<(ProjectContext? Ctx, DeploymentCandidate? Candidate)> FindOwnerAsync(
-        string id, ProjectContextFactory factory, CancellationToken ct)
+    // Callers must name the owning project explicitly (rather than
+    // this endpoint scanning every known project for a matching id) --
+    // besides avoiding an O(projects) sqlite lookup per approve/reject,
+    // it means a caller can never approve/reject a deployment belonging
+    // to a project it didn't ask for by id collision or guesswork.
+    private static async Task<(ProjectContext? Ctx, DeploymentCandidate? Candidate)> ResolveOwnedCandidateAsync(
+        string id, string projectId, ProjectContextFactory factory, CancellationToken ct)
     {
-        foreach (var p in factory.KnownProjects)
-        {
-            var ctx = factory.Find(p.Id);
-            if (ctx is null) continue;
-            var found = await ctx.Deployments.GetAsync(id, ct);
-            if (found is not null) return (ctx, found);
-        }
-        return (null, null);
+        var ctx = factory.Find(projectId);
+        if (ctx is null) return (null, null);
+
+        var candidate = await ctx.Deployments.GetAsync(id, ct);
+        if (candidate is null || candidate.ProjectId != projectId) return (null, null);
+
+        return (ctx, candidate);
     }
 
     private static async Task<string?> GetCommitSummaryAsync(string root, string commitSha, CancellationToken ct)
