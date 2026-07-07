@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Fluxor;
 using Fluxor.Blazor.Web.ReduxDevTools;
 using Forge.Dashboard.Components;
@@ -29,6 +30,7 @@ public static class UIExtensions
         services.AddHttpClient<DesignsClient>(c => c.BaseAddress = baseAddress);
         services.AddHttpClient<ArtClient>(c => c.BaseAddress = baseAddress);
         services.AddHttpClient<TasksClient>(c => c.BaseAddress = baseAddress);
+        services.AddHttpClient<Forge.Dashboard.Features.View.ViewClient>(c => c.BaseAddress = baseAddress);
         return services;
     }
 

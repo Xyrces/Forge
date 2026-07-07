@@ -1,6 +1,84 @@
 @page "/agents"
+@inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.View
+
 <PageTitle>Agents</PageTitle>
 <div class="page">
-    <h1>Agents</h1>
-    <p class="page-subtitle">Coming in stage 10.</p>
+    <div class="page-header">
+        <h1>Agents</h1>
+        <div class="page-header__meta">@ViewStore.Value.Agents.Count registered · @ViewStore.Value.Agents.Count(a => a.Enabled) enabled</div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction()))">Refresh</button>
+        </div>
+    </div>
+
+    @if (ViewStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (ViewStore.Value.Error is not null)
+    {
+        <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
+    }
+    else
+    {
+        <table class="data-grid">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Kilo Name</th>
+                    <th>Display Name</th>
+                    <th>Scope</th>
+                    <th>Enabled</th>
+                    <th>Updated</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in ViewStore.Value.Agents)
+                {
+                    <tr>
+                        <td class="mono">@row.Id</td>
+                        <td class="mono">@row.KiloName</td>
+                        <td>@row.DisplayName</td>
+                        <td>@row.Scope</td>
+                        <td>
+                            @if (row.Enabled)
+                            {
+                                <span class="pill pill--completed">on</span>
+                            }
+                            else
+                            {
+                                <span class="pill pill--failed">off</span>
+                            }
+                        </td>
+                        <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                    </tr>
+                }
+                @if (ViewStore.Value.Agents.Count == 0)
+                {
+                    <tr><td colspan="6"><div class="page-subtitle">No agents registered yet.</div></td></tr>
+                }
+            </tbody>
+        </table>
+    }
 </div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        ViewStore.StateChanged += OnStateChanged;
+        if (ViewStore.Value.LastFetchedAt is null)
+        {
+            Dispatch.Dispatch(new ViewActions.LoadViewAction());
+        }
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        ViewStore.StateChanged -= OnStateChanged;
+    }
+}

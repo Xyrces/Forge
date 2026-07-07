@@ -1,6 +1,110 @@
 @page "/backlog"
+@inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.View
+
 <PageTitle>Backlog</PageTitle>
 <div class="page">
-    <h1>Backlog</h1>
-    <p class="page-subtitle">Coming in stage 10.</p>
+    <div class="page-header">
+        <h1>Backlog</h1>
+        <div class="page-header__meta">
+            @BacklogRows.Count issues
+            <span style="margin:0 6px; color:var(--outline-variant)">|</span>
+            <span style="color:var(--tertiary)">@BacklogRows.Count(x => x.Status == "Completed") done</span>
+            <span style="margin:0 6px; color:var(--outline-variant)">|</span>
+            <span style="color:var(--error)">@BacklogRows.Count(x => x.Status == "Failed") failed</span>
+        </div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction()))">Refresh</button>
+        </div>
+    </div>
+
+    <div class="filter-bar">
+        @foreach (var f in Filters)
+        {
+            <button class="chip @(_filter == f ? "chip--active" : "")"
+                    @onclick="@(() => _filter = f)">@f</button>
+        }
+    </div>
+
+    @if (ViewStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (ViewStore.Value.Error is not null)
+    {
+        <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
+    }
+    else
+    {
+        <table class="data-grid">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Title</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Priority</th>
+                    <th>Assignee</th>
+                    <th>Updated</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in BacklogRows.Take(50))
+                {
+                    <tr>
+                        <td class="mono">@row.Id</td>
+                        <td>@row.Title</td>
+                        <td class="mono">@row.Type</td>
+                        <td><span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span></td>
+                        <td>@row.Priority</td>
+                        <td>@(row.Assignee ?? "—")</td>
+                        <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        @if (BacklogRows.Count > 50)
+        {
+            <div class="page-subtitle">(Showing first 50 of @BacklogRows.Count; pagination deferred.)</div>
+        }
+    }
 </div>
+
+@code {
+    private static readonly string[] Filters = { "All", "Pending", "InProgress", "Completed", "Failed" };
+    private string _filter = "All";
+
+    private IReadOnlyList<Forge.Dashboard.Features.View.ViewTask> BacklogRows
+    {
+        get
+        {
+            var all = ViewStore.Value.Tasks;
+            return _filter switch
+            {
+                "Pending" => all.Where(t => t.Status == "Pending").ToArray(),
+                "InProgress" => all.Where(t => t.Status == "InProgress").ToArray(),
+                "Completed" => all.Where(t => t.Status == "Completed").ToArray(),
+                "Failed" => all.Where(t => t.Status == "Failed").ToArray(),
+                _ => all,
+            };
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        ViewStore.StateChanged += OnStateChanged;
+        if (ViewStore.Value.LastFetchedAt is null)
+        {
+            Dispatch.Dispatch(new ViewActions.LoadViewAction());
+        }
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        ViewStore.StateChanged -= OnStateChanged;
+    }
+}

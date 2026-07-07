@@ -1,6 +1,74 @@
 @page "/sprints"
+@inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.View
+
 <PageTitle>Sprints</PageTitle>
 <div class="page">
-    <h1>Sprints</h1>
-    <p class="page-subtitle">Coming in stage 8 (Sprint proposer + scrum board).</p>
+    <div class="page-header">
+        <h1>Sprints</h1>
+        <div class="page-header__meta">@ViewStore.Value.Sprints.Count total · @ViewStore.Value.Sprints.Count(s => s.Status == "Active") active</div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction()))">Refresh</button>
+        </div>
+    </div>
+
+    @if (ViewStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (ViewStore.Value.Error is not null)
+    {
+        <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
+    }
+    else
+    {
+        <div class="sprint-grid">
+            @foreach (var sp in ViewStore.Value.Sprints)
+            {
+                <div class="sprint-card">
+                    <div class="sprint-card__header">
+                        <span class="mono sprint-card__id">@sp.Id</span>
+                        <span class="pill pill--@sp.Status.ToLowerInvariant()">@sp.Status</span>
+                    </div>
+                    <div class="sprint-card__name">@sp.Name</div>
+                    <div class="sprint-card__goal">@(sp.Goal ?? "(no goal)")</div>
+                    <div class="sprint-card__dates">
+                        @if (sp.StartDate is not null)
+                        {
+                            <span>@sp.StartDate.Value.ToString("MMM d")</span>
+                            @if (sp.EndDate is not null)
+                            {
+                                <span> → </span>
+                                <span>@sp.EndDate.Value.ToString("MMM d")</span>
+                            }
+                        }
+                    </div>
+                </div>
+            }
+            @if (ViewStore.Value.Sprints.Count == 0)
+            {
+                <div class="page-subtitle">No sprints yet.</div>
+            }
+        </div>
+    }
 </div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        ViewStore.StateChanged += OnStateChanged;
+        if (ViewStore.Value.LastFetchedAt is null)
+        {
+            Dispatch.Dispatch(new ViewActions.LoadViewAction());
+        }
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        ViewStore.StateChanged -= OnStateChanged;
+    }
+}
