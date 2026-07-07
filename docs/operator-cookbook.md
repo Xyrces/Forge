@@ -2,6 +2,28 @@
 
 Common scenarios you'll hit while running the orchestrator. Each recipe is one focused thing you can copy-paste.
 
+## Dashboard navigation (P6)
+
+The Blazor dashboard at `http://127.0.0.1:4097` exposes a per-area page:
+
+| Route        | What you see                                                      | Backing endpoint                                |
+| ------------ | ----------------------------------------------------------------- | ----------------------------------------------- |
+| `/`          | Home + active sprint pill in the topbar                           | `GET /api/sprints/active`                       |
+| `/tasks`     | In-progress tasks with dispatch stepper + Retry/Recover buttons   | `GET /api/tasks/in-progress`                    |
+| `/backlog`   | All issues with status filters                                    | `GET /api/state`                                |
+| `/specs`     | Spec grid + filter chips (status, action-state matrix)            | `GET /api/specs`, `GET /api/specs/{id}/actions` |
+| `/designs`   | Design kanban (ready/needs-revision/designed)                     | `GET /api/designs?projectId=...&status=...`     |
+| `/art`       | Art gallery + Meshy task timeline                                 | `GET /api/art-output?projectId=...`             |
+| `/intake`    | 3-pane: intake queue · drafts · global handoff                    | `GET /api/intake/...`                           |
+| `/sprints`   | Sprint cards (active / committed / completed)                     | `GET /api/sprints/propose-next`, `/scoring-audit`|
+| `/agents`    | Registered agents table                                           | `GET /api/state`                                |
+| `/skills`    | Loaded skills + agent bindings                                    | `GET /api/state`                                |
+| `/vision`    | `MASTER_DESIGN.md` rendered + Re-plan button                      | `POST /api/vision/refresh`                      |
+| `/ops/...`   | Recovery reports · memory extractions · headroom stats            | `GET /api/recovery/policies`, `/api/memory/extractions`, `/api/cost/headroom` |
+| `/search?q=` | Built-in search across issues / specs / agents / skills            | `GET /api/search?q=`                            |
+
+Topbar: search box, heartbeat pill (auto-polls every 15 s), active sprint pill, avatar drawer. Heartbeat goes green when `GET /api/health/heartbeat` returns 200 and turns red on failure. Sprint pill turns solid when a sprint is active.
+
 ## Run the orchestrator
 
 ```bash
