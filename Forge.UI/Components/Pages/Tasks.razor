@@ -1,6 +1,153 @@
 @page "/tasks"
+@inject IState<Forge.Dashboard.Features.Tasks.TasksState> TasksStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.Tasks
+
 <PageTitle>Tasks</PageTitle>
 <div class="page">
-    <h1>Tasks</h1>
-    <p class="page-subtitle">Coming in stage 9.</p>
+    <div class="page-header">
+        <h1>Tasks</h1>
+        <div class="page-header__meta">@TasksStore.Value.Rows.Count in progress</div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new TasksActions.LoadTasksAction()))">Refresh</button>
+        </div>
+    </div>
+
+    @if (TasksStore.Value.ActionMessage is not null)
+    {
+        <div class="page-subtitle page-subtitle--ok">@TasksStore.Value.ActionMessage</div>
+    }
+    @if (TasksStore.Value.ActionError is not null)
+    {
+        <div class="page-subtitle page-subtitle--error">@TasksStore.Value.ActionError</div>
+    }
+
+    @if (TasksStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (TasksStore.Value.Error is not null)
+    {
+        <div class="page-subtitle">Error: @TasksStore.Value.Error</div>
+    }
+    else if (TasksStore.Value.Rows.Count == 0)
+    {
+        <div class="page-subtitle">No tasks currently in progress.</div>
+    }
+    else
+    {
+        <div class="task-list">
+            @foreach (var row in TasksStore.Value.Rows)
+            {
+                <div class="task-card">
+                    <div class="task-card__header">
+                        <span class="mono">@row.Id</span>
+                        <span class="task-card__title">@row.Title</span>
+                        <span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span>
+                    </div>
+
+                    <div class="dispatch-stepper">
+                        @foreach (var step in Steps)
+                        {
+                            var reached = StepIndex(row.DispatchCheckpoint) >= StepIndex(step);
+                            <div class="dispatch-step @(reached ? "dispatch-step--done" : "")">
+                                <span class="dispatch-step__dot"></span>
+                                <span class="dispatch-step__label">@StepLabel(step)</span>
+                            </div>
+                        }
+                    </div>
+
+                    <div class="task-card__meta">
+                        <span>Assignee: @(row.Assignee ?? "—")</span>
+                        <span>Priority: @row.Priority</span>
+                        <span>Recovery attempts: @row.RecoveryAttempts</span>
+                        @if (row.PrUrl is not null)
+                        {
+                            <a href="@row.PrUrl" target="_blank">PR</a>
+                        }
+                        @if (row.Branch is not null)
+                        {
+                            <span class="mono">@row.Branch</span>
+                        }
+                    </div>
+
+                    @if (row.Events.Count > 0)
+                    {
+                        <details class="task-card__events">
+                            <summary>Events (@row.Events.Count)</summary>
+                            <ul>
+                                @foreach (var ev in row.Events)
+                                {
+                                    <li><span class="mono">@ev.At.ToString("HH:mm:ss")</span> @ev.Kind @(ev.Detail is not null ? $"— {ev.Detail}" : "")</li>
+                                }
+                            </ul>
+                        </details>
+                    }
+
+                    <div class="task-card__actions">
+                        <input type="text" placeholder="Retry message…"
+                               value="@GetRetryText(row.Id)"
+                               @oninput="@((ChangeEventArgs e) => SetRetryText(row.Id, e.Value?.ToString() ?? ""))" />
+                        <button class="btn" @onclick="@(() => SendRetry(row.Id))">Retry</button>
+                        <button class="btn btn--danger" @onclick="@(() => Recover(row.Id))">Recover</button>
+                    </div>
+                </div>
+            }
+        </div>
+    }
 </div>
+
+@code {
+    private static readonly string[] Steps = { "Claimed", "WorktreeAcquired", "AgentCompleted", "CommitDone", "PushDone", "PrOpened" };
+    private readonly Dictionary<string, string> _retryText = new();
+
+    protected override void OnInitialized()
+    {
+        TasksStore.StateChanged += OnStateChanged;
+        Dispatch.Dispatch(new TasksActions.LoadTasksAction());
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    private static int StepIndex(string? checkpoint)
+    {
+        if (checkpoint is null) return -1;
+        var idx = Array.IndexOf(Steps, checkpoint);
+        return idx;
+    }
+
+    private static string StepLabel(string step) => step switch
+    {
+        "Claimed" => "Claimed",
+        "WorktreeAcquired" => "Worktree Acquired",
+        "AgentCompleted" => "Agent Completed",
+        "CommitDone" => "Commit Done",
+        "PushDone" => "Push Done",
+        "PrOpened" => "PR Opened",
+        _ => step,
+    };
+
+    private string GetRetryText(string taskId)
+        => _retryText.TryGetValue(taskId, out var text) ? text : "";
+
+    private void SetRetryText(string taskId, string value)
+        => _retryText[taskId] = value;
+
+    private void SendRetry(string taskId)
+    {
+        if (_retryText.TryGetValue(taskId, out var text) && !string.IsNullOrWhiteSpace(text))
+        {
+            Dispatch.Dispatch(new TasksActions.RetryMessageAction(taskId, text));
+            _retryText[taskId] = "";
+        }
+    }
+
+    private void Recover(string taskId)
+        => Dispatch.Dispatch(new TasksActions.RecoverTaskAction(taskId));
+
+    public void Dispose()
+    {
+        TasksStore.StateChanged -= OnStateChanged;
+    }
+}

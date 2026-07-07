@@ -1,0 +1,9 @@
+@using Fluxor.Blazor.Web.ReduxDevTools
+
+<Fluxor.Blazor.Web.StoreInitializer />
+
+<Router AppAssembly="@typeof(Routes).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" DefaultLayout="@typeof(Layout.MainLayout)" />
+    </Found>
+</Router>

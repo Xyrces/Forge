@@ -139,13 +139,12 @@ public sealed class DashboardHost : IAsyncDisposable
             o.TimestampFormat = "HH:mm:ss.fff ";
         });
 
-        builder.Services.AddForgeUI();
+        builder.Services.AddForgeUI(new Uri($"http://{_options.Hostname}:{_options.Port}/"));
 
 _app = builder.Build();
         _app.Urls.Clear();
         _app.Urls.Add($"http://{_options.Hostname}:{_options.Port}");
 
-        _app.UseStaticFiles();
         _app.UseRouting();
         _app.UseAntiforgery();
 
