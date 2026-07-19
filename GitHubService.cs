@@ -78,4 +78,60 @@ public class GitHubService
         catch (NotFoundException) { return true; }
         catch { return false; }
     }
+
+    /// <summary>
+    /// 2026-07-18 (Phase 2.11.f + bug-1-review): post a non-blocking
+    /// issue comment on the PR. Used by the Reviewer agent to leave an
+    /// audit trail of what it reviewed, separate from the
+    /// structured review event below.
+    /// </summary>
+    public virtual async Task<long> CreateIssueCommentAsync(
+        long issueNumber, string body, CancellationToken cancellationToken = default)
+    {
+        var comment = await _client.Issue.Comment.Create(_owner, _repo, (int)issueNumber, body);
+        return comment.Id;
+    }
+
+    /// <summary>
+    /// 2026-07-18: submit a structured review event
+    /// (Approved / ChangesRequested / Commented) on a PR. The
+    /// Reviewer agent uses this to drive PRWatcher.ProcessWatchTaskAsync
+    /// to GreenAndApproved without requiring a human reviewer.
+    /// </summary>
+    public virtual async Task<long> SubmitReviewAsync(
+        int prNumber, string headSha, string body,
+        PullRequestReviewState state, CancellationToken cancellationToken = default)
+    {
+        var review = new PullRequestReviewCreate
+        {
+            CommitId = headSha,
+            Body = body,
+            Event = state switch
+            {
+                PullRequestReviewState.Approved => PullRequestReviewEvent.Approve,
+                PullRequestReviewState.ChangesRequested => PullRequestReviewEvent.RequestChanges,
+                _ => PullRequestReviewEvent.Comment,
+            },
+        };
+        var result = await _client.PullRequest.Review.Create(_owner, _repo, prNumber, review);
+        return result.Id;
+    }
+
+    /// <summary>
+    /// 2026-07-18: fetch the PR's unified diff text. Used by the
+    /// Reviewer agent to inspect the engineer's changes before
+    /// deciding on Approval / ChangesRequested.
+    /// </summary>
+    public virtual async Task<string> GetPullRequestDiffAsync(
+        int prNumber, CancellationToken cancellationToken = default)
+    {
+        var pr = await _client.PullRequest.Get(_owner, _repo, prNumber);
+        var headers = new System.Collections.Generic.Dictionary<string, string>
+        {
+            ["Accept"] = "application/vnd.github.v3.diff"
+        };
+        var diff = await _client.Connection.Get<string>(
+            new Uri(pr.Url), headers, "application/vnd.github.v3.diff");
+        return diff.Body ?? "";
+    }
 }
