@@ -48,6 +48,9 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly AgentMessageBus _messageBus;
     private readonly Orchestrator.SprintProposalAuditStore? _sprintProposalAudit;
     private readonly Orchestrator.SprintProposeService? _sprintPropose;
+    private readonly GitHubService? _gitHub;
+    private readonly Forge.Agents.IAgentRunner? _reviewerRunner;
+    private readonly ILoggerFactory? _loggerFactory;
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ProjectContextFactory? _projectFactory;
     private readonly SlotTable? _slots;
@@ -90,7 +93,10 @@ public sealed class DashboardHost : IAsyncDisposable
         Orchestrator.SprintProposalAuditStore? sprintProposalAudit = null,
         Orchestrator.SprintProposeService? sprintPropose = null,
         ProjectContextFactory? projectFactory = null,
-        SlotTable? slots = null)
+        SlotTable? slots = null,
+        GitHubService? gitHub = null,
+        Forge.Agents.IAgentRunner? reviewerRunner = null,
+        ILoggerFactory? loggerFactory = null)
     {
         _options = options;
         _headroom = headroom;
@@ -122,6 +128,9 @@ public sealed class DashboardHost : IAsyncDisposable
         _codebaseCacheOverride = codebaseCache;
         _sprintProposalAudit = sprintProposalAudit;
         _sprintPropose = sprintPropose;
+        _gitHub = gitHub;
+        _reviewerRunner = reviewerRunner;
+        _loggerFactory = loggerFactory;
         _messageBus = messageBus;
         _bus = bus;
         _projectFactory = projectFactory;
@@ -152,6 +161,23 @@ public sealed class DashboardHost : IAsyncDisposable
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
         if (_projectFactory is not null) builder.Services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
+
+        // 2026-07-18 (Phase 2.11.f + bug-1-review): the Reviewer
+        // dispatcher needs to be in the DI service collection
+        // BEFORE builder.Build() because the service collection
+        // is read-only after that point. The endpoint pulls it
+        // from ctx.RequestServices.
+        Forge.Reviewer.ReviewerDispatcher? reviewerDispatcherForBuild = null;
+        if (_projectFactory is not null && _gitHub is not null && _reviewerRunner is not null)
+        {
+            string? ResolveReviewerToken() => System.Environment.GetEnvironmentVariable("FORGE_REVIEWER_TOKEN");
+            var d = new Forge.Reviewer.ReviewerDispatcher(
+                _issues, _gitHub, _reviewerRunner, ResolveReviewerToken,
+                _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
+                    ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance);
+            builder.Services.AddSingleton(d);
+            reviewerDispatcherForBuild = d;
+        }
 
 _app = builder.Build();
         _app.Urls.Clear();
@@ -245,6 +271,11 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
             DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
+        }
+
+        if (reviewerDispatcherForBuild is not null)
+        {
+            ReviewerEndpoints.MapReviewerEndpoints(_app, reviewerDispatcherForBuild);
         }
 
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger);

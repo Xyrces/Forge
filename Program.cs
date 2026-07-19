@@ -774,6 +774,69 @@ Console.Error.WriteLine(ex.ToString());
         var memoryBootstrap = new Core.IssueStore(memoryDbPath);
         var memoryStore = new MemoryStore(memoryDbPath);
 
+        // 2026-07-18 (Phase 2.11.f + bug-3 deploy self-deadlock fix):
+        // before any startup work, scan sibling-of-releases for
+        // .pending-{sha} markers and consume them. The new release
+        // was published by SelfHostedWindowsServiceDeploymentExecutor;
+        // we swap the junction (and delete the marker) before any
+        // startup work so a half-failed deploy from the previous
+        // process bootstraps into the new binary cleanly.
+        var primaryDeployCfg = primary.Deployment;
+        if (primaryDeployCfg?.Kind == DeploymentKind.SelfHostedWindowsService
+            && !string.IsNullOrWhiteSpace(primaryDeployCfg.ReleasesRoot)
+            && !string.IsNullOrWhiteSpace(primaryDeployCfg.CurrentLinkPath))
+        {
+            var siblingOfReleases = Path.GetDirectoryName(primaryDeployCfg.ReleasesRoot.TrimEnd('\\','/'))!;
+            if (Directory.Exists(siblingOfReleases))
+            {
+                foreach (var markerPath in Directory.GetFiles(siblingOfReleases, ".pending-*"))
+                {
+                    try
+                    {
+                        var sha = Path.GetFileName(markerPath).Substring(".pending-".Length);
+                        var releaseDir = Path.Combine(primaryDeployCfg.ReleasesRoot, sha);
+                        if (!Directory.Exists(releaseDir))
+                        {
+                            logger.LogWarning("Skipping pending marker {Marker}: releaseDir {ReleaseDir} missing", markerPath, releaseDir);
+                            File.Delete(markerPath);
+                            continue;
+                        }
+                        var current = primaryDeployCfg.CurrentLinkPath;
+                        if (Directory.Exists(current))
+                        {
+                            var attrs = File.GetAttributes(current);
+                            if (attrs.HasFlag(FileAttributes.ReparsePoint)) Directory.Delete(current);
+                            else
+                            {
+                                var backup = current + ".pre-junction-" + DateTime.UtcNow.Ticks;
+                                Directory.Move(current, backup);
+                            }
+                        }
+                        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(current))!);
+                        var psi = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "cmd.exe",
+                            Arguments = $"/c mklink /J \"{current}\" \"{releaseDir}\"",
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            CreateNoWindow = true,
+                        };
+                        using var proc = System.Diagnostics.Process.Start(psi) ?? throw new InvalidOperationException("mklink start failed");
+                        proc.WaitForExit();
+                        if (proc.ExitCode != 0)
+                            throw new InvalidOperationException($"mklink exit={proc.ExitCode}; {proc.StandardError.ReadToEnd()}");
+                        File.Delete(markerPath);
+                        logger.LogInformation("Staged swap applied: current -> {ReleaseDir}", releaseDir);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Pending marker {Marker} failed; leaving for retry", markerPath);
+                    }
+                }
+            }
+        }
+
         // Phase 4: JSONL mirror of the issue store. Background service
         // rewrites the file every 5s so it's safe to tail -f.
         var issuesJsonlPath = Path.Combine(primaryStateDir, "issues.jsonl");
@@ -1067,7 +1130,10 @@ Console.Error.WriteLine(ex.ToString());
             codebaseBuilder: codebaseGraphBuilder,
             codebaseCache: codebaseGraphCache,
             projectFactory: projectFactory,
-            slots: slots);
+            slots: slots,
+            gitHub: gitHub,
+            reviewerRunner: agentRunner,
+            loggerFactory: loggerFactory);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never
