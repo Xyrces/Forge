@@ -278,6 +278,15 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             ReviewerEndpoints.MapReviewerEndpoints(_app, reviewerDispatcherForBuild);
         }
 
+        // 2026-07-17 (epic-1): the dashboard listens via
+        // Microsoft's IHostLifetime. The health endpoint below
+        // synthesizes listening/dispatch/deployment signals into a
+        // single /api/forgesystem/health snapshot for the
+        // operator. DefaultHealthSnapshotFactory reads the
+        // orchestrator's recovery + deployment tables when
+        // they're wired; otherwise it returns placeholders.
+        HealthEndpoint.MapHealthEndpoint(_app, new DefaultHealthSnapshotFactory());
+
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger);
 
         if (_intakeRegistry is not null)
