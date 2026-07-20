@@ -778,8 +778,9 @@ Console.Error.WriteLine(ex.ToString());
                 WorktreeRoot = options.Workspace.WorktreeRoot,
                 DefaultBranch = options.Workspace.DefaultBranch,
             },
-            loggerFactory.CreateLogger<GitWorktreeService>());
-        var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
+            loggerFactory.CreateLogger<GitWorktreeService>(),
+            githubToken: options.GitHub?.Token);
+        var gitHub = BuildGitHubService(options.GitHub ?? new Forge.Configuration.GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         var roleRegistry = new RoleAgentRegistry();
         var agentsStore = new Core.AgentStore(issues);
         var skillsStore = new Core.SkillStore(issues);

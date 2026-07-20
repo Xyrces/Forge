@@ -9,11 +9,19 @@ public sealed class GitWorktreeService
 {
     private readonly WorkspaceOptions _options;
     private readonly ILogger<GitWorktreeService> _logger;
+    // Optional GitHub PAT used to authenticate git push when the
+    // global credential.helper (e.g. !gh auth git-credential) can't
+    // get a TTY in non-interactive contexts (SCM, recovery, tests).
+    // When set, every git process spawned by this service inherits
+    // GITHUB_TOKEN in its environment; git honors it for github.com
+    // remote operations even with no credential helper present.
+    private readonly string? _githubToken;
 
-    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger)
+    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger, string? githubToken = null)
     {
         _options = options;
         _logger = logger;
+        _githubToken = githubToken;
     }
 
     public string WorkspaceRoot => Path.GetFullPath(_options.Root);
@@ -185,6 +193,18 @@ public sealed class GitWorktreeService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        // Authenticate via env var so the git credential helper doesn't
+        // try to prompt on stdin (which hangs in non-interactive
+        // contexts like the SCM). GCM and libsecret ignore this, but
+        // git's built-in credential resolution reads it for github.com.
+        // Also disable the credential helper entirely for this process
+        // tree so it can't fall through to a TTY-required helper like
+        // `gh auth git-credential`.
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        if (!string.IsNullOrEmpty(_githubToken))
+        {
+            psi.Environment["GITHUB_TOKEN"] = _githubToken;
+        }
 
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start git process");
