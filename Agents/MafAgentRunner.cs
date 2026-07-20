@@ -155,6 +155,23 @@ public async Task<AgentRunResult> RunAsync(
                 .Select(m => m.Text));
             var newSessionId = await SerializeSessionAsync(response, agent, session, ct);
 
+            // DIAGNOSTIC: surface what the agent actually returned.
+            // Helps debug the silent-agent bug where result.Text is
+            // empty in production but non-empty in live tests.
+            _logger.LogInformation(
+                "MafAgentRunner.RunAsync({Role}): msgs={N} assistant_text_chars={L} tool_msgs={T}",
+                role,
+                response.Messages.Count,
+                text.Length,
+                response.Messages.Count(m => m.Role == ChatRole.Tool));
+            foreach (var m in response.Messages)
+            {
+                var preview = (m.Text ?? "").Length > 200 ? m.Text!.Substring(0, 200) + "..." : m.Text;
+                _logger.LogDebug(
+                    "  msg role={Role} text_len={L} preview={P}",
+                    m.Role, (m.Text ?? "").Length, preview);
+            }
+
             return new AgentRunResult(
     Text: text,
     SessionId: newSessionId,

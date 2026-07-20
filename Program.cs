@@ -52,6 +52,24 @@ public static class Program
                 o.TimestampFormat = "HH:mm:ss.fff ";
                 o.IncludeScopes = false;
             });
+            // Always log to a file so the SCM-hosted service has
+            // something visible in C:\ProgramData\Forge\forge-scm.log
+            // when stdout is swallowed by the SCM. The diagnostic
+            // MafAgentRunner logs use this to debug the silent-agent
+            // bug. Cheap (rolling size), and the file only exists when
+            // the service is running.
+            var logFile = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "Forge", "forge-scm.log");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(logFile)!);
+                builder.AddProvider(new Forge.Core.ForgeFileLoggerProvider(logFile));
+            }
+            catch
+            {
+                // best-effort: if we can't write the log, console still works
+            }
             builder.SetMinimumLevel(LogLevel.Information);
         });
         var logger = loggerFactory.CreateLogger("Forge");

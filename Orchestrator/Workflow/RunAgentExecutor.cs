@@ -98,6 +98,19 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     ["issueId"] = issue.Id,
                 },
                 ct);
+            // DIAGNOSTIC: surface what the agent returned so we can
+            // debug the "empty modelResponse" bug. Will be removed
+            // once we find the root cause.
+            logger.LogInformation(
+                "RunAgent({Id}) role={Role} text_len={Len} session_id={Sid}",
+                issue.Id, role, result.Text?.Length ?? 0, result.SessionId ?? "<null>");
+            if (string.IsNullOrEmpty(result.Text))
+            {
+                logger.LogWarning(
+                    "RunAgent({Id}) returned EMPTY text. Prompt length={Pl}. " +
+                    "Inspect MafAgentRunner.RunAsync to see if response.Messages contains tool calls only.",
+                    issue.Id, fullPrompt.Length);
+            }
         }
         catch (Exception ex)
         {
@@ -123,7 +136,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         // Record the model response in issue metadata so the
         // dashboard can show what the agent said, even when
         // downstream steps fail.
-        await RecordModelResponseAsync(issues, issue.Id, result.Text, ct);
+        await RecordModelResponseAsync(issues, issue.Id, result.Text ?? string.Empty, ct);
         // P4 Stage A: advance to agent_completed. From here the
         // recoverer knows the LLM has finished; if we crash before
         // CommitPushPr runs, the recoverer resumes from commit.
@@ -141,7 +154,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["sessionId"] = result.SessionId ?? "",
                 ["elapsedMs"] = result.Elapsed.TotalMilliseconds,
             }));
-        return new AgentCompleted(input, AgentResult.Ok, result.Text, result.SessionId);
+        return new AgentCompleted(input, AgentResult.Ok, result.Text ?? string.Empty, result.SessionId);
     }
 
     private static async Task RecordModelResponseAsync(
