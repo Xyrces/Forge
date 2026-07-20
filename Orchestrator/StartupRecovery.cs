@@ -111,6 +111,12 @@ public sealed class StartupRecovery
     public async Task<RecoveryActionRecord> ReplayAsync(IssueRecord issue, CancellationToken ct = default)
     {
         var before = issue.DispatchCheckpoint?.ToDbValue();
+        // Per-issue timeout: a single stuck GitHub API call or git
+        // push must not block the entire startup. 60s is enough for
+        // a healthy PR creation; if it takes longer, log + skip +
+        // let the next dispatch tick try.
+        using var issueCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        issueCts.CancelAfter(TimeSpan.FromSeconds(60));
         try
         {
             // Classify first — pure function over metadata + worktree.
@@ -124,17 +130,17 @@ public sealed class StartupRecovery
 
                 case RecoveryAction.Failed:
                     _logger.LogWarning("Recovery({Id}): failing — {Reason}", issue.Id, decision.Reason);
-                    await _issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
+                    await _issues.IncrementRecoveryAttemptsAsync(issue.Id, issueCts.Token);
                     if (issue.RecoveryAttempts + 1 >= _options.MaxAttempts)
                     {
                         // Hard fail: clean up worktree + transition to Failed.
-                        await TryRemoveWorktreeAsync(issue, ct);
+                        await TryRemoveWorktreeAsync(issue, issueCts.Token);
                         await _issues.TransitionAsync(issue.Id, IssueStatus.Failed,
                             $"recovered: {decision.Reason}", metadata: new Dictionary<string, object>
                             {
                                 ["lastError"] = $"recovered: {decision.Reason}",
                                 ["recoveryFailedAt"] = DateTime.UtcNow.ToString(IssueStore.DateFormat),
-                            }, ct: ct);
+                            }, ct: issueCts.Token);
                         _events.Publish(RecoveryEvent(issue.Id, "failed", decision.Reason));
                         return new RecoveryActionRecord(issue.Id, before, null, "failed", decision.Reason);
                     }
@@ -146,12 +152,21 @@ public sealed class StartupRecovery
                         $"retry: {decision.Reason}");
 
                 case RecoveryAction.Replay:
-                    return await ReplayFromCheckpointAsync(issue, decision, ct);
+                    return await ReplayFromCheckpointAsync(issue, decision, issueCts.Token);
 
                 default:
                     return new RecoveryActionRecord(issue.Id, before, before, "left_alone",
                         $"unknown decision {decision.Action}");
             }
+        }
+        catch (OperationCanceledException) when (issueCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // Per-issue timeout tripped. Log + leave alone so the
+            // dispatch loop can re-attempt later.
+            _logger.LogWarning(
+                "Recovery({Id}) timed out after 60s; leaving for dispatch loop", issue.Id);
+            return new RecoveryActionRecord(issue.Id, before, before, "failed",
+                "recovery timeout");
         }
         catch (Exception ex)
         {
@@ -166,6 +181,8 @@ public sealed class StartupRecovery
         var before = issue.DispatchCheckpoint?.ToDbValue();
         var worktreePath = issue.GetMetadata("worktreePath");
         var branch = issue.GetMetadata("branch") ?? $"agent/{issue.Id}";
+        _logger.LogInformation("Recovery({Id}): replaying from {Cp} on branch {Branch}",
+            issue.Id, before, branch);
         if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
         {
             // The recoverer can't replay without the worktree. Fail it.
@@ -207,8 +224,11 @@ public sealed class StartupRecovery
                     return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
 
                 case DispatchCheckpoint.CommitDone:
+                    _logger.LogInformation("Recovery({Id}): CommitDone step - pushing", issue.Id);
                     await _worktrees.PushAsync(worktreePath!, branch, ct);
+                    _logger.LogInformation("Recovery({Id}): push OK - opening PR", issue.Id);
                     await TryOpenPrAsync(issue, branch, ct);
+                    _logger.LogInformation("Recovery({Id}): PR OK", issue.Id);
                     await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
                     await _issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
                     _events.Publish(RecoveryEvent(issue.Id, "replay", "commit_done -> pr_opened"));
