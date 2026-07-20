@@ -168,7 +168,10 @@ public async Task<AgentRunResult> RunAsync(
                 {
                     var preview = (m.Text ?? "");
                     if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
-                    sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} preview={preview}");
+                    var toolCalls = m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>()
+                        .Select(c => $"{c.Name}({string.Join(",", c.Arguments?.Keys ?? new System.Collections.Generic.List<string>())})")
+                        .ToList();
+                    sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} tool_calls=[{string.Join(";", toolCalls)}] preview={preview}");
                 }
                 sw.Flush();
             }
