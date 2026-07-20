@@ -40,13 +40,24 @@ public static class UIExtensions
 
     public static WebApplication MapForgeUI(this WebApplication app)
     {
-        var candidate = Path.GetFullPath(Path.Combine(
-            Path.GetDirectoryName(typeof(App).Assembly.Location)!,
-            "..", "..", "..", "Forge.UI", "wwwroot"));
-        var uiWwwroot = Directory.Exists(candidate)
-            ? candidate
-            : Path.Combine(app.Environment.ContentRootPath, "wwwroot");
-        if (Directory.Exists(uiWwwroot))
+        // Resolve the UI's wwwroot directory. When running from source
+        // (dotnet run) the App assembly lives in bin/Debug/net10.0/Forge.UI.dll
+        // and ../../../Forge.UI/wwwroot lands in the source tree. When
+        // running as the published SCM binary the assembly lives in
+        // C:\ProgramData\Forge\current\Forge.UI.dll and the same
+        // relative path lands at C:\Forge.UI\wwwroot (wrong). The
+        // publish step doesn't copy the static files into the release
+        // dir, so fall back to looking in:
+        //   1. <AppContext.BaseDirectory>/wwwroot      -- future: when we
+        //      publish the static files into the binary dir
+        //   2. <repo-root>/Forge.UI/wwwroot             -- dev / fallback:
+        //      walk up from the binary dir to find the repo root via
+        //      *.sln file marker, then descend into Forge.UI/wwwroot.
+        // Without one of these, app.css / app.js / _framework/blazor.web.js
+        // are not served and the dashboard renders without styling or
+        // interactive component support.
+        var uiWwwroot = ResolveUiWwwroot();
+        if (uiWwwroot is not null)
         {
             app.UseStaticFiles(new StaticFileOptions
             {
@@ -64,5 +75,33 @@ public static class UIExtensions
         app.MapRazorComponents<App>()
             .AddInteractiveServerRenderMode();
         return app;
+    }
+
+    private static string? ResolveUiWwwroot()
+    {
+        // 1. Published binary next to wwwroot
+        var baseDir = AppContext.BaseDirectory;
+        var sibling = Path.Combine(baseDir, "wwwroot");
+        if (Directory.Exists(sibling) && File.Exists(Path.Combine(sibling, "app.css")))
+            return sibling;
+
+        // 2. Walk up from the binary dir looking for a *.sln file,
+        //    then descend into Forge.UI/wwwroot.
+        var dir = new DirectoryInfo(baseDir);
+        while (dir is not null)
+        {
+            var sln = dir.EnumerateFiles("*.sln").FirstOrDefault();
+            if (sln is not null)
+            {
+                var candidate = Path.Combine(dir.FullName, "Forge.UI", "wwwroot");
+                if (Directory.Exists(candidate) && File.Exists(Path.Combine(candidate, "app.css")))
+                    return candidate;
+                // Found the sln but the UI wwwroot doesn't exist there
+                // -- this means a clean checkout without UI assets.
+                return null;
+            }
+            dir = dir.Parent;
+        }
+        return null;
     }
 }
