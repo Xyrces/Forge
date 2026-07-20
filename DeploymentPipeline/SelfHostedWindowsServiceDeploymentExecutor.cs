@@ -47,6 +47,20 @@ public sealed class SelfHostedWindowsServiceDeploymentExecutor : IDeploymentExec
                 $"publish \"{d.PublishProject}\" -c Release -o \"{releaseDir}\"", checkoutDir, ct);
             log.AppendLine(publishCore.Log);
             if (publishCore.ExitCode != 0) return new DeploymentExecutionResult(false, log.ToString());
+
+            // The UI's static files (app.css, app.js, _framework/blazor.web.js)
+            // live in Forge.UI/wwwroot but `dotnet publish Forge.Core.csproj`
+            // doesn't copy them. They live alongside the binary, so copy
+            // them from the source tree into the release dir. Without this
+            // the dashboard renders unstyled and missing interactive support.
+            var uiWwwroot = Path.Combine(checkoutDir, "Forge.UI", "wwwroot");
+            if (Directory.Exists(uiWwwroot))
+            {
+                var uiDst = Path.Combine(releaseDir, "wwwroot");
+                await RunAsync("cmd", $"/c xcopy /E /I /Y \"{uiWwwroot}\" \"{uiDst}\"", releaseDir, ct);
+                log.AppendLine($"Copied UI wwwroot: {uiWwwroot} -> {uiDst}");
+            }
+
             await File.WriteAllTextAsync(pendingMarker,
                 $"staged for {candidate.Id} by {candidate.RequestedBy} at {DateTime.UtcNow:O}\nreleaseDir={releaseDir}\n", ct);
             log.AppendLine($"Staged swap via marker: {pendingMarker}");
