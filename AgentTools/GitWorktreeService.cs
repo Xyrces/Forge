@@ -75,6 +75,29 @@ public sealed class GitWorktreeService
 
     public async Task<CommitResult> CommitAllAsync(string worktreePath, string message, CancellationToken cancellationToken = default)
     {
+        // Guard: never let an agent commit on a protected branch.
+        // An agent should always operate on its agent/<taskId>
+        // worktree branch; if HEAD is on main (or any non-agent
+        // branch) the workflow has misconfigured something and we
+        // refuse rather than silently polluting main. The engineer
+        // agent must push a branch and open a PR via CommitPushPrExecutor;
+        // direct-to-main commits bypass the Reviewer dispatcher entirely.
+        var branchResult = await RunGitInAsync(worktreePath, "rev-parse --abbrev-ref HEAD", cancellationToken);
+        var currentBranch = branchResult.Stdout.Trim();
+        if (currentBranch.Equals("main", StringComparison.OrdinalIgnoreCase)
+            || currentBranch.Equals("master", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to commit on protected branch '{currentBranch}'. " +
+                "Engineer agents must commit on their agent/<taskId> worktree branch " +
+                "and open a PR via CommitPushPrExecutor.");
+        }
+        if (!currentBranch.StartsWith("agent/", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to commit on branch '{currentBranch}': must be agent/<taskId>. " +
+                "Direct commits outside the agent/* namespace bypass the Reviewer dispatcher.");
+        }
         await RunGitInAsync(worktreePath, "add -A", cancellationToken);
         var msgPath = Path.Combine(Path.GetTempPath(), $"commit-msg-{Guid.NewGuid():N}.txt");
         await File.WriteAllTextAsync(msgPath, message, cancellationToken);
@@ -99,6 +122,14 @@ public sealed class GitWorktreeService
 
     public async Task<string> PushAsync(string worktreePath, string branch, CancellationToken cancellationToken = default)
     {
+        // Guard: never push a protected branch from an agent dispatch.
+        if (branch.Equals("main", StringComparison.OrdinalIgnoreCase)
+            || branch.Equals("master", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to push protected branch '{branch}'. " +
+                "Agents must push their agent/<taskId> branch only.");
+        }
         var result = await RunGitInAsync(worktreePath, $"push -u origin \"{branch}\"", cancellationToken);
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"git push failed (exit={result.ExitCode}): {result.Stderr}");
