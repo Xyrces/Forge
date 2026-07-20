@@ -26,7 +26,14 @@ public sealed class SelfHostedWindowsServiceDeploymentExecutor : IDeploymentExec
         if (!OperatingSystem.IsWindows())
             return new DeploymentExecutionResult(false, "SelfHostedWindowsService deployment is Windows-only.");
         var log = new StringBuilder();
-        var checkoutDir = Path.Combine(project.Root, ".forge", "deploy-checkouts", candidate.Id);
+        // Distinct path from the build runner's deploy-checkouts/<id>:
+        // the build runner drops its checkout in the finally block but
+        // file handles / git metadata can linger long enough that a
+        // fresh `git worktree add` against the same path here gets
+        // "already exists" fatal before the publish step starts.
+        // Using a separate deploy-checkouts/publish-<id> dir avoids
+        // that race entirely.
+        var checkoutDir = Path.Combine(project.Root, ".forge", "deploy-checkouts", $"publish-{candidate.Id}");
         var releaseDir = Path.Combine(d.ReleasesRoot, candidate.CommitSha);
         var siblingReleasesRoot = Path.GetDirectoryName(d.ReleasesRoot.TrimEnd('\\','/'))!;
         var pendingMarker = Path.Combine(siblingReleasesRoot, $".pending-{candidate.CommitSha}");
