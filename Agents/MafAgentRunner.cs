@@ -155,21 +155,26 @@ public async Task<AgentRunResult> RunAsync(
                 .Select(m => m.Text));
             var newSessionId = await SerializeSessionAsync(response, agent, session, ct);
 
-            // DIAGNOSTIC: surface what the agent actually returned.
-            // Helps debug the silent-agent bug where result.Text is
-            // empty in production but non-empty in live tests.
-            _logger.LogInformation(
-                "MafAgentRunner.RunAsync({Role}): msgs={N} assistant_text_chars={L} tool_msgs={T}",
-                role,
-                response.Messages.Count,
-                text.Length,
-                response.Messages.Count(m => m.Role == ChatRole.Tool));
-            foreach (var m in response.Messages)
+            // DIAGNOSTIC: append to a side-channel log so we can
+            // diagnose the silent-agent bug even when the SCM swallows
+            // stdout. The file lives in C:\ProgramData\Forge\agent.log
+            // and is appended on every agent run.
+            try
             {
-                var preview = (m.Text ?? "").Length > 200 ? m.Text!.Substring(0, 200) + "..." : m.Text;
-                _logger.LogDebug(
-                    "  msg role={Role} text_len={L} preview={P}",
-                    m.Role, (m.Text ?? "").Length, preview);
+                var diagLog = @"C:\ProgramData\Forge\agent.log";
+                using var sw = new StreamWriter(diagLog, append: true);
+                sw.WriteLine($"--- {DateTime.Now:O} role={role} msgs={response.Messages.Count} text_len={text.Length} tool_msgs={response.Messages.Count(m => m.Role == ChatRole.Tool)} session_id={newSessionId ?? "<null>"} ---");
+                foreach (var m in response.Messages)
+                {
+                    var preview = (m.Text ?? "");
+                    if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
+                    sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} preview={preview}");
+                }
+                sw.Flush();
+            }
+            catch
+            {
+                // best-effort
             }
 
             return new AgentRunResult(
