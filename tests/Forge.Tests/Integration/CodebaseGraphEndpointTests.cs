@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -56,7 +56,12 @@ public class CodebaseGraphEndpointTests : IDisposable
     private IHost BuildHost()
     {
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var workDir = Path.GetTempPath();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -140,3 +145,4 @@ public class CodebaseGraphEndpointTests : IDisposable
         Assert.Equal(firstBuiltAt, second.GetProperty("builtAt").GetDateTime());
     }
 }
+

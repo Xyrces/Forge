@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -61,7 +61,11 @@ public class RecoveryEndpointTests : IDisposable
             NullLogger<StartupRecovery>.Instance);
 
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -226,7 +230,7 @@ public class RecoveryEndpointTests : IDisposable
         Assert.Equal(2, payload.GetProperty("scanned").GetInt32());
         var decisions = payload.GetProperty("decisions");
         Assert.Equal(2, decisions.GetArrayLength());
-        // Verify the GitHub stub wasn't called — dry-run must not
+        // Verify the GitHub stub wasn't called â€” dry-run must not
         // produce side effects.
         Assert.Equal(0, _gitHub.CallCount);
     }

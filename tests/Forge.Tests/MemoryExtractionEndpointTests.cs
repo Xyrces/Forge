@@ -1,4 +1,4 @@
-using System.Net.Http.Json;
+﻿using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -37,7 +37,11 @@ public class MemoryExtractionEndpointTests : IDisposable
         _extractions = new MemoryExtractionStore(_dbPath);
 
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -140,3 +144,5 @@ public class MemoryExtractionEndpointTests : IDisposable
         Assert.InRange(ts, before, after);
     }
 }
+
+

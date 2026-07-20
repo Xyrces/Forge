@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using Microsoft.AspNetCore.Builder;
@@ -33,7 +33,11 @@ public class CodebaseGraphRebuildEndpointTests : IDisposable
         _cache = new CodebaseGraphCacheStore(_issues);
 
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         var app = builder.Build();

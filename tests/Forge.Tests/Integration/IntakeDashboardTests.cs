@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -66,7 +66,11 @@ public class IntakeDashboardTests : IDisposable
     private IHost BuildHost()
     {
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -207,3 +211,6 @@ internal static class HostExtensions
         return idx >= 0 && int.TryParse(first[(idx + 1)..], out var p) ? p : 0;
     }
 }
+
+
+

@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using Microsoft.AspNetCore.Builder;
@@ -35,7 +35,11 @@ public class OpsEndpointsTests : IDisposable
         _extractions = new MemoryExtractionStore(_dbPath);
 
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         var app = builder.Build();
@@ -87,7 +91,11 @@ public class OpsEndpointsTests : IDisposable
     public async Task HeadroomStats_EnabledUnreachable_ReturnsError()
     {
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         var app = builder.Build();
         OpsEndpoints.MapOpsEndpoints(app, null,

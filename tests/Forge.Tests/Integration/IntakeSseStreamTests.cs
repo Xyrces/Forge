@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -53,7 +53,11 @@ public class IntakeSseStreamTests : IDisposable
     private IHost BuildHost()
     {
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -61,7 +65,7 @@ public class IntakeSseStreamTests : IDisposable
 
         // We mount only SpecEndpoints + the events stream (the same SSE
         // endpoint the dashboard uses). The full intake flow isn't
-        // involved here — we just want to verify SSE delivers events.
+        // involved here â€” we just want to verify SSE delivers events.
         SpecEndpoints.MapSpecEndpoints(app, _specs, new SpecExtractionReader(_issues),
             NullLogger<DashboardHost>.Instance, _intakeStore);
 
@@ -204,3 +208,5 @@ public class IntakeSseStreamTests : IDisposable
         Assert.Equal(1, deps.GetArrayLength());
     }
 }
+
+

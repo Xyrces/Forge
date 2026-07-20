@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -126,7 +126,11 @@ public class CostTrackerTests : IDisposable
         _tracker.Record(new UsageDetails { InputTokenCount = 500, OutputTokenCount = 100 }, "QA");
 
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -157,7 +161,11 @@ public class CostTrackerTests : IDisposable
     {
         _tracker.Record(new UsageDetails { InputTokenCount = 1000 }, "CoreDev");
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         var app = builder.Build();

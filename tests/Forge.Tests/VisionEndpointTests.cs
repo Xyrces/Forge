@@ -38,7 +38,13 @@ public class VisionEndpointTests : IDisposable
         vision.Reload();
 
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        // Pin contentRoot to _workDir so WebApplication doesn't fall back
+        // to a stale cwd when the build runner has a different directory.
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");

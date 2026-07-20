@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -32,7 +32,11 @@ public class MemoryEndpointTests : IDisposable
         _memory = new MemoryStore(_dbPath);
 
         var port = GetEphemeralPort();
-        var builder = WebApplication.CreateBuilder();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
+            ApplicationName = "Forge.Tests",
+        });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -124,3 +128,5 @@ public class MemoryEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.NotFound, del.StatusCode);
     }
 }
+
+
