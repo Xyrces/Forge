@@ -1,6 +1,7 @@
 bin/
 obj/
 .portHorizon/
+.forge/
 *.user
 *.suo
 .DS_Store
