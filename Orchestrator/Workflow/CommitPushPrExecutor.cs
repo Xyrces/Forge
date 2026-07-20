@@ -88,17 +88,24 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         // a StartupRecovery pass can resume from push_done if we
         // crash between push and PR-open, or from pr_opened if we
         // crash after the PR is recorded.
+        logger.LogInformation("CommitPushPr({Id}): setting CommitDone", issue.Id);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
+        logger.LogInformation("CommitPushPr({Id}): calling PushAsync", issue.Id);
         await worktrees.PushAsync(worktreePath, branch, ct);
+        logger.LogInformation("CommitPushPr({Id}): push done, setting PushDone", issue.Id);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
         var headSha = await worktrees.GetHeadShaAsync(worktreePath, ct);
+        logger.LogInformation("CommitPushPr({Id}): got head sha {Sha}", issue.Id, headSha);
 
+        logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
+            issue.Id, branch, input.Worktree.BaseBranch);
         var pr = await gitHub.CreatePullRequestAsync(
             title: $"[{issue.Type}] {issue.Title}",
             body: BuildPrBody(issue, headSha, input.Text),
             headBranch: branch,
             baseBranch: input.Worktree.BaseBranch,
             cancellationToken: ct);
+        logger.LogInformation("CommitPushPr({Id}): PR #{N} opened", issue.Id, pr.Number);
 
         await UpdateMetadataAsync(issues, issue.Id, m =>
         {
