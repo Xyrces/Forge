@@ -19,7 +19,21 @@ namespace Forge.Dashboard;
 /// </summary>
 public static class SpecEndpoints
 {
-    public static void MapSpecEndpoints(
+    public static void MapSpecEndpoints(  
+        // Public discovery endpoint: advertises the tools the forgesystem  
+        // exposes to spec authoring. Anonymous (no auth) so external tooling  
+        // (and the dashboard's own capability probe) can enumerate them.  
+        app.MapGet("/api/forgesystem/spec", () => Results.Json(new  
+        {  
+            tools = new[]  
+            {  
+                "bash",  
+                "file_write",  
+                "file_read",  
+                "grep",  
+                "git"  
+            }  
+        }, DashboardJson.Options));  
         WebApplication app,
         ISpecStore specs,
         ISpecExtractionReader extractor,
