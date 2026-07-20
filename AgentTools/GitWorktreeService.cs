@@ -84,11 +84,17 @@ public sealed class GitWorktreeService
         // direct-to-main commits bypass the Reviewer dispatcher entirely.
         var branchResult = await RunGitInAsync(worktreePath, "rev-parse --abbrev-ref HEAD", cancellationToken);
         var currentBranch = branchResult.Stdout.Trim();
-        if (currentBranch.Equals("main", StringComparison.OrdinalIgnoreCase)
+        // "HEAD" means detached HEAD (no branch checked out) -- also
+        // a misconfiguration: the agent should be on its agent/<id>
+        // branch before committing. Refuse rather than allow the
+        // commit to land on a detached HEAD that gets fast-forwarded
+        // into main.
+        if (currentBranch.Equals("HEAD", StringComparison.OrdinalIgnoreCase)
+            || currentBranch.Equals("main", StringComparison.OrdinalIgnoreCase)
             || currentBranch.Equals("master", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException(
-                $"Refusing to commit on protected branch '{currentBranch}'. " +
+                $"Refusing to commit on branch '{currentBranch}'. " +
                 "Engineer agents must commit on their agent/<taskId> worktree branch " +
                 "and open a PR via CommitPushPrExecutor.");
         }
