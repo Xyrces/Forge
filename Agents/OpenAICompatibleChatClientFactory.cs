@@ -136,6 +136,13 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
         var options = new OpenAIClientOptions
         {
             Endpoint = new Uri(provider.BaseUrl),
+            // Bump the default 100s network timeout. The agent's
+            // tool-call loops (multiple bash iterations + final
+            // assistant response) routinely exceed 100s when running
+            // against the kilo gateway, and the default timeout
+            // throws AggregateException mid-run which the runner
+            // then surfaces as a malformed <threw:> response.
+            NetworkTimeout = TimeSpan.FromMinutes(5),
         };
         if (!string.IsNullOrEmpty(provider.OrgId))
         {
