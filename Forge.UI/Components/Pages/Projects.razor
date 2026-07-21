@@ -16,7 +16,8 @@
             </span>
         </div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction()))">Refresh</button>
+            <button class="btn" @onclick="@(() => Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction()))">Refresh</button>
+            <button class="btn btn--primary" @onclick="ToggleForm">@(_formOpen ? "Cancel" : "Add Project")</button>
         </div>
     </div>
 
@@ -28,54 +29,115 @@
     {
         <div class="page-subtitle">Error: @ProjectsStore.Value.Error</div>
     }
-    else if (ProjectsStore.Value.Projects.Count == 0)
-    {
-        <div class="page-subtitle">
-            No projects registered. Configure <code>projects[]</code> in <code>appsettings.json</code> to enable multi-project concurrency caps.
-        </div>
-    }
     else
     {
-        <div class="project-grid">
-            @foreach (var p in ProjectsStore.Value.Projects)
-            {
-                <a class="project-card" href="@($"/projects/{p.Id}/overview")">
-                    <div class="project-card__head">
-                        <span class="project-card__id">@p.Id</span>
-                        <span class="project-card__name">@p.Name</span>
-                    </div>
-                    <div class="project-card__root" title="@p.Root">@p.Root</div>
-                    <div class="project-card__counters">
-                        <span class="pill pill--pending">@p.Pending pending</span>
-                        <span class="pill pill--inprogress">@p.InProgress in flight</span>
-                        <span class="pill pill--completed">@p.Completed done</span>
-                        @if (p.Failed > 0)
-                        {
-                            <span class="pill pill--failed">@p.Failed failed</span>
-                        }
-                    </div>
-                    <div class="project-card__slots">
-                        @foreach (var s in p.Slots)
-                        {
-                            <span class="slot-chip @(s.InFlight >= s.Max ? "slot-chip--full" : "")">
-                                @s.Role @s.InFlight/@s.Max
-                            </span>
-                        }
-                    </div>
-                </a>
-            }
-        </div>
+        @if (_formOpen)
+        {
+            <div class="card add-project-card">
+                <h2>Add Project</h2>
+                <p class="add-project-hint">
+                    Forge clones the repo into <code>&lt;dataRoot&gt;/projects/&lt;id&gt;/</code> on submit.
+                    Private repos need a GitHub PAT configured server-side
+                    (<code>GITHUB_TOKEN</code> env var or <code>github.token</code> in appsettings.json).
+                </p>
 
-        <div class="page-subtitle page-subtitle--meta">
-            Multi-project is read-only in v1: the dashboard lists every registered project and its slot meter,
-            but the orchestrator dispatch loop still runs against <code>@ProjectsStore.Value.Projects.First().Id</code>
-            (legacy <code>workspace.root</code>). Configure <code>projects[]</code> in <code>appsettings.json</code> to add more;
-            the legacy key auto-shims to a single <code>"default"</code> project (warning logged).
-        </div>
+                @if (ProjectsStore.Value.AddError is not null)
+                {
+                    <div class="banner banner--warn">
+                        <span>@ProjectsStore.Value.AddError</span>
+                        <button class="btn btn--link" @onclick="@(() => Dispatch.Dispatch(new ProjectsActions.AddProjectDismissErrorAction()))">Dismiss</button>
+                    </div>
+                }
+
+                @if (!string.IsNullOrEmpty(ProjectsStore.Value.LastAdded))
+                {
+                    <div class="banner banner--ok">
+                        Registered <code>@ProjectsStore.Value.LastAdded</code>. Refreshing project list…
+                    </div>
+                }
+
+                <form class="form-grid" @onsubmit="SubmitAsync" @onsubmit:preventDefault="true">
+                    <label>
+                        <span>ID <small>(lowercase, [a-z0-9_-]{1..32}, becomes the dispatch key)</small></span>
+                        <input type="text" placeholder="forge" @bind="_model.Id" required pattern="[a-z0-9][a-z0-9_-]*" maxlength="32" autocomplete="off" />
+                    </label>
+                    <label>
+                        <span>Name <small>(display label)</small></span>
+                        <input type="text" placeholder="Forge" @bind="_model.Name" required maxlength="64" autocomplete="off" />
+                    </label>
+                    <label class="form-grid__full">
+                        <span>Repository URL <small>(HTTPS with PAT or SSH)</small></span>
+                        <input type="url" placeholder="https://github.com/Xyrces/Forge.git" @bind="_model.RepoUrl" required autocomplete="off" />
+                    </label>
+                    <label>
+                        <span>Default branch</span>
+                        <input type="text" placeholder="main" @bind="_model.DefaultBranch" autocomplete="off" maxlength="64" />
+                    </label>
+                    <div class="form-grid__actions">
+                        <button type="submit" class="btn btn--primary" disabled="@ProjectsStore.Value.Submitting">
+                            @(ProjectsStore.Value.Submitting ? "Registering…" : "Register")
+                        </button>
+                        <button type="button" class="btn" @onclick="ToggleForm" disabled="@ProjectsStore.Value.Submitting">Cancel</button>
+                    </div>
+                </form>
+            </div>
+        }
+
+        @if (ProjectsStore.Value.Projects.Count == 0)
+        {
+            <div class="page-subtitle">
+                No projects registered. Click <strong>Add Project</strong> to register one — Forge clones the repo
+                into a managed directory under <code>&lt;dataRoot&gt;/projects/&lt;id&gt;</code> and exposes it on the next dispatch cycle.
+            </div>
+        }
+        else
+        {
+            <div class="project-grid">
+                @foreach (var p in ProjectsStore.Value.Projects)
+                {
+                    <a class="project-card" href="@($"/projects/{p.Id}/overview")">
+                        <div class="project-card__head">
+                            <span class="project-card__id">@p.Id</span>
+                            <span class="project-card__name">@p.Name</span>
+                        </div>
+                        <div class="project-card__root" title="@p.RepoUrl">@p.RepoUrl</div>
+                        @if (!string.IsNullOrEmpty(p.Root))
+                        {
+                            <div class="project-card__local" title="@p.Root">workdir: @p.Root</div>
+                        }
+                        <div class="project-card__counters">
+                            <span class="pill pill--pending">@p.Pending pending</span>
+                            <span class="pill pill--inprogress">@p.InProgress in flight</span>
+                            <span class="pill pill--completed">@p.Completed done</span>
+                            @if (p.Failed > 0)
+                            {
+                                <span class="pill pill--failed">@p.Failed failed</span>
+                            }
+                        </div>
+                        <div class="project-card__slots">
+                            @foreach (var s in p.Slots)
+                            {
+                                <span class="slot-chip @(s.InFlight >= s.Max ? "slot-chip--full" : "")">
+                                    @s.Role @s.InFlight/@s.Max
+                                </span>
+                            }
+                        </div>
+                    </a>
+                }
+            </div>
+
+            <div class="page-subtitle page-subtitle--meta">
+                Dispatch currently routes to the first registered project on restart.
+                Add more here and restart <code>forge</code> to pick them up as dispatch targets.
+            </div>
+        }
     }
 </div>
 
 @code {
+    private bool _formOpen;
+    private AddProjectForm _model = new();
+
     protected override void OnInitialized()
     {
         ProjectsStore.StateChanged += OnStateChanged;
@@ -87,8 +149,42 @@
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
 
+    private void ToggleForm()
+    {
+        _formOpen = !_formOpen;
+        if (!_formOpen)
+        {
+            _model = new();
+            Dispatch.Dispatch(new ProjectsActions.AddProjectDismissErrorAction());
+        }
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_model.Id) ||
+            string.IsNullOrWhiteSpace(_model.Name) ||
+            string.IsNullOrWhiteSpace(_model.RepoUrl))
+        {
+            return;
+        }
+        Dispatch.Dispatch(new ProjectsActions.AddProjectAction(
+            _model.Id.Trim(),
+            _model.Name.Trim(),
+            _model.RepoUrl.Trim(),
+            string.IsNullOrWhiteSpace(_model.DefaultBranch) ? null : _model.DefaultBranch.Trim()));
+        await Task.CompletedTask;
+    }
+
     public void Dispose()
     {
         ProjectsStore.StateChanged -= OnStateChanged;
+    }
+
+    private sealed class AddProjectForm
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string RepoUrl { get; set; } = string.Empty;
+        public string DefaultBranch { get; set; } = string.Empty;
     }
 }

@@ -29,102 +29,57 @@ public class ProjectRegistryLoaderTests : IDisposable
     }
 
     [Fact]
-    public void Load_WithLegacyWorkspaceRoot_ShimsSingleDefaultProject()
+    public async Task LoadAsync_ReadsOnlyFromSqlite()
     {
-        var options = new AgentOptions
-        {
-            Workspace = new WorkspaceOptions { Root = @"C:\legacy\root" },
-        };
-        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
-        Assert.Single(projects);
-        Assert.Equal("default", projects[0].Id);
-        Assert.Equal(@"C:\legacy\root", projects[0].Root);
-    }
-
-    [Fact]
-    public void Load_WithProjectsArray_TakesProjectsVerbatim()
-    {
-        var options = new AgentOptions
-        {
-            Workspace = new WorkspaceOptions { Root = @"C:\legacy\root" },
-            Projects = new ProjectsOptions
-            {
-                Projects = new List<ProjectOptions>
-                {
-                    new() { Id = "porthorizon", Name = "PortHorizon", Root = @"C:\ph" },
-                    new() { Id = "suikoden", Name = "Suikoden", Root = @"C:\sdk", Roles = new() { ["coredev"] = 3 } },
-                },
-            },
-        };
-        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
-        Assert.Equal(2, projects.Count);
-        Assert.DoesNotContain(projects, p => p.Id == "default");
-        Assert.Equal(3, projects.Single(p => p.Id == "suikoden").Roles["coredev"]);
-    }
-
-    [Fact]
-    public void Load_WithEmptyProjectsAndEmptyWorkspace_SynthesizesAutoScaffoldDefault()
-    {
-        var options = new AgentOptions();
-        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
-        var single = Assert.Single(projects);
-        Assert.Equal("default", single.Id);
-        Assert.Equal(string.Empty, single.Root);
-    }
-
-    [Fact]
-    public void EnvOverride_TakesPrecedenceOverLegacyRoot()
-    {
-        var options = new AgentOptions { Workspace = new WorkspaceOptions { Root = @"C:\from-config" } };
-        var env = new Dictionary<string, string> { ["FORGE_DEFAULT_PROJECT_ROOT"] = @"C:\from-env" };
-        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance, env);
-        Assert.Single(projects);
-        Assert.Equal(@"C:\from-env", projects[0].Root);
-    }
-
-    [Fact]
-    public async Task Load_SqliteProjectsAreAuthoritative()
-    {
+        // SQLite is the sole source of truth. appsettings.json
+        // projects[] is no longer consulted — the loader reads only
+        // the project table.
         await _store.UpsertAsync(new NewProject(
             Id: "porthorizon",
-            Name: "From SQLite",
+            Name: "PortHorizon",
             RepoUrl: "https://github.com/Xyrces/PortHorizon",
             DefaultBranch: "main"));
 
-        var options = new AgentOptions
-        {
-            Projects = new ProjectsOptions
-            {
-                Projects = new List<ProjectOptions>
-                {
-                    new() { Id = "suikoden", Name = "From Config", RepoUrl = "https://example.com/sdk" },
-                },
-            },
-        };
-
-        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
-        Assert.Equal(2, projects.Count);
-        Assert.Equal("From SQLite", projects.Single(p => p.Id == "porthorizon").Name);
-        Assert.Equal("From Config", projects.Single(p => p.Id == "suikoden").Name);
+        var projects = await ProjectRegistryLoader.LoadAsync(_store);
+        Assert.Single(projects);
+        var p = projects[0];
+        Assert.Equal("porthorizon", p.Id);
+        Assert.Equal("PortHorizon", p.Name);
+        Assert.Equal("https://github.com/Xyrces/PortHorizon", p.RepoUrl);
+        Assert.Equal("main", p.DefaultBranch);
+        // Root is derived at bootstrap time, not stored in SQLite.
+        Assert.Equal(string.Empty, p.Root);
     }
 
     [Fact]
-    public async Task Seed_CopiesConfigProjectsIntoSqlite()
+    public async Task LoadAsync_EmptyStore_ReturnsEmptyList()
     {
+        // No synthesis: empty store = empty registry. Operators
+        // must add via the dashboard or POST /api/projects.
+        var projects = await ProjectRegistryLoader.LoadAsync(_store);
+        Assert.Empty(projects);
+    }
+
+    [Fact]
+    public async Task SeedAsync_LogsAndIgnoresConfigProjects()
+    {
+        // SeedAsync used to copy appsettings.json into SQLite. The
+        // "DB is the single source of truth" iteration removed that
+        // — SeedAsync now logs a warning and is a no-op, so legacy
+        // callers don't break.
         var config = new ProjectsOptions
         {
             Projects = new List<ProjectOptions>
             {
                 new() { Id = "forge", Name = "Forge", RepoUrl = "https://github.com/Xyrces/Forge" },
-                new() { Id = "porthorizon", Name = "PortHorizon", RepoUrl = "https://github.com/Xyrces/PortHorizon" },
             },
         };
         await ProjectRegistryLoader.SeedAsync(_store, config, NullLogger.Instance);
-        Assert.Equal(2, (await _store.ListAsync()).Count);
+        Assert.Empty(await _store.ListAsync());
 
-        // Idempotent: re-running doesn't duplicate.
-        await ProjectRegistryLoader.SeedAsync(_store, config, NullLogger.Instance);
-        Assert.Equal(2, (await _store.ListAsync()).Count);
+        // Empty config is also a no-op.
+        await ProjectRegistryLoader.SeedAsync(_store, new ProjectsOptions(), NullLogger.Instance);
+        Assert.Empty(await _store.ListAsync());
     }
 }
 

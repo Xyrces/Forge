@@ -102,6 +102,10 @@ public sealed class ProjectBootstrap
 
             if (!Directory.Exists(Path.Combine(rootPath, ".git")))
             {
+                // The cloner deletes the local path on clone failure
+                // (so a retry isn't a no-op). Re-create it here so
+                // the git-init fallback has a valid cwd.
+                Directory.CreateDirectory(rootPath);
                 RunGit(rootPath, "init -q -b main");
                 RunGit(rootPath, "config user.email \"forge@local\"");
                 RunGit(rootPath, "config user.name \"Forge Bootstrap\"");

@@ -22,3 +22,41 @@ public class ProjectsEffects : Effect<ProjectsActions.LoadProjectsAction>
         }
     }
 }
+
+public class AddProjectEffect : Effect<ProjectsActions.AddProjectAction>
+{
+    private readonly ProjectsClient _client;
+    public AddProjectEffect(ProjectsClient client) { _client = client; }
+
+    public override async Task HandleAsync(
+        ProjectsActions.AddProjectAction action,
+        IDispatcher dispatcher)
+    {
+        dispatcher.Dispatch(new ProjectsActions.AddProjectSubmittingAction());
+        try
+        {
+            var body = new AddProjectRequestBody(action.Id, action.Name, action.RepoUrl, action.DefaultBranch);
+            var resp = await _client.AddAsync(body, CancellationToken.None);
+            if (!string.IsNullOrEmpty(resp.Warning))
+            {
+                // Inline clone failed but the project was registered.
+                // Surface the warning so the operator can fix + retry
+                // via POST /api/projects/{id}/sync.
+                dispatcher.Dispatch(new ProjectsActions.AddProjectFailedAction(
+                    $"registered, but clone failed: {resp.Warning}"));
+            }
+            else
+            {
+                dispatcher.Dispatch(new ProjectsActions.AddProjectSucceededAction(action.Id));
+            }
+            // Refresh the list regardless of clone outcome.
+            dispatcher.Dispatch(new ProjectsActions.LoadProjectsAction());
+            // Refresh the list regardless of clone outcome.
+            dispatcher.Dispatch(new ProjectsActions.LoadProjectsAction());
+        }
+        catch (Exception ex)
+        {
+            dispatcher.Dispatch(new ProjectsActions.AddProjectFailedAction(ex.Message));
+        }
+    }
+}

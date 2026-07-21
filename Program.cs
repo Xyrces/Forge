@@ -180,6 +180,11 @@ if (mode == CliMode.DashboardOnly)
         try
         {
             var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+            if (projects.Count == 0)
+            {
+                Console.Error.WriteLine("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
+                return 1;
+            }
             var primary = projects[0];
             await using var issues = new IssueStore(dbByProject[primary.Id]);
             var all = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
@@ -208,6 +213,11 @@ if (mode == CliMode.DashboardOnly)
         var branch = ParseArg(args, "--branch") ?? $"agent/{title}";
 
         var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        if (projects.Count == 0)
+        {
+            Console.Error.WriteLine("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
+            return 1;
+        }
         var primary = projects[0];
         var issues = new IssueStore(dbByProject[primary.Id]);
 
@@ -283,19 +293,20 @@ if (mode == CliMode.DashboardOnly)
         var primaryStore = new Core.IssueStore(primaryDbPath);
         var projectStore = new Core.ProjectStore(primaryStore);
 
-        // Seed SQLite from appsettings.json on first boot. Idempotent.
-        try
-        {
-            ProjectRegistryLoader.SeedAsync(projectStore, options.Projects, logger).GetAwaiter().GetResult();
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Project seeding from appsettings.json failed; continuing.");
-        }
-
         var cloner = new Projects.ProjectCloner(dataRoot, null);
         var bootstrap = new Projects.ProjectBootstrap(dataRoot, cloner, options.GitHub, null);
-        var registry = ProjectRegistryLoader.Load(options, projectStore, logger);
+        var registry = ProjectRegistryLoader.LoadAsync(projectStore, CancellationToken.None)
+            .GetAwaiter().GetResult();
+
+        if (registry.Count == 0)
+        {
+            logger.LogWarning(
+                "No projects registered. Add one via the dashboard Projects page (POST /api/projects) before dispatch will run work.");
+        }
+        else
+        {
+            logger.LogInformation("Loaded {Count} project(s) from SQLite.", registry.Count);
+        }
 
         var finalised = new List<ProjectOptions>(registry.Count);
         var dbByProject = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -456,7 +467,13 @@ Console.Error.WriteLine(ex.ToString());
     {
         try
         {
+            var failures = new List<string>();
             var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+            if (projects.Count == 0)
+            {
+                Console.Error.WriteLine("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
+                return 1;
+            }
             var primary = projects[0];
             var primaryDb = dbByProject[primary.Id];
             var stateDir = Path.GetDirectoryName(primaryDb)!;
@@ -539,6 +556,12 @@ Console.Error.WriteLine(ex.ToString());
     {
         var failures = new List<string>();
         var (projects, dbByProject, dataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+        if (projects.Count == 0)
+        {
+            failures.Add("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
+            foreach (var f in failures) Console.Error.WriteLine($"  fail: {f}");
+            return 1;
+        }
         var primary = projects[0];
         var primaryDb = dbByProject[primary.Id];
         var stateDir = Path.GetDirectoryName(primaryDb)!;
@@ -793,6 +816,12 @@ Console.Error.WriteLine(ex.ToString());
         CancellationToken externalStop = default)
     {
         var (knownProjects, orchDbByProject, orchDataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+        if (knownProjects.Count == 0)
+        {
+            logger.LogWarning(
+                "No projects registered. To register one, run with `--dashboard-only` and use the Projects page (or POST /api/projects), then restart the orchestrator. The v1 dispatch loop is single-project; runtime hot-add of dispatch targets is a follow-up — see AGENTS.md.");
+            return 1;
+        }
         var primary = knownProjects[0];
         var primaryDb = orchDbByProject[primary.Id];
         var primaryStateDir = Path.GetDirectoryName(primaryDb)!;

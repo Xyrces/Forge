@@ -91,34 +91,43 @@ which repoints `/opt/forge/current` and runs `systemctl restart
 forge` — synchronous, no detached helper needed (unlike the
 historical Windows-SCM path that used `tools/Forge.Deployer`).
 
-## Project model (project-agnostic, self-build capable)
+## Project model (DB-only registry, project-agnostic)
 
 Forge is project-agnostic — there is no hardcoded "PortHorizon"
-assumption in the codebase. Each project is defined by a Git URL +
-default branch:
+assumption in the codebase. Projects are registered in the SQLite
+`project` table (schema v17), surfaced in the dashboard, and picked
+up by the dispatch loop. The `appsettings.json` `projects[]` array
+is **deprecated** — it is no longer the source of truth. Add
+projects via:
 
-- `ProjectOptions.RepoUrl` — the canonical identifier. Set this on
-  the project entry in `appsettings.json` `projects[]` (one-time
-  seed) or via `POST /api/projects` (runtime add).
-- `ProjectCloner.CloneAsync` clones into `<dataRoot>/projects/<id>/`
-  on first boot. PAT for private repos comes from `GITHUB_TOKEN`
-  env var or `github.token` in appsettings; the PAT is injected
-  into the clone URL only (the stored `origin` is reset to the
-  clean form immediately after, and a credential-store file is
-  written for future `git push`/`pull`).
-- `ProjectStore` (schema v17, SQLite table `project`) is the
-  runtime-mutable registry. `appsettings.json` `projects[]` is
-  seeded into it on first boot via
-  `ProjectRegistryLoader.SeedAsync` (idempotent — re-runs don't
-  overwrite operator edits).
-- Worktrees are created off `<dataRoot>/projects/<id>/` (the
-  cloned repo) — `git worktree add` semantics unchanged.
+- **Dashboard**: `Projects` page → **Add Project** button.
+  Fields: `id` (lowercase slug, becomes the dispatch key),
+  `name` (display label), `repoUrl` (HTTPS or SSH), `defaultBranch`.
+- **API**: `POST /api/projects/` with the same JSON shape. The
+  endpoint calls `ProjectCloner.CloneAsync` inline (best-effort
+  — clone failures don't roll back the registration; the operator
+  fixes the PAT/repo and retries via `POST /api/projects/{id}/sync`).
 
-**First goal: build Forge with Forge.** Add a `forge` project entry
-with `repoUrl: "https://github.com/Xyrces/Forge.git"` and Forge
-will clone itself, run agents on it, and rebuild + restart on
-deployment approval. See `appsettings.example.json` for the
-canonical example.
+Other project-lifecycle endpoints:
+
+- `DELETE /api/projects/{id}` — remove from registry. Does NOT
+  delete the local clone or worktrees (operator-managed cleanup).
+- `POST /api/projects/{id}/sync` — `git pull --ff-only` the default
+  branch. Updates `last_synced_at` + `last_sync_error` in SQLite.
+
+Auth model (private repos): PAT is read from `GITHUB_TOKEN` env var
+or `github.token` in appsettings.json; injected into the clone URL
+only, then the stored `origin` is reset to the clean form
+immediately, and a credential-store file (mode 0600) is written
+under `<localPath>/.forge/git-credentials` for future `git push` /
+`pull`.
+
+**First goal: build Forge with Forge.** Add a `forge` entry
+(id=forge, repoUrl=https://github.com/Xyrces/Forge.git) via the UI
+or API, then restart the orchestrator so the dispatch loop sees
+it. The v1 dispatch loop picks the first registered project as
+its primary; runtime hot-add of dispatch targets is a planned
+follow-up.
 
 ## Where to add follow-up skills / rules (this very plan's "out of scope" items)
 
