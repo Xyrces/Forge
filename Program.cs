@@ -316,7 +316,7 @@ if (mode == CliMode.DashboardOnly)
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
-        var (dashboardOnlyProjects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+        var (dashboardOnlyProjects, dbByProject, dataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
         var defaultDb = dashboardOnlyProjects.Count > 0
             ? dbByProject[dashboardOnlyProjects[0].Id]
             : throw new InvalidOperationException("At least one project is required to run the dashboard.");
@@ -326,7 +326,7 @@ if (mode == CliMode.DashboardOnly)
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
-        var dashboardOnlyFactory = new ProjectContextFactory(dashboardOnlyProjects, dbByProject);
+        var dashboardOnlyFactory = new ProjectContextFactory(projectStore, dataRoot, dbByProject);
         var dashboardOnlySlots = new SlotTable();
         var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
         foreach (var pp in dashboardOnlyProjects)
@@ -1058,7 +1058,7 @@ Console.Error.WriteLine(ex.ToString());
         // slots per (projectId, role). The orchestrator dispatch
         // loop still uses the legacy single-workspace path; this
         // exposes multi-project info to the dashboard.
-        var projectFactory = new ProjectContextFactory(knownProjects, orchDbByProject);
+        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject);
         var slots = new SlotTable();
         var roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
         foreach (var p in knownProjects)

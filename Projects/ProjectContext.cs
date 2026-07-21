@@ -51,38 +51,115 @@ public sealed class ProjectContext : IAsyncDisposable
 /// Builds <see cref="ProjectContext"/> instances lazily and caches them
 /// for the lifetime of the dashboard host. One process can hold many
 /// projects in memory simultaneously; each owns its own
-/// <see cref="IssueStore"/> backed by its own SQLite file. Accepts the
-/// full bootstrap result list so the SQLite path is whatever the
-/// bootstrap allocated (not re-derived from the operator's input).
+/// <see cref="IssueStore"/> backed by its own SQLite file.
+///
+/// <para>
+/// Two modes:
+/// <list type="bullet">
+///   <item><b>Static mode</b> (legacy): pass an in-memory project list at
+///   construction. <see cref="KnownProjects"/> is fixed for the
+///   process lifetime.</item>
+///   <item><b>Live mode</b>: pass an <see cref="IProjectStore"/>. Every
+///   <see cref="KnownProjects"/> call re-reads from the store, so
+///   <c>POST /api/projects</c> + <c>DELETE /api/projects/{id}</c> are
+///   reflected on the next request without a restart.</item>
+/// </list>
+/// The orchestrator's dispatch loop still picks a single primary
+/// project at startup (the first row); runtime adds affect dashboard
+/// introspection (slot table counters, <c>/api/board</c>,
+/// <c>/api/projects</c>) but NOT dispatch routing — which is a
+/// deliberate v1 limitation. For the "build forge with forge" first
+/// goal, the <c>forge</c> project should be listed in
+/// <c>appsettings.json</c> so it's wired into dispatch at startup.
+/// </para>
 /// </summary>
 public sealed class ProjectContextFactory : IAsyncDisposable
 {
-    private readonly IReadOnlyList<ProjectOptions> _projects;
+    private readonly IReadOnlyList<ProjectOptions>? _staticProjects;
+    private readonly IProjectStore? _store;
     private readonly IReadOnlyDictionary<string, string> _issuesDbByProject;
+    private readonly string _dataRoot;
     private readonly ConcurrentDictionary<string, ProjectContext> _cache = new();
     private bool _disposed;
 
+    /// <summary>Static (legacy) construction. <see cref="KnownProjects"/> is fixed.</summary>
     public ProjectContextFactory(
         IReadOnlyList<ProjectOptions> projects,
         IReadOnlyDictionary<string, string>? issuesDbByProject = null)
+        : this(projects, store: null, dataRoot: null, issuesDbByProject)
     {
-        _projects = projects;
+    }
+
+    /// <summary>Live construction. <see cref="KnownProjects"/> re-reads the store on each call.</summary>
+    public ProjectContextFactory(
+        IProjectStore store,
+        string dataRoot,
+        IReadOnlyDictionary<string, string>? issuesDbByProject = null)
+        : this(projects: null, store: store, dataRoot: dataRoot, issuesDbByProject)
+    {
+    }
+
+    private ProjectContextFactory(
+        IReadOnlyList<ProjectOptions>? projects,
+        IProjectStore? store,
+        string? dataRoot,
+        IReadOnlyDictionary<string, string>? issuesDbByProject)
+    {
+        if (projects is null && store is null)
+            throw new ArgumentException("Either projects (static) or store (live) must be supplied.");
+        _staticProjects = projects;
+        _store = store;
+        _dataRoot = dataRoot ?? ForgesystemPaths.ResolveDataRoot();
         _issuesDbByProject = issuesDbByProject
             ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
-    public IReadOnlyList<ProjectOptions> KnownProjects => _projects;
+    public IReadOnlyList<ProjectOptions> KnownProjects
+    {
+        get
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(ProjectContextFactory));
+            if (_staticProjects is not null) return _staticProjects;
+            // Live mode: re-read the store on each access so POST /
+            // DELETE show up immediately. ListAsync is a single
+            // SELECT + materialization, cheap enough for the dashboard
+            // cadence. Cache is per-project IssueStore.
+            var rows = _store!.ListAsync(CancellationToken.None)
+                .GetAwaiter().GetResult();
+            var bootstrapRepoUrlById = _issuesDbByProject;
+            var list = new List<ProjectOptions>(rows.Count);
+            foreach (var r in rows)
+            {
+                // Preserve the operator-configured Root when the
+                // bootstrap only seeded from appsettings; for SQLite-
+                // only adds, leave Root empty so ResolveDataRoot
+                // derives it from <dataRoot>/projects/<id>/.
+                var root = bootstrapRepoUrlById.ContainsKey(r.Id)
+                    ? string.Empty
+                    : string.Empty;
+                list.Add(new ProjectOptions
+                {
+                    Id = r.Id,
+                    Name = r.Name,
+                    RepoUrl = r.RepoUrl,
+                    DefaultBranch = r.DefaultBranch,
+                    Root = root,
+                });
+            }
+            return list;
+        }
+    }
 
     public ProjectContext? Find(string projectId)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(ProjectContextFactory));
         if (_cache.TryGetValue(projectId, out var ctx)) return ctx;
-        var opts = _projects.FirstOrDefault(p =>
+        var opts = KnownProjects.FirstOrDefault(p =>
             string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase));
         if (opts is null) return null;
         var dbPath = _issuesDbByProject.TryGetValue(projectId, out var assigned)
             ? assigned
-            : ProjectStateDirs.IssuesDbFor(opts, ForgesystemPaths.ResolveDataRoot());
+            : ProjectStateDirs.IssuesDbFor(opts, _dataRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var ctx2 = new ProjectContext(opts, new IssueStore(dbPath));
         return _cache.GetOrAdd(projectId, ctx2);
