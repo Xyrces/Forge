@@ -240,7 +240,7 @@ if (useRealLlm)
 
         var projectStore = new ProjectStore(issues);
         await projectStore.UpsertAsync(new NewProject(
-            Id: "harness", Name: "Harness", RepoUrl: "", DefaultBranch: "main"));
+            Id: "harness", Name: "Harness", RepoUrl: clone, DefaultBranch: "main"));
 
         var bundleFactory = new ProjectDispatchBundleFactory(
             options: new AgentOptions { GitHub = new GitHubOptions() },
