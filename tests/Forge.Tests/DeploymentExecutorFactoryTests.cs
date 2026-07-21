@@ -31,9 +31,9 @@ public class DeploymentExecutorFactoryTests
     }
 
     [Fact]
-    public void Create_KindSelfHostedWindowsService_ReturnsSelfHostedExecutor()
+    public void Create_KindSelfHostedSystemdService_ReturnsSystemdExecutor()
     {
-        var project = new ProjectOptions { Id = "p", Deployment = new DeploymentOptions { Kind = DeploymentKind.SelfHostedWindowsService } };
-        Assert.IsType<SelfHostedWindowsServiceDeploymentExecutor>(_factory.Create(project));
+        var project = new ProjectOptions { Id = "p", Deployment = new DeploymentOptions { Kind = DeploymentKind.SelfHostedSystemdService } };
+        Assert.IsType<SelfHostedSystemdServiceDeploymentExecutor>(_factory.Create(project));
     }
 }

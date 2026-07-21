@@ -32,13 +32,15 @@ public sealed record DeploymentOptions
     // being replaced -- no service bounce needed.
     public string? ScriptPath { get; set; }
 
-    // --- DeploymentKind.SelfHostedWindowsService ---
+    // --- DeploymentKind.SelfHostedSystemdService ---
     // Only meaningful for a project whose deployment IS Forge
-    // redeploying itself: Forge cannot overwrite its own open
-    // .exe/.dll files, so this path builds to a fresh versioned
-    // release folder and hands off to the detached Forge.Deployer
-    // helper (tools/Forge.Deployer) to do the stop -> repoint ->
-    // start dance after Forge's own process is about to exit.
+    // redeploying itself. Builds to a fresh versioned release folder
+    // under ReleasesRoot, atomically repoints CurrentLinkPath at it,
+    // and runs `systemctl restart forge`. The release unit is
+    // ExecStart=/opt/forge/current/Forge.Core.dll, so repointing the
+    // symlink + restarting is sufficient -- no detached helper
+    // needed (systemd stop is reliable, unlike Windows SCM where
+    // killing one's own process mid-restart is awkward).
     public string? ServiceName { get; set; }
     public string? PublishProject { get; set; }
     public string? ReleasesRoot { get; set; }
@@ -49,5 +51,5 @@ public enum DeploymentKind
 {
     None,
     Script,
-    SelfHostedWindowsService,
+    SelfHostedSystemdService,
 }

@@ -75,12 +75,12 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
 
         events.Publish(new DashboardEvent(
             DateTime.UtcNow, DashboardEventKind.AgentSessionStarted,
-            issue.Id, $"role={roleAgent.KiloAgentName} worktree={worktreePath}"));
+            issue.Id, $"role={roleAgent.AgentName} worktree={worktreePath}"));
 
         var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
         var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
-        var queued = drainMessageBus(roleAgent.KiloAgentName);
+        var queued = drainMessageBus(roleAgent.AgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)
             ? prompt
             : prompt + "\n\n## Operator messages\n" + queued + "\n\nAddress these messages before working on the task.";

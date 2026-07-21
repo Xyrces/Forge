@@ -95,7 +95,7 @@ public class MafAgentRunnerBashToolTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-bash-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-bash-md-{Guid.NewGuid():N}"));
 
         var result = await runner.RunAsync(
             AgentType.CoreDev,
@@ -128,7 +128,7 @@ public class MafAgentRunnerBashToolTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-bash-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-bash-md-{Guid.NewGuid():N}"));
 
         // No context => no worktreePath => no BashTool registered.
         var result = await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);

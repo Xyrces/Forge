@@ -68,7 +68,7 @@ public class TaskEndpointsTests : IDisposable
     [Fact]
     public async Task InProgress_IncludesEvents()
     {
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Test", Priority: 2, Assignee: "kilo"), default);
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Test", Priority: 2, Assignee: "forge"), default);
         await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, default);
         await _issues.AddEventAsync(task.Id, "agent.started", "ready");
 

@@ -11,7 +11,7 @@ namespace Forge.Agents;
 /// <summary>
 /// MAF-based implementation of <see cref="IAgentRunner"/>. Phase 0:
 /// wraps <see cref="ChatClientAgent"/>, instantiated fresh per call with
-/// the role's instructions loaded from the .kilo/agents/<role>.md
+/// the role's instructions loaded from the agents/<role>.md
 /// frontmatter <c>description</c> field. Phase 1: skills from
 /// <see cref="ISkillSource"/> (global + role-scoped) are appended to the
 /// agent's instructions.
@@ -29,7 +29,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly LlmConfig _config;
     private readonly RoleAgentRegistry _roles;
     private readonly ILogger<MafAgentRunner> _logger;
-    private readonly string _kiloAgentsRoot;
+    private readonly string _rolePromptsRoot;
     private readonly ISkillSource? _skills;
     private readonly MemoryStore? _memory;
     private readonly ContextHandoffStore? _handoffs;
@@ -43,7 +43,7 @@ public sealed class MafAgentRunner : IAgentRunner
         RoleAgentRegistry roles,
         ILogger<MafAgentRunner> logger,
         ISkillSource? skills = null,
-        string kiloAgentsRoot = ".kilo/agents",
+        string rolePromptsRoot = "agents",
         MemoryStore? memory = null,
         ContextHandoffStore? handoffs = null,
         // P5.1 stores — passed as factories so the runner can
@@ -59,7 +59,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _roles = roles;
         _logger = logger;
         _skills = skills;
-        _kiloAgentsRoot = kiloAgentsRoot;
+        _rolePromptsRoot = rolePromptsRoot;
         _memory = memory;
         _handoffs = handoffs;
         _designArtifactsFactory = designArtifacts;
@@ -79,7 +79,7 @@ public async Task<AgentRunResult> RunAsync(
         CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
-        var roleInstructions = LoadRoleInstructions(roleDef.KiloAgentName);
+        var roleInstructions = LoadRoleInstructions(roleDef.AgentName);
         var skillInstructions = _skills is null
             ? string.Empty
             : await BuildSkillInstructionsAsync(role, ct);
@@ -135,7 +135,7 @@ public async Task<AgentRunResult> RunAsync(
         var agent = new ChatClientAgent(
             chatClientWithTools,
             instructions: instructions,
-            name: roleDef.KiloAgentName,
+            name: roleDef.AgentName,
             description: roleDef.ProjectSubdir,
             tools: tools);
 
@@ -261,13 +261,13 @@ finally
         return MemoryStore.RenderForPrompt(memories);
     }
 
-    private string LoadRoleInstructions(string kiloAgentName)
+    private string LoadRoleInstructions(string agentName)
     {
-        var path = Path.Combine(_kiloAgentsRoot, kiloAgentName + ".md");
+        var path = Path.Combine(_rolePromptsRoot, agentName + ".md");
         if (!File.Exists(path))
         {
-            _logger.LogWarning("kilo agent file not found at {Path}; using fallback instructions", path);
-            return $"You are the {kiloAgentName} agent for the PortHorizon project.";
+            _logger.LogWarning("role prompt file not found at {Path}; using fallback instructions", path);
+            return $"You are the {agentName} agent for the PortHorizon project.";
         }
         // Minimal YAML frontmatter parser: the file is `--- description: ...\n rest`. We
         // return the description field as the MAF instructions. Multi-line YAML,
@@ -289,7 +289,7 @@ finally
                 desc.AppendLine(line["description:".Length..].Trim());
             }
         }
-        if (desc.Length == 0) desc.AppendLine($"You are the {kiloAgentName} agent for the PortHorizon project.");
+        if (desc.Length == 0) desc.AppendLine($"You are the {agentName} agent for the PortHorizon project.");
         return desc.ToString().Trim();
     }
 

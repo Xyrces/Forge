@@ -125,7 +125,7 @@ public sealed class ProductAgentFactory
     private readonly IDashboardEventBus _events;
     private readonly ISkillSource? _skills;
     private readonly ILoggerFactory _loggerFactory;
-    private readonly string _kiloAgentsRoot;
+    private readonly string _rolePromptsRoot;
 
     public ProductAgentFactory(
         ISpecStore specs,
@@ -137,7 +137,7 @@ public sealed class ProductAgentFactory
         IDashboardEventBus events,
         ISkillSource? skills,
         ILoggerFactory loggerFactory,
-        string kiloAgentsRoot = ".kilo/agents")
+        string rolePromptsRoot = "agents")
     {
         _specs = specs;
         _issues = issues;
@@ -148,10 +148,10 @@ public sealed class ProductAgentFactory
         _events = events;
         _skills = skills;
         _loggerFactory = loggerFactory;
-        _kiloAgentsRoot = kiloAgentsRoot;
+        _rolePromptsRoot = rolePromptsRoot;
     }
 
     public ProductAgent Create() => new(
         _specs, _issues, _projectContext, _chatClientFactory, _config, _roles,
-        _events, _loggerFactory.CreateLogger<ProductAgent>(), _skills, _kiloAgentsRoot);
+        _events, _loggerFactory.CreateLogger<ProductAgent>(), _skills, _rolePromptsRoot);
 }

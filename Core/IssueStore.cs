@@ -130,7 +130,7 @@ public interface IIssueStore
     Task SetCheckpointAsync(string id, DispatchCheckpoint checkpoint, CancellationToken ct = default);
     /// <summary>
     /// List every issue currently in <c>InProgress</c> with
-    /// <c>assignee=kilo</c>. These are the candidates the
+    /// <c>assignee=forge</c>. These are the candidates the
     /// StartupRecovery pass inspects on a restart.
     /// </summary>
     Task<IReadOnlyList<IssueRecord>> ListInProgressForRecoveryAsync(CancellationToken ct = default);
@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 15;
+    public const int CurrentSchemaVersion = 17;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -253,7 +253,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             -- v2 tables: agent, skill, sprint, sprint_issue
             CREATE TABLE IF NOT EXISTS agent (
                 id           TEXT PRIMARY KEY,
-                kilo_name    TEXT NOT NULL UNIQUE,
+                agent_name   TEXT NOT NULL UNIQUE,
                 display_name TEXT NOT NULL,
                 scope        TEXT NOT NULL DEFAULT '',
                 description  TEXT,
@@ -261,6 +261,27 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 config_json  TEXT NOT NULL DEFAULT '{}',
                 created_at   TEXT NOT NULL,
                 updated_at   TEXT NOT NULL
+            );
+            -- v16: rename kilo_name -> agent_name on legacy DBs.
+            -- (Fresh DBs already use agent_name, so the rename is a no-op
+            -- via the IF EXISTS guard below.)
+            -- v16: rename orchestrator runner assignee 'kilo' -> 'forge'.
+            -- (Same idempotency guard.)
+
+            -- v17: project registry table. Source of truth for projects
+            -- that are registered at runtime via POST /api/projects; the
+            -- appsettings.json projects[] list seeds the initial set on
+            -- first boot (one-time copy). Idempotent.
+            CREATE TABLE IF NOT EXISTS project (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                repo_url        TEXT NOT NULL,
+                default_branch  TEXT NOT NULL DEFAULT 'main',
+                local_path      TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                last_synced_at  TEXT,
+                last_sync_error TEXT
             );
 
             CREATE TABLE IF NOT EXISTS skill (
@@ -744,6 +765,32 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             }
             throw;
         }
+
+        // v16 (post-init): the unconditional ALTER TABLE / UPDATE that
+        // would belong inline above don't run when the new column name
+        // is already in place (fresh DBs) or when no rows have the
+        // legacy 'kilo' assignee. Gate each step on the legacy shape.
+        ApplyLegacyKiloRenames(conn);
+    }
+
+    private void ApplyLegacyKiloRenames(SqliteConnection conn)
+    {
+        using (var probe = conn.CreateCommand())
+        {
+            probe.CommandText = "SELECT 1 FROM pragma_table_info('agent') WHERE name = 'kilo_name' LIMIT 1";
+            var exists = probe.ExecuteScalar();
+            if (exists is not null)
+            {
+                using var alter = conn.CreateCommand();
+                alter.CommandText = "ALTER TABLE agent RENAME COLUMN kilo_name TO agent_name";
+                alter.ExecuteNonQuery();
+            }
+        }
+        using (var update = conn.CreateCommand())
+        {
+            update.CommandText = "UPDATE issue SET assignee = 'forge' WHERE assignee = 'kilo'";
+            update.ExecuteNonQuery();
+        }
     }
 
     private SqliteConnection Open()
@@ -1009,15 +1056,16 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        // InProgress + assignee=kilo are the dispatch candidates
+        // InProgress + assignee=forge are the dispatch candidates
         // the recoverer inspects. Assignee is the durable marker
-        // (the kilo JWT); other agents (reviewer, manual) don't
+        // identifying the orchestrator's runner; other agents
+        // (reviewer, manual) don't
         // go through the EngineeringDispatchWorkflow so they
         // don't need recovery.
         cmd.CommandText = """
             SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts
             FROM issue
-            WHERE status = 'InProgress' AND assignee = 'kilo'
+            WHERE status = 'InProgress' AND assignee = 'forge'
             ORDER BY updated_at ASC
             """;
         var list = new List<IssueRecord>();

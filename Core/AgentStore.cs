@@ -4,12 +4,12 @@ using Microsoft.Data.Sqlite;
 namespace Forge.Core;
 
 public sealed record AgentRecord(
-    string Id, string KiloName, string DisplayName, string Scope,
+    string Id, string AgentName, string DisplayName, string Scope,
     string? Description, bool Enabled, string ConfigJson,
     DateTime CreatedAt, DateTime UpdatedAt);
 
 public sealed record NewAgent(
-    string KiloName, string DisplayName, string Scope = "",
+    string AgentName, string DisplayName, string Scope = "",
     string? Description = null, bool Enabled = true,
     IReadOnlyDictionary<string, object>? Config = null);
 
@@ -18,10 +18,10 @@ public interface IAgentStore
     Task<AgentRecord> CreateAsync(NewAgent spec, CancellationToken ct = default);
     Task<IReadOnlyList<AgentRecord>> ListAsync(CancellationToken ct = default);
     Task<AgentRecord?> GetAsync(string id, CancellationToken ct = default);
-    Task<AgentRecord?> GetByKiloNameAsync(string kiloName, CancellationToken ct = default);
+    Task<AgentRecord?> GetByNameAsync(string agentName, CancellationToken ct = default);
     Task<AgentRecord> UpdateAsync(string id, IReadOnlyDictionary<string, object?> fields, CancellationToken ct = default);
     Task DeleteAsync(string id, CancellationToken ct = default);
-    Task BulkUpsertFromKiloFilesAsync(IEnumerable<(string KiloName, string DisplayName, string Scope, string? Description)> entries, CancellationToken ct = default);
+    Task BulkUpsertFromAgentFilesAsync(IEnumerable<(string AgentName, string DisplayName, string Scope, string? Description)> entries, CancellationToken ct = default);
 }
 
 public sealed class AgentStore : IAgentStore, IAsyncDisposable
@@ -40,10 +40,10 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = (SqliteTransaction)tx;
-            cmd.CommandText = @"INSERT INTO agent (id, kilo_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
-                VALUES ($id, $kilo, $display, $scope, $desc, $enabled, $config, $now, $now)";
+            cmd.CommandText = @"INSERT INTO agent (id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
+                VALUES ($id, $agent, $display, $scope, $desc, $enabled, $config, $now, $now)";
             cmd.Parameters.AddWithValue("$id", id);
-            cmd.Parameters.AddWithValue("$kilo", spec.KiloName);
+            cmd.Parameters.AddWithValue("$agent", spec.AgentName);
             cmd.Parameters.AddWithValue("$display", spec.DisplayName);
             cmd.Parameters.AddWithValue("$scope", spec.Scope ?? "");
             cmd.Parameters.AddWithValue("$desc", (object?)spec.Description ?? DBNull.Value);
@@ -53,7 +53,7 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
-        return new AgentRecord(id, spec.KiloName, spec.DisplayName, spec.Scope ?? "", spec.Description, spec.Enabled, configJson, now, now);
+        return new AgentRecord(id, spec.AgentName, spec.DisplayName, spec.Scope ?? "", spec.Description, spec.Enabled, configJson, now, now);
     }
 
     public async Task<IReadOnlyList<AgentRecord>> ListAsync(CancellationToken ct = default)
@@ -61,7 +61,7 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, kilo_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent ORDER BY display_name";
+        cmd.CommandText = "SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent ORDER BY display_name";
         var list = new List<AgentRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(Read(rd));
@@ -73,19 +73,19 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, kilo_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent WHERE id = $id";
+        cmd.CommandText = "SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
 
-    public async Task<AgentRecord?> GetByKiloNameAsync(string kiloName, CancellationToken ct = default)
+    public async Task<AgentRecord?> GetByNameAsync(string agentName, CancellationToken ct = default)
     {
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, kilo_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent WHERE kilo_name = $kilo";
-        cmd.Parameters.AddWithValue("$kilo", kiloName);
+        cmd.CommandText = "SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent WHERE agent_name = $agent";
+        cmd.Parameters.AddWithValue("$agent", agentName);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
@@ -95,7 +95,7 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
         var existing = await GetAsync(id, ct) ?? throw new InvalidOperationException($"Agent {id} not found");
         var merged = existing with
         {
-            KiloName = fields.TryGetValue("kiloName", out var kn) && kn is string s1 ? s1 : existing.KiloName,
+            AgentName = fields.TryGetValue("agentName", out var kn) && kn is string s1 ? s1 : existing.AgentName,
             DisplayName = fields.TryGetValue("displayName", out var dn) && dn is string s2 ? s2 : existing.DisplayName,
             Scope = fields.TryGetValue("scope", out var sc) && sc is string s3 ? s3 : existing.Scope,
             Description = fields.TryGetValue("description", out var dsc) ? (string?)dsc : existing.Description,
@@ -108,8 +108,8 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"UPDATE agent SET kilo_name=$kilo, display_name=$display, scope=$scope, description=$desc, enabled=$enabled, config_json=$config, updated_at=$now WHERE id=$id";
-        cmd.Parameters.AddWithValue("$kilo", merged.KiloName);
+        cmd.CommandText = @"UPDATE agent SET agent_name=$agent, display_name=$display, scope=$scope, description=$desc, enabled=$enabled, config_json=$config, updated_at=$now WHERE id=$id";
+        cmd.Parameters.AddWithValue("$agent", merged.AgentName);
         cmd.Parameters.AddWithValue("$display", merged.DisplayName);
         cmd.Parameters.AddWithValue("$scope", merged.Scope);
         cmd.Parameters.AddWithValue("$desc", (object?)merged.Description ?? DBNull.Value);
@@ -131,7 +131,7 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task BulkUpsertFromKiloFilesAsync(IEnumerable<(string KiloName, string DisplayName, string Scope, string? Description)> entries, CancellationToken ct = default)
+    public async Task BulkUpsertFromAgentFilesAsync(IEnumerable<(string AgentName, string DisplayName, string Scope, string? Description)> entries, CancellationToken ct = default)
     {
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
@@ -140,15 +140,15 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
         {
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = (SqliteTransaction)tx;
-            cmd.CommandText = @"INSERT INTO agent (id, kilo_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
-                VALUES ($id, $kilo, $display, $scope, $desc, 1, '{}', $now, $now)
-                ON CONFLICT(kilo_name) DO UPDATE SET
+            cmd.CommandText = @"INSERT INTO agent (id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
+                VALUES ($id, $agent, $display, $scope, $desc, 1, '{}', $now, $now)
+                ON CONFLICT(agent_name) DO UPDATE SET
                     display_name = excluded.display_name,
                     scope        = excluded.scope,
                     description  = excluded.description,
                     updated_at   = excluded.updated_at";
             cmd.Parameters.AddWithValue("$id", $"agent-{Guid.NewGuid().ToString("N")[..10]}");
-            cmd.Parameters.AddWithValue("$kilo", entry.KiloName);
+            cmd.Parameters.AddWithValue("$agent", entry.AgentName);
             cmd.Parameters.AddWithValue("$display", entry.DisplayName);
             cmd.Parameters.AddWithValue("$scope", entry.Scope);
             cmd.Parameters.AddWithValue("$desc", (object?)entry.Description ?? DBNull.Value);
@@ -160,7 +160,7 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
 
     private static AgentRecord Read(SqliteDataReader rd) => new(
         Id: rd.GetString(0),
-        KiloName: rd.GetString(1),
+        AgentName: rd.GetString(1),
         DisplayName: rd.GetString(2),
         Scope: rd.GetString(3),
         Description: rd.IsDBNull(4) ? null : rd.GetString(4),

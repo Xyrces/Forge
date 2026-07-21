@@ -115,7 +115,7 @@ public class StartupRecoveryTests : IDisposable
         DispatchCheckpoint target, bool commitChanges = false, bool withPrNumber = false)
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
-        var claimed = await _issues.ClaimAsync(issue.Id, "kilo");
+        var claimed = await _issues.ClaimAsync(issue.Id, "forge");
         Assert.NotNull(claimed);
         await _worktrees.CreateAsync(issue.Id, "main");
         var worktreePath = _worktrees.WorktreePathFor(issue.Id);
@@ -183,7 +183,7 @@ public class StartupRecoveryTests : IDisposable
     public void Classify_PreCheckpoint_LeavesAlone()
     {
         var issue = new IssueRecord("i1", "i1", "task", "x", null,
-            IssueStatus.InProgress, 2, "kilo",
+            IssueStatus.InProgress, 2, "forge",
             DateTime.UtcNow, DateTime.UtcNow, null, "{}", ParentIssueId: null,
             DispatchCheckpoint: null, CheckpointAt: null, RecoveryAttempts: 0);
         var d = _recovery.Classify(issue);
@@ -301,7 +301,7 @@ public class StartupRecoveryTests : IDisposable
         //  5. push_done -> replay -> pr_opened
         //  6. pr_opened with prNumber -> left alone
         var claimedOnly = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "claimed"));
-        await _issues.ClaimAsync(claimedOnly.Id, "kilo");
+        await _issues.ClaimAsync(claimedOnly.Id, "forge");
         await _issues.SetCheckpointAsync(claimedOnly.Id, DispatchCheckpoint.Claimed);
 
         var wtOk = await SeedIssueAsync(DispatchCheckpoint.WorktreeAcquired);

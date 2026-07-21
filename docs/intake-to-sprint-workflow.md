@@ -1040,7 +1040,7 @@ public sealed class ScrumMasterAgent
         IDashboardEventBus events,
         ISkillSource? skills,
         ILogger<ScrumMasterAgent> logger,
-        string kiloAgentsRoot = ".kilo/agents");
+        string rolePromptsRoot = "agents");
 
     /// <summary>
     /// Run the scrum loop: read the just-completed sprint, pick

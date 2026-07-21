@@ -11,8 +11,8 @@
 /// <see cref="SessionId"/> is the MAF <c>AgentSession</c> blob in
 /// <c>JsonElement</c> form. Round-trip it via
 /// <c>AgentSession.SerializeSessionAsync</c> / <c>DeserializeSessionAsync</c>
-/// to resume the conversation after a restart. The kilo runner returns
-/// null here (kilo has no equivalent).
+/// to resume the conversation after a restart. The pre-MAF ACP runner
+/// returned null here (it had no session equivalent).
 /// </para>
 /// </summary>
 public sealed record AgentRunResult(

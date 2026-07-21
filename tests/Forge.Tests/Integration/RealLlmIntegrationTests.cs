@@ -15,8 +15,9 @@ namespace Forge.Tests.Integration;
 /// <para>
 /// To run locally: <c>$env:LLM_API_KEY = "..."; dotnet test --filter
 /// FullyQualifiedName~RealLlmIntegration</c>. The factory will hit
-/// <c>LLM_BASE_URL</c> (default <c>http://127.0.0.1:4096</c>, the kilo
-/// serve default) using <c>LLM_MODEL</c> (default <c>stub-model</c>).
+/// <c>LLM_BASE_URL</c> (default <c>http://127.0.0.1:4096</c>, the local
+/// kilo-gateway emulator default) using <c>LLM_MODEL</c> (default
+/// <c>stub-model</c>).
 /// </para>
 ///
 /// <para>

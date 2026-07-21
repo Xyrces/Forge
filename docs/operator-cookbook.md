@@ -260,7 +260,7 @@ The Groomer gate widens to `Designed | AssetReady | Approved | Groomed` — both
 
 ## Recover from a crash mid-workflow
 
-If the orchestrator dies mid-dispatch (Ctrl-C, host reboot, OOM, SIGKILL), the in-flight issue's row is left at `status=InProgress + assignee=kilo + dispatch_checkpoint=<wherever we got to>`. Stage A of P4 (`StartupRecovery`) replays the unfinished side-effects on the next launch.
+If the orchestrator dies mid-dispatch (Ctrl-C, host reboot, OOM, SIGKILL), the in-flight issue's row is left at `status=InProgress + assignee=forge + dispatch_checkpoint=<wherever we got to>`. Stage A of P4 (`StartupRecovery`) replays the unfinished side-effects on the next launch.
 
 **Automatic (default):** the orchestrator runs `StartupRecovery` at startup, BEFORE the dispatch loop starts. You'll see a log line like:
 
@@ -426,9 +426,9 @@ If you set the env var, no file edit is needed — the orchestrator picks it up 
 If you need a new role beyond `CoreDev` / `ClientDev` / `QA` / `Reviewer` / `Intake`:
 
 1. Add the enum value to `IAgent.AgentType` in `IAgent.cs`.
-2. Register the role in `Agents/RoleAgentRegistry.cs` (kilo agent name, project subdir, allowed tools).
+2. Register the role in `Agents/RoleAgentRegistry.cs` (agent name, project subdir, allowed tools).
 3. Add a `LLM_ConfigRole` mapping in `appsettings.json` (`llm.roles.<NewRole>`).
-4. Drop a system-prompt template at `<workspace>/.kilo/agents/<newrole>.md`.
+4. Drop a system-prompt template at `<workspace>/agents/<newrole>.md`.
 5. Update `RoleAgentRegistry.FromTaskType` to map any task types you want to use the new role.
 
 The orchestrator's startup fails fast on unknown role / unknown `llm.roles.<X>` keys, so the wiring is explicit.

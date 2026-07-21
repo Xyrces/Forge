@@ -62,7 +62,8 @@ public class ProjectBootstrapTests : IDisposable
     {
         _tempRoot = Path.Combine(Path.GetTempPath(), "forge-bootstrap-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(_tempRoot);
-        _bootstrap = new ProjectBootstrap(_tempRoot, NullLogger<ProjectBootstrap>.Instance);
+        var cloner = new ProjectCloner(_tempRoot, NullLogger<ProjectCloner>.Instance);
+        _bootstrap = new ProjectBootstrap(_tempRoot, cloner, null, NullLogger<ProjectBootstrap>.Instance);
     }
 
     public void Dispose()

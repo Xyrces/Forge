@@ -24,6 +24,18 @@ public static class ProjectsEndpoints
              .WithName("GetProject")
              .WithSummary("Single-project detail (counters + role caps).");
 
+        group.MapPost("/", AddProjectAsync)
+             .WithName("AddProject")
+             .WithSummary("Register a new project + clone its repo on first boot. Idempotent.");
+
+        group.MapDelete("/{id}", RemoveProjectAsync)
+             .WithName("RemoveProject")
+             .WithSummary("Remove a project from the registry. Does NOT delete the local clone or worktrees.");
+
+        group.MapPost("/{id}/sync", SyncProjectAsync)
+             .WithName("SyncProject")
+             .WithSummary("git pull --ff-only origin <defaultBranch>. Updates local_path on success.");
+
         group.MapPatch("/{id}/slots/{role}", PatchSlotAsync)
              .WithName("PatchProjectSlot")
              .WithSummary("Adjust the in-process concurrency cap for a (project, role) pair.");
@@ -49,7 +61,7 @@ public static class ProjectsEndpoints
             var completed = ctx is null ? 0 : await ctx.CountByStatusAsync(IssueStatus.Completed, ct);
             var failed = ctx is null ? 0 : await ctx.CountByStatusAsync(IssueStatus.Failed, ct);
             rows.Add(new ProjectDto(
-                p.Id, p.Name, p.Root, p.Roles,
+                p.Id, p.Name, p.RepoUrl, p.DefaultBranch, p.Root, p.Roles,
                 pending, inprogress, completed, failed,
                 slots.Snapshot().Where(m => m.ProjectId == p.Id).ToList()));
         }
@@ -66,10 +78,95 @@ public static class ProjectsEndpoints
         var completed = await ctx.CountByStatusAsync(IssueStatus.Completed, ct);
         var failed = await ctx.CountByStatusAsync(IssueStatus.Failed, ct);
         return Results.Ok(new ProjectDto(
-            ctx.Options.Id, ctx.Options.Name, ctx.Options.Root, ctx.Options.Roles,
+            ctx.Options.Id, ctx.Options.Name, ctx.Options.RepoUrl, ctx.Options.DefaultBranch, ctx.Options.Root, ctx.Options.Roles,
             pending, inprogress, completed, failed,
             slots.Snapshot().Where(m => m.ProjectId == id).ToList()));
     }
+
+    private static async Task<IResult> AddProjectAsync(
+        AddProjectRequest? body,
+        IProjectStore store,
+        ProjectCloner cloner,
+        Configuration.GitHubOptions github,
+        ILoggerFactory loggerFactory,
+        CancellationToken ct)
+    {
+        if (body is null || string.IsNullOrWhiteSpace(body.Id) || string.IsNullOrWhiteSpace(body.RepoUrl))
+            return Results.BadRequest(new { error = "id and repoUrl are required" });
+        if (!IsValidId(body.Id))
+            return Results.BadRequest(new { error = "id must match [a-z0-9][a-z0-9_-]* (lowercase, 1-32 chars)" });
+
+        var logger = loggerFactory.CreateLogger("Projects.Add");
+        var record = await store.UpsertAsync(new NewProject(
+            Id: body.Id,
+            Name: string.IsNullOrWhiteSpace(body.Name) ? body.Id : body.Name,
+            RepoUrl: body.RepoUrl,
+            DefaultBranch: string.IsNullOrWhiteSpace(body.DefaultBranch) ? "main" : body.DefaultBranch), ct);
+
+        // Attempt the clone inline. Failure doesn't roll back the
+        // registry row — the operator can retry via sync, or the
+        // next startup will attempt it again.
+        ProjectCloneResult? clone = null;
+        try
+        {
+            clone = await cloner.CloneAsync(new ProjectOptions
+            {
+                Id = record.Id,
+                Name = record.Name,
+                RepoUrl = record.RepoUrl,
+                DefaultBranch = record.DefaultBranch,
+            }, github, ct);
+            await store.UpdateLocalPathAsync(record.Id, clone.LocalPath, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Project '{Id}' added but initial clone failed; will retry on next sync/startup", record.Id);
+            await store.UpdateSyncStatusAsync(record.Id, DateTime.UtcNow, ex.Message, ct);
+            return Results.Json(new
+            {
+                project = record,
+                clone = (ProjectCloneResult?)null,
+                warning = $"registered, but clone failed: {ex.Message}",
+            }, statusCode: 202);
+        }
+
+        await store.UpdateSyncStatusAsync(record.Id, DateTime.UtcNow, null, ct);
+        return Results.Ok(new { project = record, clone });
+    }
+
+    private static async Task<IResult> RemoveProjectAsync(
+        string id, IProjectStore store, CancellationToken ct)
+    {
+        var removed = await store.DeleteAsync(id, ct);
+        return removed ? Results.NoContent() : Results.NotFound(new { error = "project not found", id });
+    }
+
+    private static async Task<IResult> SyncProjectAsync(
+        string id, IProjectStore store, ProjectCloner cloner,
+        Configuration.GitHubOptions github,
+        ILoggerFactory loggerFactory,
+        CancellationToken ct)
+    {
+        var logger = loggerFactory.CreateLogger("Projects.Sync");
+        var record = await store.GetAsync(id, ct);
+        if (record is null) return Results.NotFound(new { error = "project not found", id });
+
+        var ok = await cloner.SyncAsync(new ProjectOptions
+        {
+            Id = record.Id,
+            Name = record.Name,
+            RepoUrl = record.RepoUrl,
+            DefaultBranch = record.DefaultBranch,
+        }, github, ct);
+        await store.UpdateSyncStatusAsync(id, DateTime.UtcNow, ok ? null : "git pull failed (see journalctl)", ct);
+        return ok ? Results.Ok(new { id, syncedAt = DateTime.UtcNow })
+                  : Results.Json(new { error = "git pull failed; check journalctl" }, statusCode: 502);
+    }
+
+    private static bool IsValidId(string id) =>
+        id.Length >= 1 && id.Length <= 32 &&
+        id.All(c => char.IsAsciiLetterOrDigit(c) || c == '_' || c == '-') &&
+        char.IsAsciiLetterOrDigit(id[0]);
 
     private static IResult PatchSlotAsync(
         string id, string role, SlotTable slots,
@@ -84,6 +181,8 @@ public static class ProjectsEndpoints
     public sealed record ProjectDto(
         string Id,
         string Name,
+        string RepoUrl,
+        string DefaultBranch,
         string Root,
         Dictionary<string, int> Roles,
         int Pending,
@@ -91,6 +190,12 @@ public static class ProjectsEndpoints
         int Completed,
         int Failed,
         IReadOnlyList<SlotTable.SlotMeter> Slots);
+
+    public sealed record AddProjectRequest(
+        string Id,
+        string Name,
+        string RepoUrl,
+        string? DefaultBranch);
 
     public sealed record PatchSlotRequest(int Max);
 

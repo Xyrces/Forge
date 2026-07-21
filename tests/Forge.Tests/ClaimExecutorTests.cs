@@ -76,6 +76,6 @@ public class ClaimExecutorTests : IDisposable
 
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.InProgress, after!.Status);
-        Assert.Equal("kilo", after.Assignee);
+        Assert.Equal("forge", after.Assignee);
     }
 }

@@ -83,7 +83,7 @@ public static class DeploymentsEndpoints
     // minimum is 4, but 7 is the practical floor before collisions
     // become a real concern). This value is later interpolated
     // directly into `git` command-line arguments and filesystem paths
-    // (DeploymentBuildRunner, SelfHostedWindowsServiceDeploymentExecutor,
+    // (DeploymentBuildRunner, SelfHostedSystemdServiceDeploymentExecutor,
     // GetCommitSummaryAsync below) -- rejecting anything that isn't a
     // plain hex string here is what keeps those call sites safe,
     // rather than re-validating (or forgetting to) at each one.
@@ -131,7 +131,7 @@ public static class DeploymentsEndpoints
         // Redeploying Forge itself bounces the ONE process running the
         // dispatch loop for every registered project, not just this
         // one -- surface that broadly before letting it through.
-        if (project.Deployment?.Kind == DeploymentKind.SelfHostedWindowsService && !force)
+        if (project.Deployment?.Kind == DeploymentKind.SelfHostedSystemdService && !force)
         {
             var inFlight = slots.Snapshot().Where(s => s.InFlight > 0).ToList();
             if (inFlight.Count > 0)
@@ -169,10 +169,9 @@ public static class DeploymentsEndpoints
 
         if (result.StillInProgress)
         {
-            // SelfHostedWindowsService: the detached Forge.Deployer
-            // process (and, shortly, the service bounce it triggers)
-            // owns the rest of this story. Deployed/DeployFailed
-            // arrives via DeploymentResultReconciler at next startup.
+            // Reserved for future executors that hand off to an
+            // external job runner. Today all executors are
+            // synchronous (Script, SelfHostedSystemdService).
             return Results.Ok(new { id, status = "Deploying", message = result.Log });
         }
 

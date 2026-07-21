@@ -36,7 +36,7 @@ public sealed class ClaimExecutor : FunctionExecutor<IssueRecord, ClaimedIssue>
     /// <para>
     /// When called from the orchestrator's pre-claim path, the
     /// input is already <see cref="IssueStatus.InProgress"/> with
-    /// assignee = "kilo" — we treat that as a successful claim
+    /// assignee = "forge" — we treat that as a successful claim
     /// and pass through to the worktree stage. When called
     /// directly (e.g. from a workflow that doesn't pre-claim),
     /// this method performs the actual <see cref="IIssueStore.ClaimAsync"/>
@@ -53,14 +53,14 @@ public sealed class ClaimExecutor : FunctionExecutor<IssueRecord, ClaimedIssue>
     {
         // Pre-claim path: the orchestrator already claimed the
         // issue. Pass through; no re-claim, no AlreadyClaimed.
-        if (input.Status == IssueStatus.InProgress && input.Assignee == "kilo")
+        if (input.Status == IssueStatus.InProgress && input.Assignee == "forge")
         {
             var preClaimedBranch = input.GetMetadata("branch") ?? $"agent/{input.Id}";
             return new ClaimedIssue(input, ClaimResult.Ok, null, preClaimedBranch);
         }
 
         // Standalone path: do the claim ourselves.
-        var claimed = await issues.ClaimAsync(input.Id, "kilo", ct);
+        var claimed = await issues.ClaimAsync(input.Id, "forge", ct);
         if (claimed is null)
         {
             logger.LogDebug("Issue {Id} already claimed elsewhere", input.Id);

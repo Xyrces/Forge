@@ -83,7 +83,7 @@ public class WorktreeExecutorTests : IDisposable
     {
         // After P3 wired the orchestrator pre-claims, the workflow
         // no longer double-claims. ClaimExecutor's pre-claim-aware
-        // path treats an already-InProgress issue with assignee=kilo
+        // path treats an already-InProgress issue with assignee=forge
         // as Ok (pass-through). To test the AlreadyClaimed sentinel,
         // we use a different assignee on the first claim so the
         // second ClaimExecutor call falls into the standalone path

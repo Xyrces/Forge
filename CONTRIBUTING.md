@@ -82,9 +82,9 @@ AIFunctions are how the model invokes code on the host. To add one:
 ### Adding a new role
 
 1. Add the enum value to `IAgent.AgentType`.
-2. Register the role in `Agents/RoleAgentRegistry.cs` (kilo agent name, project subdir, allowed tools).
+2. Register the role in `Agents/RoleAgentRegistry.cs` (agent name, project subdir, allowed tools).
 3. Add a `llm.roles.<NewRole>` block in `appsettings.json`.
-4. Drop a system-prompt template at `<workspace>/.kilo/agents/<newrole>.md`.
+4. Drop a system-prompt template at `<workspace>/agents/<newrole>.md`.
 5. Update `RoleAgentRegistry.FromTaskType` if you want certain task types to map to the new role.
 
 ### Adding a new workflow executor

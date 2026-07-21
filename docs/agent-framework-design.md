@@ -5,7 +5,7 @@ Status: P0 closed 2026-06-30. Goal: replace the kilo-based runtime in Forge with
 
 **Forward-looking design:** see [`intake-to-sprint-workflow.md`](./intake-to-sprint-workflow.md) for the multi-agent workflow that turns operator intent into shipped increments (Phases 2-4). The two docs are siblings: this one covers the runtime, the other covers what the agents do together.
 
-**P0 outcome (2026-06-30):** the MAF runner is the only agent runtime. The `AcpClient`/`AcpProcessManager`/`AcpSession`/`AcpProtocol` files and their integration tests are deleted. `IAgentRunner` (Microsoft.Agents.AI 1.11.1) is wired into `OrchestratorAgent`; `MafAgentRunner` wraps `ChatClientAgent` with the role's `.kilo/agents/<role>.md` frontmatter as `instructions:`. 89/89 tests pass. P0.5+ phases (real LLM providers, git/PR tools, intake via HarnessAgent) proceed per the table below.
+**P0 outcome (2026-06-30):** the MAF runner is the only agent runtime. The `AcpClient`/`AcpProcessManager`/`AcpSession`/`AcpProtocol` files and their integration tests are deleted. `IAgentRunner` (Microsoft.Agents.AI 1.11.1) is wired into `OrchestratorAgent`; `MafAgentRunner` wraps `ChatClientAgent` with the role's `agents/<role>.md` frontmatter as `instructions:`. 89/89 tests pass. P0.5+ phases (real LLM providers, git/PR tools, intake via HarnessAgent) proceed per the table below.
 
 ## Why we are doing this
 
@@ -176,9 +176,9 @@ Each phase is behind a feature flag (`Orchestrator:Runtime=Kilo|Maf`, `Orchestra
 3. **`AgentSession` not reusable across agents.** The same xmldoc says "an AgentSession may not be reusable across different agents." Our agent instances are constructed per-issue with the same factory shape; we need to keep that invariant or reload the session under a new agent.
 4. **Experimental attributes + HarnessAgent IS adopted (intake role only).** HarnessAgent and parts of Microsoft.Agents.AI.Tools.Shell are tagged [Experimental(DiagnosticIds.Experiments.AgentsAIExperiments)]. We adopt HarnessAgent **only for the intake role** (single persistent project-aware conversation that needs HarnessAgent's bundled todo / file-memory / hosted-web-search / loop conveniences). Engineering, designer, artist, and groomer agents use plain ChatClientAgent + AIFunctions. Pin the HarnessAgent prerelease version; treat the API as frozen between minor upgrades. Add <NoWarn>AGENTS_AI_EXPERIMENTS</NoWarn> for now.
 5. **DurableTask on a vanilla `IHost`.** The README and `Workflows/` folder are opaque on whether `Microsoft.Agents.AI.DurableTask` works in a console host with the in-process DTS sidecar. Validate with `dotnet/samples/04-hosting` before designing around it.
-6. **Skills `SKILL.md` schema mismatch.** The MAF skills design uses YAML frontmatter with `name`, `description`, `license?`, `compatibility?`, `allowedTools?`. Our existing `.kilo/agents/*.md` files don't match this. We either (a) rewrite the files to match, (b) write a custom `AgentFileSkillsSource` subclass that reads our schema, or (c) keep skills in SQLite and use the in-memory provider.
+6. **Skills `SKILL.md` schema mismatch.** The MAF skills design uses YAML frontmatter with `name`, `description`, `license?`, `compatibility?`, `allowedTools?`. Our existing `agents/*.md` files don't match this. We either (a) rewrite the files to match, (b) write a custom `AgentFileSkillsSource` subclass that reads our schema, or (c) keep skills in SQLite and use the in-memory provider.
 7. **No ACP.** kilo's wire protocol is gone. Anything in our codebase that referenced `AcpClient`, `AcpSession`, or the kilo JSON shape becomes dead code (kept behind an interface for the rollback window).
-8. **kilo files.** The `.kilo/agents/*.md` files stay on disk during the migration (they're the source of `instructions:` for the `ChatClientAgent`). Long-term, the dashboard's Agent editor should write both the SQLite row and the .md file, like before.
+8. **Role prompt files.** The `agents/*.md` files stay on disk during the migration (they're the source of `instructions:` for the `ChatClientAgent`). Long-term, the dashboard's Agent editor should write both the SQLite row and the .md file, like before.
 
 
 
@@ -215,7 +215,7 @@ If the orchestrator crashes mid-dispatch, on restart:
 
 The "Restart safety" row in the stays-vs-changes table is misleading: MAF gives us half. The other half is on us. We write the checkpoints; MAF gives us the agent conversation.
 
-## .kilo/agents/*.md fate — pick one
+## agents/*.md fate — pick one
 
 Three options, all explicit:
 
@@ -258,7 +258,7 @@ These are reads-only-from-the-issue's perspective. Writes happen at the phase bo
 
 9. **GitHub MCP tool overlap.** If we ever use the GitHub Copilot provider or any provider that bundles the GitHub MCP server, the agent will receive *built-in* GitHub tools (PR creation, issue filing, etc.) that overlap with our hand-rolled open_pull_request AIFunction. Pick: (a) let the agent use provider-native GitHub tools and keep Octokit only for the merge-watcher; (b) disable provider-native GitHub tools in our ChatClientAgentOptions.Tools and own the GitHub surface ourselves. (b) is the default; (a) is cheaper if we trust the provider tool-set.
 10. **DurableTask container dependency.** Phase 4 requires either Azure-hosted Durable Functions, docker run mcr.microsoft.com/dts/dts-emulator, or a self-hosted DTS. There is no in-process DTS. Accepting Phase 4 means accepting a Docker-or-Azure dependency in the deploy story. The current Forge binary has no such dependency. Phase 4 is opt-in; the orchestrator can ship P0..P3 without it.
-11. **Naming.** The old RoleAgentRegistry + .kilo/agents/*.md model has the word kilo in several places (e.g. the kiloName column on AgentStore). The MAF migration is the natural point to rename to provider/displayName. We do this as part of Phase 0 to avoid carrying the wrong name into the MAF era.
+11. **Naming.** The old RoleAgentRegistry + agents/*.md model had the word kilo in several places (e.g. the kiloName column on AgentStore). The MAF migration is the natural point to rename to displayName. We do this as part of Phase 0 to avoid carrying the wrong name into the MAF era.
 
 
 ## Cross-functional agents (product, design, artist, groomer)

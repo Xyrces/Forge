@@ -40,7 +40,7 @@ public sealed class DesignerAgent
     private readonly IDashboardEventBus _events;
     private readonly ILogger<DesignerAgent> _logger;
     private readonly string _runId;
-    private readonly string _kiloAgentsRoot;
+    private readonly string _rolePromptsRoot;
 
     public DesignerAgent(
         ISpecStore specs,
@@ -53,7 +53,7 @@ public sealed class DesignerAgent
         RoleAgentRegistry roles,
         IDashboardEventBus events,
         ILogger<DesignerAgent> logger,
-        string kiloAgentsRoot = ".kilo/agents",
+        string rolePromptsRoot = "agents",
         string? runId = null)
     {
         _specs = specs;
@@ -66,7 +66,7 @@ public sealed class DesignerAgent
         _roles = roles;
         _events = events;
         _logger = logger;
-        _kiloAgentsRoot = kiloAgentsRoot;
+        _rolePromptsRoot = rolePromptsRoot;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
     }
 
@@ -135,10 +135,10 @@ public sealed class DesignerAgent
         // Pick the chat-client factory entry. The Designer is an
         // Orchestrator-only role; it doesn't have an AgentType, so
         // we honor the configured "designer" role's provider +
-        // model (the kilo agent name we resolve to CoreDev's
+        // model (the agent name we resolve to CoreDev's
         // config for the factory call). Falls back to CoreDev's
         // config when the "designer" role isn't configured.
-        var designerRole = _roles.ByKiloAgentName(RoleAgentRegistry.DesignerKiloAgentName);
+        var designerRole = _roles.ByAgentName(RoleAgentRegistry.DesignerAgentName);
         var roleForClient = designerRole ?? _roles.ForType(AgentType.CoreDev);
         var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
         // Function-invocation middleware: the LLM's tool_calls get

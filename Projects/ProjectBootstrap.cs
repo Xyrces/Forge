@@ -5,36 +5,52 @@ using Microsoft.Extensions.Logging;
 namespace Forge.Projects;
 
 /// <summary>
-/// Result of preparing a single project for use. Operators who
-/// pre-supplied their own <c>workspace.root</c> get
-/// <see cref="Mode"/> = Operator; auto-scaffolded projects get
-/// <see cref="Mode"/> = AutoScaffold so the UI can surface which paths
-/// the orchestrator created.
+/// Result of preparing a single project for use.
+/// <see cref="Created"/> is true when the bootstrap had to create the
+/// project directory on disk. <see cref="InitializedAsGitRepo"/> is
+/// true when the bootstrap had to scaffold an empty git repo (no
+/// <see cref="ProjectOptions.RepoUrl"/> was set, OR a clone failed
+/// and we fell back to the legacy empty-repo path).
 /// </summary>
 public sealed record ProjectBootstrapResult(
     ProjectOptions Project,
     bool Created,
     bool InitializedAsGitRepo,
+    bool ClonedFromRemote,
     string StateDirectory,
     string IssuesDbPath,
     string WorktreeParent);
 
 /// <summary>
-/// Prepares per-project filesystem locations on disk. When the operator
-/// has supplied <see cref="ProjectOptions.Root"/>, that path is honored
-/// as-is (created if missing, initialized as a git repo if missing).
-/// When empty, the project is fully auto-scaffolded under
-/// <see cref="ForgesystemPaths.ProjectDir"/> and assigned a Root equal
-/// to that scaffold directory.
+/// Prepares per-project filesystem locations on disk. Three modes:
+/// <list type="number">
+///   <item><b>Managed clone</b>: <see cref="ProjectOptions.RepoUrl"/>
+///   is set. <see cref="ProjectCloner"/> clones into
+///   <c>{dataRoot}/projects/{id}/</c>.</item>
+///   <item><b>Operator-managed</b>: <see cref="ProjectOptions.Root"/>
+///   is set. Honored as-is (created if missing, initialized as a git
+///   repo if missing).</item>
+///   <item><b>Auto-scaffold</b>: both empty. Bootstrap creates
+///   <c>{dataRoot}/projects/{id}/</c> + an empty git repo (legacy
+///   "zero-config fresh machine" path).</item>
+/// </list>
 /// </summary>
 public sealed class ProjectBootstrap
 {
     private readonly string _dataRoot;
+    private readonly ProjectCloner _cloner;
+    private readonly Configuration.GitHubOptions? _github;
     private readonly ILogger<ProjectBootstrap>? _logger;
 
-    public ProjectBootstrap(string dataRoot, ILogger<ProjectBootstrap>? logger = null)
+    public ProjectBootstrap(
+        string dataRoot,
+        ProjectCloner cloner,
+        Configuration.GitHubOptions? github = null,
+        ILogger<ProjectBootstrap>? logger = null)
     {
         _dataRoot = dataRoot;
+        _cloner = cloner;
+        _github = github;
         _logger = logger;
     }
 
@@ -48,6 +64,8 @@ public sealed class ProjectBootstrap
 
         var operatorRoot = project.Root;
         var isOperatorManaged = !string.IsNullOrWhiteSpace(operatorRoot);
+        var hasRepoUrl = !string.IsNullOrWhiteSpace(project.RepoUrl);
+
         var rootPath = isOperatorManaged
             ? Path.GetFullPath(operatorRoot)
             : ForgesystemPaths.ProjectDir(_dataRoot, project.Id);
@@ -63,20 +81,40 @@ public sealed class ProjectBootstrap
         }
 
         var gitInitDone = false;
+        var clonedFromRemote = false;
         if (!Directory.Exists(Path.Combine(rootPath, ".git")))
         {
-            RunGit(rootPath, "init -q -b main");
-            RunGit(rootPath, "config user.email \"forge@local\"");
-            RunGit(rootPath, "config user.name \"Forge Bootstrap\"");
-            File.WriteAllText(
-                Path.Combine(rootPath, ".gitignore"),
-                ".forge/\n*.user\n");
-            RunGit(rootPath, "add .gitignore");
-            RunGit(rootPath, "commit -q -m \"scaffold\"");
-            gitInitDone = true;
-            _logger?.LogInformation(
-                "Project '{Id}': initialised empty git repo at {Root} (default branch main)",
-                project.Id, rootPath);
+            if (hasRepoUrl)
+            {
+                try
+                {
+                    _cloner.CloneAsync(project, _github, CancellationToken.None)
+                        .GetAwaiter().GetResult();
+                    clonedFromRemote = true;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogError(ex,
+                        "Project '{Id}': clone from {Url} failed; falling back to empty-repo scaffold",
+                        project.Id, project.RepoUrl);
+                }
+            }
+
+            if (!Directory.Exists(Path.Combine(rootPath, ".git")))
+            {
+                RunGit(rootPath, "init -q -b main");
+                RunGit(rootPath, "config user.email \"forge@local\"");
+                RunGit(rootPath, "config user.name \"Forge Bootstrap\"");
+                File.WriteAllText(
+                    Path.Combine(rootPath, ".gitignore"),
+                    ".forge/\n*.user\n");
+                RunGit(rootPath, "add .gitignore");
+                RunGit(rootPath, "commit -q -m \"scaffold\"");
+                gitInitDone = true;
+                _logger?.LogInformation(
+                    "Project '{Id}': initialised empty git repo at {Root} (default branch main)",
+                    project.Id, rootPath);
+            }
         }
 
         var stateDir = isOperatorManaged
@@ -101,6 +139,7 @@ public sealed class ProjectBootstrap
             resolved,
             Created: created,
             InitializedAsGitRepo: gitInitDone,
+            ClonedFromRemote: clonedFromRemote,
             StateDirectory: stateDir,
             IssuesDbPath: issuesDb,
             WorktreeParent: worktreeParent);

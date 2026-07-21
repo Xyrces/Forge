@@ -50,7 +50,7 @@ public sealed class ProductAgent
     private readonly ISkillSource? _skills;
     private readonly IDashboardEventBus _events;
     private readonly ILogger<ProductAgent> _logger;
-    private readonly string _kiloAgentsRoot;
+    private readonly string _rolePromptsRoot;
     private readonly string _runId;
 
     public ProductAgent(
@@ -63,7 +63,7 @@ public sealed class ProductAgent
         IDashboardEventBus events,
         ILogger<ProductAgent> logger,
         ISkillSource? skills = null,
-        string kiloAgentsRoot = ".kilo/agents",
+        string rolePromptsRoot = "agents",
         string? runId = null)
     {
         _specs = specs;
@@ -75,7 +75,7 @@ public sealed class ProductAgent
         _events = events;
         _logger = logger;
         _skills = skills;
-        _kiloAgentsRoot = kiloAgentsRoot;
+        _rolePromptsRoot = rolePromptsRoot;
         // Each run gets a stable id so the spec_version author can be
         // traced to a specific agent run. Defaults to a fresh guid
         // but tests pass a deterministic id.
@@ -269,9 +269,9 @@ public sealed class ProductAgent
             : $"version={updated.CurrentVersion}";
     }
 
-    private string LoadRoleInstructions(string kiloAgentName)
+    private string LoadRoleInstructions(string agentName)
     {
-        var path = Path.Combine(_kiloAgentsRoot, kiloAgentName + ".md");
+        var path = Path.Combine(_rolePromptsRoot, agentName + ".md");
         if (!File.Exists(path)) return string.Empty;
         return File.ReadAllText(path);
     }

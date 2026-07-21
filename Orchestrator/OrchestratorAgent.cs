@@ -128,9 +128,9 @@ private readonly ArtOutputStore _artOutputs;
         {
             // P3 (final wiring): dispatch is now driven by the MAF
             // Workflows pipeline. ClaimExecutor detects the
-            // pre-claim (InProgress + assignee=kilo) and passes
+            // pre-claim (InProgress + assignee=forge) and passes
             // through; otherwise it claims itself.
-            var claimed = await _issues.ClaimAsync(issue.Id, "kilo", cancellationToken);
+            var claimed = await _issues.ClaimAsync(issue.Id, "forge", cancellationToken);
             if (claimed is null)
             {
                 _logger.LogDebug("Issue {Id} already claimed elsewhere", issue.Id);
@@ -139,7 +139,7 @@ private readonly ArtOutputStore _artOutputs;
             await PublishTransition(claimed, IssueStatus.Pending, IssueStatus.InProgress, null, cancellationToken);
 
             // Re-fetch after the claim/transition so the workflow's
-            // input has InProgress + assignee=kilo (ClaimExecutor
+            // input has InProgress + assignee=forge (ClaimExecutor
             // short-circuits on that combination).
             var preClaimed = (await _issues.GetAsync(claimed.Id, cancellationToken))!;
 
@@ -313,7 +313,7 @@ private readonly ArtOutputStore _artOutputs;
 
     internal static string BuildPrompt(IssueRecord issue, RoleAgent role, string worktreePath, string branch, string? defaultBranch)
         => $"""
-            You are acting as the **{role.KiloAgentName}** agent for the PortHorizon project.
+            You are acting as the **{role.AgentName}** agent for the PortHorizon project.
             Working directory: {worktreePath}
             Branch: {branch} (base: {defaultBranch ?? "main"})
 
@@ -337,7 +337,7 @@ private readonly ArtOutputStore _artOutputs;
     internal static string BuildPrBody(IssueRecord issue, RoleAgent role, string sha, string response)
         => $"""
             ## Summary
-            Automated change for issue `{issue.Id}` (type: {issue.Type}, role: {role.KiloAgentName}).
+            Automated change for issue `{issue.Id}` (type: {issue.Type}, role: {role.AgentName}).
 
             ## Description
             {issue.Description}

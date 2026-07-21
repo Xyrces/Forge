@@ -125,7 +125,7 @@ public sealed class ArtistAgent
         // doesn't have an AgentType. We honor the configured
         // "artist" role's provider + model; fall back to CoreDev's
         // config when the "artist" role isn't configured.
-        var artistRole = _roles.ByKiloAgentName(RoleAgentRegistry.ArtistKiloAgentName);
+        var artistRole = _roles.ByAgentName(RoleAgentRegistry.ArtistAgentName);
         var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
 

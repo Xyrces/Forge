@@ -15,7 +15,7 @@ public enum DispatchCheckpoint
 {
     /// <summary>
     /// ClaimExecutor accepted the issue but no worktree yet.
-    /// Side-effects: status=InProgress, assignee=kilo. Replay
+    /// Side-effects: status=InProgress, assignee=forge. Replay
     /// from worktree acquisition.
     /// </summary>
     Claimed,

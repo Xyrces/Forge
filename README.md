@@ -177,7 +177,7 @@ The page polls `/api/state` every 2s and subscribes to `/api/events` for instant
 8. `GitHubService.CreatePullRequestAsync` opens the PR (`[type] title`).
 9. `OrchestratorAgent` enqueues a `pr-watch` follow-up issue.
 10. `PRWatcher` polls GitHub every 30s. On green CI + approval, it merges, deletes the branch, removes the worktree, and marks the dev task `Completed`. On `REQUEST_CHANGES`, it marks `Blocked`. On red CI, it marks `Failed`.
-11. **Restart safety**: P4 Stage A (default, in-process) — `StartupRecovery` runs at every startup, classifies every `InProgress + assignee=kilo` issue by its `dispatch_checkpoint`, and replays unfinished side-effects (commit / push / PR open). Use `--recover` to dry-run. See `docs/p4-restart-safety.md` for the full contract + the audit row format. P4 Stage B (opt-in, requires Docker or Podman) persists the entire workflow state in a Durable Task Scheduler sidecar via `Microsoft.Agents.AI.DurableTask`. Bring up the sidecar with `docker compose -f deploy/docker-compose.yml up -d` (or `podman-compose ... up -d`) and set `Orchestrator:Execution=Durable`. See `deploy/README.md` for the full operation.
+11. **Restart safety**: P4 Stage A (default, in-process) — `StartupRecovery` runs at every startup, classifies every `InProgress + assignee=forge` issue by its `dispatch_checkpoint`, and replays unfinished side-effects (commit / push / PR open). Use `--recover` to dry-run. See `docs/p4-restart-safety.md` for the full contract + the audit row format. P4 Stage B (opt-in, requires Docker or Podman) persists the entire workflow state in a Durable Task Scheduler sidecar via `Microsoft.Agents.AI.DurableTask`. Bring up the sidecar with `docker compose -f deploy/docker-compose.yml up -d` (or `podman-compose ... up -d`) and set `Orchestrator:Execution=Durable`. See `deploy/README.md` for the full operation.
 
 Optional: a `DependencyGraph` exists in `IssueStore` (`blocks` / `related` / `duplicates` edges). `ReadyAsync` excludes issues with an open `blocks` edge whose blocker is not `Completed`/`Closed`. `Failed` blockers are **not** auto-cleared — the operator must explicitly close them or remove the edge.
 
@@ -193,7 +193,7 @@ Configured in `Agents/RoleAgentRegistry.cs`:
 | `Reviewer`  | (read-only)            | read, grep, glob, webfetch | Architecture-compliance review on GitHub |
 | `Intake`    | (interactive)          | chat + tool emits | operator inbox → proposed spec + epic |
 
-The system prompt for each role is loaded from `<workspace>/.kilo/agents/<role>.md` (YAML frontmatter's `description:` field). Missing files get a generic fallback and a warning log.
+The system prompt for each role is loaded from `<workspace>/agents/<role>.md` (YAML frontmatter's `description:` field). Missing files get a generic fallback and a warning log.
 
 ## State files
 

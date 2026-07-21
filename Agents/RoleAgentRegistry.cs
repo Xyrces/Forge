@@ -3,7 +3,7 @@
 namespace Forge.Agents;
 
 public sealed record RoleAgent(
-    string KiloAgentName,
+    string AgentName,
     string ProjectSubdir,
     IReadOnlyList<string> AllowedTools);
 
@@ -27,29 +27,29 @@ public sealed class RoleAgentRegistry
     /// registered as a custom entry under the key "designer" so
     /// the LLM provider / model can be configured separately in
     /// appsettings.json (llm.roles.designer). Falls back to CoreDev's
-    /// kilo agent name when not configured.
+    /// agent name when not configured.
     /// </summary>
-    public const string DesignerKiloAgentName = "designer";
+    public const string DesignerAgentName = "designer";
 
     /// <summary>
     /// P2.b: Artist is an Orchestrator-only role (no AgentType).
     /// Same pattern as Designer: configured under
     /// llm.roles.artist in appsettings.json; falls back to
-    /// CoreDev's kilo agent name when not configured.
+    /// CoreDev's agent name when not configured.
     /// </summary>
-    public const string ArtistKiloAgentName = "artist";
+    public const string ArtistAgentName = "artist";
 
     /// <summary>
-    /// Get a role by its kilo agent name. Returns null when no role
+    /// Get a role by its agent name. Returns null when no role
     /// matches. Use this for the Designer (which is keyed by name
     /// not by AgentType).
     /// </summary>
-    public RoleAgent? ByKiloAgentName(string kiloAgentName)
+    public RoleAgent? ByAgentName(string agentName)
     {
-        if (string.IsNullOrWhiteSpace(kiloAgentName)) return null;
+        if (string.IsNullOrWhiteSpace(agentName)) return null;
         foreach (var r in _roles.Values)
         {
-            if (string.Equals(r.KiloAgentName, kiloAgentName, StringComparison.Ordinal))
+            if (string.Equals(r.AgentName, agentName, StringComparison.Ordinal))
                 return r;
         }
         return null;

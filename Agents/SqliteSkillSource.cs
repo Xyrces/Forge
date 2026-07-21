@@ -4,7 +4,7 @@ namespace Forge.Agents;
 
 /// <summary>
 /// SQLite-backed skill source. Resolves a role to its
-/// <c>AgentRecord.Id</c> via <see cref="IAgentStore.GetByKiloNameAsync"/>,
+/// <c>AgentRecord.Id</c> via <see cref="IAgentStore.GetByNameAsync"/>,
 /// then loads global + per-agent skills from <see cref="ISkillStore"/>.
 /// </summary>
 public sealed class SqliteSkillSource : ISkillSource
@@ -23,7 +23,7 @@ public sealed class SqliteSkillSource : ISkillSource
     public async Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, CancellationToken ct = default)
     {
         var roleDef = _roles.ForType(role);
-        var agent = await _agents.GetByKiloNameAsync(roleDef.KiloAgentName, ct);
+        var agent = await _agents.GetByNameAsync(roleDef.AgentName, ct);
         var agentId = agent?.Id;
 
         // Global skills.

@@ -12,7 +12,7 @@ namespace Forge.Orchestrator;
 /// BEFORE the dispatch loop. See <c>docs/p4-restart-safety.md</c>.
 ///
 /// <para>
-/// For every issue in <c>status=InProgress + assignee=kilo</c>:
+/// For every issue in <c>status=InProgress + assignee=forge</c>:
 /// inspect the <c>dispatch_checkpoint</c> + the worktree
 /// directory + the metadata, then either replay the
 /// side-effect the previous run didn't get to, fail the issue,
@@ -59,7 +59,7 @@ public sealed class StartupRecovery
     public StartupRecoveryOptions Options => _options;
 
     /// <summary>
-    /// Sweep every in-progress kilo issue. Returns the
+    /// Sweep every in-progress forge issue. Returns the
     /// <see cref="RecoveryReportRecord"/> id of the audit row.
     /// </summary>
     public async Task<long> RunAsync(string? specId = null, CancellationToken ct = default)

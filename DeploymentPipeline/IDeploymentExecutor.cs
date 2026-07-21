@@ -16,10 +16,9 @@ public interface IDeploymentExecutor
         ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct = default);
 }
 
-// Success + Log describe the OUTCOME KNOWN AT RETURN TIME. For
-// StillInProgress = true (only ever set by
-// SelfHostedWindowsServiceDeploymentExecutor), Success reflects only
-// whether the hand-off to Forge.Deployer succeeded -- the real
-// deploy/deploy-failed verdict arrives later via a result file that
-// Forge.Core reconciles on its next startup (DeploymentPipeline/DeploymentResultReconciler.cs).
+// Success + Log describe the OUTCOME KNOWN AT RETURN TIME. All
+// current executors (Script, SelfHostedSystemdService) report
+// synchronously: the swap is complete by the time ExecuteAsync
+// returns, so StillInProgress is reserved for future executors
+// (e.g. a remote cloud deploy that returns a job id).
 public sealed record DeploymentExecutionResult(bool Success, string Log, bool StillInProgress = false);

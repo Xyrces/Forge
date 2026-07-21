@@ -3,7 +3,7 @@
 ## Goals
 
 1. Interactive orchestration control (pause/resume/retry tasks, change priority).
-2. Agent CRUD with kilo mirror (.kilo/agents/*.md).
+2. Agent CRUD with role-prompt mirror (agents/*.md).
 3. Skill CRUD (per-agent and global).
 4. Backlog + Sprint views (flat table vs Kanban) over the same issue store.
 5. Sprint orchestration: one active sprint at a time; orchestrator picks only sprint issues.
@@ -12,7 +12,7 @@
 
 Adds four tables to issues.db: `agent`, `skill`, `sprint`, `sprint_issue`.
 
-- `agent` mirrors .kilo/agents/*.md; one row per kilo agent. Fields: kilo_name, display_name, scope, description, enabled, config_json.
+- `agent` mirrors agents/*.md; one row per role agent. Fields: agent_name, display_name, scope, description, enabled, config_json.
 - `skill` has agent_id (nullable; NULL = global). Unique on (name, agent_id).
 - `sprint` has goal, start/end dates, status (active|completed|archived). Single-active invariant enforced transactionally.
 - `sprint_issue` is the many-to-many linking sprint to issue.
@@ -32,7 +32,7 @@ Five tabs: Tasks (current), Backlog, Sprints, Agents, Skills. Vanilla JS, dark t
 
 ## Orchestrator changes
 
-- Startup: load .kilo/agents/*.md into agent table.
+- Startup: load agents/*.md into agent table.
 - DispatchCycleAsync: ReadyAsync filters by active sprint when one exists.
 - Before each prompt: drain AgentMessageBus and prepend queued messages.
 

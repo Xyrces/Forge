@@ -119,105 +119,97 @@ etc. Example (`appsettings.multi-project.example.json`):
 }
 ```
 
-## `DeploymentKind.SelfHostedWindowsService`
+## `DeploymentKind.SelfHostedSystemdService`
 
-The path Forge uses to redeploy **itself**. `DeploymentPipeline/SelfHostedWindowsServiceDeploymentExecutor.cs`:
+The path Forge uses to redeploy **itself** on Linux.
+`DeploymentPipeline/SelfHostedSystemdServiceDeploymentExecutor.cs`:
 
 1. Checks the candidate commit out into an ephemeral worktree (same
    pattern as the build runner).
-2. `dotnet publish {PublishProject} -c Release -o {ReleasesRoot}\{sha}`
+2. `dotnet publish {PublishProject} -c Release -o {ReleasesRoot}/{sha}`
    — a brand new, never-before-used versioned directory. Nothing that
    could currently be `current` is ever touched.
-3. `dotnet publish tools/Forge.Deployer/Forge.Deployer.csproj -c
-   Release -o {ReleasesRoot}\..\deployer` — republishes the helper
-   tool itself from the SAME commit, into a **stable** folder outside
-   the release/current rotation (so the helper isn't subject to the
-   same file-lock problem it exists to solve).
-4. Launches `Forge.Deployer.exe` **detached** with `--service-name
-   --current-link --release-dir --result-path`, then returns
-   immediately with the row left at `Deploying`. This request is
-   expected to return successfully even though Forge's own process is
-   about to be killed a few seconds later by the very thing it just
-   launched.
+3. Copies `Forge.UI/wwwroot/*` into the release dir (the static
+   files `dotnet publish` doesn't ship).
+4. Atomically repoints `{CurrentLinkPath}` at the new release
+   directory: `ln -sfn` to a temp name + `mv -Tf` into place (POSIX
+   rename is atomic on the same filesystem, so a `tail -f` or a
+   concurrent agent run never sees a half-applied symlink).
+5. `systemctl restart {ServiceName}`. The unit's ExecStart points at
+   `/opt/forge/current/Forge.Core.dll`, so the restart picks up the
+   freshly-repointed binary. `Type=notify` + `AddSystemd()` make the
+   restart synchronous — `systemctl` blocks until READY=1 (i.e.
+   until the new process has called READY=1 in `RunOrchestratorAsync`).
 
-`Forge.Deployer` (`tools/Forge.Deployer/Program.cs`) is a standalone
-console app with **zero** dependency on `Forge.Core` — if it
-referenced Forge.Core's assemblies, a locked-file race would be
-possible during the exact swap it exists to perform. It:
+**No detached helper process** is needed, unlike the historical
+Windows Service path. systemd's `stop`/`start` are reliable
+operations on a third-party process — there's no "Forge killing its
+own SCM registration" race to work around. Result: the executor
+returns synchronously with success/failure already known; no result
+file pickup on next startup, no `DeploymentResultReconciler`.
 
-1. Stops the named Windows Service (`ServiceController.Stop()` +
-   `WaitForStatus(Stopped)`).
-2. Repoints the `current` **junction** (not a symlink — junctions
-   don't need `SeCreateSymbolicLinkPrivilege`, just ordinary
-   filesystem write access) at the new release directory. `mklink /J`
-   via `cmd.exe`, since .NET's `Directory.CreateSymbolicLink` creates
-   real symlinks, not junctions.
-3. Starts the service back up and waits for `Running`.
-4. Writes a `{success, releaseDir, log, completedAtUtc}` JSON result
-   file to `--result-path` and exits.
-
-### Closing the loop: `DeploymentResultReconciler`
-
-Forge.Core's own process died mid-flow (step 1 above), so nothing
-inside that process can ever record the final Deployed/DeployFailed
-verdict. `DeploymentPipeline/DeploymentResultReconciler.cs` runs once at the START
-of every `RunOrchestratorAsync` — i.e. as soon as ANY Forge.Core
-process boots, whether that's the just-deployed release starting
-cleanly or an operator manually restarting after a failed swap — and:
-
-1. For every project with `DeploymentKind.SelfHostedWindowsService`,
-   scans `{ReleasesRoot}\..\deploy-status\*.json`.
-2. Matches each result file's name (the deployment id) against that
-   project's `DeploymentStore`, writes `MarkDeployedAsync`/
-   `MarkDeployFailedAsync` with the captured log, and deletes the file.
-
-## Filesystem layout (Windows Service mode)
+## Filesystem layout (systemd service mode)
 
 ```
-C:\ProgramData\Forge\
-  current\              <-- junction, repointed on every successful deploy
-  releases\
-    <sha-a>\             <-- dotnet publish output, one per deployed commit
-    <sha-b>\
-  deployer\              <-- stable Forge.Deployer.exe, republished on every deploy
-  deploy-status\         <-- transient result files, consumed by DeploymentResultReconciler
-  appsettings.json        <-- service's own config (NOT the dev repo's gitignored one)
+/opt/forge/
+  releases/<sha>/         <-- dotnet publish output, one per deployed commit
+  current -> releases/<sha> <-- symlink, repointed on every successful deploy
+
+/etc/forge/
+  appsettings.json         <-- service's own config (NOT the dev repo's gitignored one)
+  forge.env                <-- secrets (mode 0600, root:forge)
+
+/var/lib/forge/            <-- StateDirectory=forge
+  state/
+    issues.db              <-- IssueStore (SQLite)
+    memory.db              <-- MemoryStore (SQLite)
+    issues.jsonl           <-- IssuesJsonlMirror
 ```
 
 The dev repo (wherever `projects[].root` points, e.g.
-`C:\Users\jtn50\repos\gamedev\Forge`) is completely separate from
-this. Agents commit and open PRs there; nothing under
-`C:\ProgramData\Forge` is ever git-tracked.
+`/home/jtn5016/repos/gamedev/Forge`) is completely separate from
+this. Agents commit and open PRs there; nothing under `/opt/forge`
+or `/var/lib/forge` is ever git-tracked.
 
-## Installing the Windows Service
+## Installing the systemd service
 
-```powershell
-# One-time, from an elevated PowerShell session. Publish a first
-# release manually before running this (the script refuses to
-# register a service pointed at a missing binary).
-dotnet publish Forge.Core.csproj -c Release -o C:\ProgramData\Forge\releases\bootstrap
-cmd /c mklink /J C:\ProgramData\Forge\current C:\ProgramData\Forge\releases\bootstrap
+```bash
+# One-time, from root. Publish a first release manually before
+# running this.
+sudo dotnet publish Forge.Core.csproj -c Release -o /opt/forge/releases/bootstrap
 
-scripts\install-service.ps1 -CurrentLink C:\ProgramData\Forge\current `
-                             -AppSettings C:\ProgramData\Forge\appsettings.json
+sudo scripts/install-systemd-service.sh \
+    --release-dir /opt/forge/releases/bootstrap
 ```
 
-Every deployment after that repoints `current` and restarts the
-service — `install-service.ps1` is a one-time setup step, not part of
-the deploy loop. `scripts\uninstall-service.ps1` reverses it (stops +
-`sc.exe delete`; does not touch `releases`/`deploy-status`).
+The installer:
+- Creates the `forge` system user (nologin, home `/var/lib/forge`).
+- Drops secrets from `KILO_GATEWAY_API_KEY` / `GITHUB_TOKEN` env vars
+  into `/etc/forge/forge.env` (mode 0600) when set.
+- Repoints `/opt/forge/current` at the release dir.
+- Copies `deploy/systemd/forge.service` into `/etc/systemd/system/`.
+- `systemctl enable --now forge` + `systemctl status`.
+
+Every deployment after that is the executor doing steps 1-5 above —
+`install-systemd-service.sh` is a one-time setup step. The unit
+template is `deploy/systemd/forge.service`; re-running the install
+script with a new `--release-dir` repoints + restarts in place.
+
+Full operator runbook (TLS, journald log queries, reverse-proxy
+config, backup procedures): `docs/linux-deployment.md`.
 
 ## Known limitations
 
 - **The whole service bounces, not just one project's dispatch.**
   Forge runs a single dispatch loop across every registered project in
-  one process. A `SelfHostedWindowsService` deploy for the `forge`
+  one process. A `SelfHostedSystemdService` deploy for the `forge`
   project restarts that entire process, which is why the approve
   endpoint checks in-flight tasks across ALL projects, not just
   `forge`'s own slots.
-- **Junction-based, Windows-only.** `Forge.Deployer` is not built or
-  runnable on non-Windows platforms; `DeploymentKind.SelfHostedWindowsService`
-  is a Windows Service concept end to end.
+- **Linux-only.** `SelfHostedSystemdService` is Linux-only by
+  construction (`OperatingSystem.IsLinux()` guard at the top of the
+  executor). For non-Linux hosts, use `Script` and a hand-rolled
+  install script.
 - **No authentication on `/api/deployments` (or anywhere else in the
   dashboard).** Mitigated today by `AgentOptions.Hostname` defaulting
   to `127.0.0.1` — the dashboard is not reachable off-box out of the

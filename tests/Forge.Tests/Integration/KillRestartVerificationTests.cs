@@ -122,7 +122,7 @@ public class KillRestartVerificationTests : IDisposable
     public async Task KillAfterCommitBeforePush_RecoveryPushesAndOpensPr()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Inventory HUD"));
-        await _issues.ClaimAsync(issue.Id, "kilo");
+        await _issues.ClaimAsync(issue.Id, "forge");
         await _worktrees.CreateAsync(issue.Id, "main");
         var worktreePath = _worktrees.WorktreePathFor(issue.Id);
         var branch = $"agent/{issue.Id}";
@@ -188,7 +188,7 @@ public class KillRestartVerificationTests : IDisposable
     public async Task KillAfterPushBeforePr_RecoveryOpensPrWithoutPushingAgain()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Wiring"));
-        await _issues.ClaimAsync(issue.Id, "kilo");
+        await _issues.ClaimAsync(issue.Id, "forge");
         await _worktrees.CreateAsync(issue.Id, "main");
         var worktreePath = _worktrees.WorktreePathFor(issue.Id);
         var branch = $"agent/{issue.Id}";
@@ -225,7 +225,7 @@ public class KillRestartVerificationTests : IDisposable
 
     /// <summary>
     /// Negative case: orchestrator crashes BEFORE creating a
-    /// worktree (only claimed + assignee=kilo). The recoverer
+    /// worktree (only claimed + assignee=forge). The recoverer
     /// can't replay the LLM; the right thing to do is leave
     /// the issue alone and let the dispatch loop pick it up
     /// on the next ReadyAsync tick (which will re-claim and
@@ -235,7 +235,7 @@ public class KillRestartVerificationTests : IDisposable
     public async Task KillAfterClaimBeforeWorktree_RecoveryLeavesAlone()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Sketch"));
-        await _issues.ClaimAsync(issue.Id, "kilo");
+        await _issues.ClaimAsync(issue.Id, "forge");
         // No worktree created. No checkpoint advanced past "claimed".
         Assert.Equal(DispatchCheckpoint.Claimed, (await _issues.GetAsync(issue.Id))!.DispatchCheckpoint);
 

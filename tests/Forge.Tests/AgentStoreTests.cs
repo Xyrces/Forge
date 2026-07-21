@@ -30,7 +30,7 @@ public class AgentStoreTests : IDisposable
     {
         var a = await _agents.CreateAsync(new NewAgent("coredev", "CoreDev", "PortHorizon.Core"));
         Assert.False(string.IsNullOrEmpty(a.Id));
-        Assert.Equal("coredev", a.KiloName);
+        Assert.Equal("coredev", a.AgentName);
         Assert.True(a.Enabled);
     }
 
@@ -46,19 +46,19 @@ public class AgentStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task GetByKiloName_FindsExisting()
+    public async Task GetByName_FindsExisting()
     {
         await _agents.CreateAsync(new NewAgent("qa", "QA"));
-        var a = await _agents.GetByKiloNameAsync("qa");
+        var a = await _agents.GetByNameAsync("qa");
         Assert.NotNull(a);
-        Assert.Equal("qa", a!.KiloName);
+        Assert.Equal("qa", a!.AgentName);
     }
 
     [Fact]
     public async Task BulkUpsert_IsIdempotent()
     {
-        await _agents.BulkUpsertFromKiloFilesAsync(new[] { ("dev", "Dev", "", (string?)null) });
-        await _agents.BulkUpsertFromKiloFilesAsync(new[] { ("dev", "Dev v2", "PortHorizon.Core", (string?)null) });
+        await _agents.BulkUpsertFromAgentFilesAsync(new[] { ("dev", "Dev", "", (string?)null) });
+        await _agents.BulkUpsertFromAgentFilesAsync(new[] { ("dev", "Dev v2", "PortHorizon.Core", (string?)null) });
         var list = await _agents.ListAsync();
         Assert.Single(list);
         Assert.Equal("Dev v2", list[0].DisplayName);

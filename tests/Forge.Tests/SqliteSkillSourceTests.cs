@@ -65,10 +65,10 @@ public class SqliteSkillSourceTests : IDisposable
         try { File.Delete(_dbPath); } catch { }
     }
 
-    private async Task<string> SeedAgentAsync(string kiloName, string displayName)
+    private async Task<string> SeedAgentAsync(string agentName, string displayName)
     {
         var rec = await _agents.CreateAsync(new NewAgent(
-            KiloName: kiloName, DisplayName: displayName));
+            AgentName: agentName, DisplayName: displayName));
         return rec.Id;
     }
 
@@ -98,8 +98,8 @@ public class SqliteSkillSourceTests : IDisposable
         await SeedAgentAsync("coredev", "Core Dev");
         await SeedAgentAsync("reviewer", "Reviewer");
 
-        var coredevId = (await _agents.GetByKiloNameAsync("coredev"))!.Id;
-        var reviewerId = (await _agents.GetByKiloNameAsync("reviewer"))!.Id;
+        var coredevId = (await _agents.GetByNameAsync("coredev"))!.Id;
+        var reviewerId = (await _agents.GetByNameAsync("reviewer"))!.Id;
 
         await _skills.CreateAsync(new NewSkill(Name: "ecs-style", Body: "X", AgentId: coredevId));
         await _skills.CreateAsync(new NewSkill(Name: "tone-of-voice", Body: "Y", AgentId: reviewerId));
@@ -147,7 +147,7 @@ public class SqliteSkillSourceTests : IDisposable
     public async Task LoadForRole_SkillNameCollision_GlobalThenRole_RoleWins()
     {
         await SeedAgentAsync("coredev", "Core Dev");
-        var coredevId = (await _agents.GetByKiloNameAsync("coredev"))!.Id;
+        var coredevId = (await _agents.GetByNameAsync("coredev"))!.Id;
 
         await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "GLOBAL VERSION", AgentId: null));
         await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "ROLE VERSION", AgentId: coredevId));

@@ -124,8 +124,8 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         app.MapPost("/api/agents/db", async (HttpContext ctx) =>
         {
             var spec = await JsonSerializer.DeserializeAsync<NewAgent>(ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
-            if (spec is null || string.IsNullOrWhiteSpace(spec.KiloName) || string.IsNullOrWhiteSpace(spec.DisplayName))
-                return Results.BadRequest(new { error = "kiloName and displayName required" });
+            if (spec is null || string.IsNullOrWhiteSpace(spec.AgentName) || string.IsNullOrWhiteSpace(spec.DisplayName))
+                return Results.BadRequest(new { error = "agentName and displayName required" });
             var created = await agents.CreateAsync(spec, ctx.RequestAborted);
             return Results.Json(ToAgentView(created), DashboardJson.Options, statusCode: 201);
         });
@@ -239,20 +239,20 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         });
 
         // ---- Agent messages ----
-        app.MapPost("/api/agents/{kiloName}/messages", (string kiloName, HttpContext ctx) =>
+        app.MapPost("/api/agents/{agentName}/messages", (string agentName, HttpContext ctx) =>
         {
             return ReadMessageBodyAsync(ctx, message =>
             {
-                messageBus.Enqueue(kiloName, message);
+                messageBus.Enqueue(agentName, message);
                 logger.LogInformation("Queued message for agent {Agent} (pending count: {N})",
-                    kiloName, messageBus.Count(kiloName));
+                    agentName, messageBus.Count(agentName));
                 return Results.Accepted();
             });
         });
 
-        app.MapGet("/api/agents/{kiloName}/messages", (string kiloName) =>
+        app.MapGet("/api/agents/{agentName}/messages", (string agentName) =>
         {
-            return Results.Json(new { agent = kiloName, pending = messageBus.Count(kiloName) },
+            return Results.Json(new { agent = agentName, pending = messageBus.Count(agentName) },
                 DashboardJson.Options);
         });
     }
@@ -297,7 +297,7 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
     private static object ToAgentView(AgentRecord a) => new
     {
         id = a.Id,
-        kiloName = a.KiloName,
+        agentName = a.AgentName,
         displayName = a.DisplayName,
         scope = a.Scope,
         description = a.Description,

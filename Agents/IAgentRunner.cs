@@ -4,8 +4,8 @@ namespace Forge.Agents;
 
 /// <summary>
 /// Abstraction over the agent runtime. Phase 0: in-process Microsoft Agent
-/// Framework (MAF) via <see cref="MafAgentRunner"/>. The kilo/ACP path was
-/// removed in P0 once the MAF runner proved the contract.
+/// Framework (MAF) via <see cref="MafAgentRunner"/>. The pre-MAF ACP/CLI
+/// path was removed in P0 once the MAF runner proved the contract.
 ///
 /// <para>
 /// The runner is stateless across tasks: each call instantiates a fresh

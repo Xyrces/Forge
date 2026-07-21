@@ -52,14 +52,14 @@ IssueStore.CreateAsync           ──►  issue row (status=Pending, type=task
   │
   │  every 3s: DispatchSingleTaskAsync on ReadyAsync()
   ▼
-IssueStore.ClaimAsync            ──►  status=InProgress, assignee=kilo
+IssueStore.ClaimAsync            ──►  status=InProgress, assignee=forge
   │                                  metadata: branch=agent/<id>
   ▼
 GitWorktreeService.CreateAsync   ──►  branch agent/<id>, worktree at
   │                                   .portHorizon/worktrees/<id>
   ▼
 MafAgentRunner.RunAsync           ──►  MAF agent loop with:
-  │                                   role instructions from .kilo/agents/<role>.md
+  │                                   role instructions from agents/<role>.md
   │                                   memory block (## Project memory) from MemoryStore
   │                                   prompt with task body + worktree path
   │                                   bash AIFunction → cmd.exe /c <command>

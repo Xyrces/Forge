@@ -35,7 +35,7 @@ public sealed record ViewTask(
 
 public sealed record ViewAgent(
     string Id,
-    string KiloName,
+    string AgentName,
     string DisplayName,
     string Scope,
     string? Description,
@@ -100,7 +100,7 @@ public sealed class ViewClient
                 t.branch,
                 t.worktreePath)).ToArray(),
             Agents: resp.agents.Select(a => new ViewAgent(
-                a.id, a.kiloName ?? "", a.displayName ?? "", a.scope ?? "",
+                a.id, a.agentName ?? "", a.displayName ?? "", a.scope ?? "",
                 a.description, a.enabled, a.configJson ?? "{}", a.createdAt, a.updatedAt)).ToArray(),
             Skills: resp.skills.Select(s => new ViewSkill(
                 s.id, s.name ?? "", s.description, s.body, s.agentId,
@@ -140,7 +140,7 @@ public sealed class ViewClient
 
     private sealed record AgentDto(
         string id,
-        string kiloName,
+        string agentName,
         string displayName,
         string scope,
         string? description,

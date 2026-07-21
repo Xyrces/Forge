@@ -82,7 +82,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         if (opts is null) return null;
         var dbPath = _issuesDbByProject.TryGetValue(projectId, out var assigned)
             ? assigned
-            : ProjectStateDirs.IssuesDbFor(opts);
+            : ProjectStateDirs.IssuesDbFor(opts, ForgesystemPaths.ResolveDataRoot());
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var ctx2 = new ProjectContext(opts, new IssueStore(dbPath));
         return _cache.GetOrAdd(projectId, ctx2);

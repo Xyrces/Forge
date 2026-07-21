@@ -31,10 +31,11 @@ public class DispatchCheckpointTests : IDisposable
     [Fact]
     public void SchemaVersion_IsCurrent_AfterMigration()
     {
-        // v12 = P5 SharedContext. v13 = P5.5 memory extraction.
-        // v14 = P6 Stage 8 sprint proposal audit. v15 = P8 deployment
-        // candidates.
-        Assert.Equal(15, IssueStore.CurrentSchemaVersion);
+// v12 = P5 SharedContext. v13 = P5.5 memory extraction.
+// v14 = P6 Stage 8 sprint proposal audit. v15 = P8 deployment
+// candidates. v16 = drop kilo prefix on agent table + assignee.
+// v17 = project registry table for runtime project add/remove.
+        Assert.Equal(17, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]
@@ -51,7 +52,7 @@ public class DispatchCheckpointTests : IDisposable
     public async Task ClaimAsync_SetsCheckpointClaimed()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
-        var claimed = await _issues.ClaimAsync(issue.Id, "kilo");
+        var claimed = await _issues.ClaimAsync(issue.Id, "forge");
         Assert.NotNull(claimed);
         Assert.Equal(DispatchCheckpoint.Claimed, claimed!.DispatchCheckpoint);
         Assert.NotNull(claimed.CheckpointAt);
@@ -62,7 +63,7 @@ public class DispatchCheckpointTests : IDisposable
     public async Task SetCheckpointAsync_AdvancesThroughAllStates()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
-        await _issues.ClaimAsync(issue.Id, "kilo");
+        await _issues.ClaimAsync(issue.Id, "forge");
 
         foreach (var cp in new[] {
             DispatchCheckpoint.WorktreeAcquired,
@@ -83,7 +84,7 @@ public class DispatchCheckpointTests : IDisposable
     public async Task TransitionAsync_TerminalStatus_ClearsCheckpoint()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
-        await _issues.ClaimAsync(issue.Id, "kilo");
+        await _issues.ClaimAsync(issue.Id, "forge");
         await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.AgentCompleted);
         await _issues.TransitionAsync(issue.Id, IssueStatus.Failed, "test failure");
         var after = await _issues.GetAsync(issue.Id);
@@ -92,15 +93,15 @@ public class DispatchCheckpointTests : IDisposable
     }
 
     [Fact]
-    public async Task ListInProgressForRecoveryAsync_ReturnsOnlyKiloInProgress()
+    public async Task ListInProgressForRecoveryAsync_ReturnsOnlyForgeInProgress()
     {
-        // Three candidates: kilo+InProgress (should appear),
-        // human+InProgress (should NOT appear), kilo+Pending (should NOT appear).
-        var kilo = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "k"));
+        // Three candidates: forge+InProgress (should appear),
+        // human+InProgress (should NOT appear), forge+Pending (should NOT appear).
+        var forge = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "k"));
         var human = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "h", Assignee: "human"));
         var pending = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "p"));
 
-        await _issues.ClaimAsync(kilo.Id, "kilo");
+        await _issues.ClaimAsync(forge.Id, "forge");
         // Force the human-assigned issue into InProgress without
         // touching the checkpoint (mimics a manual state).
         var humanIssue = (await _issues.GetAsync(human.Id))!;
@@ -108,7 +109,7 @@ public class DispatchCheckpointTests : IDisposable
 
         var list = await _issues.ListInProgressForRecoveryAsync();
         Assert.Single(list);
-        Assert.Equal(kilo.Id, list[0].Id);
+        Assert.Equal(forge.Id, list[0].Id);
         Assert.Equal(DispatchCheckpoint.Claimed, list[0].DispatchCheckpoint);
     }
 
@@ -116,7 +117,7 @@ public class DispatchCheckpointTests : IDisposable
     public async Task IncrementRecoveryAttemptsAsync_IncrementsCounter()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
-        await _issues.ClaimAsync(issue.Id, "kilo");
+        await _issues.ClaimAsync(issue.Id, "forge");
         var n = await _issues.IncrementRecoveryAttemptsAsync(issue.Id);
         Assert.Equal(1, n);
         var after = await _issues.GetAsync(issue.Id);

@@ -82,7 +82,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-wf-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-wf-md-{Guid.NewGuid():N}"));
     }
 
     private sealed class TestScriptingFactory : IChatClientFactory

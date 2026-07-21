@@ -54,6 +54,9 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly InMemoryDashboardEventBus _bus;
     private readonly ProjectContextFactory? _projectFactory;
     private readonly SlotTable? _slots;
+    private readonly IProjectStore? _projectStore;
+    private readonly ProjectCloner? _projectCloner;
+    private readonly GitHubOptions? _githubOptions;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
@@ -96,7 +99,10 @@ public sealed class DashboardHost : IAsyncDisposable
         SlotTable? slots = null,
         GitHubService? gitHub = null,
         Forge.Agents.IAgentRunner? reviewerRunner = null,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        IProjectStore? projectStore = null,
+        ProjectCloner? projectCloner = null,
+        GitHubOptions? githubOptions = null)
     {
         _options = options;
         _headroom = headroom;
@@ -135,6 +141,9 @@ public sealed class DashboardHost : IAsyncDisposable
         _bus = bus;
         _projectFactory = projectFactory;
         _slots = slots;
+        _projectStore = projectStore;
+        _projectCloner = projectCloner;
+        _githubOptions = githubOptions;
         _logger = logger;
     }
 
@@ -161,6 +170,9 @@ public sealed class DashboardHost : IAsyncDisposable
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
         if (_projectFactory is not null) builder.Services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
+        if (_projectStore is not null) builder.Services.AddSingleton(_projectStore);
+        if (_projectCloner is not null) builder.Services.AddSingleton(_projectCloner);
+        if (_githubOptions is not null) builder.Services.AddSingleton(_githubOptions);
 
         // 2026-07-18 (Phase 2.11.f + bug-1-review): the Reviewer
         // dispatcher needs to be in the DI service collection
@@ -220,7 +232,7 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
                     agents = agents.Select(a => new
                     {
                         id = a.Id,
-                        kiloName = a.KiloName,
+                        agentName = a.AgentName,
                         displayName = a.DisplayName,
                         scope = a.Scope,
                         description = a.Description,

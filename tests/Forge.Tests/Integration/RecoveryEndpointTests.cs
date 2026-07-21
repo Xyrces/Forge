@@ -141,7 +141,7 @@ public class RecoveryEndpointTests : IDisposable
     private async Task<string> SeedAsync(DispatchCheckpoint target)
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
-        await _issues.ClaimAsync(issue.Id, "kilo");
+        await _issues.ClaimAsync(issue.Id, "forge");
         await _worktrees.CreateAsync(issue.Id, "main");
         var wp = _worktrees.WorktreePathFor(issue.Id);
         await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null,

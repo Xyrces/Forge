@@ -10,12 +10,14 @@ namespace Forge.Configuration;
 /// </summary>
 public static class ProjectStateDirs
 {
-    public static string RootFor(ProjectOptions project)
+    public static string RootFor(ProjectOptions project, string dataRoot)
     {
         if (project is null) throw new ArgumentNullException(nameof(project));
-        if (string.IsNullOrWhiteSpace(project.Root))
-            throw new InvalidOperationException($"Project '{project.Id}' has empty Root.");
-        return project.Root;
+        if (!string.IsNullOrWhiteSpace(project.Root)) return project.Root;
+        if (string.IsNullOrWhiteSpace(project.RepoUrl))
+            throw new InvalidOperationException(
+                $"Project '{project.Id}' has neither Root nor RepoUrl; cannot resolve a working copy path.");
+        return ForgesystemPaths.ProjectDir(dataRoot, project.Id);
     }
 
     /// <summary>
@@ -24,20 +26,20 @@ public static class ProjectStateDirs
     /// returns <c>{root}/.portHorizon/state</c> (legacy layout).
     /// All other projects use <c>{root}/.portHorizon/state/{id}</c>.
     /// </summary>
-    public static string StateDirFor(ProjectOptions project)
-        => Path.Combine(RootFor(project), ".portHorizon", "state", StateSubdirFor(project));
+    public static string StateDirFor(ProjectOptions project, string dataRoot)
+        => Path.Combine(RootFor(project, dataRoot), ".portHorizon", "state", StateSubdirFor(project));
 
     public static string StateSubdirFor(ProjectOptions project)
         => string.Equals(project.Id, "default", StringComparison.OrdinalIgnoreCase)
             ? string.Empty
             : project.Id;
 
-    public static string IssuesDbFor(ProjectOptions project)
-        => Path.Combine(StateDirFor(project), "issues.db");
+    public static string IssuesDbFor(ProjectOptions project, string dataRoot)
+        => Path.Combine(StateDirFor(project, dataRoot), "issues.db");
 
-    public static string MemoryDbFor(ProjectOptions project)
-        => Path.Combine(StateDirFor(project), "memory.db");
+    public static string MemoryDbFor(ProjectOptions project, string dataRoot)
+        => Path.Combine(StateDirFor(project, dataRoot), "memory.db");
 
-    public static string IssuesJsonlFor(ProjectOptions project)
-        => Path.Combine(StateDirFor(project), "issues.jsonl");
+    public static string IssuesJsonlFor(ProjectOptions project, string dataRoot)
+        => Path.Combine(StateDirFor(project, dataRoot), "issues.jsonl");
 }

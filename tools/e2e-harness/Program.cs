@@ -164,10 +164,10 @@ public static class Program
         CostTracker? costTracker = null;
 if (useRealLlm)
             {
-                var kiloKey = Environment.GetEnvironmentVariable("LLM_API_KEY")
+                var llmApiKey = Environment.GetEnvironmentVariable("LLM_API_KEY")
                     ?? throw new InvalidOperationException("--real-llm requires LLM_API_KEY env var");
-                var kiloBase = Environment.GetEnvironmentVariable("LLM_BASE_URL") ?? "https://api.kilo.ai/api/gateway";
-                var kiloModel = Environment.GetEnvironmentVariable("LLM_MODEL") ?? "minimax/minimax-m3";
+                var llmBase = Environment.GetEnvironmentVariable("LLM_BASE_URL") ?? "https://api.kilo.ai/api/gateway";
+                var llmModel = Environment.GetEnvironmentVariable("LLM_MODEL") ?? "minimax/minimax-m3";
                 var llmOptions = new Configuration.LlmOptions
                 {
                     DefaultProvider = "kilo-gateway",
@@ -176,14 +176,14 @@ if (useRealLlm)
                         new()
                         {
                             Name = "kilo-gateway",
-                            BaseUrl = kiloBase,
-                            ApiKey = kiloKey,
-                            DefaultModel = kiloModel,
+                            BaseUrl = llmBase,
+                            ApiKey = llmApiKey,
+                            DefaultModel = llmModel,
                         },
                     },
                     Roles = new Dictionary<string, Configuration.LlmRoleModelOptions>
                     {
-                        ["CoreDev"] = new() { ProviderName = "kilo-gateway", Model = kiloModel },
+                        ["CoreDev"] = new() { ProviderName = "kilo-gateway", Model = llmModel },
                     },
                 };
                 var llmConfig = LlmConfigAdapter.FromOptions(llmOptions);

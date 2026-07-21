@@ -1,0 +1,93 @@
+[Unit]
+Description=Forge — multi-project AI coding agent orchestrator
+Documentation=https://github.com/Xyrces/Forge
+After=network-online.target
+Wants=network-online.target
+
+# Rate-limit restart loops (auto-restart on crash, but not on a
+# clean stop). Without these, a process that crashes in a tight
+# loop would restart every 5s forever; with them, after 10
+# restarts in 60s the unit enters "failed" and stops trying.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+# Type=notify: Forge calls AddSystemd() in Program.cs, which publishes
+# READY=1 once the orchestrator's dispatch loop has started, and STOPPING=1
+# on graceful shutdown. systemd waits for READY=1 before considering the
+# unit "started" (no race with the dashboard becoming reachable).
+Type=notify
+NotifyAccess=main
+
+# ExecStart points at the symlink, NOT at a fixed release path, so
+# `systemctl restart forge` after a SelfHostedSystemdService deploy
+# picks up the freshly-repointed binary automatically. The deploy
+# executor handles the symlink swap.
+ExecStart=/usr/bin/dotnet /opt/forge/current/Forge.Core.dll --config /etc/forge/appsettings.json
+
+# StateDirectory=auto creates /var/lib/forge owned by User=forge at
+# first start; StateDirectory=forge -> /var/lib/forge. The agent
+# processes' worktrees and the JSONL mirror live here. Override with
+# Environment=ASPNETCORE_CONTENTROOT=... if you need a different
+# layout (see appsettings.json's workspace.root + .portHorizon/state/).
+WorkingDirectory=/var/lib/forge
+StateDirectory=forge
+StateDirectoryMode=0750
+
+# Run as an unprivileged user. Create with `useradd --system --home
+# /var/lib/forge --shell /usr/sbin/nologin forge` before `systemctl
+# enable --now forge`.
+User=forge
+Group=forge
+
+# Resource limits. Spawner.MaxConcurrentSessions defaults to 4 agent
+# runs in parallel — the defaults below are generous but tunable.
+LimitNOFILE=65536
+MemoryMax=8G
+TasksMax=512
+
+# Graceful shutdown: SIGTERM, systemd waits up to 30s for the
+# dispatch loop to drain in-flight issues (they transition to
+# status=Pending with assignee=<empty> on next startup; StartupRecovery
+# picks them up via dispatch_checkpoint).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+FinalKillSignal=SIGKILL
+
+# Auto-restart on crash, but not on a clean stop.
+Restart=on-failure
+RestartSec=5s
+
+# Environment passthrough. ASPNETCORE_URLS binds the dashboard.
+# FORGE_* entries are read by OptionsLoader for non-appsettings
+# overrides. Keep secrets out of the unit file — use
+# `systemctl edit forge` and drop them into override.conf with
+# mode 0600, or use EnvironmentFile=/etc/forge/forge.env.
+Environment=ASPNETCORE_URLS=http://127.0.0.1:4097
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Environment=DOTNET_NOLOGO=1
+
+# Hardening. systemd unit defaults already drop most caps; the
+# explicit list below makes it obvious what's allowed. Adjust
+# NoNewPrivileges if you need a privileged operation (you shouldn't).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+# Allow reads of the appsettings file + the symlinked release dir.
+ReadOnlyPaths=/etc/forge /opt/forge
+ReadWritePaths=/var/lib/forge
+
+[Install]
+WantedBy=multi-user.target

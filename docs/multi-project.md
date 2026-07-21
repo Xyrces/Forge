@@ -229,9 +229,10 @@ points at for that Forge process (matters if you keep the source repo's
 own remote and the deploying instance's `github` config in sync). The
 part that's genuinely new is what happens **after** a PR merges — see
 `docs/deployment-pipeline.md` for the full deployment-approval flow
-(`/deployments` dashboard page, `DeploymentKind.SelfHostedWindowsService`,
-and the `Forge.Deployer` helper that survives the service bounce Forge
-can't survive on its own).
+(`/deployments` dashboard page, `DeploymentKind.SelfHostedSystemdService`,
+the symlink-repoint + `systemctl restart` flow, and the `forge` unit's
+`ExecStart=/opt/forge/current/Forge.Core.dll` so restarts pick up the
+freshly-repointed binary).
 
 **Ordering matters if you also list other projects.** The dispatch
 loop (as opposed to the dashboard, which is genuinely multi-project) is

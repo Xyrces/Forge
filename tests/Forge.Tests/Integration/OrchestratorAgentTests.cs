@@ -25,8 +25,8 @@ namespace Forge.Tests.Integration;
 /// </para>
 ///
 /// <para>
-/// P0 deliverable: the Maf path is wired end-to-end. <c>Runtime=Acp</c>
-/// must throw a <see cref="NotSupportedException"/> because the kilo path
+/// P0 deliverable: the MAF path is wired end-to-end. <c>Runtime=Acp</c>
+/// must throw a <see cref="NotSupportedException"/> because the ACP path
 /// is staged for removal.
 /// </para>
 /// </summary>

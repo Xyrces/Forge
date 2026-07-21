@@ -11,11 +11,11 @@ public class RoleAgentRegistryTests
     {
         var registry = new RoleAgentRegistry();
         var coredev = registry.ForType(AgentType.CoreDev);
-        Assert.Equal("coredev", coredev.KiloAgentName);
+        Assert.Equal("coredev", coredev.AgentName);
         Assert.Equal("PortHorizon.Core", coredev.ProjectSubdir);
 
         var reviewer = registry.ForType(AgentType.Reviewer);
-        Assert.Equal("reviewer", reviewer.KiloAgentName);
+        Assert.Equal("reviewer", reviewer.AgentName);
         Assert.DoesNotContain(reviewer.AllowedTools, t => t == "edit");
         Assert.DoesNotContain(reviewer.AllowedTools, t => t == "bash");
     }

@@ -12,7 +12,7 @@ Status: **design draft** (no code yet). Goal: replace `StateStore`'s JSON-file t
 | Hash-based IDs (`bd-a1b2`) | Today we use caller-supplied string IDs (`--enqueue-task my-task-001`). Hash IDs survive merges, don't collide on copy-paste, encode ordering. |
 | `ready` query (no open blockers) | The dispatch loop's main job becomes "find a ready task, claim it, dispatch." |
 | `issues.jsonl` export | Human-readable, line-oriented, git-diff-friendly snapshot of the queue. We can `tail` it, `grep` it, commit it for a "what was the queue at this point in time" record. Beads uses this exact mechanism for the same reason. |
-| Memory / context (`bd remember`) | Project-level memory that gets injected into prompts. Today we have `.kilo/agents/*.md` for role memory but nowhere to store cross-task learnings ("Xyrc decided they want NetArchTest gates deferred"). |
+| Memory / context (`bd remember`) | Project-level memory that gets injected into prompts. Today we have `agents/*.md` for role memory but nowhere to store cross-task learnings ("Xyrc decided they want NetArchTest gates deferred"). |
 
 ## What we're explicitly NOT keeping
 

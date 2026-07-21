@@ -1,6 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Hosting.WindowsServices;
+using Microsoft.Extensions.Hosting.Systemd;
 using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
 using Forge.AgentTools;
@@ -95,33 +95,38 @@ if (mode == CliMode.DashboardOnly)
         if (mode == CliMode.RecoverAndStart)
             return await RunRecoverAsync(options, loggerFactory, logger, dryRun: false);
 
-        // Windows Service hosting. When launched by the Service
-        // Control Manager (sc.exe / New-Service / Windows Services
-        // MMC), stdin/stdout are not a console and Console.CancelKeyPress
-        // never fires on stop -- the SCM instead expects the process
+        // systemd hosting. When launched by systemd (Type=notify),
+        // stdin/stdout are not a console and Console.CancelKeyPress
+        // never fires on stop -- systemd instead expects the process
         // to honor a stop signal delivered through the generic host's
-        // IHostApplicationLifetime. WindowsServiceHelpers.IsWindowsService()
-        // returns false for `dotnet run`/interactive launches, so this
-        // is a no-op for every other invocation in this switch.
-        if (WindowsServiceHelpers.IsWindowsService())
-            return await RunAsWindowsServiceAsync(options, loggerFactory, logger);
+        // IHostApplicationLifetime. INVOCATION_ID is set by systemd
+        // for every service unit process; its presence is the
+        // canonical "we were launched by systemd" signal. This is
+        // a no-op for every other invocation in this switch.
+        if (IsSystemdService())
+            return await RunAsSystemdServiceAsync(options, loggerFactory, logger);
 
         return await RunOrchestratorAsync(options, loggerFactory, logger);
     }
 
-    // Wraps RunOrchestratorAsync in a minimal generic Host so the
-    // Service Control Manager sees a well-behaved service: SCM start
-    // is acknowledged once the host starts the hosted service, and an
-    // SCM stop request cancels stoppingToken, which we forward into
+    private static bool IsSystemdService()
+    {
+        return !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INVOCATION_ID"));
+    }
+
+    // Wraps RunOrchestratorAsync in a minimal generic Host so systemd
+    // sees a well-behaved Type=notify service: READY=1 is published
+    // once the hosted service starts, and a systemd stop request
+    // cancels stoppingToken, which we forward into
     // RunOrchestratorAsync's own shutdown token. Everything else
     // (dashboard, dispatch loop, schedulers) is unchanged -- this is
     // purely a lifecycle adapter, not a parallel code path.
-    private static async Task<int> RunAsWindowsServiceAsync(
+    private static async Task<int> RunAsSystemdServiceAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
         var exitCode = 0;
         var builder = Host.CreateApplicationBuilder();
-        builder.Services.AddWindowsService(o => o.ServiceName = "Forge");
+        builder.Services.AddSystemd();
         builder.Services.AddHostedService(_ =>
             new OrchestratorHostedService(options, loggerFactory, logger, code => exitCode = code));
         using var host = builder.Build();
@@ -174,7 +179,7 @@ if (mode == CliMode.DashboardOnly)
     {
         try
         {
-            var (projects, dbByProject, _) = BuildProjectBootstrap(options, logger);
+            var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
             var primary = projects[0];
             await using var issues = new IssueStore(dbByProject[primary.Id]);
             var all = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
@@ -202,7 +207,7 @@ if (mode == CliMode.DashboardOnly)
         var description = ParseArg(args, "--task-desc") ?? "no description";
         var branch = ParseArg(args, "--branch") ?? $"agent/{title}";
 
-        var (projects, dbByProject, _) = BuildProjectBootstrap(options, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
         var primary = projects[0];
         var issues = new IssueStore(dbByProject[primary.Id]);
 
@@ -259,15 +264,38 @@ if (mode == CliMode.DashboardOnly)
     /// </summary>
     private static (IReadOnlyList<ProjectOptions> Projects,
                     Dictionary<string, string> IssuesDbByProject,
-                    string DataRoot)
+                    string DataRoot,
+                    Core.ProjectStore ProjectStore,
+                    Projects.ProjectCloner Cloner)
         BuildProjectBootstrap(AgentOptions options, ILogger logger)
     {
         var dataRoot = ForgesystemPaths.ResolveDataRoot(options.Forgesystem.DataRoot);
         Directory.CreateDirectory(dataRoot);
         logger.LogInformation("Forgesystem data root: {Root}", dataRoot);
 
-        var bootstrap = new ProjectBootstrap(dataRoot, null);
-        var registry = ProjectRegistryLoader.Load(options, logger);
+        // ProjectStore + ProjectCloner need an IssueStore to anchor
+        // their SQLite connection. The "primary" project (first in
+        // the registry) gets its IssueStore created here, then we
+        // pass it to the registry loader + cloner. Other projects get
+        // their IssueStore allocated inside the loop below.
+        var primaryDbPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
+        Directory.CreateDirectory(Path.GetDirectoryName(primaryDbPath)!);
+        var primaryStore = new Core.IssueStore(primaryDbPath);
+        var projectStore = new Core.ProjectStore(primaryStore);
+
+        // Seed SQLite from appsettings.json on first boot. Idempotent.
+        try
+        {
+            ProjectRegistryLoader.SeedAsync(projectStore, options.Projects, logger).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Project seeding from appsettings.json failed; continuing.");
+        }
+
+        var cloner = new Projects.ProjectCloner(dataRoot, null);
+        var bootstrap = new Projects.ProjectBootstrap(dataRoot, cloner, options.GitHub, null);
+        var registry = ProjectRegistryLoader.Load(options, projectStore, logger);
 
         var finalised = new List<ProjectOptions>(registry.Count);
         var dbByProject = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -277,18 +305,18 @@ if (mode == CliMode.DashboardOnly)
             finalised.Add(result.Project);
             dbByProject[result.Project.Id] = result.IssuesDbPath;
             logger.LogInformation(
-                "Project '{Id}' root={Root} state={State} created={Created} gitInit={GitInit}",
+                "Project '{Id}' root={Root} state={State} created={Created} gitInit={GitInit} cloned={Cloned}",
                 result.Project.Id, result.Project.Root, result.StateDirectory,
-                result.Created, result.InitializedAsGitRepo);
+                result.Created, result.InitializedAsGitRepo, result.ClonedFromRemote);
         }
 
-        return (finalised, dbByProject, dataRoot);
+        return (finalised, dbByProject, dataRoot, projectStore, cloner);
     }
 
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
-        var (dashboardOnlyProjects, dbByProject, _) = BuildProjectBootstrap(options, logger);
+        var (dashboardOnlyProjects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
         var defaultDb = dashboardOnlyProjects.Count > 0
             ? dbByProject[dashboardOnlyProjects[0].Id]
             : throw new InvalidOperationException("At least one project is required to run the dashboard.");
@@ -308,7 +336,10 @@ var dashboard = new DashboardHost(
             options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
             projectFactory: dashboardOnlyFactory,
-            slots: dashboardOnlySlots);
+            slots: dashboardOnlySlots,
+            projectStore: projectStore,
+            projectCloner: cloner,
+            githubOptions: options.GitHub);
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -425,7 +456,7 @@ Console.Error.WriteLine(ex.ToString());
     {
         try
         {
-            var (projects, dbByProject, _) = BuildProjectBootstrap(options, logger);
+            var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
             var primary = projects[0];
             var primaryDb = dbByProject[primary.Id];
             var stateDir = Path.GetDirectoryName(primaryDb)!;
@@ -507,7 +538,7 @@ Console.Error.WriteLine(ex.ToString());
     private static async Task<int> RunPreflightCheckAsync(AgentOptions options, ILogger logger)
     {
         var failures = new List<string>();
-        var (projects, dbByProject, dataRoot) = BuildProjectBootstrap(options, logger);
+        var (projects, dbByProject, dataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
         var primary = projects[0];
         var primaryDb = dbByProject[primary.Id];
         var stateDir = Path.GetDirectoryName(primaryDb)!;
@@ -761,7 +792,7 @@ Console.Error.WriteLine(ex.ToString());
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger,
         CancellationToken externalStop = default)
     {
-        var (knownProjects, orchDbByProject, orchDataRoot) = BuildProjectBootstrap(options, logger);
+        var (knownProjects, orchDbByProject, orchDataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
         var primary = knownProjects[0];
         var primaryDb = orchDbByProject[primary.Id];
         var primaryStateDir = Path.GetDirectoryName(primaryDb)!;
@@ -792,69 +823,6 @@ Console.Error.WriteLine(ex.ToString());
         var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
         var memoryBootstrap = new Core.IssueStore(memoryDbPath);
         var memoryStore = new MemoryStore(memoryDbPath);
-
-        // 2026-07-18 (Phase 2.11.f + bug-3 deploy self-deadlock fix):
-        // before any startup work, scan sibling-of-releases for
-        // .pending-{sha} markers and consume them. The new release
-        // was published by SelfHostedWindowsServiceDeploymentExecutor;
-        // we swap the junction (and delete the marker) before any
-        // startup work so a half-failed deploy from the previous
-        // process bootstraps into the new binary cleanly.
-        var primaryDeployCfg = primary.Deployment;
-        if (primaryDeployCfg?.Kind == DeploymentKind.SelfHostedWindowsService
-            && !string.IsNullOrWhiteSpace(primaryDeployCfg.ReleasesRoot)
-            && !string.IsNullOrWhiteSpace(primaryDeployCfg.CurrentLinkPath))
-        {
-            var siblingOfReleases = Path.GetDirectoryName(primaryDeployCfg.ReleasesRoot.TrimEnd('\\','/'))!;
-            if (Directory.Exists(siblingOfReleases))
-            {
-                foreach (var markerPath in Directory.GetFiles(siblingOfReleases, ".pending-*"))
-                {
-                    try
-                    {
-                        var sha = Path.GetFileName(markerPath).Substring(".pending-".Length);
-                        var releaseDir = Path.Combine(primaryDeployCfg.ReleasesRoot, sha);
-                        if (!Directory.Exists(releaseDir))
-                        {
-                            logger.LogWarning("Skipping pending marker {Marker}: releaseDir {ReleaseDir} missing", markerPath, releaseDir);
-                            File.Delete(markerPath);
-                            continue;
-                        }
-                        var current = primaryDeployCfg.CurrentLinkPath;
-                        if (Directory.Exists(current))
-                        {
-                            var attrs = File.GetAttributes(current);
-                            if (attrs.HasFlag(FileAttributes.ReparsePoint)) Directory.Delete(current);
-                            else
-                            {
-                                var backup = current + ".pre-junction-" + DateTime.UtcNow.Ticks;
-                                Directory.Move(current, backup);
-                            }
-                        }
-                        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(current))!);
-                        var psi = new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = "cmd.exe",
-                            Arguments = $"/c mklink /J \"{current}\" \"{releaseDir}\"",
-                            UseShellExecute = false,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            CreateNoWindow = true,
-                        };
-                        using var proc = System.Diagnostics.Process.Start(psi) ?? throw new InvalidOperationException("mklink start failed");
-                        proc.WaitForExit();
-                        if (proc.ExitCode != 0)
-                            throw new InvalidOperationException($"mklink exit={proc.ExitCode}; {proc.StandardError.ReadToEnd()}");
-                        File.Delete(markerPath);
-                        logger.LogInformation("Staged swap applied: current -> {ReleaseDir}", releaseDir);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Pending marker {Marker} failed; leaving for retry", markerPath);
-                    }
-                }
-            }
-        }
 
         // Phase 4: JSONL mirror of the issue store. Background service
         // rewrites the file every 5s so it's safe to tail -f.
@@ -934,7 +902,7 @@ Console.Error.WriteLine(ex.ToString());
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
-            kiloAgentsRoot: Path.Combine(primary.Root, ".kilo", "agents"),
+            rolePromptsRoot: Path.Combine(primary.Root, "agents"),
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,
@@ -1020,7 +988,7 @@ Console.Error.WriteLine(ex.ToString());
                 eventBus,
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
-                kiloAgentsRoot: Path.Combine(primary.Root, ".kilo", "agents")));
+                rolePromptsRoot: Path.Combine(primary.Root, "agents")));
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
         specStoreRef.Set(specStore);  // P5 — wire the spec store to the late-binding holder
         var specExtractionReader = new Core.SpecExtractionReader(issues);
@@ -1031,7 +999,7 @@ Console.Error.WriteLine(ex.ToString());
         var productAgentFactory = new Agents.ProductAgentFactory(
             specStore, issues, projectContextSource, chatClientFactory, llmConfig,
             roleRegistry, eventBus, skillSource, loggerFactory,
-            Path.Combine(primary.Root, ".kilo", "agents"));
+            Path.Combine(primary.Root, "agents"));
         var productRefinementQueue = new Agents.ProductRefinementQueue(
             productAgentFactory, specStore, eventBus,
             loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
@@ -1109,18 +1077,6 @@ Console.Error.WriteLine(ex.ToString());
                 string.Join(",", knownProjects.Select(p => $"{p.Id}={p.Name}")));
         }
 
-        // P8: reconcile any SelfHostedWindowsService deployment that
-        // completed (or failed) while THIS process wasn't running --
-        // the executor that kicked it off was killed by the very
-        // service stop it triggered, so the verdict could only ever
-        // be written by whichever Forge.Core process starts next.
-        var deployReconciler = new Deploy.DeploymentResultReconciler(
-            loggerFactory.CreateLogger<Deploy.DeploymentResultReconciler>());
-        await deployReconciler.ReconcileAsync(
-            knownProjects,
-            projectId => new Deploy.DeploymentStore(orchDbByProject[projectId]),
-            CancellationToken.None);
-
         var dashboard = new DashboardHost(
             options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
             loggerFactory.CreateLogger<DashboardHost>(),
@@ -1152,7 +1108,10 @@ Console.Error.WriteLine(ex.ToString());
             slots: slots,
             gitHub: gitHub,
             reviewerRunner: agentRunner,
-            loggerFactory: loggerFactory);
+            loggerFactory: loggerFactory,
+            projectStore: projectStore,
+            projectCloner: cloner,
+            githubOptions: options.GitHub);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never
@@ -1179,7 +1138,7 @@ try
 
             // P4 Stage A — StartupRecovery. Runs ONCE before the
             // dispatch loop starts. Inspects every InProgress +
-            // assignee=kilo issue, replays the cheap side-effects
+            // assignee=forge issue, replays the cheap side-effects
             // (commit, push, PR open) when the LLM has already
             // finished but the previous run crashed, and writes
             // one recovery_report row. By default we run recovery

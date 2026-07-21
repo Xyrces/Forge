@@ -27,7 +27,7 @@ Add a `dispatch_checkpoint` column to `issue` (or a new `issue_checkpoint` table
 
 | Checkpoint | Means | Side-effects already taken | Side-effects still to take |
 |---|---|---|---|
-| `claimed` | ClaimExecutor accepted the issue | status=InProgress, assignee=kilo | WorktreeExecutor → acquire worktree |
+| `claimed` | ClaimExecutor accepted the issue | status=InProgress, assignee=forge | WorktreeExecutor → acquire worktree |
 | `worktree_acquired` | Worktree directory exists, branch created | `worktreePath` + `branch` set | RunAgent → agent loop |
 | `agent_completed` | LLM finished; `result.Text` captured | `modelResponse` set; files in worktree | CommitPushPr → commit |
 | `commit_done` | Local commit on the branch | `branchSha` updated | push |
@@ -40,7 +40,7 @@ The checkpoint is advanced BEFORE the next side-effect. On restart, the recovere
 
 `Program.cs` adds a `StartupRecovery.RunAsync(specs, issues, worktrees, gitHub, events, logger)` step before the dispatch loop. It:
 
-1. Loads every issue with `status=InProgress` + `assignee=kilo`.
+1. Loads every issue with `status=InProgress` + `assignee=forge`.
 2. For each: classify by metadata (no checkpoint → just-claimed; `worktreePath` set → worktree_acquired; `branchSha` set → commit_done; `prNumber` set → pr_opened).
 3. For each classification, either:
    - **Replay from next checkpoint.** E.g. `commit_done` + no `prNumber` → re-push (idempotent: `git push` is a no-op if the remote is up-to-date) and re-open the PR (idempotent: re-opening a closed PR with the same head fails; we use the existing PR if `prNumber` is set, else create new).

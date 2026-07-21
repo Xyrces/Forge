@@ -3,8 +3,8 @@ namespace Forge.Orchestrator;
 /// <summary>
 /// P5.5: abstraction over the auto-memory extraction step that
 /// runs after a successful PR open. Production wires
-/// <see cref="MemoryExtractor"/> (which calls the kilo
-/// gateway). Tests can swap in <see cref="NoOpMemoryExtractor"/>
+/// <see cref="MemoryExtractor"/> (which calls the kilo gateway).
+/// Tests can swap in <see cref="NoOpMemoryExtractor"/>
 /// or a scripted implementation that returns a fixed
 /// <see cref="ExtractionResult"/>.
 /// </summary>

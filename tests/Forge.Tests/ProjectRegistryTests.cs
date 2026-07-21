@@ -1,12 +1,33 @@
 using Forge.Configuration;
+using Forge.Core;
 using Forge.Orchestrator.Slots;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace Forge.Tests;
 
-public class ProjectRegistryLoaderTests
+public class ProjectRegistryLoaderTests : IDisposable
 {
+    private readonly string _dbPath;
+    private readonly IssueStore _issues;
+    private readonly ProjectStore _store;
+
+    public ProjectRegistryLoaderTests()
+    {
+        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-reg-{Guid.NewGuid():N}.db");
+        _issues = new IssueStore(_dbPath);
+        _store = new ProjectStore(_issues);
+    }
+
+    public void Dispose()
+    {
+        _store.Dispose();
+        _issues.Dispose();
+        try { File.Delete(_dbPath); } catch { }
+        try { File.Delete(_dbPath + "-wal"); } catch { }
+        try { File.Delete(_dbPath + "-shm"); } catch { }
+    }
+
     [Fact]
     public void Load_WithLegacyWorkspaceRoot_ShimsSingleDefaultProject()
     {
@@ -14,7 +35,7 @@ public class ProjectRegistryLoaderTests
         {
             Workspace = new WorkspaceOptions { Root = @"C:\legacy\root" },
         };
-        var projects = ProjectRegistryLoader.Load(options, NullLogger.Instance);
+        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
         Assert.Single(projects);
         Assert.Equal("default", projects[0].Id);
         Assert.Equal(@"C:\legacy\root", projects[0].Root);
@@ -35,7 +56,7 @@ public class ProjectRegistryLoaderTests
                 },
             },
         };
-        var projects = ProjectRegistryLoader.Load(options, NullLogger.Instance);
+        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
         Assert.Equal(2, projects.Count);
         Assert.DoesNotContain(projects, p => p.Id == "default");
         Assert.Equal(3, projects.Single(p => p.Id == "suikoden").Roles["coredev"]);
@@ -45,7 +66,7 @@ public class ProjectRegistryLoaderTests
     public void Load_WithEmptyProjectsAndEmptyWorkspace_SynthesizesAutoScaffoldDefault()
     {
         var options = new AgentOptions();
-        var projects = ProjectRegistryLoader.Load(options, NullLogger.Instance);
+        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
         var single = Assert.Single(projects);
         Assert.Equal("default", single.Id);
         Assert.Equal(string.Empty, single.Root);
@@ -56,9 +77,54 @@ public class ProjectRegistryLoaderTests
     {
         var options = new AgentOptions { Workspace = new WorkspaceOptions { Root = @"C:\from-config" } };
         var env = new Dictionary<string, string> { ["FORGE_DEFAULT_PROJECT_ROOT"] = @"C:\from-env" };
-        var projects = ProjectRegistryLoader.Load(options, NullLogger.Instance, env);
+        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance, env);
         Assert.Single(projects);
         Assert.Equal(@"C:\from-env", projects[0].Root);
+    }
+
+    [Fact]
+    public async Task Load_SqliteProjectsAreAuthoritative()
+    {
+        await _store.UpsertAsync(new NewProject(
+            Id: "porthorizon",
+            Name: "From SQLite",
+            RepoUrl: "https://github.com/Xyrces/PortHorizon",
+            DefaultBranch: "main"));
+
+        var options = new AgentOptions
+        {
+            Projects = new ProjectsOptions
+            {
+                Projects = new List<ProjectOptions>
+                {
+                    new() { Id = "suikoden", Name = "From Config", RepoUrl = "https://example.com/sdk" },
+                },
+            },
+        };
+
+        var projects = ProjectRegistryLoader.Load(options, _store, NullLogger.Instance);
+        Assert.Equal(2, projects.Count);
+        Assert.Equal("From SQLite", projects.Single(p => p.Id == "porthorizon").Name);
+        Assert.Equal("From Config", projects.Single(p => p.Id == "suikoden").Name);
+    }
+
+    [Fact]
+    public async Task Seed_CopiesConfigProjectsIntoSqlite()
+    {
+        var config = new ProjectsOptions
+        {
+            Projects = new List<ProjectOptions>
+            {
+                new() { Id = "forge", Name = "Forge", RepoUrl = "https://github.com/Xyrces/Forge" },
+                new() { Id = "porthorizon", Name = "PortHorizon", RepoUrl = "https://github.com/Xyrces/PortHorizon" },
+            },
+        };
+        await ProjectRegistryLoader.SeedAsync(_store, config, NullLogger.Instance);
+        Assert.Equal(2, (await _store.ListAsync()).Count);
+
+        // Idempotent: re-running doesn't duplicate.
+        await ProjectRegistryLoader.SeedAsync(_store, config, NullLogger.Instance);
+        Assert.Equal(2, (await _store.ListAsync()).Count);
     }
 }
 
@@ -68,13 +134,15 @@ public class ProjectStateDirsTests
     // literals -- ProjectStateDirs itself is cross-platform (it uses
     // Path.Combine throughout), so the test has to be too, or it fails
     // on Linux CI runners where Path.Combine joins with '/'.
+    private const string DataRoot = "/forge/data";
+
     [Fact]
     public void Default_UsesLegacyFlatLayout()
     {
         var root = Path.Combine(Path.GetPathRoot(Path.GetTempPath()) ?? "/", "ph");
         var p = new ProjectOptions { Id = "default", Root = root };
-        Assert.Equal(Path.Combine(root, ".portHorizon", "state"), ProjectStateDirs.StateDirFor(p));
-        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "issues.db"), ProjectStateDirs.IssuesDbFor(p));
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state"), ProjectStateDirs.StateDirFor(p, DataRoot));
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "issues.db"), ProjectStateDirs.IssuesDbFor(p, DataRoot));
     }
 
     [Fact]
@@ -82,15 +150,30 @@ public class ProjectStateDirsTests
     {
         var root = Path.Combine(Path.GetPathRoot(Path.GetTempPath()) ?? "/", "sdk");
         var p = new ProjectOptions { Id = "suikoden", Root = root };
-        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden"), ProjectStateDirs.StateDirFor(p));
-        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden", "memory.db"), ProjectStateDirs.MemoryDbFor(p));
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden"), ProjectStateDirs.StateDirFor(p, DataRoot));
+        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden", "memory.db"), ProjectStateDirs.MemoryDbFor(p, DataRoot));
     }
 
     [Fact]
-    public void EmptyRoot_Throws()
+    public void EmptyRootAndRepoUrl_Throws()
     {
         var p = new ProjectOptions { Id = "x" };
-        Assert.Throws<InvalidOperationException>(() => ProjectStateDirs.StateDirFor(p));
+        Assert.Throws<InvalidOperationException>(() => ProjectStateDirs.StateDirFor(p, DataRoot));
+    }
+
+    [Fact]
+    public void RepoUrlOnly_DerivesFromForgesystemProjectsDir()
+    {
+        var p = new ProjectOptions { Id = "forge", RepoUrl = "https://github.com/Xyrces/Forge" };
+        Assert.Equal(Path.Combine(DataRoot, "projects", "forge"), ProjectStateDirs.RootFor(p, DataRoot));
+    }
+
+    [Fact]
+    public void ExplicitRoot_BeatsRepoUrlDerivedPath()
+    {
+        var explicitRoot = "/srv/explicit";
+        var p = new ProjectOptions { Id = "forge", RepoUrl = "https://x", Root = explicitRoot };
+        Assert.Equal(explicitRoot, ProjectStateDirs.RootFor(p, DataRoot));
     }
 }
 

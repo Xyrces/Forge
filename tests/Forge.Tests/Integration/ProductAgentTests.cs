@@ -206,7 +206,7 @@ public class ProductRefinementQueueTests : IDisposable
             _specs, _issues, projectContext, factory,
             new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
             new RoleAgentRegistry(), _events, null,
-            NullLoggerFactory.Instance, kiloAgentsRoot: "");
+            NullLoggerFactory.Instance, rolePromptsRoot: "");
 
         await using var queue = new ProductRefinementQueue(
             agentFactory, _specs, _events,

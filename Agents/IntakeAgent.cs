@@ -57,7 +57,7 @@ public sealed class IntakeAgent
     private readonly ISkillSource? _skills;
     private readonly IDashboardEventBus _events;
     private readonly ILogger<IntakeAgent> _logger;
-    private readonly string _kiloAgentsRoot;
+    private readonly string _rolePromptsRoot;
     private readonly string _defaultModel;
 
     public IntakeAgent(
@@ -72,7 +72,7 @@ public sealed class IntakeAgent
         ILogger<IntakeAgent> logger,
         ISpecStore? specs = null,
         ISkillSource? skills = null,
-        string kiloAgentsRoot = ".kilo/agents",
+        string rolePromptsRoot = "agents",
         string defaultModel = "minimax-m2")
     {
         _projectId = projectId;
@@ -86,7 +86,7 @@ public sealed class IntakeAgent
         _events = events;
         _logger = logger;
         _skills = skills;
-        _kiloAgentsRoot = kiloAgentsRoot;
+        _rolePromptsRoot = rolePromptsRoot;
         _defaultModel = defaultModel;
     }
 
@@ -473,9 +473,9 @@ public sealed class IntakeAgent
             """;
     }
 
-    private string LoadRoleInstructions(string kiloAgentName)
+    private string LoadRoleInstructions(string agentName)
     {
-        var path = Path.Combine(_kiloAgentsRoot, kiloAgentName + ".md");
+        var path = Path.Combine(_rolePromptsRoot, agentName + ".md");
         if (!File.Exists(path)) return string.Empty;
         return File.ReadAllText(path);
     }

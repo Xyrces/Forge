@@ -8,8 +8,8 @@ using Xunit;
 namespace Forge.Tests.Integration;
 
 /// <summary>
-/// Live-LLM test: drives MafAgentRunner end-to-end against the kilo
-/// gateway to verify the agent can issue tool_calls, have them
+/// Live-LLM test: drives MafAgentRunner end-to-end against the kilo gateway
+/// to verify the agent can issue tool_calls, have them
 /// executed, and produce a final plain-text response. Used to
 /// diagnose empty-modelResponse bugs in production dispatch.
 /// </summary>
@@ -39,7 +39,7 @@ public class MafAgentRunnerLiveTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
 
         var worktree = Path.Combine(Path.GetTempPath(), $"ph-live-wt-{Guid.NewGuid():N}");
         Directory.CreateDirectory(worktree);
@@ -95,7 +95,7 @@ public class MafAgentRunnerLiveTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
 
         // Use the actual prompt shape from RunAgentExecutor.BuildPrompt.
         // Working directory points at a temp dir with a sample .cs file
@@ -170,7 +170,7 @@ public class MafAgentRunnerLiveTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
 
         // Create a small repo-like workspace for the agent.
         var worktree = Path.Combine(Path.GetTempPath(), $"ph-multi-{Guid.NewGuid():N}");

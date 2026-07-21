@@ -147,15 +147,15 @@ public class OptionsLoaderTests : IDisposable
         """);
         var savedCwd = Directory.GetCurrentDirectory();
         Environment.SetEnvironmentVariable("LLM_API_KEY", "kg-env-123");
-        Environment.SetEnvironmentVariable("LLM_BASE_URL", "http://kilo.local:9999");
+        Environment.SetEnvironmentVariable("LLM_BASE_URL", "http://forge.local:9999");
         try
         {
             Directory.SetCurrentDirectory(_workDir);
             var options = OptionsLoader.Load();
-            var kilo = options.Llm.Providers.FirstOrDefault(p => p.Name == "kilo-gateway");
-            Assert.NotNull(kilo);
-            Assert.Equal("kg-env-123", kilo!.ApiKey);
-            Assert.Equal("http://kilo.local:9999", kilo.BaseUrl);
+            var provider = options.Llm.Providers.FirstOrDefault(p => p.Name == "kilo-gateway");
+            Assert.NotNull(provider);
+            Assert.Equal("kg-env-123", provider!.ApiKey);
+            Assert.Equal("http://forge.local:9999", provider.BaseUrl);
             Assert.Equal("kilo-gateway", options.Llm.DefaultProvider);
         }
         finally

@@ -9,7 +9,7 @@ namespace Forge.Tests.Integration;
 /// <summary>
 /// Phase 0 integration test: instantiate <see cref="MafAgentRunner"/>
 /// with a <see cref="ScriptedChatClient"/>, run a fixture prompt, and
-/// assert the response shape. No real LLM, no kilo, no worktree, no
+/// assert the response shape. No real LLM, no worktree, no
 /// PR, no dashboard. The dashboard surface (issue table) is tested
 /// in a separate test that wires the runner into the orchestrator's
 /// claim path; that is Phase 0.5 work.
@@ -17,9 +17,9 @@ namespace Forge.Tests.Integration;
 /// P0 deliverable per docs/agent-framework-design.md:
 /// - MafAgentRunner.RunAsync returns a non-empty response.
 /// - The response is the text that the stubbed IChatClient returned.
-/// - The role's instructions from .kilo/agents/<role>.md are loaded
+/// - The role's instructions from agents/<role>.md are loaded
 ///   into the agent.
-/// - The integration test runs without kilo installed.
+/// - The integration test runs without external services installed.
 /// </summary>
 public class Phase0Tests
 {
@@ -47,7 +47,7 @@ public class Phase0Tests
     [Fact]
     public async Task RunAsync_PassesRoleInstructionsToAgent()
     {
-        // The .kilo/agents/coredev.md has a description: field at the top
+        // The agents/coredev.md has a description: field at the top
         // of its YAML frontmatter. MafAgentRunner must lift that into the
         // agent instructions. We don't intercept the actual ChatOptions
         // sent to the IChatClient (that requires a custom decorator),
@@ -118,7 +118,7 @@ public class Phase0Tests
     [Fact]
     public async Task RunAsync_MissingAgentFile_UsesFallbackInstructions()
     {
-        // kiloAgentsRoot points at an empty temp directory; the runner
+        // rolePromptsRoot points at an empty temp directory; the runner
         // should fall back to a generic "you are the X agent" string
         // rather than throw FileNotFoundException. This keeps dispatch
         // resilient when a role's .md is missing.
@@ -132,7 +132,7 @@ public class Phase0Tests
             config:         new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-agents-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-agents-{Guid.NewGuid():N}"));
 
         var result = await runner.RunAsync(AgentType.QA, "do thing", sessionId: null, ct: default);
 

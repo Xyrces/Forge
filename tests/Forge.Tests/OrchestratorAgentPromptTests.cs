@@ -19,7 +19,7 @@ public class OrchestratorAgentPromptTests
             DateTime.UtcNow, DateTime.UtcNow, null, "{}");
 
     private static RoleAgent MakeRole() => new(
-        KiloAgentName: "coredev",
+        AgentName: "coredev",
         ProjectSubdir: "Forge",
         AllowedTools: new List<string> { "dotnet", "git", "gh" });
 

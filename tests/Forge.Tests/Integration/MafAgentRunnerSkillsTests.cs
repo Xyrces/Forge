@@ -32,7 +32,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
 
         var result = await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -63,7 +63,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: skills,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
 
         await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -97,7 +97,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: skills,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
 
         await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -122,7 +122,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: failing,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
 
         var result = await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -153,7 +153,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: skills,
-            kiloAgentsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
 
         await runner.RunAsync(AgentType.CoreDev, "x", sessionId: null, ct: default);
         var coreInstructions = factory.LastInstructions!;
