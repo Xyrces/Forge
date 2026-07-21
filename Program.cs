@@ -995,13 +995,15 @@ Console.Error.WriteLine(ex.ToString());
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
         }
 
+        var dispatchBundleFactory = new ProjectDispatchBundleFactory(
+            options, orchDataRoot, projectStore, cloner,
+            agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory);
+
         var orchestrator = new OrchestratorAgent(
-            agentRunner, roleRegistry, worktrees, gitHub, prWatcher, issues,
-            agents, sprints, messageBus,
-            eventBus,
-            designArtifacts,
-            artOutputs,
-            dispatcher,
+            projectStore,
+            dispatchBundleFactory,
+            agentRunner, roleRegistry,
+            messageBus, dispatcher, eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>());
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);

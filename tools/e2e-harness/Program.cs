@@ -10,6 +10,7 @@ using Forge.Configuration;
 using Forge.Core;
 using Forge.Dashboard;
 using Forge.Orchestrator;
+using Forge.Projects;
 using Forge.Reviewer;
 
 namespace Forge.Tools.E2E;
@@ -215,13 +216,61 @@ if (useRealLlm)
         }
 
         // 4. Build the orchestrator.
-        var orchestrator = new OrchestratorAgent(
-            runner, roleRegistry, worktrees, gitHub,
+        var harnessBundle = new ProjectDispatchBundle(
+            project: new ProjectOptions
+            {
+                Id = "harness",
+                Name = "Harness",
+                RepoUrl = "",
+                DefaultBranch = "main",
+                Root = clone,
+            },
+            issueStore: issues,
+            agents: agentsStore,
+            sprints: sprints,
+            designArtifacts: designArtifacts,
+            artOutputs: artOutputs,
+            worktrees: worktrees,
+            gitHub: gitHub,
             prWatcher: new PRWatcher(gitHub, worktrees, issues,
                 TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30), eventBus,
                 NullLogger<PRWatcher>.Instance),
-            issues, agentsStore, sprints, messageBus, eventBus,
-            designArtifacts, artOutputs,
+            events: eventBus,
+            logger: NullLogger<ProjectDispatchBundle>.Instance);
+
+        var projectStore = new ProjectStore(issues);
+        await projectStore.UpsertAsync(new NewProject(
+            Id: "harness", Name: "Harness", RepoUrl: "", DefaultBranch: "main"));
+
+        var bundleFactory = new ProjectDispatchBundleFactory(
+            options: new AgentOptions { GitHub = new GitHubOptions() },
+            dataRoot: Path.GetDirectoryName(dbPath)!,
+            projectStore: projectStore,
+            cloner: new ProjectCloner(Path.GetDirectoryName(dbPath)!, NullLogger<ProjectCloner>.Instance),
+            runner: runner,
+            roleRegistry: roleRegistry,
+            dispatcher: new InProcessDispatcher(
+                async (issue, ct) =>
+                {
+                    var wf = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
+                        issues, runner, worktrees, gitHub, roleRegistry,
+                        new WorkspaceOptions { Root = clone, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
+                        eventBus, agent => messageBus.Drain(agent),
+                        designArtifacts, artOutputs,
+                        harnessExtractor, harnessExtractionStore,
+                        NullLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>.Instance);
+                    await wf.RunAsync(issue, ct);
+                },
+                NullLogger<InProcessDispatcher>.Instance),
+            messageBus: messageBus,
+            events: eventBus,
+            loggerFactory: NullLoggerFactory.Instance);
+
+        var orchestrator = new OrchestratorAgent(
+            projectStore,
+            bundleFactory,
+            runner, roleRegistry,
+            messageBus,
             new InProcessDispatcher(
                 async (issue, ct) =>
                 {
@@ -235,6 +284,7 @@ if (useRealLlm)
                     await wf.RunAsync(issue, ct);
                 },
                 NullLogger<InProcessDispatcher>.Instance),
+            eventBus,
             NullLogger<OrchestratorAgent>.Instance);
 
         // 5. Skip the design + artist + groomer stages by
@@ -263,6 +313,7 @@ if (useRealLlm)
         Console.WriteLine("  running one dispatch cycle...");
         var result = await orchestrator.DispatchSingleTaskAsync(
             (await issues.GetAsync(task.Id))!,
+            harnessBundle,
             CancellationToken.None);
         Console.WriteLine($"  dispatch result: success={result.Success} message={result.Message}");
 

@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using Forge.AgentTools;
 using Forge.Agents;
 using Forge.Configuration;
@@ -10,22 +11,16 @@ namespace Forge.Orchestrator;
 
 public sealed class OrchestratorAgent : IAgent
 {
-    private readonly IAgentRunner _runner;
+    private readonly IProjectStore _projectStore;
+    private readonly IProjectDispatchBundleFactory _bundleFactory;
     private readonly RoleAgentRegistry _roleRegistry;
-    private readonly GitWorktreeService _worktrees;
-    private readonly GitHubService _gitHub;
-    private readonly PRWatcher _prWatcher;
-    private readonly IIssueStore _issues;
-    private readonly DesignArtifactStore _designArtifacts;
-private readonly ArtOutputStore _artOutputs;
-    private readonly IAgentStore _agents;
-    private readonly ISprintStore _sprints;
+    private readonly IAgentRunner _runner;
     private readonly AgentMessageBus _messageBus;
     private readonly IWorkflowDispatcher _dispatcher;
-    private SpawnerOptions _spawnerOptions = new();
-    private WorkspaceOptions _workspaceOptions = new();
-    private readonly ILogger<OrchestratorAgent> _logger;
     private readonly IDashboardEventBus _events;
+    private readonly ILogger<OrchestratorAgent> _logger;
+    private readonly ConcurrentDictionary<string, ProjectDispatchBundle> _bundles = new();
+    private SpawnerOptions _spawnerOptions = new();
     private SemaphoreSlim _concurrencyLimiter = new(4);
     private readonly int _maxRetryCount;
 
@@ -35,34 +30,22 @@ private readonly ArtOutputStore _artOutputs;
     public AgentStatus Status { get; private set; } = AgentStatus.Idle;
 
     public OrchestratorAgent(
+        IProjectStore projectStore,
+        IProjectDispatchBundleFactory bundleFactory,
         IAgentRunner runner,
         RoleAgentRegistry roleRegistry,
-        GitWorktreeService worktrees,
-        GitHubService gitHub,
-        PRWatcher prWatcher,
-        IIssueStore issues,
-        IAgentStore agents,
-        ISprintStore sprints,
         AgentMessageBus messageBus,
-        IDashboardEventBus events,
-        DesignArtifactStore designArtifacts,
-        ArtOutputStore artOutputs,
         IWorkflowDispatcher dispatcher,
+        IDashboardEventBus events,
         ILogger<OrchestratorAgent> logger)
     {
+        _projectStore = projectStore;
+        _bundleFactory = bundleFactory;
         _runner = runner;
         _roleRegistry = roleRegistry;
-        _worktrees = worktrees;
-        _gitHub = gitHub;
-        _prWatcher = prWatcher;
-        _issues = issues;
-        _agents = agents;
-        _sprints = sprints;
         _messageBus = messageBus;
-        _events = events;
-        _designArtifacts = designArtifacts;
-        _artOutputs = artOutputs;
         _dispatcher = dispatcher;
+        _events = events;
         _logger = logger;
         _concurrencyLimiter = new SemaphoreSlim(4);
         _maxRetryCount = 1;
@@ -88,39 +71,89 @@ private readonly ArtOutputStore _artOutputs;
         {
             Status = AgentStatus.Error;
             throw;
-}
+        }
     }
 
+    /// <summary>
+    /// One iteration of the dispatch loop. Walks every registered
+    /// project, asks each project's bundle for its ready queue, and
+    /// dispatches. Runtime-added projects (via POST /api/projects)
+    /// are picked up on the next cycle without a service restart.
+    /// </summary>
     private async Task DispatchCycleAsync(CancellationToken cancellationToken)
     {
-        var activeSprint = await _sprints.GetActiveAsync(cancellationToken);
-        var sprintId = activeSprint?.Id;
-        var ready = await _issues.ReadyAsync(_spawnerOptions.MaxConcurrentSessions, sprintId, cancellationToken);
+        var projectRecords = await _projectStore.ListAsync(cancellationToken);
+        if (projectRecords.Count == 0) return;
 
-        var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
-        foreach (var watch in watchTasks)
-            _ = Task.Run(() => ProcessWatchIssueAsync(watch, cancellationToken), cancellationToken);
+        foreach (var record in projectRecords)
+        {
+            if (cancellationToken.IsCancellationRequested) return;
+            var bundle = GetOrCreateBundle(ProjectRecordToOptions(record));
+            if (bundle is null) continue;
 
-        var devTasks = ready.Where(i => i.Type != AgentTaskTypes.PrWatch).ToList();
-        foreach (var dev in devTasks)
-            _ = Task.Run(() => DispatchSingleTaskAsync(dev, cancellationToken), cancellationToken);
+            try
+            {
+                var activeSprint = await bundle.Sprints.GetActiveAsync(cancellationToken);
+                var ready = await bundle.IssueStore.ReadyAsync(_spawnerOptions.MaxConcurrentSessions, activeSprint?.Id, cancellationToken);
+                if (ready.Count == 0) continue;
+
+                var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
+                foreach (var watch in watchTasks)
+                    _ = Task.Run(() => ProcessWatchIssueAsync(watch, bundle, cancellationToken), cancellationToken);
+
+                var devTasks = ready.Where(i => i.Type != AgentTaskTypes.PrWatch).ToList();
+                foreach (var dev in devTasks)
+                    _ = Task.Run(() => DispatchSingleTaskAsync(dev, bundle, cancellationToken), cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Dispatch cycle for project '{Id}' crashed; skipping this cycle for that project", bundle.Project.Id);
+            }
+        }
     }
 
-    private async Task<Result> ProcessWatchIssueAsync(IssueRecord watchIssue, CancellationToken cancellationToken)
+    private ProjectDispatchBundle? GetOrCreateBundle(ProjectOptions project)
+    {
+        return _bundles.GetOrAdd(project.Id, _ =>
+        {
+            try
+            {
+                _logger.LogInformation("Constructing dispatch bundle for project '{Id}' (root={Root}, repo={Repo})",
+                    project.Id, project.Root, project.RepoUrl);
+                return _bundleFactory.Build(project);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to build dispatch bundle for project '{Id}'", project.Id);
+                return null!;
+            }
+        });
+    }
+
+    private static ProjectOptions ProjectRecordToOptions(ProjectRecord r) => new()
+    {
+        Id = r.Id,
+        Name = r.Name,
+        RepoUrl = r.RepoUrl,
+        DefaultBranch = r.DefaultBranch,
+        Root = string.Empty,
+    };
+
+    private async Task<Result> ProcessWatchIssueAsync(IssueRecord watchIssue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
         try
         {
-            await _prWatcher.ProcessWatchTaskAsync(watchIssue, cancellationToken);
+            await bundle.PrWatcher.ProcessWatchTaskAsync(watchIssue, cancellationToken);
             return new Result(true, $"Watch {watchIssue.Id} complete");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Watch issue {Id} crashed", watchIssue.Id);
+            _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watchIssue.Id, bundle.Project.Id);
             return new Result(false, ex.Message);
         }
     }
 
-    public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, CancellationToken cancellationToken)
+    public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
         await _concurrencyLimiter.WaitAsync(cancellationToken);
         var startedAt = DateTime.UtcNow;
@@ -130,7 +163,7 @@ private readonly ArtOutputStore _artOutputs;
             // Workflows pipeline. ClaimExecutor detects the
             // pre-claim (InProgress + assignee=forge) and passes
             // through; otherwise it claims itself.
-            var claimed = await _issues.ClaimAsync(issue.Id, "forge", cancellationToken);
+            var claimed = await bundle.IssueStore.ClaimAsync(issue.Id, "forge", cancellationToken);
             if (claimed is null)
             {
                 _logger.LogDebug("Issue {Id} already claimed elsewhere", issue.Id);
@@ -141,7 +174,7 @@ private readonly ArtOutputStore _artOutputs;
             // Re-fetch after the claim/transition so the workflow's
             // input has InProgress + assignee=forge (ClaimExecutor
             // short-circuits on that combination).
-            var preClaimed = (await _issues.GetAsync(claimed.Id, cancellationToken))!;
+            var preClaimed = (await bundle.IssueStore.GetAsync(claimed.Id, cancellationToken))!;
 
             // P4 Stage B: the dispatcher abstracts over InProcess
             // (current behavior) vs Durable (DTS-backed). Both
@@ -155,20 +188,20 @@ private readonly ArtOutputStore _artOutputs;
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Workflow dispatch for {Id} threw", preClaimed.Id);
-                await HandleFailureAsync(preClaimed, ex, cancellationToken);
+                await HandleFailureAsync(preClaimed, ex, bundle, cancellationToken);
                 return new Result(false, ex.Message);
             }
 
             // Inspect the issue post-workflow to construct the
             // Result message (preserves the old sequential contract).
-            var after = await _issues.GetAsync(preClaimed.Id, cancellationToken);
+            var after = await bundle.IssueStore.GetAsync(preClaimed.Id, cancellationToken);
             var lastError = after?.GetMetadata("lastError");
             if (!string.IsNullOrEmpty(lastError))
             {
                 _logger.LogWarning("Workflow dispatch for {Id} reported failure: {Err}",
                     preClaimed.Id, lastError);
                 var ex = new InvalidOperationException(lastError);
-                await HandleFailureAsync(preClaimed, ex, cancellationToken);
+                await HandleFailureAsync(preClaimed, ex, bundle, cancellationToken);
                 return new Result(false, lastError);
             }
             var prNumber = after?.GetMetadata("prNumber");
@@ -186,7 +219,7 @@ private readonly ArtOutputStore _artOutputs;
         }
         catch (OperationCanceledException)
         {
-            await SafeTransitionAsync(issue.Id, IssueStatus.Failed, "cancelled", cancellationToken);
+            await SafeTransitionAsync(issue.Id, IssueStatus.Failed, "cancelled", bundle, cancellationToken);
             return new Result(false, "cancelled");
         }
         finally
@@ -198,12 +231,11 @@ private readonly ArtOutputStore _artOutputs;
     internal void BindOptions(AgentOptions options)
     {
         _spawnerOptions = options.Spawner;
-        _workspaceOptions = options.Workspace;
         _concurrencyLimiter.Dispose();
         _concurrencyLimiter = new SemaphoreSlim(Math.Max(1, options.Spawner.MaxConcurrentSessions));
     }
 
-    private async Task HandleFailureAsync(IssueRecord issue, Exception ex, CancellationToken cancellationToken)
+    private async Task HandleFailureAsync(IssueRecord issue, Exception ex, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
         var retryCount = 0;
         var prev = issue.GetMetadata("retryCount");
@@ -215,25 +247,24 @@ private readonly ArtOutputStore _artOutputs;
             await UpdateMetadataAsync(issue.Id, m => MergeDict(m, new Dictionary<string, object>
             {
                 ["retryCount"] = retryCount + 1
-            }), cancellationToken);
-            await SafeTransitionAsync(issue.Id, IssueStatus.Pending, ex.Message, cancellationToken);
+            }), bundle, cancellationToken);
+            await SafeTransitionAsync(issue.Id, IssueStatus.Pending, ex.Message, bundle, cancellationToken);
             _logger.LogWarning("Issue {Id} will be retried (attempt {N})", issue.Id, retryCount + 1);
         }
         else
         {
-            await SafeTransitionAsync(issue.Id, IssueStatus.Failed, ex.Message, cancellationToken);
+            await SafeTransitionAsync(issue.Id, IssueStatus.Failed, ex.Message, bundle, cancellationToken);
             if (!string.IsNullOrEmpty(worktreePath))
             {
-                try { await _worktrees.RemoveAsync(issue.Id, cancellationToken); }
+                try { await bundle.Worktrees.RemoveAsync(issue.Id, cancellationToken); }
                 catch (Exception wx) { _logger.LogWarning(wx, "Worktree removal failed"); }
             }
         }
     }
 
-    private async Task EnqueueWatchIssueAsync(
-        string devIssueId, int prNumber, string branch, string worktreePath, CancellationToken ct)
+    private async Task EnqueueWatchIssueAsync(string devIssueId, int prNumber, string branch, string worktreePath, ProjectDispatchBundle bundle, CancellationToken ct)
     {
-        var watch = await _issues.CreateAsync(new NewIssue(
+        var watch = await bundle.IssueStore.CreateAsync(new NewIssue(
             Type: AgentTaskTypes.PrWatch,
             Title: $"Watch PR #{prNumber} for {devIssueId}",
             Description: $"Wait for PR #{prNumber} to be reviewed.",
@@ -247,13 +278,13 @@ private readonly ArtOutputStore _artOutputs;
         _logger.LogInformation("Enqueued watch issue {Id} for PR #{PrNumber}", watch.Id, prNumber);
     }
 
-    private async Task RecordModelResponseMetadataAsync(string id, string? response = null, string? error = null, CancellationToken ct = default)
+    private async Task RecordModelResponseMetadataAsync(string id, string? response, string? error, ProjectDispatchBundle bundle, CancellationToken ct = default)
     {
         try
         {
-            var current = await _issues.GetAsync(id, ct);
+            var current = await bundle.IssueStore.GetAsync(id, ct);
             if (current is null) return;
-            await _issues.TransitionAsync(id, current.Status,
+            await bundle.IssueStore.TransitionAsync(id, current.Status,
                 error: error ?? current.GetMetadata("lastError"),
                 metadata: new Dictionary<string, object>
                 {
@@ -268,22 +299,22 @@ private readonly ArtOutputStore _artOutputs;
         }
     }
 
-    private async Task UpdateMetadataAsync(string id, Func<Dictionary<string, object>, Dictionary<string, object>> mutate, CancellationToken ct)
+    private async Task UpdateMetadataAsync(string id, Func<Dictionary<string, object>, Dictionary<string, object>> mutate, ProjectDispatchBundle bundle, CancellationToken ct)
     {
-        var current = await _issues.GetAsync(id, ct);
+        var current = await bundle.IssueStore.GetAsync(id, ct);
         if (current is null) return;
         using var doc = System.Text.Json.JsonDocument.Parse(string.IsNullOrEmpty(current.MetadataJson) ? "{}" : current.MetadataJson);
         var dict = new Dictionary<string, object>(StringComparer.Ordinal);
         foreach (var prop in doc.RootElement.EnumerateObject())
             dict[prop.Name] = System.Text.Json.JsonSerializer.Deserialize<object>(prop.Value.GetRawText())!;
         var merged = mutate(dict);
-        await _issues.TransitionAsync(id, current.Status, current.GetMetadata("lastError"),
+        await bundle.IssueStore.TransitionAsync(id, current.Status, current.GetMetadata("lastError"),
             metadata: merged, ct: ct);
     }
 
-    private async Task SafeTransitionAsync(string id, IssueStatus to, string? error, CancellationToken ct)
+    private async Task SafeTransitionAsync(string id, IssueStatus to, string? error, ProjectDispatchBundle bundle, CancellationToken ct)
     {
-        try { await _issues.TransitionAsync(id, to, error, ct: ct); }
+        try { await bundle.IssueStore.TransitionAsync(id, to, error, ct: ct); }
         catch (Exception ex) { _logger.LogWarning(ex, "Transition failed for {Id}", id); }
     }
 
