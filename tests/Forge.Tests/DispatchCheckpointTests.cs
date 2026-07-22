@@ -35,7 +35,8 @@ public class DispatchCheckpointTests : IDisposable
 // v14 = P6 Stage 8 sprint proposal audit. v15 = P8 deployment
 // candidates. v16 = drop kilo prefix on agent table + assignee.
 // v17 = project registry table for runtime project add/remove.
-        Assert.Equal(17, IssueStore.CurrentSchemaVersion);
+// v18 = per-project encrypted secret store.
+        Assert.Equal(18, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

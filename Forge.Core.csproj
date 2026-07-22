@@ -21,6 +21,29 @@
     <EmbeddedResource Remove="tests/**" />
   </ItemGroup>
 
+  <!--
+    The Blazor WASM UI (Forge.UI) lives in a sibling project with
+    StaticWebAssetsEnabled=true. The static web assets (app.css,
+    app.js, _framework/*) flow into this project through the
+    StaticWebAssetsProjectReference + the SDK's
+    ResolveStaticWebAssetsTargets target. The explicit Content
+    below is a belt-and-braces fallback for SDK versions that
+    don't auto-merge: it ensures the wwwroot is copied into the
+    publish output even if the StaticWebAssets pipeline skips
+    this project (e.g., OutputType=Exe with no Razor entrypoint
+    in this project — Razor is in Forge.UI).
+
+    Without this, the dashboard renders an unstyled Blazor SPA
+    because /app.css returns 404 from the running Kestrel. The
+    Forge.Core project is the only one that runs (Exe); Forge.UI
+    is a Sdk.Web library that produces Razor + the Blazor
+    bootstrapper. Their static web assets must end up on disk
+    next to Forge.Core.dll.
+  -->
+  <ItemGroup>
+    <Content Include="Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.12.0" />

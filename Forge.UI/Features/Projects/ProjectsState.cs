@@ -30,6 +30,9 @@ public sealed record ProjectsEndpointRow(
 
 public sealed record ProjectsSlotRow(string ProjectId, string Role, int InFlight, int Max);
 
+public sealed record SecretMetadataDto(string Kind, bool Set, DateTime? CreatedAt, DateTime? UpdatedAt);
+public sealed record SetSecretRequestBody(string Kind, string Value);
+
 public sealed record AddProjectRequestBody(string Id, string Name, string RepoUrl, string? DefaultBranch);
 public sealed record AddProjectResponseBody(ProjectRecord Project, object? ClonedInfo, string? Warning);
 public sealed record ProjectRecord(

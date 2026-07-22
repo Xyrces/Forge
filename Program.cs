@@ -75,13 +75,13 @@ public static class Program
         var logger = loggerFactory.CreateLogger("Forge");
 
         if (mode == CliMode.Status)
-            return await PrintStatusAsync(options, logger);
+            return await PrintStatusAsync(options, loggerFactory);
 
         if (mode == CliMode.Check)
-            return await RunPreflightCheckAsync(options, logger);
+            return await RunPreflightCheckAsync(options, loggerFactory);
 
         if (mode == CliMode.Enqueue)
-            return await EnqueueTaskAsync(args, options);
+            return await EnqueueTaskAsync(args, options, loggerFactory);
 
 if (mode == CliMode.DashboardOnly)
             return await RunDashboardOnlyAsync(options, loggerFactory, logger);
@@ -175,11 +175,11 @@ if (mode == CliMode.DashboardOnly)
         return null;
     }
 
-    private static async Task<int> PrintStatusAsync(AgentOptions options, ILogger logger)
+    private static async Task<int> PrintStatusAsync(AgentOptions options, ILoggerFactory loggerFactory)
     {
         try
         {
-            var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+            var (projects, dbByProject, _, projectStore, cloner, secretStore) = BuildProjectBootstrap(options, loggerFactory);
             if (projects.Count == 0)
             {
                 Console.Error.WriteLine("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
@@ -204,7 +204,7 @@ if (mode == CliMode.DashboardOnly)
         }
     }
 
-    private static async Task<int> EnqueueTaskAsync(string[] args, AgentOptions options)
+    private static async Task<int> EnqueueTaskAsync(string[] args, AgentOptions options, ILoggerFactory loggerFactory)
     {
         var title = ParseArg(args, "--enqueue-task")
             ?? $"task-{Guid.NewGuid().ToString("N")[..8]}";
@@ -212,7 +212,7 @@ if (mode == CliMode.DashboardOnly)
         var description = ParseArg(args, "--task-desc") ?? "no description";
         var branch = ParseArg(args, "--branch") ?? $"agent/{title}";
 
-        var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        var (projects, dbByProject, _, projectStore, cloner, secretStore) = BuildProjectBootstrap(options, loggerFactory);
         if (projects.Count == 0)
         {
             Console.Error.WriteLine("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
@@ -275,23 +275,33 @@ if (mode == CliMode.DashboardOnly)
     private static (IReadOnlyList<ProjectOptions> Projects,
                     Dictionary<string, string> IssuesDbByProject,
                     string DataRoot,
-                    Core.ProjectStore ProjectStore,
-                    Projects.ProjectCloner Cloner)
-        BuildProjectBootstrap(AgentOptions options, ILogger logger)
+                     Core.ProjectStore ProjectStore,
+                     Projects.ProjectCloner Cloner,
+                     Core.SecretStore SecretStore)
+        BuildProjectBootstrap(AgentOptions options, ILoggerFactory loggerFactory)
     {
+        var logger = loggerFactory.CreateLogger("Forge.Bootstrap");
         var dataRoot = ForgesystemPaths.ResolveDataRoot(options.Forgesystem.DataRoot);
         Directory.CreateDirectory(dataRoot);
         logger.LogInformation("Forgesystem data root: {Root}", dataRoot);
 
-        // ProjectStore + ProjectCloner need an IssueStore to anchor
-        // their SQLite connection. The "primary" project (first in
-        // the registry) gets its IssueStore created here, then we
-        // pass it to the registry loader + cloner. Other projects get
-        // their IssueStore allocated inside the loop below.
+        // ProjectStore + ProjectCloner + SecretStore all need an
+        // IssueStore to anchor their SQLite connection. The "primary"
+        // project (first in the registry) gets its IssueStore
+        // created here, then we pass it to the registry loader +
+        // cloner. Other projects get their IssueStore allocated
+        // inside the loop below. The SecretStore piggy-backs on
+        // the same SQLite file (the `secret` table lives in the
+        // default project's DB; cross-project secret rows are
+        // scoped by project_id).
         var primaryDbPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
         Directory.CreateDirectory(Path.GetDirectoryName(primaryDbPath)!);
         var primaryStore = new Core.IssueStore(primaryDbPath);
         var projectStore = new Core.ProjectStore(primaryStore);
+        var secretStore = new Core.SecretStore(
+            primaryStore,
+            Microsoft.AspNetCore.DataProtection.DataProtectionProvider.Create("forge.secrets"),
+            loggerFactory.CreateLogger<Core.SecretStore>());
 
         var cloner = new Projects.ProjectCloner(dataRoot, null);
         var bootstrap = new Projects.ProjectBootstrap(dataRoot, cloner, options.GitHub, null);
@@ -321,13 +331,13 @@ if (mode == CliMode.DashboardOnly)
                 result.Created, result.InitializedAsGitRepo, result.ClonedFromRemote);
         }
 
-        return (finalised, dbByProject, dataRoot, projectStore, cloner);
+        return (finalised, dbByProject, dataRoot, projectStore, cloner, secretStore);
     }
 
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
-        var (dashboardOnlyProjects, dbByProject, dataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+        var (dashboardOnlyProjects, dbByProject, dataRoot, projectStore, cloner, secretStore) = BuildProjectBootstrap(options, loggerFactory);
         var defaultDb = dashboardOnlyProjects.Count > 0
             ? dbByProject[dashboardOnlyProjects[0].Id]
             : throw new InvalidOperationException("At least one project is required to run the dashboard.");
@@ -350,7 +360,8 @@ var dashboard = new DashboardHost(
             slots: dashboardOnlySlots,
             projectStore: projectStore,
             projectCloner: cloner,
-            githubOptions: options.GitHub);
+            githubOptions: options.GitHub,
+            secretStore: secretStore);
 
         using var shutdownCts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -468,7 +479,7 @@ Console.Error.WriteLine(ex.ToString());
         try
         {
             var failures = new List<string>();
-            var (projects, dbByProject, _, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+            var (projects, dbByProject, _, projectStore, cloner, secretStore) = BuildProjectBootstrap(options, loggerFactory);
             if (projects.Count == 0)
             {
                 Console.Error.WriteLine("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
@@ -552,10 +563,10 @@ Console.Error.WriteLine(ex.ToString());
         }
     }
 
-    private static async Task<int> RunPreflightCheckAsync(AgentOptions options, ILogger logger)
+    private static async Task<int> RunPreflightCheckAsync(AgentOptions options, ILoggerFactory loggerFactory)
     {
         var failures = new List<string>();
-        var (projects, dbByProject, dataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+        var (projects, dbByProject, dataRoot, projectStore, cloner, secretStore) = BuildProjectBootstrap(options, loggerFactory);
         if (projects.Count == 0)
         {
             failures.Add("No projects registered. Add one via POST /api/projects or the dashboard Projects page.");
@@ -815,7 +826,7 @@ Console.Error.WriteLine(ex.ToString());
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger,
         CancellationToken externalStop = default)
     {
-        var (knownProjects, orchDbByProject, orchDataRoot, projectStore, cloner) = BuildProjectBootstrap(options, logger);
+        var (knownProjects, orchDbByProject, orchDataRoot, projectStore, cloner, secretStore) = BuildProjectBootstrap(options, loggerFactory);
         if (knownProjects.Count == 0)
         {
             logger.LogWarning(
@@ -1142,7 +1153,8 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory: loggerFactory,
             projectStore: projectStore,
             projectCloner: cloner,
-            githubOptions: options.GitHub);
+            githubOptions: options.GitHub,
+            secretStore: secretStore);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never

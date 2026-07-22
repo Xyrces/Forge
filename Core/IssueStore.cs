@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 17;
+    public const int CurrentSchemaVersion = 18;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -282,6 +282,24 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 updated_at      TEXT NOT NULL,
                 last_synced_at  TEXT,
                 last_sync_error TEXT
+            );
+            -- v18: per-project secret store. Ciphertext is opaque
+            -- (encrypted with IDataProtector using a per-deployment
+            -- master key). Kinds are an open string: 'github_token',
+            -- 'kilo_gateway_api_key', 'meshy_api_key', etc. The
+            -- (project_id, kind) pair is unique. When the row is
+            -- missing for a given (project_id, kind), the orchestrator
+            -- falls back to the global env/appsettings value so
+            -- existing setups keep working.
+            CREATE TABLE IF NOT EXISTS secret (
+                id          TEXT PRIMARY KEY,
+                project_id  TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                ciphertext  BLOB NOT NULL,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE,
+                UNIQUE (project_id, kind)
             );
 
             CREATE TABLE IF NOT EXISTS skill (

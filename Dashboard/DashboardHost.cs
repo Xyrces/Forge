@@ -57,6 +57,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly SlotTable? _slots;
     private readonly IProjectStore? _projectStore;
     private readonly ProjectCloner? _projectCloner;
+    private readonly Forge.Core.SecretStore? _secretStore;
     private readonly GitHubOptions? _githubOptions;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
@@ -103,7 +104,8 @@ public sealed class DashboardHost : IAsyncDisposable
         ILoggerFactory? loggerFactory = null,
         IProjectStore? projectStore = null,
         ProjectCloner? projectCloner = null,
-        GitHubOptions? githubOptions = null)
+        GitHubOptions? githubOptions = null,
+        Forge.Core.SecretStore? secretStore = null)
     {
         _options = options;
         _headroom = headroom;
@@ -144,6 +146,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _slots = slots;
         _projectStore = projectStore;
         _projectCloner = projectCloner;
+        _secretStore = secretStore;
         _githubOptions = githubOptions;
         _logger = logger;
     }
@@ -205,6 +208,21 @@ public sealed class DashboardHost : IAsyncDisposable
         if (_projectStore is not null) builder.Services.AddSingleton(_projectStore);
         if (_projectCloner is not null) builder.Services.AddSingleton(_projectCloner);
         if (_githubOptions is not null) builder.Services.AddSingleton(_githubOptions);
+
+        // Secrets: Microsoft.AspNetCore.DataProtection. The provider
+        // is shared with the orchestrator process (same master key
+        // ring at ~/.aspnet/DataProtection-Keys/ on Linux) so a
+        // secret written by the dashboard is readable by the
+        // agent's IAgentRunner the moment it's upserted. The
+        // purpose string is in SecretStore's ctor.
+        if (_secretStore is not null)
+        {
+            builder.Services.AddDataProtection();
+            // Register the concrete instance by its interface so
+            // endpoint signatures like `[FromServices] ISecretStore`
+            // resolve correctly.
+            builder.Services.AddSingleton<Forge.Core.ISecretStore>(_secretStore);
+        }
 
         // 2026-07-18 (Phase 2.11.f + bug-1-review): the Reviewer
         // dispatcher needs to be in the DI service collection
@@ -325,6 +343,7 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         if (_projectFactory is not null && _slots is not null)
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
+            SecretsEndpoints.MapSecretsEndpoints(_app);
             DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
         }
 
