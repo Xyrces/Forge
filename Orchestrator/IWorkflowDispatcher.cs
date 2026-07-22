@@ -48,13 +48,17 @@ public interface IWorkflowDispatcher
     /// dispatch-then-check-shape.
     /// </summary>
     /// <remarks>
-    /// For <see cref="InProcessDispatcher"/> the workflow runs
-    /// on the calling thread; for
-    /// <see cref="DurableDispatcher"/> it runs on the DTS
-    /// worker thread and the dispatcher waits on the durable
-    /// run handle.
+    /// The <paramref name="bundle"/> carries the dispatch project's
+    /// stores (IssueStore, worktrees, GitHub, artifact stores) so the
+    /// workflow executors act on the correct project. For
+    /// <see cref="InProcessDispatcher"/> the workflow runs on the
+    /// calling thread with the bundle's stores; for
+    /// <see cref="DurableDispatcher"/> the DTS-hosted workflow is
+    /// still constructed once with startup stores (multi-project
+    /// Durable wiring is a known follow-up — use InProcess for
+    /// multi-project deployments).
     /// </remarks>
-    Task DispatchAsync(IssueRecord issue, CancellationToken ct);
+    Task DispatchAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken ct);
 
     /// <summary>
     /// Wait for the orchestrator host to be ready. For
@@ -74,19 +78,19 @@ public interface IWorkflowDispatcher
 /// </summary>
 public sealed class InProcessDispatcher : IWorkflowDispatcher
 {
-    private readonly Func<IssueRecord, CancellationToken, Task> _runOne;
+    private readonly Func<IssueRecord, ProjectDispatchBundle, CancellationToken, Task> _runOne;
     private readonly ILogger<InProcessDispatcher> _logger;
 
     public InProcessDispatcher(
-        Func<IssueRecord, CancellationToken, Task> runOne,
+        Func<IssueRecord, ProjectDispatchBundle, CancellationToken, Task> runOne,
         ILogger<InProcessDispatcher> logger)
     {
         _runOne = runOne;
         _logger = logger;
     }
 
-    public Task DispatchAsync(IssueRecord issue, CancellationToken ct)
-        => _runOne(issue, ct);
+    public Task DispatchAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken ct)
+        => _runOne(issue, bundle, ct);
 
     public Task EnsureReadyAsync(CancellationToken ct) => Task.CompletedTask;
 }
@@ -105,6 +109,6 @@ public abstract class DurableDispatcherBase : IWorkflowDispatcher
     /// <summary>Inject the workflow client. Tests can supply an
     /// in-process emulator client; production wires in the
     /// Durable Task Scheduler sidecar client.</summary>
-    public abstract Task DispatchAsync(IssueRecord issue, CancellationToken ct);
+    public abstract Task DispatchAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken ct);
     public abstract Task EnsureReadyAsync(CancellationToken ct);
 }

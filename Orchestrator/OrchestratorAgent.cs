@@ -183,7 +183,7 @@ public sealed class OrchestratorAgent : IAgent
             // dispatch-then-check shape.
             try
             {
-                await _dispatcher.DispatchAsync(preClaimed, cancellationToken);
+                await _dispatcher.DispatchAsync(preClaimed, bundle, cancellationToken);
             }
             catch (Exception ex)
             {

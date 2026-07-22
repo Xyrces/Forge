@@ -107,7 +107,7 @@ public sealed class OrchestratorAgentTests : IDisposable
             _roleRegistry,
             _messageBus,
             new InProcessDispatcher(
-                (issue, ct) => RunWorkflowInProcess(runner, issue, ct),
+                (issue, bundle, ct) => RunWorkflowInProcess(runner, issue, ct),
                 NullLogger<InProcessDispatcher>.Instance),
             _events,
             NullLogger<OrchestratorAgent>.Instance);

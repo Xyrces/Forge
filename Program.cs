@@ -995,15 +995,21 @@ Console.Error.WriteLine(ex.ToString());
             // workflow via InProcessExecution. P4 Stage A's
             // StartupRecovery handles crash safety.
             dispatcher = new Orchestrator.InProcessDispatcher(
-                async (issue, ct) =>
+                async (issue, bundle, ct) =>
                 {
+                    // Per-project workflow: the bundle carries the
+                    // dispatch project's stores (issues, worktrees,
+                    // GitHub, artifact stores) so non-primary
+                    // projects dispatch against their own repo.
+                    // WorkspaceOptions only feeds DefaultBranch.
                     var workflow = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
-                        issues, agentRunner, worktrees, gitHub, roleRegistry, options.Workspace,
+                        bundle.IssueStore, agentRunner, bundle.Worktrees, bundle.GitHub, roleRegistry,
+                        new WorkspaceOptions { DefaultBranch = bundle.Project.DefaultBranch },
                         eventBus, agent => messageBus.Drain(agent),
-                        designArtifacts, artOutputs,
+                        bundle.DesignArtifacts, bundle.ArtOutputs,
                         memoryExtractor, extractionStore,
                         loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
-                        projectId: primary.Id);
+                        projectId: bundle.Project.Id);
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());

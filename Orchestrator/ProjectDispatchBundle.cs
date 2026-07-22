@@ -154,18 +154,49 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         return _options.GitHub?.Token;
     }
 
-    private GitHubOptions BuildGitHubOptions(string projectId)
+    private GitHubOptions BuildGitHubOptions(ProjectOptions project)
     {
         var global = _options.GitHub ?? new GitHubOptions();
-        var token = ResolveGitHubToken(projectId);
-        if (string.IsNullOrEmpty(token) || string.Equals(token, global.Token, StringComparison.Ordinal))
+        var token = ResolveGitHubToken(project.Id);
+        var (owner, repo) = ParseGitHubOwnerRepo(project.RepoUrl) ?? (global.Owner, global.Repo);
+        if (string.IsNullOrEmpty(token) && string.Equals(owner, global.Owner, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(repo, global.Repo, StringComparison.OrdinalIgnoreCase))
             return global;
         return new GitHubOptions
         {
-            Owner = global.Owner,
-            Repo = global.Repo,
-            Token = token,
+            Owner = owner,
+            Repo = repo,
+            Token = token ?? global.Token,
         };
+    }
+
+    /// <summary>
+    /// Parse owner/repo from common GitHub URL shapes:
+    /// https://github.com/Owner/Repo(.git), ssh git@github.com:Owner/Repo(.git).
+    /// Returns null for non-GitHub or unparseable URLs (PR ops then
+    /// fall back to the global options).
+    /// </summary>
+    internal static (string Owner, string Repo)? ParseGitHubOwnerRepo(string? repoUrl)
+    {
+        if (string.IsNullOrWhiteSpace(repoUrl)) return null;
+        string path;
+        if (repoUrl.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase))
+        {
+            path = repoUrl["git@github.com:".Length..];
+        }
+        else if (Uri.TryCreate(repoUrl, UriKind.Absolute, out var uri)
+                 && string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            path = uri.AbsolutePath.TrimStart('/');
+        }
+        else
+        {
+            return null;
+        }
+        if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            path = path[..^4];
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 2 ? (parts[0], parts[1]) : null;
     }
 
     /// <summary>
@@ -199,7 +230,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             _loggerFactory.CreateLogger<GitWorktreeService>(),
             githubToken: ResolveGitHubToken(project.Id));
 
-        var gitHub = new GitHubService(BuildGitHubOptions(project.Id));
+        var gitHub = new GitHubService(BuildGitHubOptions(ensured.Project));
 
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issueStore,

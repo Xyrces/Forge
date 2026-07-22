@@ -91,8 +91,13 @@ public sealed class DurableDispatcher : DurableDispatcherBase
             _options.DtsConnectionString);
     }
 
-    public override async Task DispatchAsync(IssueRecord issue, CancellationToken ct)
+    public override async Task DispatchAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken ct)
     {
+        // NOTE: the DTS-hosted workflow was constructed once at
+        // startup with the primary project's stores; the bundle
+        // param is accepted for interface parity but multi-project
+        // Durable wiring is a known follow-up. Use InProcess
+        // execution for multi-project deployments.
         // Schedule the workflow on the Durable client. The
         // client writes the orchestration instance to the DTS
         // sidecar; the worker thread picks it up and runs it.
