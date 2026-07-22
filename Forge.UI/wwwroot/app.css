@@ -123,6 +123,21 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
   font-size: 11px; font-weight: 800;
 }
 .app-topbar__search { flex: 1; display: flex; justify-content: center; }
+
+/* Project switcher — the global "what am I looking at" lens. */
+.project-switcher {
+  display: flex; align-items: center; gap: 6px;
+  margin-left: 16px; padding: 3px 8px;
+  background: var(--surface-1); border: 1px solid var(--outline);
+  border-radius: var(--radius-md);
+}
+.project-switcher__icon { color: var(--primary); font-size: 11px; }
+.project-switcher__select {
+  background: transparent; border: none; outline: none;
+  color: var(--on-surface); font-family: var(--font-sans);
+  font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.project-switcher__select option { background: var(--surface-1); color: var(--on-surface); }
 .app-topbar__search input {
   width: 360px; height: 28px;
   background: var(--surface-1); border: 1px solid var(--outline);

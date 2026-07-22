@@ -1,5 +1,6 @@
 @page "/specs"
 @inject IState<Forge.Dashboard.Features.Specs.SpecsState> SpecsStore
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @implements IDisposable
 @using Forge.Dashboard.Features.Specs
@@ -10,7 +11,7 @@
         <h1>Specs</h1>
         <div class="page-header__meta">@SpecsStore.Value.Rows.Count total</div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new LoadSpecsAction()))">Refresh</button>
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new LoadSpecsAction(ShellStore.Value.CurrentProjectId)))">Refresh</button>
         </div>
     </div>
 
@@ -18,7 +19,7 @@
         @foreach (var filter in Filters)
         {
             <button class="chip @(SpecsStore.Value.StatusFilter == filter ? "chip--active" : "")"
-                    @onclick="@(() => Dispatch.Dispatch(new SetStatusFilterAction(filter)))">
+                    @onclick="@(() => Dispatch.Dispatch(new SetStatusFilterAction(filter, ShellStore.Value.CurrentProjectId)))">
                 @filter
             </button>
         }
@@ -71,19 +72,34 @@
 @code {
     private static readonly string[] Filters = { "All", "Draft", "Designed", "AssetReady", "Approved", "Groomed", "Shipped" };
 
+    private string? _loadedProject;
+
     protected override void OnInitialized()
     {
         SpecsStore.StateChanged += OnStateChanged;
-        if (SpecsStore.Value.Rows.Count == 0)
-        {
-            Dispatch.Dispatch(new LoadSpecsAction());
-        }
+        ShellStore.StateChanged += OnShellChanged;
+        LoadForCurrentProject();
     }
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
 
+    private void OnShellChanged(object? sender, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+        {
+            InvokeAsync(LoadForCurrentProject);
+        }
+    }
+
+    private void LoadForCurrentProject()
+    {
+        _loadedProject = ShellStore.Value.CurrentProjectId;
+        Dispatch.Dispatch(new LoadSpecsAction(_loadedProject));
+    }
+
     public void Dispose()
     {
         SpecsStore.StateChanged -= OnStateChanged;
+        ShellStore.StateChanged -= OnShellChanged;
     }
 }

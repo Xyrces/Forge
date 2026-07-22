@@ -16,7 +16,7 @@ public sealed class ViewEffects
     {
         try
         {
-            var snapshot = await _client.FetchAsync(CancellationToken.None);
+            var snapshot = await _client.FetchAsync(action.ProjectId, CancellationToken.None);
             dispatcher.Dispatch(new ViewActions.ViewLoadedAction(new ViewState
             {
                 Tasks = snapshot.Tasks,

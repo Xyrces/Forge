@@ -25,11 +25,11 @@ public sealed record SpecRow(
 
 public static class SpecsActions
 {
-    public sealed record LoadSpecsAction();
+    public sealed record LoadSpecsAction(string? ProjectId = null);
     public sealed record SpecsLoadedAction(IReadOnlyList<SpecRow> Rows);
     public sealed record SpecsLoadFailedAction(string Error);
 
-    public sealed record SetStatusFilterAction(string Filter);
+    public sealed record SetStatusFilterAction(string Filter, string? ProjectId = null);
 }
 
 public sealed class SpecsClient
@@ -41,11 +41,14 @@ public sealed class SpecsClient
         _http = http;
     }
 
-    public async Task<IReadOnlyList<SpecRow>> ListAsync(string? status, CancellationToken ct)
+    public async Task<IReadOnlyList<SpecRow>> ListAsync(string? status, string? projectId, CancellationToken ct)
     {
-        var url = string.IsNullOrEmpty(status) || status == "All"
-            ? "/api/specs"
-            : "/api/specs?status=" + Uri.EscapeDataString(status);
+        var qs = new List<string>(2);
+        if (!string.IsNullOrEmpty(status) && status != "All")
+            qs.Add("status=" + Uri.EscapeDataString(status));
+        if (!string.IsNullOrEmpty(projectId))
+            qs.Add("project=" + Uri.EscapeDataString(projectId));
+        var url = qs.Count == 0 ? "/api/specs" : "/api/specs?" + string.Join('&', qs);
         return await _http.GetFromJsonAsync<List<SpecRow>>(url, ct) ?? new List<SpecRow>();
     }
 

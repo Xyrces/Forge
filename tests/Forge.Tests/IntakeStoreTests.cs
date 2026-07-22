@@ -71,8 +71,11 @@ public class IntakeStoreTests : IDisposable
         Assert.Equal(IntakeMessageRole.System, fetched.Messages[2].Role);
         Assert.Equal("epic-1", fetched.Messages[2].ProposedEpicId);
         Assert.Equal("Demo epic", fetched.Messages[2].ProposedEpicTitle);
-        // updatedAt advances on each append.
-        Assert.True(fetched.UpdatedAt >= session.CreatedAt);
+        // updatedAt advances on each append. Compare the two STORED
+        // timestamps (both parsed at millisecond precision) — the
+        // in-memory session.CreatedAt keeps full tick precision, which
+        // races the ms-truncated DB round-trip and flakes.
+        Assert.True(fetched.UpdatedAt >= fetched.CreatedAt);
     }
 
     [Fact]

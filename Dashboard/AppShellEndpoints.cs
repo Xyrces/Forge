@@ -25,7 +25,8 @@ public static class AppShellEndpoints
         ISprintStore sprints,
         ISpecStore specs,
         MemoryStore? memory,
-        ILogger logger)
+        ILogger logger,
+        Projects.ProjectContextFactory? projectContexts = null)
     {
         app.MapGet("/api/health/heartbeat", () =>
         {
@@ -33,9 +34,18 @@ public static class AppShellEndpoints
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
         });
 
-        app.MapGet("/api/sprints/active", async (CancellationToken ct) =>
+        app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
         {
-            var s = await sprints.GetActiveAsync(ct);
+            // Multi-project: ?projectId= reads that project's sprint
+            // store; absent falls back to the injected primary store.
+            var store = sprints;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx = projectContexts.Find(projectId);
+                if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx.Sprints;
+            }
+            var s = await store.GetActiveAsync(ct);
             return Results.Json(new ActiveSprintDto(s?.Id, s?.Name));
         });
 

@@ -39,17 +39,28 @@ public static class TaskEndpoints
         IIssueStore issues,
         AgentMessageBus? messageBus,
         Orchestrator.StartupRecovery? recovery,
-        ILogger logger)
+        ILogger logger,
+        Projects.ProjectContextFactory? projectContexts = null)
     {
-        app.MapGet("/api/tasks/in-progress", async (int? limit, CancellationToken ct) =>
+        app.MapGet("/api/tasks/in-progress", async (int? limit, string? projectId, CancellationToken ct) =>
         {
             try
             {
-                var inFlight = await issues.ListInProgressForRecoveryAsync(ct);
+                // Multi-project: when ?projectId= is supplied and the
+                // factory is available, read from that project's store;
+                // otherwise fall back to the injected primary store.
+                var store = issues;
+                if (projectId is not null && projectContexts is not null)
+                {
+                    var ctx = projectContexts.Find(projectId);
+                    if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                    store = ctx.Issues;
+                }
+                var inFlight = await store.ListInProgressForRecoveryAsync(ct);
                 var rows = new List<InProgressTaskDto>(inFlight.Count);
                 foreach (var t in inFlight.Take(limit ?? 100))
                 {
-                    var events = await issues.ListEventsAsync(t.Id, limit: 10, ct);
+                    var events = await store.ListEventsAsync(t.Id, limit: 10, ct);
                     rows.Add(new InProgressTaskDto(
                         Id: t.Id,
                         Type: t.Type,

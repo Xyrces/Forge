@@ -1,5 +1,6 @@
 @page "/tasks"
 @inject IState<Forge.Dashboard.Features.Tasks.TasksState> TasksStore
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @implements IDisposable
 @using Forge.Dashboard.Features.Tasks
@@ -10,7 +11,7 @@
         <h1>Tasks</h1>
         <div class="page-header__meta">@TasksStore.Value.Rows.Count in progress</div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new TasksActions.LoadTasksAction()))">Refresh</button>
+            <button class="btn btn--primary" @onclick="LoadForCurrentProject">Refresh</button>
         </div>
     </div>
 
@@ -105,10 +106,27 @@
     protected override void OnInitialized()
     {
         TasksStore.StateChanged += OnStateChanged;
-        Dispatch.Dispatch(new TasksActions.LoadTasksAction());
+        ShellStore.StateChanged += OnShellChanged;
+        LoadForCurrentProject();
     }
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    private void OnShellChanged(object? sender, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+        {
+            InvokeAsync(LoadForCurrentProject);
+        }
+    }
+
+    private string? _loadedProject;
+
+    private void LoadForCurrentProject()
+    {
+        _loadedProject = ShellStore.Value.CurrentProjectId;
+        Dispatch.Dispatch(new TasksActions.LoadTasksAction(_loadedProject));
+    }
 
     private static int StepIndex(string? checkpoint)
     {
@@ -149,5 +167,6 @@
     public void Dispose()
     {
         TasksStore.StateChanged -= OnStateChanged;
+        ShellStore.StateChanged -= OnShellChanged;
     }
 }

@@ -26,14 +26,37 @@ public static class SpecEndpoints
         ILogger logger,
         Forge.Core.IIntakeStore? intakeStore = null,
         GroomerAgentFactory? groomerFactory = null,
-        IssueGroomerRunStore? groomerRuns = null)
+        IssueGroomerRunStore? groomerRuns = null,
+        Projects.ProjectContextFactory? projectContexts = null)
     {
+        // Multi-project: when ?project= names a registered project and the
+        // factory is available, read from THAT project's spec store (spec
+        // rows live in the per-project issues sqlite file). Absent param
+        // keeps the legacy behavior: the injected primary store, filtered
+        // by the project_id column.
+        ISpecStore ResolveSpecs(string? project)
+        {
+            if (project is not null && projectContexts is not null)
+            {
+                var ctx = projectContexts.Find(project);
+                if (ctx is not null) return ctx.Specs;
+            }
+            return specs;
+        }
+
         app.MapGet("/api/specs", async (string? project, string? status, CancellationToken ct) =>
         {
             SpecStatus? statusFilter = null;
             if (!string.IsNullOrEmpty(status) && Enum.TryParse<SpecStatus>(status, ignoreCase: true, out var s))
                 statusFilter = s;
-            var list = await specs.ListAsync(project, statusFilter, ct);
+            // When reading from a resolved per-project store, don't also
+            // filter by the project_id column (rows in a per-project DB
+            // already belong to that project; legacy rows may carry a
+            // stale project_id). The legacy single-store path still
+            // filters by column.
+            var resolved = ResolveSpecs(project);
+            var columnFilter = ReferenceEquals(resolved, specs) ? project : null;
+            var list = await resolved.ListAsync(columnFilter, statusFilter, ct);
             return Results.Json(list.Select(ToSpecView).ToArray(), DashboardJson.Options);
         });
 

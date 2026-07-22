@@ -34,7 +34,7 @@ public sealed record TaskRow(
 
 public static class TasksActions
 {
-    public sealed record LoadTasksAction();
+    public sealed record LoadTasksAction(string? ProjectId = null);
     public sealed record TasksLoadedAction(IReadOnlyList<TaskRow> Rows);
     public sealed record TasksLoadFailedAction(string Error);
 
@@ -56,8 +56,13 @@ public sealed class TasksClient
         _http = http;
     }
 
-    public async Task<IReadOnlyList<TaskRow>> ListInProgressAsync(CancellationToken ct)
-        => await _http.GetFromJsonAsync<List<TaskRow>>("/api/tasks/in-progress", ct) ?? new List<TaskRow>();
+    public async Task<IReadOnlyList<TaskRow>> ListInProgressAsync(string? projectId, CancellationToken ct)
+    {
+        var url = projectId is null
+            ? "/api/tasks/in-progress"
+            : $"/api/tasks/in-progress?projectId={Uri.EscapeDataString(projectId)}";
+        return await _http.GetFromJsonAsync<List<TaskRow>>(url, ct) ?? new List<TaskRow>();
+    }
 
     public async Task RetryMessageAsync(string taskId, string text, CancellationToken ct)
     {

@@ -1,5 +1,6 @@
 @page "/skills"
 @inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @implements IDisposable
 @using Forge.Dashboard.Features.View
@@ -10,7 +11,7 @@
         <h1>Skills</h1>
         <div class="page-header__meta">@ViewStore.Value.Skills.Count loaded · @ViewStore.Value.Skills.Count(s => s.Enabled) enabled</div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction()))">Refresh</button>
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId)))">Refresh</button>
         </div>
     </div>
 
@@ -64,19 +65,37 @@
 </div>
 
 @code {
+    private string? _loadedProject;
+
     protected override void OnInitialized()
     {
         ViewStore.StateChanged += OnStateChanged;
+        ShellStore.StateChanged += OnShellChanged;
         if (ViewStore.Value.LastFetchedAt is null)
         {
-            Dispatch.Dispatch(new ViewActions.LoadViewAction());
+            LoadForCurrentProject();
         }
     }
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
 
+    private void OnShellChanged(object? sender, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+        {
+            InvokeAsync(LoadForCurrentProject);
+        }
+    }
+
+    private void LoadForCurrentProject()
+    {
+        _loadedProject = ShellStore.Value.CurrentProjectId;
+        Dispatch.Dispatch(new ViewActions.LoadViewAction(_loadedProject));
+    }
+
     public void Dispose()
     {
         ViewStore.StateChanged -= OnStateChanged;
+        ShellStore.StateChanged -= OnShellChanged;
     }
 }

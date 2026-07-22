@@ -1,5 +1,6 @@
 @page "/art"
 @inject IState<Forge.Dashboard.Features.Art.ArtState> ArtStore
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @implements IDisposable
 
@@ -41,12 +42,37 @@
 </div>
 
 @code {
+    private string? _loadedProject;
+
     protected override void OnInitialized()
     {
         ArtStore.StateChanged += OnStateChanged;
-        Dispatch.Dispatch(new Forge.Dashboard.Features.Art.ArtActions.LoadArtAction("PortHorizon"));
+        ShellStore.StateChanged += OnShellChanged;
+        LoadForCurrentProject();
     }
 
     private void OnStateChanged(object? s, EventArgs e) => InvokeAsync(StateHasChanged);
-    public void Dispose() { ArtStore.StateChanged -= OnStateChanged; }
+
+    private void OnShellChanged(object? s, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+        {
+            InvokeAsync(LoadForCurrentProject);
+        }
+    }
+
+    private void LoadForCurrentProject()
+    {
+        _loadedProject = ShellStore.Value.CurrentProjectId;
+        if (_loadedProject is not null)
+        {
+            Dispatch.Dispatch(new Forge.Dashboard.Features.Art.ArtActions.LoadArtAction(_loadedProject));
+        }
+    }
+
+    public void Dispose()
+    {
+        ArtStore.StateChanged -= OnStateChanged;
+        ShellStore.StateChanged -= OnShellChanged;
+    }
 }

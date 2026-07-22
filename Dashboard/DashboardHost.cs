@@ -260,15 +260,27 @@ public sealed class DashboardHost : IAsyncDisposable
 
         _app.UseAntiforgery();
 
-_app.MapGet("/api/state", async (CancellationToken ct) =>
+_app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         {
             try
             {
-                var tasks = await _issues.ListAsync(new IssueFilter(), ct);
-                var activeSprint = await _sprints.GetActiveAsync(ct);
+                // Multi-project: ?projectId= reads that project's issue +
+                // sprint stores (agents/skills stay global — they're not
+                // project-scoped today). Absent param = primary project.
+                var issueStore = _issues;
+                var sprintStore = _sprints;
+                if (projectId is not null && _projectFactory is not null)
+                {
+                    var pctx = _projectFactory.Find(projectId);
+                    if (pctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                    issueStore = pctx.Issues;
+                    sprintStore = pctx.Sprints;
+                }
+                var tasks = await issueStore.ListAsync(new IssueFilter(), ct);
+                var activeSprint = await sprintStore.GetActiveAsync(ct);
                 var agents = await _agents.ListAsync(ct);
                 var skills = await _skills.ListAsync(null, globalOnly: false, ct);
-                var sprints = await _sprints.ListAsync(activeOnly: false, ct);
+                var sprints = await sprintStore.ListAsync(activeOnly: false, ct);
                 var view = new
                 {
                     tasks = tasks.Select(t => new
@@ -368,14 +380,14 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
         // they're wired; otherwise it returns placeholders.
         HealthEndpoint.MapHealthEndpoint(_app, new DefaultHealthSnapshotFactory());
 
-        AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger);
+        AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger, _projectFactory);
 
         if (_intakeRegistry is not null)
         {
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory);
 
         if (_memory is not null)
         {
@@ -441,7 +453,7 @@ if (_groomerRuns is not null)
                 SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger);
             }
 
-            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger);
+            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory);
         }
 
         _app.MapGet("/api/agents", () =>

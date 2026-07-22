@@ -26,4 +26,12 @@ public static class AppShellReducers
         var next = state.LiveFeed.Concat(new[] { action.Entry }).TakeLast(200).ToArray();
         return state with { LiveFeed = next };
     }
+
+    [ReducerMethod]
+    public static AppShellState OnProjectsLoaded(AppShellState state, AppShellActions.ProjectsLoadedAction action)
+        => state with { Projects = action.Projects, CurrentProjectId = action.CurrentProjectId };
+
+    [ReducerMethod]
+    public static AppShellState OnSelectProject(AppShellState state, AppShellActions.SelectProjectAction action)
+        => state with { CurrentProjectId = action.ProjectId };
 }

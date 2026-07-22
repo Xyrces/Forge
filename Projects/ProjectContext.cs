@@ -17,6 +17,8 @@ public sealed class ProjectContext : IAsyncDisposable
 
     private readonly IssueStore _issues;
     private readonly Lazy<DeploymentStore> _deployments;
+    private readonly Lazy<SpecStore> _specs;
+    private readonly Lazy<SprintStore> _sprints;
 
     public ProjectContext(ProjectOptions options, IssueStore issues)
     {
@@ -28,10 +30,17 @@ public sealed class ProjectContext : IAsyncDisposable
         // is a thin typed layer over that table, so it's safe to
         // construct lazily against the same path.
         _deployments = new Lazy<DeploymentStore>(() => new DeploymentStore(_issues.DbPath));
+        // Spec + sprint rows also live in the issues sqlite file
+        // (created by EnsureSchema); both stores are typed layers
+        // over the same IssueStore instance.
+        _specs = new Lazy<SpecStore>(() => new SpecStore(_issues));
+        _sprints = new Lazy<SprintStore>(() => new SprintStore(_issues));
     }
 
     public IIssueStore Issues => _issues;
     public DeploymentStore Deployments => _deployments.Value;
+    public ISpecStore Specs => _specs.Value;
+    public ISprintStore Sprints => _sprints.Value;
 
     public async Task<int> CountByStatusAsync(IssueStatus status, CancellationToken ct)
     {

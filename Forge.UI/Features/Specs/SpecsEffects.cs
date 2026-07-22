@@ -16,7 +16,7 @@ public sealed class SpecsEffects
     {
         try
         {
-            var rows = await _client.ListAsync(null, CancellationToken.None);
+            var rows = await _client.ListAsync(null, action.ProjectId, CancellationToken.None);
             dispatcher.Dispatch(new SpecsActions.SpecsLoadedAction(rows));
         }
         catch (Exception ex)
@@ -30,7 +30,7 @@ public sealed class SpecsEffects
     {
         try
         {
-            var rows = await _client.ListAsync(action.Filter, CancellationToken.None);
+            var rows = await _client.ListAsync(action.Filter, action.ProjectId, CancellationToken.None);
             dispatcher.Dispatch(new SpecsActions.SpecsLoadedAction(rows));
         }
         catch (Exception ex)

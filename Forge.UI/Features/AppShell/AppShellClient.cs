@@ -23,15 +23,31 @@ public sealed class AppShellClient
         _http = http;
     }
 
-    public async Task<ActiveSprintDto?> GetActiveSprintAsync(CancellationToken ct)
+    public async Task<ActiveSprintDto?> GetActiveSprintAsync(string? projectId, CancellationToken ct)
     {
         try
         {
-            return await _http.GetFromJsonAsync<ActiveSprintDto>("/api/sprints/active", ct);
+            var url = projectId is null
+                ? "/api/sprints/active"
+                : $"/api/sprints/active?projectId={Uri.EscapeDataString(projectId)}";
+            return await _http.GetFromJsonAsync<ActiveSprintDto>(url, ct);
         }
         catch (HttpRequestException)
         {
             return null;
+        }
+    }
+
+    public async Task<IReadOnlyList<ProjectListEntry>> ListProjectsAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<List<ProjectListEntry>>("/api/projects/", ct)
+                ?? new List<ProjectListEntry>();
+        }
+        catch (HttpRequestException)
+        {
+            return new List<ProjectListEntry>();
         }
     }
 

@@ -64,7 +64,7 @@ public sealed record ViewSprint(
 
 public static class ViewActions
 {
-    public sealed record LoadViewAction();
+    public sealed record LoadViewAction(string? ProjectId = null);
     public sealed record ViewLoadedAction(
         ViewState State);
     public sealed record ViewLoadFailedAction(string Error);
@@ -79,9 +79,12 @@ public sealed class ViewClient
         _http = http;
     }
 
-    public async Task<ViewSnapshot> FetchAsync(CancellationToken ct)
+    public async Task<ViewSnapshot> FetchAsync(string? projectId, CancellationToken ct)
     {
-        var resp = await _http.GetFromJsonAsync<RawState>("api/state", ct)
+        var url = projectId is null
+            ? "api/state"
+            : $"api/state?projectId={Uri.EscapeDataString(projectId)}";
+        var resp = await _http.GetFromJsonAsync<RawState>(url, ct)
                    ?? throw new InvalidOperationException("empty /api/state");
         var snapshot = new ViewSnapshot(
             Tasks: resp.tasks.Select(t => new ViewTask(
