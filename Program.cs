@@ -1009,7 +1009,8 @@ Console.Error.WriteLine(ex.ToString());
                         bundle.DesignArtifacts, bundle.ArtOutputs,
                         memoryExtractor, extractionStore,
                         loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
-                        projectId: bundle.Project.Id);
+                        projectId: bundle.Project.Id,
+                        loggerFactory: loggerFactory);
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
@@ -1028,6 +1029,8 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory.CreateLogger<OrchestratorAgent>());
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
+        var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
+        specStoreRef.Set(specStore);  // P5 — wire the spec store to the late-binding holder
         var intakeRegistry = new IntakeAgentRegistry(projectId =>
             new IntakeAgent(
                 projectId,
@@ -1040,9 +1043,8 @@ Console.Error.WriteLine(ex.ToString());
                 eventBus,
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
-                rolePromptsRoot: Path.Combine(primary.Root, "agents")));
-        var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
-        specStoreRef.Set(specStore);  // P5 — wire the spec store to the late-binding holder
+                rolePromptsRoot: Path.Combine(primary.Root, "agents"),
+                specs: specStoreRef.Value));
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
         var codebaseGraphBuilder = new Codebase.DotnetCodebaseGraphBuilder();
