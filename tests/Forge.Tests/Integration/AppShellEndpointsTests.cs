@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
+using System.Reflection;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using Microsoft.AspNetCore.Builder;
@@ -78,6 +80,76 @@ public class AppShellEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task BuildInfo_ReturnsOkWithInformationalVersionAndFramework()
+    {
+        var resp = await _client.GetAsync("/api/meta/buildinfo");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var body = await resp.Content.ReadFromJsonAsync<BuildInfoShape>();
+        Assert.NotNull(body);
+        Assert.False(string.IsNullOrWhiteSpace(body!.InformationalVersion),
+            "informationalVersion must be non-empty");
+        Assert.False(string.IsNullOrWhiteSpace(body.Framework),
+            "framework must be non-empty");
+    }
+
+    [Fact]
+    public async Task BuildInfo_UsesCamelCaseJson()
+    {
+        var raw = await _client.GetStringAsync("/api/meta/buildinfo");
+        Assert.Contains("informationalVersion", raw);
+        Assert.Contains("framework", raw);
+        // Property names must not leak the PascalCase record field names.
+        Assert.DoesNotContain("InformationalVersion", raw);
+        Assert.DoesNotContain("Framework", raw);
+    }
+
+    [Fact]
+    public async Task BuildInfo_VersionMatchesAssemblyAttribute()
+    {
+        // The endpoint resolves InformationalVersion from
+        // AssemblyInformationalVersionAttribute (falls back to
+        // AssemblyName.Version, then to "0.0.0"). CI stamps a
+        // "+sha" suffix on top of the semantic version, so the
+        // comparison goes through the version-prefix only.
+        var asm = typeof(AppShellEndpoints).Assembly;
+        var expectedAttr = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        var expectedName = asm.GetName().Version?.ToString();
+        var expected = !string.IsNullOrWhiteSpace(expectedAttr)
+            ? expectedAttr!
+            : (!string.IsNullOrWhiteSpace(expectedName) ? expectedName! : "0.0.0");
+
+        var body = await (await _client.GetAsync("/api/meta/buildinfo"))
+            .Content.ReadFromJsonAsync<BuildInfoShape>();
+
+        Assert.NotNull(body);
+        var actualPrefix = body!.InformationalVersion.Split('+')[0];
+        var expectedPrefix = expected.Split('+')[0];
+        Assert.Equal(expectedPrefix, actualPrefix);
+    }
+
+    [Fact]
+    public async Task BuildInfo_FrameworkContainsDotNet()
+    {
+        var body = await (await _client.GetAsync("/api/meta/buildinfo"))
+            .Content.ReadFromJsonAsync<BuildInfoShape>();
+
+        Assert.NotNull(body);
+        Assert.False(string.IsNullOrWhiteSpace(body!.Framework));
+        Assert.NotEqual("Unknown", body.Framework);
+        Assert.Contains(".NET", body.Framework);
+    }
+
+    [Fact]
+    public async Task BuildInfo_PostReturns405_ReadOnlyContract()
+    {
+        // Lock the read-only contract: the endpoint is registered
+        // via MapGet only, so a POST must return 405.
+        var resp = await _client.PostAsync("/api/meta/buildinfo", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task ActiveSprint_None_ReturnsNull()
     {
         var resp = await _client.GetAsync("/api/sprints/active");
@@ -136,6 +208,12 @@ public class AppShellEndpointsTests : IDisposable
         public string Status { get; set; } = "";
         public DateTime At { get; set; }
         public string? Version { get; set; }
+    }
+
+    public sealed class BuildInfoShape
+    {
+        public string InformationalVersion { get; set; } = "";
+        public string Framework { get; set; } = "";
     }
 
     public sealed class ActiveSprintShape
