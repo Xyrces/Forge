@@ -380,6 +380,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         // they're wired; otherwise it returns placeholders.
         HealthEndpoint.MapHealthEndpoint(_app, new DefaultHealthSnapshotFactory());
 
+        MetaEndpoints.MapMetaEndpoints(_app);
+
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger, _projectFactory);
 
         if (_intakeRegistry is not null)
