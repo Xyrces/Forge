@@ -456,7 +456,7 @@ if (_groomerRuns is not null)
             TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory);
         }
 
-        app.MapBuildInfoEndpoint();
+        _app.MapBuildInfoEndpoint();
 
         _app.MapGet("/api/agents", () =>
         {
