@@ -78,6 +78,28 @@ public class AppShellEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task BuildInfo_ReturnsNonEmptyVersionAndFramework()
+    {
+        var resp = await _client.GetAsync("/api/meta/buildinfo");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<BuildInfoShape>();
+        Assert.NotNull(body);
+        // Both fields must be populated; informationalVersion falls
+        // back to the assembly version when the attribute is absent,
+        // and framework is always non-empty on a supported runtime.
+        Assert.False(string.IsNullOrWhiteSpace(body!.InformationalVersion));
+        Assert.False(string.IsNullOrWhiteSpace(body.Framework));
+    }
+
+    [Fact]
+    public async Task BuildInfo_IsReadOnly_NoPostHandler()
+    {
+        // Probe must not accept POST: read-only contract.
+        var resp = await _client.PostAsync("/api/meta/buildinfo", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task ActiveSprint_None_ReturnsNull()
     {
         var resp = await _client.GetAsync("/api/sprints/active");
@@ -136,6 +158,12 @@ public class AppShellEndpointsTests : IDisposable
         public string Status { get; set; } = "";
         public DateTime At { get; set; }
         public string? Version { get; set; }
+    }
+
+    public sealed class BuildInfoShape
+    {
+        public string InformationalVersion { get; set; } = string.Empty;
+        public string Framework { get; set; } = string.Empty;
     }
 
     public sealed class ActiveSprintShape
