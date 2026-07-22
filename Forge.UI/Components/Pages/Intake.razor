@@ -88,16 +88,98 @@
 
         <aside class="intake-context">
             <div class="intake-context__tabs">
-                <span class="chip chip--active">Spec Draft</span>
-                <span class="chip">Architecture</span>
-                <span class="chip">Memory</span>
+                <button class="chip @(_activeTab == "spec" ? "chip--active" : "")" @onclick='() => SelectTab("spec")'>Spec Draft</button>
+                <button class="chip @(_activeTab == "arch" ? "chip--active" : "")" @onclick='() => SelectTab("arch")'>Architecture</button>
+                <button class="chip @(_activeTab == "memory" ? "chip--active" : "")" @onclick='() => SelectTab("memory")'>Memory</button>
             </div>
             <div class="intake-context__body">
-                <p class="page-subtitle">Architecture tab (Stage 6) renders the Cytoscape graph from <code>/api/codebase-graph?repoRoot=…</code>. Graph payload includes nodes + project edges; modules touched by the current epic are highlighted.</p>
-                <button class="btn" @onclick="RebuildGraph">Refresh Graph</button>
-                @if (_graphFileCount.HasValue)
+                @if (_activeTab == "spec")
                 {
-                    <p class="page-subtitle">@_graphFileCount files · sha @_graphSha</p>
+                    @if (_activeSessionId is null)
+                    {
+                        <p class="page-subtitle">Pick a session to see its spec drafts.</p>
+                    }
+                    else if (_sessionSpecs is null)
+                    {
+                        <p class="page-subtitle">Loading…</p>
+                    }
+                    else if (_sessionSpecs.Count == 0)
+                    {
+                        <p class="page-subtitle">No specs for this session yet — they appear after you accept a proposed epic.</p>
+                    }
+                    else
+                    {
+                        @foreach (var spec in _sessionSpecs)
+                        {
+                            <div class="card" style="margin-bottom:10px">
+                                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                                    <strong>@spec.Title</strong>
+                                    <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Status</span>
+                                </div>
+                                <div class="mono page-subtitle">@spec.Id · v@spec.CurrentVersion</div>
+                                @if (!string.IsNullOrWhiteSpace(spec.Body))
+                                {
+                                    <pre class="intake-spec-body">@Truncate(spec.Body, 800)</pre>
+                                }
+                            </div>
+                        }
+                    }
+                }
+                else if (_activeTab == "arch")
+                {
+                    <div style="display:flex;gap:8px;margin-bottom:10px">
+                        <button class="btn" @onclick="RebuildGraph" disabled="@_graphLoading">
+                            @(_graphLoading ? "Building…" : "Refresh Graph")
+                        </button>
+                    </div>
+                    @if (_graphError is not null)
+                    {
+                        <div class="banner banner--error"><span>@_graphError</span></div>
+                    }
+                    @if (_graph is not null)
+                    {
+                        <p class="page-subtitle">
+                            @_graph.FileCount files · @_graph.ImportCount imports · @_graph.ProjectEdgeCount project edges<br />
+                            sha @_graph.RepoSha[..Math.Min(8, _graph.RepoSha.Length)] · built @_graph.BuiltAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                        </p>
+                        @if (_graph.Files.Count > 0)
+                        {
+                            <div class="intake-module-list">
+                                @foreach (var mod in _graph.Files.GroupBy(f => f.Module).OrderByDescending(g => g.Count()).Take(20))
+                                {
+                                    <div class="intake-module">
+                                        <span class="mono">@(string.IsNullOrEmpty(mod.Key) ? "(root)" : mod.Key)</span>
+                                        <span class="page-subtitle">@mod.Count() files</span>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    }
+                    else if (!_graphLoading && _graphError is null)
+                    {
+                        <p class="page-subtitle">Load the codebase graph for the current project.</p>
+                    }
+                }
+                else
+                {
+                    @if (_memory is null)
+                    {
+                        <p class="page-subtitle">Loading…</p>
+                    }
+                    else if (_memory.Count == 0)
+                    {
+                        <p class="page-subtitle">No memory entries yet.</p>
+                    }
+                    else
+                    {
+                        @foreach (var m in _memory.Take(30))
+                        {
+                            <div class="intake-memory-row">
+                                <span class="mono">@m.Key</span>
+                                <span class="page-subtitle">@Truncate(m.Value, 120)</span>
+                            </div>
+                        }
+                    }
                 }
             </div>
         </aside>
@@ -113,11 +195,108 @@
     private bool _accepting;
     private readonly HashSet<long> _acceptedEpicIds = new();
     private string? _actionError;
-    private int? _graphFileCount;
-    private string? _graphSha;
+    private string _activeTab = "spec";
+    private List<SessionSpecDto>? _sessionSpecs;
+    private GraphDto? _graph;
+    private bool _graphLoading;
+    private string? _graphError;
+    private List<MemoryDto>? _memory;
 
     public sealed record SessionDto(string Id, string ProjectId, string Title, DateTime CreatedAt, DateTime UpdatedAt, List<MessageDto>? Messages);
     public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle);
+    public sealed record SessionSpecDto(string Id, string ProjectId, string Title, string Status, int CurrentVersion, string? Body);
+    public sealed record GraphDto(string RepoRoot, string RepoSha, DateTime BuiltAt, int FileCount, int ImportCount, int ProjectEdgeCount, List<GraphFileDto> Files);
+    public sealed record GraphFileDto(string Path, string Module, string Language);
+    public sealed record MemoryDto(string Key, string Value, DateTime UpdatedAt);
+
+    private void SelectTab(string tab)
+    {
+        _activeTab = tab;
+        _ = tab switch
+        {
+            "spec" => LoadSessionSpecs(),
+            "arch" => LoadGraph(forceRebuild: false),
+            "memory" => LoadMemory(),
+            _ => Task.CompletedTask,
+        };
+    }
+
+    private async Task LoadSessionSpecs()
+    {
+        if (_activeSessionId is null) { _sessionSpecs = null; return; }
+        try
+        {
+            _sessionSpecs = await Http.GetFromJsonAsync<List<SessionSpecDto>>($"/api/intake/sessions/{_activeSessionId}/specs");
+        }
+        catch { _sessionSpecs = new(); }
+        StateHasChanged();
+    }
+
+    private async Task<string?> CurrentProjectRoot()
+    {
+        try
+        {
+            var id = ShellStore.Value.CurrentProjectId;
+            if (id is null) return null;
+            var projects = await Http.GetFromJsonAsync<List<ProjectRootDto>>("/api/projects/");
+            return projects?.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))?.Root;
+        }
+        catch { return null; }
+    }
+
+    private async Task LoadGraph(bool forceRebuild)
+    {
+        _graphLoading = true;
+        _graphError = null;
+        StateHasChanged();
+        try
+        {
+            var root = await CurrentProjectRoot();
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                _graphError = "Current project's local path is unknown — cannot build the codebase graph.";
+                return;
+            }
+            var url = forceRebuild
+                ? $"/api/codebase-graph/rebuild?repoRoot={Uri.EscapeDataString(root)}"
+                : $"/api/codebase-graph?repoRoot={Uri.EscapeDataString(root)}";
+            if (forceRebuild)
+            {
+                var resp = await Http.PostAsync(url, null);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    _graphError = $"Graph build failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                    return;
+                }
+                _graph = await Http.GetFromJsonAsync<GraphDto>($"/api/codebase-graph?repoRoot={Uri.EscapeDataString(root)}");
+            }
+            else
+            {
+                _graph = await Http.GetFromJsonAsync<GraphDto>(url);
+            }
+        }
+        catch (Exception ex) { _graphError = ex.Message; }
+        finally
+        {
+            _graphLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadMemory()
+    {
+        try
+        {
+            _memory = await Http.GetFromJsonAsync<List<MemoryDto>>("/api/memory");
+        }
+        catch { _memory = new(); }
+        StateHasChanged();
+    }
+
+    private static string Truncate(string s, int max) =>
+        string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max] + "…";
+
+    public sealed record ProjectRootDto(string Id, string Root);
 
     protected override async Task OnInitializedAsync()
     {
@@ -144,10 +323,12 @@
     private async Task SetActive(string id)
     {
         _activeSessionId = id;
+        _sessionSpecs = null;
         try
         {
             var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{id}");
             _messages = resp?.Messages?.ToList() ?? new();
+            if (_activeTab == "spec") await LoadSessionSpecs();
         }
         catch { _messages = new(); }
         StateHasChanged();
@@ -192,6 +373,7 @@
             {
                 _acceptedEpicIds.Add(messageId);
                 _actionError = null;
+                await LoadSessionSpecs();
             }
             else
             {
@@ -216,22 +398,7 @@
         finally { _sending = false; }
     }
 
-    private async Task RebuildGraph()
-    {
-        try
-        {
-            await Http.PostAsync("/api/codebase-graph/rebuild?repoRoot=" + Uri.EscapeDataString("C:/Users/jtn50/repos/gamedev/PortHorizon"), null);
-            var graph = await Http.GetFromJsonAsync<GraphDto>("/api/codebase-graph?repoRoot=" + Uri.EscapeDataString("C:/Users/jtn50/repos/gamedev/PortHorizon"));
-            if (graph is not null)
-            {
-                _graphFileCount = graph.fileCount;
-                _graphSha = graph.repoSha;
-            }
-        }
-        catch { }
-    }
-
-    public sealed record GraphDto(string repoSha, int fileCount, int importCount);
+    private Task RebuildGraph() => LoadGraph(forceRebuild: true);
 
     public void Dispose() { }
 }
