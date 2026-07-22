@@ -19,6 +19,8 @@ public static class AppShellEndpoints
 
     public sealed record ActiveSprintDto(string? Id, string? Name);
 
+    public sealed record UptimeDto(long UptimeMs, string UtcTimestamp);
+
     public static void MapAppShellEndpoints(
         WebApplication app,
         IIssueStore issues,
@@ -29,6 +31,13 @@ public static class AppShellEndpoints
         Projects.ProjectContextFactory? projectContexts = null)
     {
         app.MapGet("/api/health/ping", () => Results.Json(new { pong = true, at = DateTime.UtcNow.ToString("o") }));
+
+        app.MapGet("/api/health/uptime", () =>
+        {
+            var uptimeMs = Environment.TickCount64;
+            var utcTimestamp = DateTime.UtcNow.ToString("o");
+            return Results.Json(new UptimeDto(uptimeMs, utcTimestamp));
+        });
 
         app.MapGet("/api/health/heartbeat", () =>
         {
