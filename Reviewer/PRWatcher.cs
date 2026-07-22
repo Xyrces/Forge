@@ -67,6 +67,23 @@ public sealed class PRWatcher
             }
 
             var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+
+            // Externally merged (operator merged by hand, or the
+            // branch protection bot did): close the loop exactly as
+            // if we had merged it ourselves. Without this check the
+            // watch polls forever on CI+reviews of a dead PR.
+            if (pr.Merged)
+            {
+                _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
+                await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
+                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
+                    taskId, $"PR #{prNumber} merged externally; task completed"));
+                return 0;
+            }
+
             // P4 e2e-harness seam: tests can return the SHA
             // directly without going through Octokit's
             // PullRequest.Head (which has a private setter).

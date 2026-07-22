@@ -253,6 +253,9 @@ public sealed class OrchestratorAgentTests : IDisposable
             Type: "epic", Title: "container epic", Description: "should not dispatch"));
         var story = await _issues.CreateAsync(new NewIssue(
             Type: "story", Title: "container story", Description: "should not dispatch"));
+        var watch = await _issues.CreateAsync(new NewIssue(
+            Type: "pr-watch", Title: "watch issue", Description: "routes to the watcher, not engineering",
+            Metadata: new Dictionary<string, object> { ["prNumber"] = 999, ["taskId"] = "task-x" }));
 
         using var cts = new CancellationTokenSource();
         cts.CancelAfter(TimeSpan.FromSeconds(3));
@@ -268,6 +271,15 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.Equal(IssueStatus.Pending, storyAfter.Status);
         Assert.Null(epicAfter.Assignee);
         Assert.Null(storyAfter.Assignee);
+
+        // The pr-watch issue must never be claimed by ENGINEERING
+        // dispatch (regression: the container filter briefly let it
+        // through and the watch was closed as a no-op commit). The
+        // watch path (PrWatcher stub in the bundle) may or may not
+        // have claimed it — what matters is it was not marked
+        // Completed by the no-diff engineering path.
+        var watchAfter = (await _issues.GetAsync(watch.Id, CancellationToken.None))!;
+        Assert.NotEqual(IssueStatus.Completed, watchAfter.Status);
     }
 
     private static void InitRepo(string path)

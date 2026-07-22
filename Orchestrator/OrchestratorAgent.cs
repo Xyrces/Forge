@@ -120,7 +120,8 @@ public sealed class OrchestratorAgent : IAgent
                 // entire pipeline.) All other types dispatch,
                 // preserving operator-enqueued type names (dev, ecs,
                 // ui, bug, ...).
-                var devTasks = ready.Where(i => !AgentTaskTypes.IsContainer(i.Type)).ToList();
+                var devTasks = ready.Where(i => i.Type != AgentTaskTypes.PrWatch
+                    && !AgentTaskTypes.IsContainer(i.Type)).ToList();
                 var skipped = ready.Count - watchTasks.Count - devTasks.Count;
                 if (skipped > 0)
                 {
