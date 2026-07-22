@@ -199,8 +199,9 @@ public sealed class DashboardHost : IAsyncDisposable
         // The base URL the Blazor WASM client + dashboard page see.
         // When the Kestrel section redirects, prefer the https://...
         // entry; otherwise the legacy Hostname:Port wins.
-        var baseUrl = ResolveBaseUrl();
-        builder.Services.AddForgeUI(new Uri(baseUrl));
+        var publicBaseUrl = ResolveBaseUrl();
+        var localBaseAddress = ResolveLocalBaseAddress();
+        builder.Services.AddForgeUI(new Uri(publicBaseUrl), new Uri(localBaseAddress));
 
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
@@ -486,15 +487,34 @@ _app.MapForgeUI();
 
     private string ResolveBaseUrl()
     {
+        // The public-facing URL the ForgeUI sees. We replace the
+        // "any" address (0.0.0.0 / *) with the configured Hostname
+        // so the rendered HTML links point at a real address.
         if (_options.Kestrel?.Endpoints is { Count: > 0 })
         {
-            // Prefer the https entry (production); fall back to http.
             if (_options.Kestrel.Endpoints.TryGetValue("https", out var h) && h.Url is { Length: > 0 } hu)
                 return hu.Replace("0.0.0.0", _options.Hostname).Replace("*", _options.Hostname);
             if (_options.Kestrel.Endpoints.TryGetValue("http", out var p) && p.Url is { Length: > 0 } pu)
                 return pu.Replace("0.0.0.0", _options.Hostname).Replace("*", _options.Hostname);
         }
         return $"http://{_options.Hostname}:{_options.Port}";
+    }
+
+    /// <summary>
+    /// The HttpClient BaseAddress the Blazor <c>AppShellClient</c>
+    /// + <c>ProjectsClient</c> + ... use for their server-side HTTP
+    /// calls. Must be a loopback-style address — 0.0.0.0 / *
+    /// don't work as outgoing host names, and the public IP only
+    /// works if the C# runtime is on the same network. Loopback is
+    /// always reachable from in-process code regardless of which
+    /// interface the dashboard binds.
+    /// </summary>
+    private string ResolveLocalBaseAddress()
+    {
+        var publicUrl = ResolveBaseUrl();
+        // 0.0.0.0 + * both meaning "any" — the dashboard listens on
+        // loopback, so route in-process calls there.
+        return publicUrl.Replace("0.0.0.0", "127.0.0.1").Replace("*", "127.0.0.1");
     }
 
     private static int ParsePort(string url)

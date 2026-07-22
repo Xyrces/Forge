@@ -18,7 +18,7 @@ namespace Forge.Dashboard;
 
 public static class UIExtensions
 {
-    public static IServiceCollection AddForgeUI(this IServiceCollection services, Uri baseAddress)
+    public static IServiceCollection AddForgeUI(this IServiceCollection services, Uri publicBaseAddress, Uri localBaseAddress)
     {
         var uiAssembly = typeof(App).Assembly;
         services.AddRazorComponents()
@@ -27,14 +27,21 @@ public static class UIExtensions
         services.AddFluxor(options =>
             options.ScanAssemblies(uiAssembly)
                    .UseReduxDevTools());
-        services.AddHttpClient<AppShellClient>(c => c.BaseAddress = baseAddress);
-        services.AddHttpClient<SpecsClient>(c => c.BaseAddress = baseAddress);
-        services.AddHttpClient<DesignsClient>(c => c.BaseAddress = baseAddress);
-        services.AddHttpClient<ArtClient>(c => c.BaseAddress = baseAddress);
-        services.AddHttpClient<TasksClient>(c => c.BaseAddress = baseAddress);
-        services.AddHttpClient<Forge.Dashboard.Features.View.ViewClient>(c => c.BaseAddress = baseAddress);
-        services.AddHttpClient<ProjectsClient>(c => c.BaseAddress = baseAddress);
-        services.AddHttpClient<DeploymentsClient>(c => c.BaseAddress = baseAddress);
+        // publicBaseAddress is what the Blazor ForgeUI component
+        // sees (so the rendered HTML links to e.g.
+        // https://192.168.68.78:443/...). localBaseAddress is what
+        // the server-side HttpClient uses for its API calls — it
+        // must be a real hostname (not 0.0.0.0 / *), and loopback is
+        // always reachable regardless of which network interface
+        // the operator's browser hit.
+        services.AddHttpClient<AppShellClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<SpecsClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<DesignsClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<ArtClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<TasksClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<Forge.Dashboard.Features.View.ViewClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<ProjectsClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<DeploymentsClient>(c => c.BaseAddress = localBaseAddress);
         return services;
     }
 
