@@ -171,6 +171,30 @@ public sealed record DashboardOptions
     public bool Enabled { get; set; } = true;
     public int Port { get; set; } = 4097;
     public string Hostname { get; set; } = "127.0.0.1";
+    public KestrelOptions Kestrel { get; set; } = new();
+}
+
+public sealed record KestrelOptions
+{
+    public Dictionary<string, KestrelEndpoint> Endpoints { get; set; } = new();
+    public KestrelHttpsOptions Https { get; set; } = new();
+    public bool RedirectHttps { get; set; } = true;
+}
+
+public sealed record KestrelEndpoint
+{
+    public string Url { get; set; } = string.Empty;
+}
+
+public sealed record KestrelHttpsOptions
+{
+    public KestrelCertificateOptions Certificate { get; set; } = new();
+}
+
+public sealed record KestrelCertificateOptions
+{
+    public string Path { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
 }
 
 /// <summary>

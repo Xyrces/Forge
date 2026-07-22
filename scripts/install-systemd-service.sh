@@ -115,6 +115,20 @@ fi
 ln -sfn "$RELEASE_DIR" /opt/forge/current
 echo "Repointed /opt/forge/current -> $RELEASE_DIR"
 
+# Re-apply CAP_NET_BIND_SERVICE on the new binary. The cap is
+# file-attribute + lost on every publish; the dashboard needs it
+# to bind 80/443. Requires the one-time NOPASSWD sudoers drop-in
+# at /etc/sudoers.d/forge-setcap (see scripts/forge-setcap-setup.sh).
+# Silent no-op if the cap is already set; logs a warning if the
+# rule isn't present (dashboard falls back to its 4097 port).
+if [[ -x /usr/bin/sudo ]] && /usr/bin/sudo -n /sbin/setcap cap_net_bind_service=+ep "/opt/forge/current/Forge.Core.dll" 2>/dev/null; then
+    echo "Re-applied CAP_NET_BIND_SERVICE on $(/usr/bin/getcap /opt/forge/current/Forge.Core.dll)"
+elif [[ -f /etc/sudoers.d/forge-setcap ]]; then
+    echo "WARN: setcap failed despite sudoers drop-in; dashboard will fall back to its 4097 port" >&2
+else
+    echo "NOTE: /etc/sudoers.d/forge-setcap not installed; run scripts/forge-setcap-setup.sh once to enable 80/443 binding" >&2
+fi
+
 # Install the unit file. We copy (not symlink) so operators can edit
 # the unit locally with `systemctl edit forge` without touching the
 # repo.

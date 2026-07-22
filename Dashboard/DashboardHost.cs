@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection;
@@ -147,7 +148,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _logger = logger;
     }
 
-    public string BaseUrl => $"http://{_options.Hostname}:{_port}";
+    public string BaseUrl => ResolveBaseUrl();
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -165,7 +166,38 @@ public sealed class DashboardHost : IAsyncDisposable
             o.TimestampFormat = "HH:mm:ss.fff ";
         });
 
-        builder.Services.AddForgeUI(new Uri($"http://{_options.Hostname}:{_options.Port}/"));
+        // Kestrel endpoints: bind 80 (HTTP) + 443 (HTTPS) if the
+        // operator configured the Kestrel section; fall back to
+        // the legacy Hostname:Port single-endpoint mode otherwise
+        // (so existing dev/test setups keep working without
+        // touching appsettings).
+        if (_options.Kestrel is { Endpoints.Count: > 0 })
+        {
+            // Resolve HTTPS options once.
+            var httpsCertPath = _options.Kestrel.Https?.Certificate?.Path is { Length: > 0 } p ? p : null;
+            var httpsCertPwd = _options.Kestrel.Https?.Certificate?.Password ?? string.Empty;
+
+            builder.WebHost.ConfigureKestrel(opts =>
+            {
+                foreach (var (name, ep) in _options.Kestrel.Endpoints)
+                {
+                    var port = ParsePort(ep.Url);
+                    if (port <= 0) continue;
+                    var isHttps = name.Equals("https", StringComparison.OrdinalIgnoreCase);
+                    opts.ListenAnyIP(port, listen =>
+                    {
+                        if (isHttps && httpsCertPath is not null)
+                            listen.UseHttps(httpsCertPath, httpsCertPwd);
+                    });
+                }
+            });
+        }
+
+        // The base URL the Blazor WASM client + dashboard page see.
+        // When the Kestrel section redirects, prefer the https://...
+        // entry; otherwise the legacy Hostname:Port wins.
+        var baseUrl = ResolveBaseUrl();
+        builder.Services.AddForgeUI(new Uri(baseUrl));
 
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
@@ -191,11 +223,22 @@ public sealed class DashboardHost : IAsyncDisposable
             reviewerDispatcherForBuild = d;
         }
 
-_app = builder.Build();
+ _app = builder.Build();
         _app.Urls.Clear();
-        _app.Urls.Add($"http://{_options.Hostname}:{_options.Port}");
+        // Kestrel already binds the configured endpoints via the
+        // ConfigureKestrel calls above. Clearing Urls prevents the
+        // generic host from also binding Hostname:Port (which would
+        // double-bind when both sections are configured).
 
         _app.UseRouting();
+
+        if (_options.Kestrel.RedirectHttps &&
+            _options.Kestrel.Endpoints.ContainsKey("http") &&
+            _options.Kestrel.Endpoints.ContainsKey("https"))
+        {
+            _app.UseHttpsRedirection();
+        }
+
         _app.UseAntiforgery();
 
 _app.MapGet("/api/state", async (CancellationToken ct) =>
@@ -420,6 +463,31 @@ _app.MapForgeUI();
         await Task.Delay(100, cancellationToken);
         _port = _options.Port;
         _logger.LogInformation("Dashboard listening on {Url}", BaseUrl);
+    }
+
+    private string ResolveBaseUrl()
+    {
+        if (_options.Kestrel?.Endpoints is { Count: > 0 })
+        {
+            // Prefer the https entry (production); fall back to http.
+            if (_options.Kestrel.Endpoints.TryGetValue("https", out var h) && h.Url is { Length: > 0 } hu)
+                return hu.Replace("0.0.0.0", _options.Hostname).Replace("*", _options.Hostname);
+            if (_options.Kestrel.Endpoints.TryGetValue("http", out var p) && p.Url is { Length: > 0 } pu)
+                return pu.Replace("0.0.0.0", _options.Hostname).Replace("*", _options.Hostname);
+        }
+        return $"http://{_options.Hostname}:{_options.Port}";
+    }
+
+    private static int ParsePort(string url)
+    {
+        // Accepts "http://0.0.0.0:443" / "https://0.0.0.0:80" / "http://*:8080".
+        var idx = url.LastIndexOf(':');
+        if (idx < 0 || idx == url.Length - 1) return 0;
+        var seg = url[(idx + 1)..];
+        // Strip any trailing slash.
+        var slash = seg.IndexOf('/');
+        if (slash > 0) seg = seg[..slash];
+        return int.TryParse(seg, out var p) ? p : 0;
     }
 
     private static string SanitizeEventName(string kind)
