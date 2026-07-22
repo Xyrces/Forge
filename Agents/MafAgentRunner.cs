@@ -38,6 +38,16 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
     private readonly ISecretStore? _secrets;
 
+    /// <summary>
+    /// Optional path for the per-run diagnostic side-channel log
+    /// (message roles, text lengths, tool-call names). Set by
+    /// Program.cs to a file under the Forgesystem state root. When
+    /// null the diagnostic write is skipped. Replaces the historical
+    /// hardcoded <c>C:\ProgramData\Forge\agent.log</c>, which was
+    /// silently swallowed on Linux.
+    /// </summary>
+    public static string? DiagnosticLogPath { get; set; }
+
     public MafAgentRunner(
         IChatClientFactory chatClientFactory,
         LlmConfig config,
@@ -160,24 +170,28 @@ public async Task<AgentRunResult> RunAsync(
             var newSessionId = await SerializeSessionAsync(response, agent, session, ct);
 
             // DIAGNOSTIC: append to a side-channel log so we can
-            // diagnose the silent-agent bug even when the SCM swallows
-            // stdout. The file lives in C:\ProgramData\Forge\agent.log
-            // and is appended on every agent run.
+            // diagnose the silent-agent bug even when the host swallows
+            // stdout. Path is set by Program.cs (state root); skipped
+            // when unset. Best-effort: never breaks a run.
             try
             {
-                var diagLog = @"C:\ProgramData\Forge\agent.log";
-                using var sw = new StreamWriter(diagLog, append: true);
-                sw.WriteLine($"--- {DateTime.Now:O} role={role} msgs={response.Messages.Count} text_len={text.Length} tool_msgs={response.Messages.Count(m => m.Role == ChatRole.Tool)} session_id={newSessionId ?? "<null>"} ---");
-                foreach (var m in response.Messages)
+                var diagLog = DiagnosticLogPath;
+                if (!string.IsNullOrEmpty(diagLog))
                 {
-                    var preview = (m.Text ?? "");
-                    if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
-                    var toolCalls = m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>()
-                        .Select(c => $"{c.Name}({string.Join(",", c.Arguments?.Keys ?? new System.Collections.Generic.List<string>())})")
-                        .ToList();
-                    sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} tool_calls=[{string.Join(";", toolCalls)}] preview={preview}");
+                    Directory.CreateDirectory(Path.GetDirectoryName(diagLog)!);
+                    using var sw = new StreamWriter(diagLog, append: true);
+                    sw.WriteLine($"--- {DateTime.Now:O} role={role} msgs={response.Messages.Count} text_len={text.Length} tool_msgs={response.Messages.Count(m => m.Role == ChatRole.Tool)} session_id={newSessionId ?? "<null>"} ---");
+                    foreach (var m in response.Messages)
+                    {
+                        var preview = (m.Text ?? "");
+                        if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
+                        var toolCalls = m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>()
+                            .Select(c => $"{c.Name}({string.Join(",", c.Arguments?.Keys ?? new System.Collections.Generic.List<string>())})")
+                            .ToList();
+                        sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} tool_calls=[{string.Join(";", toolCalls)}] preview={preview}");
+                    }
+                    sw.Flush();
                 }
-                sw.Flush();
             }
             catch
             {

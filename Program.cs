@@ -1031,6 +1031,7 @@ Console.Error.WriteLine(ex.ToString());
         // constructed (the runner builds its tool list per call,
         // so a forward-reference is enough).
         var specStoreRef = new Core.SpecStoreHolder();
+        MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
