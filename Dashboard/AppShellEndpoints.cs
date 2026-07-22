@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -19,6 +20,8 @@ public static class AppShellEndpoints
 
     public sealed record ActiveSprintDto(string? Id, string? Name);
 
+    public sealed record BuildInfoDto(string InformationalVersion, string Framework);
+
     public static void MapAppShellEndpoints(
         WebApplication app,
         IIssueStore issues,
@@ -34,6 +37,13 @@ public static class AppShellEndpoints
         {
             var version = typeof(AppShellEndpoints).Assembly.GetName().Version?.ToString();
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
+        });
+
+        app.MapGet("/api/meta/buildinfo", () =>
+        {
+            var informationalVersion = typeof(AppShellEndpoints).Assembly.GetName().Version?.ToString() ?? "unknown";
+            var framework = RuntimeInformation.FrameworkDescription;
+            return Results.Json(new BuildInfoDto(informationalVersion, framework));
         });
 
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
