@@ -95,8 +95,10 @@ historical Windows-SCM path that used `tools/Forge.Deployer`).
 
 Forge is project-agnostic — there is no hardcoded "PortHorizon"
 assumption in the codebase. Projects are registered in the SQLite
-`project` table (schema v17), surfaced in the dashboard, and picked
-up by the dispatch loop. The `appsettings.json` `projects[]` array
+`project` table (schema v17; v18 added the per-project `secret`
+table, v19 added `project.roles_json` for DB-persisted role
+caps), surfaced in the dashboard, and picked up by the dispatch
+loop. The `appsettings.json` `projects[]` array
 is **deprecated** — it is no longer the source of truth. Add
 projects via:
 
