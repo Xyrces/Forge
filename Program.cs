@@ -1098,9 +1098,13 @@ Console.Error.WriteLine(ex.ToString());
         // the dashboard so the dashboard can expose recovery
         // endpoints (POST /api/recovery/run + dry-run + reports).
         // RunAsync is called later, after the dashboard starts.
+        // Uses the primary project's dispatch bundle for git/GitHub
+        // so recovery honors per-project credentials (github_token
+        // secret) instead of the global startup services.
+        var primaryBundle = dispatchBundleFactory.Build(primary);
         var startupRecovery = new Orchestrator.StartupRecovery(
-            issues, recoveryReports!, worktrees,
-            new Orchestrator.GitHubRecoveryAdapter(gitHub),
+            issues, recoveryReports!, primaryBundle.Worktrees,
+            new Orchestrator.GitHubRecoveryAdapter(primaryBundle.GitHub),
             eventBus,
             loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
         _startupRecovery = startupRecovery;  // held against GC reaping
