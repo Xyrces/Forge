@@ -382,6 +382,16 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger, _projectFactory);
 
+        // 2026-07-22 (task-65): build / runtime metadata for the
+        // dashboard. informationalVersion comes from the
+        // AssemblyInformationalVersionAttribute stamped on the entry
+        // assembly by the build pipeline; framework comes from
+        // RuntimeInformation.FrameworkDescription. Grouped with the
+        // other Dashboard.Map* calls (see AppShellEndpoints /
+        // HealthEndpoint) since these are the meta-style dashboard
+        // endpoints operators hit first when triaging a deploy.
+        BuildInfoEndpoints.MapBuildInfoEndpoint(_app);
+
         if (_intakeRegistry is not null)
         {
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
