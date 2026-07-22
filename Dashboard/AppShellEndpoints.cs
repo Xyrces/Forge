@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -9,6 +11,8 @@ namespace Forge.Dashboard;
 public static class AppShellEndpoints
 {
     public sealed record HeartbeatDto(string Status, DateTime At, string? Version);
+
+    public sealed record BuildInfoDto(string InformationalVersion, string Framework);
 
     public sealed record SearchHitDto(string Kind, string Id, string Title, string Snippet);
 
@@ -34,6 +38,41 @@ public static class AppShellEndpoints
         {
             var version = typeof(AppShellEndpoints).Assembly.GetName().Version?.ToString();
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
+        });
+
+        // Build metadata: informationalVersion is resolved from
+        // AssemblyInformationalVersionAttribute (the commit-counted
+        // version the build pipeline stamps on the assembly); when
+        // the attribute is missing we fall back to the assembly
+        // version, then to "0.0.0", so the field is always
+        // non-empty. framework is the runtime framework string from
+        // RuntimeInformation.FrameworkDescription, with "Unknown"
+        // as a parseable fallback. Serialized via DashboardJson so
+        // the property names stay camelCase (informationalVersion,
+        // framework) to match the rest of the dashboard's API
+        // surface. Registered MapGet only — non-GET methods auto-
+        // 405, locking the read-only contract.
+        app.MapGet("/api/meta/buildinfo", () =>
+        {
+            var assembly = typeof(AppShellEndpoints).Assembly;
+            var informationalVersion =
+                assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (string.IsNullOrWhiteSpace(informationalVersion))
+            {
+                informationalVersion = assembly.GetName().Version?.ToString();
+            }
+            if (string.IsNullOrWhiteSpace(informationalVersion))
+            {
+                informationalVersion = "0.0.0";
+            }
+
+            var framework = RuntimeInformation.FrameworkDescription;
+            if (string.IsNullOrWhiteSpace(framework))
+            {
+                framework = "Unknown";
+            }
+
+            return Results.Json(new BuildInfoDto(informationalVersion, framework), DashboardJson.Options);
         });
 
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
