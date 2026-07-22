@@ -17,6 +17,7 @@ public static class MetaEndpoints
             var items = dataSource.Endpoints
                 .Select(e => e is RouteEndpoint re ? re.RoutePattern.RawText : e.DisplayName)
                 .Where(text => !string.IsNullOrWhiteSpace(text))
+                .Select(text => text!)
                 .Where(text => text.StartsWith("/api/", StringComparison.OrdinalIgnoreCase))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(text => text, StringComparer.OrdinalIgnoreCase)
