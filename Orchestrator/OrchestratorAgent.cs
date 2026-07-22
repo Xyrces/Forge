@@ -187,8 +187,13 @@ public sealed class OrchestratorAgent : IAgent
         for (var e = ex; e is not null; e = e.InnerException)
         {
             if (e is System.ClientModel.ClientResultException cre && cre.Status == 429) return true;
-            if (e.Message.Contains("429") && e.Message.Contains("TooManyRequests", StringComparison.OrdinalIgnoreCase)) return true;
-            if (e.Message.Contains("429", StringComparison.OrdinalIgnoreCase) && e.Message.Contains("rate", StringComparison.OrdinalIgnoreCase)) return true;
+            var msg = e.Message;
+            if (!msg.Contains("429")) continue;
+            if (msg.Contains("Too Many Requests", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("TooManyRequests", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Status: 429"))
+                return true;
         }
         return false;
     }
