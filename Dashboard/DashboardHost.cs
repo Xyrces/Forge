@@ -382,6 +382,12 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger, _projectFactory);
 
+        // task-55: surfaces build / runtime metadata (informationalVersion + .NET framework)
+        // so operators can verify what the dashboard is running against without
+        // ssh/cmd-line access. Registered alongside the other meta/health endpoints
+        // in DashboardHost so all Dashboard.* endpoint groups stay grouped.
+        BuildInfoEndpoints.MapBuildInfoEndpoint(_app);
+
         if (_intakeRegistry is not null)
         {
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
