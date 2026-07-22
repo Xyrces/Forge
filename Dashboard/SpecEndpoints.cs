@@ -27,7 +27,8 @@ public static class SpecEndpoints
         Forge.Core.IIntakeStore? intakeStore = null,
         GroomerAgentFactory? groomerFactory = null,
         IssueGroomerRunStore? groomerRuns = null,
-        Projects.ProjectContextFactory? projectContexts = null)
+        Projects.ProjectContextFactory? projectContexts = null,
+        Forge.Core.IIssueStore? issues = null)
     {
         // Multi-project: when ?project= names a registered project and the
         // factory is available, read from THAT project's spec store (spec
@@ -201,7 +202,7 @@ public static class SpecEndpoints
         // (groomer.run.started / completed / failed) as it works.
         if (groomerFactory is not null)
         {
-            app.MapPost("/api/specs/{id}/groom", async (string id, CancellationToken ct) =>
+            app.MapPost("/api/specs/{id}/groom", async (string id, string? force, CancellationToken ct) =>
             {
                 var spec = await specs.GetAsync(id, ct);
                 if (spec is null)
@@ -220,6 +221,28 @@ public static class SpecEndpoints
                         error = "spec_not_groomable",
                         detail = $"spec status is {spec.Status}; expected Designed | AssetReady | Approved | Groomed"
                     });
+                }
+
+                // Idempotency guard: grooming APPENDS stories/tasks.
+                // A Groomed spec that already has stories was already
+                // decomposed; re-grooming without an explicit force
+                // piles up duplicates (observed 2026-07-22: ~27 repeat
+                // grooms of one spec → 83 stories / 147 tasks / 28 PRs).
+                // Intentional re-decomposition passes ?force=true.
+                if (spec.Status == SpecStatus.Groomed
+                    && issues is not null
+                    && !string.Equals(force, "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    var existing = await issues.ListAsync(
+                        new Forge.Core.IssueFilter { Type = "story" }, ct);
+                    if (existing.Any(s => string.Equals(s.ParentIssueId, spec.Id, StringComparison.Ordinal)))
+                    {
+                        return Results.Conflict(new
+                        {
+                            error = "spec_already_groomed",
+                            detail = "spec already has stories from a previous groom; re-run with ?force=true to re-decompose (appends new stories/tasks)"
+                        });
+                    }
                 }
 
                 // Fire-and-forget on a background task. The HTTP

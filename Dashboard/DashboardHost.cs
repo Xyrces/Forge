@@ -387,7 +387,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues);
 
         if (_memory is not null)
         {

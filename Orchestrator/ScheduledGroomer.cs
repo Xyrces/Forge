@@ -84,14 +84,19 @@ public sealed class ScheduledGroomer
         try
         {
             // P2.a / P2.b: pull all specs and filter in C#. The
-            // Groomer gate accepts Designed | AssetReady | Approved
-            // | Groomed (the widening is in GroomerAgent itself;
-            // this scheduler just hands candidates to it).
+            // candidate set is the "ready to groom" statuses:
+            // Designed (Designer approved), AssetReady, Approved
+            // (operator fast-path). Groomed is deliberately NOT
+            // auto-groomed: grooming appends stories/tasks, so a
+            // terminal spec in the candidate set gets re-decomposed
+            // every interval forever (observed 2026-07-22: ~27 runs
+            // → 83 stories / 147 tasks / 28 PRs for one spec).
+            // Intentional re-decomposition goes through the manual
+            // endpoint with ?force=true.
             var all = await _specs.ListAsync(projectId: null, status: null, ct);
             candidates = all.Where(s => s.Status is SpecStatus.Designed
                 or SpecStatus.AssetReady
-                or SpecStatus.Approved
-                or SpecStatus.Groomed).ToList();
+                or SpecStatus.Approved).ToList();
         }
         catch (Exception ex)
         {

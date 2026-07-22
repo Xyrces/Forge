@@ -392,7 +392,7 @@ public class SpecGroomerEndpointTests : IDisposable
         SpecEndpoints.MapSpecEndpoints(
             app, _specs, new SpecExtractionReader(_issues),
             NullLogger<DashboardHost>.Instance, new Core.IntakeStore(_issues),
-            groomerFactory);
+            groomerFactory, issues: _issues);
         return app;
     }
 
@@ -460,8 +460,31 @@ public class SpecGroomerEndpointTests : IDisposable
     [Fact]
     public async Task Groom_MissingSpec_Returns404()
     {
-        var resp = await _client.PostAsync("/api/specs/spec-missing/groom", content: null);
+        var resp = await _client.PostAsync($"/api/specs/spec-missing/groom", content: null);
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Groom_GroomedSpecWithStories_Returns409_UnlessForced()
+    {
+        // Grooming APPENDS stories/tasks; re-grooming an already-groomed
+        // spec without ?force=true is the accumulation bug observed
+        // 2026-07-22 (~27 repeat grooms → 83 stories / 147 tasks / 28 PRs
+        // for one spec).
+        var id = await CreateApprovedSpecAsync();
+        await _specs.SetStatusAsync(id, SpecStatus.Grooming);
+        await _specs.SetStatusAsync(id, SpecStatus.Groomed);
+        await _issues.CreateAsync(new NewIssue(
+            Type: "story", Title: "Existing story", ParentId: id));
+
+        var conflict = await _client.PostAsync($"/api/specs/{id}/groom", content: null);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        var body = await conflict.Content.ReadAsStringAsync();
+        Assert.Contains("spec_already_groomed", body);
+
+        // Explicit operator re-decompose still works.
+        var forced = await _client.PostAsync($"/api/specs/{id}/groom?force=true", content: null);
+        Assert.Equal(HttpStatusCode.Accepted, forced.StatusCode);
     }
 }
 
