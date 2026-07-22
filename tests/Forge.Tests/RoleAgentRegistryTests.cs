@@ -12,7 +12,7 @@ public class RoleAgentRegistryTests
         var registry = new RoleAgentRegistry();
         var coredev = registry.ForType(AgentType.CoreDev);
         Assert.Equal("coredev", coredev.AgentName);
-        Assert.Equal("PortHorizon.Core", coredev.ProjectSubdir);
+        Assert.Contains("Forge backend", coredev.ProjectSubdir);
 
         var reviewer = registry.ForType(AgentType.Reviewer);
         Assert.Equal("reviewer", reviewer.AgentName);

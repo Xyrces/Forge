@@ -1,5 +1,6 @@
 @page "/intake"
 @inject HttpClient Http
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @implements IDisposable
 
 <PageTitle>Intake</PageTitle>
@@ -11,6 +12,14 @@
             <button class="btn btn--primary" @onclick="StartNewSession">New session</button>
         </div>
     </div>
+
+    @if (_actionError is not null)
+    {
+        <div class="banner banner--error">
+            <span>@_actionError</span>
+            <button class="btn btn--link" @onclick="() => _actionError = null">Dismiss</button>
+        </div>
+    }
 
     <div class="intake-split">
         <aside class="intake-sessions">
@@ -56,7 +65,16 @@
                             <div class="chat-msg__card">
                                 <div class="chat-msg__card-header">Proposed Epic</div>
                                 <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
-                                <button class="btn btn--primary">Accept Epic</button>
+                                @if (_acceptedEpicIds.Contains(m.Id))
+                                {
+                                    <span class="pill pill--primary">Accepted</span>
+                                }
+                                else
+                                {
+                                    <button class="btn btn--primary" @onclick="@(() => AcceptEpic(m.Id))" disabled="@_accepting">
+                                        @(_accepting ? "Accepting…" : "Accept Epic")
+                                    </button>
+                                }
                             </div>
                         }
                     </div>
@@ -92,6 +110,9 @@
     private string? _activeSessionId;
     private string _draft = "";
     private bool _sending;
+    private bool _accepting;
+    private readonly HashSet<long> _acceptedEpicIds = new();
+    private string? _actionError;
     private int? _graphFileCount;
     private string? _graphSha;
 
@@ -134,15 +155,51 @@
 
     private async Task StartNewSession()
     {
+        // The intake session is created for the project selected in
+        // the topbar switcher — everything downstream (spec, groomed
+        // tasks, dispatch) flows into that project's stores.
+        var projectId = ShellStore.Value.CurrentProjectId;
+        if (string.IsNullOrEmpty(projectId))
+        {
+            _actionError = "No project selected in the topbar switcher yet.";
+            return;
+        }
         try
         {
-            var resp = await Http.PostAsJsonAsync("/api/intake/sessions", new { projectId = "PortHorizon", title = "New session" });
+            var resp = await Http.PostAsJsonAsync("/api/intake/sessions", new { projectId, title = "New session" });
             if (resp.IsSuccessStatusCode)
             {
+                _actionError = null;
                 await ReloadSessions();
             }
+            else
+            {
+                _actionError = $"Create session failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+            }
         }
-        catch { }
+        catch (Exception ex) { _actionError = ex.Message; }
+    }
+
+    private async Task AcceptEpic(long messageId)
+    {
+        if (_activeSessionId is null) return;
+        _accepting = true;
+        try
+        {
+            var resp = await Http.PostAsync(
+                $"/api/intake/sessions/{_activeSessionId}/accept-epic/{messageId}", null);
+            if (resp.IsSuccessStatusCode)
+            {
+                _acceptedEpicIds.Add(messageId);
+                _actionError = null;
+            }
+            else
+            {
+                _actionError = $"Accept failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+            }
+        }
+        catch (Exception ex) { _actionError = ex.Message; }
+        finally { _accepting = false; }
     }
 
     private async Task SendMessage()

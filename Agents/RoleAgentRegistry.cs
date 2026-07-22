@@ -15,8 +15,13 @@ public sealed class RoleAgentRegistry
     {
         _roles = new Dictionary<AgentType, RoleAgent>
         {
-            [AgentType.CoreDev]   = new("coredev",   "PortHorizon.Core",   new[] { "bash", "read", "edit", "grep", "glob", "webfetch" }),
-            [AgentType.ClientDev] = new("clientdev", "PortHorizon.Client", new[] { "bash", "read", "edit", "grep", "glob", "webfetch" }),
+            // ProjectSubdir describes the role's territory inside the
+            // *forge* repo (this repository). It feeds the agent's MAF
+            // description metadata and the dispatch prompt's boundary
+            // rule; the authoritative boundary prose lives in the
+            // repo's agents/<role>.md role prompt.
+            [AgentType.CoreDev]   = new("coredev",   "Forge backend (Core/, Agents/, Orchestrator/, Dashboard/, Configuration/, Projects/, AgentTools/)", new[] { "bash", "read", "edit", "grep", "glob", "webfetch" }),
+            [AgentType.ClientDev] = new("clientdev", "Forge.UI/", new[] { "bash", "read", "edit", "grep", "glob", "webfetch" }),
             [AgentType.QA]        = new("qa",        "",                   new[] { "bash", "read", "grep", "glob" }),
             [AgentType.Reviewer]  = new("reviewer",  "",                   new[] { "read", "grep", "glob", "webfetch" }),
         };

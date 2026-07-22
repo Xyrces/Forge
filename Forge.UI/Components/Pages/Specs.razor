@@ -2,8 +2,10 @@
 @inject IState<Forge.Dashboard.Features.Specs.SpecsState> SpecsStore
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
+@inject HttpClient Http
 @implements IDisposable
 @using Forge.Dashboard.Features.Specs
+@using System.Net.Http.Json
 
 <PageTitle>Specs</PageTitle>
 <div class="page">
@@ -35,6 +37,13 @@
     }
     else
     {
+        @if (_actionError is not null)
+        {
+            <div class="banner banner--error">
+                <span>@_actionError</span>
+                <button class="btn btn--link" @onclick="() => _actionError = null">Dismiss</button>
+            </div>
+        }
         <table class="data-grid">
             <thead>
                 <tr>
@@ -44,6 +53,7 @@
                     <th>Version</th>
                     <th>Parent Epic</th>
                     <th>Updated</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -58,6 +68,23 @@
                         <td class="mono">v@row.CurrentVersion</td>
                         <td class="mono">@(row.ParentIssueId ?? row.ParentSpecId ?? "—")</td>
                         <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td>
+                            @* Non-visual fast-path: Draft -> Approved (operator review),
+                               then Approved/Designed/AssetReady -> Groom (decompose into
+                               stories/tasks). Mirrors /api/specs/{id}/actions. *@
+                            @if (string.Equals(row.Status, "Draft", StringComparison.OrdinalIgnoreCase))
+                            {
+                                <button class="btn btn--small btn--primary" @onclick="@(() => Approve(row.Id))" disabled="@_acting">
+                                    Approve
+                                </button>
+                            }
+                            @if (row.Status is "Approved" or "Designed" or "AssetReady")
+                            {
+                                <button class="btn btn--small btn--primary" @onclick="@(() => Groom(row.Id))" disabled="@_acting">
+                                    @(_groomingId == row.Id ? "Grooming…" : "Groom")
+                                </button>
+                            }
+                        </td>
                     </tr>
                 }
             </tbody>
@@ -73,6 +100,61 @@
     private static readonly string[] Filters = { "All", "Draft", "Designed", "AssetReady", "Approved", "Groomed", "Shipped" };
 
     private string? _loadedProject;
+    private bool _acting;
+    private string? _groomingId;
+    private string? _actionError;
+
+    private async Task Approve(string specId)
+    {
+        _acting = true;
+        try
+        {
+            var resp = await Http.PatchAsJsonAsync($"/api/specs/{specId}",
+                new { op = "set_status", status = "Approved" });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _actionError = $"Approve failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                return;
+            }
+            _actionError = null;
+            LoadForCurrentProject();
+        }
+        catch (Exception ex) { _actionError = ex.Message; }
+        finally { _acting = false; }
+    }
+
+    private async Task Groom(string specId)
+    {
+        _acting = true;
+        _groomingId = specId;
+        try
+        {
+            // Fire-and-forget server-side: the groomer agent runs in
+            // the background and flips the spec Grooming -> Groomed
+            // while creating story/task issues. Poll the list a few
+            // times so the user sees the transition without leaving
+            // the page.
+            var resp = await Http.PostAsync($"/api/specs/{specId}/groom", null);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _actionError = $"Groom failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                return;
+            }
+            _actionError = null;
+            LoadForCurrentProject();
+            for (var i = 0; i < 8; i++)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(15));
+                LoadForCurrentProject();
+            }
+        }
+        catch (Exception ex) { _actionError = ex.Message; }
+        finally
+        {
+            _acting = false;
+            _groomingId = null;
+        }
+    }
 
     protected override void OnInitialized()
     {
