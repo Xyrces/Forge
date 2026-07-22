@@ -28,6 +28,8 @@ public static class AppShellEndpoints
         ILogger logger,
         Projects.ProjectContextFactory? projectContexts = null)
     {
+        app.MapGet("/api/health/ping", () => Results.Json(new { pong = true, at = DateTime.UtcNow.ToString("o") }));
+
         app.MapGet("/api/health/heartbeat", () =>
         {
             var version = typeof(AppShellEndpoints).Assembly.GetName().Version?.ToString();
