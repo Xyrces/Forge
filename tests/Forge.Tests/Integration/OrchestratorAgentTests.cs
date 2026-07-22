@@ -237,6 +237,39 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.NotEqual(IssueStatus.Pending, after.Status);
     }
 
+    [Fact]
+    public async Task DispatchCycle_SkipsPipelineContainers()
+    {
+        // Epics and stories feed the spec -> groom chain; the
+        // engineering loop must never claim them (UI e2e finding:
+        // an intake-accepted epic was implemented directly).
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+
+        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        BindMaf(orch);
+
+        var epic = await _issues.CreateAsync(new NewIssue(
+            Type: "epic", Title: "container epic", Description: "should not dispatch"));
+        var story = await _issues.CreateAsync(new NewIssue(
+            Type: "story", Title: "container story", Description: "should not dispatch"));
+
+        using var cts = new CancellationTokenSource();
+        cts.CancelAfter(TimeSpan.FromSeconds(3));
+        try
+        {
+            await orch.ExecuteAsync(cts.Token);
+        }
+        catch (OperationCanceledException) { /* expected */ }
+
+        var epicAfter = (await _issues.GetAsync(epic.Id, CancellationToken.None))!;
+        var storyAfter = (await _issues.GetAsync(story.Id, CancellationToken.None))!;
+        Assert.Equal(IssueStatus.Pending, epicAfter.Status);
+        Assert.Equal(IssueStatus.Pending, storyAfter.Status);
+        Assert.Null(epicAfter.Assignee);
+        Assert.Null(storyAfter.Assignee);
+    }
+
     private static void InitRepo(string path)
     {
         RunGit(path, "init", "-q -b main");

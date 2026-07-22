@@ -23,6 +23,11 @@ public sealed class OrchestratorAgent : IAgent
     private SpawnerOptions _spawnerOptions = new();
     private SemaphoreSlim _concurrencyLimiter = new(4);
     private readonly int _maxRetryCount;
+    // GitHub rate-limit cooldown for the PR-watch path. When Octokit
+    // reports RateLimitExceeded, watch issues are skipped until this
+    // time so the loop doesn't hammer the API every dispatch cycle.
+    private DateTime _githubRateLimitedUntil = DateTime.MinValue;
+    private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -98,10 +103,29 @@ public sealed class OrchestratorAgent : IAgent
                 if (ready.Count == 0) continue;
 
                 var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
+                if (watchTasks.Count > 0 && DateTime.UtcNow < _githubRateLimitedUntil)
+                {
+                    _logger.LogDebug("Dispatch cycle: skipping {N} watch issues — GitHub rate-limit cooldown until {Until:HH:mm:ss}",
+                        watchTasks.Count, _githubRateLimitedUntil);
+                    watchTasks = new List<IssueRecord>();
+                }
                 foreach (var watch in watchTasks)
                     _ = Task.Run(() => ProcessWatchIssueAsync(watch, bundle, cancellationToken), cancellationToken);
 
-                var devTasks = ready.Where(i => i.Type != AgentTaskTypes.PrWatch).ToList();
+                // Engineering dispatch skips pipeline containers.
+                // Epics and stories feed the spec -> groom chain;
+                // they are not units of engineering work. (Found by
+                // the first UI e2e: an intake-accepted epic was
+                // claimed directly and implemented, bypassing the
+                // entire pipeline.) All other types dispatch,
+                // preserving operator-enqueued type names (dev, ecs,
+                // ui, bug, ...).
+                var devTasks = ready.Where(i => !AgentTaskTypes.IsContainer(i.Type)).ToList();
+                var skipped = ready.Count - watchTasks.Count - devTasks.Count;
+                if (skipped > 0)
+                {
+                    _logger.LogDebug("Dispatch cycle: skipped {N} pipeline container issues (epic/story are not dispatchable)", skipped);
+                }
                 foreach (var dev in devTasks)
                     _ = Task.Run(() => DispatchSingleTaskAsync(dev, bundle, cancellationToken), cancellationToken);
             }
@@ -148,7 +172,16 @@ public sealed class OrchestratorAgent : IAgent
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watchIssue.Id, bundle.Project.Id);
+            if (ex is Octokit.RateLimitExceededException)
+            {
+                _githubRateLimitedUntil = DateTime.UtcNow + GitHubRateLimitCooldown;
+                _logger.LogWarning("Watch issue {Id}: GitHub rate limit exceeded; backing off watch processing for {Cooldown} (project={Project})",
+                    watchIssue.Id, GitHubRateLimitCooldown, bundle.Project.Id);
+            }
+            else
+            {
+                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watchIssue.Id, bundle.Project.Id);
+            }
             return new Result(false, ex.Message);
         }
     }
