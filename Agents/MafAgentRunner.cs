@@ -36,6 +36,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<DesignArtifactStore?>? _designArtifactsFactory;
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
+    private readonly ISecretStore? _secrets;
 
     public MafAgentRunner(
         IChatClientFactory chatClientFactory,
@@ -52,7 +53,8 @@ public sealed class MafAgentRunner : IAgentRunner
         // tool build; the result is cached.
         Func<DesignArtifactStore?>? designArtifacts = null,
         Func<ISpecStore?>? specs = null,
-        Func<ArtOutputStore?>? artOutputs = null)
+        Func<ArtOutputStore?>? artOutputs = null,
+        ISecretStore? secrets = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -65,6 +67,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _designArtifactsFactory = designArtifacts;
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
+        _secrets = secrets;
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -105,7 +108,8 @@ public async Task<AgentRunResult> RunAsync(
         var bashWorkingDir = ResolveWorktreePath(context);
         if (!string.IsNullOrWhiteSpace(bashWorkingDir))
         {
-            tools.Add(new BashTool(bashWorkingDir, logger: null).AsAIFunction());
+            var secretEnv = await ResolveSecretEnvAsync(context, ct);
+            tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv).AsAIFunction());
         }
 
         // P5.1 — ArtifactReadTool is always available when the
@@ -204,6 +208,62 @@ finally
         if (context is null) return null;
         if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
         return raw.ToString();
+    }
+
+    /// <summary>
+    /// Build the secrets-by-reference environment for the agent's bash
+    /// tool. Every stored kind for the project becomes
+    /// <c>FORGE_SECRET_&lt;KIND&gt;</c> (uppercased, '-' → '_');
+    /// <c>github_token</c> also maps to the conventional
+    /// <c>GITHUB_TOKEN</c>. Values are decrypted here and injected into
+    /// the spawned process environment — they never appear in the
+    /// model's prompt, tool-call JSON, or logs. Returns null when no
+    /// project context or no secrets are stored.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, string>?> ResolveSecretEnvAsync(
+        IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+    {
+        if (_secrets is null || context is null) return null;
+        if (!context.TryGetValue("projectId", out var raw) || raw is null) return null;
+        var projectId = raw.ToString();
+        if (string.IsNullOrWhiteSpace(projectId)) return null;
+
+        IReadOnlyList<SecretRecord> stored;
+        try
+        {
+            stored = await _secrets.ListAsync(projectId, ct);
+        }
+        catch (Exception ex)
+        {
+            // Secret lookup must never break a dispatch; the agent
+            // just runs without the env vars.
+            _logger.LogWarning(ex, "Failed to list secrets for project {ProjectId}; continuing without secret env", projectId);
+            return null;
+        }
+        if (stored.Count == 0) return null;
+
+        var env = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var meta in stored)
+        {
+            string? plaintext;
+            try
+            {
+                plaintext = await _secrets.GetPlaintextAsync(projectId, meta.Kind, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to decrypt secret {Kind} for project {ProjectId}; skipping", meta.Kind, projectId);
+                continue;
+            }
+            if (string.IsNullOrEmpty(plaintext)) continue;
+
+            env[$"FORGE_SECRET_{meta.Kind.Replace('-', '_').ToUpperInvariant()}"] = plaintext;
+            if (string.Equals(meta.Kind, SecretKinds.GitHubToken, StringComparison.OrdinalIgnoreCase))
+            {
+                env["GITHUB_TOKEN"] = plaintext;
+            }
+        }
+        return env.Count == 0 ? null : env;
     }
 
     private async Task<string> BuildSkillInstructionsAsync(AgentType role, CancellationToken ct)

@@ -31,12 +31,21 @@ public sealed class BashTool
     private readonly ILogger<BashTool>? _logger;
     private readonly string _workingDirectory;
     private readonly TimeSpan _defaultTimeout;
+    private readonly IReadOnlyDictionary<string, string>? _envVars;
 
-    public BashTool(string workingDirectory, TimeSpan? defaultTimeout = null, ILogger<BashTool>? logger = null)
+    /// <param name="envVars">
+    /// Extra environment variables injected into every spawned
+    /// process — used for secrets-by-reference (FORGE_SECRET_*).
+    /// Values are never logged; the model sees only the variable
+    /// names in its own commands.
+    /// </param>
+    public BashTool(string workingDirectory, TimeSpan? defaultTimeout = null, ILogger<BashTool>? logger = null,
+        IReadOnlyDictionary<string, string>? envVars = null)
     {
         _workingDirectory = workingDirectory;
         _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(30);
         _logger = logger;
+        _envVars = envVars;
     }
 
     public string WorkingDirectory => _workingDirectory;
@@ -93,6 +102,17 @@ public sealed class BashTool
                 StandardOutputEncoding = Encoding.UTF8,
                 StandardErrorEncoding = Encoding.UTF8,
             };
+
+        // Secrets-by-reference: inject per-project env vars
+        // (FORGE_SECRET_*, GITHUB_TOKEN, ...) so the model can use
+        // them in commands without the values entering its context.
+        if (_envVars is not null)
+        {
+            foreach (var kv in _envVars)
+            {
+                psi.Environment[kv.Key] = kv.Value;
+            }
+        }
 
         _logger?.LogInformation("BashTool: cwd={Cwd} cmd={Cmd} timeout={Timeout}s", cwd, command, (int)timeout.TotalSeconds);
 

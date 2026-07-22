@@ -103,6 +103,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
     private readonly AgentMessageBus _messageBus;
     private readonly IDashboardEventBus _events;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly ISecretStore? _secrets;
 
     public ProjectDispatchBundleFactory(
         AgentOptions options,
@@ -114,7 +115,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         IWorkflowDispatcher dispatcher,
         AgentMessageBus messageBus,
         IDashboardEventBus events,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        ISecretStore? secrets = null)
     {
         _options = options;
         _dataRoot = dataRoot;
@@ -126,6 +128,44 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         _messageBus = messageBus;
         _events = events;
         _loggerFactory = loggerFactory;
+        _secrets = secrets;
+    }
+
+    /// <summary>
+    /// Per-project github_token secret overrides the global
+    /// GITHUB_TOKEN / github.token config. Build() is sync, so the
+    /// secret read blocks — same pattern as ProjectContextFactory's
+    /// live KnownProjects. A decrypt failure (keyring rotation)
+    /// falls back to the global token.
+    /// </summary>
+    private string? ResolveGitHubToken(string projectId)
+    {
+        if (_secrets is null) return _options.GitHub?.Token;
+        try
+        {
+            var perProject = _secrets.GetPlaintextAsync(projectId, SecretKinds.GitHubToken)
+                .GetAwaiter().GetResult();
+            if (!string.IsNullOrEmpty(perProject)) return perProject;
+        }
+        catch
+        {
+            // fall through to the global token
+        }
+        return _options.GitHub?.Token;
+    }
+
+    private GitHubOptions BuildGitHubOptions(string projectId)
+    {
+        var global = _options.GitHub ?? new GitHubOptions();
+        var token = ResolveGitHubToken(projectId);
+        if (string.IsNullOrEmpty(token) || string.Equals(token, global.Token, StringComparison.Ordinal))
+            return global;
+        return new GitHubOptions
+        {
+            Owner = global.Owner,
+            Repo = global.Repo,
+            Token = token,
+        };
     }
 
     /// <summary>
@@ -157,9 +197,9 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
                 DefaultBranch = string.IsNullOrWhiteSpace(ensured.Project.DefaultBranch) ? "main" : ensured.Project.DefaultBranch,
             },
             _loggerFactory.CreateLogger<GitWorktreeService>(),
-            githubToken: _options.GitHub?.Token);
+            githubToken: ResolveGitHubToken(project.Id));
 
-        var gitHub = new GitHubService(_options.GitHub ?? new GitHubOptions());
+        var gitHub = new GitHubService(BuildGitHubOptions(project.Id));
 
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issueStore,

@@ -141,8 +141,9 @@ When future agents hit a recurring need, drop a skill in `.kilo/skills/<name>/SK
 - Slash commands → `.kilo/command/<name>.md` once a concrete operator workflow needs them.
 - Kilo subagent definitions → `.kilo/agent/<name>.md` (singular) when delegation becomes useful.
 
-The three skills that already ship with this plan:
+The skills that ship today:
 
 - `.kilo/skills/forge-architecture/SKILL.md` — navigation map.
 - `.kilo/skills/forge-task-lifecycle/SKILL.md` — the engineering dispatch pipeline (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch) + `PRWatcher`.
 - `.kilo/skills/forge-recovery/SKILL.md` — P4 Stage A in-process recovery vs P4 Stage B Durable Task Scheduler sidecar.
+- `.kilo/skills/forge-secrets/SKILL.md` — the per-project secrets system: encrypted storage, the two-panel Secrets page, and the by-reference consumption model (`FORGE_SECRET_*` env vars in the agent bash tool; values never enter LLM context).

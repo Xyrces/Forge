@@ -13,7 +13,9 @@ The path a single engineering task takes, end to end, in the production code pat
 [Claim] → [Worktree] → [RunAgent] → [CommitPushPr] → [EnqueueWatch] → [PRWatcher]
 ```
 
-Production is the sequential code in `OrchestratorAgent.DispatchSingleTaskAsync` (`Orchestrator/OrchestratorAgent.cs:123`). The `Orchestrator/Workflow/` directory builds the same five stages as a MAF WorkflowBuilder graph (typed `FunctionExecutor<TIn, TOut>` instances), which is exercised by `EngineeringDispatchWorkflowTests` but **not** the production dispatcher. Both go through `IWorkflowDispatcher`; today the in-process implementation (`Orchestrator/DurableDispatcher.cs`) wins; with `Orchestrator:Execution=Durable`, the DTS-backed implementation wins (P4 Stage B — see `forge-recovery`).
+Production is `OrchestratorAgent.DispatchSingleTaskAsync` (`Orchestrator/OrchestratorAgent.cs`), which claims the issue up-front and then hands it to `IWorkflowDispatcher.DispatchAsync`. The default dispatcher is `InProcessDispatcher`, which builds `Orchestrator/Workflow/EngineeringDispatchWorkflow` per dispatch and runs it via MAF `InProcessExecution` — **the workflow executors ARE the production path**. With `Orchestrator:Execution=Durable`, the same workflow runs on the DTS sidecar (P4 Stage B — see `forge-recovery`).
+
+Multi-project note: `OrchestratorAgent` iterates the registered projects each cycle and claims from each project's own `IssueStore` (via cached `ProjectDispatchBundle`s). However the dispatcher's workflow executors are constructed once at startup with the **primary** project's stores — per-store workflow wiring for non-primary projects is a known follow-up. Reason accordingly when debugging a non-primary project.
 
 ## Stage 1 — Claim
 
@@ -45,8 +47,9 @@ The dispatcher's `ClaimExecutor` short-circuits when the input is already `InPro
   3. **Project memory block** — `## Project memory` from `MemoryStore.RecallAsync()`; rendered as a bullet list with expiry metadata. Falls back to empty on error.
 - The user's prompt (the operator's task body + worktree context) goes to the user message — **never** to instructions. This is the P1 fix.
 - **Tools wired into the agent:**
-  - `BashTool(workingDirectory=<worktree>)` AIFunction — `cmd.exe /c <command>` on Windows, `bash -c <command>` elsewhere; default `workingDirectory` is the task's worktree. Resolved via `context["worktreePath"]`.
+  - `BashTool(workingDirectory=<worktree>, envVars=<project secrets>)` AIFunction — `/bin/sh -c <command>` on Linux/macOS, `cmd.exe /c` on Windows; default `workingDirectory` is the task's worktree. Resolved via `context["worktreePath"]`.
   - `ArtifactReadTool` — when stores are wired; lets agents pull a single artifact body on demand rather than have the orchestrator inline every body.
+- **Secrets by reference:** when `context["projectId"]` is set (the workflow passes the dispatch project's id), `MafAgentRunner.ResolveSecretEnvAsync` decrypts the project's stored secrets and injects them into the bash process environment: every kind as `FORGE_SECRET_<KIND>` (uppercased, `-`→`_`), plus `github_token` as the conventional `GITHUB_TOKEN`. Values never enter the model's prompt, tool-call JSON, or logs — the model references `$VAR` names only. Role prompts document the contract.
 - Optional params on AIFunctions need C# default values (`string? param = null`, not `string? param`) — the MAF binder throws `ArgumentException` otherwise.
 - LLM client built via `IChatClientFactory.Create(_config, role)` — resolves the provider/model from `LlmConfig.Resolve(role)`.
 - Wrapped with `ChatClientBuilder.UseFunctionInvocation()` so model-emitted `FunctionCallContent` actually runs the tool (instead of just appearing in the response).
@@ -90,17 +93,15 @@ The dispatcher's `ClaimExecutor` short-circuits when the input is already `InPro
 - After the retry: hard-fail to `Failed`. If a worktree path exists, `GitWorktreeService.RemoveAsync` is called best-effort.
 - `OperationCanceledException` → `Failed("cancelled")` and exit.
 
-## The two implementation paths
+## The two dispatcher runtimes
 
-| Aspect | Sequential (production) | MAF Workflows (dormant) |
+| Aspect | InProcess (default) | Durable / DTS (opt-in) |
 |---|---|---|
-| Source | `OrchestratorAgent.DispatchSingleTaskAsync` | `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` + `*Executor.cs` |
-| Stage shape | Inlined code | Typed `FunctionExecutor<TIn, TOut>` instances |
-| Short-circuits | `if (claimed is null)` early return; `if no diff` early return | `AlreadyClaimed` / `NoDiff` / `Skipped` first-class result variants; typed channels route them |
-| Tested by | `OrchestratorAgentTests`, `EngineeringDispatchWorkflowTests` | `EngineeringDispatchWorkflowTests` against a real temp git repo |
-| Status | Live | Behavioral parity not yet fully verified → not swapped in |
+| Source | `InProcessDispatcher` lambda builds `EngineeringDispatchWorkflow` per dispatch | `DurableDispatcher` registers the same workflow with the DTS sidecar |
+| Crash safety | P4 Stage A `StartupRecovery` replays checkpoints at startup | Workflow state persists in the sidecar |
+| Enabled by | default | `Orchestrator:Execution=Durable` |
 
-The orchestration skill is correct regardless of which path is wired, because the externally observable state transitions are the same.
+Both run the identical five executors; the externally observable state transitions are the same. See `forge-recovery` for the full tradeoff table.
 
 ## Why this matters
 

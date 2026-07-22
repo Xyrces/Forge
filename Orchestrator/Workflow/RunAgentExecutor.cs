@@ -24,6 +24,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     private readonly DesignArtifactStore _designArtifacts;
     private readonly ArtOutputStore _artOutputs;
     private readonly ILogger<RunAgentExecutor> _logger;
+    private readonly string? _projectId;
 
     public RunAgentExecutor(
         IIssueStore issues,
@@ -33,10 +34,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         IDashboardEventBus events,
         DesignArtifactStore designArtifacts,
         ArtOutputStore artOutputs,
-        ILogger<RunAgentExecutor> logger)
+        ILogger<RunAgentExecutor> logger,
+        string? projectId = null)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, ct),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -49,6 +51,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         _designArtifacts = designArtifacts;
         _artOutputs = artOutputs;
         _logger = logger;
+        _projectId = projectId;
     }
 
     public static async ValueTask<AgentCompleted> HandleAsync(
@@ -61,6 +64,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         DesignArtifactStore designArtifacts,
         ArtOutputStore artOutputs,
         ILogger logger,
+        string? projectId,
         CancellationToken ct)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
@@ -96,6 +100,10 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     ["worktreePath"] = worktreePath,
                     ["branch"] = branch,
                     ["issueId"] = issue.Id,
+                    // Drives the runner's secrets-by-reference env
+                    // injection (FORGE_SECRET_*). Null-safe: the
+                    // runner skips env when absent.
+                    ["projectId"] = projectId ?? string.Empty,
                 },
                 ct);
             // DIAGNOSTIC: surface what the agent returned so we can

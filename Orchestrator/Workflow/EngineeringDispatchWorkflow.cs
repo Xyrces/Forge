@@ -42,7 +42,8 @@ public sealed class EngineeringDispatchWorkflow
         ArtOutputStore artOutputs,
         IMemoryExtractor memoryExtractor,
         MemoryExtractionStore extractionStore,
-        ILogger<EngineeringDispatchWorkflow> logger)
+        ILogger<EngineeringDispatchWorkflow> logger,
+        string? projectId = null)
     {
         var nullFactory = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         _claim = new ClaimExecutor(issues, nullFactory.CreateLogger<ClaimExecutor>());
@@ -50,7 +51,7 @@ public sealed class EngineeringDispatchWorkflow
             nullFactory.CreateLogger<WorktreeExecutor>());
         _runAgent = new RunAgentExecutor(issues, agentRunner, roleRegistry,
             drainMessageBus, events, designArtifacts, artOutputs,
-            nullFactory.CreateLogger<RunAgentExecutor>());
+            nullFactory.CreateLogger<RunAgentExecutor>(), projectId);
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
             memoryExtractor, extractionStore,
             nullFactory.CreateLogger<CommitPushPrExecutor>());

@@ -947,7 +947,8 @@ Console.Error.WriteLine(ex.ToString());
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,
             specs: () => specStoreRef.Value,
-            artOutputs: () => artOutputs);
+            artOutputs: () => artOutputs,
+            secrets: secretStore);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
@@ -975,7 +976,8 @@ Console.Error.WriteLine(ex.ToString());
                 eventBus, agent => messageBus.Drain(agent),
                 designArtifacts, artOutputs,
                 memoryExtractor, extractionStore,
-                loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>())
+                loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
+                projectId: primary.Id)
                 .Build();
             var services = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -1000,7 +1002,8 @@ Console.Error.WriteLine(ex.ToString());
                         eventBus, agent => messageBus.Drain(agent),
                         designArtifacts, artOutputs,
                         memoryExtractor, extractionStore,
-                        loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>());
+                        loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
+                        projectId: primary.Id);
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
@@ -1008,7 +1011,8 @@ Console.Error.WriteLine(ex.ToString());
 
         var dispatchBundleFactory = new ProjectDispatchBundleFactory(
             options, orchDataRoot, projectStore, cloner,
-            agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory);
+            agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
+            secrets: secretStore);
 
         var orchestrator = new OrchestratorAgent(
             projectStore,

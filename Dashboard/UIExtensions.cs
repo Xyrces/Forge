@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
+using System.Net.Http;
 using Fluxor;
 using Fluxor.Blazor.Web.ReduxDevTools;
 using Forge.Dashboard.Components;
@@ -42,6 +43,13 @@ public static class UIExtensions
         services.AddHttpClient<Forge.Dashboard.Features.View.ViewClient>(c => c.BaseAddress = localBaseAddress);
         services.AddHttpClient<ProjectsClient>(c => c.BaseAddress = localBaseAddress);
         services.AddHttpClient<DeploymentsClient>(c => c.BaseAddress = localBaseAddress);
+        // Plain HttpClient for components that call the API directly
+        // (Secrets, Board, Intake, Vision). Without this, @inject
+        // HttpClient fails DI resolution and those pages render
+        // their empty-state with no error. Same loopback base
+        // address as the typed clients.
+        services.AddHttpClient("ForgeApi", c => c.BaseAddress = localBaseAddress);
+        services.AddScoped(sp => sp.GetRequiredService<IHttpClientFactory>().CreateClient("ForgeApi"));
         return services;
     }
 

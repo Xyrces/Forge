@@ -42,14 +42,24 @@ public static class SecretsEndpoints
         CancellationToken ct)
     {
         var secrets = await store.ListAsync(id, ct);
-        // Whitelist of known kinds so the UI always shows the same
-        // set of fields (even when unset). Operators add more
-        // kinds by editing the list below.
-        var knownKinds = new[] { SecretKinds.GitHubToken, SecretKinds.KiloGatewayApiKey, SecretKinds.MeshyApiKey };
         var byKind = secrets.ToDictionary(s => s.Kind, s => s, StringComparer.OrdinalIgnoreCase);
+
+        // Whitelist of known kinds so the UI's upper panel always
+        // shows the same supported fields (even when unset). Custom
+        // kinds the operator stored via POST follow, sorted, so the
+        // lower panel can render everything that exists.
+        var knownKinds = new[] { SecretKinds.GitHubToken, SecretKinds.KiloGatewayApiKey, SecretKinds.MeshyApiKey };
         var dtos = knownKinds.Select(kind => byKind.TryGetValue(kind, out var row)
             ? new SecretMetadataDto(kind, Set: true, row.CreatedAt, row.UpdatedAt)
-            : new SecretMetadataDto(kind, Set: false, null, null));
+            : new SecretMetadataDto(kind, Set: false, null, null))
+            .Concat(byKind.Keys
+                .Where(k => !knownKinds.Contains(k, StringComparer.OrdinalIgnoreCase))
+                .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
+                .Select(k =>
+                {
+                    var row = byKind[k];
+                    return new SecretMetadataDto(row.Kind, Set: true, row.CreatedAt, row.UpdatedAt);
+                }));
         return Results.Ok(dtos);
     }
 
@@ -62,6 +72,8 @@ public static class SecretsEndpoints
     {
         if (body is null || string.IsNullOrWhiteSpace(body.Kind) || string.IsNullOrEmpty(body.Value))
             return Results.BadRequest(new { error = "kind and value are required" });
+        if (!IsValidKind(body.Kind))
+            return Results.BadRequest(new { error = "kind must match [a-z0-9][a-z0-9_-]* (1-64 chars); it becomes an env-var suffix FORGE_SECRET_<KIND>" });
         if (body.Value.Length > 8192)
             return Results.BadRequest(new { error = "value too long (>8KB)" });
         var logger = loggerFactory.CreateLogger("Secrets.Upsert");
@@ -79,5 +91,16 @@ public static class SecretsEndpoints
     {
         var removed = await store.DeleteAsync(id, kind, ct);
         return removed ? Results.NoContent() : Results.NotFound(new { error = "secret not set" });
+    }
+
+    /// <summary>
+    /// Custom kinds become env-var suffixes (<c>FORGE_SECRET_&lt;KIND&gt;</c>)
+    /// in agent bash sessions, so constrain to lowercase slug shape.
+    /// </summary>
+    private static bool IsValidKind(string kind)
+    {
+        if (kind.Length < 1 || kind.Length > 64) return false;
+        if (!char.IsAsciiLetterLower(kind[0]) && !char.IsDigit(kind[0])) return false;
+        return kind.All(c => char.IsAsciiLetterLower(c) || char.IsDigit(c) || c == '_' || c == '-');
     }
 }

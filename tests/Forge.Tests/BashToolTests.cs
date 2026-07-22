@@ -119,4 +119,31 @@ public class BashToolTests : IDisposable
         Assert.NotNull(fn);
         Assert.Equal("bash", fn.Name);
     }
+
+    [Fact]
+    public async Task Bash_EnvVars_AreInjectedIntoProcess()
+    {
+        // Secrets-by-reference: env vars passed to the ctor reach the
+        // spawned shell, so commands can reference $NAME without the
+        // value appearing in the command text itself.
+        if (OperatingSystem.IsWindows()) return; // sh-only assertion
+        var env = new Dictionary<string, string>
+        {
+            ["FORGE_SECRET_TEST_KEY"] = "s3cret-value",
+        };
+        var tool = new BashTool(_cwd, logger: NullLogger<BashTool>.Instance, envVars: env);
+        var result = await tool.Bash("echo ref=$FORGE_SECRET_TEST_KEY");
+        Assert.Contains("exit=0", result);
+        Assert.Contains("ref=s3cret-value", result);
+    }
+
+    [Fact]
+    public async Task Bash_NoEnvVars_LeavesReferenceUnset()
+    {
+        if (OperatingSystem.IsWindows()) return; // sh-only assertion
+        var tool = new BashTool(_cwd, logger: NullLogger<BashTool>.Instance);
+        var result = await tool.Bash("echo ref=${FORGE_SECRET_TEST_KEY:-<unset>}");
+        Assert.Contains("exit=0", result);
+        Assert.Contains("ref=<unset>", result);
+    }
 }
