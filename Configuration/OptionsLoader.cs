@@ -25,12 +25,12 @@ public static class OptionsLoader
         var options = new AgentOptions();
         config.Bind(options);
 
-        ApplyEnvOverrides(options);
+        ApplyEnvOverrides(options, config);
         Validate(options);
         return options;
     }
 
-    private static void ApplyEnvOverrides(AgentOptions options)
+    private static void ApplyEnvOverrides(AgentOptions options, IConfiguration config)
     {
         // LLM provider env-var override. The kilo gateway (and OpenAI,
         // Anthropic, etc.) need an API key. We inject a single-provider
@@ -61,10 +61,21 @@ public static class OptionsLoader
                 options.Llm.DefaultProvider = llmProviderName;
         }
 
-        var ghToken = Environment.GetEnvironmentVariable("GitHub__Token")
+        var configToken = config.GetValue<string?>("github:token");
+        var ghToken = ExtractToken(configToken);
+        ghToken ??= Environment.GetEnvironmentVariable("GitHub__Token")
             ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
         if (!string.IsNullOrEmpty(ghToken))
             options.GitHub.Token = ghToken;
+    }
+
+    private static string? ExtractToken(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+            return null;
+
+        var trimmed = token.Trim();
+        return trimmed.Length == 0 ? null : trimmed;
     }
 
     private static void Validate(AgentOptions options)
