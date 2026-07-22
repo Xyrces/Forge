@@ -22,12 +22,18 @@ public static class ProjectStateDirs
 
     /// <summary>
     /// Returns the state directory for <paramref name="project"/>.
-    /// For <c>Id == "default"</c> and no explicit per-project override,
-    /// returns <c>{root}/.portHorizon/state</c> (legacy layout).
-    /// All other projects use <c>{root}/.portHorizon/state/{id}</c>.
+    /// The legacy <c>"default"</c> project keeps the v0 layout
+    /// (<c>{root}/.portHorizon/state</c>) for backward compatibility
+    /// with existing on-disk DB files. All other projects use the
+    /// canonical layout that <c>ProjectBootstrap</c> creates:
+    /// <c>{dataRoot}/projects/{id}/.forge/state</c> — uniform for
+    /// both clone-managed and operator-managed repos, so state never
+    /// pollutes an operator-owned working copy.
     /// </summary>
     public static string StateDirFor(ProjectOptions project, string dataRoot)
-        => Path.Combine(RootFor(project, dataRoot), ".portHorizon", "state", StateSubdirFor(project));
+        => string.Equals(project.Id, "default", StringComparison.OrdinalIgnoreCase)
+            ? Path.Combine(RootFor(project, dataRoot), ".portHorizon", "state")
+            : ForgesystemPaths.StateDir(dataRoot, project.Id);
 
     public static string StateSubdirFor(ProjectOptions project)
         => string.Equals(project.Id, "default", StringComparison.OrdinalIgnoreCase)

@@ -101,19 +101,35 @@ public class ProjectStateDirsTests
     }
 
     [Fact]
-    public void NonDefault_GetPerProjectSubdir()
+    public void NonDefault_GetCanonicalForgeLayout()
     {
+        // Non-default projects use the same layout ProjectBootstrap
+        // creates: {dataRoot}/projects/{id}/.forge/state — regardless
+        // of whether the repo root is operator-managed, so state
+        // never lands inside an operator-owned working copy.
         var root = Path.Combine(Path.GetPathRoot(Path.GetTempPath()) ?? "/", "sdk");
         var p = new ProjectOptions { Id = "suikoden", Root = root };
-        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden"), ProjectStateDirs.StateDirFor(p, DataRoot));
-        Assert.Equal(Path.Combine(root, ".portHorizon", "state", "suikoden", "memory.db"), ProjectStateDirs.MemoryDbFor(p, DataRoot));
+        Assert.Equal(Path.Combine(DataRoot, "projects", "suikoden", ".forge", "state"), ProjectStateDirs.StateDirFor(p, DataRoot));
+        Assert.Equal(Path.Combine(DataRoot, "projects", "suikoden", ".forge", "state", "memory.db"), ProjectStateDirs.MemoryDbFor(p, DataRoot));
     }
 
     [Fact]
     public void EmptyRootAndRepoUrl_Throws()
     {
-        var p = new ProjectOptions { Id = "x" };
+        // The legacy "default" project still resolves state under
+        // its repo root — without Root or RepoUrl that's impossible.
+        var p = new ProjectOptions { Id = "default" };
         Assert.Throws<InvalidOperationException>(() => ProjectStateDirs.StateDirFor(p, DataRoot));
+    }
+
+    [Fact]
+    public void EmptyRoot_NonDefault_StillResolves()
+    {
+        // Non-default state lives under {dataRoot}/projects/{id}/
+        // .forge/state — derivable from the id alone.
+        var p = new ProjectOptions { Id = "x" };
+        Assert.Equal(Path.Combine(DataRoot, "projects", "x", ".forge", "state"),
+            ProjectStateDirs.StateDirFor(p, DataRoot));
     }
 
     [Fact]

@@ -135,17 +135,15 @@ public sealed class ProjectContextFactory : IAsyncDisposable
             // cadence. Cache is per-project IssueStore.
             var rows = _store!.ListAsync(CancellationToken.None)
                 .GetAwaiter().GetResult();
-            var bootstrapRepoUrlById = _issuesDbByProject;
             var list = new List<ProjectOptions>(rows.Count);
             foreach (var r in rows)
             {
-                // Preserve the operator-configured Root when the
-                // bootstrap only seeded from appsettings; for SQLite-
-                // only adds, leave Root empty so ResolveDataRoot
-                // derives it from <dataRoot>/projects/<id>/.
-                var root = bootstrapRepoUrlById.ContainsKey(r.Id)
-                    ? string.Empty
-                    : string.Empty;
+                // Root: the clone path recorded at registration
+                // (local_path), else the canonical clone location
+                // <dataRoot>/projects/<id> that ProjectBootstrap uses.
+                var root = !string.IsNullOrWhiteSpace(r.LocalPath)
+                    ? r.LocalPath!
+                    : ForgesystemPaths.ProjectDir(_dataRoot, r.Id);
                 list.Add(new ProjectOptions
                 {
                     Id = r.Id,
