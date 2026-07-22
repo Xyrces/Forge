@@ -43,9 +43,13 @@ public sealed class EngineeringDispatchWorkflow
         IMemoryExtractor memoryExtractor,
         MemoryExtractionStore extractionStore,
         ILogger<EngineeringDispatchWorkflow> logger,
-        string? projectId = null)
+        string? projectId = null,
+        ILoggerFactory? loggerFactory = null)
     {
-        var nullFactory = Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
+        // Executor loggers: production passes the real factory so
+        // executor diagnostics (checkpoint advances, push/PR steps)
+        // reach the journal; tests omit it and keep NullLogger.
+        var nullFactory = loggerFactory ?? Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
         _claim = new ClaimExecutor(issues, nullFactory.CreateLogger<ClaimExecutor>());
         _worktree = new WorktreeExecutor(issues, worktrees, workspaceOptions.DefaultBranch,
             nullFactory.CreateLogger<WorktreeExecutor>());

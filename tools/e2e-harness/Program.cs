@@ -250,7 +250,7 @@ if (useRealLlm)
             runner: runner,
             roleRegistry: roleRegistry,
             dispatcher: new InProcessDispatcher(
-                async (issue, ct) =>
+                async (issue, bundle, ct) =>
                 {
                     var wf = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
                         issues, runner, worktrees, gitHub, roleRegistry,
@@ -272,7 +272,7 @@ if (useRealLlm)
             runner, roleRegistry,
             messageBus,
             new InProcessDispatcher(
-                async (issue, ct) =>
+                async (issue, bundle, ct) =>
                 {
                     var wf = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
                         issues, runner, worktrees, gitHub, roleRegistry,

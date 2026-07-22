@@ -215,6 +215,22 @@ public sealed class OrchestratorAgent : IAgent
             {
                 return new Result(true, "completed with no diff");
             }
+            // Mid-pipeline halt detection: the workflow run returned
+            // but the issue never reached PrOpened and has no
+            // lastError. MAF InProcessExecution swallows executor
+            // faults (the run just halts), so without this check the
+            // issue would sit InProgress forever with no retry and
+            // no error anywhere. Treat as a dispatch failure and let
+            // the retry/hard-fail policy handle it.
+            if (after?.Status == IssueStatus.InProgress
+                && after.DispatchCheckpoint is not null
+                && after.DispatchCheckpoint < DispatchCheckpoint.PrOpened)
+            {
+                var msg = $"workflow halted mid-pipeline at checkpoint {after.DispatchCheckpoint} without surfacing an error";
+                _logger.LogWarning("Workflow dispatch for {Id}: {Msg}", preClaimed.Id, msg);
+                await HandleFailureAsync(preClaimed, new InvalidOperationException(msg), bundle, cancellationToken);
+                return new Result(false, msg);
+            }
             return new Result(true, "workflow completed");
         }
         catch (OperationCanceledException)
