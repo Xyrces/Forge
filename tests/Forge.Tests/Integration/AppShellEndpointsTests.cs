@@ -123,6 +123,55 @@ public class AppShellEndpointsTests : IDisposable
         Assert.Contains(body.Issues, i => i.Title.Contains("memory"));
     }
 
+    [Fact]
+    public async Task Uptime_ReturnsMonotonicUptimeAndUtcTimestamp()
+    {
+        var resp = await _client.GetAsync("/api/health/uptime");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<UptimeShape>();
+        Assert.NotNull(body);
+
+        // uptimeMs: monotonic, non-negative, bounded by the live
+        // TickCount64 + a small jitter allowance for the gap
+        // between server capture and test assertion.
+        var now = Environment.TickCount64;
+        Assert.True(body!.UptimeMs >= 0);
+        Assert.True(body.UptimeMs <= now + 1000,
+            $"uptimeMs {body.UptimeMs} should be within TickCount64 ({now}) + 1000ms jitter");
+
+        // utcTimestamp: round-trippable ISO-8601 UTC, anchored to
+        // "now" within ±1 minute.
+        var ts = DateTime.Parse(body.UtcTimestamp, null,
+            System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, ts.Kind);
+        var skew = (DateTime.UtcNow - ts).Duration();
+        Assert.True(skew < TimeSpan.FromMinutes(1),
+            $"timestamp skew {skew} exceeds 1 minute");
+    }
+
+    [Fact]
+    public async Task Uptime_SecondCallHasNonDecreasingUptime()
+    {
+        var first = await _client.GetFromJsonAsync<UptimeShape>("/api/health/uptime");
+        Assert.NotNull(first);
+        // Sleep a small amount and re-read; monotonicity means the
+        // second reading must be >= the first.
+        await Task.Delay(50);
+        var second = await _client.GetFromJsonAsync<UptimeShape>("/api/health/uptime");
+        Assert.NotNull(second);
+        Assert.True(second!.UptimeMs >= first!.UptimeMs,
+            $"second uptimeMs {second.UptimeMs} < first {first.UptimeMs}");
+    }
+
+    [Fact]
+    public async Task Uptime_PostReturnsMethodNotAllowed()
+    {
+        // Read-only contract: POST must auto-405 from the
+        // minimal-API router since we only registered MapGet.
+        var resp = await _client.PostAsync("/api/health/uptime", content: null);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
     private static int GetEphemeralPort()
     {
         var l = new TcpListener(System.Net.IPAddress.Loopback, 0);
@@ -157,5 +206,11 @@ public class AppShellEndpointsTests : IDisposable
         public List<SearchHitShape> Issues { get; set; } = new();
         public List<SearchHitShape> Specs { get; set; } = new();
         public List<SearchHitShape> Memory { get; set; } = new();
+    }
+
+    public sealed class UptimeShape
+    {
+        public long UptimeMs { get; set; }
+        public string UtcTimestamp { get; set; } = "";
     }
 }

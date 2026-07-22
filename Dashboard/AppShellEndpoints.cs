@@ -19,6 +19,16 @@ public static class AppShellEndpoints
 
     public sealed record ActiveSprintDto(string? Id, string? Name);
 
+    /// <summary>
+    /// Process uptime snapshot. <see cref="UptimeMs"/> comes from
+    /// <see cref="Environment.TickCount64"/> so it stays monotonic
+    /// across wall-clock jumps (NTP slews, manual clock edits).
+    /// <see cref="UtcTimestamp"/> is the snapshot's wall-clock
+    /// anchor in round-trippable ISO-8601 UTC, so consumers can
+    /// pair a monotonic elapsed value with an instant in time.
+    /// </summary>
+    public sealed record UptimeDto(long UptimeMs, string UtcTimestamp);
+
     public static void MapAppShellEndpoints(
         WebApplication app,
         IIssueStore issues,
@@ -34,6 +44,18 @@ public static class AppShellEndpoints
         {
             var version = typeof(AppShellEndpoints).Assembly.GetName().Version?.ToString();
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
+        });
+
+        // Monotonic uptime + wall-clock anchor. GET only; non-GET
+        // requests auto-405 from the minimal-API router, which
+        // matches the read-only contract for sibling /api/health/*
+        // endpoints.
+        app.MapGet("/api/health/uptime", () =>
+        {
+            var dto = new UptimeDto(
+                UptimeMs: Environment.TickCount64,
+                UtcTimestamp: DateTime.UtcNow.ToString("o"));
+            return Results.Json(dto);
         });
 
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
