@@ -36,6 +36,17 @@ public static class AppShellEndpoints
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
         });
 
+        // AC1 (task-40): uptime in ms from Environment.TickCount64
+        // plus a UTC ISO-8601 timestamp of when the snapshot was taken.
+        // TickCount64 measures time since process start, which is what
+        // a liveness probe wants; the timestamp anchors it to wall-clock.
+        app.MapGet("/api/health/uptime", () =>
+        {
+            var uptimeMs = Environment.TickCount64;
+            var utcTimestamp = DateTime.UtcNow.ToString("o");
+            return Results.Json(new { uptimeMs, utcTimestamp });
+        });
+
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
         {
             // Multi-project: ?projectId= reads that project's sprint
