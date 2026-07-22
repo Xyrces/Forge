@@ -10,6 +10,8 @@ public static class AppShellEndpoints
 {
     public sealed record HeartbeatDto(string Status, DateTime At, string? Version);
 
+    public sealed record UptimeDto(long UptimeMs, string UtcTimestamp);
+
     public sealed record SearchHitDto(string Kind, string Id, string Title, string Snippet);
 
     public sealed record SearchResultsDto(
@@ -35,6 +37,12 @@ public static class AppShellEndpoints
             var version = typeof(AppShellEndpoints).Assembly.GetName().Version?.ToString();
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
         });
+
+        app.MapGet("/api/health/uptime", () => Results.Json(new
+        {
+            uptimeMs = Environment.TickCount64,
+            utcTimestamp = DateTime.UtcNow.ToString("o")
+        }));
 
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
         {
