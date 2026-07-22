@@ -36,6 +36,13 @@ public static class AppShellEndpoints
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
         });
 
+        app.MapGet("/api/health/uptime", () =>
+            Results.Json(new
+            {
+                uptimeMs = Environment.TickCount64,
+                utcTimestamp = DateTime.UtcNow.ToString("o")
+            }));
+
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
         {
             // Multi-project: ?projectId= reads that project's sprint
