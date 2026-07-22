@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
@@ -78,6 +79,43 @@ public class AppShellEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Uptime_ReturnsOkWithMonotonicMsAndIsoTimestamp()
+    {
+        var resp = await _client.GetAsync("/api/health/uptime");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<UptimeShape>();
+        Assert.NotNull(body);
+        Assert.True(body!.UptimeMs >= 0, $"uptimeMs should be non-negative, was {body.UptimeMs}");
+        Assert.True(body.UptimeMs <= Environment.TickCount64 + 1000,
+            $"uptimeMs {body.UptimeMs} should be <= current TickCount64 ({Environment.TickCount64}) plus a small jitter allowance");
+
+        var parsed = DateTime.Parse(body.UtcTimestamp, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, parsed.Kind);
+        Assert.True(parsed > DateTime.UtcNow.AddMinutes(-1));
+        Assert.True(parsed < DateTime.UtcNow.AddMinutes(1));
+    }
+
+    [Fact]
+    public async Task Uptime_IsMonotonicallyNonDecreasing()
+    {
+        var first = await _client.GetFromJsonAsync<UptimeShape>("/api/health/uptime");
+        Assert.NotNull(first);
+        await Task.Delay(50);
+        var second = await _client.GetFromJsonAsync<UptimeShape>("/api/health/uptime");
+        Assert.NotNull(second);
+        Assert.True(second!.UptimeMs >= first!.UptimeMs,
+            $"second uptimeMs ({second.UptimeMs}) must be >= first ({first.UptimeMs})");
+    }
+
+    [Fact]
+    public async Task Utime_PostReturns405_ReadOnlyContract()
+    {
+        // Lock the read-only contract: POST must return 405.
+        var resp = await _client.PostAsync("/api/health/uptime", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task ActiveSprint_None_ReturnsNull()
     {
         var resp = await _client.GetAsync("/api/sprints/active");
@@ -136,6 +174,12 @@ public class AppShellEndpointsTests : IDisposable
         public string Status { get; set; } = "";
         public DateTime At { get; set; }
         public string? Version { get; set; }
+    }
+
+    public sealed class UptimeShape
+    {
+        public long UptimeMs { get; set; }
+        public string UtcTimestamp { get; set; } = "";
     }
 
     public sealed class ActiveSprintShape
