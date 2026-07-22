@@ -155,13 +155,36 @@ public async Task<AgentRunResult> RunAsync(
 
         var message = new ChatMessage(ChatRole.User, fullPrompt);
         var session = await DeserializeSessionAsync(agent, sessionId, ct);
+        // Always run with a session so leaked-markup continuations below
+        // keep the full conversation history.
+        session ??= await agent.CreateSessionAsync(ct);
 
         try
         {
             var startedAt = DateTime.UtcNow;
-            var response = session is null
-                ? await agent.RunAsync(message, cancellationToken: ct)
-                : await agent.RunAsync(message, session, cancellationToken: ct);
+            var response = await agent.RunAsync(message, session, cancellationToken: ct);
+
+            // minimax-m3 quirk: near the end of long tool-call runs the
+            // model sometimes emits its next tool call as literal text
+            // markup ("]<]minimax[>[<tool_call>...<invoke name=...") in
+            // the assistant content instead of a structured tool_calls
+            // entry. MAF sees no tool calls and ends the loop
+            // prematurely — the run "completes" with prose (+markup) as
+            // the final answer and zero edits made. Detect the leak and
+            // nudge the model to re-issue properly; bounded so a
+            // persistently-degrading model cannot loop forever.
+            const int maxContinuations = 3;
+            for (var continuation = 0;
+                 continuation < maxContinuations && HasLeakedToolCallMarkup(LastAssistantText(response));
+                 continuation++)
+            {
+                _logger.LogWarning(
+                    "Role {Role}: tool-call markup leaked into response text; nudging model to continue ({N}/{Max})",
+                    role, continuation + 1, maxContinuations);
+                response = await agent.RunAsync(
+                    new ChatMessage(ChatRole.User, LeakedToolCallContinuationPrompt),
+                    session, cancellationToken: ct);
+            }
             var elapsed = DateTime.UtcNow - startedAt;
 
             var text = string.Concat(response.Messages
@@ -382,6 +405,29 @@ finally
             return null;
         }
     }
+
+    /// <summary>
+    /// Nudge sent when the model emits a tool call as plain-text markup
+    /// (see the minimax-m3 note in RunAsync). Deliberately short: the
+    /// model has the full conversation in its session already.
+    /// </summary>
+    private const string LeakedToolCallContinuationPrompt =
+        "Your previous message contained a tool call emitted as plain-text markup, which cannot be executed. " +
+        "If you intended to call a tool, re-issue it now as a proper tool call. " +
+        "If you have already completed the task, reply with a brief summary of what you changed (no markup).";
+
+    private static string LastAssistantText(AgentResponse response) =>
+        response.Messages.LastOrDefault(m => m.Role == ChatRole.Assistant)?.Text ?? string.Empty;
+
+    /// <summary>
+    /// True when assistant text contains tool-call markup that leaked
+    /// into the content channel instead of arriving as structured
+    /// tool_calls. Internal for tests.
+    /// </summary>
+    internal static bool HasLeakedToolCallMarkup(string text) =>
+        text.Contains("]<]minimax[>", StringComparison.Ordinal) ||
+        text.Contains("<tool_call>", StringComparison.Ordinal) ||
+        text.Contains("<invoke name=", StringComparison.Ordinal);
 
     private async Task<string?> SerializeSessionAsync(
         AgentResponse response, ChatClientAgent agent, AgentSession? session, CancellationToken ct)
