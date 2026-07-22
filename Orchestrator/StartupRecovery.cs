@@ -349,6 +349,23 @@ public sealed class StartupRecovery
         await _issues.TransitionAsync(issue.Id, issue.Status, error: null,
             metadata: new Dictionary<string, object> { ["prNumber"] = pr.Number }, ct: ct);
         _logger.LogInformation("Recovery({Id}): opened PR #{Pr}", issue.Id, pr.Number);
+
+        // Mirror OrchestratorAgent.EnqueueWatchIssueAsync so the
+        // PRWatcher actually observes the recovered PR; without a
+        // pr-watch issue the PR would sit unobserved forever.
+        var worktreePath = issue.GetMetadata("worktreePath") ?? string.Empty;
+        var watch = await _issues.CreateAsync(new Core.NewIssue(
+            Type: AgentTaskTypes.PrWatch,
+            Title: $"Watch PR #{pr.Number} for {issue.Id}",
+            Description: $"Wait for PR #{pr.Number} to be reviewed.",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = pr.Number,
+                ["branch"] = branch,
+                ["worktreePath"] = worktreePath,
+                ["taskId"] = issue.Id,
+            }), ct);
+        _logger.LogInformation("Recovery({Id}): enqueued watch issue {WatchId} for PR #{Pr}", issue.Id, watch.Id, pr.Number);
     }
 
     private async Task TryRemoveWorktreeAsync(IssueRecord issue, CancellationToken ct)
