@@ -274,7 +274,14 @@ public sealed class OrchestratorAgent : IAgent
             var lastError = after?.GetMetadata("lastError");
             if (!string.IsNullOrEmpty(lastError))
             {
-                if (IsLlmRateLimited(new InvalidOperationException(lastError)))
+                // A recorded 429 with a completed PR is noise: the
+                // agent's LLM call rate-limited mid-conversation but
+                // the workflow still committed + pushed + opened the
+                // PR. Never requeue those — that would redispatch
+                // finished work (observed live: two tasks requeued
+                // with PRs #6/#7 already open).
+                var reachedPr = after?.DispatchCheckpoint >= DispatchCheckpoint.PrOpened;
+                if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr)
                 {
                     _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
                     _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",
