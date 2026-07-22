@@ -36,6 +36,7 @@
             <a class="chip" href="@($"/projects/{Id}/backlog")">Backlog</a>
             <a class="chip" href="@($"/projects/{Id}/sprints")">Sprints</a>
             <a class="chip" href="@($"/projects/{Id}/tasks")">Tasks</a>
+            <a class="chip" href="@($"/projects/{Id}/secrets")">Secrets</a>
         </div>
 
         <section class="overview-section">
@@ -82,20 +83,49 @@
         </section>
 
         <section class="overview-section">
-            <h2>Role caps (config)</h2>
+            <h2>Role caps (persisted)</h2>
+            <p class="page-subtitle page-subtitle--meta">
+                Saved to the project row in SQLite and applied to the live slot table immediately.
+                Values equal to the built-in default are stored as "no override".
+            </p>
+
+            @if (ProjectsStore.Value.RolesSaveError is not null)
+            {
+                <div class="banner banner--error"><span>@ProjectsStore.Value.RolesSaveError</span></div>
+            }
+            @if (ProjectsStore.Value.RolesSavedFor == Id)
+            {
+                <div class="banner banner--ok"><span>Role caps saved and applied to live slots.</span></div>
+            }
+
             <table class="data-grid">
                 <thead>
-                    <tr><th>Role</th><th>Max</th></tr>
+                    <tr><th>Role</th><th style="width:110px">Max</th><th>Source</th></tr>
                 </thead>
                 <tbody>
-                    @foreach (var roleCap in proj.Roles)
+                    @foreach (var role in AllRoles(proj))
                     {
-                        <tr><td class="mono">@roleCap.Key</td><td>@roleCap.Value</td></tr>
+                        var isOverride = _roleEdits.ContainsKey(role);
+                        var effective = isOverride ? _roleEdits[role] : DefaultRoleCaps.GetValueOrDefault(role, 1);
+                        <tr>
+                            <td class="mono">@role</td>
+                            <td>
+                                <input type="number" min="1" max="32" class="role-cap-input"
+                                       value="@effective"
+                                       @onchange="@(e => OnRoleCapChanged(role, e))" />
+                            </td>
+                            <td>
+                                <span class="pill @(isOverride ? "pill--primary" : "")">@(isOverride ? "override" : "default")</span>
+                            </td>
+                        </tr>
                     }
                 </tbody>
             </table>
-            <div class="page-subtitle page-subtitle--meta">
-                Edit <code>appsettings.json</code> <code>projects[].roles</code>; restart the orchestrator to pick up changes.
+            <div class="form-grid__actions" style="margin-top:10px">
+                <button class="btn btn--primary" @onclick="SaveRoles" disabled="@ProjectsStore.Value.RolesSaving">
+                    @(ProjectsStore.Value.RolesSaving ? "Saving…" : "Save role caps")
+                </button>
+                <button class="btn" @onclick="ResetRoleEdits" disabled="@ProjectsStore.Value.RolesSaving">Reset to defaults</button>
             </div>
         </section>
     }
@@ -103,6 +133,24 @@
 
 @code {
     [Parameter] public string Id { get; set; } = string.Empty;
+
+    // Mirror of Configuration.DefaultProjectRoles.Default — used only to
+    // label rows as "default" vs "override" and to seed the edit grid.
+    // The server remains authoritative when it applies caps.
+    private static readonly Dictionary<string, int> DefaultRoleCaps = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["coredev"] = 2,
+        ["clientdev"] = 2,
+        ["reviewer"] = 2,
+        ["intake"] = 1,
+        ["designer"] = 1,
+        ["artist"] = 1,
+        ["groomer"] = 1,
+        ["orchestrator"] = 1,
+    };
+
+    private readonly Dictionary<string, int> _roleEdits = new(StringComparer.OrdinalIgnoreCase);
+    private string? _editsInitializedFor;
 
     protected override void OnInitialized()
     {
@@ -113,7 +161,49 @@
         }
     }
 
-    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+    private void OnStateChanged(object? sender, EventArgs e)
+    {
+        // (Re)seed the edit grid from the freshly loaded project once
+        // per project id; don't clobber in-flight edits on refresh.
+        var proj = ProjectsStore.Value.Projects.FirstOrDefault(p =>
+            string.Equals(p.Id, Id, StringComparison.OrdinalIgnoreCase));
+        if (proj is not null && !string.Equals(_editsInitializedFor, proj.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            _roleEdits.Clear();
+            foreach (var kv in proj.Roles) _roleEdits[kv.Key] = kv.Value;
+            _editsInitializedFor = proj.Id;
+        }
+        InvokeAsync(StateHasChanged);
+    }
+
+    private IEnumerable<string> AllRoles(ProjectsEndpointRow proj) =>
+        DefaultRoleCaps.Keys
+            .Concat(proj.Roles.Keys)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(r => r, StringComparer.OrdinalIgnoreCase);
+
+    private void OnRoleCapChanged(string role, ChangeEventArgs e)
+    {
+        if (e.Value is string s && int.TryParse(s, out var n))
+        {
+            n = Math.Clamp(n, 1, 32);
+            if (DefaultRoleCaps.TryGetValue(role, out var d) && d == n)
+                _roleEdits.Remove(role); // same as default → no override
+            else
+                _roleEdits[role] = n;
+        }
+    }
+
+    private void SaveRoles()
+    {
+        var roles = new Dictionary<string, int>(_roleEdits, StringComparer.OrdinalIgnoreCase);
+        Dispatch.Dispatch(new ProjectsActions.UpdateProjectRolesAction(Id, roles));
+    }
+
+    private void ResetRoleEdits()
+    {
+        _roleEdits.Clear();
+    }
 
     public void Dispose()
     {

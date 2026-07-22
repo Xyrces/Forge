@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 18;
+    public const int CurrentSchemaVersion = 19;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -281,7 +281,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL,
                 last_synced_at  TEXT,
-                last_sync_error TEXT
+                last_sync_error TEXT,
+                roles_json      TEXT NOT NULL DEFAULT '{}'
             );
             -- v18: per-project secret store. Ciphertext is opaque
             -- (encrypted with IDataProtector using a per-deployment
@@ -789,6 +790,21 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // is already in place (fresh DBs) or when no rows have the
         // legacy 'kilo' assignee. Gate each step on the legacy shape.
         ApplyLegacyKiloRenames(conn);
+
+        // v19 (post-init): project.roles_json for DB-persisted role
+        // caps. CREATE TABLE IF NOT EXISTS covers fresh DBs; existing
+        // DBs need the guarded ALTER.
+        ApplyV19ProjectRoles(conn);
+    }
+
+    private void ApplyV19ProjectRoles(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('project') WHERE name = 'roles_json' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE project ADD COLUMN roles_json TEXT NOT NULL DEFAULT '{}'";
+        alter.ExecuteNonQuery();
     }
 
     private void ApplyLegacyKiloRenames(SqliteConnection conn)

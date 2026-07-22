@@ -13,6 +13,9 @@ public sealed record ProjectsState
     public bool Submitting { get; init; }
     public string? AddError { get; init; }
     public string? LastAdded { get; init; }
+    public bool RolesSaving { get; init; }
+    public string? RolesSaveError { get; init; }
+    public string? RolesSavedFor { get; init; }
 }
 
 public sealed record ProjectsEndpointRow(
@@ -52,6 +55,12 @@ public static class ProjectsActions
     public sealed record AddProjectSucceededAction(string Id);
     public sealed record AddProjectFailedAction(string Error);
     public sealed record AddProjectDismissErrorAction();
+
+    /// <summary>Replace a project's persisted role caps and re-apply live slots.</summary>
+    public sealed record UpdateProjectRolesAction(string Id, Dictionary<string, int> Roles);
+    public sealed record UpdateProjectRolesSavingAction();
+    public sealed record UpdateProjectRolesSucceededAction(string Id);
+    public sealed record UpdateProjectRolesFailedAction(string Error);
 }
 
 public sealed class ProjectsClient
@@ -76,5 +85,18 @@ public sealed class ProjectsClient
         }
         return System.Text.Json.JsonSerializer.Deserialize<AddProjectResponseBody>(raw)
             ?? throw new InvalidOperationException("Empty response body");
+    }
+
+    public async Task UpdateRolesAsync(string id, Dictionary<string, int> roles, CancellationToken ct)
+    {
+        var resp = await _http.PutAsJsonAsync(
+            $"/api/projects/{Uri.EscapeDataString(id)}/roles",
+            new { roles }, ct);
+        var raw = await resp.Content.ReadAsStringAsync(ct);
+        if (!resp.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"PUT /api/projects/{id}/roles returned {(int)resp.StatusCode}: {raw}");
+        }
     }
 }

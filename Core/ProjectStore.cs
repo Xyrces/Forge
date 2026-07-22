@@ -18,7 +18,13 @@ public sealed record ProjectRecord(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     DateTime? LastSyncedAt,
-    string? LastSyncError);
+    string? LastSyncError,
+    IReadOnlyDictionary<string, int>? Roles = null)
+{
+    /// <summary>Per-project role-cap overrides (role -&gt; max). Empty = use defaults.</summary>
+    public IReadOnlyDictionary<string, int> Roles { get; init; } =
+        Roles ?? new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+}
 
 public sealed record NewProject(
     string Id,
@@ -34,6 +40,14 @@ public interface IProjectStore
     Task<bool> DeleteAsync(string id, CancellationToken ct = default);
     Task UpdateLocalPathAsync(string id, string localPath, CancellationToken ct = default);
     Task UpdateSyncStatusAsync(string id, DateTime syncedAt, string? error, CancellationToken ct = default);
+
+    /// <summary>
+    /// Replace the per-project role-cap overrides (role -&gt; max).
+    /// Persisted to <c>project.roles_json</c>; the orchestrator seeds
+    /// <c>SlotTable</c> from these on startup and the dashboard
+    /// re-applies them live on save.
+    /// </summary>
+    Task<bool> UpdateRolesAsync(string id, IReadOnlyDictionary<string, int> roles, CancellationToken ct = default);
 }
 
 public sealed class ProjectStore : IProjectStore, IAsyncDisposable
@@ -98,7 +112,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error
+        cmd.CommandText = @"SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error, roles_json
             FROM project WHERE id = $id";
         cmd.Parameters.AddWithValue("$id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
@@ -110,7 +124,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = new SqliteConnection(_issues.ConnectionString);
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error
+        cmd.CommandText = @"SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error, roles_json
             FROM project ORDER BY id";
         var list = new List<ProjectRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
@@ -157,6 +171,20 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<bool> UpdateRolesAsync(string id, IReadOnlyDictionary<string, int> roles, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(roles);
+        var json = System.Text.Json.JsonSerializer.Serialize(roles);
+        await using var conn = new SqliteConnection(_issues.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"UPDATE project SET roles_json = $roles, updated_at = $now WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$roles", json);
+        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        return await cmd.ExecuteNonQueryAsync(ct) > 0;
+    }
+
     private static ProjectRecord Read(SqliteDataReader rd) => new(
         Id: rd.GetString(0),
         Name: rd.GetString(1),
@@ -166,7 +194,26 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         CreatedAt: IssueStore.ParseTime(rd.GetString(5)),
         UpdatedAt: IssueStore.ParseTime(rd.GetString(6)),
         LastSyncedAt: rd.IsDBNull(7) ? null : IssueStore.ParseTime(rd.GetString(7)),
-        LastSyncError: rd.IsDBNull(8) ? null : rd.GetString(8));
+        LastSyncError: rd.IsDBNull(8) ? null : rd.GetString(8),
+        Roles: ParseRoles(rd.IsDBNull(9) ? null : rd.GetString(9)));
+
+    private static IReadOnlyDictionary<string, int> ParseRoles(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, int>>(json);
+            return parsed is null
+                ? new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, int>(parsed, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Corrupt roles_json shouldn't take the registry down;
+            // treat as "no overrides" — the operator re-saves from the UI.
+            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     public void Dispose() { }

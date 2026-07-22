@@ -40,6 +40,9 @@ public static class ProjectsEndpoints
              .WithName("PatchProjectSlot")
              .WithSummary("Adjust the in-process concurrency cap for a (project, role) pair.");
 
+        group.MapPut("/{id}/roles", PutRolesAsync)
+             .WithName("PutProjectRoles")
+             .WithSummary("Replace the project's persisted role-cap overrides (role -> max) and apply them to the live slot table.");
         endpoints.MapGet("/api/board", BoardAsync)
                  .WithName("CrossProjectBoard")
                  .WithSummary("Cross-project kanban feed: each row tagged with project_id.");
@@ -177,6 +180,43 @@ public static class ProjectsEndpoints
         slots.Configure(id, role, body.Max);
         return Results.Ok(new { projectId = id, role, max = body.Max });
     }
+
+    private static async Task<IResult> PutRolesAsync(
+        string id,
+        PutRolesRequest? body,
+        IProjectStore store,
+        SlotTable slots,
+        CancellationToken ct)
+    {
+        if (body?.Roles is null)
+            return Results.BadRequest(new { error = "roles object required, e.g. { \"roles\": { \"coredev\": 2 } }" });
+
+        // Validate: role keys are non-empty short tokens; caps 1..32.
+        foreach (var (role, max) in body.Roles)
+        {
+            if (string.IsNullOrWhiteSpace(role) || role.Length > 32)
+                return Results.BadRequest(new { error = $"invalid role key '{role}'" });
+            if (max < 1 || max > 32)
+                return Results.BadRequest(new { error = $"role '{role}': max must be 1..32 (got {max})" });
+        }
+
+        var roles = new Dictionary<string, int>(body.Roles, StringComparer.OrdinalIgnoreCase);
+        var updated = await store.UpdateRolesAsync(id, roles, ct);
+        if (!updated) return Results.NotFound(new { error = "project not found", id });
+
+        // Apply live: re-seed every known role (defaults ∪ overrides)
+        // so removing an override also resets the slot to its default.
+        var allRoles = new HashSet<string>(Configuration.DefaultProjectRoles.Default.Keys, StringComparer.OrdinalIgnoreCase);
+        foreach (var r in roles.Keys) allRoles.Add(r);
+        foreach (var r in allRoles)
+        {
+            slots.Configure(id, r, Configuration.DefaultProjectRoles.MaxFor(roles, r));
+        }
+
+        return Results.Ok(new { projectId = id, roles });
+    }
+
+    public sealed record PutRolesRequest(Dictionary<string, int> Roles);
 
     public sealed record ProjectDto(
         string Id,

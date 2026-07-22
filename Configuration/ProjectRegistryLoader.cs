@@ -56,5 +56,8 @@ public static class ProjectRegistryLoader
         // ProjectStore doesn't store Root because the SQLite row
         // would drift on operator moves.
         Root = string.Empty,
+        // Role caps persist in SQLite (v19 roles_json); the
+        // orchestrator seeds SlotTable from these at startup.
+        Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
     };
 }

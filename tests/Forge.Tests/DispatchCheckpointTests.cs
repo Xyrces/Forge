@@ -36,7 +36,8 @@ public class DispatchCheckpointTests : IDisposable
 // candidates. v16 = drop kilo prefix on agent table + assignee.
 // v17 = project registry table for runtime project add/remove.
 // v18 = per-project encrypted secret store.
-        Assert.Equal(18, IssueStore.CurrentSchemaVersion);
+// v19 = project.roles_json — DB-persisted per-project role caps.
+        Assert.Equal(19, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

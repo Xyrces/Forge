@@ -138,6 +138,15 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
   font-size: 12px; font-weight: 600; cursor: pointer;
 }
 .project-switcher__select option { background: var(--surface-1); color: var(--on-surface); }
+
+/* Role caps editor on the project overview. */
+.role-cap-input {
+  width: 72px; padding: 4px 8px;
+  background: var(--surface-1); border: 1px solid var(--outline);
+  border-radius: var(--radius-sm); color: var(--on-surface);
+  font-family: var(--font-mono); font-size: 12px;
+}
+.role-cap-input:focus { border-color: var(--primary); outline: none; }
 .app-topbar__search input {
   width: 360px; height: 28px;
   background: var(--surface-1); border: 1px solid var(--outline);

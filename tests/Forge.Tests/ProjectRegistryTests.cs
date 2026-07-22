@@ -222,3 +222,94 @@ public class DefaultProjectRolesTests
         Assert.Equal(1, DefaultProjectRoles.MaxFor(new(), "ghost"));
     }
 }
+
+public class ProjectStoreRolesTests : IDisposable
+{
+    private readonly string _dbPath;
+    private readonly IssueStore _issues;
+    private readonly ProjectStore _store;
+
+    public ProjectStoreRolesTests()
+    {
+        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-roles-{Guid.NewGuid():N}.db");
+        _issues = new IssueStore(_dbPath);
+        _store = new ProjectStore(_issues);
+    }
+
+    public void Dispose()
+    {
+        _store.Dispose();
+        _issues.Dispose();
+        try { File.Delete(_dbPath); } catch { }
+        try { File.Delete(_dbPath + "-wal"); } catch { }
+        try { File.Delete(_dbPath + "-shm"); } catch { }
+    }
+
+    private async Task<ProjectRecord> SeedAsync(string id = "forge")
+        => await _store.UpsertAsync(new NewProject(
+            Id: id, Name: id, RepoUrl: $"https://example.com/{id}.git", DefaultBranch: "main"));
+
+    [Fact]
+    public async Task NewProject_HasEmptyRoles()
+    {
+        var p = await SeedAsync();
+        Assert.NotNull(p.Roles);
+        Assert.Empty(p.Roles);
+    }
+
+    [Fact]
+    public async Task UpdateRoles_RoundTrips()
+    {
+        await SeedAsync();
+        var roles = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["coredev"] = 4,
+            ["reviewer"] = 1,
+        };
+        var updated = await _store.UpdateRolesAsync("forge", roles);
+        Assert.True(updated);
+
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.Equal(2, p!.Roles.Count);
+        Assert.Equal(4, p.Roles["coredev"]);
+        Assert.Equal(1, p.Roles["reviewer"]);
+    }
+
+    [Fact]
+    public async Task UpdateRoles_ReplacesNotMerges()
+    {
+        await SeedAsync();
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 4 });
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["artist"] = 2 });
+
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.Single(p!.Roles);
+        Assert.Equal(2, p.Roles["artist"]);
+    }
+
+    [Fact]
+    public async Task UpdateRoles_UnknownProject_ReturnsFalse()
+    {
+        var updated = await _store.UpdateRolesAsync("ghost", new Dictionary<string, int> { ["coredev"] = 2 });
+        Assert.False(updated);
+    }
+
+    [Fact]
+    public async Task Upsert_DoesNotClobberExistingRoles()
+    {
+        await SeedAsync();
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 3 });
+
+        // Re-upsert (e.g. rename / repo URL change) must preserve roles_json.
+        await _store.UpsertAsync(new NewProject(
+            Id: "forge", Name: "Forge Renamed",
+            RepoUrl: "https://example.com/forge.git", DefaultBranch: "main"));
+
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.Equal("Forge Renamed", p!.Name);
+        Assert.Equal(3, p.Roles["coredev"]);
+    }
+}

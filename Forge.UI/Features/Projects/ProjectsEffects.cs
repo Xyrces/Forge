@@ -23,6 +23,31 @@ public class ProjectsEffects : Effect<ProjectsActions.LoadProjectsAction>
     }
 }
 
+public class UpdateProjectRolesEffect : Effect<ProjectsActions.UpdateProjectRolesAction>
+{
+    private readonly ProjectsClient _client;
+    public UpdateProjectRolesEffect(ProjectsClient client) { _client = client; }
+
+    public override async Task HandleAsync(
+        ProjectsActions.UpdateProjectRolesAction action,
+        IDispatcher dispatcher)
+    {
+        dispatcher.Dispatch(new ProjectsActions.UpdateProjectRolesSavingAction());
+        try
+        {
+            await _client.UpdateRolesAsync(action.Id, action.Roles, CancellationToken.None);
+            dispatcher.Dispatch(new ProjectsActions.UpdateProjectRolesSucceededAction(action.Id));
+            // Reload so the counters, slot meters, and role caps all
+            // reflect the persisted + live-applied change.
+            dispatcher.Dispatch(new ProjectsActions.LoadProjectsAction());
+        }
+        catch (Exception ex)
+        {
+            dispatcher.Dispatch(new ProjectsActions.UpdateProjectRolesFailedAction(ex.Message));
+        }
+    }
+}
+
 public class AddProjectEffect : Effect<ProjectsActions.AddProjectAction>
 {
     private readonly ProjectsClient _client;

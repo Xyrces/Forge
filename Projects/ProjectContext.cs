@@ -153,6 +153,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
                     RepoUrl = r.RepoUrl,
                     DefaultBranch = r.DefaultBranch,
                     Root = root,
+                    Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
                 });
             }
             return list;
