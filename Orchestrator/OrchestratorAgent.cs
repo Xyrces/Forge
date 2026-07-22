@@ -28,6 +28,11 @@ public sealed class OrchestratorAgent : IAgent
     // time so the loop doesn't hammer the API every dispatch cycle.
     private DateTime _githubRateLimitedUntil = DateTime.MinValue;
     private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
+    // LLM 429 cooldown for the engineering dispatch path. Free-tier
+    // providers rate-limit parallel agent runs; a 429 re-queues the
+    // task (not a code failure) and pauses new dev dispatches.
+    private DateTime _llmRateLimitedUntil = DateTime.MinValue;
+    private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -134,6 +139,12 @@ public sealed class OrchestratorAgent : IAgent
                 {
                     _logger.LogDebug("Dispatch cycle: skipped {N} pipeline container issues (epic/story are not dispatchable)", skipped);
                 }
+                if (devTasks.Count > 0 && DateTime.UtcNow < _llmRateLimitedUntil)
+                {
+                    _logger.LogDebug("Dispatch cycle: skipping {N} dev tasks — LLM rate-limit cooldown until {Until:HH:mm:ss}",
+                        devTasks.Count, _llmRateLimitedUntil);
+                    continue;
+                }
                 foreach (var dev in devTasks)
                     _ = Task.Run(() => DispatchSingleTaskAsync(dev, bundle, cancellationToken), cancellationToken);
             }
@@ -170,6 +181,17 @@ public sealed class OrchestratorAgent : IAgent
         DefaultBranch = r.DefaultBranch,
         Root = string.Empty,
     };
+
+    private static bool IsLlmRateLimited(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is System.ClientModel.ClientResultException cre && cre.Status == 429) return true;
+            if (e.Message.Contains("429") && e.Message.Contains("TooManyRequests", StringComparison.OrdinalIgnoreCase)) return true;
+            if (e.Message.Contains("429", StringComparison.OrdinalIgnoreCase) && e.Message.Contains("rate", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
 
     private async Task<Result> ProcessWatchIssueAsync(IssueRecord watchIssue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
@@ -228,6 +250,14 @@ public sealed class OrchestratorAgent : IAgent
             }
             catch (Exception ex)
             {
+                if (IsLlmRateLimited(ex))
+                {
+                    _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",
+                        preClaimed.Id, LlmRateLimitCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
+                    return new Result(false, "llm-rate-limited");
+                }
                 _logger.LogError(ex, "Workflow dispatch for {Id} threw", preClaimed.Id);
                 await HandleFailureAsync(preClaimed, ex, bundle, cancellationToken);
                 return new Result(false, ex.Message);
@@ -239,6 +269,14 @@ public sealed class OrchestratorAgent : IAgent
             var lastError = after?.GetMetadata("lastError");
             if (!string.IsNullOrEmpty(lastError))
             {
+                if (IsLlmRateLimited(new InvalidOperationException(lastError)))
+                {
+                    _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",
+                        preClaimed.Id, LlmRateLimitCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
+                    return new Result(false, "llm-rate-limited");
+                }
                 _logger.LogWarning("Workflow dispatch for {Id} reported failure: {Err}",
                     preClaimed.Id, lastError);
                 var ex = new InvalidOperationException(lastError);
