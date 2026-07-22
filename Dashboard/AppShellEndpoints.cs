@@ -36,6 +36,16 @@ public static class AppShellEndpoints
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
         });
 
+        // Liveness probe: monotonic uptime (Environment.TickCount64)
+        // paired with a wall-clock UTC timestamp for snapshot anchoring.
+        // Read-only; no side effects.
+        app.MapGet("/api/health/uptime", () =>
+        {
+            var uptimeMs = Environment.TickCount64;
+            var utcTimestamp = DateTime.UtcNow.ToString("o");
+            return Results.Json(new { uptimeMs, utcTimestamp });
+        });
+
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
         {
             // Multi-project: ?projectId= reads that project's sprint

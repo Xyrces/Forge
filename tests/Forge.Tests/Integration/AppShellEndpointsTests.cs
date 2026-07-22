@@ -78,6 +78,33 @@ public class AppShellEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Uptime_ReturnsMonotonicAndTimestamp()
+    {
+        var before = Environment.TickCount64;
+        var resp = await _client.GetAsync("/api/health/uptime");
+        var after = Environment.TickCount64;
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<UptimeShape>();
+        Assert.NotNull(body);
+        // Monotonic: server-reported uptime must be within the
+        // before/after window of the monotonic clock.
+        Assert.InRange(body!.UptimeMs, before, after);
+        // Wall-clock ISO-8601 round-trip parses as UTC.
+        var parsed = DateTime.Parse(body.UtcTimestamp, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, parsed.Kind);
+        Assert.True(parsed > DateTime.UtcNow.AddMinutes(-1));
+        Assert.True(parsed < DateTime.UtcNow.AddMinutes(1));
+    }
+
+    [Fact]
+    public async Task Uptime_IsReadOnly_NoPostHandler()
+    {
+        // Probe must not accept POST: read-only contract.
+        var resp = await _client.PostAsync("/api/health/uptime", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task ActiveSprint_None_ReturnsNull()
     {
         var resp = await _client.GetAsync("/api/sprints/active");
@@ -142,6 +169,12 @@ public class AppShellEndpointsTests : IDisposable
     {
         public string? Id { get; set; }
         public string? Name { get; set; }
+    }
+
+    public sealed class UptimeShape
+    {
+        public long UptimeMs { get; set; }
+        public string UtcTimestamp { get; set; } = "";
     }
 
     public sealed class SearchHitShape
