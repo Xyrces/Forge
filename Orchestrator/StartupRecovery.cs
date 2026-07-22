@@ -298,8 +298,11 @@ public sealed class StartupRecovery
                 if (!worktreeExists)
                     return new RecoveryDecision(RecoveryAction.Failed,
                         "worktree_acquired but directory missing");
-                return new RecoveryDecision(RecoveryAction.LeftAlone,
-                    "worktree exists; LLM re-run deferred to dispatch loop");
+                // Replay re-queues to Pending so the dispatch loop
+                // re-claims (the loop never claims InProgress
+                // issues, so leaving it would orphan the task).
+                return new RecoveryDecision(RecoveryAction.Replay,
+                    "worktree exists; re-queue for LLM re-run");
 
             case DispatchCheckpoint.AgentCompleted:
             case DispatchCheckpoint.CommitDone:
