@@ -348,6 +348,12 @@ _app.MapGet("/api/state", async (CancellationToken ct) =>
             DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
         }
 
+        // Cert download — the install helper for first-time
+        // operators. Served over both HTTP and HTTPS (HTTPS would
+        // require the cert to already be trusted, defeating the
+        // point of this download).
+        CertEndpoints.MapCertEndpoints(_app);
+
         if (reviewerDispatcherForBuild is not null)
         {
             ReviewerEndpoints.MapReviewerEndpoints(_app, reviewerDispatcherForBuild);
