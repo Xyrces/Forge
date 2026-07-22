@@ -99,7 +99,12 @@ public sealed class OrchestratorAgent : IAgent
             try
             {
                 var activeSprint = await bundle.Sprints.GetActiveAsync(cancellationToken);
-                var ready = await bundle.IssueStore.ReadyAsync(_spawnerOptions.MaxConcurrentSessions, activeSprint?.Id, cancellationToken);
+                // Fetch the full ready queue (limit 0) and filter in
+                // memory: containers (epic/story) clog the queue head
+                // when the LIMIT is applied before filtering, so real
+                // tasks behind them never dispatch (found live: 7
+                // stories + a watch starved 4 feature tasks).
+                var ready = await bundle.IssueStore.ReadyAsync(0, activeSprint?.Id, cancellationToken);
                 if (ready.Count == 0) continue;
 
                 var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
@@ -121,7 +126,9 @@ public sealed class OrchestratorAgent : IAgent
                 // preserving operator-enqueued type names (dev, ecs,
                 // ui, bug, ...).
                 var devTasks = ready.Where(i => i.Type != AgentTaskTypes.PrWatch
-                    && !AgentTaskTypes.IsContainer(i.Type)).ToList();
+                    && !AgentTaskTypes.IsContainer(i.Type))
+                    .Take(_spawnerOptions.MaxConcurrentSessions)
+                    .ToList();
                 var skipped = ready.Count - watchTasks.Count - devTasks.Count;
                 if (skipped > 0)
                 {

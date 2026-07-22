@@ -253,12 +253,17 @@ public sealed class OrchestratorAgentTests : IDisposable
             Type: "epic", Title: "container epic", Description: "should not dispatch"));
         var story = await _issues.CreateAsync(new NewIssue(
             Type: "story", Title: "container story", Description: "should not dispatch"));
+        // A real task queued BEHIND containers must still dispatch
+        // (queue-head starvation regression: ReadyAsync's LIMIT
+        // applied before the container filter).
+        var task = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "real work", Description: "must dispatch despite containers ahead"));
         var watch = await _issues.CreateAsync(new NewIssue(
             Type: "pr-watch", Title: "watch issue", Description: "routes to the watcher, not engineering",
             Metadata: new Dictionary<string, object> { ["prNumber"] = 999, ["taskId"] = "task-x" }));
 
         using var cts = new CancellationTokenSource();
-        cts.CancelAfter(TimeSpan.FromSeconds(3));
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
         try
         {
             await orch.ExecuteAsync(cts.Token);
@@ -271,6 +276,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.Equal(IssueStatus.Pending, storyAfter.Status);
         Assert.Null(epicAfter.Assignee);
         Assert.Null(storyAfter.Assignee);
+
+        // The real task was claimed despite the containers ahead of it.
+        var taskAfter = (await _issues.GetAsync(task.Id, CancellationToken.None))!;
+        Assert.NotEqual(IssueStatus.Pending, taskAfter.Status);
 
         // The pr-watch issue must never be claimed by ENGINEERING
         // dispatch (regression: the container filter briefly let it
