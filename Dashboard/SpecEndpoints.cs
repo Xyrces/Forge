@@ -237,11 +237,13 @@ public static class SpecEndpoints
                     var startedAt = DateTime.UtcNow;
                     try
                     {
-                        await agent.GroomAsync(id);
+                        var result = await agent.GroomAsync(id);
                         if (runs is not null && run is not null)
                         {
                             await runs.FinishAsync(run.Id, GroomerRunStatus.Succeeded,
-                                storiesProduced: 0, tasksProduced: 0, error: null,
+                                storiesProduced: result?.StoryIds.Count ?? 0,
+                                tasksProduced: result?.TaskIds.Count ?? 0,
+                                error: null,
                                 duration: DateTime.UtcNow - startedAt,
                                 ct: CancellationToken.None);
                         }

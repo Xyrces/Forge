@@ -138,21 +138,17 @@ public sealed class ScheduledGroomer
         try
         {
             var groomer = _groomerFactory.Create();
-            await groomer.GroomAsync(spec.Id, ct);
+            var result = await groomer.GroomAsync(spec.Id, ct);
             var duration = DateTime.UtcNow - startedAt;
-            // We don't have a clean way to count stories + tasks
-            // produced by the groomer from here; the GroomerAgent
-            // itself doesn't return them. The dashboard's Groomer
-            // timeline shows the started + succeeded/failed pair,
-            // and the spec's child-issue count can be read off the
-            // spec page.
             await _runStore.FinishAsync(
                 run.Id, GroomerRunStatus.Succeeded,
-                storiesProduced: 0, tasksProduced: 0,
+                storiesProduced: result?.StoryIds.Count ?? 0,
+                tasksProduced: result?.TaskIds.Count ?? 0,
                 error: null,
                 duration: duration,
                 ct: ct);
-            _logger.LogInformation("ScheduledGroomer: spec {SpecId} groomed in {Ms}ms", spec.Id, duration.TotalMilliseconds);
+            _logger.LogInformation("ScheduledGroomer: spec {SpecId} groomed in {Ms}ms ({Stories} stories, {Tasks} tasks)",
+                spec.Id, duration.TotalMilliseconds, result?.StoryIds.Count ?? 0, result?.TaskIds.Count ?? 0);
         }
         catch (Exception ex)
         {
