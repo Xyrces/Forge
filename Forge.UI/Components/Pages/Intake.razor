@@ -351,7 +351,15 @@
             if (resp.IsSuccessStatusCode)
             {
                 _actionError = null;
+                var created = await resp.Content.ReadFromJsonAsync<SessionDto>();
                 await ReloadSessions();
+                // Select the session we just created — ReloadSessions
+                // defaults to the first (oldest) one, which strands
+                // the operator in a stale thread.
+                if (created is not null)
+                {
+                    await SetActive(created.Id);
+                }
             }
             else
             {
