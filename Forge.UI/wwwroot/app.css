@@ -329,6 +329,22 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .banner--warn { background: rgba(242, 181, 90, 0.10); border: 1px solid var(--warn); color: var(--on-surface); }
 .banner--error { background: rgba(255, 107, 122, 0.10); border: 1px solid var(--error); color: var(--on-surface); }
 .banner > span { flex: 1; }
+.banner--warn:has(.cert-help) { flex-direction: column; align-items: stretch; }
+
+/* Cert trust help (OS-aware install one-liners + copy buttons) */
+.cert-help { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.cert-help__block { display: flex; flex-direction: column; gap: 4px; }
+.cert-help__label { font-weight: 600; font-size: 12px; }
+.cert-help__cmdrow { display: flex; gap: 8px; align-items: stretch; }
+.cert-help__cmd {
+  flex: 1; padding: 8px 10px; border-radius: var(--radius-sm, 6px);
+  background: var(--surface-variant, rgba(255,255,255,0.04));
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; line-height: 1.5;
+  word-break: break-all; user-select: all;
+}
+.cert-help__copy { flex-shrink: 0; align-self: center; }
+.cert-help__note { font-size: 11px; color: var(--on-surface-variant, #9aa); }
+.cert-help__hint { font-size: 11px; color: var(--on-surface-variant, #9aa); }
 
 /* =========================================================================
    Page layouts

@@ -1,0 +1,100 @@
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+
+@* OS-aware self-signed-cert install help. Detects the *browser's*
+   OS via JS interop and shows the matching one-liner with a
+   copy-to-clipboard button. One-liners (not scripts) so a paste
+   into a terminal survives a sudo password prompt. *@
+
+<div class="cert-help">
+    @if (_os is null)
+    {
+        <span class="cert-help__hint">Detecting your OS…</span>
+    }
+    else
+    {
+        @foreach (var block in VisibleBlocks)
+        {
+            <div class="cert-help__block">
+                <div class="cert-help__label">@block.Label</div>
+                <div class="cert-help__cmdrow">
+                    <code class="cert-help__cmd">@block.Command</code>
+                    <button type="button" class="btn cert-help__copy" @onclick="@(() => CopyAsync(block))">
+                        @(_copiedKey == block.Key ? "Copied!" : "Copy")
+                    </button>
+                </div>
+                @if (block.Note is not null)
+                {
+                    <div class="cert-help__note">@((MarkupString)block.Note)</div>
+                }
+            </div>
+        }
+        <div class="cert-help__hint">
+            Cert URL: <a href="@CertUrl" download="forge.crt">@CertUrl</a>
+            — after installing, restart your browser.
+        </div>
+    }
+</div>
+
+@code {
+    private sealed record CmdBlock(string Key, string Label, string Command, string? Note);
+
+    private string? _os;
+    private string? _copiedKey;
+    private List<CmdBlock> _all = [];
+
+    private string CertUrl => $"{Nav.BaseUri.TrimEnd('/')}/cert/";
+
+    private IEnumerable<CmdBlock> VisibleBlocks => _os switch
+    {
+        "linux" => _all.Where(b => b.Key is "linux" or "linux-chrome"),
+        "mac" => _all.Where(b => b.Key == "mac"),
+        "windows" => _all.Where(b => b.Key == "windows"),
+        _ => _all,
+    };
+
+    protected override void OnInitialized()
+    {
+        var cert = CertUrl;
+        _all =
+        [
+            new("linux", "Linux — system trust store (Debian/Ubuntu)",
+                $"curl -fsSLk {cert} | sudo tee /usr/local/share/ca-certificates/forge.crt >/dev/null && sudo update-ca-certificates",
+                "Fixes <code>curl</code> + OpenSSL-based tools. For Arch use <code>/etc/ca-certificates/trust-source/anchors/</code> + <code>sudo trust extract-compat</code>; for Fedora/RHEL use <code>/etc/pki/ca-trust/source/anchors/</code> + <code>sudo update-ca-trust</code>."),
+            new("linux-chrome", "Linux — Chrome/Chromium browser (NSS store)",
+                $"curl -fsSLk {cert} -o /tmp/forge.crt && certutil -d sql:$HOME/.pki/nssdb -A -t \"C,,\" -n forge -i /tmp/forge.crt",
+                "Chrome on Linux does <em>not</em> use the system store — run this too. Firefox: Settings → Privacy &amp; Security → Certificates → Import <code>forge.crt</code>."),
+            new("mac", "macOS — System keychain",
+                $"curl -fsSLk {cert} -o /tmp/forge.crt && sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /tmp/forge.crt",
+                "Safari + Chrome pick this up immediately after a browser restart."),
+            new("windows", "Windows — PowerShell (run as Administrator)",
+                $"curl.exe -fsSLk {cert} -o forge.crt; Import-Certificate -FilePath .\\forge.crt -CertStoreLocation Cert:\\LocalMachine\\Root",
+                "Or: download <code>forge.crt</code>, double-click → Install Certificate → Local Machine → Trusted Root Certification Authorities."),
+        ];
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _os = await JS.InvokeAsync<string>("forge.env.getOs");
+            StateHasChanged();
+        }
+    }
+
+    private async Task CopyAsync(CmdBlock block)
+    {
+        var ok = await JS.InvokeAsync<bool>("forge.clipboard.copy", block.Command);
+        _copiedKey = ok ? block.Key : null;
+        StateHasChanged();
+        if (ok)
+        {
+            await Task.Delay(2000);
+            if (_copiedKey == block.Key)
+            {
+                _copiedKey = null;
+                StateHasChanged();
+            }
+        }
+    }
+}

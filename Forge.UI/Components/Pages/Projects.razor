@@ -35,12 +35,9 @@
             <div class="banner banner--warn" style="margin-top:12px">
                 <span>
                     Looks like a TLS / certificate error. The dashboard ships with a self-signed
-                    cert — install it as a trusted root on this machine:
-                    <a href="/cert/" download="forge.crt" style="margin-left:4px">Download forge.crt</a>,
-                    then run the
-                    <a href="/cert/install" target="_blank" rel="noopener">install helper</a>
-                    (or paste the shell script at <code>https://&lt;host&gt;/cert/install</code> into a root shell).
+                    cert — install it as a trusted root on this machine with the matching command:
                 </span>
+                <CertTrustHelp />
             </div>
         }
     }

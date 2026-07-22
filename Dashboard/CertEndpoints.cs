@@ -33,7 +33,7 @@ public static class CertEndpoints
 
         group.MapGet("/install", ServeInstallHelperAsync)
              .WithName("CertInstallHelper")
-             .WithSummary("Per-OS install commands (one line each) for Linux, macOS, and Windows.");
+             .WithSummary("Paste-safe per-OS install one-liners (Linux / macOS / Windows), host-aware.");
 
         return endpoints;
     }
@@ -59,61 +59,44 @@ public static class CertEndpoints
 
     private static IResult ServeInstallHelperAsync(HttpContext ctx)
     {
-        // Hand back a tiny shell-script the operator can pipe to
-        // bash on macOS / Linux. Windows users just download the
-        // .crt and double-click it.
-        var text = """
-            #!/usr/bin/env bash
-            # forge cert installer — copy this output into a terminal as root.
-            # Detects the OS + runs the right command.
+        // Emit paste-safe one-liners (not a multi-line script):
+        // multi-line pastes into bash break on the sudo password
+        // prompt — the prompt swallows the remaining pasted lines.
+        // One line = one paste = sudo prompts cleanly.
+        //
+        // The cert URL is built from the request's own scheme+host
+        // so the commands work from any machine that can reach the
+        // dashboard, without hardcoding an IP.
+        var certUrl = $"{ctx.Request.Scheme}://{ctx.Request.Host}/cert/";
 
-            set -euo pipefail
+        var text = $"""
+            # Forge cert install — copy the ONE line for your OS and paste it
+            # into a terminal. It downloads the cert (with -k, since the cert
+            # is self-signed and not yet trusted) and installs it as a
+            # trusted root.
 
-            URL=${FORGE_URL:-https://192.168.68.78/cert/}
-            TMP=$(mktemp)
-            trap 'rm -f "$TMP"' EXIT
+            # Linux — system trust store (Debian/Ubuntu):
+            curl -fsSLk {certUrl} | sudo tee /usr/local/share/ca-certificates/forge.crt >/dev/null && sudo update-ca-certificates
 
-            echo "Downloading certificate from $URL ..."
-            # -k because we're fetching our own self-signed cert.
-            # The trust-the-cert step below is the actual fix.
-            if command -v curl >/dev/null 2>&1; then
-                curl -fsSLk "$URL" -o "$TMP"
-            else
-                wget --no-check-certificate -qO "$TMP" "$URL"
-            fi
+            # Linux — Chrome/Chromium browser store (Chrome does NOT use the
+            # system store; run this in addition):
+            curl -fsSLk {certUrl} -o /tmp/forge.crt && certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n forge -i /tmp/forge.crt
 
-            if [ "$(uname -s)" = "Darwin" ]; then
-                echo "macOS detected — adding to System keychain (requires sudo)..."
-                sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$TMP"
-                echo "Done. Safari / Chrome will now trust 192.168.68.78 immediately."
-            elif [ "$(uname -s)" = "Linux" ]; then
-                if [ -d /usr/local/share/ca-certificates ]; then
-                    echo "Linux (Debian/Ubuntu) detected — installing to /usr/local/share/ca-certificates/..."
-                    sudo cp "$TMP" /usr/local/share/ca-certificates/forge.crt
-                    sudo update-ca-certificates
-                elif [ -d /etc/ca-certificates/trust-source/anchors ]; then
-                    echo "Linux (Arch) detected — installing to /etc/ca-certificates/trust-source/anchors/..."
-                    sudo cp "$TMP" /etc/ca-certificates/trust-source/anchors/forge.crt
-                    sudo trust extract-compat
-                elif [ -d /etc/pki/ca-trust/source/anchors ]; then
-                    echo "Linux (Fedora/RHEL) detected — installing to /etc/pki/ca-trust/source/anchors/..."
-                    sudo cp "$TMP" /etc/pki/ca-trust/source/anchors/forge.crt
-                    sudo update-ca-trust
-                else
-                    echo "Linux distribution not auto-detected. Install the cert manually:"
-                    echo "  sudo cp $TMP /your/cert/dir/forge.crt"
-                    echo "  sudo update-ca-certificates   # or the equivalent for your distro"
-                    exit 1
-                fi
-                echo "Done. Restart your browser to pick up the new trust store."
-            else
-                echo "Unsupported OS: $(uname -s). Install manually:"
-                echo "  Download: $URL"
-                echo "  Save as forge.crt, double-click, 'Install Certificate' -> Trusted Root Certification Authorities"
-                exit 1
-            fi
+            # Linux — Arch:
+            curl -fsSLk {certUrl} | sudo tee /etc/ca-certificates/trust-source/anchors/forge.crt >/dev/null && sudo trust extract-compat
+
+            # Linux — Fedora/RHEL:
+            curl -fsSLk {certUrl} | sudo tee /etc/pki/ca-trust/source/anchors/forge.crt >/dev/null && sudo update-ca-trust
+
+            # macOS:
+            curl -fsSLk {certUrl} -o /tmp/forge.crt && sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /tmp/forge.crt
+
+            # Windows — PowerShell (run as Administrator):
+            curl.exe -fsSLk {certUrl} -o forge.crt; Import-Certificate -FilePath .\forge.crt -CertStoreLocation Cert:\LocalMachine\Root
+
+            # Afterwards: restart your browser.
             """;
-        ctx.Response.Headers["Content-Disposition"] = "inline; filename=\"install-forge-cert.sh\"";
-        return Results.Content(text, "text/x-shellscript");
+        ctx.Response.Headers["Content-Disposition"] = "inline; filename=\"install-forge-cert.txt\"";
+        return Results.Content(text, "text/plain");
     }
 }
