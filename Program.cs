@@ -1123,7 +1123,8 @@ Console.Error.WriteLine(ex.ToString());
             dispatchBundleFactory,
             agentRunner, roleRegistry,
             messageBus, dispatcher, eventBus,
-            loggerFactory.CreateLogger<OrchestratorAgent>());
+            loggerFactory.CreateLogger<OrchestratorAgent>(),
+            loggerFactory: loggerFactory);
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);

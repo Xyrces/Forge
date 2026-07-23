@@ -88,6 +88,17 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
         var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
+        // Rework loop: a task requeued by the PRWatcher carries the
+        // failure context (CI failure or reviewer notes) — surface it
+        // prominently so the agent fixes THAT, not re-explores.
+        var reworkContext = issue.GetMetadata("reworkContext");
+        if (!string.IsNullOrWhiteSpace(reworkContext))
+        {
+            var round = issue.GetMetadata("reworkAttempts") ?? "1";
+            prompt += $"\n\n## Rework required (round {round})\n" +
+                $"Your previous attempt produced a PR that did NOT pass review/CI. " +
+                $"Fix the following on the SAME branch (do not restructure unrelated work):\n\n{reworkContext}";
+        }
         var queued = drainMessageBus(roleAgent.AgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)
             ? prompt

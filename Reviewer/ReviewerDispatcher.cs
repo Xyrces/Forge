@@ -1,100 +1,105 @@
-using System.Diagnostics;
-using Microsoft.Agents.AI;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Octokit;
 using Forge.Agents;
-using Forge.Configuration;
 using Forge.Core;
 using Forge.Dashboard;
 using static Octokit.PullRequestReviewState;
 
 namespace Forge.Reviewer;
 
-
-    /// <summary>
-    /// 2026-07-18 (Phase 2.11.f + bug-2) the missing piece of the
-    /// Phase 2 review loop. PRWatcher.ProcessWatchTaskAsync polls
-    /// GitHub for review state and merges when CI=Success AND
-    /// reviewStates contains Approved. But no Reviewer agent existed to
-    /// actually post the Approval. This class fills that gap:
-    ///   1. Picks up pr-watch issues the orchestrator surfaces.
-    ///   2. Fetches the PR's unified diff from GitHub.
-    ///   3. Runs the Reviewer role through MafAgentRunner against
-    ///      the diff + spec body.
-    ///   4. Posts a non-blocking issue comment with the assessment
-    ///      (so the audit trail is human-readable).
-    ///   5. Submits a structured PullRequestReview event:
-    ///      Approve if the LLM's verdict is positive, RequestChanges
-    ///      otherwise. The structured event is what PRWatcher
-    ///      observes to drive GreenAndApproved.
-    ///   6. Marks the pr-watch issue Completed on success (the
-    ///      underlying engineer task continues to InProgress until
-    ///      the actual merge; PRWatcher's verdict evaluation handles
-    ///      that).
-    ///
-    /// Hard guard: this class will not run when the configured
-    /// GitHub PAT is the same identity that opened the PR. The
-    /// operator policy "you can't review your own PR" is enforced
-    /// here as well as in code (a token identity mismatch would
-    /// otherwise let the engineer agent Approve its own work).
-    /// </summary>
+/// <summary>
+/// The reviewer stage of the sprint review loop. For a pr-watch
+/// issue: fetch the PR's diff, run the Reviewer role against it,
+/// post the assessment as a GitHub comment (human-readable audit),
+/// and record the structured verdict in the watch's metadata —
+/// <c>reviewSha</c>, <c>reviewVerdict</c> (Approved |
+/// ChangesRequested | Error), <c>reviewNotes</c>, <c>reviewRound</c>.
+///
+/// <para>
+/// The queue metadata is the machine record the PRWatcher merges
+/// on; the GitHub comment is the audit trail. A formal GitHub
+/// review submission is attempted opportunistically (works when the
+/// engine identity differs from the PR author; GitHub hard-blocks
+/// formal self-reviews with a 422, which is tolerated — the local
+/// verdict is authoritative in the solo-identity model).
+/// </para>
+///
+/// <para>
+/// Reviews are per-head-SHA: a watch whose PR head moved since the
+/// last review gets re-reviewed (rework round). The watcher owns
+/// all issue transitions; this class only writes verdict metadata.
+/// </para>
+/// </summary>
 public sealed class ReviewerDispatcher
 {
     private readonly IIssueStore _issues;
     private readonly GitHubService _gitHub;
     private readonly IAgentRunner _agentRunner;
-    private readonly Func<string?> _resolveReviewerToken;
     private readonly ILogger<ReviewerDispatcher> _logger;
 
     public ReviewerDispatcher(
         IIssueStore issues,
         GitHubService gitHub,
         IAgentRunner agentRunner,
-        Func<string?> resolveReviewerToken,
         ILogger<ReviewerDispatcher> logger)
     {
         _issues = issues;
         _gitHub = gitHub;
         _agentRunner = agentRunner;
-        _resolveReviewerToken = resolveReviewerToken;
         _logger = logger;
     }
 
-    public async Task<int> ProcessWatchTaskAsync(
-        IssueRecord watchTask,
-        CancellationToken cancellationToken = default)
+    public sealed record ReviewOutcome(
+        ReviewerVerdict Verdict,
+        string Body,
+        string HeadSha,
+        string? Error = null);
+
+    /// <summary>
+    /// Review the PR behind a watch issue once. Returns null when no
+    /// review was needed (already reviewed at the current head SHA).
+    /// Never throws for LLM/GitHub failures — those come back as an
+    /// Error outcome so the watcher's circuit breaker can count them.
+    /// </summary>
+    public async Task<ReviewOutcome?> ReviewOnceAsync(
+        IssueRecord watchTask, CancellationToken cancellationToken = default,
+        Func<PullRequest, string>? headShaOverride = null)
     {
         var prText = watchTask.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
         {
             _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
-            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
-            return 1;
+            return new ReviewOutcome(ReviewerVerdict.Error, "", "", "missing prNumber");
         }
 
-        var alreadyApproved = (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
-            .Any(r => r.State.Value == Approved);
-        if (alreadyApproved)
+        PullRequest pr;
+        try
         {
-            _logger.LogInformation("PR #{Pr} already has an Approved review; reviewer skipping", prNumber);
-            return 0;
+            pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
         }
-
-        // Anti-self-review: if the only Reviewer-token identity is
-        // the same as the one that opened the PR, skip. GitHub API
-        // doesn't expose "who created this PR" cheaply; we instead
-        // refuse to run when the reviewer token is unset OR when
-        // the resolveToken callback returns the same string as the
-        // configured engine token.
-        var token = _resolveReviewerToken() ?? "";
-        if (string.IsNullOrEmpty(token))
+        catch (Exception ex)
         {
-            _logger.LogWarning("PR #{Pr}: reviewer token not configured; skipping auto-review (operator must approve manually)", prNumber);
-            return 0;
+            _logger.LogWarning(ex, "PR #{Pr}: could not fetch for review", prNumber);
+            return new ReviewOutcome(ReviewerVerdict.Error, "", "", $"GetPullRequest: {ex.Message}");
+        }
+        // Test seam: Octokit's PullRequest.Head is init-only (even
+        // the e2e harness keeps SHA in a side channel); tests supply
+        // the head SHA directly.
+        var headSha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+
+        // Per-SHA dedupe: the watch sweep calls this every pass; only
+        // a head move (rework push) triggers a fresh round. An Error
+        // verdict does NOT dedupe — the sweep retries the review (the
+        // watcher's circuit breaker bounds the retries).
+        var reviewedSha = watchTask.GetMetadata("reviewSha");
+        var recordedVerdict = watchTask.GetMetadata("reviewVerdict");
+        if (string.Equals(reviewedSha, headSha, StringComparison.Ordinal)
+            && !string.IsNullOrEmpty(recordedVerdict)
+            && recordedVerdict != nameof(ReviewerVerdict.Error))
+        {
+            return null;
         }
 
-        var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
         string diff;
         try
         {
@@ -102,127 +107,156 @@ public sealed class ReviewerDispatcher
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not fetch diff for PR #{Pr}; falling back to empty diff", prNumber);
+            _logger.LogWarning(ex, "Could not fetch diff for PR #{Pr}; reviewing with empty diff", prNumber);
             diff = "";
         }
 
+        var round = 1;
+        if (int.TryParse(watchTask.GetMetadata("reviewRound"), out var prior)) round = prior + 1;
+
         var prompt = BuildReviewerPrompt(pr, diff, watchTask);
-        AgentRunResult? result = null;
-        string? runnerError = null;
+        ReviewerVerdict verdict;
+        string body;
+        string? error = null;
         try
         {
-            result = await _agentRunner.RunAsync(
+            var result = await _agentRunner.RunAsync(
                 AgentType.Reviewer, prompt, sessionId: null, ct: cancellationToken);
+            (verdict, body) = ParseReviewerOutput(result.Text);
         }
         catch (Exception ex)
         {
-            // The agent can throw mid-tool-call (e.g. the
-            // BYOK provider short-circuits the tool parser under
-            // certain conditions). Surface the failure AND
-            // fall back to a hard-coded approve so the watch
-            // task still completes -- operator policy is to leave
-            // the comment of approval visible regardless of who
-            // generated the verdict text.
-            _logger.LogWarning(ex, "Reviewer LLM call failed for PR #{Pr}; falling back to auto-approve", prNumber);
-            runnerError = ex.Message;
+            // No silent approvals: an unavailable reviewer is an
+            // Error outcome (the circuit breaker escalates to the
+            // operator), never an Approve.
+            _logger.LogWarning(ex, "Reviewer LLM call failed for PR #{Pr}", prNumber);
+            verdict = ReviewerVerdict.Error;
+            body = "";
+            error = $"{ex.GetType().Name}: {ex.Message}";
         }
 
-        var (verdict, body) = result is { Text: { Length: > 0 } t }
-            ? ParseReviewerOutput(result.Text)
-            : (ReviewerVerdict.Approve,
-                "**Forge Operator auto-approval** (reviewer LLM was unavailable).\n\n" +
-                $"The Reviewer agent failed to produce a verdict:\n\n```\n{runnerError}\n```\n\n" +
-                "Marking Approved as fallback because the engineer change set was confined " +
-                "to the agent's own worktree and survives the build verify step.\n\n" +
-                "A human reviewer should manually re-evaluate this PR.");
-
-        await _gitHub.CreateIssueCommentAsync(prNumber,
-            $"**[Reviewer agent]** {verdict}\n\n{body}", cancellationToken);
-
-        // 2026-07-18: the operator policy "you can't review your own PR"
-        // means the same GitHub identity can't post a review on a PR
-        // they opened. GitHub hard-blocks the request with a 422
-        // ("Can not request changes on your own pull request" /
-        // similar for Approve). We attempt the review submission,
-        // and if GitHub refuses with that flavor we still post the
-        // comment + drop a marker in the issue store so the operator
-        // sees the comment of approval without rejecting the watch.
-        //
-        // Self-hosted Forge devs are routinely the engineer AND the
-        // reviewer (no separate identities available). Treating the
-        // 422 as a success gives PRWatcher the Approved event it
-        // needs (already approved on prior poll) OR skips the
-        // merge path on the next poll.
-        try
+        // Audit trail on GitHub (comments are allowed on own PRs;
+        // only formal reviews are identity-restricted).
+        if (verdict != ReviewerVerdict.Error)
         {
-            var reviewState = verdict == ReviewerVerdict.Approve
-                ? Approved
-                : ChangesRequested;
-            await _gitHub.SubmitReviewAsync(prNumber, pr.Head.Sha, body, reviewState, cancellationToken);
-            _logger.LogInformation(
-                "PR #{Pr}: Reviewer submitted {Verdict} review state via GitHub API",
-                prNumber, verdict);
-        }
-        catch (Octokit.ApiValidationException ex)
-            when (ex.Message.Contains("Can not request changes", StringComparison.OrdinalIgnoreCase)
-                || ex.Message.Contains("Can not approve", StringComparison.OrdinalIgnoreCase)
-                || ex.Message.Contains("own pull request", StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogWarning(
-                "PR #{Pr}: GitHub refused to let the reviewer self-approve (operator-policy). " +
-                "Treating the issue comment as the record of approval. Error: {Msg}",
-                prNumber, ex.Message);
-            // The comment we just posted IS the operator-visible
-            // record; PRWatcher's polling will pick up the comment
-            // but not the review_state transition. Mark the watch
-            // issue as still pending so the operator can re-run with
-            // a separate identity when one becomes available.
+            try
+            {
+                await _gitHub.CreateIssueCommentAsync(prNumber,
+                    $"**[Forge Reviewer — round {round}]** {verdict}\n\n{body}", cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PR #{Pr}: review comment post failed", prNumber);
+            }
+            // Opportunistic formal review: works when the engine
+            // identity differs from the PR author; the solo-identity
+            // 422 is expected and tolerated (local verdict rules).
+            try
+            {
+                await _gitHub.SubmitReviewAsync(prNumber, headSha, body,
+                    verdict == ReviewerVerdict.Approve ? Approved : ChangesRequested,
+                    cancellationToken);
+            }
+            catch (Octokit.ApiValidationException ex)
+                when (ex.Message.Contains("own pull request", StringComparison.OrdinalIgnoreCase)
+                    || ex.Message.Contains("Can not request changes", StringComparison.OrdinalIgnoreCase)
+                    || ex.Message.Contains("Can not approve", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("PR #{Pr}: formal self-review blocked (expected solo-identity 422)", prNumber);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PR #{Pr}: formal review submit failed", prNumber);
+            }
         }
 
-        // Best-effort: mark the watch issue Completed. When the
-        // dispatcher is invoked via the HTTP endpoint (where the
-        // "watch issue" is a synthetic record rather than a real
-        // row), this transition is a no-op against the issue
-        // store. We still attempt it for the orchestrator-driven
-        // path where the watch issue is real.
-        try
+        // Record the verdict in the watch metadata — the PRWatcher's
+        // merge/rework decision reads this.
+        await UpdateWatchMetadataAsync(watchTask, m =>
         {
-            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed,
-                $"auto-review: {verdict}", ct: cancellationToken);
-        }
-        catch (Exception ex)
+            m["reviewSha"] = headSha;
+            m["reviewVerdict"] = verdict.ToString();
+            m["reviewNotes"] = body.Length > 2000 ? body[..2000] : body;
+            m["reviewRound"] = round;
+            if (error is not null) m["reviewError"] = error;
+            else m.Remove("reviewError");
+            return m;
+        }, cancellationToken);
+
+        _logger.LogInformation("PR #{Pr}: reviewer verdict {Verdict} (round {Round}, sha {Sha})",
+            prNumber, verdict, round, headSha[..Math.Min(7, headSha.Length)]);
+        return new ReviewOutcome(verdict, body, headSha, error);
+    }
+
+    /// <summary>
+    /// Back-compat wrapper for the HTTP endpoint: review once and
+    /// return a process-style exit code.
+    /// </summary>
+    public async Task<int> ProcessWatchTaskAsync(
+        IssueRecord watchTask,
+        CancellationToken cancellationToken = default)
+    {
+        var outcome = await ReviewOnceAsync(watchTask, cancellationToken);
+        return outcome is null || outcome.Error is null ? 0 : 1;
+    }
+
+    private async Task UpdateWatchMetadataAsync(
+        IssueRecord watchTask,
+        Func<Dictionary<string, object>, Dictionary<string, object>> mutate,
+        CancellationToken ct)
+    {
+        var cur = await _issues.GetAsync(watchTask.Id, ct);
+        if (cur is null) return;
+        var current = new Dictionary<string, object>();
+        if (!string.IsNullOrWhiteSpace(cur.MetadataJson))
         {
-            _logger.LogDebug(ex, "Marking watch issue {Id} Completed failed (likely synthetic)", watchTask.Id);
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(cur.MetadataJson);
+                if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    foreach (var p in doc.RootElement.EnumerateObject())
+                    {
+                        current[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                            ? p.Value.GetString()!
+                            : p.Value.GetRawText();
+                    }
+                }
+            }
+            catch { /* malformed metadata: start fresh */ }
         }
-        _logger.LogInformation(
-            "PR #{Pr}: Reviewer posted {Verdict}",
-            prNumber, verdict);
-        return 0;
+        var next = mutate(current);
+        await _issues.TransitionAsync(cur.Id, cur.Status, error: null, metadata: next, ct: ct);
     }
 
     private static string BuildReviewerPrompt(PullRequest pr, string diff, IssueRecord watchTask)
     {
-        return $"You are the Reviewer role for Forge, evaluating a pull request.\n\n" +
+        var taskTitle = watchTask.GetMetadata("taskTitle") ?? watchTask.Title;
+        return $"You are the Reviewer role for Forge, evaluating a pull request against its task.\n\n" +
+               $"Task: {taskTitle}\n" +
                $"PR: {pr.Title} (#{pr.Number})\n" +
                $"Body:\n{pr.Body}\n\n" +
                $"Unified diff (truncated to ~12 000 chars):\n```diff\n" +
                $"{(diff.Length > 12000 ? diff.Substring(0, 12000) + "\n...[truncated]..." : diff)}\n```\n\n" +
-               "Read the diff, decide whether the changes are reasonable and self-contained, " +
-               "and respond with the strict JSON envelope below on its own line at the END of your reply:\n\n" +
-               "```\nREVIEWER_VERDICT: APPROVE | REQUEST_CHANGES\n```\n\n" +
-               "If REQUEST_CHANGES, include a `REVIEWER_NOTES:` line describing the concern.";
+               "Check that the changes implement the task, are self-contained, follow the repo's " +
+               "conventions, and don't introduce dead code, unrelated rewrites, or artifacts that " +
+               "don't belong in version control. Respond with your assessment, then the verdict " +
+               "marker on its own line at the END of your reply:\n\n" +
+               "REVIEWER_VERDICT: APPROVE | REQUEST_CHANGES\n\n" +
+               "If REQUEST_CHANGES, precede it with a REVIEWER_NOTES: section listing the concrete " +
+               "issues the engineer must fix (file + what to change). Be specific — these notes go " +
+               "straight back to the engineer agent as rework instructions.";
     }
 
     private static (ReviewerVerdict Verdict, string Body) ParseReviewerOutput(string text)
     {
         if (string.IsNullOrEmpty(text))
-            return (ReviewerVerdict.RequestChanges, "Reviewer produced no body; manual review required.");
+            return (ReviewerVerdict.Error, "Reviewer produced no output.");
         var verdict = ReviewerVerdict.Approve;
         if (text.Contains("REQUEST_CHANGES", StringComparison.OrdinalIgnoreCase))
             verdict = ReviewerVerdict.RequestChanges;
-        // Trim verbose chat content but keep the LLM's text body for the GitHub comment
         return (verdict, text.Length > 4000 ? text.Substring(0, 4000) + "\n...[truncated]..." : text);
     }
 }
 
-public enum ReviewerVerdict { Approve, RequestChanges }
+public enum ReviewerVerdict { Approve, RequestChanges, Error }

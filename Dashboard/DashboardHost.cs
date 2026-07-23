@@ -233,9 +233,12 @@ public sealed class DashboardHost : IAsyncDisposable
         Forge.Reviewer.ReviewerDispatcher? reviewerDispatcherForBuild = null;
         if (_projectFactory is not null && _gitHub is not null && _reviewerRunner is not null)
         {
-            string? ResolveReviewerToken() => System.Environment.GetEnvironmentVariable("FORGE_REVIEWER_TOKEN");
+            // Reviewer verdicts are recorded in queue metadata (the
+            // machine record) with a GitHub comment as audit — no
+            // separate reviewer token is required in the
+            // solo-identity model.
             var d = new Forge.Reviewer.ReviewerDispatcher(
-                _issues, _gitHub, _reviewerRunner, ResolveReviewerToken,
+                _issues, _gitHub, _reviewerRunner,
                 _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
                     ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance);
             builder.Services.AddSingleton(d);

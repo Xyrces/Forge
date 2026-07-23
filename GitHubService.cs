@@ -45,6 +45,25 @@ public class GitHubService
         return await _client.PullRequest.Create(_owner, _repo, pr);
     }
 
+    /// <summary>
+    /// Find the OPEN pull request whose head branch is
+    /// <paramref name="headBranch"/>, or null. Used by the rework
+    /// loop: a reworked task pushes to its existing branch, so the PR
+    /// already exists and must be reused, not re-created (Octokit's
+    /// Create throws ValidationException in that case).
+    /// </summary>
+    public virtual async Task<PullRequest?> GetOpenPullRequestForBranchAsync(
+        string headBranch, CancellationToken cancellationToken = default)
+    {
+        var request = new PullRequestRequest { State = ItemStateFilter.Open };
+        var open = await _client.PullRequest.GetAllForRepository(_owner, _repo, request);
+        // Head.Ref is the branch name for same-repo PRs; match
+        // case-insensitively (git refs are case-sensitive but the
+        // orchestrator normalizes branch names at creation).
+        return open.FirstOrDefault(p =>
+            string.Equals(p.Head.Ref, headBranch, StringComparison.OrdinalIgnoreCase));
+    }
+
     public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
     {
         try

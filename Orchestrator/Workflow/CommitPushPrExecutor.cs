@@ -97,15 +97,29 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         var headSha = await worktrees.GetHeadShaAsync(worktreePath, ct);
         logger.LogInformation("CommitPushPr({Id}): got head sha {Sha}", issue.Id, headSha);
 
-        logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
-            issue.Id, branch, input.Worktree.BaseBranch);
-        var pr = await gitHub.CreatePullRequestAsync(
-            title: $"[{issue.Type}] {issue.Title}",
-            body: BuildPrBody(issue, headSha, input.Text),
-            headBranch: branch,
-            baseBranch: input.Worktree.BaseBranch,
-            cancellationToken: ct);
-        logger.LogInformation("CommitPushPr({Id}): PR #{N} opened", issue.Id, pr.Number);
+        // Rework loop: the issue may already carry a prNumber (its
+        // earlier dispatch opened the PR; this run pushed new commits
+        // to the same branch). Reuse that PR — creating a second one
+        // for the same branch is rejected by GitHub.
+        var existingPrText = issue.GetMetadata("prNumber");
+        Octokit.PullRequest pr;
+        if (int.TryParse(existingPrText, out var existingPrNumber))
+        {
+            logger.LogInformation("CommitPushPr({Id}): rework — reusing PR #{Pr} (push updated the branch)", issue.Id, existingPrNumber);
+            pr = await gitHub.GetPullRequestAsync(existingPrNumber, ct);
+        }
+        else
+        {
+            logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
+                issue.Id, branch, input.Worktree.BaseBranch);
+            pr = await gitHub.CreatePullRequestAsync(
+                title: $"[{issue.Type}] {issue.Title}",
+                body: BuildPrBody(issue, headSha, input.Text),
+                headBranch: branch,
+                baseBranch: input.Worktree.BaseBranch,
+                cancellationToken: ct);
+            logger.LogInformation("CommitPushPr({Id}): PR #{N} opened", issue.Id, pr.Number);
+        }
 
         await UpdateMetadataAsync(issues, issue.Id, m =>
         {

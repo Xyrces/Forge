@@ -19,6 +19,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly IWorkflowDispatcher _dispatcher;
     private readonly IDashboardEventBus _events;
     private readonly ILogger<OrchestratorAgent> _logger;
+    private readonly ILoggerFactory? _loggerFactory;
     private readonly ConcurrentDictionary<string, ProjectDispatchBundle> _bundles = new();
     private SpawnerOptions _spawnerOptions = new();
     private SemaphoreSlim _concurrencyLimiter = new(4);
@@ -56,7 +57,8 @@ public sealed class OrchestratorAgent : IAgent
         AgentMessageBus messageBus,
         IWorkflowDispatcher dispatcher,
         IDashboardEventBus events,
-        ILogger<OrchestratorAgent> logger)
+        ILogger<OrchestratorAgent> logger,
+        ILoggerFactory? loggerFactory = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -66,6 +68,7 @@ public sealed class OrchestratorAgent : IAgent
         _dispatcher = dispatcher;
         _events = events;
         _logger = logger;
+        _loggerFactory = loggerFactory;
         _concurrencyLimiter = new SemaphoreSlim(4);
         _maxRetryCount = 1;
     }
@@ -226,9 +229,12 @@ public sealed class OrchestratorAgent : IAgent
     /// <summary>
     /// One sequential poll over every Pending watch issue — a single
     /// GitHub burst per <see cref="WatchSweepInterval"/> instead of
-    /// unbounded parallel poll loops. A 429 aborts the sweep early and
-    /// arms the cooldown. Watch issues stay Pending between sweeps (by
-    /// design: the watch IS a long-lived poll subscription).
+    /// unbounded parallel poll loops. Each watch first gets its
+    /// reviewer pass (ReviewerDispatcher records the verdict in the
+    /// watch metadata), then the merge/rework decision
+    /// (PRWatcher.PollWatchOnceAsync). A 429 aborts the sweep early
+    /// and arms the cooldown. Watch issues stay Pending between
+    /// sweeps (by design: the watch IS a long-lived subscription).
     /// </summary>
     private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
@@ -239,8 +245,23 @@ public sealed class OrchestratorAgent : IAgent
             if (cancellationToken.IsCancellationRequested) return;
             try
             {
-                var outcome = await bundle.PrWatcher.PollWatchOnceAsync(watch, cancellationToken);
-                _logger.LogDebug("Watch {Id}: {Outcome}", watch.Id, outcome);
+                // Review first (verdict metadata), then decide. The
+                // reviewer is constructed per sweep — it shares the
+                // bundle's stores + the shared agent runner.
+                var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+                    bundle.IssueStore, bundle.GitHub, _runner,
+                    _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
+                        ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance);
+                var fresh = watch;
+                var outcome = await reviewer.ReviewOnceAsync(watch, cancellationToken);
+                if (outcome is not null)
+                {
+                    // The review updated the watch's metadata; re-read
+                    // so the poll sees the fresh verdict.
+                    fresh = await bundle.IssueStore.GetAsync(watch.Id, cancellationToken) ?? watch;
+                }
+                var poll = await bundle.PrWatcher.PollWatchOnceAsync(fresh, cancellationToken);
+                _logger.LogDebug("Watch {Id}: {Outcome}", watch.Id, poll);
             }
             catch (Octokit.RateLimitExceededException)
             {
