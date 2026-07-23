@@ -2,8 +2,10 @@
 @inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
+@inject HttpClient Http
 @implements IDisposable
 @using Forge.Dashboard.Features.View
+@using System.Net.Http.Json
 
 <PageTitle>Backlog</PageTitle>
 <div class="page">
@@ -17,9 +19,41 @@
             <span style="color:var(--error)">@BacklogRows.Count(x => x.Status == "Failed") failed</span>
         </div>
         <div class="page-header__actions">
+            <button class="btn" @onclick="() => _showNewTask = !_showNewTask">@(_showNewTask ? "Cancel" : "New task")</button>
             <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId)))">Refresh</button>
         </div>
     </div>
+
+    @if (_showNewTask)
+    {
+        @* Dev-task creation — the path for features too small for
+           the epic pipeline (intake refuses those by design). *@
+        <div class="card" style="margin-bottom:14px">
+            <h2>New dev task</h2>
+            <form class="form-grid" @onsubmit="CreateTaskAsync" @onsubmit:preventDefault="true">
+                <label>
+                    <span>Title</span>
+                    <input type="text" @bind="_newTitle" placeholder="Add GET /api/health/uptime endpoint" maxlength="200" />
+                </label>
+                <label>
+                    <span>Description</span>
+                    <textarea rows="4" @bind="_newDescription" placeholder="File: Dashboard/AppShellEndpoints.cs. Returns { uptimeMs, at }. Verify with dotnet build + dotnet test."></textarea>
+                </label>
+                <div class="form-grid__actions">
+                    <button type="submit" class="btn btn--primary" disabled="@(_creating || string.IsNullOrWhiteSpace(_newTitle))">
+                        @(_creating ? "Creating…" : "Create task")
+                    </button>
+                </div>
+            </form>
+            @if (_createError is not null)
+            {
+                <div class="banner banner--error"><span>@_createError</span></div>
+            }
+            <p class="hint" style="margin-top:8px">
+                Created as type <code>task</code> for <strong>@ShellStore.Value.CurrentProjectId</strong> — the dispatch loop claims it next cycle.
+            </p>
+        </div>
+    }
 
     <div class="filter-bar">
         @foreach (var f in Filters)
@@ -94,6 +128,41 @@
     }
 
     private string? _loadedProject;
+    private bool _showNewTask;
+    private bool _creating;
+    private string _newTitle = "";
+    private string _newDescription = "";
+    private string? _createError;
+
+    private async Task CreateTaskAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_newTitle)) return;
+        var projectId = ShellStore.Value.CurrentProjectId;
+        if (string.IsNullOrEmpty(projectId))
+        {
+            _createError = "No project selected in the topbar switcher.";
+            return;
+        }
+        _creating = true;
+        _createError = null;
+        try
+        {
+            var resp = await Http.PostAsJsonAsync(
+                $"/api/state/issues?projectId={Uri.EscapeDataString(projectId)}",
+                new { type = "task", title = _newTitle.Trim(), description = _newDescription });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _createError = $"Create failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                return;
+            }
+            _newTitle = "";
+            _newDescription = "";
+            _showNewTask = false;
+            Dispatch.Dispatch(new ViewActions.LoadViewAction(projectId));
+        }
+        catch (Exception ex) { _createError = ex.Message; }
+        finally { _creating = false; }
+    }
 
     protected override void OnInitialized()
     {

@@ -204,15 +204,20 @@ public sealed class StartupRecovery
                 case DispatchCheckpoint.WorktreeAcquired:
                     // We don't re-run the LLM here (would require
                     // loading the AgentSession which is Stage B).
-                    // The cheapest correct thing is: leave it in
-                    // InProgress; the next dispatch tick will
-                    // re-claim it and re-run from scratch.
-                    // The worktree already exists, so re-acquire
-                    // is a no-op.
-                    _events.Publish(RecoveryEvent(issue.Id, "left_alone",
-                        "worktree_acquired; LLM re-run deferred to next dispatch tick"));
-                    return new RecoveryActionRecord(issue.Id, before, before, "left_alone",
-                        "worktree_acquired; LLM re-run deferred to next dispatch tick");
+                    // The cheapest correct thing is: transition the
+                    // issue back to Pending so the next dispatch tick
+                    // re-claims it and re-runs from scratch. The
+                    // worktree already exists, so re-acquire is a
+                    // no-op. (Previously this left the issue
+                    // InProgress assuming the loop re-claims it —
+                    // but the loop only claims Pending issues, so
+                    // those orphans sat forever.)
+                    await _issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        "recovery: orphaned at worktree_acquired by restart; re-queued", ct: ct);
+                    _events.Publish(RecoveryEvent(issue.Id, "requeued",
+                        "worktree_acquired; transitioned to Pending for re-dispatch"));
+                    return new RecoveryActionRecord(issue.Id, before, before, "requeued",
+                        "worktree_acquired; transitioned to Pending for re-dispatch");
 
                 case DispatchCheckpoint.AgentCompleted:
                     // Commit + push + PR.
@@ -293,8 +298,11 @@ public sealed class StartupRecovery
                 if (!worktreeExists)
                     return new RecoveryDecision(RecoveryAction.Failed,
                         "worktree_acquired but directory missing");
-                return new RecoveryDecision(RecoveryAction.LeftAlone,
-                    "worktree exists; LLM re-run deferred to dispatch loop");
+                // Replay re-queues to Pending so the dispatch loop
+                // re-claims (the loop never claims InProgress
+                // issues, so leaving it would orphan the task).
+                return new RecoveryDecision(RecoveryAction.Replay,
+                    "worktree exists; re-queue for LLM re-run");
 
             case DispatchCheckpoint.AgentCompleted:
             case DispatchCheckpoint.CommitDone:

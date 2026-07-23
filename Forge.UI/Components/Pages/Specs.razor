@@ -69,10 +69,11 @@
                         <td class="mono">@(row.ParentIssueId ?? row.ParentSpecId ?? "—")</td>
                         <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
                         <td>
-                            @* Non-visual fast-path: Draft -> Approved (operator review),
-                               then Approved/Designed/AssetReady -> Groom (decompose into
-                               stories/tasks). Mirrors /api/specs/{id}/actions. *@
-                            @if (string.Equals(row.Status, "Draft", StringComparison.OrdinalIgnoreCase))
+                            @* Non-visual fast-path: Draft | ReadyForDesign | NeedsRevision
+                               -> Approved (operator review), then
+                               Approved/Designed/AssetReady -> Groom (decompose
+                               into stories/tasks). Mirrors /api/specs/{id}/actions. *@
+                            @if (row.Status is "Draft" or "ReadyForDesign" or "NeedsRevision")
                             {
                                 <button class="btn btn--small btn--primary" @onclick="@(() => Approve(row.Id))" disabled="@_acting">
                                     Approve

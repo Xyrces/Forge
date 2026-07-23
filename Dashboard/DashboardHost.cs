@@ -351,7 +351,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             }
         });
 
-        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger);
+        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory);
 
         if (_projectFactory is not null && _slots is not null)
         {
@@ -389,7 +389,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues);
 
         if (_memory is not null)
         {
