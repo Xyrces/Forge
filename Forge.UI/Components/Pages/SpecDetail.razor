@@ -101,7 +101,7 @@
                     {
                         <li style="margin:2px 0">
                             <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
-                            <span class="mono">@task.Id</span>
+                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
                             <span>@task.Title</span>
                             @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url)
                             {
@@ -119,7 +119,7 @@
                     {
                         <li>
                             <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
-                            <span class="mono">@task.Id</span>
+                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
                             <span>@task.Title</span>
                             @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url2)
                             {

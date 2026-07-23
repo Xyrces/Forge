@@ -339,9 +339,16 @@ public sealed class OrchestratorAgent : IAgent
                 // the workflow still committed + pushed + opened the
                 // PR. Never requeue those — that would redispatch
                 // finished work (observed live: two tasks requeued
-                // with PRs #6/#7 already open).
+                // with PRs #6/#7 already open). Also never requeue a
+                // task that is ALREADY terminal: a stale long-running
+                // dispatch can finish minutes after the watch merged
+                // its PR (observed live 2026-07-23: the 18-minute
+                // rework run for task-10 finished after the merge and
+                // the 429 path flipped Completed back to Pending,
+                // leaving a completed sprint with a todo task).
                 var reachedPr = after?.DispatchCheckpoint >= DispatchCheckpoint.PrOpened;
-                if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr)
+                var alreadyTerminal = after?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed;
+                if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
                     _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
                     _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",

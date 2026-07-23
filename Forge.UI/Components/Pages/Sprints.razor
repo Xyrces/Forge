@@ -3,6 +3,7 @@
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @inject HttpClient Http
+@inject NavigationManager Nav
 @using System.Net.Http.Json
 @implements IDisposable
 @using Forge.Dashboard.Features.View
@@ -95,7 +96,7 @@
                         }
                         @foreach (var card in cards)
                         {
-                            <div class="kanban__card">
+                            <div class="kanban__card" style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{card.Id}"))">
                                 <div class="kanban__card-top">
                                     <span class="mono kanban__card-id">@card.Id</span>
                                     <span style="display:flex;gap:6px;align-items:center">
@@ -105,7 +106,7 @@
                                         }
                                         @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
                                         {
-                                            <a href="@url" target="_blank" rel="noopener">PR #@card.PrNumber</a>
+                                            <a href="@url" target="_blank" rel="noopener" @onclick:stopPropagation="true">PR #@card.PrNumber</a>
                                         }
                                     </span>
                                 </div>

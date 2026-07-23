@@ -71,6 +71,18 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             worktreePath, $"Task({issue.Id}): {issue.Title}", ct);
         if (!commit.HasChanges)
         {
+            // Stale-dispatch guard: a long agent run can finish AFTER
+            // the watch already merged this task's PR (the rework
+            // loop reuses the branch). Never stomp a terminal state
+            // with a fresh transition.
+            var current = await issues.GetAsync(issue.Id, ct);
+            if (current?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed)
+            {
+                logger.LogInformation(
+                    "Issue {Id}: no diff, but the task is already {Status} (watch closed the loop meanwhile) — leaving it alone",
+                    issue.Id, current!.Status);
+                return new PrOpened(input, PrResult.NoDiff, 0, null);
+            }
             logger.LogWarning("Issue {Id}: model produced no diff. Marking Completed.", issue.Id);
             await issues.TransitionAsync(issue.Id, IssueStatus.Completed,
                 "no changes (agent made 0 edits)", ct: ct);

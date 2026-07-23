@@ -117,6 +117,35 @@ public class CommitPushPrExecutorTests : IDisposable
         Assert.Equal(IssueStatus.Completed, after!.Status);
     }
 
+    [Fact]
+    public async Task NoDiff_TaskAlreadyTerminal_LeavesItAlone()
+    {
+        // Stale-dispatch race: a long agent run finishes AFTER the
+        // watch merged the task's PR. The no-diff path must not
+        // stomp the terminal state (observed live: a Completed task
+        // flipped back to Pending via the 429 path downstream).
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "I did nothing.", null);
+        // The watch merges the PR while the agent runs.
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Completed, "merged");
+
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, default);
+
+        Assert.Equal(PrResult.NoDiff, result.Result);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Completed, after!.Status);
+        // And crucially: no NEW transition stomped it (the row's
+        // UpdatedAt is the merge's, not a fresh no-diff write).
+    }
+
     // WithDiff test omitted: GitHubService.CreatePullRequestAsync returns
     // a read-only Octokit.PullRequest that's hard to stub without a real
     // connection. The with-diff path is covered by the live demo

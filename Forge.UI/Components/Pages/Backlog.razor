@@ -3,6 +3,7 @@
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @inject HttpClient Http
+@inject NavigationManager Nav
 @implements IDisposable
 @using Forge.Dashboard.Features.View
 @using System.Net.Http.Json
@@ -89,13 +90,13 @@
             <tbody>
                 @foreach (var row in BacklogRows.Take(50))
                 {
-                    <tr>
+                    <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{row.Id}"))">
                         <td class="mono">@row.Id</td>
                         <td>
                             @row.Title
                             @if (row.PrNumber is not null && PrUrl(row.PrNumber) is { } url)
                             {
-                                <a href="@url" target="_blank" rel="noopener" title="Open PR #@row.PrNumber">PR #@row.PrNumber</a>
+                                <a href="@url" target="_blank" rel="noopener" title="Open PR #@row.PrNumber" @onclick:stopPropagation="true">PR #@row.PrNumber</a>
                             }
                             @if (row.ReworkAttempts is not null)
                             {
