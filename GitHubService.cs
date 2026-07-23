@@ -77,6 +77,32 @@ public class GitHubService
 
     public virtual async Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
     {
+        // GitHub Actions reports via CHECK RUNS, not legacy commit
+        // statuses — the combined-status endpoint returns 'pending'
+        // forever for check-run-only CI (observed 2026-07-23:
+        // approved PRs never auto-merged, CI failures never fed the
+        // rework loop). Read check runs first; fall back to legacy
+        // statuses for repos that still use them.
+        var checkRuns = await _client.Check.Run.GetAllForReference(_owner, _repo, sha);
+        if (checkRuns.TotalCount > 0)
+        {
+            var runs = checkRuns.CheckRuns;
+            if (runs.Any(r => r.Status.Value is not CheckStatus.Completed))
+            {
+                return CommitState.Pending;
+            }
+            // Cancelled / Neutral / Skipped are acceptable (a
+            // cancelled run is usually superseded by a newer push,
+            // which has its own runs on the new head).
+            if (runs.Any(r => r.Conclusion?.Value
+                    is CheckConclusion.Failure
+                    or CheckConclusion.TimedOut
+                    or CheckConclusion.ActionRequired))
+            {
+                return CommitState.Failure;
+            }
+            return CommitState.Success;
+        }
         var response = await _client.Repository.Status.GetCombined(_owner, _repo, sha);
         return response.State.Value;
     }

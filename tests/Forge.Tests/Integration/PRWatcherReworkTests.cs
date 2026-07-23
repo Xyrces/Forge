@@ -145,7 +145,11 @@ public class PRWatcherReworkTests : IDisposable
         var (task, watch) = await SeedAsync(watchMeta: new Dictionary<string, object>
         {
             ["reviewSha"] = "abc123",
-            ["reviewVerdict"] = "ChangesRequested",
+            // The ReviewerDispatcher records nameof(ReviewerVerdict.*)
+            // — seed with the exact production value (a literal
+            // "ChangesRequested" here once masked a production
+            // mismatch where the watcher never saw the verdict).
+            ["reviewVerdict"] = "RequestChanges",
             ["reviewNotes"] = "MetaEndpoints.cs: use OfType<string> instead of the null-forgiving Select",
         });
 
@@ -168,7 +172,7 @@ public class PRWatcherReworkTests : IDisposable
         var (_, watch) = await SeedAsync(watchMeta: new Dictionary<string, object>
         {
             ["reviewSha"] = "oldsha",
-            ["reviewVerdict"] = "ChangesRequested",
+            ["reviewVerdict"] = "RequestChanges",
         });
 
         var outcome = await NewWatcher(gh).PollWatchOnceAsync(

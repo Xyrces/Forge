@@ -139,10 +139,10 @@ public sealed class PRWatcher
         var operatorApproved = reviewStates.Any(s => s == PullRequestReviewState.Approved);
         var operatorChangesRequested = reviewStates.Any(s => s == PullRequestReviewState.ChangesRequested);
         var approved = operatorApproved
-            || (agentVerdictCurrent && string.Equals(agentVerdict, "Approve", StringComparison.Ordinal));
+            || (agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.Approve), StringComparison.Ordinal));
         var changesRequested = operatorChangesRequested
-            || (agentVerdictCurrent && string.Equals(agentVerdict, "ChangesRequested", StringComparison.Ordinal));
-        var reviewErrored = agentVerdictCurrent && string.Equals(agentVerdict, "Error", StringComparison.Ordinal);
+            || (agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.RequestChanges), StringComparison.Ordinal));
+        var reviewErrored = agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.Error), StringComparison.Ordinal);
 
         var ciGreen = ci == CommitState.Success;
         var ciFailed = ci is CommitState.Failure or CommitState.Error;
