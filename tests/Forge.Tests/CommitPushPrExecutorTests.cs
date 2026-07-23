@@ -91,21 +91,18 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
-    public async Task NoDiff_TransitionsToCompletedAndReturnsNoDiff()
+    public async Task NoDiff_ExplicitNoOpMarker_TransitionsToCompleted()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var claimed = await ClaimExecutor.HandleAsync(
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        // No file edits in the worktree -> CommitAllAsync returns no changes.
-        var agent = new AgentCompleted(worktree, AgentResult.Ok, "I did nothing.", null);
+        // No file edits in the worktree -> CommitAllAsync returns no changes,
+        // but the agent explicitly concluded no work was needed.
+        var agent = new AgentCompleted(worktree, AgentResult.Ok,
+            "Verified: the endpoint already exists and behaves as specified. NO_CHANGES_NEEDED", null);
 
-        var exec = new CommitPushPrExecutor(
-            _issues, _worktrees, new StubGitHub(), _events,
-            new NoOpMemoryExtractor(),
-            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-            NullLogger<CommitPushPrExecutor>.Instance);
         var result = await CommitPushPrExecutor.HandleAsync(
             agent, _issues, _worktrees, new StubGitHub(), _events,
             new NoOpMemoryExtractor(),
@@ -115,6 +112,40 @@ public class CommitPushPrExecutorTests : IDisposable
         Assert.Equal(PrResult.NoDiff, result.Result);
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.Completed, after!.Status);
+    }
+
+    [Fact]
+    public async Task NoDiff_NoMarker_RequeuesWithBreaker()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        // 0 edits and NO marker: a truncated/stuck run (observed live:
+        // the MAF 40-iteration cap cut every run during exploration).
+        var agent = new AgentCompleted(worktree, AgentResult.Ok,
+            "Now I have a comprehensive understanding. Let me design the implementation.", null);
+
+        for (var i = 1; i <= CommitPushPrExecutor.MaxNoProgressAttempts; i++)
+        {
+            var result = await CommitPushPrExecutor.HandleAsync(
+                agent, _issues, _worktrees, new StubGitHub(), _events,
+                new NoOpMemoryExtractor(),
+                new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+                NullLogger<CommitPushPrExecutor>.Instance, default);
+            Assert.Equal(PrResult.NoDiff, result.Result);
+            var after = await _issues.GetAsync(issue.Id);
+            if (i < CommitPushPrExecutor.MaxNoProgressAttempts)
+            {
+                Assert.Equal(IssueStatus.Pending, after!.Status);
+                Assert.Equal(i.ToString(), after.GetMetadata("noProgressAttempts"));
+            }
+            else
+            {
+                Assert.Equal(IssueStatus.Failed, after!.Status);
+            }
+        }
     }
 
     [Fact]

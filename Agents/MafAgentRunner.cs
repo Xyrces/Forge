@@ -160,9 +160,15 @@ public async Task<AgentRunResult> RunAsync(
         var chatClient = _chatClientFactory.Create(_config, role);
         // Wrap with function invocation so MAF actually executes the
         // tools the model calls (instead of just leaving them in the
-        // response).
+        // response). Cap raised from the 40 default: complex tasks
+        // legitimately spend 40+ calls exploring before the first
+        // edit — at 40 every run "completed" with 0 edits and the
+        // no-diff path marked the task done (observed live: all six
+        // tasks of the dispatcher-resilience sprint hollow-completed).
         var chatClientWithTools = tools.Count > 0
-            ? new ChatClientBuilder(chatClient).UseFunctionInvocation().Build()
+            ? new ChatClientBuilder(chatClient)
+                .UseFunctionInvocation(configure: c => c.MaximumIterationsPerRequest = 200)
+                .Build()
             : chatClient;
 
         var agent = new ChatClientAgent(

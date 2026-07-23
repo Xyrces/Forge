@@ -48,6 +48,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         _logger = logger;
     }
 
+    /// <summary>Circuit breaker for no-progress runs (no diff and no
+    /// explicit NO_CHANGES_NEEDED): requeue this many times before
+    /// failing the task for the operator.</summary>
+    public const int MaxNoProgressAttempts = 3;
+
     public static async ValueTask<PrOpened> HandleAsync(
         AgentCompleted input,
         IIssueStore issues,
@@ -83,12 +88,50 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                     issue.Id, current!.Status);
                 return new PrOpened(input, PrResult.NoDiff, 0, null);
             }
-            logger.LogWarning("Issue {Id}: model produced no diff. Marking Completed.", issue.Id);
+
+            // A no-diff run is only a legitimate completion when the
+            // agent EXPLICITLY concluded no changes were needed (the
+            // prompt's completion contract). Anything else — iteration-
+            // cap truncation, stuck-in-exploration loops — is a failed
+            // attempt: requeue with a circuit breaker. (Observed live:
+            // all six tasks of a sprint hollow-completed when the MAF
+            // 40-iteration default cut every run during exploration.)
+            var explicitNoOp = (input.Text ?? "")
+                .Contains("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase);
+            if (!explicitNoOp)
+            {
+                var attempts = int.TryParse(current?.GetMetadata("noProgressAttempts"), out var n) ? n + 1 : 1;
+                if (attempts >= MaxNoProgressAttempts)
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Failed,
+                        $"agent produced no diff in {attempts} attempts (last response truncated)",
+                        new Dictionary<string, object> { ["noProgressAttempts"] = attempts.ToString() }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Failed (no progress in {attempts} attempts)",
+                        new Dictionary<string, object?> { ["response"] = Truncate(input.Text ?? "", 400) }));
+                    logger.LogError("Issue {Id}: no diff after {Attempts} attempts — Failed for operator review", issue.Id, attempts);
+                }
+                else
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
+                        new Dictionary<string, object> { ["noProgressAttempts"] = attempts.ToString() }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Requeued (no progress, attempt {attempts})",
+                        new Dictionary<string, object?> { ["response"] = Truncate(input.Text ?? "", 400) }));
+                    logger.LogWarning("Issue {Id}: no diff without NO_CHANGES_NEEDED — requeued (attempt {Attempts})", issue.Id, attempts);
+                }
+                return new PrOpened(input, PrResult.NoDiff, 0, null);
+            }
+            logger.LogInformation(
+                "Issue {Id}: agent explicitly concluded NO_CHANGES_NEEDED. Marking Completed.", issue.Id);
             await issues.TransitionAsync(issue.Id, IssueStatus.Completed,
-                "no changes (agent made 0 edits)", ct: ct);
+                "no changes needed (agent verified)", ct: ct);
             events.Publish(new DashboardEvent(
                 DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                issue.Id, "Completed (no-op)",
+                issue.Id, "Completed (verified no-op)",
                 new Dictionary<string, object?>
                 {
                     ["response"] = Truncate(input.Text ?? "", 400),

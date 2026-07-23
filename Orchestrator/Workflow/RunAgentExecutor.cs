@@ -305,6 +305,15 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
 
             Working directory: {worktreePath}
             Branch: {branch} (base: {baseBranch}){designSection}{artSection}
+
+            ## Completion contract
+            Do the work: explore, then EDIT, then build/test. If — and
+            only if — you conclude the task genuinely requires no code
+            changes (already implemented, verification-only), end your
+            final message with the exact marker NO_CHANGES_NEEDED plus
+            a one-sentence justification. A run that produces no diff
+            without that marker is treated as a failed attempt and
+            re-queued (circuit breaker applies).
             """;
     }
 

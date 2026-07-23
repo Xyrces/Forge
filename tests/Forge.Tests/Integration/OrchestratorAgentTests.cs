@@ -164,7 +164,7 @@ public sealed class OrchestratorAgentTests : IDisposable
     [Fact]
     public async Task DispatchSingleTask_MafPath_NoOpBranch_CapturesModelResponse()
     {
-        const string scripted = "I'll add a feature but make no edits.";
+        const string scripted = "I'll add a feature but make no edits. NO_CHANGES_NEEDED";
         var orch = BuildOrchestrator(new ScriptedRunner(scripted));
         BindMaf(orch);
 
@@ -182,7 +182,7 @@ public sealed class OrchestratorAgentTests : IDisposable
     [Fact]
     public async Task DispatchSingleTask_AlreadyClaimed_ReturnsAlreadyClaimed()
     {
-        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
         BindMaf(orch);
 
         var issue = await _issues.CreateAsync(new NewIssue(
@@ -229,7 +229,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
 
-        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
         BindMaf(orch);
 
         var issue = await _issues.CreateAsync(new NewIssue(
@@ -264,7 +264,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
 
-        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
         BindMaf(orch);
 
         var epic = await _issues.CreateAsync(new NewIssue(
@@ -321,7 +321,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
 
-        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
         BindMaf(orch);
 
         var gated = await _issues.CreateAsync(new NewIssue(
@@ -346,7 +346,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
 
-        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
         BindMaf(orch);
 
         var inSprint = await _issues.CreateAsync(new NewIssue(
