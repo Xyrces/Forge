@@ -299,7 +299,7 @@ public sealed class GroomerAgent
             return "skipped";
         }
 
-        var grounding = await BuildGroundingBlockAsync(projectId: null, ct);
+        var grounding = await BuildGroundingBlockAsync(projectId: null, ct, excludeIssueId: issue.Id);
 
         var approveTool = AIFunctionFactory.Create(
             ([Description("One sentence: why this task serves the vision and how it fits current state.")] string note) =>
@@ -418,7 +418,7 @@ public sealed class GroomerAgent
     /// plans reflect the real codebase). Missing pieces degrade to
     /// explicit "none" markers rather than silence.
     /// </summary>
-    private async Task<string> BuildGroundingBlockAsync(string? projectId, CancellationToken ct)
+    private async Task<string> BuildGroundingBlockAsync(string? projectId, CancellationToken ct, string? excludeIssueId = null)
     {
         var sb = new StringBuilder();
 
@@ -433,6 +433,10 @@ public sealed class GroomerAgent
         var open = new List<IssueRecord>();
         open.AddRange(await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct));
         open.AddRange(await _issues.ListAsync(new IssueFilter { Status = IssueStatus.InProgress }, ct));
+        // Never list the candidate itself: seeing itself in the digest
+        // makes the model close its own task as a "duplicate of
+        // existing work" (observed live, task-152).
+        open.RemoveAll(i => i.Id == excludeIssueId);
         if (open.Count == 0)
         {
             sb.AppendLine("(none)");

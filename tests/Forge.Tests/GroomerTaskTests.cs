@@ -122,6 +122,24 @@ public class GroomerTaskTests : IDisposable
         Assert.Contains("existing open work", promptText);
     }
 
+    [Fact]
+    public async Task Grounding_ExcludesTheCandidateItself()
+    {
+        // Live bug (task-152): the candidate appeared in its own
+        // open-work digest and the groomer closed it as a
+        // "duplicate of existing work".
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "unique snowflake"));
+        var client = new RecordingToolCallClient(
+            "approve_task", new Dictionary<string, object?> { ["note"] = "ok" });
+
+        await NewAgent(client).GroomTaskAsync(task.Id);
+
+        // The digest lives in the system instructions; the candidate
+        // id must not appear there as an open-work row.
+        var instructions = client.FirstOptions?.Instructions ?? "";
+        Assert.DoesNotContain($"- {task.Id} [", instructions);
+    }
+
     private sealed class SingleClientFactory : IChatClientFactory
     {
         private readonly IChatClient _client;
