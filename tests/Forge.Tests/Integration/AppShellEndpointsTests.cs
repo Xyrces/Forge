@@ -89,6 +89,48 @@ public class AppShellEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Uptime_ReturnsOkWithUptimeMsAndTimestamp()
+    {
+        var resp = await _client.GetAsync("/api/health/uptime");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<UptimeShape>();
+        Assert.NotNull(body);
+        Assert.True(body!.UptimeMs >= 0);
+        Assert.True(body.UptimeMs <= Environment.TickCount64 + 1000);
+    }
+
+    [Fact]
+    public async Task Uptime_TimestampIsRoundTrippableUtc()
+    {
+        var resp = await _client.GetAsync("/api/health/uptime");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<UptimeShape>();
+        Assert.NotNull(body);
+        var ts = DateTime.Parse(body!.UtcTimestamp, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, ts.Kind);
+        var drift = (DateTime.UtcNow - ts).Duration();
+        Assert.True(drift < TimeSpan.FromMinutes(1));
+    }
+
+    [Fact]
+    public async Task Uptime_IsMonotonicBetweenCalls()
+    {
+        var first = await _client.GetFromJsonAsync<UptimeShape>("/api/health/uptime");
+        await Task.Delay(50);
+        var second = await _client.GetFromJsonAsync<UptimeShape>("/api/health/uptime");
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.True(second!.UptimeMs >= first!.UptimeMs);
+    }
+
+    [Fact]
+    public async Task Uptime_Post_ReturnsMethodNotAllowed()
+    {
+        var resp = await _client.PostAsync("/api/health/uptime", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task Search_EmptyQuery_ReturnsEmptyResults()
     {
         var resp = await _client.GetAsync("/api/search?q=");
@@ -157,5 +199,11 @@ public class AppShellEndpointsTests : IDisposable
         public List<SearchHitShape> Issues { get; set; } = new();
         public List<SearchHitShape> Specs { get; set; } = new();
         public List<SearchHitShape> Memory { get; set; } = new();
+    }
+
+    public sealed class UptimeShape
+    {
+        public long UptimeMs { get; set; }
+        public string UtcTimestamp { get; set; } = "";
     }
 }
