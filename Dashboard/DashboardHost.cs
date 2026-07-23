@@ -432,7 +432,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_vision is not null)
         {
-            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger);
+            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger, _memory);
         }
 
 if (_groomerRuns is not null)

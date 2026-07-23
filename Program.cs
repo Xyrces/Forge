@@ -987,6 +987,12 @@ Console.Error.WriteLine(ex.ToString());
         // 'vision/master' key, and pass it to the dashboard so the
         // Vision tab can surface it.
         var vision = new VisionStore(primary.Root, options.Vision.Path);
+        // Role prompts resolve per-project (<root>/agents) with a
+        // fallback to the built-in defaults shipped next to the app,
+        // so a project whose repo has no agents/ dir still gets the
+        // real role instructions instead of the degraded fallback.
+        var rolePromptsRoot = Agents.RolePromptRoot.Resolve(primary.Root);
+        logger.LogInformation("Role prompts root: {RolePromptsRoot}", rolePromptsRoot);
         var visionSnapshot = vision.Reload();
         if (visionSnapshot.Exists)
         {
@@ -1038,7 +1044,7 @@ Console.Error.WriteLine(ex.ToString());
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
-            rolePromptsRoot: Path.Combine(primary.Root, "agents"),
+            rolePromptsRoot: rolePromptsRoot,
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,
@@ -1141,7 +1147,7 @@ Console.Error.WriteLine(ex.ToString());
                 eventBus,
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
-                rolePromptsRoot: Path.Combine(primary.Root, "agents"),
+                rolePromptsRoot: rolePromptsRoot,
                 specs: specStoreRef.Value));
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
@@ -1151,7 +1157,7 @@ Console.Error.WriteLine(ex.ToString());
         var productAgentFactory = new Agents.ProductAgentFactory(
             specStore, issues, projectContextSource, chatClientFactory, llmConfig,
             roleRegistry, eventBus, skillSource, loggerFactory,
-            Path.Combine(primary.Root, "agents"));
+            rolePromptsRoot);
         var productRefinementQueue = new Agents.ProductRefinementQueue(
             productAgentFactory, specStore, eventBus,
             loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
@@ -1169,7 +1175,8 @@ Console.Error.WriteLine(ex.ToString());
             specStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root);
         var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
             specStore, designArtifacts, designerRuns, memoryStore, designHygiene,
-            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,
+            rolePromptsRoot);
         // P2.b: Meshy client + Artist pipeline. The Meshy client
         // uses a plain SocketsHttpHandler in production; the
         // injection seam (HttpMessageHandler) lets tests stub the

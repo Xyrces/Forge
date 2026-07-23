@@ -14,8 +14,11 @@
             </div>
         }
         <div class="page-header__actions">
-            <button class="btn" @onclick="RefreshAsync" disabled="@_refreshing">Export</button>
-            <button class="btn btn--primary" @onclick="RefreshAsync" disabled="@_refreshing">Trigger Re-plan</button>
+            <button class="btn" @onclick="RefreshAsync" disabled="@(_refreshing || _editing)">Refresh</button>
+            @if (!_editing)
+            {
+                <button class="btn btn--primary" @onclick="StartEdit">@(_snapshot?.Exists == true ? "Edit" : "Create")</button>
+            }
         </div>
     </div>
 
@@ -23,9 +26,31 @@
     {
         <div class="page-subtitle">Loading…</div>
     }
+    else if (_editing)
+    {
+        <div style="display:flex;flex-direction:column;gap:10px">
+            <div class="page-subtitle">
+                Editing <span class="mono">@_snapshot.Path</span> — saved to the project root and
+                injected into every agent prompt as the <span class="mono">vision/master</span> memory key.
+            </div>
+            <textarea class="mono" style="min-height:55vh;resize:vertical"
+                      @bind="_editContent" placeholder="# Master Design&#10;&#10;The north-star design every agent run is anchored to."></textarea>
+            <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn btn--primary" @onclick="SaveAsync" disabled="@_saving">@(_saving ? "Saving…" : "Save")</button>
+                <button class="btn" @onclick="CancelEdit" disabled="@_saving">Cancel</button>
+                @if (_saveError is not null)
+                {
+                    <span class="text-danger">@_saveError</span>
+                }
+            </div>
+        </div>
+    }
     else if (!_snapshot.Exists)
     {
-        <div class="page-subtitle">No vision file at @_snapshot.Path</div>
+        <div class="page-subtitle">
+            No vision file yet. Create one to give every agent run a north-star design anchor —
+            its content is injected into prompts as the <span class="mono">vision/master</span> memory key.
+        </div>
     }
     else
     {
@@ -81,6 +106,10 @@
     private List<string> _headings = new();
     private string? _activeHeading;
     private bool _refreshing;
+    private bool _editing;
+    private bool _saving;
+    private string _editContent = "";
+    private string? _saveError;
 
     public sealed record SnapshotDto(bool Exists, string Path, string? Content, DateTime? LastModifiedUtc);
 
@@ -111,6 +140,41 @@
             await LoadAsync();
         }
         finally { _refreshing = false; }
+    }
+
+    private void StartEdit()
+    {
+        _editContent = _snapshot?.Content ?? "";
+        _saveError = null;
+        _editing = true;
+    }
+
+    private void CancelEdit()
+    {
+        _editing = false;
+        _saveError = null;
+    }
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _saveError = null;
+        try
+        {
+            var resp = await Http.PutAsJsonAsync("/api/vision", new { content = _editContent });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _saveError = $"save failed: {(int)resp.StatusCode}";
+                return;
+            }
+            _editing = false;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _saveError = $"save failed: {ex.Message}";
+        }
+        finally { _saving = false; }
     }
 
     private void Parse()

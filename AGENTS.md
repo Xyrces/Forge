@@ -16,6 +16,8 @@ There are two completely different `.kilo` directory trees in this repo. Confusi
 
 Do **not** edit a role's system prompt thinking you are editing a kilo agent. They are separate worlds.
 
+**Role prompt resolution** (`Agents/RolePromptRoot.cs`): `<project-root>/agents/<role>.md` wins; otherwise the orchestrator falls back to the built-in `agents/*.md` copied next to the app at publish time (csproj `Content` include). A project whose repo has no `agents/` dir still gets the real role instructions; committing an `agents/` dir into that repo overrides per-project.
+
 ## Module boundaries (non-negotiable)
 
 Lifted from `CONTRIBUTING.md` § "Boundaries":

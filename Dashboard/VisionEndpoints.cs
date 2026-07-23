@@ -15,7 +15,8 @@ public static class VisionEndpoints
     public static void MapVisionEndpoints(
         WebApplication app,
         VisionStore vision,
-        ILogger logger)
+        ILogger logger,
+        Core.MemoryStore? memory = null)
     {
         app.MapGet("/api/vision", () =>
         {
@@ -41,5 +42,25 @@ public static class VisionEndpoints
                 lastModified = snap.LastModifiedUtc,
             });
         });
+
+        // Dashboard editor save path. Writes the file (creating it
+        // if missing) and refreshes the vision/master memory key so
+        // subsequent agent runs see the new vision immediately.
+        app.MapPut("/api/vision", async (VisionUpdate update, CancellationToken ct) =>
+        {
+            var snap = vision.Write(update.Content ?? "");
+            logger.LogInformation("Vision saved: {Path} ({Len} chars)", snap.Path, snap.Content.Length);
+            if (memory is not null && snap.Exists)
+                await memory.RememberAsync("vision/master", snap.Content, ttlDays: null, ct);
+            return Results.Json(new
+            {
+                exists = snap.Exists,
+                path = snap.Path,
+                content = snap.Content,
+                lastModified = snap.LastModifiedUtc,
+            });
+        });
     }
+
+    public sealed record VisionUpdate(string? Content);
 }

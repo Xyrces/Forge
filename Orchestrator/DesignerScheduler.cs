@@ -153,6 +153,7 @@ public sealed class DesignerAgentFactory
     private readonly RoleAgentRegistry _roles;
     private readonly IDashboardEventBus _events;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly string _rolePromptsRoot;
 
     public DesignerAgentFactory(
         ISpecStore specs,
@@ -164,7 +165,8 @@ public sealed class DesignerAgentFactory
         LlmConfig config,
         RoleAgentRegistry roles,
         IDashboardEventBus events,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        string rolePromptsRoot = "agents")
     {
         _specs = specs;
         _artifacts = artifacts;
@@ -176,9 +178,10 @@ public sealed class DesignerAgentFactory
         _roles = roles;
         _events = events;
         _loggerFactory = loggerFactory;
+        _rolePromptsRoot = rolePromptsRoot;
     }
 
     public DesignerAgent Create() => new(
         _specs, _artifacts, _runs, _memory, _hygiene, _chatClientFactory, _config, _roles, _events,
-        _loggerFactory.CreateLogger<DesignerAgent>());
+        _loggerFactory.CreateLogger<DesignerAgent>(), _rolePromptsRoot);
 }

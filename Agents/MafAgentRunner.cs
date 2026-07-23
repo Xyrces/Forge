@@ -434,7 +434,7 @@ finally
         if (!File.Exists(path))
         {
             _logger.LogWarning("role prompt file not found at {Path}; using fallback instructions", path);
-            return $"You are the {agentName} agent for the PortHorizon project.";
+            return $"You are the {agentName} agent.";
         }
         // Minimal YAML frontmatter parser: the file is `--- description: ...\n rest`. We
         // return the description field as the MAF instructions. Multi-line YAML,
@@ -456,7 +456,7 @@ finally
                 desc.AppendLine(line["description:".Length..].Trim());
             }
         }
-        if (desc.Length == 0) desc.AppendLine($"You are the {agentName} agent for the PortHorizon project.");
+        if (desc.Length == 0) desc.AppendLine($"You are the {agentName} agent.");
         return desc.ToString().Trim();
     }
 
