@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Net.Sockets;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -50,6 +51,13 @@ public class AppShellEndpointsTests : IDisposable
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
         var app = builder.Build();
+        // Stub routes alongside the endpoint under test so we can
+        // assert the response is a JSON array and surfaces patterns
+        // pulled from EndpointDataSource (including parameterized
+        // templates like "/api/things/{id}").
+        app.MapGet("/api/hello", () => Results.Json(new { hello = "world" }));
+        app.MapGet("/api/things/{id}", (string id) => Results.Json(new { id }));
+
         AppShellEndpoints.MapAppShellEndpoints(app, _issues, _sprints, _specs, _memory,
             NullLogger<DashboardHost>.Instance);
         _host = app;
@@ -121,6 +129,39 @@ public class AppShellEndpointsTests : IDisposable
         var body = await resp.Content.ReadFromJsonAsync<SearchResultsShape>();
         Assert.NotEmpty(body!.Issues);
         Assert.Contains(body.Issues, i => i.Title.Contains("memory"));
+    }
+
+    [Fact]
+    public async Task MetaEndpoints_ReturnsJsonArrayOfApiPatterns()
+    {
+        var resp = await _client.GetAsync("/api/meta/endpoints");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var body = await resp.Content.ReadFromJsonAsync<List<string>>();
+        Assert.NotNull(body);
+
+        // JSON array of strings.
+        Assert.NotEmpty(body!);
+
+        // Only /api/* patterns appear.
+        Assert.All(body, p => Assert.StartsWith("/api/", p));
+
+        // Sorted + deduplicated.
+        Assert.Equal(body.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray(), body);
+
+        // Both stub routes + the endpoint itself are present.
+        Assert.Contains("/api/hello", body);
+        Assert.Contains("/api/meta/endpoints", body);
+        Assert.Contains("/api/things/{id}", body);
+    }
+
+    [Fact]
+    public async Task MetaEndpoints_PostReturns405_ReadOnlyContract()
+    {
+        // Lock the read-only contract: the endpoint is registered
+        // via MapGet only, so a POST must return 405.
+        var resp = await _client.PostAsync("/api/meta/endpoints", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
     }
 
     private static int GetEphemeralPort()
