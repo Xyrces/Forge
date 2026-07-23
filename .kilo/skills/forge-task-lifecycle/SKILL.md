@@ -84,14 +84,13 @@ The dispatcher's `ClaimExecutor` short-circuits when the input is already `InPro
 - Title: `Watch PR #<n> for <devIssueId>`.
 - The orchestrator's next dispatch cycle sees it in `ReadyAsync` and hands it to `PRWatcher.ProcessWatchTaskAsync`.
 
-## PRWatcher — what watches the watch
+## PRWatcher — review loop, rework, merge
 
-`Orchestrator/PRWatcher.cs`:
+The sequential sweep (`OrchestratorAgent.RunWatchSweepAsync`, every 15 min; NOT a per-watch poll loop) runs **review-then-poll** per watch:
 
-- Polls GitHub every 30s (`Spawner.PollIntervalSeconds` is 3s for dispatch, but PRWatcher is a separate cadence).
-- **Green CI + approval:** Octokit merges the PR, deletes the branch, removes the worktree via `GitWorktreeService.RemoveAsync`, transitions the dev task to `Completed`.
-- **`REQUEST_CHANGES`:** transitions to `Blocked`.
-- **Red CI:** transitions to `Failed`.
+1. **Review** (`Reviewer/ReviewerDispatcher.cs::ReviewOnceAsync`): fetches the PR diff, runs the Reviewer role, records the verdict in watch metadata (`reviewSha`/`reviewVerdict`/`reviewNotes`/`reviewRound` — the machine record), posts a GitHub comment (the audit). Per-head-SHA dedupe; `Error` verdicts retry next sweep. Formal review submission is opportunistic (solo-identity 422 tolerated — the local verdict is authoritative).
+2. **Poll** (`Reviewer/PRWatcher.cs::PollWatchOnceAsync`): reads CI from **check runs** (legacy combined statuses don't see GitHub Actions) and merges when: CI green AND (formal Approved review OR reviewer-agent `Approve` at the current head). External merge (operator) also closes the loop.
+3. **Rework loop**: CI failure or changes-requested → task back to `Pending` with `reworkAttempts`/`reworkContext` metadata (the agent prompt surfaces it as "## Rework required"), watch stays live, worktree kept, `reworkInFlightSha` prevents re-triggering on the same head. Circuit breaker at `PRWatcher.MaxReworkAttempts` (3) → terminal `Failed` (CI) / `Blocked` (review) for the operator. Reviewer-error also breaks to `Blocked` (manual review). The reworked task pushes to the SAME branch — `CommitPushPrExecutor` reuses the existing PR; `EnqueueWatchExecutor` dedupes watches per PR.
 
 ## Retry / failure semantics
 
