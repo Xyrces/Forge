@@ -381,6 +381,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         HealthEndpoint.MapHealthEndpoint(_app, new DefaultHealthSnapshotFactory());
 
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger, _projectFactory);
+        BuildInfoEndpoints.MapBuildInfoEndpoint(_app);
 
         if (_intakeRegistry is not null)
         {
