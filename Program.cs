@@ -1026,7 +1026,8 @@ Console.Error.WriteLine(ex.ToString());
         var sprintPropose = new Orchestrator.SprintProposeService(issues, sprints, scorer, sprintProposalAudit);
         var memoryExtractor = new Orchestrator.MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
-            loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>());
+            loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>(),
+            sprints: sprints);
         // Late-binding holder for specStore. Created before
         // MafAgentRunner ctor, populated after specStore is
         // constructed (the runner builds its tool list per call,
@@ -1105,7 +1106,8 @@ Console.Error.WriteLine(ex.ToString());
                         memoryExtractor, extractionStore,
                         loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
                         projectId: bundle.Project.Id,
-                        loggerFactory: loggerFactory);
+                        loggerFactory: loggerFactory,
+                        sprints: bundle.Sprints);
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());

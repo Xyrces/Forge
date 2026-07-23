@@ -25,6 +25,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     private readonly ArtOutputStore _artOutputs;
     private readonly ILogger<RunAgentExecutor> _logger;
     private readonly string? _projectId;
+    private readonly ISprintStore? _sprints;
 
     public RunAgentExecutor(
         IIssueStore issues,
@@ -35,10 +36,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         DesignArtifactStore designArtifacts,
         ArtOutputStore artOutputs,
         ILogger<RunAgentExecutor> logger,
-        string? projectId = null)
+        string? projectId = null,
+        ISprintStore? sprints = null)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -52,6 +54,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         _artOutputs = artOutputs;
         _logger = logger;
         _projectId = projectId;
+        _sprints = sprints;
     }
 
     public static async ValueTask<AgentCompleted> HandleAsync(
@@ -65,6 +68,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         ArtOutputStore artOutputs,
         ILogger logger,
         string? projectId,
+        ISprintStore? sprints,
         CancellationToken ct)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
@@ -92,19 +96,59 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         AgentRunResult result;
         try
         {
+            var context = new Dictionary<string, object>
+            {
+                ["worktreePath"] = worktreePath,
+                ["branch"] = branch,
+                ["issueId"] = issue.Id,
+                // Drives the runner's secrets-by-reference env
+                // injection (FORGE_SECRET_*). Null-safe: the
+                // runner skips env when absent.
+                ["projectId"] = projectId ?? string.Empty,
+            };
+            // Sprint flow: when the issue belongs to the ACTIVE
+            // sprint, the runner gets the sprint id (drives the
+            // `sprint/{id}/` memory recall), the sprint goal, and a
+            // roster of sibling tasks — the shared context that makes
+            // a sprint more than a label.
+            if (sprints is not null)
+            {
+                try
+                {
+                    var active = await sprints.GetActiveAsync(ct);
+                    if (active is not null)
+                    {
+                        var memberIds = await sprints.GetIssueIdsAsync(active.Id, ct);
+                        if (memberIds.Contains(issue.Id))
+                        {
+                            context["sprintId"] = active.Id;
+                            context["sprintName"] = active.Name;
+                            context["sprintGoal"] = active.Goal;
+                            var roster = new List<string>();
+                            foreach (var memberId in memberIds)
+                            {
+                                if (memberId == issue.Id) continue;
+                                var sibling = await issues.GetAsync(memberId, ct);
+                                if (sibling is not null && !AgentTaskTypes.IsContainer(sibling.Type))
+                                {
+                                    roster.Add($"- {sibling.Id} [{sibling.Status}] {sibling.Title}");
+                                }
+                            }
+                            context["sprintRoster"] = string.Join("\n", roster);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Sprint context is advisory; a lookup failure must
+                    // never break a dispatch.
+                    logger.LogWarning(ex, "RunAgent({Id}): sprint context lookup failed; continuing without it", issue.Id);
+                }
+            }
             result = await runner.RunAsync(
                 role, fullPrompt,
                 sessionId: null,
-                context: new Dictionary<string, object>
-                {
-                    ["worktreePath"] = worktreePath,
-                    ["branch"] = branch,
-                    ["issueId"] = issue.Id,
-                    // Drives the runner's secrets-by-reference env
-                    // injection (FORGE_SECRET_*). Null-safe: the
-                    // runner skips env when absent.
-                    ["projectId"] = projectId ?? string.Empty,
-                },
+                context: context,
                 ct);
             // DIAGNOSTIC: surface what the agent returned so we can
             // debug the "empty modelResponse" bug. Will be removed

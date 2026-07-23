@@ -98,11 +98,12 @@ public async Task<AgentRunResult> RunAsync(
             : await BuildSkillInstructionsAsync(role, ct);
         var memoryInstructions = _memory is null
             ? string.Empty
-            : await BuildMemoryInstructionsAsync(ct);
+            : await BuildMemoryInstructionsAsync(context, ct);
         var instructions = string.Join("\n\n", new[]
         {
             roleInstructions,
             skillInstructions,
+            BuildSprintBlock(context),
             memoryInstructions,
         }.Where(s => !string.IsNullOrEmpty(s)));
         // P1 fix: instructions go to the agent's instructions: parameter,
@@ -341,8 +342,70 @@ finally
         return sb.ToString().TrimEnd();
     }
 
-    private async Task<string> BuildMemoryInstructionsAsync(CancellationToken ct)
+    /// <summary>
+    /// Sprint flow: when the dispatch context carries sprint fields
+    /// (RunAgentExecutor sets them for issues in the ACTIVE sprint),
+    /// render the shared sprint context — goal + sibling roster — so
+    /// every agent in the sprint works toward the same goal with
+    /// visibility of each other's tasks.
+    /// </summary>
+    private static string BuildSprintBlock(IReadOnlyDictionary<string, object>? context)
     {
+        if (context is null) return string.Empty;
+        if (!context.TryGetValue("sprintId", out var rawId) || rawId is null) return string.Empty;
+        var sprintId = rawId.ToString();
+        if (string.IsNullOrWhiteSpace(sprintId)) return string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## Sprint");
+        sb.AppendLine();
+        if (context.TryGetValue("sprintName", out var rawName) && rawName?.ToString() is { Length: > 0 } name)
+        {
+            sb.Append("You are working in sprint **").Append(name).Append("**");
+        }
+        else
+        {
+            sb.Append("You are working in sprint `").Append(sprintId).Append('`');
+        }
+        if (context.TryGetValue("sprintGoal", out var rawGoal) && rawGoal?.ToString() is { Length: > 0 } goal)
+        {
+            sb.Append(". Goal: ").AppendLine(goal);
+        }
+        else
+        {
+            sb.AppendLine(".");
+        }
+        if (context.TryGetValue("sprintRoster", out var rawRoster) && rawRoster?.ToString() is { Length: > 0 } roster)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Sibling tasks in this sprint (coordinate; don't duplicate their work):");
+            sb.AppendLine(roster);
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private async Task<string> BuildMemoryInstructionsAsync(
+        IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+    {
+        var sections = new List<string>();
+        // Sprint-scoped memory first: memories persisted by sibling
+        // tasks under `sprint/{id}/` (MemoryExtractor dual-persists
+        // when the issue is in the ACTIVE sprint).
+        if (context is not null
+            && context.TryGetValue("sprintId", out var rawSprint) && rawSprint is not null
+            && rawSprint.ToString() is { Length: > 0 } sprintId)
+        {
+            try
+            {
+                var sprintMemories = await _memory!.RecallAsync($"sprint/{sprintId}/", ct);
+                var rendered = MemoryStore.RenderSectionForPrompt("## Sprint memory", sprintMemories);
+                if (!string.IsNullOrEmpty(rendered)) sections.Add(rendered);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to recall sprint memory; continuing without it");
+            }
+        }
         IReadOnlyList<MemoryRecord> memories;
         try
         {
@@ -353,9 +416,16 @@ finally
             // Memory recall must never break a dispatch. Errors are
             // logged and the agent runs without the memory block.
             _logger.LogWarning(ex, "Failed to recall project memory; continuing without it");
-            return string.Empty;
+            return string.Join("\n\n", sections);
         }
-        return MemoryStore.RenderForPrompt(memories);
+        // Sprint keys already have their own section above; keep the
+        // global block free of duplicates.
+        var globalOnly = memories
+            .Where(m => !m.Key.StartsWith("sprint/", StringComparison.Ordinal))
+            .ToList();
+        var globalRendered = MemoryStore.RenderForPrompt(globalOnly);
+        if (!string.IsNullOrEmpty(globalRendered)) sections.Add(globalRendered);
+        return string.Join("\n\n", sections);
     }
 
     private string LoadRoleInstructions(string agentName)
