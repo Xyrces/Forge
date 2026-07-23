@@ -65,7 +65,7 @@ public sealed class GroomerAgent
     /// Groom a spec. Returns the list of new story issue ids, or
     /// null if the agent didn't call any create_story.
     /// </summary>
-    public async Task<IReadOnlyList<string>?> GroomAsync(string specId, CancellationToken ct = default)
+    public async Task<GroomResult?> GroomAsync(string specId, CancellationToken ct = default)
     {
         var spec = await _specs.GetAsync(specId, ct);
         if (spec is null)
@@ -89,7 +89,18 @@ public sealed class GroomerAgent
             return null;
         }
 
+        // Entry transition into the grooming state so the terminal
+        // set_spec_status("Groomed") call is a legal move
+        // (Approved|Designed|AssetReady -> Grooming -> Groomed;
+        // re-decompose from Groomed is idempotent per the machine).
+        if (spec.Status is not SpecStatus.Groomed)
+        {
+            await _specs.SetStatusAsync(specId, SpecStatus.Grooming, ct);
+        }
+
         var createdStoryIds = new List<string>();
+        var createdTaskIds = new List<string>();
+        var taskCountByStory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         List<string> CreateStoryList() => createdStoryIds;
 
         var systemPrompt = $"""
@@ -102,8 +113,9 @@ public sealed class GroomerAgent
             - Each task is type=task, has parent_id=STORY_ID, and
               has parent_id=SPEC_ID as well (we mirror the chain).
             - Each task title comes from a spec acceptance criterion.
-            - Don't go over 1-3 stories, 1-3 tasks each.
-            - When done, call `set_spec_status` with "Grooming".
+            - Don't go over 1-3 stories, 1-3 tasks each. The tools
+              enforce these caps and return limit errors.
+            - When done, call `set_spec_status` with "Groomed".
 
             Use the `create_story` tool for each story and
             `create_task` for each task. You may call them in any
@@ -127,16 +139,16 @@ public sealed class GroomerAgent
              [Description("Story id this task belongs to.")] string storyId,
              [Description("Optional 1-paragraph description.")] string? description = null,
              [Description("Priority 1-5; defaults to 2.")] int? priority = null) =>
-                CreateTaskAsync(specId, storyId, title, description, priority, createdStoryIds, ct),
+                CreateTaskAsync(specId, storyId, title, description, priority, createdStoryIds, createdTaskIds, taskCountByStory, ct),
             name: "create_task",
             description: "Create a task issue linked to the story AND the spec. " +
                          "Returns the new task's issue id.");
 
         var setStatusTool = AIFunctionFactory.Create(
-            ([Description("Status: 'Draft', 'Approved', 'Superseded', 'Archived', or 'Grooming'.")] string status) =>
+            ([Description("Status: 'Draft', 'Approved', 'Groomed', 'Superseded', or 'Archived'.")] string status) =>
                 SetStatusAsync(specId, status, ct),
             name: "set_spec_status",
-            description: "Move the spec to a new status. Use 'Grooming' " +
+            description: "Move the spec to a new status. Use 'Groomed' " +
                          "after all stories + tasks are created.");
 
         var tools = new List<AITool> { createStoryTool, createTaskTool, setStatusTool };
@@ -150,7 +162,7 @@ public sealed class GroomerAgent
         var userMessage = new ChatMessage(ChatRole.User, $"""
             Decompose this Approved spec into 1-3 stories + tasks.
             After creating the stories and tasks, call set_spec_status
-            to "Grooming".
+            to "Groomed".
 
             Spec title: {spec.Title}
             Spec body:
@@ -169,14 +181,14 @@ public sealed class GroomerAgent
             var refreshed = await _specs.GetAsync(specId, ct);
             _events.Publish(new DashboardEvent(DateTime.UtcNow,
                 "groomer.run.completed", specId,
-                $"status={refreshed?.Status} stories={createdStoryIds.Count}",
+                $"status={refreshed?.Status} stories={createdStoryIds.Count} tasks={createdTaskIds.Count}",
                 new Dictionary<string, object?>
                 {
                     ["specId"] = specId,
                     ["runId"] = _runId,
                     ["storyIds"] = string.Join(",", createdStoryIds),
                 }));
-            return createdStoryIds.Count == 0 ? null : createdStoryIds;
+            return createdStoryIds.Count == 0 ? null : new GroomResult(createdStoryIds, createdTaskIds);
         }
         catch (Exception ex)
         {
@@ -195,6 +207,9 @@ public sealed class GroomerAgent
         List<string> createdStoryIds, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(title)) return "title_required";
+        // Structural cap — the prompt's 1-3 story limit is enforced
+        // here because weaker models ignore prompt constraints.
+        if (createdStoryIds.Count >= 3) return "story_limit_reached";
         var story = await _issues.CreateAsync(new NewIssue(
             Type: "story", Title: title, Description: description ?? "",
             ParentId: specIdArg, Priority: 2), ct);
@@ -204,13 +219,20 @@ public sealed class GroomerAgent
 
     private async Task<string> CreateTaskAsync(
         string specIdArg, string storyId, string title, string? description, int? priority,
-        List<string> createdStoryIds, CancellationToken ct)
+        List<string> createdStoryIds, List<string> createdTaskIds,
+        Dictionary<string, int> taskCountByStory, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(title)) return "title_required";
         if (string.IsNullOrWhiteSpace(storyId)) return "story_id_required";
+        // Structural cap: 3 tasks per story (same rationale as the
+        // story cap).
+        var forStory = taskCountByStory.GetValueOrDefault(storyId, 0);
+        if (forStory >= 3) return "task_limit_reached_for_story";
         var task = await _issues.CreateAsync(new NewIssue(
             Type: "task", Title: title, Description: description ?? "",
             ParentId: storyId, Priority: priority ?? 2), ct);
+        createdTaskIds.Add(task.Id);
+        taskCountByStory[storyId] = forStory + 1;
         return task.Id;
     }
 
@@ -218,7 +240,7 @@ public sealed class GroomerAgent
         string specIdArg, string status, CancellationToken ct)
     {
         if (!Enum.TryParse<SpecStatus>(status, ignoreCase: true, out var newStatus))
-            return $"status_must_be_one_of_draft_approved_grooming_superseded_archived";
+            return $"status_must_be_one_of_draft_approved_groomed_superseded_archived";
         try
         {
             var refreshed = await _specs.SetStatusAsync(specIdArg, newStatus, ct);
@@ -232,3 +254,6 @@ public sealed class GroomerAgent
         }
     }
 }
+
+/// <summary>Stories + tasks created by a groom run (ids).</summary>
+public sealed record GroomResult(IReadOnlyList<string> StoryIds, IReadOnlyList<string> TaskIds);
