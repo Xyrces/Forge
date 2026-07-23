@@ -28,6 +28,15 @@ public sealed class OrchestratorAgent : IAgent
     // time so the loop doesn't hammer the API every dispatch cycle.
     private DateTime _githubRateLimitedUntil = DateTime.MinValue;
     private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
+    // Watch sweep cadence. Previously every dispatch cycle spawned a
+    // parallel Task.Run per Pending watch, and ProcessWatchTaskAsync
+    // looped internally every 30s with 3 API calls per iteration —
+    // loops multiplied unboundedly (watches are never claimed, so they
+    // stay Pending) and vaporized the 5000-req/hr GitHub quota. Now
+    // watches are polled in ONE sequential sweep every WatchSweepInterval:
+    // 3 calls per watch per sweep (2 watches -> ~24 calls/hr).
+    private DateTime _nextWatchSweepUtc = DateTime.MinValue;
+    private static readonly TimeSpan WatchSweepInterval = TimeSpan.FromMinutes(15);
     // LLM 429 cooldown for the engineering dispatch path. Free-tier
     // providers rate-limit parallel agent runs; a 429 re-queues the
     // task (not a code failure) and pauses new dev dispatches.
@@ -119,8 +128,11 @@ public sealed class OrchestratorAgent : IAgent
                         watchTasks.Count, _githubRateLimitedUntil);
                     watchTasks = new List<IssueRecord>();
                 }
-                foreach (var watch in watchTasks)
-                    _ = Task.Run(() => ProcessWatchIssueAsync(watch, bundle, cancellationToken), cancellationToken);
+                if (watchTasks.Count > 0 && DateTime.UtcNow >= _nextWatchSweepUtc)
+                {
+                    _nextWatchSweepUtc = DateTime.UtcNow + WatchSweepInterval;
+                    await RunWatchSweepAsync(watchTasks, bundle, cancellationToken);
+                }
 
                 // Engineering dispatch skips pipeline containers.
                 // Epics and stories feed the spec -> groom chain;
@@ -198,26 +210,40 @@ public sealed class OrchestratorAgent : IAgent
         return false;
     }
 
-    private async Task<Result> ProcessWatchIssueAsync(IssueRecord watchIssue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    /// <summary>
+    /// One sequential poll over every Pending watch issue — a single
+    /// GitHub burst per <see cref="WatchSweepInterval"/> instead of
+    /// unbounded parallel poll loops. A 429 aborts the sweep early and
+    /// arms the cooldown. Watch issues stay Pending between sweeps (by
+    /// design: the watch IS a long-lived poll subscription).
+    /// </summary>
+    private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
-        try
+        _logger.LogInformation("Watch sweep: polling {N} watch issue(s) (project={Project})",
+            watchTasks.Count, bundle.Project.Id);
+        foreach (var watch in watchTasks)
         {
-            await bundle.PrWatcher.ProcessWatchTaskAsync(watchIssue, cancellationToken);
-            return new Result(true, $"Watch {watchIssue.Id} complete");
-        }
-        catch (Exception ex)
-        {
-            if (ex is Octokit.RateLimitExceededException)
+            if (cancellationToken.IsCancellationRequested) return;
+            try
+            {
+                var outcome = await bundle.PrWatcher.PollWatchOnceAsync(watch, cancellationToken);
+                _logger.LogDebug("Watch {Id}: {Outcome}", watch.Id, outcome);
+            }
+            catch (Octokit.RateLimitExceededException)
             {
                 _githubRateLimitedUntil = DateTime.UtcNow + GitHubRateLimitCooldown;
-                _logger.LogWarning("Watch issue {Id}: GitHub rate limit exceeded; backing off watch processing for {Cooldown} (project={Project})",
-                    watchIssue.Id, GitHubRateLimitCooldown, bundle.Project.Id);
+                _logger.LogWarning("Watch sweep: GitHub rate limit exceeded; backing off for {Cooldown} (project={Project})",
+                    GitHubRateLimitCooldown, bundle.Project.Id);
+                return;
             }
-            else
+            catch (Exception ex)
             {
-                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watchIssue.Id, bundle.Project.Id);
+                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watch.Id, bundle.Project.Id);
             }
-            return new Result(false, ex.Message);
+            // Courtesy delay: GitHub's secondary rate limit dislikes
+            // rapid-fire request bursts even well under the quota.
+            try { await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken); }
+            catch (OperationCanceledException) { return; }
         }
     }
 

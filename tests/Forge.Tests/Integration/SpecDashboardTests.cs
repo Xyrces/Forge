@@ -428,7 +428,7 @@ public class SpecGroomerEndpointTests : IDisposable
 
         // The agent runs on a background task; poll the spec until it
         // moves to Grooming (or give up after a few seconds).
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
         SpecStatus? finalStatus = null;
         while (DateTime.UtcNow < deadline)
         {
@@ -439,8 +439,16 @@ public class SpecGroomerEndpointTests : IDisposable
         }
         Assert.Equal(SpecStatus.Grooming, finalStatus);
 
-        // At least one story was created and linked to the spec.
-        var issues = await _issues.ListAsync(new IssueFilter { Type = "story" });
+        // Stories are created DURING Grooming, so reaching the status
+        // doesn't mean the story exists yet — poll for it (CI runners
+        // are slower than dev boxes; the immediate assert was racy).
+        IReadOnlyList<IssueRecord> issues = Array.Empty<IssueRecord>();
+        while (DateTime.UtcNow < deadline)
+        {
+            issues = await _issues.ListAsync(new IssueFilter { Type = "story" });
+            if (issues.Count > 0) break;
+            await Task.Delay(100);
+        }
         Assert.Single(issues);
         Assert.Equal(id, issues[0].ParentIssueId);
     }

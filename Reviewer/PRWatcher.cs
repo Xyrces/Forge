@@ -36,7 +36,36 @@ public sealed class PRWatcher
         _logger = logger;
     }
 
-    public async Task<int> ProcessWatchTaskAsync(
+    /// <summary>
+    /// Outcome of a single watch poll (<see cref="PollWatchOnceAsync"/>).
+    /// </summary>
+    public enum WatchPollOutcome
+    {
+        /// <summary>Nothing terminal; the watch stays Pending for the next sweep.</summary>
+        Pending,
+        /// <summary>PR was merged (externally or by us); task + watch completed.</summary>
+        Merged,
+        /// <summary>Reviewer requested changes; task + watch blocked.</summary>
+        Blocked,
+        /// <summary>CI failed; task + watch failed.</summary>
+        CiFailed,
+        /// <summary>Watch exceeded its stale window; task + watch failed.</summary>
+        Stale,
+        /// <summary>Unrecoverable input (missing prNumber); watch failed.</summary>
+        Error,
+    }
+
+    /// <summary>
+    /// ONE poll of a watched PR: fetch state, evaluate CI + reviews,
+    /// and apply any terminal transition (merged / changes-requested /
+    /// CI-failed / stale). Returns without retrying when nothing is
+    /// terminal yet — the caller (OrchestratorAgent's watch sweep)
+    /// re-polls on its own slow cadence. This is the quota-friendly
+    /// path: 3 API calls per watch per sweep, no internal loop. The
+    /// stale window is anchored to the watch issue's CreatedAt, so it
+    /// stays stable no matter which sweep picks the watch up.
+    /// </summary>
+    public async Task<WatchPollOutcome> PollWatchOnceAsync(
         IssueRecord watchTask,
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
@@ -47,95 +76,126 @@ public sealed class PRWatcher
         {
             _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
             await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
-            return 1;
+            return WatchPollOutcome.Error;
         }
 
         var taskId = watchTask.GetMetadata("taskId") ?? watchTask.Id;
         var branch = watchTask.GetMetadata("branch") ?? watchTask.Title;
         var worktreePath = watchTask.GetMetadata("worktreePath");
 
-        var startedAt = DateTime.UtcNow;
+        if (DateTime.UtcNow - watchTask.CreatedAt > _staleAfter)
+        {
+            _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
+            await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
+            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+            return WatchPollOutcome.Stale;
+        }
+
+        var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+
+        // Externally merged (operator merged by hand, or the
+        // branch protection bot did): close the loop exactly as
+        // if we had merged it ourselves. Without this check the
+        // watch polls forever on CI+reviews of a dead PR.
+        if (pr.Merged)
+        {
+            _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
+            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
+            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
+                taskId, $"PR #{prNumber} merged externally; task completed"));
+            return WatchPollOutcome.Merged;
+        }
+
+        // P4 e2e-harness seam: tests can return the SHA
+        // directly without going through Octokit's
+        // PullRequest.Head (which has a private setter).
+        var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+        var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
+        // P4 e2e-harness seam: tests can pre-approve reviews
+        // without going through Octokit's sealed
+        // PullRequestReview ctor. Default = real GitHub call.
+        var reviewStates = reviewsOverride is not null
+            ? reviewsOverride(prNumber)
+            : (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
+                .Select(r => r.State.Value).ToList();
+        var verdict = EvaluateVerdictFromStates(ci, reviewStates);
+
+        _logger.LogDebug("PR #{PrNumber}: CI={Ci}, ReviewVerdict={Verdict}", prNumber, ci, verdict);
+
+        switch (verdict)
+        {
+            case ReviewVerdict.GreenAndApproved:
+                var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
+                if (merged)
+                {
+                    await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+                    await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+                    await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
+                    await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+                    _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
+                        taskId, $"PR #{prNumber} merged and branch deleted"));
+                    _logger.LogInformation("PR #{PrNumber} merged; task {TaskId} completed", prNumber, taskId);
+                    return WatchPollOutcome.Merged;
+                }
+                _logger.LogWarning("PR #{PrNumber} merge returned false; will retry next poll", prNumber);
+                return WatchPollOutcome.Pending;
+
+            case ReviewVerdict.GreenChangesRequested:
+                await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "Reviewer requested changes", ct: cancellationToken);
+                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "changes-requested", ct: cancellationToken);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrChangesRequested,
+                    taskId, $"PR #{prNumber} marked Blocked (changes requested)"));
+                _logger.LogInformation("PR #{PrNumber} marked Blocked (changes requested)", prNumber);
+                return WatchPollOutcome.Blocked;
+
+            case ReviewVerdict.CiFailed:
+                await _issues.TransitionAsync(taskId, IssueStatus.Failed, $"CI failed for {sha}: {ci}", ct: cancellationToken);
+                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "ci-failed", ct: cancellationToken);
+                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrFailed,
+                    taskId, $"PR #{prNumber} CI failed ({ci})"));
+                _logger.LogInformation("PR #{PrNumber} CI failed; task {TaskId} failed", prNumber, taskId);
+                return WatchPollOutcome.CiFailed;
+
+            case ReviewVerdict.Pending:
+            default:
+                return WatchPollOutcome.Pending;
+        }
+    }
+
+    public async Task<int> ProcessWatchTaskAsync(
+        IssueRecord watchTask,
+        CancellationToken cancellationToken = default,
+        Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
+        Func<PullRequest, string>? headShaOverride = null)
+    {
+        var prText = watchTask.GetMetadata("prNumber");
+        if (!int.TryParse(prText, out _))
+        {
+            _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
+            return 1;
+        }
+
         while (!cancellationToken.IsCancellationRequested)
         {
-            if (DateTime.UtcNow - startedAt > _staleAfter)
+            var outcome = await PollWatchOnceAsync(
+                watchTask, cancellationToken, reviewsOverride, headShaOverride);
+            switch (outcome)
             {
-                _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
-                await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
-                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
-                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-                return 124;
-            }
-
-            var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
-
-            // Externally merged (operator merged by hand, or the
-            // branch protection bot did): close the loop exactly as
-            // if we had merged it ourselves. Without this check the
-            // watch polls forever on CI+reviews of a dead PR.
-            if (pr.Merged)
-            {
-                _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
-                await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
-                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
-                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
-                    taskId, $"PR #{prNumber} merged externally; task completed"));
-                return 0;
-            }
-
-            // P4 e2e-harness seam: tests can return the SHA
-            // directly without going through Octokit's
-            // PullRequest.Head (which has a private setter).
-            var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
-            var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
-            // P4 e2e-harness seam: tests can pre-approve reviews
-            // without going through Octokit's sealed
-            // PullRequestReview ctor. Default = real GitHub call.
-            var reviewStates = reviewsOverride is not null
-                ? reviewsOverride(prNumber)
-                : (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
-                    .Select(r => r.State.Value).ToList();
-            var verdict = EvaluateVerdictFromStates(ci, reviewStates);
-
-            _logger.LogDebug("PR #{PrNumber}: CI={Ci}, ReviewVerdict={Verdict}", prNumber, ci, verdict);
-
-            switch (verdict)
-            {
-                case ReviewVerdict.GreenAndApproved:
-                    var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
-                    if (merged)
-                    {
-                        await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-                        await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
-                        await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
-                        await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-                        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
-                            taskId, $"PR #{prNumber} merged and branch deleted"));
-                        _logger.LogInformation("PR #{PrNumber} merged; task {TaskId} completed", prNumber, taskId);
-                        return 0;
-                    }
-                    _logger.LogWarning("PR #{PrNumber} merge returned false; will retry next poll", prNumber);
-                    break;
-
-                case ReviewVerdict.GreenChangesRequested:
-                    await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "Reviewer requested changes", ct: cancellationToken);
-                    await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "changes-requested", ct: cancellationToken);
-                    _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrChangesRequested,
-                        taskId, $"PR #{prNumber} marked Blocked (changes requested)"));
-                    _logger.LogInformation("PR #{PrNumber} marked Blocked (changes requested)", prNumber);
+                case WatchPollOutcome.Merged:
+                case WatchPollOutcome.Blocked:
                     return 0;
-
-                case ReviewVerdict.CiFailed:
-                    await _issues.TransitionAsync(taskId, IssueStatus.Failed, $"CI failed for {sha}: {ci}", ct: cancellationToken);
-                    await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "ci-failed", ct: cancellationToken);
-                    await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-                    _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrFailed,
-                        taskId, $"PR #{prNumber} CI failed ({ci})"));
-                    _logger.LogInformation("PR #{PrNumber} CI failed; task {TaskId} failed", prNumber, taskId);
+                case WatchPollOutcome.CiFailed:
+                case WatchPollOutcome.Error:
                     return 1;
-
-                case ReviewVerdict.Pending:
+                case WatchPollOutcome.Stale:
+                    return 124;
+                case WatchPollOutcome.Pending:
                 default:
                     break;
             }
