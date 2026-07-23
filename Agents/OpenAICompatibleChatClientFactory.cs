@@ -127,7 +127,16 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
 
     private IChatClient GetOrCreate(ProviderConfig provider, string model)
     {
-        var key = provider.Name + "|" + model;
+        // The cache key includes a short hash of the API key so a key
+        // change (operator rotation via the Secrets page, or the
+        // startup DB-secret substitution in Program.cs) never reuses
+        // a client built with the old credential. The raw key is
+        // never placed in the cache-key string.
+        var keyHash = string.IsNullOrEmpty(provider.ApiKey)
+            ? string.Empty
+            : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(provider.ApiKey)))[..12];
+        var key = provider.Name + "|" + model + "|" + keyHash;
         return _cache.GetOrAdd(key, _ => Build(provider, model));
     }
 

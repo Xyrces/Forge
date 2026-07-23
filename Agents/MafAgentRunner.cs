@@ -38,6 +38,16 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
     private readonly ISecretStore? _secrets;
 
+    /// <summary>
+    /// Optional path for the per-run diagnostic side-channel log
+    /// (message roles, text lengths, tool-call names). Set by
+    /// Program.cs to a file under the Forgesystem state root. When
+    /// null the diagnostic write is skipped. Replaces the historical
+    /// hardcoded <c>C:\ProgramData\Forge\agent.log</c>, which was
+    /// silently swallowed on Linux.
+    /// </summary>
+    public static string? DiagnosticLogPath { get; set; }
+
     public MafAgentRunner(
         IChatClientFactory chatClientFactory,
         LlmConfig config,
@@ -145,13 +155,36 @@ public async Task<AgentRunResult> RunAsync(
 
         var message = new ChatMessage(ChatRole.User, fullPrompt);
         var session = await DeserializeSessionAsync(agent, sessionId, ct);
+        // Always run with a session so leaked-markup continuations below
+        // keep the full conversation history.
+        session ??= await agent.CreateSessionAsync(ct);
 
         try
         {
             var startedAt = DateTime.UtcNow;
-            var response = session is null
-                ? await agent.RunAsync(message, cancellationToken: ct)
-                : await agent.RunAsync(message, session, cancellationToken: ct);
+            var response = await agent.RunAsync(message, session, cancellationToken: ct);
+
+            // minimax-m3 quirk: near the end of long tool-call runs the
+            // model sometimes emits its next tool call as literal text
+            // markup ("]<]minimax[>[<tool_call>...<invoke name=...") in
+            // the assistant content instead of a structured tool_calls
+            // entry. MAF sees no tool calls and ends the loop
+            // prematurely — the run "completes" with prose (+markup) as
+            // the final answer and zero edits made. Detect the leak and
+            // nudge the model to re-issue properly; bounded so a
+            // persistently-degrading model cannot loop forever.
+            const int maxContinuations = 3;
+            for (var continuation = 0;
+                 continuation < maxContinuations && HasLeakedToolCallMarkup(LastAssistantText(response));
+                 continuation++)
+            {
+                _logger.LogWarning(
+                    "Role {Role}: tool-call markup leaked into response text; nudging model to continue ({N}/{Max})",
+                    role, continuation + 1, maxContinuations);
+                response = await agent.RunAsync(
+                    new ChatMessage(ChatRole.User, LeakedToolCallContinuationPrompt),
+                    session, cancellationToken: ct);
+            }
             var elapsed = DateTime.UtcNow - startedAt;
 
             var text = string.Concat(response.Messages
@@ -160,24 +193,28 @@ public async Task<AgentRunResult> RunAsync(
             var newSessionId = await SerializeSessionAsync(response, agent, session, ct);
 
             // DIAGNOSTIC: append to a side-channel log so we can
-            // diagnose the silent-agent bug even when the SCM swallows
-            // stdout. The file lives in C:\ProgramData\Forge\agent.log
-            // and is appended on every agent run.
+            // diagnose the silent-agent bug even when the host swallows
+            // stdout. Path is set by Program.cs (state root); skipped
+            // when unset. Best-effort: never breaks a run.
             try
             {
-                var diagLog = @"C:\ProgramData\Forge\agent.log";
-                using var sw = new StreamWriter(diagLog, append: true);
-                sw.WriteLine($"--- {DateTime.Now:O} role={role} msgs={response.Messages.Count} text_len={text.Length} tool_msgs={response.Messages.Count(m => m.Role == ChatRole.Tool)} session_id={newSessionId ?? "<null>"} ---");
-                foreach (var m in response.Messages)
+                var diagLog = DiagnosticLogPath;
+                if (!string.IsNullOrEmpty(diagLog))
                 {
-                    var preview = (m.Text ?? "");
-                    if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
-                    var toolCalls = m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>()
-                        .Select(c => $"{c.Name}({string.Join(",", c.Arguments?.Keys ?? new System.Collections.Generic.List<string>())})")
-                        .ToList();
-                    sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} tool_calls=[{string.Join(";", toolCalls)}] preview={preview}");
+                    Directory.CreateDirectory(Path.GetDirectoryName(diagLog)!);
+                    using var sw = new StreamWriter(diagLog, append: true);
+                    sw.WriteLine($"--- {DateTime.Now:O} role={role} msgs={response.Messages.Count} text_len={text.Length} tool_msgs={response.Messages.Count(m => m.Role == ChatRole.Tool)} session_id={newSessionId ?? "<null>"} ---");
+                    foreach (var m in response.Messages)
+                    {
+                        var preview = (m.Text ?? "");
+                        if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
+                        var toolCalls = m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>()
+                            .Select(c => $"{c.Name}({string.Join(",", c.Arguments?.Keys ?? new System.Collections.Generic.List<string>())})")
+                            .ToList();
+                        sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} tool_calls=[{string.Join(";", toolCalls)}] preview={preview}");
+                    }
+                    sw.Flush();
                 }
-                sw.Flush();
             }
             catch
             {
@@ -368,6 +405,29 @@ finally
             return null;
         }
     }
+
+    /// <summary>
+    /// Nudge sent when the model emits a tool call as plain-text markup
+    /// (see the minimax-m3 note in RunAsync). Deliberately short: the
+    /// model has the full conversation in its session already.
+    /// </summary>
+    private const string LeakedToolCallContinuationPrompt =
+        "Your previous message contained a tool call emitted as plain-text markup, which cannot be executed. " +
+        "If you intended to call a tool, re-issue it now as a proper tool call. " +
+        "If you have already completed the task, reply with a brief summary of what you changed (no markup).";
+
+    private static string LastAssistantText(AgentResponse response) =>
+        response.Messages.LastOrDefault(m => m.Role == ChatRole.Assistant)?.Text ?? string.Empty;
+
+    /// <summary>
+    /// True when assistant text contains tool-call markup that leaked
+    /// into the content channel instead of arriving as structured
+    /// tool_calls. Internal for tests.
+    /// </summary>
+    internal static bool HasLeakedToolCallMarkup(string text) =>
+        text.Contains("]<]minimax[>", StringComparison.Ordinal) ||
+        text.Contains("<tool_call>", StringComparison.Ordinal) ||
+        text.Contains("<invoke name=", StringComparison.Ordinal);
 
     private async Task<string?> SerializeSessionAsync(
         AgentResponse response, ChatClientAgent agent, AgentSession? session, CancellationToken ct)

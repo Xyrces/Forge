@@ -671,8 +671,14 @@ Console.Error.WriteLine(ex.ToString());
             failures.Add($"memory.db: {ex.GetType().Name}: {ex.Message}");
         }
 
-        // 4. LLM provider + key configured
-        var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
+        // 4. LLM provider + key configured. The kilo gateway key is
+        //    operator-managed via the dashboard Secrets page (encrypted
+        //    per project); appsettings.json carries only the
+        //    KILO_GATEWAY_API_KEY placeholder. Resolve the DB secret
+        //    first so the auth probe below exercises the real key.
+        var llmConfig = await ResolveKiloGatewayKeyAsync(
+            LlmConfigAdapter.FromOptions(options.Llm), projects, secretStore,
+            loggerFactory.CreateLogger("Forge.Bootstrap"));
         if (string.IsNullOrEmpty(llmConfig.DefaultProvider))
         {
             failures.Add("llm.defaultProvider is empty");
@@ -727,26 +733,59 @@ Console.Error.WriteLine(ex.ToString());
             }
         }
 
-        // 5. GitHub token + repo
-        if (string.IsNullOrEmpty(options.GitHub.Token) || options.GitHub.Token.StartsWith("GITHUB_TOKEN"))
+        // 5. GitHub token + repo. The token is operator-managed per
+        //    project via the dashboard Secrets page ('github_token');
+        //    appsettings.json github.token carries only a placeholder.
+        //    Resolve the DB secret first (same pattern as the kilo
+        //    gateway key above) and probe the owning project's repo
+        //    (owner/repo parsed from its registered RepoUrl).
+        var ghToken = options.GitHub.Token;
+        var ghOwner = options.GitHub.Owner;
+        var ghRepo = options.GitHub.Repo;
+        if (string.IsNullOrEmpty(ghToken) || ghToken.StartsWith("GITHUB_TOKEN"))
         {
-            failures.Add("github.token looks unset (still a placeholder)");
+            foreach (var project in projects)
+            {
+                string? secret;
+                try
+                {
+                    secret = await secretStore.GetPlaintextAsync(
+                        project.Id, SecretKinds.GitHubToken, CancellationToken.None);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (string.IsNullOrEmpty(secret)) continue;
+
+                ghToken = secret;
+                if (ProjectDispatchBundleFactory.ParseGitHubOwnerRepo(project.RepoUrl) is { } parsed)
+                {
+                    ghOwner = parsed.Owner;
+                    ghRepo = parsed.Repo;
+                }
+                break;
+            }
+        }
+        if (string.IsNullOrEmpty(ghToken) || ghToken.StartsWith("GITHUB_TOKEN"))
+        {
+            failures.Add("github.token looks unset (still a placeholder) and no per-project 'github_token' secret is stored");
         }
         else
         {
             try
             {
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", options.GitHub.Token);
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", ghToken);
                 http.DefaultRequestHeaders.UserAgent.ParseAdd("Forge-Check");
-                var resp = await http.GetAsync($"https://api.github.com/repos/{options.GitHub.Owner}/{options.GitHub.Repo}");
+                var resp = await http.GetAsync($"https://api.github.com/repos/{ghOwner}/{ghRepo}");
                 if (resp.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"  [ok] GitHub repo {options.GitHub.Owner}/{options.GitHub.Repo} reachable");
+                    Console.WriteLine($"  [ok] GitHub repo {ghOwner}/{ghRepo} reachable");
                 }
                 else if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    failures.Add($"GitHub repo {options.GitHub.Owner}/{options.GitHub.Repo} not found (or token lacks access)");
+                    failures.Add($"GitHub repo {ghOwner}/{ghRepo} not found (or token lacks access)");
                 }
                 else if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                 {
@@ -775,6 +814,58 @@ Console.Error.WriteLine(ex.ToString());
             Console.Error.WriteLine($"  - {f}");
         }
         return 1;
+    }
+
+    /// <summary>
+    /// The kilo gateway API key is operator-managed via the dashboard
+    /// Secrets page (stored encrypted, per project) — appsettings.json
+    /// carries only the <c>KILO_GATEWAY_API_KEY</c> placeholder, which
+    /// authenticates free-tier models but is rejected by paid models
+    /// (HTTP 401 PAID_MODEL_AUTH_REQUIRED). Resolve the first stored
+    /// key across registered projects and substitute it into the
+    /// kilo-gateway provider entry so every chat client (engineering
+    /// dispatch, intake, groomer, memory extractor) authenticates.
+    /// Key rotation via the UI takes effect on restart. The key value
+    /// is never logged.
+    /// </summary>
+    private static async Task<LlmConfig> ResolveKiloGatewayKeyAsync(
+        LlmConfig config,
+        IReadOnlyList<ProjectOptions> projects,
+        SecretStore secretStore,
+        ILogger logger)
+    {
+        if (!config.Providers.Any(p => string.Equals(p.Name, LlmProviders.KiloGateway, StringComparison.OrdinalIgnoreCase)))
+        {
+            return config;
+        }
+
+        foreach (var project in projects)
+        {
+            string? key;
+            try
+            {
+                key = await secretStore.GetPlaintextAsync(
+                    project.Id, SecretKinds.KiloGatewayApiKey, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Failed to read {Kind} secret for project {ProjectId}; trying next project",
+                    SecretKinds.KiloGatewayApiKey, project.Id);
+                continue;
+            }
+            if (string.IsNullOrEmpty(key)) continue;
+
+            logger.LogInformation(
+                "kilo gateway api key resolved from project '{ProjectId}' secret store", project.Id);
+            var providers = config.Providers
+                .Select(p => string.Equals(p.Name, LlmProviders.KiloGateway, StringComparison.OrdinalIgnoreCase)
+                    ? p with { ApiKey = key }
+                    : p)
+                .ToList();
+            return config with { Providers = providers };
+        }
+        return config;
     }
 
     /// <summary>
@@ -919,7 +1010,9 @@ Console.Error.WriteLine(ex.ToString());
         var skillBootstrap = new Agents.SkillBootstrap(
             memoryStore, loggerFactory.CreateLogger<Agents.SkillBootstrap>());
         await skillBootstrap.SeedAsync();
-        var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
+        var llmConfig = await ResolveKiloGatewayKeyAsync(
+            LlmConfigAdapter.FromOptions(options.Llm), knownProjects, secretStore,
+            loggerFactory.CreateLogger("Forge.Bootstrap"));
         var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
 
         // P5.5: auto-extract project memory from the model
@@ -938,6 +1031,7 @@ Console.Error.WriteLine(ex.ToString());
         // constructed (the runner builds its tool list per call,
         // so a forward-reference is enough).
         var specStoreRef = new Core.SpecStoreHolder();
+        MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
