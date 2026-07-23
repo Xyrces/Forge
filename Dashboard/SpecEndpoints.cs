@@ -75,6 +75,68 @@ public static class SpecEndpoints
             return Results.Json(versions.Select(ToVersionView).ToArray(), DashboardJson.Options);
         });
 
+        // Spec drill-down: the decomposition tree the groomer
+        // produced (stories -> tasks, via parent_issue_id) plus the
+        // groom-run history. Powers the /specs/{id} detail page.
+        app.MapGet("/api/specs/{id}/tree", async (string id, CancellationToken ct) =>
+        {
+            var spec = await specs.GetAsync(id, ct);
+            if (spec is null) return Results.NotFound();
+
+            var storyViews = new List<object>();
+            var orphanTaskViews = new List<object>();
+            var groomRunViews = new List<object>();
+            if (issues is not null)
+            {
+                var all = await issues.ListAsync(new Forge.Core.IssueFilter(), ct);
+                var stories = all.Where(i => string.Equals(i.Type, "story", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(i.ParentIssueId, spec.Id, StringComparison.Ordinal)).ToList();
+                var tasks = all.Where(i => !Forge.Core.AgentTaskTypes.IsContainer(i.Type)
+                    && i.Type != Forge.Core.AgentTaskTypes.PrWatch).ToList();
+                foreach (var story in stories)
+                {
+                    var children = tasks.Where(t => string.Equals(t.ParentIssueId, story.Id, StringComparison.Ordinal));
+                    storyViews.Add(new
+                    {
+                        id = story.Id,
+                        title = story.Title,
+                        status = story.Status.ToString(),
+                        tasks = children.Select(ToTaskView).ToArray(),
+                    });
+                }
+                // Tasks parented directly to the spec (no story) —
+                // unusual, but show them rather than dropping them.
+                foreach (var t in tasks.Where(t => string.Equals(t.ParentIssueId, spec.Id, StringComparison.Ordinal)))
+                {
+                    orphanTaskViews.Add(ToTaskView(t));
+                }
+            }
+            if (groomerRuns is not null)
+            {
+                var runs = await groomerRuns.ListAsync(specId: spec.Id, limit: 20, ct);
+                foreach (var r in runs)
+                {
+                    groomRunViews.Add(new
+                    {
+                        ts = r.Ts,
+                        trigger = r.Trigger.ToString(),
+                        status = r.Status.ToString(),
+                        storiesProduced = r.StoriesProduced,
+                        tasksProduced = r.TasksProduced,
+                        error = r.Error,
+                        durationMs = r.DurationMs,
+                    });
+                }
+            }
+            return Results.Json(new
+            {
+                spec = ToSpecView(spec),
+                stories = storyViews,
+                orphanTasks = orphanTaskViews,
+                groomRuns = groomRunViews,
+            }, DashboardJson.Options);
+        });
+
         // Phase 2b: extracted-tables reads. The dashboard's Spec
         // side-panel renders diagrams from spec_diagram; the Graph
         // tab reads spec_touches; the Deps tab reads spec_dep.
@@ -301,18 +363,50 @@ public static class SpecEndpoints
             var canApprove = spec.Status == SpecStatus.Draft;
             var canStartGrooming = spec.Status is SpecStatus.Approved or SpecStatus.Designed or SpecStatus.AssetReady;
             var canShip = spec.Status == SpecStatus.Groomed;
+            // Designer path: a Draft spec can be sent to the Designer
+            // agent (Draft -> ReadyForDesign; the DesignerScheduler
+            // picks it up automatically and populates the design
+            // board).
+            var canSendToDesign = spec.Status == SpecStatus.Draft;
 
             return Results.Json(new
             {
                 canApprove,
                 canStartGrooming,
                 canShip,
+                canSendToDesign,
                 reason = canApprove ? "draft is ready for approval"
                     : canStartGrooming ? "designed/approved specs feed the groomer"
                     : canShip ? "groomer has decomposed into stories/tasks"
                     : $"status {spec.Status} has no available actions",
             });
         });
+    }
+
+    private static object ToTaskView(Forge.Core.IssueRecord t)
+    {
+        string? prNumber = null;
+        string? branch = null;
+        try
+        {
+            if (!string.IsNullOrEmpty(t.MetadataJson) && t.MetadataJson != "{}")
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(t.MetadataJson);
+                if (doc.RootElement.TryGetProperty("prNumber", out var pr)) prNumber = pr.ToString();
+                if (doc.RootElement.TryGetProperty("branch", out var br)) branch = br.GetString();
+            }
+        }
+        catch { /* metadata is advisory; never break the view */ }
+        return new
+        {
+            id = t.Id,
+            title = t.Title,
+            status = t.Status.ToString(),
+            priority = t.Priority,
+            assignee = t.Assignee,
+            prNumber,
+            branch,
+        };
     }
 
     private static object ToSpecView(SpecRecord s) => new

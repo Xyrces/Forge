@@ -473,6 +473,59 @@ public class SpecGroomerEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task Tree_UnknownSpec_Returns404()
+    {
+        var resp = await _client.GetAsync("/api/specs/spec-missing/tree");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Tree_GroomedSpec_GroupsStoriesWithTasks()
+    {
+        var id = await CreateApprovedSpecAsync();
+        var story = await _issues.CreateAsync(new NewIssue(
+            Type: "story", Title: "story A", ParentId: id));
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "task A1", ParentId: story.Id,
+            Metadata: new Dictionary<string, object> { ["prNumber"] = 7 }));
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "task A2", ParentId: story.Id));
+        // Noise that must NOT leak into the tree: another spec's
+        // story, a container-less watch, an epic.
+        await _issues.CreateAsync(new NewIssue(Type: "story", Title: "other spec story", ParentId: "spec-other"));
+        await _issues.CreateAsync(new NewIssue(Type: "pr-watch", Title: "watch"));
+        await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "container"));
+
+        var tree = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}/tree");
+
+        Assert.Equal(id, tree.GetProperty("spec").GetProperty("id").GetString());
+        var stories = tree.GetProperty("stories").EnumerateArray().ToArray();
+        Assert.Single(stories);
+        Assert.Equal(story.Id, stories[0].GetProperty("id").GetString());
+        var tasks = stories[0].GetProperty("tasks").EnumerateArray().ToArray();
+        Assert.Equal(2, tasks.Length);
+        Assert.Equal("7", tasks.First(t => t.GetProperty("title").GetString() == "task A1")
+            .GetProperty("prNumber").GetString());
+        Assert.Equal(JsonValueKind.Null, tasks.First(t => t.GetProperty("title").GetString() == "task A2")
+            .GetProperty("prNumber").ValueKind);
+        Assert.Empty(tree.GetProperty("orphanTasks").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task Actions_DraftSpec_IncludesSendToDesign()
+    {
+        var created = await _client.PostAsJsonAsync("/api/specs",
+            new { projectId = "P", title = "Draft", body = "x" });
+        var spec = await created.Content.ReadFromJsonAsync<JsonElement>();
+        var id = spec.GetProperty("id").GetString()!;
+
+        var actions = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}/actions");
+        Assert.True(actions.GetProperty("canSendToDesign").GetBoolean());
+        Assert.True(actions.GetProperty("canApprove").GetBoolean());
+        Assert.False(actions.GetProperty("canShip").GetBoolean());
+    }
+
+    [Fact]
     public async Task Groom_GroomedSpecWithStories_Returns409_UnlessForced()
     {
         // Grooming APPENDS stories/tasks; re-grooming an already-groomed

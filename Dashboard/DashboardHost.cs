@@ -328,6 +328,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
                         dispatchCheckpoint = t.DispatchCheckpoint?.ToString(),
                         checkpointAt = (DateTime?)null,
                         recoveryAttempts = t.RecoveryAttempts,
+                        parentIssueId = t.ParentIssueId,
                         prUrl = (string?)null,
                         branch = (string?)null,
                         worktreePath = (string?)null,

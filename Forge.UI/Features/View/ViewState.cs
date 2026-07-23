@@ -31,7 +31,18 @@ public sealed record ViewTask(
     string? DispatchCheckpoint,
     string? PrUrl,
     string? Branch,
-    string? WorktreePath);
+    string? WorktreePath,
+    string? ParentIssueId = null,
+    IReadOnlyDictionary<string, object?>? Parameters = null)
+{
+    /// <summary>prNumber from issue metadata, when the task has an open PR.</summary>
+    public string? PrNumber =>
+        Parameters is not null
+        && Parameters.TryGetValue("prNumber", out var raw)
+        && raw is not null
+            ? raw.ToString()
+            : null;
+}
 
 public sealed record ViewAgent(
     string Id,
@@ -109,7 +120,9 @@ public sealed class ViewClient
                 t.dispatchCheckpoint,
                 t.prUrl,
                 t.branch,
-                t.worktreePath)).ToArray(),
+                t.worktreePath,
+                t.parentIssueId,
+                t.parameters)).ToArray(),
             Agents: resp.agents.Select(a => new ViewAgent(
                 a.id, a.agentName ?? "", a.displayName ?? "", a.scope ?? "",
                 a.description, a.enabled, a.configJson ?? "{}", a.createdAt, a.updatedAt)).ToArray(),
@@ -150,7 +163,9 @@ public sealed class ViewClient
         string? dispatchCheckpoint,
         string? prUrl,
         string? branch,
-        string? worktreePath);
+        string? worktreePath,
+        string? parentIssueId = null,
+        Dictionary<string, object?>? parameters = null);
 
     private sealed record AgentDto(
         string id,
