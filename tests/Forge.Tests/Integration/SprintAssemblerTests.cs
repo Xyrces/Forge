@@ -18,6 +18,7 @@ namespace Forge.Tests.Integration;
 public class SprintAssemblerTests : IDisposable
 {
     private readonly string _dbPath;
+    private readonly string _workDir;
     private readonly IssueStore _issues;
     private readonly SprintStore _sprints;
     private readonly SpecStore _specs;
@@ -26,7 +27,14 @@ public class SprintAssemblerTests : IDisposable
 
     public SprintAssemblerTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-sprint-asm-{Guid.NewGuid():N}.db");
+        // Work-dir pattern (not a bare file in the temp root): the
+        // sqlite -wal/-shm companions must be cleaned too — 44k
+        // leaked ph-*.db-wal files once filled /tmp (22G) and made
+        // the whole suite fail with 'disk I/O error'.
+        var workDir = Path.Combine(Path.GetTempPath(), $"ph-sprint-asm-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        _dbPath = Path.Combine(workDir, "issues.db");
+        _workDir = workDir;
         _issues = new IssueStore(_dbPath);
         _sprints = new SprintStore(_issues);
         _specs = new SpecStore(_issues);
@@ -39,7 +47,7 @@ public class SprintAssemblerTests : IDisposable
     public void Dispose()
     {
         try { _issues.Dispose(); } catch { }
-        try { File.Delete(_dbPath); } catch { }
+        try { Directory.Delete(_workDir, recursive: true); } catch { }
     }
 
     private Task Tick() => _assembler.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);

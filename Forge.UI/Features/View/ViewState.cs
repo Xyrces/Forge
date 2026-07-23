@@ -42,6 +42,19 @@ public sealed record ViewTask(
         && raw is not null
             ? raw.ToString()
             : null;
+
+    /// <summary>
+    /// Rework round from issue metadata ("1".."3"), when the task is
+    /// in the review/rework loop. A task showing Pending with a PR
+    /// number is queued for a rework round — this is the badge that
+    /// makes that visible.
+    /// </summary>
+    public string? ReworkAttempts =>
+        Parameters is not null
+        && Parameters.TryGetValue("reworkAttempts", out var raw)
+        && raw is not null
+            ? raw.ToString()
+            : null;
 }
 
 public sealed record ViewAgent(

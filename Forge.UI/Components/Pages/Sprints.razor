@@ -98,10 +98,16 @@
                             <div class="kanban__card">
                                 <div class="kanban__card-top">
                                     <span class="mono kanban__card-id">@card.Id</span>
-                                    @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
-                                    {
-                                        <a href="@url" target="_blank" rel="noopener">PR #@card.PrNumber</a>
-                                    }
+                                    <span style="display:flex;gap:6px;align-items:center">
+                                        @if (card.ReworkAttempts is not null)
+                                        {
+                                            <span class="pill pill--blocked" title="Rework round @card.ReworkAttempts in the review loop">R@(card.ReworkAttempts)</span>
+                                        }
+                                        @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
+                                        {
+                                            <a href="@url" target="_blank" rel="noopener">PR #@card.PrNumber</a>
+                                        }
+                                    </span>
                                 </div>
                                 <div class="kanban__card-title">@card.Title</div>
                                 <div class="kanban__card-meta">
@@ -135,7 +141,7 @@
         new("Done", s => s is "Completed" or "Closed"),
     };
 
-    private sealed record Card(string Id, string Title, string Status, string? Assignee, string? PrNumber);
+    private sealed record Card(string Id, string Title, string Status, string? Assignee, string? PrNumber, string? ReworkAttempts);
 
     private ViewSprint? SelectedSprint(List<ViewSprint> sprints)
     {
@@ -160,7 +166,7 @@
             .Select(m =>
             {
                 byId.TryGetValue(m.Id, out var t);
-                return new Card(m.Id, m.Title, m.Status, t?.Assignee, t?.PrNumber);
+                return new Card(m.Id, m.Title, m.Status, t?.Assignee, t?.PrNumber, t?.ReworkAttempts);
             })
             .ToList();
     }

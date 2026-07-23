@@ -97,6 +97,10 @@
                             {
                                 <a href="@url" target="_blank" rel="noopener" title="Open PR #@row.PrNumber">PR #@row.PrNumber</a>
                             }
+                            @if (row.ReworkAttempts is not null)
+                            {
+                                <span class="pill pill--blocked" title="In the review/rework loop — queued for or working through a rework round. The PR stays open; the watch keeps it.">R@row.ReworkAttempts</span>
+                            }
                         </td>
                         <td class="mono">@row.Type</td>
                         <td><span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span></td>
