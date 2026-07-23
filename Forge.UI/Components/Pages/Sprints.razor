@@ -2,6 +2,8 @@
 @inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
+@inject HttpClient Http
+@using System.Net.Http.Json
 @implements IDisposable
 @using Forge.Dashboard.Features.View
 
@@ -23,84 +25,170 @@
     {
         <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
     }
+    else if (ViewStore.Value.Sprints.Count == 0)
+    {
+        @* Sprint flow: there is intentionally NO create button — the
+           SprintAssembler builds each sprint automatically when the
+           previous one completes, from groomed (or ad-hoc) work. *@
+        <div class="page-subtitle">No sprints yet. Sprints assemble automatically when groomed work becomes eligible.</div>
+    }
     else
     {
-        var active = ViewStore.Value.Sprints.FirstOrDefault(s => s.Status == "Active");
-        var past = ViewStore.Value.Sprints.Where(s => s.Status != "Active").ToList();
-        <div class="sprint-grid">
-            @if (active is not null)
+        var sprints = ViewStore.Value.Sprints
+            .OrderByDescending(s => s.Status == "Active")
+            .ThenByDescending(s => s.StartDate)
+            .ToList();
+        var selected = SelectedSprint(sprints);
+
+        @* Sprint switcher: Active pinned first, then newest. *@
+        <div class="filter-bar">
+            @foreach (var sp in sprints)
             {
-                <div class="sprint-card sprint-card--active">
-                    <div class="sprint-card__header">
-                        <span class="mono sprint-card__id">@active.Id</span>
-                        <span class="pill pill--active">@active.Status</span>
-                        <span class="sprint-card__progress mono">@active.DoneCount/@active.IssueCount tasks done</span>
-                    </div>
-                    <div class="sprint-card__name">@active.Name</div>
-                    <div class="sprint-card__goal">@(active.Goal ?? "(no goal)")</div>
-                    <div class="sprint-card__dates">
-                        @if (active.StartDate is not null)
-                        {
-                            <span>@active.StartDate.Value.ToString("MMM d")</span>
-                            @if (active.EndDate is not null)
-                            {
-                                <span> → </span>
-                                <span>@active.EndDate.Value.ToString("MMM d")</span>
-                            }
-                        }
-                    </div>
-                    @if (active.Members is { Count: > 0 })
-                    {
-                        <ul class="sprint-card__members">
-                            @foreach (var m in active.Members)
-                            {
-                                <li>
-                                    <span class="pill pill--@m.Status.ToLowerInvariant()">@m.Status</span>
-                                    <span class="mono">@m.Id</span>
-                                    <span>@m.Title</span>
-                                </li>
-                            }
-                        </ul>
-                    }
-                </div>
-            }
-            @foreach (var sp in past)
-            {
-                <div class="sprint-card">
-                    <div class="sprint-card__header">
-                        <span class="mono sprint-card__id">@sp.Id</span>
-                        <span class="pill pill--@sp.Status.ToLowerInvariant()">@sp.Status</span>
-                        <span class="sprint-card__progress mono">@sp.DoneCount/@sp.IssueCount</span>
-                    </div>
-                    <div class="sprint-card__name">@sp.Name</div>
-                    <div class="sprint-card__goal">@(sp.Goal ?? "(no goal)")</div>
-                    <div class="sprint-card__dates">
-                        @if (sp.StartDate is not null)
-                        {
-                            <span>@sp.StartDate.Value.ToString("MMM d")</span>
-                            @if (sp.EndDate is not null)
-                            {
-                                <span> → </span>
-                                <span>@sp.EndDate.Value.ToString("MMM d")</span>
-                            }
-                        }
-                    </div>
-                </div>
-            }
-            @if (ViewStore.Value.Sprints.Count == 0)
-            {
-                @* Sprint flow: there is intentionally NO create button —
-                   the SprintAssembler builds each sprint automatically
-                   when the previous one completes, from groomed (or
-                   ad-hoc) eligible work. *@
-                <div class="page-subtitle">No sprints yet. Sprints assemble automatically when groomed work becomes eligible.</div>
+                <button class="chip @(selected?.Id == sp.Id ? "chip--active" : "")"
+                        @onclick="@(() => _selectedSprintId = sp.Id)">
+                    @sp.Name @(sp.Status == "Active" ? "●" : "")
+                </button>
             }
         </div>
+
+        @if (selected is not null)
+        {
+            var members = EnrichMembers(selected);
+            var done = members.Count(m => m.Status is "Completed" or "Closed");
+            var pct = members.Count == 0 ? 0 : (int)Math.Round(100.0 * done / members.Count);
+
+            <div class="sprint-hero">
+                <div class="sprint-hero__top">
+                    <span class="pill pill--@selected.Status.ToLowerInvariant()">@selected.Status</span>
+                    <strong class="sprint-hero__name">@selected.Name</strong>
+                    <span class="mono sprint-hero__dates">
+                        @(selected.StartDate?.ToString("MMM d") ?? "")
+                        @(selected.EndDate is not null ? $" → {selected.EndDate.Value:MMM d}" : "")
+                    </span>
+                    <span class="mono">@done/@members.Count tasks · @pct%</span>
+                </div>
+                @if (!string.IsNullOrEmpty(selected.Goal))
+                {
+                    <div class="sprint-hero__goal">@selected.Goal</div>
+                }
+                <div class="sprint-progress"><div class="sprint-progress__fill" style="width:@pct%"></div></div>
+            </div>
+
+            @if (selected.Status != "Active")
+            {
+                <div class="page-subtitle" style="margin:8px 0">Viewing a past sprint (read-only).</div>
+            }
+
+            @* Scrum board: every task in the sprint, grouped by state. *@
+            <div class="kanban">
+                @foreach (var col in Columns)
+                {
+                    var cards = members.Where(m => col.Match(m.Status)).ToList();
+                    <div class="kanban__col">
+                        <div class="kanban__col-header">
+                            <span>@col.Title</span>
+                            <span class="mono kanban__col-count">@cards.Count</span>
+                        </div>
+                        @if (cards.Count == 0)
+                        {
+                            <div class="kanban__empty">—</div>
+                        }
+                        @foreach (var card in cards)
+                        {
+                            <div class="kanban__card">
+                                <div class="kanban__card-top">
+                                    <span class="mono kanban__card-id">@card.Id</span>
+                                    @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
+                                    {
+                                        <a href="@url" target="_blank" rel="noopener">PR #@card.PrNumber</a>
+                                    }
+                                </div>
+                                <div class="kanban__card-title">@card.Title</div>
+                                <div class="kanban__card-meta">
+                                    <span class="pill pill--@card.Status.ToLowerInvariant()">@card.Status</span>
+                                    @if (card.Assignee is not null)
+                                    {
+                                        <span class="mono">@card.Assignee</span>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
     }
 </div>
 
 @code {
     private string? _loadedProject;
+    private string? _selectedSprintId;
+    private string? _repoUrl;
+
+    private sealed record Column(string Title, Func<string, bool> Match);
+    private static readonly Column[] Columns =
+    {
+        new("To do", s => s == "Pending"),
+        new("In progress", s => s == "InProgress"),
+        new("Blocked", s => s == "Blocked"),
+        new("Failed", s => s == "Failed"),
+        new("Done", s => s is "Completed" or "Closed"),
+    };
+
+    private sealed record Card(string Id, string Title, string Status, string? Assignee, string? PrNumber);
+
+    private ViewSprint? SelectedSprint(List<ViewSprint> sprints)
+    {
+        // Default: the Active sprint; fall back to the newest.
+        if (_selectedSprintId is not null)
+        {
+            var hit = sprints.FirstOrDefault(s => s.Id == _selectedSprintId);
+            if (hit is not null) return hit;
+        }
+        return sprints.FirstOrDefault(s => s.Status == "Active") ?? sprints.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Sprint member rows carry id/title/status; enrich with the full
+    /// task view (assignee, prNumber from metadata) by cross-joining
+    /// the /api/state task list already in the store.
+    /// </summary>
+    private List<Card> EnrichMembers(ViewSprint sprint)
+    {
+        var byId = ViewStore.Value.Tasks.ToDictionary(t => t.Id);
+        return (sprint.Members ?? (IReadOnlyList<ViewSprintMember>)Array.Empty<ViewSprintMember>())
+            .Select(m =>
+            {
+                byId.TryGetValue(m.Id, out var t);
+                return new Card(m.Id, m.Title, m.Status, t?.Assignee, t?.PrNumber);
+            })
+            .ToList();
+    }
+
+    private string? PrUrl(string prNumber) =>
+        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+
+    private async Task LoadRepoUrlAsync()
+    {
+        // Repo URL from the current project registration (never
+        // hardcoded); re-resolved on project switch.
+        var projectId = ShellStore.Value.CurrentProjectId;
+        if (string.IsNullOrEmpty(projectId)) return;
+        try
+        {
+            var projects = await Http.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/projects");
+            foreach (var p in projects.EnumerateArray())
+            {
+                if (p.TryGetProperty("id", out var id) && string.Equals(id.GetString(), projectId, StringComparison.OrdinalIgnoreCase)
+                    && p.TryGetProperty("repoUrl", out var url))
+                {
+                    _repoUrl = url.GetString()?.TrimEnd('/');
+                    break;
+                }
+            }
+        }
+        catch { /* PR links are best-effort */ }
+    }
 
     protected override void OnInitialized()
     {
@@ -110,6 +198,7 @@
         {
             LoadForCurrentProject();
         }
+        _ = LoadRepoUrlAsync();
     }
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
@@ -118,7 +207,10 @@
     {
         if (ShellStore.Value.CurrentProjectId != _loadedProject)
         {
+            _repoUrl = null;
+            _selectedSprintId = null;
             InvokeAsync(LoadForCurrentProject);
+            _ = LoadRepoUrlAsync();
         }
     }
 
