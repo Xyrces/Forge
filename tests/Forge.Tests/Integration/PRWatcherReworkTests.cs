@@ -57,7 +57,7 @@ public class PRWatcherReworkTests : IDisposable
             => Task.FromResult(true);
     }
 
-    private PRWatcher NewWatcher(FakeGitHub gh) => new(
+    private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null) => new(
         gh,
         worktrees: new AgentTools.GitWorktreeService(
             new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -66,7 +66,8 @@ public class PRWatcherReworkTests : IDisposable
         pollInterval: TimeSpan.FromSeconds(1),
         staleAfter: TimeSpan.FromHours(1),
         events: _events,
-        logger: NullLogger<PRWatcher>.Instance);
+        logger: NullLogger<PRWatcher>.Instance,
+        gates: gates);
 
     private async Task<(IssueRecord task, IssueRecord watch)> SeedAsync(
         Dictionary<string, object>? taskMeta = null,
@@ -84,6 +85,37 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     private static PullRequest Pr(int n) => new(n);
+
+    [Fact]
+    public async Task MergeGreen_GateHeld_NoMerge_WatchAndTaskUntouched_ThenReleaseMerges()
+    {
+        var bootstrap = new Forge.Core.IssueStore(Path.Combine(_workDir, "memory.db"));
+        bootstrap.Dispose();
+        var gates = new Forge.Core.StageGates(new Forge.Core.MemoryStore(Path.Combine(_workDir, "memory.db")));
+        await gates.HoldAsync(Forge.Core.StageGates.Merge);
+
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var (task, watch) = await SeedAsync();
+        var watcher = NewWatcher(gh, gates);
+
+        var held = await watcher.PollWatchOnceAsync(
+            watch, CancellationToken.None, reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, held);
+        Assert.Equal(0, gh.MergeCalls);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(task.Id))!.Status);
+
+        await gates.ReleaseAsync(Forge.Core.StageGates.Merge);
+        var released = await watcher.PollWatchOnceAsync(
+            await _issues.GetAsync(watch.Id) ?? watch, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, released);
+        Assert.Equal(1, gh.MergeCalls);
+        Assert.Equal(IssueStatus.Completed, (await _issues.GetAsync(task.Id))!.Status);
+    }
 
     [Fact]
     public async Task CiFailed_RequeuesTask_WithContext_WatchStaysLive()

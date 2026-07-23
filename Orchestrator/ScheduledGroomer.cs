@@ -37,6 +37,7 @@ public sealed class ScheduledGroomer
     private readonly TimeSpan _interval;
     private readonly IIssueStore? _issues;
     private readonly ISprintStore? _sprints;
+    private readonly StageGates? _gates;
 
     /// <summary>Max ad-hoc tasks groomed per tick (LLM cost bound).</summary>
     internal const int MaxTaskGroomsPerTick = 3;
@@ -49,7 +50,8 @@ public sealed class ScheduledGroomer
         ILogger<ScheduledGroomer> logger,
         TimeSpan? interval = null,
         IIssueStore? issues = null,
-        ISprintStore? sprints = null)
+        ISprintStore? sprints = null,
+        StageGates? gates = null)
     {
         _specs = specs;
         _groomerFactory = groomerFactory;
@@ -59,6 +61,7 @@ public sealed class ScheduledGroomer
         _interval = interval ?? TimeSpan.FromMinutes(5);
         _issues = issues;
         _sprints = sprints;
+        _gates = gates;
     }
 
     public TimeSpan Interval => _interval;
@@ -89,6 +92,12 @@ public sealed class ScheduledGroomer
 
     public async Task TickAsync(CancellationToken ct)
     {
+        if (_gates is not null && await _gates.IsHeldAsync(StageGates.Groom, ct))
+        {
+            _logger.LogInformation("ScheduledGroomer: held by operator gate; skipping tick");
+            return;
+        }
+
         IReadOnlyList<SpecRecord> candidates;
         try
         {

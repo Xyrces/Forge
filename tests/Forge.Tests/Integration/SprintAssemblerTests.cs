@@ -181,6 +181,46 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task SprintGate_Held_CompletesActiveButAssemblesNothing()
+    {
+        var gates = NewGates();
+        var gated = new SprintAssembler(
+            new ProjectContextFactory(new List<ProjectOptions>()),
+            _events, NullLogger<SprintAssembler>.Instance, gates: gates);
+        Task GatedTick() => gated.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
+
+        await SeedGroomedSpecAsync("Pipeline work", 1);
+        await gates.HoldAsync(StageGates.Sprint);
+
+        // Held: no assembly, even with eligible work.
+        await GatedTick();
+        Assert.Null(await _sprints.GetActiveAsync());
+
+        // Completion is bookkeeping, not a gated decision: an active
+        // sprint whose tasks are terminal still completes under a
+        // held gate — but nothing new is started.
+        var manual = await _sprints.CreateAsync(new NewSprint(
+            Name: "manual", Goal: "g", StartDate: DateTime.UtcNow,
+            EndDate: DateTime.UtcNow.AddDays(1), Status: SprintStatus.Active));
+        await GatedTick();
+        var all = await _sprints.ListAsync(activeOnly: false);
+        Assert.Equal(SprintStatus.Completed, all.Single(s => s.Id == manual.Id).Status);
+        Assert.Null(await _sprints.GetActiveAsync());
+
+        // Released: the eligible work assembles on the next tick.
+        await gates.ReleaseAsync(StageGates.Sprint);
+        await GatedTick();
+        Assert.NotNull(await _sprints.GetActiveAsync());
+    }
+
+    private StageGates NewGates()
+    {
+        var bootstrap = new IssueStore(Path.Combine(_workDir, "memory.db"));
+        bootstrap.Dispose();
+        return new StageGates(new MemoryStore(Path.Combine(_workDir, "memory.db")));
+    }
+
+    [Fact]
     public async Task ContainersWatchesAndSprintedTasks_AreNeverIngested()
     {
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "container"));

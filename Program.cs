@@ -955,6 +955,10 @@ Console.Error.WriteLine(ex.ToString());
         var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
         var memoryBootstrap = new Core.IssueStore(memoryDbPath);
         var memoryStore = new MemoryStore(memoryDbPath);
+        // Optional operator review gates at the major automatic
+        // transitions (design / groom / sprint / merge). v1: backed
+        // by the primary project's memory store.
+        var stageGates = new Core.StageGates(memoryStore);
 
         // Phase 4: JSONL mirror of the issue store. Background service
         // rewrites the file every 5s so it's safe to tail -f.
@@ -1057,7 +1061,8 @@ Console.Error.WriteLine(ex.ToString());
             gitHub, worktrees, issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30),
             eventBus,
-            loggerFactory.CreateLogger<PRWatcher>());
+            loggerFactory.CreateLogger<PRWatcher>(),
+            gates: stageGates);
         // P4 Stage B — pick the workflow runtime based on
 // appsettings.json. The InProcess dispatcher (default) is a
 // thin lambda over the existing EngineeringDispatchWorkflow +
@@ -1123,7 +1128,7 @@ Console.Error.WriteLine(ex.ToString());
         var dispatchBundleFactory = new ProjectDispatchBundleFactory(
             options, orchDataRoot, projectStore, cloner,
             agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
-            secrets: secretStore);
+            secrets: secretStore, gates: stageGates);
 
         var orchestrator = new OrchestratorAgent(
             projectStore,
@@ -1346,7 +1351,7 @@ try
                 specStore, groomerFactory, groomerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
                 interval: TimeSpan.FromMinutes(5),
-                issues: issues, sprints: sprints);
+                issues: issues, sprints: sprints, gates: stageGates);
             _ = scheduledGroomer.RunAsync(shutdownCts.Token);
             _scheduledGroomer = scheduledGroomer;
 
@@ -1357,7 +1362,8 @@ try
             var scheduledDesigner = new Orchestrator.DesignerScheduler(
                 specStore, designerAgentFactory, designerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.DesignerScheduler>(),
-                interval: TimeSpan.FromMinutes(5));
+                interval: TimeSpan.FromMinutes(5),
+                gates: stageGates);
             _ = scheduledDesigner.RunAsync(shutdownCts.Token);
             _scheduledDesigner = scheduledDesigner;
 
@@ -1381,7 +1387,8 @@ try
             var sprintAssembler = new Orchestrator.Sprint.SprintAssembler(
                 projectFactory, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.Sprint.SprintAssembler>(),
-                interval: TimeSpan.FromMinutes(5));
+                interval: TimeSpan.FromMinutes(5),
+                gates: stageGates);
             _ = sprintAssembler.RunAsync(shutdownCts.Token);
             _sprintAssembler = sprintAssembler;
 

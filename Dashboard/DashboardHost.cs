@@ -435,6 +435,11 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger, _memory, _issues);
         }
 
+        if (_memory is not null)
+        {
+            GateEndpoints.MapGateEndpoints(_app, new StageGates(_memory), _logger);
+        }
+
 if (_groomerRuns is not null)
             {
                 GroomerEndpoints.MapGroomerEndpoints(_app, _groomerRuns, _logger);

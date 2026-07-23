@@ -18,6 +18,21 @@
         </div>
     </div>
 
+    @* Operator stage gates: hold a stage to pause its automatic
+       transition; release to let the pipeline continue. *@
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+        <span class="page-subtitle" style="margin-right:4px">Stage gates:</span>
+        @foreach (var stage in _gateStages)
+        {
+            var held = _gates.TryGetValue(stage, out var s) && s == "hold";
+            <button class="chip @(held ? "chip--active" : "")"
+                    title="@(held ? $"Held — {stage} transitions are paused. Click to release." : $"Open — {stage} runs automatically. Click to hold.")"
+                    @onclick="@(() => ToggleGateAsync(stage))">
+                @stage: @(held ? "held" : "open")
+            </button>
+        }
+    </div>
+
     @if (ViewStore.Value.Loading)
     {
         <div class="page-subtitle">Loading…</div>
@@ -132,6 +147,27 @@
     private string? _selectedSprintId;
     private string? _repoUrl;
 
+    private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge" };
+    private Dictionary<string, string> _gates = new();
+    private System.Threading.Timer? _gateTimer;
+
+    private async Task LoadGatesAsync()
+    {
+        try
+        {
+            _gates = await Http.GetFromJsonAsync<Dictionary<string, string>>("/api/gates") ?? new();
+            StateHasChanged();
+        }
+        catch { /* gates endpoint absent on older backends */ }
+    }
+
+    private async Task ToggleGateAsync(string stage)
+    {
+        var held = _gates.TryGetValue(stage, out var s) && s == "hold";
+        var resp = await Http.PostAsync($"/api/gates/{stage}/{(held ? "release" : "hold")}", null);
+        if (resp.IsSuccessStatusCode) await LoadGatesAsync();
+    }
+
     private sealed record Column(string Title, Func<string, bool> Match);
     private static readonly Column[] Columns =
     {
@@ -206,6 +242,8 @@
             LoadForCurrentProject();
         }
         _ = LoadRepoUrlAsync();
+        _gateTimer = new System.Threading.Timer(_ => InvokeAsync(LoadGatesAsync), null,
+            TimeSpan.Zero, TimeSpan.FromSeconds(10));
     }
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
@@ -229,6 +267,7 @@
 
     public void Dispose()
     {
+        _gateTimer?.Dispose();
         ViewStore.StateChanged -= OnStateChanged;
         ShellStore.StateChanged -= OnShellChanged;
     }

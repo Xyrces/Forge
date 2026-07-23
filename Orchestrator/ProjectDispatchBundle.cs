@@ -104,6 +104,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
     private readonly IDashboardEventBus _events;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ISecretStore? _secrets;
+    private readonly StageGates? _gates;
 
     public ProjectDispatchBundleFactory(
         AgentOptions options,
@@ -116,7 +117,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         AgentMessageBus messageBus,
         IDashboardEventBus events,
         ILoggerFactory loggerFactory,
-        ISecretStore? secrets = null)
+        ISecretStore? secrets = null,
+        StageGates? gates = null)
     {
         _options = options;
         _dataRoot = dataRoot;
@@ -129,6 +131,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         _events = events;
         _loggerFactory = loggerFactory;
         _secrets = secrets;
+        _gates = gates;
     }
 
     /// <summary>
@@ -243,7 +246,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             // era default) fails tasks whose PRs are perfectly healthy.
             staleAfter: TimeSpan.FromHours(24),
             _events,
-            _loggerFactory.CreateLogger<PRWatcher>());
+            _loggerFactory.CreateLogger<PRWatcher>(),
+            gates: _gates);
 
         return new ProjectDispatchBundle(
             ensured.Project,

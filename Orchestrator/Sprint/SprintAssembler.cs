@@ -50,6 +50,7 @@ public sealed class SprintAssembler
     private readonly IDashboardEventBus _events;
     private readonly ILogger<SprintAssembler> _logger;
     private readonly TimeSpan _interval;
+    private readonly StageGates? _gates;
 
     public const string AdHocGroupName = "Ad-hoc work";
     private static readonly TimeSpan SprintDuration = TimeSpan.FromDays(14);
@@ -58,12 +59,14 @@ public sealed class SprintAssembler
         ProjectContextFactory projects,
         IDashboardEventBus events,
         ILogger<SprintAssembler> logger,
-        TimeSpan? interval = null)
+        TimeSpan? interval = null,
+        StageGates? gates = null)
     {
         _projects = projects;
         _events = events;
         _logger = logger;
         _interval = interval ?? TimeSpan.FromMinutes(5);
+        _gates = gates;
     }
 
     public TimeSpan Interval => _interval;
@@ -125,6 +128,14 @@ public sealed class SprintAssembler
                 active.Id, active.Name, projectId);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
                 null, $"Sprint '{active.Name}' completed"));
+        }
+
+        // Operator gate: completing a finished sprint is bookkeeping
+        // (always allowed); STARTING new work is the gated decision.
+        if (_gates is not null && await _gates.IsHeldAsync(StageGates.Sprint, ct))
+        {
+            _logger.LogInformation("Sprint assembly held by operator gate (project={Project})", projectId);
+            return;
         }
 
         await AssembleNextAsync(projectId, issues, sprints, specs, ct);

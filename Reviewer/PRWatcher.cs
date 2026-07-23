@@ -16,6 +16,7 @@ public sealed class PRWatcher
     private readonly TimeSpan _pollInterval;
     private readonly TimeSpan _staleAfter;
     private readonly ILogger<PRWatcher> _logger;
+    private readonly StageGates? _gates;
     private readonly IDashboardEventBus _events;
 
     public PRWatcher(
@@ -25,7 +26,8 @@ public sealed class PRWatcher
         TimeSpan pollInterval,
         TimeSpan staleAfter,
         IDashboardEventBus events,
-        ILogger<PRWatcher> logger)
+        ILogger<PRWatcher> logger,
+        StageGates? gates = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -34,6 +36,7 @@ public sealed class PRWatcher
         _staleAfter = staleAfter;
         _events = events;
         _logger = logger;
+        _gates = gates;
     }
 
     /// <summary>
@@ -163,6 +166,14 @@ public sealed class PRWatcher
         // 1. All gates green -> merge. (External-merge handled above.)
         if (ciGreen && approved && !changesRequested)
         {
+            // Operator merge gate: hold auto-merge without failing
+            // anything — the watch stays live and the next sweep
+            // re-evaluates (external merges are still detected).
+            if (_gates is not null && await _gates.IsHeldAsync(StageGates.Merge, cancellationToken))
+            {
+                _logger.LogInformation("PR #{PrNumber}: merge held by operator gate", prNumber);
+                return WatchPollOutcome.Pending;
+            }
             var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
             if (merged)
             {
