@@ -92,6 +92,23 @@ public sealed class OrchestratorAgentTests : IDisposable
         _originalCwd = Directory.GetCurrentDirectory();
     }
 
+    /// <summary>
+    /// Sprint flow: engineering dispatch only claims tasks linked to
+    /// the ACTIVE sprint. Tests that expect a dispatch must activate
+    /// a sprint containing the task first.
+    /// </summary>
+    private async Task ActivateSprintWithAsync(params string[] issueIds)
+    {
+        var sprint = await _bundle.Sprints.CreateAsync(new Core.NewSprint(
+            Name: "test sprint", Goal: "g",
+            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(1),
+            Status: Core.SprintStatus.Active));
+        foreach (var id in issueIds)
+        {
+            await _bundle.Sprints.AddIssueAsync(sprint.Id, id);
+        }
+    }
+
     public void Dispose()
     {
         try { Directory.SetCurrentDirectory(_originalCwd); } catch { }
@@ -217,6 +234,7 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         var issue = await _issues.CreateAsync(new NewIssue(
             Type: DevTaskType, Title: "Run via store", Description: "Cycle"));
+        await ActivateSprintWithAsync(issue.Id);
 
         // Call the dispatch loop directly. CancellationToken with
         // immediate cancellation after the first cycle; the loop is
@@ -261,6 +279,9 @@ public sealed class OrchestratorAgentTests : IDisposable
         var watch = await _issues.CreateAsync(new NewIssue(
             Type: "pr-watch", Title: "watch issue", Description: "routes to the watcher, not engineering",
             Metadata: new Dictionary<string, object> { ["prNumber"] = 999, ["taskId"] = "task-x" }));
+        // Sprint flow: only sprint members dispatch. The containers
+        // and the watch stay unlinked (they are never sprint work).
+        await ActivateSprintWithAsync(task.Id);
 
         using var cts = new CancellationTokenSource();
         cts.CancelAfter(TimeSpan.FromSeconds(10));
@@ -289,6 +310,61 @@ public sealed class OrchestratorAgentTests : IDisposable
         // Completed by the no-diff engineering path.
         var watchAfter = (await _issues.GetAsync(watch.Id, CancellationToken.None))!;
         Assert.NotEqual(IssueStatus.Completed, watchAfter.Status);
+    }
+
+    [Fact]
+    public async Task DispatchCycle_NoActiveSprint_DevTaskStaysPending()
+    {
+        // Sprint flow: ALL engineering work happens inside a sprint.
+        // With no active sprint the gate holds every dev task, even
+        // an otherwise-ready one; the SprintAssembler owns ingest.
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+
+        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        BindMaf(orch);
+
+        var gated = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "gated work", Description: "no sprint -> no dispatch"));
+
+        using var cts = new CancellationTokenSource();
+        cts.CancelAfter(TimeSpan.FromSeconds(3));
+        try { await orch.ExecuteAsync(cts.Token); }
+        catch (OperationCanceledException) { /* expected */ }
+
+        var after = (await _issues.GetAsync(gated.Id, CancellationToken.None))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Null(after.Assignee);
+    }
+
+    [Fact]
+    public async Task DispatchCycle_TaskOutsideActiveSprint_StaysPending()
+    {
+        // Sprint flow: with a sprint active, only its members
+        // dispatch — Pending work outside the sprint waits for a
+        // later sprint's ingest.
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+
+        var orch = BuildOrchestrator(new ScriptedRunner("ok"));
+        BindMaf(orch);
+
+        var inSprint = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "sprint work", Description: "member"));
+        var outside = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "future work", Description: "not a member"));
+        await ActivateSprintWithAsync(inSprint.Id);
+
+        using var cts = new CancellationTokenSource();
+        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        try { await orch.ExecuteAsync(cts.Token); }
+        catch (OperationCanceledException) { /* expected */ }
+
+        var inAfter = (await _issues.GetAsync(inSprint.Id, CancellationToken.None))!;
+        Assert.NotEqual(IssueStatus.Pending, inAfter.Status);
+        var outAfter = (await _issues.GetAsync(outside.Id, CancellationToken.None))!;
+        Assert.Equal(IssueStatus.Pending, outAfter.Status);
+        Assert.Null(outAfter.Assignee);
     }
 
     private static void InitRepo(string path)

@@ -25,6 +25,7 @@ public static class Program
     private static Orchestrator.ScheduledGroomer? _scheduledGroomer;
     private static Orchestrator.DesignerScheduler? _scheduledDesigner;
     private static Orchestrator.ArtistScheduler? _scheduledArtist;
+    private static Orchestrator.Sprint.SprintAssembler? _sprintAssembler;
     private static Orchestrator.StartupRecovery? _startupRecovery;
     private static IssuesJsonlMirror? _issuesJsonlMirror;
 
@@ -1357,6 +1358,19 @@ try
                 interval: TimeSpan.FromMinutes(5));
             _ = scheduledArtist.RunAsync(shutdownCts.Token);
             _scheduledArtist = scheduledArtist;
+
+            // Sprint flow: the assembler wakes up every 5 minutes per
+            // project, completes the Active sprint when all its tasks
+            // are terminal, and assembles + activates the next one
+            // from eligible (groomed or ad-hoc) Pending tasks. ALL
+            // engineering work happens inside a sprint — dispatch is
+            // gated on an active sprint in OrchestratorAgent.
+            var sprintAssembler = new Orchestrator.Sprint.SprintAssembler(
+                projectFactory, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.Sprint.SprintAssembler>(),
+                interval: TimeSpan.FromMinutes(5));
+            _ = sprintAssembler.RunAsync(shutdownCts.Token);
+            _sprintAssembler = sprintAssembler;
 
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);

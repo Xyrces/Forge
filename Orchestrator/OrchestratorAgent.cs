@@ -113,15 +113,19 @@ public sealed class OrchestratorAgent : IAgent
             try
             {
                 var activeSprint = await bundle.Sprints.GetActiveAsync(cancellationToken);
+
                 // Fetch the full ready queue (limit 0) and filter in
                 // memory: containers (epic/story) clog the queue head
                 // when the LIMIT is applied before filtering, so real
                 // tasks behind them never dispatch (found live: 7
                 // stories + a watch starved 4 feature tasks).
-                var ready = await bundle.IssueStore.ReadyAsync(0, activeSprint?.Id, cancellationToken);
-                if (ready.Count == 0) continue;
+                var allReady = await bundle.IssueStore.ReadyAsync(0, sprintId: null, cancellationToken);
 
-                var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
+                // Watches are lifecycle subscriptions, not sprint
+                // work: they sweep from the FULL queue regardless of
+                // sprint state (a sprint-scoped fetch would starve
+                // them — watches are never linked to sprints).
+                var watchTasks = allReady.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
                 if (watchTasks.Count > 0 && DateTime.UtcNow < _githubRateLimitedUntil)
                 {
                     _logger.LogDebug("Dispatch cycle: skipping {N} watch issues — GitHub rate-limit cooldown until {Until:HH:mm:ss}",
@@ -134,6 +138,19 @@ public sealed class OrchestratorAgent : IAgent
                     await RunWatchSweepAsync(watchTasks, bundle, cancellationToken);
                 }
 
+                // Sprint flow gate: ALL engineering work happens inside
+                // a sprint. No active sprint => the SprintAssembler
+                // hasn't ingested work yet (or nothing is eligible);
+                // until then only design/planning stages run.
+                if (activeSprint is null)
+                {
+                    _logger.LogDebug("Dispatch cycle: no active sprint (project={Project}) — engineering dispatch gated off", bundle.Project.Id);
+                    continue;
+                }
+                var sprintMemberIds = new HashSet<string>(
+                    await bundle.Sprints.GetIssueIdsAsync(activeSprint.Id, cancellationToken),
+                    StringComparer.Ordinal);
+
                 // Engineering dispatch skips pipeline containers.
                 // Epics and stories feed the spec -> groom chain;
                 // they are not units of engineering work. (Found by
@@ -142,15 +159,11 @@ public sealed class OrchestratorAgent : IAgent
                 // entire pipeline.) All other types dispatch,
                 // preserving operator-enqueued type names (dev, ecs,
                 // ui, bug, ...).
-                var devTasks = ready.Where(i => i.Type != AgentTaskTypes.PrWatch
-                    && !AgentTaskTypes.IsContainer(i.Type))
+                var devTasks = allReady.Where(i => i.Type != AgentTaskTypes.PrWatch
+                    && !AgentTaskTypes.IsContainer(i.Type)
+                    && sprintMemberIds.Contains(i.Id))
                     .Take(_spawnerOptions.MaxConcurrentSessions)
                     .ToList();
-                var skipped = ready.Count - watchTasks.Count - devTasks.Count;
-                if (skipped > 0)
-                {
-                    _logger.LogDebug("Dispatch cycle: skipped {N} pipeline container issues (epic/story are not dispatchable)", skipped);
-                }
                 if (devTasks.Count > 0 && DateTime.UtcNow < _llmRateLimitedUntil)
                 {
                     _logger.LogDebug("Dispatch cycle: skipping {N} dev tasks — LLM rate-limit cooldown until {Until:HH:mm:ss}",
