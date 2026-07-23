@@ -281,6 +281,36 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
                 var agents = await _agents.ListAsync(ct);
                 var skills = await _skills.ListAsync(null, globalOnly: false, ct);
                 var sprints = await sprintStore.ListAsync(activeOnly: false, ct);
+                // Sprint rollups: member tasks (containers/watches
+                // excluded) + terminal counts so the Sprints page can
+                // render progress without a second query round-trip.
+                var statusById = tasks.ToDictionary(t => t.Id);
+                var sprintViews = new List<object>();
+                foreach (var sp in sprints)
+                {
+                    var memberIds = await sprintStore.GetIssueIdsAsync(sp.Id, ct);
+                    var members = memberIds
+                        .Select(id => statusById.TryGetValue(id, out var t) ? t : null)
+                        .Where(t => t is not null
+                            && !AgentTaskTypes.IsContainer(t.Type)
+                            && t.Type != AgentTaskTypes.PrWatch)
+                        .Select(t => new { id = t!.Id, title = t.Title, status = t.Status.ToString() })
+                        .ToArray();
+                    sprintViews.Add(new
+                    {
+                        id = sp.Id,
+                        name = sp.Name,
+                        goal = sp.Goal,
+                        startDate = sp.StartDate,
+                        endDate = sp.EndDate,
+                        status = sp.Status.ToString(),
+                        createdAt = sp.CreatedAt,
+                        updatedAt = sp.UpdatedAt,
+                        issueCount = members.Length,
+                        doneCount = members.Count(m => m.status is "Completed" or "Closed"),
+                        members,
+                    });
+                }
                 var view = new
                 {
                     tasks = tasks.Select(t => new
@@ -326,17 +356,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
                         createdAt = s.CreatedAt,
                         updatedAt = s.UpdatedAt
                     }).ToArray(),
-                    sprints = sprints.Select(s => new
-                    {
-                        id = s.Id,
-                        name = s.Name,
-                        goal = s.Goal,
-                        startDate = s.StartDate,
-                        endDate = s.EndDate,
-                        status = s.Status.ToString(),
-                        createdAt = s.CreatedAt,
-                        updatedAt = s.UpdatedAt
-                    }).ToArray(),
+                    sprints = sprintViews.ToArray(),
                     lastHeartbeat = DateTime.UtcNow,
                     completedTasks = tasks.Count(t => t.Status == IssueStatus.Completed),
                     failedTasks = tasks.Count(t => t.Status == IssueStatus.Failed),

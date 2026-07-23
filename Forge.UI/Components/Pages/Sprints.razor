@@ -25,13 +25,52 @@
     }
     else
     {
+        var active = ViewStore.Value.Sprints.FirstOrDefault(s => s.Status == "Active");
+        var past = ViewStore.Value.Sprints.Where(s => s.Status != "Active").ToList();
         <div class="sprint-grid">
-            @foreach (var sp in ViewStore.Value.Sprints)
+            @if (active is not null)
+            {
+                <div class="sprint-card sprint-card--active">
+                    <div class="sprint-card__header">
+                        <span class="mono sprint-card__id">@active.Id</span>
+                        <span class="pill pill--active">@active.Status</span>
+                        <span class="sprint-card__progress mono">@active.DoneCount/@active.IssueCount tasks done</span>
+                    </div>
+                    <div class="sprint-card__name">@active.Name</div>
+                    <div class="sprint-card__goal">@(active.Goal ?? "(no goal)")</div>
+                    <div class="sprint-card__dates">
+                        @if (active.StartDate is not null)
+                        {
+                            <span>@active.StartDate.Value.ToString("MMM d")</span>
+                            @if (active.EndDate is not null)
+                            {
+                                <span> → </span>
+                                <span>@active.EndDate.Value.ToString("MMM d")</span>
+                            }
+                        }
+                    </div>
+                    @if (active.Members is { Count: > 0 })
+                    {
+                        <ul class="sprint-card__members">
+                            @foreach (var m in active.Members)
+                            {
+                                <li>
+                                    <span class="pill pill--@m.Status.ToLowerInvariant()">@m.Status</span>
+                                    <span class="mono">@m.Id</span>
+                                    <span>@m.Title</span>
+                                </li>
+                            }
+                        </ul>
+                    }
+                </div>
+            }
+            @foreach (var sp in past)
             {
                 <div class="sprint-card">
                     <div class="sprint-card__header">
                         <span class="mono sprint-card__id">@sp.Id</span>
                         <span class="pill pill--@sp.Status.ToLowerInvariant()">@sp.Status</span>
+                        <span class="sprint-card__progress mono">@sp.DoneCount/@sp.IssueCount</span>
                     </div>
                     <div class="sprint-card__name">@sp.Name</div>
                     <div class="sprint-card__goal">@(sp.Goal ?? "(no goal)")</div>
@@ -50,7 +89,11 @@
             }
             @if (ViewStore.Value.Sprints.Count == 0)
             {
-                <div class="page-subtitle">No sprints yet.</div>
+                @* Sprint flow: there is intentionally NO create button —
+                   the SprintAssembler builds each sprint automatically
+                   when the previous one completes, from groomed (or
+                   ad-hoc) eligible work. *@
+                <div class="page-subtitle">No sprints yet. Sprints assemble automatically when groomed work becomes eligible.</div>
             }
         </div>
     }

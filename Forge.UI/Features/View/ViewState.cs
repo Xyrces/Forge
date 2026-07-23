@@ -60,6 +60,14 @@ public sealed record ViewSprint(
     string? Goal,
     DateTime? StartDate,
     DateTime? EndDate,
+    string Status,
+    int IssueCount = 0,
+    int DoneCount = 0,
+    IReadOnlyList<ViewSprintMember>? Members = null);
+
+public sealed record ViewSprintMember(
+    string Id,
+    string Title,
     string Status);
 
 public static class ViewActions
@@ -110,7 +118,10 @@ public sealed class ViewClient
                 s.enabled, s.createdAt, s.updatedAt)).ToArray(),
             Sprints: resp.sprints.Select(sp => new ViewSprint(
                 sp.id, sp.name, sp.goal, sp.startDate, sp.endDate,
-                sp.status ?? "Unknown")).ToArray(),
+                sp.status ?? "Unknown",
+                sp.issueCount, sp.doneCount,
+                (sp.members ?? Array.Empty<SprintMemberDto>())
+                    .Select(m => new ViewSprintMember(m.id, m.title, m.status)).ToArray())).ToArray(),
             CompletedTasks: resp.completedTasks,
             FailedTasks: resp.failedTasks);
         return snapshot;
@@ -168,6 +179,14 @@ public sealed class ViewClient
         string? goal,
         DateTime? startDate,
         DateTime? endDate,
+        string status,
+        int issueCount = 0,
+        int doneCount = 0,
+        SprintMemberDto[]? members = null);
+
+    private sealed record SprintMemberDto(
+        string id,
+        string title,
         string status);
 }
 
