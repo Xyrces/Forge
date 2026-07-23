@@ -28,6 +28,20 @@ public sealed class OrchestratorAgent : IAgent
     // time so the loop doesn't hammer the API every dispatch cycle.
     private DateTime _githubRateLimitedUntil = DateTime.MinValue;
     private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
+    // Watch sweep cadence. Previously every dispatch cycle spawned a
+    // parallel Task.Run per Pending watch, and ProcessWatchTaskAsync
+    // looped internally every 30s with 3 API calls per iteration —
+    // loops multiplied unboundedly (watches are never claimed, so they
+    // stay Pending) and vaporized the 5000-req/hr GitHub quota. Now
+    // watches are polled in ONE sequential sweep every WatchSweepInterval:
+    // 3 calls per watch per sweep (2 watches -> ~24 calls/hr).
+    private DateTime _nextWatchSweepUtc = DateTime.MinValue;
+    private static readonly TimeSpan WatchSweepInterval = TimeSpan.FromMinutes(15);
+    // LLM 429 cooldown for the engineering dispatch path. Free-tier
+    // providers rate-limit parallel agent runs; a 429 re-queues the
+    // task (not a code failure) and pauses new dev dispatches.
+    private DateTime _llmRateLimitedUntil = DateTime.MinValue;
+    private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -99,7 +113,12 @@ public sealed class OrchestratorAgent : IAgent
             try
             {
                 var activeSprint = await bundle.Sprints.GetActiveAsync(cancellationToken);
-                var ready = await bundle.IssueStore.ReadyAsync(_spawnerOptions.MaxConcurrentSessions, activeSprint?.Id, cancellationToken);
+                // Fetch the full ready queue (limit 0) and filter in
+                // memory: containers (epic/story) clog the queue head
+                // when the LIMIT is applied before filtering, so real
+                // tasks behind them never dispatch (found live: 7
+                // stories + a watch starved 4 feature tasks).
+                var ready = await bundle.IssueStore.ReadyAsync(0, activeSprint?.Id, cancellationToken);
                 if (ready.Count == 0) continue;
 
                 var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
@@ -109,8 +128,11 @@ public sealed class OrchestratorAgent : IAgent
                         watchTasks.Count, _githubRateLimitedUntil);
                     watchTasks = new List<IssueRecord>();
                 }
-                foreach (var watch in watchTasks)
-                    _ = Task.Run(() => ProcessWatchIssueAsync(watch, bundle, cancellationToken), cancellationToken);
+                if (watchTasks.Count > 0 && DateTime.UtcNow >= _nextWatchSweepUtc)
+                {
+                    _nextWatchSweepUtc = DateTime.UtcNow + WatchSweepInterval;
+                    await RunWatchSweepAsync(watchTasks, bundle, cancellationToken);
+                }
 
                 // Engineering dispatch skips pipeline containers.
                 // Epics and stories feed the spec -> groom chain;
@@ -120,11 +142,20 @@ public sealed class OrchestratorAgent : IAgent
                 // entire pipeline.) All other types dispatch,
                 // preserving operator-enqueued type names (dev, ecs,
                 // ui, bug, ...).
-                var devTasks = ready.Where(i => !AgentTaskTypes.IsContainer(i.Type)).ToList();
+                var devTasks = ready.Where(i => i.Type != AgentTaskTypes.PrWatch
+                    && !AgentTaskTypes.IsContainer(i.Type))
+                    .Take(_spawnerOptions.MaxConcurrentSessions)
+                    .ToList();
                 var skipped = ready.Count - watchTasks.Count - devTasks.Count;
                 if (skipped > 0)
                 {
                     _logger.LogDebug("Dispatch cycle: skipped {N} pipeline container issues (epic/story are not dispatchable)", skipped);
+                }
+                if (devTasks.Count > 0 && DateTime.UtcNow < _llmRateLimitedUntil)
+                {
+                    _logger.LogDebug("Dispatch cycle: skipping {N} dev tasks — LLM rate-limit cooldown until {Until:HH:mm:ss}",
+                        devTasks.Count, _llmRateLimitedUntil);
+                    continue;
                 }
                 foreach (var dev in devTasks)
                     _ = Task.Run(() => DispatchSingleTaskAsync(dev, bundle, cancellationToken), cancellationToken);
@@ -163,26 +194,56 @@ public sealed class OrchestratorAgent : IAgent
         Root = string.Empty,
     };
 
-    private async Task<Result> ProcessWatchIssueAsync(IssueRecord watchIssue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    private static bool IsLlmRateLimited(Exception ex)
     {
-        try
+        for (var e = ex; e is not null; e = e.InnerException)
         {
-            await bundle.PrWatcher.ProcessWatchTaskAsync(watchIssue, cancellationToken);
-            return new Result(true, $"Watch {watchIssue.Id} complete");
+            if (e is System.ClientModel.ClientResultException cre && cre.Status == 429) return true;
+            var msg = e.Message;
+            if (!msg.Contains("429")) continue;
+            if (msg.Contains("Too Many Requests", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("TooManyRequests", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Status: 429"))
+                return true;
         }
-        catch (Exception ex)
+        return false;
+    }
+
+    /// <summary>
+    /// One sequential poll over every Pending watch issue — a single
+    /// GitHub burst per <see cref="WatchSweepInterval"/> instead of
+    /// unbounded parallel poll loops. A 429 aborts the sweep early and
+    /// arms the cooldown. Watch issues stay Pending between sweeps (by
+    /// design: the watch IS a long-lived poll subscription).
+    /// </summary>
+    private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Watch sweep: polling {N} watch issue(s) (project={Project})",
+            watchTasks.Count, bundle.Project.Id);
+        foreach (var watch in watchTasks)
         {
-            if (ex is Octokit.RateLimitExceededException)
+            if (cancellationToken.IsCancellationRequested) return;
+            try
+            {
+                var outcome = await bundle.PrWatcher.PollWatchOnceAsync(watch, cancellationToken);
+                _logger.LogDebug("Watch {Id}: {Outcome}", watch.Id, outcome);
+            }
+            catch (Octokit.RateLimitExceededException)
             {
                 _githubRateLimitedUntil = DateTime.UtcNow + GitHubRateLimitCooldown;
-                _logger.LogWarning("Watch issue {Id}: GitHub rate limit exceeded; backing off watch processing for {Cooldown} (project={Project})",
-                    watchIssue.Id, GitHubRateLimitCooldown, bundle.Project.Id);
+                _logger.LogWarning("Watch sweep: GitHub rate limit exceeded; backing off for {Cooldown} (project={Project})",
+                    GitHubRateLimitCooldown, bundle.Project.Id);
+                return;
             }
-            else
+            catch (Exception ex)
             {
-                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watchIssue.Id, bundle.Project.Id);
+                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watch.Id, bundle.Project.Id);
             }
-            return new Result(false, ex.Message);
+            // Courtesy delay: GitHub's secondary rate limit dislikes
+            // rapid-fire request bursts even well under the quota.
+            try { await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken); }
+            catch (OperationCanceledException) { return; }
         }
     }
 
@@ -220,6 +281,14 @@ public sealed class OrchestratorAgent : IAgent
             }
             catch (Exception ex)
             {
+                if (IsLlmRateLimited(ex))
+                {
+                    _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",
+                        preClaimed.Id, LlmRateLimitCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
+                    return new Result(false, "llm-rate-limited");
+                }
                 _logger.LogError(ex, "Workflow dispatch for {Id} threw", preClaimed.Id);
                 await HandleFailureAsync(preClaimed, ex, bundle, cancellationToken);
                 return new Result(false, ex.Message);
@@ -231,6 +300,21 @@ public sealed class OrchestratorAgent : IAgent
             var lastError = after?.GetMetadata("lastError");
             if (!string.IsNullOrEmpty(lastError))
             {
+                // A recorded 429 with a completed PR is noise: the
+                // agent's LLM call rate-limited mid-conversation but
+                // the workflow still committed + pushed + opened the
+                // PR. Never requeue those — that would redispatch
+                // finished work (observed live: two tasks requeued
+                // with PRs #6/#7 already open).
+                var reachedPr = after?.DispatchCheckpoint >= DispatchCheckpoint.PrOpened;
+                if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr)
+                {
+                    _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",
+                        preClaimed.Id, LlmRateLimitCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
+                    return new Result(false, "llm-rate-limited");
+                }
                 _logger.LogWarning("Workflow dispatch for {Id} reported failure: {Err}",
                     preClaimed.Id, lastError);
                 var ex = new InvalidOperationException(lastError);

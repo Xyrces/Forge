@@ -43,7 +43,7 @@ public class GroomerAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task GroomAsync_ApprovedSpec_AgentMovesSpecToGrooming()
+    public async Task GroomAsync_ApprovedSpec_AgentMovesSpecToGroomed()
     {
         // Create an Approved spec.
         var spec = await _specs.CreateAsync(new NewSpec(
@@ -56,17 +56,14 @@ public class GroomerAgentTests : IDisposable
                 """));
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
 
-        // Scripted: agent calls set_spec_status("Grooming"). The
-        // story/task chain is harder to script without the agent
-        // extracting a real id from create_story's response, so
-        // this test focuses on the status transition + a single
-        // create_story call to verify the tool works.
+        // Scripted: agent creates a story then moves the spec to
+        // Groomed (the intended terminal status after P3.5).
         var fcs = new[]
         {
             new FunctionCallContent("c1", "create_story",
                 new Dictionary<string, object?> { ["title"] = "Story 1" }),
             new FunctionCallContent("c2", "set_spec_status",
-                new Dictionary<string, object?> { ["status"] = "Grooming" }),
+                new Dictionary<string, object?> { ["status"] = "Groomed" }),
         };
         var scripted = new MultiToolCallingChatClient(fcs, "Done.");
         var agent = BuildAgent(scripted);
@@ -76,11 +73,11 @@ public class GroomerAgentTests : IDisposable
         // the linked tasks because the scripted client can't model
         // "use the result of the previous call as input to this one."
         Assert.NotNull(result);
-        Assert.Single(result!);
+        Assert.Single(result!.StoryIds);
 
-        // Spec moved to Grooming.
+        // Spec moved to Groomed.
         var refreshed = await _specs.GetAsync(spec.Id);
-        Assert.Equal(SpecStatus.Grooming, refreshed!.Status);
+        Assert.Equal(SpecStatus.Groomed, refreshed!.Status);
     }
 
     [Fact]
