@@ -120,8 +120,15 @@ public sealed class ReviewerDispatcher
         string? error = null;
         try
         {
+            // Context carries the watched task id so the Reviewer's
+            // file_followup tool can defer non-blocking findings as
+            // groomable follow-up tasks (parented via metadata).
+            var reviewContext = new Dictionary<string, object>
+            {
+                ["issueId"] = watchTask.GetMetadata("taskId") ?? watchTask.Id,
+            };
             var result = await _agentRunner.RunAsync(
-                AgentType.Reviewer, prompt, sessionId: null, ct: cancellationToken);
+                AgentType.Reviewer, prompt, sessionId: null, context: reviewContext, ct: cancellationToken);
             (verdict, body) = ParseReviewerOutput(result.Text);
         }
         catch (Exception ex)

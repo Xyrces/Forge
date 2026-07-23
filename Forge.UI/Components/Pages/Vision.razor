@@ -51,6 +51,23 @@
             No vision file yet. Create one to give every agent run a north-star design anchor —
             its content is injected into prompts as the <span class="mono">vision/master</span> memory key.
         </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
+            <button class="btn btn--primary" @onclick="StartEdit">Write it now</button>
+            <button class="btn" @onclick="RequestDraftAsync" disabled="@_drafting">
+                @(_drafting ? "Filing…" : "Draft from codebase")
+            </button>
+            @if (_draftTaskId is not null)
+            {
+                <span class="page-subtitle">
+                    Task <a href="/tasks/@_draftTaskId" class="mono">@_draftTaskId</a> filed —
+                    it goes through grooming, then a sprint, then a PR. This page fills in when it merges.
+                </span>
+            }
+            @if (_draftError is not null)
+            {
+                <span class="text-danger">@_draftError</span>
+            }
+        </div>
     }
     else
     {
@@ -110,6 +127,9 @@
     private bool _saving;
     private string _editContent = "";
     private string? _saveError;
+    private bool _drafting;
+    private string? _draftTaskId;
+    private string? _draftError;
 
     public sealed record SnapshotDto(bool Exists, string Path, string? Content, DateTime? LastModifiedUtc);
 
@@ -176,6 +196,35 @@
         }
         finally { _saving = false; }
     }
+
+    private async Task RequestDraftAsync()
+    {
+        _drafting = true;
+        _draftError = null;
+        try
+        {
+            var resp = await Http.PostAsync("/api/vision/draft-request", null);
+            if (resp.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                _draftError = "a vision draft task is already open";
+                return;
+            }
+            if (!resp.IsSuccessStatusCode)
+            {
+                _draftError = $"request failed: {(int)resp.StatusCode}";
+                return;
+            }
+            var payload = await resp.Content.ReadFromJsonAsync<DraftResponse>();
+            _draftTaskId = payload?.TaskId;
+        }
+        catch (Exception ex)
+        {
+            _draftError = $"request failed: {ex.Message}";
+        }
+        finally { _drafting = false; }
+    }
+
+    private sealed record DraftResponse(string TaskId, string Status);
 
     private void Parse()
     {

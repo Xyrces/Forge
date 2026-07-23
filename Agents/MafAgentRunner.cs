@@ -37,6 +37,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
     private readonly ISecretStore? _secrets;
+    private readonly IIssueStore? _issues;
 
     /// <summary>
     /// Optional path for the per-run diagnostic side-channel log
@@ -64,7 +65,8 @@ public sealed class MafAgentRunner : IAgentRunner
         Func<DesignArtifactStore?>? designArtifacts = null,
         Func<ISpecStore?>? specs = null,
         Func<ArtOutputStore?>? artOutputs = null,
-        ISecretStore? secrets = null)
+        ISecretStore? secrets = null,
+        IIssueStore? issues = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -78,6 +80,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
         _secrets = secrets;
+        _issues = issues;
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -137,6 +140,21 @@ public async Task<AgentRunResult> RunAsync(
             var readTool = new ArtifactReadTool(
                 designArtifacts, specs, artOutputs, _handoffs, logger: null);
             tools.Add(readTool.AsAIFunction());
+        }
+
+        // Follow-up filing: engineering + review roles can file
+        // out-of-scope discoveries as tasks. Filed follow-ups are
+        // NOT sprint-eligible — they land parentless with no groomed
+        // marker and wait for the groomer's ad-hoc pass (operator
+        // rule: no task enters a sprint without technical grooming).
+        if (_issues is not null
+            && role is AgentType.CoreDev or AgentType.ClientDev or AgentType.QA or AgentType.Reviewer
+            && context is not null
+            && context.TryGetValue("issueId", out var issueIdObj)
+            && issueIdObj is string followUpSource
+            && !string.IsNullOrWhiteSpace(followUpSource))
+        {
+            tools.Add(new FollowUpTool(_issues, followUpSource, role.ToString()).AsAIFunction());
         }
 
         var chatClient = _chatClientFactory.Create(_config, role);

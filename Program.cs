@@ -1050,7 +1050,8 @@ Console.Error.WriteLine(ex.ToString());
             designArtifacts: () => designArtifacts,
             specs: () => specStoreRef.Value,
             artOutputs: () => artOutputs,
-            secrets: secretStore);
+            secrets: secretStore,
+            issues: issues);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
@@ -1166,7 +1167,8 @@ Console.Error.WriteLine(ex.ToString());
         // event subscription dies.
         _productRefinementQueue = productRefinementQueue;
         var groomerFactory = new Agents.GroomerAgentFactory(
-            issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory);
+            issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
+            memory: memoryStore, projectRoot: primary.Root);
         // P2.a: Designer pipeline. The hygiene checker is shared
         // between the manual endpoint, the scheduled run, and the
         // agent's first step. The factory builds fresh DesignerAgent
@@ -1343,7 +1345,8 @@ try
             var scheduledGroomer = new Orchestrator.ScheduledGroomer(
                 specStore, groomerFactory, groomerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
-                interval: TimeSpan.FromMinutes(5));
+                interval: TimeSpan.FromMinutes(5),
+                issues: issues, sprints: sprints);
             _ = scheduledGroomer.RunAsync(shutdownCts.Token);
             _scheduledGroomer = scheduledGroomer;
 

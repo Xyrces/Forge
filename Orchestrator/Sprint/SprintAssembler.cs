@@ -13,10 +13,12 @@ namespace Forge.Orchestrator.Sprint;
 /// <para>Rules (operator, 2026-07-22):</para>
 ///
 /// <list type="number">
-/// <item>Once a spec is accepted into an epic and groomed into
-/// stories + tasks, its tasks become ELIGIBLE for sprint ingest.
-/// Operator-created ad-hoc tasks are eligible too — ALL work is
-/// sprint work, even a single item.</item>
+    /// <item>Once a spec is accepted into an epic and groomed into
+    /// stories + tasks, its tasks become ELIGIBLE for sprint ingest.
+    /// Ad-hoc tasks (operator-enqueued, agent-filed follow-ups)
+    /// become eligible only after technical grooming marks them
+    /// (<c>groomed=true</c> metadata) — no task enters a sprint
+    /// without grooming (operator rule, 2026-07-23).</item>
 /// <item>The next sprint is assembled at the completion of the
 /// last: when every task linked to the Active sprint is terminal
 /// (Completed | Failed | Closed), the sprint is marked Completed
@@ -173,6 +175,17 @@ public sealed class SprintAssembler
                 !AgentTaskTypes.IsContainer(i.Type)
                 && i.Type != AgentTaskTypes.PrWatch
                 && !sprinted.Contains(i.Id))
+            .ToList();
+
+        // Grooming gate: a task whose parent chain never reaches a
+        // groomed spec (ad-hoc) is eligible only after technical
+        // grooming approves it (metadata groomed=true, set by the
+        // ScheduledGroomer task pass). Spec-chain tasks were groomed
+        // with their spec. Operator-enqueued and agent-filed
+        // follow-ups wait for grooming like everything else.
+        eligible = eligible
+            .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName
+                || string.Equals(t.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (eligible.Count == 0) return;
 

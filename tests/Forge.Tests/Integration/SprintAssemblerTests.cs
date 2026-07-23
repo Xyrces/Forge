@@ -134,8 +134,12 @@ public class SprintAssemblerTests : IDisposable
     public async Task AdHocTask_GetsOwnSprint_AfterSpecGroups()
     {
         await SeedGroomedSpecAsync("Pipeline work", 1);
+        // Ad-hoc tasks need technical grooming before sprint ingest
+        // (operator rule 2026-07-23): the groomed marker stands in
+        // for the ScheduledGroomer's ad-hoc pass here.
         var adhoc = await _issues.CreateAsync(new NewIssue(
-            Type: "task", Title: "operator one-off"));
+            Type: "task", Title: "operator one-off",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
 
         await Tick(); // spec group wins
         var first = await _sprints.GetActiveAsync();
@@ -157,6 +161,26 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task UngroomedAdHocTask_IsNeverIngested()
+    {
+        // Operator rule 2026-07-23: no task enters a sprint without
+        // technical grooming. An ad-hoc Pending task with no
+        // groomed marker blocks nothing — the assembler simply
+        // sees no eligible work.
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "ungroomed one-off"));
+        await Tick();
+        Assert.Null(await _sprints.GetActiveAsync());
+
+        // Grooming marks it; next tick it is assembled.
+        await _issues.TransitionAsync(task.Id, IssueStatus.Pending, null,
+            metadata: new Dictionary<string, object> { ["groomed"] = "true" });
+        await Tick();
+        var active = await _sprints.GetActiveAsync();
+        Assert.NotNull(active);
+        Assert.Contains(task.Id, await _sprints.GetIssueIdsAsync(active!.Id));
+    }
+
+    [Fact]
     public async Task ContainersWatchesAndSprintedTasks_AreNeverIngested()
     {
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "container"));
@@ -166,7 +190,8 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync()); // nothing eligible
 
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real"));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
         await Tick();
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
@@ -192,7 +217,8 @@ public class SprintAssemblerTests : IDisposable
             Name: "empty", Goal: "g", StartDate: DateTime.UtcNow,
             EndDate: DateTime.UtcNow.AddDays(1), Status: SprintStatus.Active));
 
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real"));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
         await Tick();
 
         var all = await _sprints.ListAsync(activeOnly: false);

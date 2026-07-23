@@ -16,6 +16,8 @@ public sealed class GroomerAgentFactory
     private readonly IChatClientFactory _chatClientFactory;
     private readonly LlmConfig _config;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly MemoryStore? _memory;
+    private readonly string? _projectRoot;
 
     public GroomerAgentFactory(
         IIssueStore issues,
@@ -23,7 +25,9 @@ public sealed class GroomerAgentFactory
         IDashboardEventBus events,
         IChatClientFactory chatClientFactory,
         LlmConfig config,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        MemoryStore? memory = null,
+        string? projectRoot = null)
     {
         _issues = issues;
         _specs = specs;
@@ -31,10 +35,12 @@ public sealed class GroomerAgentFactory
         _chatClientFactory = chatClientFactory;
         _config = config;
         _loggerFactory = loggerFactory;
+        _memory = memory;
+        _projectRoot = projectRoot;
     }
 
     public GroomerAgent Create(string? runId = null) => new(
         _issues, _specs, _events, _chatClientFactory, _config,
         _loggerFactory.CreateLogger<GroomerAgent>(),
-        runId: runId);
+        runId: runId, memory: _memory, projectRoot: _projectRoot);
 }
