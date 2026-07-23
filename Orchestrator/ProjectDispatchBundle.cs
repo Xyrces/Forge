@@ -235,7 +235,13 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issueStore,
             pollInterval: TimeSpan.FromSeconds(30),
-            staleAfter: TimeSpan.FromMinutes(30),
+            // Stale window for the sequential watch sweep. Anchored to
+            // the watch's CreatedAt (see PRWatcher.PollWatchOnceAsync),
+            // so it must cover the operator-merge latency: the solo-
+            // identity model means a human merges by hand, possibly
+            // hours after the PR opens. 30 minutes (the old poll-loop
+            // era default) fails tasks whose PRs are perfectly healthy.
+            staleAfter: TimeSpan.FromHours(24),
             _events,
             _loggerFactory.CreateLogger<PRWatcher>());
 
