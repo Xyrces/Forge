@@ -59,7 +59,7 @@ public static class AgentsEndpoints
                 {
                     var (p, m, isOverride) = llmConfig.ResolveEffective(agentType, overrides);
                     var source = isOverride ? "override"
-                        : llmConfig.Roles.ContainsKey(agentType) ? "role-config"
+                        : llmConfig.Roles.ContainsKey(agentType) ? "config"
                         : "default";
                     model = new { provider = (string?)p.Name, model = (string?)m, source };
                 }
@@ -108,9 +108,58 @@ public static class AgentsEndpoints
                 });
             }
 
+            // Pipeline (scheduler-side) roles — the same catalog the
+            // project drill-down's slot grid renders, so both surfaces
+            // answer "what agents exist?" identically. Model column:
+            // intake resolves its own AgentType; designer/groomer/
+            // artist borrow coredev's client (shown, not separately
+            // editable); the orchestrator runs no LLM.
+            var pipeline = new List<object>();
+            foreach (var pr in RoleAgentRegistry.Pipeline)
+            {
+                object pModel;
+                if (llmConfig is null)
+                {
+                    pModel = new { provider = (string?)"?", model = (string?)"?", source = "unknown" };
+                }
+                else if (pr.ModelType is { } mt)
+                {
+                    var (p, m, isOverride) = llmConfig.ResolveEffective(mt, overrides);
+                    var source = isOverride ? "override"
+                        : llmConfig.Roles.ContainsKey(mt) ? "config"
+                        : "default";
+                    pModel = new { provider = (string?)p.Name, model = (string?)m, source };
+                }
+                else if (pr.InheritsModelFrom is not null)
+                {
+                    var (p, m, _) = llmConfig.ResolveEffective(Core.AgentType.CoreDev, overrides);
+                    pModel = new { provider = (string?)p.Name, model = (string?)m, source = $"inherits {pr.InheritsModelFrom}" };
+                }
+                else
+                {
+                    pModel = new { provider = (string?)null, model = (string?)null, source = "none" };
+                }
+
+                var pSlotMax = slots?.MaxFor(pid, pr.AgentName) ?? 0;
+                if (pSlotMax == 0)
+                    pSlotMax = Configuration.DefaultProjectRoles.MaxFor(
+                        new Dictionary<string, int>(projectRoles, StringComparer.OrdinalIgnoreCase), pr.AgentName);
+
+                pipeline.Add(new
+                {
+                    name = pr.AgentName,
+                    description = pr.Description,
+                    surface = pr.Surface,
+                    model = pModel,
+                    modelEditable = pr.ModelType is not null,
+                    slot = new { inFlight = slots?.InFlight(pid, pr.AgentName) ?? 0, max = pSlotMax },
+                });
+            }
+
             return Results.Ok(new
             {
                 roles,
+                pipeline,
                 providers = llmConfig?.Providers.Select(p => p.Name).ToArray() ?? Array.Empty<string>(),
                 overridesEditable = overrides is not null,
             });
@@ -122,14 +171,13 @@ public static class AgentsEndpoints
                 return Results.Json(new { error = "model overrides are not available in this mode" }, statusCode: 503);
             if (body is null || string.IsNullOrWhiteSpace(body.Provider) || string.IsNullOrWhiteSpace(body.Model))
                 return Results.BadRequest(new { error = "provider and model are required" });
-            var role = registry.ByAgentName(name);
-            if (role is null)
+            var agentType = ResolveAgentType(registry, name);
+            if (agentType is null)
                 return Results.NotFound(new { error = $"unknown role '{name}'" });
             if (llmConfig.Providers.All(p => !string.Equals(p.Name, body.Provider, StringComparison.OrdinalIgnoreCase)))
                 return Results.BadRequest(new { error = $"provider '{body.Provider}' is not configured; known: {string.Join(", ", llmConfig.Providers.Select(p => p.Name))}" });
 
-            var agentType = registry.TypeOf(role);
-            await overrides.SetAsync(agentType, body.Provider, body.Model, ct);
+            await overrides.SetAsync(agentType.Value, body.Provider, body.Model, ct);
             return Results.Ok(new { role = name, provider = body.Provider, model = body.Model, source = "override" });
         });
 
@@ -137,12 +185,23 @@ public static class AgentsEndpoints
         {
             if (overrides is null)
                 return Results.Json(new { error = "model overrides are not available in this mode" }, statusCode: 503);
-            var role = registry.ByAgentName(name);
-            if (role is null)
+            var agentType = ResolveAgentType(registry, name);
+            if (agentType is null)
                 return Results.NotFound(new { error = $"unknown role '{name}'" });
-            await overrides.ClearAsync(registry.TypeOf(role), ct);
-            return Results.Ok(new { role = name, source = "role-config-or-default" });
+            await overrides.ClearAsync(agentType.Value, ct);
+            return Results.Ok(new { role = name, source = "config-or-default" });
         });
+    }
+
+    /// <summary>Role name → AgentType for the override APIs: the four
+    /// engineering roles via the registry, plus intake (the only
+    /// pipeline role with its own AgentType + model).</summary>
+    private static Core.AgentType? ResolveAgentType(RoleAgentRegistry registry, string name)
+    {
+        var role = registry.ByAgentName(name);
+        if (role is not null) return registry.TypeOf(role);
+        if (string.Equals(name, "intake", StringComparison.OrdinalIgnoreCase)) return Core.AgentType.Intake;
+        return null;
     }
 
     private static (string Source, string? Path, string? Content) LoadPrompt(string? projectRoot, string agentName)

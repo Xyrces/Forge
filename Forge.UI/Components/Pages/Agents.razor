@@ -23,6 +23,10 @@
     }
     else
     {
+        <section class="overview-section">
+            <h2>Engineering roles</h2>
+            <p class="page-subtitle page-subtitle--meta">Dispatched per task by the sprint loop. Models editable live; caps edited per project.</p>
+        </section>
         @foreach (var role in _data.Roles)
         {
             <div class="card overview-section">
@@ -151,6 +155,72 @@
                 </table>
             </div>
         }
+
+        <section class="overview-section">
+            <h2>Pipeline roles</h2>
+            <p class="page-subtitle page-subtitle--meta">
+                Scheduler-side agents (intake, design, grooming, art) plus the dispatch loop itself.
+                Instructions live in code, not prompt files; designer/groomer/artist borrow coredev's model.
+            </p>
+        </section>
+        @foreach (var role in _data.Pipeline)
+        {
+            <div class="card overview-section">
+                <div class="role-head">
+                    <span class="role-head__name">@role.Name</span>
+                    <span class="pill">pipeline</span>
+                    <span class="meta-text">@role.Description</span>
+                    <a href="@role.Surface" class="meta-text" style="margin-left:auto;">view work →</a>
+                    <span style="width:180px;">
+                        <RoleSlotMeter Role="@role.Name" InFlight="@role.Slot.InFlight" Max="@role.Slot.Max" />
+                    </span>
+                </div>
+                <table class="data-grid">
+                    <tbody>
+                        <tr>
+                            <td style="width:130px;" class="meta-text">Model</td>
+                            <td>
+                                @if (_editingRole == role.Name)
+                                {
+                                    <div class="role-model-edit">
+                                        <select class="mono" @bind="_editProvider">
+                                            @foreach (var p in _data.Providers)
+                                            {
+                                                <option value="@p">@p</option>
+                                            }
+                                        </select>
+                                        <input type="text" class="mono" @bind="_editModel" placeholder="model (e.g. kimi-k3)" />
+                                        <button class="btn btn--primary" @onclick="() => SaveModelAsync(role.Name)">Save</button>
+                                        <button class="btn" @onclick="() => _editingRole = null">Cancel</button>
+                                        @if (_editError is not null)
+                                        {
+                                            <span class="error-text">@_editError</span>
+                                        }
+                                    </div>
+                                }
+                                else if (role.Model.Provider is null)
+                                {
+                                    <span class="meta-text">no LLM</span>
+                                }
+                                else
+                                {
+                                    <span class="mono">@role.Model.Provider / @role.Model.Model</span>
+                                    <span class="pill @(role.Model.Source == "override" ? "pill--primary" : "")" style="margin-left:8px; font-size:11px;">@role.Model.Source</span>
+                                    @if (_data.OverridesEditable && role.ModelEditable)
+                                    {
+                                        <button class="btn" style="margin-left:8px; padding:2px 10px; font-size:12px;" @onclick="() => BeginEditPipeline(role)">Edit</button>
+                                        @if (role.Model.Source == "override")
+                                        {
+                                            <button class="btn" style="margin-left:4px; padding:2px 10px; font-size:12px;" @onclick="() => ClearModelAsync(role.Name)">Clear override</button>
+                                        }
+                                    }
+                                }
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        }
     }
 </div>
 
@@ -195,6 +265,14 @@
     }
 
     private void BeginEdit(RoleDto role)
+    {
+        _editingRole = role.Name;
+        _editProvider = role.Model.Provider ?? (_data?.Providers.FirstOrDefault() ?? "");
+        _editModel = role.Model.Model ?? "";
+        _editError = null;
+    }
+
+    private void BeginEditPipeline(PipelineRoleDto role)
     {
         _editingRole = role.Name;
         _editProvider = role.Model.Provider ?? (_data?.Providers.FirstOrDefault() ?? "");
@@ -257,11 +335,14 @@
         _pollCts.Dispose();
     }
 
-    private sealed record RolesResponse(List<RoleDto> Roles, string[] Providers, bool OverridesEditable);
+    private sealed record RolesResponse(List<RoleDto> Roles, List<PipelineRoleDto> Pipeline, string[] Providers, bool OverridesEditable);
     private sealed record RoleDto(
         string Name, string AgentType, string Territory, string[] Tools,
         ModelDto Model, SlotDto Slot, PromptDto Prompt,
         CurrentRunDto? CurrentRun, LastRunDto? LastRun);
+    private sealed record PipelineRoleDto(
+        string Name, string Description, string Surface,
+        ModelDto Model, bool ModelEditable, SlotDto Slot);
     private sealed record ModelDto(string? Provider, string? Model, string Source);
     private sealed record SlotDto(int InFlight, int Max);
     private sealed record PromptDto(string Source, string? Path, string? Content);

@@ -277,10 +277,9 @@ if (mode == CliMode.DashboardOnly)
     private static Orchestrator.Slots.SlotTable BuildSlotTable(IReadOnlyList<ProjectOptions> projects)
     {
         var slots = new Orchestrator.Slots.SlotTable();
-        var roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
         foreach (var p in projects)
         {
-            foreach (var role in roleFiller)
+            foreach (var role in Agents.RoleAgentRegistry.AllSlotRoles)
             {
                 var max = DefaultProjectRoles.MaxFor(p.Roles, role);
                 slots.Configure(p.Id, role, max);

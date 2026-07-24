@@ -95,4 +95,46 @@ public sealed class RoleAgentRegistry
         "review" => AgentType.Reviewer,
         _ => AgentType.CoreDev
     };
+
+    /// <summary>
+    /// A pipeline (scheduler-side) role: not dispatched per-task by the
+    /// engineering loop, but a first-class agent the operator must be
+    /// able to see (operator rule 2026-07-24: nothing hidden).
+    /// <see cref="ModelType"/> is set when the role has its own
+    /// AgentType (intake — its model is independently configurable);
+    /// <see cref="InheritsModelFrom"/> names the engineering role whose
+    /// model the scheduler borrows (designer/groomer/artist create
+    /// their chat clients as CoreDev). Orchestrator has no LLM at all.
+    /// </summary>
+    public sealed record PipelineRole(
+        string AgentName,
+        string Description,
+        AgentType? ModelType,
+        string? InheritsModelFrom,
+        string Surface);
+
+    /// <summary>
+    /// The canonical pipeline-role catalog — the SAME list the project
+    /// drill-down's slot grid shows, so both surfaces answer "what
+    /// agents exist?" identically.
+    /// </summary>
+    public static readonly IReadOnlyList<PipelineRole> Pipeline = new[]
+    {
+        new PipelineRole("artist",       "Visual asset generation (Meshy)",            null,             "coredev", "/art"),
+        new PipelineRole("designer",     "Spec → design artifacts (hygiene + visuals)", null,            "coredev", "/designs"),
+        new PipelineRole("groomer",      "Spec + ad-hoc technical grooming",           null,             "coredev", "/specs"),
+        new PipelineRole("intake",       "Operator intake sessions → epics/specs",     AgentType.Intake, null,      "/intake"),
+        new PipelineRole("orchestrator", "Dispatch loop — no LLM",                     null,             null,      "/flow"),
+    };
+
+    /// <summary>
+    /// Every role name that gets a SlotTable pool — engineering +
+    /// pipeline. Program.BuildSlotTable sizes pools from this so the
+    /// drill-down's slot grid and the Agents page show the same set.
+    /// </summary>
+    public static IReadOnlyList<string> AllSlotRoles
+        => new[] { "coredev", "clientdev", "qa", "reviewer" }
+            .Concat(Pipeline.Select(p => p.AgentName))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
 }
