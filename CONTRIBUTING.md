@@ -60,6 +60,13 @@ If a new class needs to read `IOptions<AgentOptions>` AND write to `IssueStore` 
 - Use `Microsoft.Extensions.Logging.Abstractions.NullLogger<T>.Instance` when you need a no-op logger in tests.
 - Tests use xUnit + FluentAssertions-light (xUnit's `Assert.Equal` etc.). No Moq; we hand-roll fakes. Fakes are typed classes, not extension methods on `Mock<T>`.
 
+### UI consistency (enforced, not aspirational)
+
+- **Shared concepts render through shared components.** A concurrency slot is `<RoleSlotMeter>` everywhere (project drill-down AND the Agents page). If a concept appears on two pages, it gets ONE component in `Forge.UI/Components/`; pages compose, they don't re-render their own version.
+- **No inline `style=` for shared visuals.** Cards, pills, grids, meters, banners, form controls come from the design-system classes in `Forge.UI/wwwroot/app.css` (`.card`, `.pill--*`, `.data-grid`, `.slot-card`, `.banner--*`, `.role-*`). New shared visuals get a class in `app.css` (documented with a comment), not a page-local inline style.
+- **Cross-link related surfaces instead of duplicating them.** Role caps live on the project drill-down; role models/prompts live on `/agents`. Each links to the other. A setting edited in two places is a bug.
+- Pages poll for live data with `PeriodicTimer` + `CancellationTokenSource` cancelled in `Dispose` (see `Agents.razor`).
+
 ### Schema migrations
 
 When you change `Core/IssueStore.cs`'s schema:

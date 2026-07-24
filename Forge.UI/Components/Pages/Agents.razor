@@ -15,7 +15,7 @@
 
     @if (_error is not null)
     {
-        <div class="page-subtitle">Error: @_error</div>
+        <div class="banner banner--error"><span>@_error</span></div>
     }
     else if (_data is null)
     {
@@ -25,52 +25,50 @@
     {
         @foreach (var role in _data.Roles)
         {
-            <div class="card" style="margin-bottom:16px; padding:16px; border:1px solid var(--border,#333); border-radius:8px;">
-                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <span class="mono" style="font-size:18px; font-weight:600;">@role.Name</span>
+            <div class="card overview-section">
+                <div class="role-head">
+                    <span class="role-head__name">@role.Name</span>
                     <span class="pill">@role.AgentType</span>
                     @if (role.CurrentRun is not null)
                     {
                         <a href="/runs/@role.CurrentRun.Id" class="pill pill--inprogress" style="text-decoration:none;">
                             RUNNING · @(role.CurrentRun.TaskId ?? "—") · @Elapsed(role.CurrentRun.StartedAt)
                         </a>
-                        <span style="font-size:12px; opacity:.8;">
-                            @ProgressText(role.CurrentRun)
-                        </span>
+                        <span class="meta-text">@ProgressText(role.CurrentRun)</span>
                         @if (role.CurrentRun.TaskId is not null)
                         {
-                            <a href="/tasks/@role.CurrentRun.TaskId" style="font-size:12px;">view task</a>
+                            <a href="/tasks/@role.CurrentRun.TaskId" class="meta-text">view task</a>
                         }
                     }
                     else
                     {
                         <span class="pill">idle</span>
                     }
-                    <span style="margin-left:auto; font-size:12px; opacity:.75;">
-                        slots @role.Slot.InFlight/@role.Slot.Max
+                    <span style="width:180px; margin-left:auto;">
+                        <RoleSlotMeter Role="@role.Name" InFlight="@role.Slot.InFlight" Max="@role.Slot.Max" />
                     </span>
                 </div>
 
-                <table class="data-grid" style="margin-top:12px;">
+                <table class="data-grid">
                     <tbody>
                         <tr>
-                            <td style="width:130px; opacity:.7;">Model</td>
+                            <td style="width:130px;" class="meta-text">Model</td>
                             <td>
                                 @if (_editingRole == role.Name)
                                 {
-                                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                    <div class="role-model-edit">
                                         <select class="mono" @bind="_editProvider">
                                             @foreach (var p in _data.Providers)
                                             {
                                                 <option value="@p">@p</option>
                                             }
                                         </select>
-                                        <input class="mono" style="min-width:260px;" @bind="_editModel" placeholder="model (e.g. kimi-k3)" />
+                                        <input type="text" class="mono" @bind="_editModel" placeholder="model (e.g. kimi-k3)" />
                                         <button class="btn btn--primary" @onclick="() => SaveModelAsync(role.Name)">Save</button>
                                         <button class="btn" @onclick="() => _editingRole = null">Cancel</button>
                                         @if (_editError is not null)
                                         {
-                                            <span style="color:var(--failed,#f66); font-size:12px;">@_editError</span>
+                                            <span class="error-text">@_editError</span>
                                         }
                                     </div>
                                 }
@@ -90,11 +88,11 @@
                             </td>
                         </tr>
                         <tr>
-                            <td style="opacity:.7;">Territory</td>
-                            <td class="mono" style="font-size:12px;">@(string.IsNullOrWhiteSpace(role.Territory) ? "(whole repo)" : role.Territory)</td>
+                            <td class="meta-text">Territory</td>
+                            <td class="mono meta-text">@(string.IsNullOrWhiteSpace(role.Territory) ? "(whole repo)" : role.Territory)</td>
                         </tr>
                         <tr>
-                            <td style="opacity:.7;">Tools</td>
+                            <td class="meta-text">Tools</td>
                             <td>
                                 @foreach (var t in role.Tools)
                                 {
@@ -103,18 +101,18 @@
                             </td>
                         </tr>
                         <tr>
-                            <td style="opacity:.7;">Concurrency</td>
-                            <td style="font-size:12px;">
+                            <td class="meta-text">Concurrency</td>
+                            <td class="meta-text">
                                 @role.Slot.InFlight in flight · cap @role.Slot.Max
-                                <a href="/projects/forge" style="margin-left:8px;">edit caps</a>
+                                <a href="/projects/forge/overview" style="margin-left:8px;">edit caps</a>
                             </td>
                         </tr>
                         <tr>
-                            <td style="opacity:.7;">Last run</td>
-                            <td style="font-size:12px;">
+                            <td class="meta-text">Last run</td>
+                            <td class="meta-text">
                                 @if (role.LastRun is null)
                                 {
-                                    <span style="opacity:.6;">none yet</span>
+                                    <span>none yet</span>
                                 }
                                 else
                                 {
@@ -122,21 +120,21 @@
                                         <span class="pill @(role.LastRun.Status == "succeeded" ? "pill--completed" : "pill--failed")">@role.LastRun.Status</span>
                                     </a>
                                     <span class="mono" style="margin-left:6px;">@(role.LastRun.TaskId ?? "—")</span>
-                                    <span style="margin-left:6px; opacity:.75;">@FormatWhen(role.LastRun.FinishedAt) · @FormatDuration(role.LastRun.DurationMs)</span>
+                                    <span style="margin-left:6px;">@FormatWhen(role.LastRun.FinishedAt) · @FormatDuration(role.LastRun.DurationMs)</span>
                                     @if (!string.IsNullOrEmpty(role.LastRun.Error))
                                     {
-                                        <div style="opacity:.75; margin-top:2px;" class="mono">@Truncate(role.LastRun.Error, 160)</div>
+                                        <div class="error-text mono">@Truncate(role.LastRun.Error, 160)</div>
                                     }
                                 }
                             </td>
                         </tr>
                         <tr>
-                            <td style="opacity:.7; vertical-align:top;">Role prompt</td>
+                            <td class="meta-text" style="vertical-align:top;">Role prompt</td>
                             <td>
                                 <details>
-                                    <summary style="cursor:pointer; font-size:12px;">
+                                    <summary style="cursor:pointer;" class="meta-text">
                                         <span class="pill" style="font-size:11px;">@role.Prompt.Source</span>
-                                        <span class="mono" style="margin-left:6px; font-size:11px; opacity:.7;">@role.Prompt.Path</span>
+                                        <span class="mono" style="margin-left:6px;">@role.Prompt.Path</span>
                                     </summary>
                                     @if (role.Prompt.Content is null)
                                     {
@@ -144,7 +142,7 @@
                                     }
                                     else
                                     {
-                                        <pre class="mono" style="max-height:420px; overflow:auto; font-size:11px; padding:10px; border:1px solid var(--border,#333); border-radius:6px; white-space:pre-wrap;">@role.Prompt.Content</pre>
+                                        <pre class="prompt-block">@role.Prompt.Content</pre>
                                     }
                                 </details>
                             </td>

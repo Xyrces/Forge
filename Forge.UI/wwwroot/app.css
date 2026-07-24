@@ -440,6 +440,22 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
    Overview / metrics
    ------------------------------------------------------------------------- */
 
+/* Role control surface (Agents page) — same visual language as the
+   project drill-down: .card, .pill, .data-grid, .slot-card. Keep
+   role presentation consistent everywhere; add new role UI here,
+   not inline. */
+.role-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.role-head__name { font-family: var(--font-mono); font-size: 16px; font-weight: 600; }
+.meta-text { font-size: 12px; color: var(--on-surface-variant); }
+.error-text { color: var(--error); font-size: 12px; }
+.prompt-block {
+  max-height: 420px; overflow: auto; font-family: var(--font-mono); font-size: 11px;
+  padding: 10px; background: var(--surface-1); border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-md); white-space: pre-wrap;
+}
+.role-model-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.role-model-edit input { min-width: 260px; }
+
 .overview-section { margin-top: 24px; }
 .overview-section h2 {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;

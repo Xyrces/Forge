@@ -40,6 +40,7 @@ If a class needs to read `IOptions<X>` AND write `IssueStore` AND make HTTP call
 - Never swallow exceptions in production paths. Log them or return early. Never `try { ... } catch (Exception) { }`.
 - Never use `Task.Run` to "fix" an async signature. If a method is async, await it. If it isn't, don't fake it.
 - Don't add `--dashboard-only`-style escape-hatch CLI flags without operator sign-off. They tend to outlast their purpose.
+- **UI consistency is enforced** (operator rule, 2026-07-24): shared concepts render through shared components (a slot is `<RoleSlotMeter>` everywhere); no inline `style=` for shared visuals — design-system classes in `Forge.UI/wwwroot/app.css` (`.card`, `.pill--*`, `.data-grid`, `.slot-card`, `.banner--*`, `.role-*`); new shared visuals get an `app.css` class, not a page-local style; cross-link related surfaces, never edit the same setting in two places (caps = project drill-down, models/prompts = `/agents`).
 
 ## Agent-specific rules (the ones an LLM agent most often gets wrong)
 
