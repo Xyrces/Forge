@@ -1,0 +1,181 @@
+@page "/now"
+@inject HttpClient Http
+@implements IDisposable
+@using System.Net.Http.Json
+
+<PageTitle>Now</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Now</h1>
+        <div class="page-header__meta">@(_feed is null ? "loading…" : $"as of {_feed.GeneratedAt.ToLocalTime():HH:mm:ss}")</div>
+        <div class="page-header__actions">
+            <button class="btn" @onclick="LoadAsync">Refresh</button>
+        </div>
+    </div>
+
+    @if (_feed is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else
+    {
+        @* ── 1. NEEDS ATTENTION ─────────────────────────────── *@
+        <section style="margin-bottom:22px">
+            <h2 style="font-size:15px;margin:0 0 8px">Needs your attention</h2>
+            @if (_feed.Attention.Count == 0)
+            {
+                <div style="padding:14px 16px;border:1px solid var(--outline-variant);border-left:4px solid #2e7d32;border-radius:8px;color:var(--on-surface-variant)">
+                    Nothing needs you. The machine is running.
+                </div>
+            }
+            <div style="display:flex;flex-direction:column;gap:6px">
+                @foreach (var a in _feed.Attention)
+                {
+                    <a href="@a.Link" style="text-decoration:none;color:inherit">
+                        <div style="padding:10px 14px;border:1px solid var(--outline-variant);border-radius:8px;border-left:4px solid @SeverityColor(a.Severity)">
+                            <div style="display:flex;justify-content:space-between;gap:12px">
+                                <span style="font-weight:500">@a.Title</span>
+                                <span class="mono" style="font-size:11px;color:var(--on-surface-variant)">@a.Kind</span>
+                            </div>
+                            @if (a.Detail is not null)
+                            {
+                                <div style="font-size:13px;color:var(--on-surface-variant);margin-top:2px">@a.Detail</div>
+                            }
+                        </div>
+                    </a>
+                }
+            </div>
+        </section>
+
+        @* ── 2. HAPPENING NOW ───────────────────────────────── *@
+        <section style="margin-bottom:22px">
+            <h2 style="font-size:15px;margin:0 0 8px">Happening now</h2>
+            @if (_feed.Live.Count == 0)
+            {
+                <div class="page-subtitle">Idle — no agent runs in flight.</div>
+            }
+            <div style="display:flex;flex-direction:column;gap:4px">
+                @foreach (var l in _feed.Live)
+                {
+                    <a href="/tasks/@l.IssueId" style="text-decoration:none;color:inherit">
+                        <div style="display:flex;gap:10px;align-items:center;padding:8px 12px;border:1px solid var(--outline-variant);border-radius:8px">
+                            <span style="width:8px;height:8px;border-radius:50%;background:var(--primary);flex-shrink:0"></span>
+                            <span class="mono" style="min-width:90px">@l.IssueId</span>
+                            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@l.Title</span>
+                            <span style="color:var(--on-surface-variant);font-size:13px">@l.Stage</span>
+                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(l.ElapsedMs)</span>
+                        </div>
+                    </a>
+                }
+            </div>
+        </section>
+
+        @* ── 3. WAITING & WHY ───────────────────────────────── *@
+        <section style="margin-bottom:22px">
+            <h2 style="font-size:15px;margin:0 0 8px">Waiting — and why</h2>
+            @if (_feed.Waiting.Count == 0)
+            {
+                <div class="page-subtitle">Nothing queued.</div>
+            }
+            <div style="display:flex;flex-direction:column;gap:4px">
+                @foreach (var w in _feed.Waiting)
+                {
+                    <a href="/tasks/@w.IssueId" style="text-decoration:none;color:inherit">
+                        <div style="display:flex;gap:10px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--outline-variant)">
+                            <span class="mono" style="min-width:90px;color:var(--on-surface-variant)">@w.IssueId</span>
+                            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px">@w.Title</span>
+                            <span style="font-size:13px;color:var(--on-surface-variant)">@w.Reason</span>
+                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(w.WaitingMs)</span>
+                        </div>
+                    </a>
+                }
+            </div>
+        </section>
+
+        @* ── 4. PULSE ───────────────────────────────────────── *@
+        <section>
+            <h2 style="font-size:15px;margin:0 0 8px">Pipeline</h2>
+            <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+                <span style="display:flex;gap:6px;align-items:center">
+                    @foreach (var (stage, state) in _feed.Pulse.Gates)
+                    {
+                        <button class="chip @(state == "hold" ? "chip--active" : "")"
+                                title="@(state == "hold" ? $"Held — {stage} paused. Click to release." : $"{stage} open. Click to hold.")"
+                                @onclick="@(() => ToggleGateAsync(stage))">
+                            @stage
+                        </button>
+                    }
+                </span>
+                @if (_feed.Pulse.Sprint is { } s)
+                {
+                    <a href="/sprints" style="text-decoration:none">
+                        Sprint: <strong>@s.Name</strong> — @s.Done/@s.Total done
+                    </a>
+                }
+                else
+                {
+                    <span class="page-subtitle">No active sprint</span>
+                }
+                <span class="page-subtitle">last activity @(_feed.Pulse.LastActivityAt?.ToLocalTime().ToString("HH:mm:ss") ?? "—")</span>
+            </div>
+        </section>
+    }
+</div>
+
+@code {
+    private NowFeedDto? _feed;
+    private System.Threading.Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _timer = new System.Threading.Timer(_ => InvokeAsync(LoadAsync), null,
+            TimeSpan.Zero, TimeSpan.FromSeconds(5));
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _feed = await Http.GetFromJsonAsync<NowFeedDto>("/api/now");
+            StateHasChanged();
+        }
+        catch { /* keep last good frame */ }
+    }
+
+    private async Task ToggleGateAsync(string stage)
+    {
+        var held = _feed?.Pulse.Gates.TryGetValue(stage, out var s) == true && s == "hold";
+        var resp = await Http.PostAsync($"/api/gates/{stage}/{(held ? "release" : "hold")}", null);
+        if (resp.IsSuccessStatusCode) await LoadAsync();
+    }
+
+    private static string SeverityColor(string severity) => severity switch
+    {
+        "fail" => "#c62828",
+        "warn" => "#ef6c00",
+        _ => "#1565c0",
+    };
+
+    private static string Fmt(long ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        if (ts.TotalDays >= 1) return $"{(int)ts.TotalDays}d";
+        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h";
+        if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m";
+        return $"{(int)ts.TotalSeconds}s";
+    }
+
+    public void Dispose() => _timer?.Dispose();
+
+    private sealed record NowFeedDto(
+        DateTime GeneratedAt,
+        List<AttentionDto> Attention,
+        List<LiveDto> Live,
+        List<WaitingDto> Waiting,
+        PulseDto Pulse);
+    private sealed record AttentionDto(string Severity, string Kind, string Title, string? Detail, string? IssueId, string Link);
+    private sealed record LiveDto(string IssueId, string Title, string Stage, long ElapsedMs);
+    private sealed record WaitingDto(string IssueId, string Title, string Reason, long WaitingMs);
+    private sealed record PulseDto(Dictionary<string, string> Gates, SprintDto? Sprint, DateTime? LastActivityAt);
+    private sealed record SprintDto(string Id, string Name, int Done, int Total);
+}

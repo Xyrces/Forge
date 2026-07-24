@@ -441,6 +441,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         }
 
         FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions);
+        NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory);
 
 if (_groomerRuns is not null)
             {
