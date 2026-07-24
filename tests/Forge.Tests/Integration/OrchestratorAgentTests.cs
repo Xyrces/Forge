@@ -427,6 +427,67 @@ public sealed class OrchestratorAgentTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task DispatchCycle_InFlightCap_SecondTaskWaitsForFirst()
+    {
+        // Regression (observed live 2026-07-24): fire-and-forget
+        // Task.Run dispatch with no in-flight tracking let every
+        // poll tick claim more work before earlier runs finished —
+        // burst 429s and same-task double-claims 1ms apart.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new BlockingRunner(gate);
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        var orch = BuildOrchestrator(runner);
+        BindMaf(orch);
+
+        var first = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "first", Description: "x"));
+        var second = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "second", Description: "x"));
+        await ActivateSprintWithAsync(first.Id, second.Id);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        var loop = orch.ExecuteAsync(cts.Token);
+
+        // First task gets claimed and its run blocks on the gate.
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            return (await _issues.GetAsync(first.Id))!.Status == IssueStatus.InProgress;
+        }, TimeSpan.FromSeconds(12));
+        // While it is in flight, the second task must NOT be claimed
+        // (previously: claimed on the very next poll tick).
+        await Task.Delay(2500);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(second.Id))!.Status);
+
+        gate.SetResult();
+        await WaitForAsync(async () =>
+            (await _issues.GetAsync(second.Id))!.Status != IssueStatus.Pending, TimeSpan.FromSeconds(10));
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+    }
+
+    private static async Task WaitForAsync(Func<Task<bool>> cond, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (await cond()) return;
+            await Task.Delay(100);
+        }
+        Assert.Fail("condition not met within timeout");
+    }
+
+    private sealed class BlockingRunner : IAgentRunner
+    {
+        private readonly TaskCompletionSource _gate;
+        public BlockingRunner(TaskCompletionSource gate) { _gate = gate; }
+        public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            await _gate.Task;
+            return new AgentRunResult("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1));
+        }
+    }
+
     private sealed class ScriptedRunner : IAgentRunner
     {
         private readonly string _response;

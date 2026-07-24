@@ -112,12 +112,18 @@
                     <tr><th>When</th><th>Kind</th><th>Detail</th></tr>
                 </thead>
                 <tbody>
-                    @foreach (var e in _events)
+                    @foreach (var g in GroupedEvents())
                     {
                         <tr>
-                            <td class="mono">@e.At</td>
-                            <td class="mono">@e.Kind</td>
-                            <td>@e.Detail</td>
+                            <td class="mono">@g.At</td>
+                            <td class="mono">@g.Kind</td>
+                            <td>
+                                @g.Detail
+                                @if (g.Count > 1)
+                                {
+                                    <span class="pill pill--blocked" title="@($"{g.Count} identical events, {g.FirstAt} → {g.At}")">×@g.Count</span>
+                                }
+                            </td>
                         </tr>
                     }
                 </tbody>
@@ -136,6 +142,27 @@
     private string? _error;
 
     private string StatusCss => Prop(_task, "status")?.ToLowerInvariant() ?? "unknown";
+
+    // Collapse runs of identical events (kind + detail) into one row
+    // with a ×N badge — a 429 storm otherwise renders as an
+    // unreadable wall of duplicates (observed live on task-156).
+    private IEnumerable<EventGroup> GroupedEvents()
+    {
+        EventGroup? cur = null;
+        foreach (var e in _events)
+        {
+            if (cur is not null && cur.Kind == e.Kind && cur.Detail == e.Detail)
+            {
+                cur = cur with { At = e.At, Count = cur.Count + 1 };
+                continue;
+            }
+            if (cur is not null) yield return cur;
+            cur = new EventGroup(e.At, e.At, e.Kind, e.Detail, 1);
+        }
+        if (cur is not null) yield return cur;
+    }
+
+    private sealed record EventGroup(string FirstAt, string At, string Kind, string Detail, int Count);
 
     protected override async Task OnInitializedAsync() => await LoadAsync();
 

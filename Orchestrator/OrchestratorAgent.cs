@@ -43,6 +43,14 @@ public sealed class OrchestratorAgent : IAgent
     // task (not a code failure) and pauses new dev dispatches.
     private DateTime _llmRateLimitedUntil = DateTime.MinValue;
     private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
+    // In-flight dev dispatches. The cycle fire-and-forgets runs via
+    // Task.Run so the watch sweep isn't starved — but without this
+    // guard, every poll tick can claim MORE work before an earlier
+    // run fails (the 429 cooldown is only set when the run fails),
+    // which produced burst 429s and same-task double-claims 1ms
+    // apart (observed live 2026-07-24). The cap enforces
+    // MaxConcurrentSessions across cycles, not just within one.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -164,7 +172,8 @@ public sealed class OrchestratorAgent : IAgent
                 // ui, bug, ...).
                 var devTasks = allReady.Where(i => i.Type != AgentTaskTypes.PrWatch
                     && !AgentTaskTypes.IsContainer(i.Type)
-                    && sprintMemberIds.Contains(i.Id))
+                    && sprintMemberIds.Contains(i.Id)
+                    && !_inFlight.ContainsKey(i.Id))
                     .Take(_spawnerOptions.MaxConcurrentSessions)
                     .ToList();
                 if (devTasks.Count > 0 && DateTime.UtcNow < _llmRateLimitedUntil)
@@ -173,8 +182,29 @@ public sealed class OrchestratorAgent : IAgent
                         devTasks.Count, _llmRateLimitedUntil);
                     continue;
                 }
+                if (devTasks.Count > 0 && _inFlight.Count >= _spawnerOptions.MaxConcurrentSessions)
+                {
+                    _logger.LogDebug("Dispatch cycle: {N} runs in flight (cap {Cap}) — not claiming more",
+                        _inFlight.Count, _spawnerOptions.MaxConcurrentSessions);
+                    continue;
+                }
                 foreach (var dev in devTasks)
-                    _ = Task.Run(() => DispatchSingleTaskAsync(dev, bundle, cancellationToken), cancellationToken);
+                {
+                    if (!_inFlight.TryAdd(dev.Id, 0))
+                    {
+                        _logger.LogDebug("Dispatch cycle: {Id} already in flight — skipping double-claim", dev.Id);
+                        continue;
+                    }
+                    _ = Task.Run(async () =>
+                    {
+                        try { await DispatchSingleTaskAsync(dev, bundle, cancellationToken); }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Dispatch for {Id} faulted", dev.Id);
+                        }
+                        finally { _inFlight.TryRemove(dev.Id, out _); }
+                    }, cancellationToken);
+                }
             }
             catch (Exception ex)
             {
