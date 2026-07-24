@@ -95,7 +95,9 @@ public static class FlowEndpoints
             var events = await issues.ListEventsAsync(id, limit: 200, ct);
             var journey = FlowGraph.BuildJourney(
                 issue,
-                events.Select(e => (e.Kind, e.Timestamp, (string?)e.Detail)).ToList(),
+                // Store returns newest-first; the journey is chronological.
+                events.OrderBy(e => e.Timestamp)
+                    .Select(e => (e.Kind, e.Timestamp, (string?)e.Detail)).ToList(),
                 currentNode);
 
             // Per-stage drill-down details. Everything here is read
