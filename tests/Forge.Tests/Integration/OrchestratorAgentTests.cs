@@ -97,7 +97,7 @@ public sealed class OrchestratorAgentTests : IDisposable
     /// the ACTIVE sprint. Tests that expect a dispatch must activate
     /// a sprint containing the task first.
     /// </summary>
-    private async Task ActivateSprintWithAsync(params string[] issueIds)
+    private async Task<string> ActivateSprintWithAsync(params string[] issueIds)
     {
         var sprint = await _bundle.Sprints.CreateAsync(new Core.NewSprint(
             Name: "test sprint", Goal: "g",
@@ -107,6 +107,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         {
             await _bundle.Sprints.AddIssueAsync(sprint.Id, id);
         }
+        return sprint.Id;
     }
 
     public void Dispose()
@@ -158,7 +159,75 @@ public sealed class OrchestratorAgentTests : IDisposable
         {
             Workspace = new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
             Spawner = new SpawnerOptions { MaxConcurrentSessions = 1, PollIntervalSeconds = 1 },
+            // Per-model cooldown keys: CoreDev resolves to the default
+            // model, ClientDev is pinned to a second model on the same
+            // provider (the minimax vs kimi-k3 quota split).
+            Llm = new LlmOptions
+            {
+                Providers =
+                {
+                    new LlmProviderOptions { Name = "kilo-gateway", BaseUrl = "http://stub", DefaultModel = "minimax/minimax-m3" },
+                },
+                DefaultProvider = "kilo-gateway",
+                Roles = { ["ClientDev"] = new LlmRoleModelOptions { ProviderName = "kilo-gateway", Model = "kimi-k3" } },
+            },
         });
+    }
+
+    [Fact]
+    public async Task DispatchCycle_ModelCooldown_OtherModelStillClaims()
+    {
+        // Per-model 429 cooldowns (operator ask 2026-07-24): quotas
+        // live at the (provider, model) boundary — a 429 from minimax
+        // must NOT freeze tasks that would run on kimi-k3.
+        var runner = new CoreDevRateLimitedRunner();
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        var orch = BuildOrchestrator(runner);
+        BindMaf(orch);
+
+        // Sprint starts with only the dev task: it claims, 429s, and
+        // arms the minimax cooldown.
+        var dev = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "dev", Description: "x"));
+        var sprintId = await ActivateSprintWithAsync(dev.Id);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var loop = orch.ExecuteAsync(cts.Token);
+        await WaitForAsync(() => Task.FromResult(runner.CoreDev429d), TimeSpan.FromSeconds(15));
+        await WaitForAsync(async () =>
+            (await _issues.GetAsync(dev.Id))!.Status == IssueStatus.Pending, TimeSpan.FromSeconds(10));
+
+        // NOW a kimi-k3 task enters the sprint — mid-cooldown for
+        // minimax. A global cooldown would hold it for 3 minutes;
+        // per-model lets it claim immediately.
+        var ui = await _issues.CreateAsync(new NewIssue(Type: "ui", Title: "ui task", Description: "x"));
+        await _bundle.Sprints.AddIssueAsync(sprintId, ui.Id);
+
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            return (await _issues.GetAsync(ui.Id))!.Status is IssueStatus.InProgress or IssueStatus.Completed;
+        }, TimeSpan.FromSeconds(15));
+        // The minimax task must NOT have been reclaimed in the meantime.
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(dev.Id))!.Status);
+
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+    }
+
+    private sealed class CoreDevRateLimitedRunner : IAgentRunner
+    {
+        public volatile bool CoreDev429d;
+        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+            => role == AgentType.CoreDev
+                ? Throw429()
+                : Task.FromResult(new AgentRunResult("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1)));
+        private Task<AgentRunResult> Throw429()
+        {
+            CoreDev429d = true;
+            return Task.FromException<AgentRunResult>(
+                new HttpRequestException("Error 429 Too Many Requests: rate limit reached"));
+        }
     }
 
     [Fact]

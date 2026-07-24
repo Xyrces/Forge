@@ -38,10 +38,14 @@ public sealed class OrchestratorAgent : IAgent
     // 3 calls per watch per sweep (2 watches -> ~24 calls/hr).
     private DateTime _nextWatchSweepUtc = DateTime.MinValue;
     private static readonly TimeSpan WatchSweepInterval = TimeSpan.FromMinutes(15);
-    // LLM 429 cooldown for the engineering dispatch path. Free-tier
-    // providers rate-limit parallel agent runs; a 429 re-queues the
-    // task (not a code failure) and pauses new dev dispatches.
-    private DateTime _llmRateLimitedUntil = DateTime.MinValue;
+    // LLM 429 cooldowns for the engineering dispatch path, keyed by
+    // (provider, model) — quotas live at that boundary, so a 429 from
+    // minimax must not freeze tasks that would run on a different
+    // model (e.g. kimi-k3 reserved for grooming/review). A 429
+    // re-queues the task (not a code failure) and pauses new
+    // dispatches FOR THAT MODEL ONLY.
+    private readonly ModelRateLimitTracker _modelCooldowns;
+    private Agents.LlmConfig? _llmConfig;
     private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
     // In-flight dev dispatches. The cycle fire-and-forgets runs via
     // Task.Run so the watch sweep isn't starved — but without this
@@ -69,7 +73,8 @@ public sealed class OrchestratorAgent : IAgent
         IDashboardEventBus events,
         ILogger<OrchestratorAgent> logger,
         ILoggerFactory? loggerFactory = null,
-        Slots.SlotTable? slots = null)
+        Slots.SlotTable? slots = null,
+        ModelRateLimitTracker? modelCooldowns = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -81,6 +86,7 @@ public sealed class OrchestratorAgent : IAgent
         _logger = logger;
         _loggerFactory = loggerFactory;
         _slots = slots ?? new Slots.SlotTable();
+        _modelCooldowns = modelCooldowns ?? new ModelRateLimitTracker();
         _maxRetryCount = 1;
     }
 
@@ -178,17 +184,30 @@ public sealed class OrchestratorAgent : IAgent
                     && sprintMemberIds.Contains(i.Id)
                     && !_inFlight.ContainsKey(i.Id))
                     .ToList();
-                if (ready.Count > 0 && DateTime.UtcNow < _llmRateLimitedUntil)
+                // Per-(provider, model) 429 cooldowns: skip only the
+                // tasks whose model is cooling down. A minimax 429
+                // must not starve a task that would run on kimi-k3.
+                var coolingModels = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+                var claimable = new List<IssueRecord>(ready.Count);
+                foreach (var t in ready)
                 {
-                    _logger.LogDebug("Dispatch cycle: skipping {N} dev tasks — LLM rate-limit cooldown until {Until:HH:mm:ss}",
-                        ready.Count, _llmRateLimitedUntil);
+                    var mk = ResolveModelKey(t.Type);
+                    var until = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
+                    if (until is null) claimable.Add(t);
+                    else coolingModels[mk.Provider + "/" + mk.Model] = until.Value;
+                }
+                if (claimable.Count == 0 && coolingModels.Count > 0)
+                {
+                    foreach (var (model, until) in coolingModels)
+                        _logger.LogDebug("Dispatch cycle: {N} dev task(s) skipped — model {Model} cooling down until {Until:HH:mm:ss}",
+                            ready.Count, model, until);
                     continue;
                 }
                 // Per-role parallelism: every ready unblocked sprint
                 // task competes for ITS role's slot pool (coredev,
                 // clientdev, qa, reviewer). A full pool skips just
                 // that role's tasks — other roles keep claiming.
-                foreach (var dev in ready)
+                foreach (var dev in claimable)
                 {
                     var role = ResolveRoleName(dev.Type);
                     EnsureSlotCap(bundle.Project, role);
@@ -362,9 +381,10 @@ public sealed class OrchestratorAgent : IAgent
             {
                 if (IsLlmRateLimited(ex))
                 {
-                    _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
-                    _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",
-                        preClaimed.Id, LlmRateLimitCooldown);
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
                     await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
                     return new Result(false, "llm-rate-limited");
                 }
@@ -418,9 +438,10 @@ public sealed class OrchestratorAgent : IAgent
                 var alreadyTerminal = after?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed;
                 if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
-                    _llmRateLimitedUntil = DateTime.UtcNow + LlmRateLimitCooldown;
-                    _logger.LogWarning("Issue {Id}: LLM rate limit (429); re-queued, dispatch cooling down for {Cooldown}",
-                        preClaimed.Id, LlmRateLimitCooldown);
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
                     await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
                     return new Result(false, "llm-rate-limited");
                 }
@@ -469,6 +490,36 @@ public sealed class OrchestratorAgent : IAgent
     internal void BindOptions(AgentOptions options)
     {
         _spawnerOptions = options.Spawner;
+        // Provider+model map for per-model 429 cooldowns. Only names
+        // are used (cooldown keys) — secret resolution stays with the
+        // real chat-client factory. Invalid/absent config degrades to
+        // a single "default" bucket (the old global-cooldown behavior).
+        try { _llmConfig = Agents.LlmConfigAdapter.FromOptions(options.Llm); }
+        catch (Exception ex)
+        {
+            _llmConfig = null;
+            _logger.LogWarning("LLM role-model config unusable ({Err}) — per-model 429 cooldowns degrade to a single global bucket", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Resolve the (provider, model) a task would run on — the cooldown
+    /// key. Falls back to ("default","default") when no LLM config is
+    /// bound (tests) or the role's entry is broken, which reproduces
+    /// the pre-per-model global cooldown for that bucket.
+    /// </summary>
+    private (string Provider, string Model) ResolveModelKey(string taskType)
+    {
+        if (_llmConfig is null) return ("default", "default");
+        try
+        {
+            var (provider, model) = _llmConfig.Resolve(RoleAgentRegistry.FromTaskType(taskType));
+            return (provider.Name, model);
+        }
+        catch (InvalidOperationException)
+        {
+            return ("default", "default");
+        }
     }
 
     /// <summary>Task type → slot-pool role name (coredev/clientdev/qa/reviewer).</summary>
