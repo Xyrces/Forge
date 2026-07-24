@@ -74,7 +74,27 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
 
         var commit = await worktrees.CommitAllAsync(
             worktreePath, $"Task({issue.Id}): {issue.Title}", ct);
-        if (!commit.HasChanges)
+        // An agent that commits its own work via bash during the run
+        // (the prompt's contract) leaves "nothing to commit" for
+        // CommitAllAsync — which is NOT the same as "no work
+        // produced". Check whether the branch is actually ahead of
+        // base before declaring a no-diff run. (Observed live
+        // 2026-07-24: task-155's run committed +149 lines of real
+        // tests, then got requeued as 'no diff (attempt 1)' and was
+        // two strikes from Failed despite the work being real.)
+        var hasChanges = commit.HasChanges;
+        if (!hasChanges)
+        {
+            var ahead = await worktrees.GetDiffStatsAsync(worktreePath, input.Worktree.BaseBranch, ct);
+            if (!string.IsNullOrWhiteSpace(ahead.Summary))
+            {
+                hasChanges = true;
+                logger.LogInformation(
+                    "CommitPushPr({Id}): nothing to commit but branch is ahead of {Base} — agent self-committed ({Summary}); proceeding to push/PR",
+                    issue.Id, input.Worktree.BaseBranch, ahead.Summary);
+            }
+        }
+        if (!hasChanges)
         {
             // Stale-dispatch guard: a long agent run can finish AFTER
             // the watch already merged this task's PR (the rework

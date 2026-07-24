@@ -91,6 +91,52 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task SelfCommittedBranch_IsNotTreatedAsNoDiff()
+    {
+        // Regression (observed live 2026-07-24, task-155): an agent
+        // that commits its own work via bash leaves 'nothing to
+        // commit' for CommitAllAsync — but the branch IS ahead of
+        // base. The executor must proceed to push/PR, not burn a
+        // no-progress strike toward Failed.
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+
+        // Bare remote so PushAsync has somewhere to land the branch.
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+
+        // Simulate the agent self-committing in the worktree (bash).
+        var wtPath = worktree.WorktreePath!;
+        File.WriteAllText(Path.Combine(wtPath, "New.cs"), "class New {}");
+        Run("git", "config user.email test@test", wtPath);
+        Run("git", "config user.name Test", wtPath);
+        Run("git", "add -A", wtPath);
+        Run("git", "commit -q -m agent-work", wtPath);
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        // The stub throws at PR creation — reaching it proves the
+        // executor took the push/PR path, not the no-diff path.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CommitPushPrExecutor.HandleAsync(
+                agent, _issues, _worktrees, new StubGitHub(), _events,
+                new NoOpMemoryExtractor(),
+                new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+                NullLogger<CommitPushPrExecutor>.Instance, default).AsTask());
+
+        Assert.Contains("CreatePullRequestAsync should not be called", ex.Message);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.InProgress, after!.Status);
+        Assert.Null(after.GetMetadata("noProgressAttempts"));
+        Assert.Equal(DispatchCheckpoint.PushDone, after.DispatchCheckpoint);
+    }
+
+
+    [Fact]
     public async Task NoDiff_ExplicitNoOpMarker_TransitionsToCompleted()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
