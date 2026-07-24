@@ -955,6 +955,10 @@ Console.Error.WriteLine(ex.ToString());
         var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
         var memoryBootstrap = new Core.IssueStore(memoryDbPath);
         var memoryStore = new MemoryStore(memoryDbPath);
+        // Agent run registry + transcripts (schema v20 table on the
+        // primary project's issues.db): who ran what, when, and the
+        // full conversation for the run-detail view.
+        var agentRunStore = new Core.AgentRunStore(primaryDb);
         // Optional operator review gates at the major automatic
         // transitions (design / groom / sprint / merge). v1: backed
         // by the primary project's memory store.
@@ -1055,7 +1059,8 @@ Console.Error.WriteLine(ex.ToString());
             specs: () => specStoreRef.Value,
             artOutputs: () => artOutputs,
             secrets: secretStore,
-            issues: issues);
+            issues: issues,
+            runs: agentRunStore);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
@@ -1282,7 +1287,8 @@ Console.Error.WriteLine(ex.ToString());
             projectStore: projectStore,
             projectCloner: cloner,
             githubOptions: options.GitHub,
-            secretStore: secretStore);
+            secretStore: secretStore,
+            agentRuns: agentRunStore);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never

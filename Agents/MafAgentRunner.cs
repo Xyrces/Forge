@@ -38,6 +38,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
+    private readonly AgentRunStore? _runs;
 
     /// <summary>
     /// Optional path for the per-run diagnostic side-channel log
@@ -66,7 +67,8 @@ public sealed class MafAgentRunner : IAgentRunner
         Func<ISpecStore?>? specs = null,
         Func<ArtOutputStore?>? artOutputs = null,
         ISecretStore? secrets = null,
-        IIssueStore? issues = null)
+        IIssueStore? issues = null,
+        AgentRunStore? runs = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -81,6 +83,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _artOutputsFactory = artOutputs;
         _secrets = secrets;
         _issues = issues;
+        _runs = runs;
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -184,10 +187,33 @@ public async Task<AgentRunResult> RunAsync(
         // keep the full conversation history.
         session ??= await agent.CreateSessionAsync(ct);
 
+        // Run registry: visible in near real time as 'running'
+        // (who is doing what); the full transcript is persisted
+        // when the run finishes. Best-effort — never breaks a run.
+        var runId = Guid.NewGuid().ToString("N")[..12];
+        var runTaskId = ResolveContextString(context, "issueId");
+        var startedAt = DateTime.UtcNow;
+        if (_runs is not null)
+        {
+            try
+            {
+                await _runs.StartAsync(runId, runTaskId, role.ToString(),
+                    _config.Resolve(role).Model, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "agent_run start record failed for {Role}; continuing", role);
+            }
+        }
+
         try
         {
-            var startedAt = DateTime.UtcNow;
             var response = await agent.RunAsync(message, session, cancellationToken: ct);
+            // Transcript accumulation: AgentResponse.Messages holds
+            // only the messages added by THAT call, so stitch the
+            // initial prompt + each continuation turn together.
+            var transcriptMessages = new List<ChatMessage> { message };
+            transcriptMessages.AddRange(response.Messages);
 
             // minimax-m3 quirk: near the end of long tool-call runs the
             // model sometimes emits its next tool call as literal text
@@ -206,9 +232,12 @@ public async Task<AgentRunResult> RunAsync(
                 _logger.LogWarning(
                     "Role {Role}: tool-call markup leaked into response text; nudging model to continue ({N}/{Max})",
                     role, continuation + 1, maxContinuations);
+                var nudge = new ChatMessage(ChatRole.User, LeakedToolCallContinuationPrompt);
                 response = await agent.RunAsync(
-                    new ChatMessage(ChatRole.User, LeakedToolCallContinuationPrompt),
+                    nudge,
                     session, cancellationToken: ct);
+                transcriptMessages.Add(nudge);
+                transcriptMessages.AddRange(response.Messages);
             }
             var elapsed = DateTime.UtcNow - startedAt;
 
@@ -246,6 +275,24 @@ public async Task<AgentRunResult> RunAsync(
                 // best-effort
             }
 
+            if (_runs is not null)
+            {
+                try
+                {
+                    var transcript = BuildTranscriptJson(transcriptMessages);
+                    var toolCalls = transcriptMessages.Sum(m =>
+                        m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Count());
+                    await _runs.FinishAsync(runId, "succeeded",
+                        (long)elapsed.TotalMilliseconds,
+                        transcriptMessages.Count, toolCalls, text.Length,
+                        error: null, transcriptJson: transcript, ct: CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "agent_run finish record failed for {Role}; continuing", role);
+                }
+            }
+
             return new AgentRunResult(
     Text: text,
     SessionId: newSessionId,
@@ -253,7 +300,19 @@ public async Task<AgentRunResult> RunAsync(
     OutputTokens: 0,
     Elapsed: elapsed);
         }
-finally
+        catch (Exception ex) when (_runs is not null)
+        {
+            try
+            {
+                await _runs.FinishAsync(runId, "failed",
+                    (long)(DateTime.UtcNow - startedAt).TotalMilliseconds,
+                    0, 0, 0, $"{ex.GetType().Name}: {ex.Message}",
+                    transcriptJson: null, ct: CancellationToken.None);
+            }
+            catch { /* best-effort */ }
+            throw;
+        }
+        finally
         {
             // MAF ChatClientAgent does not implement IDisposable; chatClient is the
             // resource, and our stubbed IChatClient (Microsoft.Extensions.AI) is
@@ -271,6 +330,70 @@ finally
         if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
         return raw.ToString();
     }
+
+    private static string? ResolveContextString(IReadOnlyDictionary<string, object>? context, string key)
+    {
+        if (context is null) return null;
+        return context.TryGetValue(key, out var raw) ? raw?.ToString() : null;
+    }
+
+    /// <summary>
+    /// Serialize a run's full conversation for the run-detail view:
+    /// roles, text, tool calls (name + args), and tool results.
+    /// Full-fidelity with per-field caps (50KB text, 20KB results)
+    /// so a pathological single message can't blow up a row; table
+    /// size is bounded by AgentRunStore retention, not truncation.
+    /// </summary>
+    internal static string BuildTranscriptJson(IEnumerable<ChatMessage> messages)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new System.Text.Json.Utf8JsonWriter(stream))
+        {
+            writer.WriteStartArray();
+            foreach (var m in messages)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("role", m.Role.Value);
+                writer.WritePropertyName("contents");
+                writer.WriteStartArray();
+                foreach (var c in m.Contents)
+                {
+                    switch (c)
+                    {
+                        case Microsoft.Extensions.AI.TextContent text:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "text");
+                            writer.WriteString("text", Cap(text.Text, 50_000));
+                            writer.WriteEndObject();
+                            break;
+                        case Microsoft.Extensions.AI.FunctionCallContent call:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "tool_call");
+                            writer.WriteString("name", call.Name);
+                            writer.WriteString("callId", call.CallId);
+                            writer.WriteString("args", Cap(JsonSerializer.Serialize(call.Arguments), 20_000));
+                            writer.WriteEndObject();
+                            break;
+                        case Microsoft.Extensions.AI.FunctionResultContent result:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "tool_result");
+                            writer.WriteString("callId", result.CallId);
+                            writer.WriteString("result", Cap(
+                                result.Result?.ToString() ?? "", 20_000));
+                            writer.WriteEndObject();
+                            break;
+                    }
+                }
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string Cap(string? s, int n)
+        => s is null ? "" : s.Length <= n ? s : s[..n] + "…[truncated]";
 
     /// <summary>
     /// Build the secrets-by-reference environment for the agent's bash

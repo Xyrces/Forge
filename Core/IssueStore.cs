@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 19;
+    public const int CurrentSchemaVersion = 20;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -302,6 +302,34 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE,
                 UNIQUE (project_id, kind)
             );
+
+            -- v20: agent run registry + transcripts. One row per
+            -- agent run (engineering roles via MafAgentRunner):
+            -- written at run start (status='running') so the
+            -- dashboard sees who is doing what in near real time,
+            -- finished with outcome + the FULL conversation
+            -- transcript (roles, text, tool calls + results) for the
+            -- run-detail view. Retention (AgentRunStore.FinishAsync):
+            -- 30 days / newest 50 per task — transcripts are the
+            -- high-volume data and the 35GB budget is protected by
+            -- pruning, not by truncating content.
+            CREATE TABLE IF NOT EXISTS agent_run (
+                id               TEXT PRIMARY KEY,
+                task_id          TEXT,
+                role             TEXT NOT NULL,
+                model            TEXT,
+                status           TEXT NOT NULL,
+                started_at       TEXT NOT NULL,
+                finished_at      TEXT,
+                duration_ms      INTEGER,
+                message_count    INTEGER,
+                tool_call_count  INTEGER,
+                text_chars       INTEGER,
+                error            TEXT,
+                transcript_json  TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_run_started ON agent_run(started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run(task_id);
 
             CREATE TABLE IF NOT EXISTS skill (
                 id           TEXT PRIMARY KEY,
