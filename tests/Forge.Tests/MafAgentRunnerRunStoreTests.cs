@@ -17,6 +17,28 @@ public class MafAgentRunnerRunStoreTests : IDisposable
     private readonly IssueStore _schema;
     private readonly AgentRunStore _runs;
 
+    [Fact]
+    public void BuildTranscriptJson_IncludesThinkingContent()
+    {
+        // DeepSeek-style reasoning: TextReasoningContent must survive
+        // serialization as a "thinking" block (the run page renders
+        // it collapsible) — previously dropped entirely.
+        var messages = new[]
+        {
+            new Microsoft.Extensions.AI.ChatMessage(
+                Microsoft.Extensions.AI.ChatRole.Assistant,
+                new Microsoft.Extensions.AI.AIContent[]
+                {
+                    new Microsoft.Extensions.AI.TextReasoningContent("let me think about this…"),
+                    new Microsoft.Extensions.AI.TextContent("the answer is 4"),
+                }),
+        };
+        var json = Agents.MafAgentRunner.BuildTranscriptJson(messages);
+        Assert.Contains("\"thinking\"", json);
+        Assert.Contains("let me think about this", json);
+        Assert.Contains("the answer is 4", json);
+    }
+
     public MafAgentRunnerRunStoreTests()
     {
         _workDir = Path.Combine(Path.GetTempPath(), $"ph-mrs-{Guid.NewGuid():N}");

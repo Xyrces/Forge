@@ -424,6 +424,12 @@ public async Task<AgentRunResult> RunAsync(
                 {
                     switch (c)
                     {
+                        case Microsoft.Extensions.AI.TextReasoningContent thinking:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "thinking");
+                            writer.WriteString("text", Cap(thinking.Text, 50_000));
+                            writer.WriteEndObject();
+                            break;
                         case Microsoft.Extensions.AI.TextContent text:
                             writer.WriteStartObject();
                             writer.WriteString("type", "text");

@@ -68,6 +68,15 @@
                                 <pre style="margin:0;padding:12px;white-space:pre-wrap;font-size:13px;border-top:1px solid var(--outline-variant)">@msg.Text</pre>
                             </details>
                             break;
+                        case "thinking":
+                            <details style="border:1px solid var(--outline-variant);border-left:3px solid var(--outline-variant);border-radius:8px">
+                                <summary style="cursor:pointer;padding:8px 12px;color:var(--on-surface-variant)">
+                                    <span class="pill" style="font-size:11px">thinking</span>
+                                    <span style="font-size:12px;margin-left:8px">model reasoning (@msg.Text.Length chars)</span>
+                                </summary>
+                                <pre style="margin:0;padding:12px;white-space:pre-wrap;font-size:12px;color:var(--on-surface-variant);border-top:1px solid var(--outline-variant)">@msg.Text</pre>
+                            </details>
+                            break;
                         case "assistant":
                             <div style="border:1px solid var(--outline-variant);border-left:3px solid var(--primary);border-radius:8px;padding:10px 14px">
                                 <span class="pill pill--primary" style="font-size:11px">assistant</span>
@@ -189,6 +198,9 @@
         var msgs = new List<ChatMsg>();
         foreach (var (role, contents) in raw)
         {
+            var thinking = string.Concat(contents
+                .Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "thinking")
+                .Select(c => c.GetProperty("text").GetString()));
             var text = string.Concat(contents
                 .Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "text")
                 .Select(c => c.GetProperty("text").GetString()));
@@ -200,6 +212,10 @@
                     resultsByCallId.GetValueOrDefault(c.GetProperty("callId").GetString() ?? "")))
                 .ToList();
 
+            if (!string.IsNullOrWhiteSpace(thinking))
+            {
+                msgs.Add(new ChatMsg("thinking", thinking, new()));
+            }
             if (calls.Count > 0)
             {
                 msgs.Add(new ChatMsg("tools", "", calls));
