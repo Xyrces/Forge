@@ -190,6 +190,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             {
                 var meta = ParseMetadata(cur.MetadataJson);
                 meta["lastError"] = $"{ex.GetType().Name}: {ex.Message}";
+                meta["lastErrorAt"] = DateTime.UtcNow.ToString("O");
                 meta["modelResponse"] = $"<threw: {ex.GetType().Name}: {ex.Message}>";
                 await issues.TransitionAsync(issue.Id, cur.Status,
                     error: meta["lastError"]?.ToString(), metadata: meta, ct: ct);

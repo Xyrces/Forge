@@ -332,6 +332,29 @@ public sealed class OrchestratorAgent : IAgent
             // Result message (preserves the old sequential contract).
             var after = await bundle.IssueStore.GetAsync(preClaimed.Id, cancellationToken);
             var lastError = after?.GetMetadata("lastError");
+            // lastError is written by RunAgentExecutor on a failed
+            // run and NEVER cleared by requeues — so a value from an
+            // EARLIER dispatch must not fail THIS one (observed live:
+            // task-153 completed as a verified no-op, then flipped to
+            // Failed over a stale error from yesterday's run). Only a
+            // failure stamped during this dispatch counts.
+            var lastErrorFresh =
+                DateTimeOffset.TryParse(after?.GetMetadata("lastErrorAt"), out var lea)
+                && lea.UtcDateTime >= startedAt.AddSeconds(-2);
+            if (!string.IsNullOrEmpty(lastError) && !lastErrorFresh)
+            {
+                _logger.LogInformation("Issue {Id}: ignoring stale lastError from {At} (this dispatch started {Started:O})",
+                    preClaimed.Id, after?.GetMetadata("lastErrorAt"), startedAt);
+                await UpdateMetadataAsync(preClaimed.Id, m =>
+                {
+                    // metadata is upsert-merge only: JSON null is the
+                    // delete idiom (GetMetadata surfaces it as empty).
+                    m["lastError"] = null!;
+                    m["lastErrorAt"] = null!;
+                    return m;
+                }, bundle, cancellationToken);
+                lastError = null;
+            }
             if (!string.IsNullOrEmpty(lastError))
             {
                 // A recorded 429 with a completed PR is noise: the

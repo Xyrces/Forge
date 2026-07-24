@@ -129,6 +129,12 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 "Issue {Id}: agent explicitly concluded NO_CHANGES_NEEDED. Marking Completed.", issue.Id);
             await issues.TransitionAsync(issue.Id, IssueStatus.Completed,
                 "no changes needed (agent verified)", ct: ct);
+            await UpdateMetadataAsync(issues, issue.Id, m =>
+            {
+                m["lastError"] = null!;
+                m["lastErrorAt"] = null!;
+                return m;
+            }, ct);
             events.Publish(new DashboardEvent(
                 DateTime.UtcNow, DashboardEventKind.TaskTransition,
                 issue.Id, "Completed (verified no-op)",
@@ -180,6 +186,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         {
             m["prNumber"] = pr.Number;
             m["branchSha"] = headSha;
+            // Success clears any stale run-failure record (requeues
+            // never remove it; metadata is upsert-merge only, so
+            // JSON null is the delete idiom).
+            m["lastError"] = null!;
+            m["lastErrorAt"] = null!;
             return m;
         }, ct);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);

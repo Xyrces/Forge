@@ -180,6 +180,33 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task DispatchSingleTask_StaleLastError_DoesNotFailSuccessfulRun()
+    {
+        // Regression (observed live 2026-07-24): a failed run records
+        // lastError in metadata; requeues never clear it. The next
+        // SUCCESSFUL dispatch read the stale error post-workflow and
+        // flipped the task to Failed. The freshness guard + clear-on-
+        // success fix this.
+        var orch = BuildOrchestrator(new ScriptedRunner("verified, nothing to do. NO_CHANGES_NEEDED"));
+        BindMaf(orch);
+
+        var issue = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "x", Description: "y",
+            Metadata: new Dictionary<string, object>
+            {
+                ["lastError"] = "ArgumentOutOfRangeException: from yesterday's run",
+                ["lastErrorAt"] = DateTimeOffset.UtcNow.AddHours(-6).ToString("O"),
+            }));
+
+        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+
+        Assert.True(result.Success, $"expected success, got: {result.Message}");
+        var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
+        Assert.Equal(IssueStatus.Completed, after.Status);
+        Assert.True(string.IsNullOrEmpty(after.GetMetadata("lastError")));
+    }
+
+    [Fact]
     public async Task DispatchSingleTask_AlreadyClaimed_ReturnsAlreadyClaimed()
     {
         var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
