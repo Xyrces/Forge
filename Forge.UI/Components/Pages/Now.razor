@@ -6,7 +6,7 @@
 <PageTitle>Now</PageTitle>
 <div class="page">
     <div class="page-header">
-        <h1>Now</h1>
+        <h1>Dashboard</h1>
         <div class="page-header__meta">@(_feed is null ? "loading…" : $"as of {_feed.GeneratedAt.ToLocalTime():HH:mm:ss}")</div>
         <div class="page-header__actions">
             <button class="btn" @onclick="LoadAsync">Refresh</button>
@@ -19,84 +19,50 @@
     }
     else
     {
-        @* ── 1. NEEDS ATTENTION ─────────────────────────────── *@
-        <section style="margin-bottom:22px">
-            <h2 style="font-size:15px;margin:0 0 8px">Needs your attention</h2>
-            @if (_feed.Attention.Count == 0)
-            {
-                <div style="padding:14px 16px;border:1px solid var(--outline-variant);border-left:4px solid #2e7d32;border-radius:8px;color:var(--on-surface-variant)">
-                    Nothing needs you. The machine is running.
+        @* ── KPI tiles ── *@
+        <div class="dash-grid">
+            <a href="/sprints" style="text-decoration:none;color:inherit">
+                <div class="dash-tile">
+                    <span class="dash-tile__label">Active sprint</span>
+                    @if (_feed.Pulse.Sprint is { } s)
+                    {
+                        <span style="font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="@s.Name">@s.Name</span>
+                        <div class="dash-tile__bar"><div style="width:@(s.Total == 0 ? 0 : (100 * s.Done / s.Total))%"></div></div>
+                        <span class="dash-tile__caption">@s.Done of @s.Total done · @s.Id</span>
+                    }
+                    else
+                    {
+                        <span class="dash-tile__value">—</span>
+                        <span class="dash-tile__caption">no active sprint</span>
+                    }
                 </div>
-            }
-            <div style="display:flex;flex-direction:column;gap:6px">
-                @foreach (var a in _feed.Attention)
-                {
-                    <a href="@a.Link" style="text-decoration:none;color:inherit">
-                        <div style="padding:10px 14px;border:1px solid var(--outline-variant);border-radius:8px;border-left:4px solid @SeverityColor(a.Severity)">
-                            <div style="display:flex;justify-content:space-between;gap:12px">
-                                <span style="font-weight:500">@a.Title</span>
-                                <span class="mono" style="font-size:11px;color:var(--on-surface-variant)">@a.Kind</span>
-                            </div>
-                            @if (a.Detail is not null)
-                            {
-                                <div style="font-size:13px;color:var(--on-surface-variant);margin-top:2px">@a.Detail</div>
-                            }
-                        </div>
-                    </a>
-                }
-            </div>
-        </section>
-
-        @* ── 2. HAPPENING NOW ───────────────────────────────── *@
-        <section style="margin-bottom:22px">
-            <h2 style="font-size:15px;margin:0 0 8px">Happening now</h2>
-            @if (_feed.Live.Count == 0)
-            {
-                <div class="page-subtitle">Idle — no agent runs in flight.</div>
-            }
-            <div style="display:flex;flex-direction:column;gap:4px">
-                @foreach (var l in _feed.Live)
-                {
-                    <a href="/tasks/@l.IssueId" style="text-decoration:none;color:inherit">
-                        <div style="display:flex;gap:10px;align-items:center;padding:8px 12px;border:1px solid var(--outline-variant);border-radius:8px">
-                            <span style="width:8px;height:8px;border-radius:50%;background:var(--primary);flex-shrink:0"></span>
-                            <span class="mono" style="min-width:90px">@l.IssueId</span>
-                            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@l.Title</span>
-                            <span style="color:var(--on-surface-variant);font-size:13px">@l.Stage</span>
-                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(l.ElapsedMs)</span>
-                        </div>
-                    </a>
-                }
-            </div>
-        </section>
-
-        @* ── 3. WAITING & WHY ───────────────────────────────── *@
-        <section style="margin-bottom:22px">
-            <h2 style="font-size:15px;margin:0 0 8px">Waiting — and why</h2>
-            @if (_feed.Waiting.Count == 0)
-            {
-                <div class="page-subtitle">Nothing queued.</div>
-            }
-            <div style="display:flex;flex-direction:column;gap:4px">
-                @foreach (var w in _feed.Waiting)
-                {
-                    <a href="/tasks/@w.IssueId" style="text-decoration:none;color:inherit">
-                        <div style="display:flex;gap:10px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--outline-variant)">
-                            <span class="mono" style="min-width:90px;color:var(--on-surface-variant)">@w.IssueId</span>
-                            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px">@w.Title</span>
-                            <span style="font-size:13px;color:var(--on-surface-variant)">@w.Reason</span>
-                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(w.WaitingMs)</span>
-                        </div>
-                    </a>
-                }
-            </div>
-        </section>
-
-        @* ── 4. PULSE ───────────────────────────────────────── *@
-        <section>
-            <h2 style="font-size:15px;margin:0 0 8px">Pipeline</h2>
-            <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
-                <span style="display:flex;gap:6px;align-items:center">
+            </a>
+            <a href="/flow" style="text-decoration:none;color:inherit">
+                <div class="dash-tile">
+                    <span class="dash-tile__label">Agent runs</span>
+                    <span class="dash-tile__value">@_feed.Live.Count <span style="font-size:13px;font-weight:400;color:var(--on-surface-variant)">running</span></span>
+                    <span class="dash-tile__caption">
+                        @if (_feed.Live.Count > 0)
+                        {
+                            @($"{_feed.Live[0].IssueId} · {Fmt(_feed.Live[0].ElapsedMs)}")
+                        }
+                        else
+                        {
+                            @:idle
+                        }
+                    </span>
+                </div>
+            </a>
+            <a href="/backlog" style="text-decoration:none;color:inherit">
+                <div class="dash-tile">
+                    <span class="dash-tile__label">Waiting</span>
+                    <span class="dash-tile__value">@_feed.Waiting.Count</span>
+                    <span class="dash-tile__caption">@TopReason()</span>
+                </div>
+            </a>
+            <div class="dash-tile">
+                <span class="dash-tile__label">Stage gates</span>
+                <span style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
                     @foreach (var (stage, state) in _feed.Pulse.Gates)
                     {
                         <button class="chip @(state == "hold" ? "chip--active" : "")"
@@ -106,24 +72,107 @@
                         </button>
                     }
                 </span>
-                @if (_feed.Pulse.Sprint is { } s)
+                <span class="dash-tile__caption">
+                    @{
+                        var heldCount = _feed.Pulse.Gates.Values.Count(v => v == "hold");
+                    }
+                    @(heldCount == 0 ? "all open — pipeline automatic" : $"{heldCount} held")
+                </span>
+            </div>
+        </div>
+
+        @* ── Happening now | Waiting & why ── *@
+        <div class="dash-panels">
+            <div class="dash-panel">
+                <div class="dash-panel__title">
+                    <span>Happening now</span>
+                    <a href="/flow">flow →</a>
+                </div>
+                @if (_feed.Live.Count == 0)
                 {
-                    <a href="/sprints" style="text-decoration:none">
-                        Sprint: <strong>@s.Name</strong> — @s.Done/@s.Total done
+                    <div class="page-subtitle">Idle — no agent runs in flight.</div>
+                }
+                @foreach (var l in _feed.Live)
+                {
+                    <a href="/tasks/@l.IssueId" style="text-decoration:none;color:inherit">
+                        <div style="display:flex;gap:10px;align-items:center;padding:7px 4px;border-bottom:1px solid var(--outline-variant)">
+                            <span style="width:8px;height:8px;border-radius:50%;background:var(--primary);flex-shrink:0"></span>
+                            <span class="mono" style="min-width:84px">@l.IssueId</span>
+                            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px">@l.Title</span>
+                            <span style="color:var(--on-surface-variant);font-size:13px">@l.Stage</span>
+                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(l.ElapsedMs)</span>
+                        </div>
                     </a>
                 }
-                else
-                {
-                    <span class="page-subtitle">No active sprint</span>
-                }
-                <span class="page-subtitle">last activity @(_feed.Pulse.LastActivityAt?.ToLocalTime().ToString("HH:mm:ss") ?? "—")</span>
             </div>
-        </section>
+            <div class="dash-panel">
+                <div class="dash-panel__title">
+                    <span>Waiting — and why</span>
+                    <a href="/backlog">backlog →</a>
+                </div>
+                @if (_feed.Waiting.Count == 0)
+                {
+                    <div class="page-subtitle">Nothing queued.</div>
+                }
+                @foreach (var w in _feed.Waiting.Take(8))
+                {
+                    <a href="/tasks/@w.IssueId" style="text-decoration:none;color:inherit">
+                        <div style="display:flex;gap:10px;align-items:center;padding:7px 4px;border-bottom:1px solid var(--outline-variant)">
+                            <span class="mono" style="min-width:84px;color:var(--on-surface-variant)">@w.IssueId</span>
+                            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px">@w.Title</span>
+                            <span style="font-size:13px;color:var(--on-surface-variant)">@w.Reason</span>
+                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(w.WaitingMs)</span>
+                        </div>
+                    </a>
+                }
+                @if (_feed.Waiting.Count > 8)
+                {
+                    <div class="page-subtitle" style="margin-top:6px">+@(_feed.Waiting.Count - 8) more</div>
+                }
+            </div>
+        </div>
+
+        @* ── Pipeline flow strip ── *@
+        @if (_flow is not null)
+        {
+            <div class="dash-panel">
+                <div class="dash-panel__title">
+                    <span>Pipeline flow</span>
+                    <a href="/flow">open flow →</a>
+                </div>
+                <svg viewBox="0 0 740 480" style="width:100%;max-height:380px">
+                    <defs>
+                        <marker id="darrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--outline-variant)" />
+                        </marker>
+                    </defs>
+                    @foreach (var e in _flow.Edges)
+                    {
+                        var a = _flow.Nodes.First(n => n.Id == e.From);
+                        var b = _flow.Nodes.First(n => n.Id == e.To);
+                        <line x1="@a.X" y1="@a.Y" x2="@b.X" y2="@b.Y" stroke="var(--outline-variant)" stroke-width="1" marker-end="url(#darrow)" opacity="0.55" />
+                    }
+                    @foreach (var n in _flow.Nodes)
+                    {
+                        <rect x="@(n.X - 62)" y="@(n.Y - 24)" width="124" height="48" rx="9"
+                              fill="var(--surface)" stroke="@(n.Count > 0 ? "var(--primary)" : "var(--outline-variant)")"
+                              stroke-width="@(n.Count > 0 ? 1.8 : 1)" />
+                        @SvgText(n.X, n.Y + 4, "var(--on-surface)", 12, "middle", n.Label)
+                        @if (n.Count > 0)
+                        {
+                            <circle cx="@(n.X + 52)" cy="@(n.Y - 18)" r="11" fill="var(--primary)" />
+                            @SvgText(n.X + 52, n.Y - 14, "var(--on-primary, #fff)", 11, "middle", n.Count.ToString(), bold: true)
+                        }
+                    }
+                </svg>
+            </div>
+        }
     }
 </div>
 
 @code {
     private NowFeedDto? _feed;
+    private FlowDto? _flow;
     private System.Threading.Timer? _timer;
 
     protected override void OnInitialized()
@@ -137,9 +186,27 @@
         try
         {
             _feed = await Http.GetFromJsonAsync<NowFeedDto>("/api/now");
+            _flow ??= await Http.GetFromJsonAsync<FlowDto>("/api/flow");
+            if (_flow is not null)
+            {
+                // Refresh counts without rebuilding the whole strip.
+                var fresh = await Http.GetFromJsonAsync<FlowDto>("/api/flow");
+                if (fresh is not null) _flow = fresh;
+            }
             StateHasChanged();
         }
         catch { /* keep last good frame */ }
+    }
+
+    private string TopReason()
+    {
+        if (_feed is null || _feed.Waiting.Count == 0) return "nothing queued";
+        var groups = _feed.Waiting.GroupBy(w => w.Reason).OrderByDescending(g => g.Count()).ToList();
+        var top = groups[0];
+        var reason = top.Key.Length > 42 ? top.Key[..42] + "…" : top.Key;
+        return groups.Count == 1
+            ? $"{top.Count()}× {reason}"
+            : $"{top.Count()}× {reason} (+{groups.Count - 1} other)";
     }
 
     private async Task ToggleGateAsync(string stage)
@@ -149,13 +216,6 @@
         if (resp.IsSuccessStatusCode) await LoadAsync();
     }
 
-    private static string SeverityColor(string severity) => severity switch
-    {
-        "fail" => "#c62828",
-        "warn" => "#ef6c00",
-        _ => "#1565c0",
-    };
-
     private static string Fmt(long ms)
     {
         var ts = TimeSpan.FromMilliseconds(ms);
@@ -164,6 +224,10 @@
         if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m";
         return $"{(int)ts.TotalSeconds}s";
     }
+
+    private static MarkupString SvgText(int x, int y, string fill, int size, string anchor, string content, bool bold = false)
+        => new($"<text x=\"{x}\" y=\"{y}\" fill=\"{fill}\" font-size=\"{size}\" text-anchor=\"{anchor}\"" +
+               (bold ? " font-weight=\"600\"" : "") + $">{System.Net.WebUtility.HtmlEncode(content)}</text>");
 
     public void Dispose() => _timer?.Dispose();
 
@@ -178,4 +242,8 @@
     private sealed record WaitingDto(string IssueId, string Title, string Reason, long WaitingMs);
     private sealed record PulseDto(Dictionary<string, string> Gates, SprintDto? Sprint, DateTime? LastActivityAt);
     private sealed record SprintDto(string Id, string Name, int Done, int Total);
+
+    private sealed record FlowDto(List<FlowNodeDto> Nodes, List<FlowEdgeDto> Edges);
+    private sealed record FlowNodeDto(string Id, string Label, string Lane, int X, int Y, int Count);
+    private sealed record FlowEdgeDto(string From, string To);
 }

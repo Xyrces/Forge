@@ -42,8 +42,7 @@ public class NowFeedTests
             now);
 
         // fail group precedes warn/info; both fail kinds present.
-        var firstNonFail = items.FindIndex(i => i.Severity != "fail");
-        Assert.True(firstNonFail > 0);
+        Assert.True(items.TakeWhile(i => i.Severity == "fail").Count() >= 2);
         Assert.Contains(items, i => i.Kind == "failed-task" && i.Severity == "fail");
         Assert.Contains(items, i => i.Kind == "breaker-risk" && i.Severity == "fail");
         Assert.Contains(items, i => i.Kind == "held-gate" && i.Detail!.Contains("auto-merge"));
