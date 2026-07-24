@@ -163,7 +163,24 @@ public async Task<AgentRunResult> RunAsync(
             tools.Add(new FollowUpTool(_issues, followUpSource, role.ToString()).AsAIFunction());
         }
 
+        // Run identity + start timestamp must exist BEFORE the chat
+        // client is built: the activity tracker below wraps the raw
+        // provider client and heartbeats per round-trip against this
+        // run id. (The 'running' row itself is still written after
+        // agent construction — a client-construction failure then
+        // leaves no stale row.)
+        var runId = Guid.NewGuid().ToString("N")[..12];
+        var runTaskId = ResolveContextString(context, "issueId");
+        var startedAt = DateTime.UtcNow;
+
         var chatClient = _chatClientFactory.Create(_config, role);
+        // Per-round-trip activity heartbeat. Wraps the RAW provider
+        // client so MAF's internal model→tool→model loop (inside one
+        // agent.RunAsync) is visible in near-real-time; wrapping the
+        // outer client would only fire once per RunAsync call.
+        var trackedClient = _runs is null
+            ? chatClient
+            : new ActivityTrackingChatClient(chatClient, runId, _runs);
         // Wrap with function invocation so MAF actually executes the
         // tools the model calls (instead of just leaving them in the
         // response). Cap raised from the 40 default: complex tasks
@@ -172,10 +189,10 @@ public async Task<AgentRunResult> RunAsync(
         // no-diff path marked the task done (observed live: all six
         // tasks of the dispatcher-resilience sprint hollow-completed).
         var chatClientWithTools = tools.Count > 0
-            ? new ChatClientBuilder(chatClient)
+            ? new ChatClientBuilder(trackedClient)
                 .UseFunctionInvocation(configure: c => c.MaximumIterationsPerRequest = 200)
                 .Build()
-            : chatClient;
+            : trackedClient;
 
         var agent = new ChatClientAgent(
             chatClientWithTools,
@@ -192,12 +209,10 @@ public async Task<AgentRunResult> RunAsync(
 
         // Run registry: visible in near real time as 'running'
         // (who is doing what); progress heartbeats land after every
-        // model response and the full transcript is persisted when
-        // the run finishes (partial transcript on failure).
-        // Best-effort — never breaks a run.
-        var runId = Guid.NewGuid().ToString("N")[..12];
-        var runTaskId = ResolveContextString(context, "issueId");
-        var startedAt = DateTime.UtcNow;
+        // model response (per-round-trip via the activity tracker,
+        // plus a coarser stitch here after each continuation) and the
+        // full transcript is persisted when the run finishes (partial
+        // transcript on failure). Best-effort — never breaks a run.
         if (_runs is not null)
         {
             try
