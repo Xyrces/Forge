@@ -79,6 +79,7 @@ In production (systemd), this maps to `/var/lib/forge/state/` via `StateDirector
 ## When stuck
 
 1. `dotnet run --project Forge -- --check`. If it passes, the bug is in the dispatch path. If it fails, the failure message names the subsystem to investigate.
+2. The **Flow page** (`/flow`) shows the live pipeline DAG — planning lane (specs/ad-hoc) vs implementation lane (tasks), per-node counts, and a per-issue journey view (`/flow?issue={id}`) derived from the `issue_event` timeline. First stop for "where is my work stuck?".
 2. `tail -f` `.portHorizon/state/issues.jsonl` for live queue state (or `sudo journalctl -u forge -f` on the host).
 3. `<dataRoot>/logs/agent.log` — per-run diagnostic: message roles, text lengths, tool-call names per agent run. First stop when a run "completes" with no diff. (minimax-m3 quirk: it can emit a tool call as literal text markup `]<]minimax[><tool_call>...`; `MafAgentRunner` detects the leak and nudges the model to continue, bounded at 3.)
 4. The dashboard `Events` tab streams `DashboardEvent` over SSE.
