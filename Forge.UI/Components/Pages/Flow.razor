@@ -70,7 +70,7 @@
                 }
             </svg>
 
-            <div style="width:320px;flex-shrink:0">
+            <div style="width:380px;flex-shrink:0">
                 @if (_journey is not null)
                 {
                     <div style="display:flex;justify-content:space-between;align-items:center">
@@ -80,22 +80,64 @@
                     <div class="page-subtitle" style="margin:6px 0 10px">
                         <a href="/tasks/@_journey.IssueId" class="mono">@_journey.IssueId</a> — @_journey.Title
                     </div>
-                    <ol style="list-style:none;padding:0;margin:0">
-                        @foreach (var v in _journey.Visits)
+                    <div style="position:relative;padding-left:18px;border-left:2px solid var(--outline-variant);margin-left:6px">
+                        @foreach (var (v, idx) in _journey.Visits.Select((v, i) => (v, i)))
                         {
-                            var label = _fleet.Nodes.FirstOrDefault(n => n.Id == v.Node)?.Label ?? v.Node;
-                            <li style="padding:6px 0;border-bottom:1px solid var(--outline-variant)">
-                                <div style="display:flex;justify-content:space-between">
-                                    <span>@label@(v.Count > 1 ? $" ×{v.Count}" : "")</span>
-                                    <span class="mono" style="color:var(--on-surface-variant);font-size:12px">@v.At.ToString("MM-dd HH:mm")</span>
+                            var label = _fleet?.Nodes.FirstOrDefault(n => n.Id == v.Node)?.Label ?? v.Node;
+                            var expanded = _expandedVisit == idx;
+                            var isCurrent = idx == _journey.Visits.Count - 1 && v.Note == "current";
+                            <div style="position:relative;margin-bottom:4px">
+                                <div style="position:absolute;left:-23px;top:8px;width:10px;height:10px;border-radius:50%;background:@(isCurrent ? "var(--primary)" : "var(--outline-variant)")"></div>
+                                <div style="cursor:pointer;padding:6px 8px;border-radius:8px;border:1px solid @(expanded ? "var(--primary)" : "transparent")"
+                                     @onclick="@(() => ToggleVisit(idx))">
+                                    <div style="display:flex;justify-content:space-between;align-items:center">
+                                        <span>@label@(v.Count > 1 ? $" ×{v.Count}" : "")</span>
+                                        <span class="mono" style="color:var(--on-surface-variant);font-size:12px">@v.At.ToString("MM-dd HH:mm")</span>
+                                    </div>
+                                    <div style="display:flex;gap:8px;align-items:center;color:var(--on-surface-variant);font-size:12px">
+                                        <span>@FormatDuration(v.DurationMs)</span>
+                                        @if (v.Note is not null)
+                                        {
+                                            <span>· @v.Note</span>
+                                        }
+                                    </div>
+                                    @if (expanded && v.Details.ValueKind == System.Text.Json.JsonValueKind.Object)
+                                    {
+                                        <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--outline-variant);font-size:13px">
+                                            @foreach (var prop in v.Details.EnumerateObject())
+                                            {
+                                                if (prop.Value.ValueKind is System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.Undefined) { continue; }
+                                                <div style="display:flex;gap:8px;padding:2px 0">
+                                                    <span class="mono" style="color:var(--on-surface-variant);min-width:130px">@prop.Name</span>
+                                                    <span style="word-break:break-word">
+                                                        @if (prop.Name == "prNumber" && PrUrl(prop.Value.ToString()) is { } url)
+                                                        {
+                                                            <a href="@url" target="_blank" rel="noopener">#@prop.Value</a>
+                                                        }
+                                                        else if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                                        {
+                                                            @if (prop.Value.GetArrayLength() == 0)
+                                                            {
+                                                                <text>—</text>
+                                                            }
+                                                            foreach (var item in prop.Value.EnumerateArray())
+                                                            {
+                                                                <div class="mono" style="font-size:12px">@FormatJsonScalar(item)</div>
+                                                            }
+                                                        }
+                                                        else
+                                                        {
+                                                            @FormatJsonScalar(prop.Value)
+                                                        }
+                                                    </span>
+                                                </div>
+                                            }
+                                        </div>
+                                    }
                                 </div>
-                                @if (v.Note is not null)
-                                {
-                                    <div style="color:var(--on-surface-variant);font-size:12px">@v.Note</div>
-                                }
-                            </li>
+                            </div>
                         }
-                    </ol>
+                    </div>
                 }
                 else if (_selectedNode is not null)
                 {
@@ -136,6 +178,8 @@
     private FleetDto? _fleet;
     private JourneyDto? _journey;
     private string? _selectedNode;
+    private int? _expandedVisit;
+    private string? _repoUrl;
     private DateTime? _lastFetch;
     private System.Threading.Timer? _timer;
 
@@ -147,7 +191,47 @@
         {
             _ = LoadJourneyAsync(InitialIssue);
         }
+        _ = LoadRepoUrlAsync();
     }
+
+    private async Task LoadRepoUrlAsync()
+    {
+        try
+        {
+            using var doc = await Http.GetFromJsonAsync<System.Text.Json.JsonDocument>("/api/projects/");
+            var first = doc?.RootElement.EnumerateArray().FirstOrDefault();
+            if (first is { } p && p.TryGetProperty("repoUrl", out var ru))
+            {
+                _repoUrl = ru.GetString()?.TrimEnd('/');
+            }
+        }
+        catch { /* PR links degrade to plain text */ }
+    }
+
+    private string? PrUrl(string prNumber)
+        => _repoUrl is not null && int.TryParse(prNumber, out var n)
+            ? $"{_repoUrl}/pull/{n}" : null;
+
+    private void ToggleVisit(int idx)
+        => _expandedVisit = _expandedVisit == idx ? null : idx;
+
+    private static string FormatDuration(long ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        if (ts.TotalDays >= 1) return $"{(int)ts.TotalDays}d {ts.Hours}h";
+        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes}m";
+        if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m {ts.Seconds}s";
+        return $"{(int)ts.TotalSeconds}s";
+    }
+
+    private static string FormatJsonScalar(System.Text.Json.JsonElement el) => el.ValueKind switch
+    {
+        System.Text.Json.JsonValueKind.String => el.GetString() ?? "",
+        System.Text.Json.JsonValueKind.Object => string.Join(", ",
+            el.EnumerateObject().Take(6).Select(p => $"{p.Name}={FormatJsonScalar(p.Value)}")),
+        System.Text.Json.JsonValueKind.Array => $"[{el.GetArrayLength()} items]",
+        _ => el.ToString(),
+    };
 
     private async Task LoadFleetAsync()
     {
@@ -170,6 +254,7 @@
     {
         try
         {
+            _expandedVisit = null;
             _journey = await Http.GetFromJsonAsync<JourneyDto>($"/api/flow/issues/{issueId}");
         }
         catch { /* item may have left the fleet */ }
@@ -192,5 +277,7 @@
     private sealed record IssueSampleDto(string Id, string Title, string Status);
     private sealed record JourneyDto(
         string IssueId, string Title, string Status, string? CurrentNode, int? PrNumber, List<VisitDto> Visits);
-    private sealed record VisitDto(string Node, DateTime At, string? Note, int Count);
+    private sealed record VisitDto(
+        string Node, DateTime At, string? Note, int Count, long DurationMs,
+        System.Text.Json.JsonElement Details);
 }

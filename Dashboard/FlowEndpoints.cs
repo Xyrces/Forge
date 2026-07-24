@@ -21,7 +21,8 @@ public static class FlowEndpoints
         WebApplication app,
         IIssueStore issues,
         ISpecStore specs,
-        ISprintStore sprints)
+        ISprintStore sprints,
+        Orchestrator.MemoryExtractionStore? extractions = null)
     {
         app.MapGet("/api/flow", async (CancellationToken ct) =>
         {
@@ -97,6 +98,36 @@ public static class FlowEndpoints
                 events.Select(e => (e.Kind, e.Timestamp, (string?)e.Detail)).ToList(),
                 currentNode);
 
+            // Per-stage drill-down details. Everything here is read
+            // from stores the pipeline already writes — the journey
+            // is a VIEW, nothing is persisted for it.
+            var watch = all.FirstOrDefault(i =>
+                i.Type == AgentTaskTypes.PrWatch
+                && string.Equals(i.GetMetadata("taskId"), issue.Id, StringComparison.Ordinal));
+            var extractionRuns = extractions is null
+                ? (IReadOnlyList<Orchestrator.MemoryExtractionRecord>)Array.Empty<Orchestrator.MemoryExtractionRecord>()
+                : await extractions.ListForTaskAsync(issue.Id, ct);
+            string? specId = hasSpecChain ? SprintAssembler.ResolveGroupKey(issue, byId) : null;
+            var spec = specId is not null ? await specs.GetAsync(specId, ct) : null;
+
+            var visits = new List<object>();
+            for (var i = 0; i < journey.Count; i++)
+            {
+                var v = journey[i];
+                var durationMs = i + 1 < journey.Count
+                    ? (long)(journey[i + 1].At - v.At).TotalMilliseconds
+                    : (long)(DateTime.UtcNow - v.At).TotalMilliseconds;
+                visits.Add(new
+                {
+                    node = v.Node,
+                    at = v.At,
+                    note = v.Note,
+                    count = v.Count,
+                    durationMs,
+                    details = StageDetails(v.Node, issue, watch, spec, active, sprintMembers, extractionRuns),
+                });
+            }
+
             return (IResult)Results.Json(new
             {
                 issueId = issue.Id,
@@ -104,8 +135,83 @@ public static class FlowEndpoints
                 status = issue.Status.ToString(),
                 currentNode,
                 prNumber = issue.GetMetadata("prNumber"),
-                visits = journey.Select(v => new { node = v.Node, at = v.At, note = v.Note, count = v.Count }),
+                visits,
             });
         });
+    }
+
+    private static object? StageDetails(
+        string node,
+        IssueRecord issue,
+        IssueRecord? watch,
+        SpecRecord? spec,
+        SprintRecord? activeSprint,
+        HashSet<string> sprintMembers,
+        IReadOnlyList<Orchestrator.MemoryExtractionRecord> extractionRuns)
+    {
+        string? Meta(string key) => issue.GetMetadata(key);
+        return node switch
+        {
+            "groom" => new
+            {
+                outcome = Meta("groomed") == "true" ? "approved" : Meta("groomCloseReason") is not null ? "closed" : "pending",
+                note = Meta("groomNote"),
+                closeReason = Meta("groomCloseReason"),
+                runId = Meta("groomRunId"),
+                groomedAt = Meta("groomedAt"),
+            },
+            "backlog" => spec is not null
+                ? new { specId = spec.Id, specTitle = spec.Title, specStatus = spec.Status.ToString() }
+                : null,
+            "sprint" => activeSprint is not null && sprintMembers.Contains(issue.Id)
+                ? new { sprintId = activeSprint.Id, name = activeSprint.Name, goal = activeSprint.Goal }
+                : null,
+            "setup" => new
+            {
+                branch = Meta("branch"),
+                worktree = Meta("worktreePath"),
+            },
+            "agent" => new
+            {
+                noProgressAttempts = Meta("noProgressAttempts"),
+                extractions = extractionRuns.Select(r => new
+                {
+                    at = r.Timestamp,
+                    r.SourceChars,
+                    r.ExtractedCount,
+                    keys = r.PersistedKeys,
+                    error = r.Error,
+                }).ToArray(),
+            },
+            "pr" or "review" => new
+            {
+                prNumber = Meta("prNumber"),
+                watchStatus = watch?.Status.ToString(),
+                ciVerdict = watch?.GetMetadata("reviewVerdict"),
+                reviewRound = watch?.GetMetadata("reviewRound"),
+                reviewNotes = watch?.GetMetadata("reviewNotes"),
+                reviewedSha = watch?.GetMetadata("reviewSha"),
+            },
+            "rework" => new
+            {
+                attempts = Meta("reworkAttempts"),
+                context = Meta("reworkContext"),
+                prNumber = Meta("prNumber"),
+                maxAttempts = 3,
+            },
+            "done" => new
+            {
+                closedAt = issue.ClosedAt,
+                prNumber = Meta("prNumber"),
+                merged = Meta("prNumber") is not null,
+            },
+            "blocked" => new
+            {
+                noProgressAttempts = Meta("noProgressAttempts"),
+                reworkAttempts = Meta("reworkAttempts"),
+                groomCloseReason = Meta("groomCloseReason"),
+            },
+            _ => null,
+        };
     }
 }
