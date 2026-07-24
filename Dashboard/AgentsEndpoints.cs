@@ -165,6 +165,18 @@ public static class AgentsEndpoints
             });
         });
 
+        app.MapGet("/api/agents/providers/{name}/models", async (string name, CancellationToken ct) =>
+        {
+            if (llmConfig is null)
+                return Results.Json(new { error = "no LLM config in this mode" }, statusCode: 503);
+            var provider = llmConfig.Providers.FirstOrDefault(p =>
+                string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (provider is null)
+                return Results.NotFound(new { error = $"unknown provider '{name}'" });
+            var models = await ProviderModelCatalog.GetModelsAsync(provider, ct);
+            return (IResult)Results.Ok(new { provider = provider.Name, models });
+        });
+
         app.MapPut("/api/agents/roles/{name}/model", async (string name, PutRoleModelRequest? body, CancellationToken ct) =>
         {
             if (overrides is null || llmConfig is null)

@@ -6,6 +6,8 @@
    the same. The parent owns WHICH role is being model-edited
    (Editing/EditError); the row owns the in-progress input values
    and reports them via OnSaveModel. *@
+@inject HttpClient Http
+@using System.Net.Http.Json
 
 <div class="card agent-row">
     <div @onclick="() => _expanded = !_expanded">
@@ -105,13 +107,20 @@
                             @if (Editing)
                             {
                                 <div class="role-model-edit">
-                                    <select class="mono" @bind="_editProvider">
+                                    <select class="mono" @bind="_editProvider" @bind:after="LoadModelsAsync">
                                         @foreach (var p in Providers)
                                         {
                                             <option value="@p">@p</option>
                                         }
                                     </select>
-                                    <input type="text" class="mono" @bind="_editModel" placeholder="model (e.g. kimi-k3)" />
+                                    <input type="text" class="mono" list="models-@Name" @bind="_editModel"
+                                           placeholder="@(_availableModels.Length > 0 ? $"search {_availableModels.Length} models or type any id…" : "model (e.g. kimi-k3)")" />
+                                    <datalist id="models-@Name">
+                                        @foreach (var m in _availableModels)
+                                        {
+                                            <option value="@m"></option>
+                                        }
+                                    </datalist>
                                     <button class="btn btn--primary" @onclick="SaveModelAsync">Save</button>
                                     <button class="btn" @onclick="() => OnCancelEdit.InvokeAsync(Name)">Cancel</button>
                                     @if (EditError is not null)
@@ -215,17 +224,40 @@
     private bool _wasEditing;
     private string _editProvider = "";
     private string _editModel = "";
+    private string[] _availableModels = Array.Empty<string>();
 
-    protected override void OnParametersSet()
+    protected override async Task OnParametersSetAsync()
     {
-        // Entering edit mode: seed the inputs from the current model.
+        // Entering edit mode: seed the inputs from the current model
+        // and load the provider's available-model catalog.
         if (Editing && !_wasEditing)
         {
             _editProvider = Model.Provider ?? (Providers.FirstOrDefault() ?? "");
             _editModel = Model.Model ?? "";
+            await LoadModelsAsync();
         }
         _wasEditing = Editing;
     }
+
+    /// <summary>Available models for the selected provider, fetched
+    /// lazily (only while editing — the page polls roles every 5s,
+    /// and this must NOT ride that poll).</summary>
+    private async Task LoadModelsAsync()
+    {
+        try
+        {
+            var resp = await Http.GetFromJsonAsync<ProviderModelsResponse>(
+                $"/api/agents/providers/{Uri.EscapeDataString(_editProvider)}/models");
+            _availableModels = resp?.Models ?? Array.Empty<string>();
+        }
+        catch
+        {
+            _availableModels = Array.Empty<string>();
+        }
+        StateHasChanged();
+    }
+
+    private sealed record ProviderModelsResponse(string Provider, string[] Models);
 
     private Task SaveModelAsync()
         => OnSaveModel.InvokeAsync((Name, _editProvider, _editModel));
