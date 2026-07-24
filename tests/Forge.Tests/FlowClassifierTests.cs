@@ -93,11 +93,38 @@ public class FlowClassifierTests
             ("created", t0, null),
             ("claimed", t0.AddMinutes(10), null),
             ("status_change", t0.AddMinutes(10), "Pending->InProgress"),
+            ("status_change", t0.AddMinutes(11), "InProgress->InProgress"),   // worktree acquired
+            ("status_change", t0.AddMinutes(18), "InProgress->InProgress"),   // push checkpoint (noise)
         };
         var visits = FlowGraph.BuildJourney(issue, events, "review");
 
         Assert.Equal(new[] { "backlog", "setup", "agent", "review" }, visits.Select(v => v.Node).ToArray());
         Assert.Equal("current", visits[^1].Note);
+        // Agent stage starts at worktree acquisition (11 min), not at
+        // claim (10 min) — real wall-time per stage.
+        Assert.Equal(t0.AddMinutes(11), visits[2].At);
+    }
+
+    [Fact]
+    public void Journey_AgentDuration_IsRunWallTime()
+    {
+        var t0 = DateTime.UtcNow.AddMinutes(-30);
+        var issue = Issue(IssueStatus.Completed, pr: null);
+        var events = new List<(string, DateTime, string?)>
+        {
+            ("created", t0, null),
+            ("claimed", t0.AddMinutes(1), null),
+            ("status_change", t0.AddMinutes(1), "Pending->InProgress"),
+            ("status_change", t0.AddMinutes(2), "InProgress->InProgress"),
+            ("status_change", t0.AddMinutes(9), "InProgress->Completed"),
+        };
+        var visits = FlowGraph.BuildJourney(issue, events, "done");
+
+        var agent = visits.Single(v => v.Node == "agent");
+        var done = visits.Single(v => v.Node == "done");
+        // agent 00:02 -> done 00:09 = 7 minutes of run wall-time.
+        Assert.Equal(t0.AddMinutes(2), agent.At);
+        Assert.Equal(t0.AddMinutes(9), done.At);
     }
 
     [Fact]

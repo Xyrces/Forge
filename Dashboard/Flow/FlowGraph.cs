@@ -154,6 +154,8 @@ public static class FlowGraph
 
         var prNumber = issue.GetMetadata("prNumber");
         var adHoc = issue.ParentIssueId is null;
+        var inRun = false;   // between claim and exit-from-InProgress
+        var agentStarted = false;
 
         foreach (var (kind, at, detail) in events)
         {
@@ -166,12 +168,29 @@ public static class FlowGraph
                     break;
                 case "claimed":
                     Push("setup", at, "claimed by dispatcher");
+                    inRun = true;
+                    agentStarted = false;
                     break;
                 case "status_change" when detail is not null:
                 {
-                    if (detail.Contains("->InProgress", StringComparison.Ordinal))
+                    if (detail.Contains("InProgress->InProgress", StringComparison.Ordinal))
                     {
-                        Push("agent", at, null);
+                        // Checkpoint write. The FIRST one after a claim
+                        // is worktree-acquired ≈ agent run start; later
+                        // ones (commit/push/PR checkpoints) are noise
+                        // for stage timing. This is what makes the
+                        // agent node's duration the true run wall-time
+                        // (was: agent stamped at claim → 0s runs).
+                        if (inRun && !agentStarted)
+                        {
+                            Push("agent", at, null);
+                            agentStarted = true;
+                        }
+                    }
+                    else if (detail.Contains("Pending->InProgress", StringComparison.Ordinal))
+                    {
+                        // The claim transition itself (fires with the
+                        // claimed event) — not a stage of its own.
                     }
                     else if (detail.Contains("InProgress->Pending", StringComparison.Ordinal))
                     {
@@ -179,19 +198,31 @@ public static class FlowGraph
                             detail.Contains("llm-429", StringComparison.Ordinal) ? "LLM 429 requeue"
                             : detail.Contains("no diff", StringComparison.Ordinal) ? "no-progress requeue"
                             : prNumber is not null ? "rework queued" : "requeued");
+                        inRun = false;
+                    }
+                    else if (detail.Contains("->InProgress", StringComparison.Ordinal))
+                    {
+                        // Any other entry into InProgress (e.g. recovery
+                        // replay): treat as a run starting.
+                        Push("agent", at, null);
+                        inRun = true;
+                        agentStarted = true;
                     }
                     else if (detail.Contains("->Completed", StringComparison.Ordinal))
                     {
                         Push("done", at, prNumber is not null ? "merged" : "no-op");
+                        inRun = false;
                     }
                     else if (detail.Contains("->Closed", StringComparison.Ordinal))
                     {
                         Push("done", at, "closed");
+                        inRun = false;
                     }
                     else if (detail.Contains("->Failed", StringComparison.Ordinal)
                         || detail.Contains("->Blocked", StringComparison.Ordinal))
                     {
                         Push("blocked", at, detail);
+                        inRun = false;
                     }
                     break;
                 }

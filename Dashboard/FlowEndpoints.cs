@@ -75,6 +75,13 @@ public static class FlowEndpoints
                 }),
                 edges = FlowGraph.Edges.Select(e => new { from = e.From, to = e.To }),
                 activeSprintId = active?.Id,
+                // Issue-first picker: every traceable work item (newest
+                // activity first), capped for payload size.
+                allIssues = all
+                    .Where(i => i.Type != AgentTaskTypes.PrWatch && !AgentTaskTypes.IsContainer(i.Type))
+                    .OrderByDescending(i => i.UpdatedAt)
+                    .Take(300)
+                    .Select(i => new { id = i.Id, title = i.Title, status = i.Status.ToString() }),
             });
         });
 
