@@ -70,10 +70,13 @@ public sealed class AgentRunStore : IDisposable
     /// Mid-run heartbeat: updates turn/tool-call counts and stamps
     /// last_activity_at so the dashboard can distinguish "agent is
     /// actively working" from "run has been waiting on the provider
-    /// with no output for N minutes". Cheap single-row UPDATE; the
-    /// runner calls it after every model response.
+    /// with no output for N minutes". When <paramref name="transcriptJson"/>
+    /// is provided the accumulated live transcript is persisted too —
+    /// the run-detail page streams the conversation AS IT HAPPENS.
+    /// Cheap single-row UPDATE; the activity tracker calls it after
+    /// every model round-trip.
     /// </summary>
-    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, CancellationToken ct = default)
+    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, string? transcriptJson = null, CancellationToken ct = default)
     {
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
@@ -81,7 +84,8 @@ public sealed class AgentRunStore : IDisposable
         cmd.CommandText = """
             UPDATE agent_run SET
                 message_count = $msgs, tool_call_count = $tools,
-                text_chars = $chars, last_activity_at = $activity
+                text_chars = $chars, last_activity_at = $activity,
+                transcript_json = COALESCE($transcript, transcript_json)
             WHERE id = $id
             """;
         cmd.Parameters.AddWithValue("$id", id);
@@ -89,6 +93,7 @@ public sealed class AgentRunStore : IDisposable
         cmd.Parameters.AddWithValue("$tools", toolCallCount);
         cmd.Parameters.AddWithValue("$chars", textChars);
         cmd.Parameters.AddWithValue("$activity", DateTime.UtcNow.ToString(DateFormat));
+        cmd.Parameters.AddWithValue("$transcript", (object?)transcriptJson ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

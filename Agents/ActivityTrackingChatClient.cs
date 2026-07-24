@@ -22,6 +22,12 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
     private int _roundTrips;
     private int _toolCalls;
     private int _textChars;
+    // Live transcript accumulation. The response only carries the
+    // assistant turn; tool RESULTS arrive in the NEXT call's incoming
+    // history (appended by the function-invocation layer), so we diff
+    // the incoming history against what we've already seen.
+    private readonly List<ChatMessage> _liveTranscript = new();
+    private int _seenHistory;
 
     public ActivityTrackingChatClient(IChatClient inner, string runId, AgentRunStore runs)
         : base(inner)
@@ -33,7 +39,8 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
     public override async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
     {
-        var response = await base.GetResponseAsync(messages, options, cancellationToken);
+        var incoming = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        var response = await base.GetResponseAsync(incoming, options, cancellationToken);
 
         var roundTrips = Interlocked.Increment(ref _roundTrips);
         var tools = response.Messages.Sum(m =>
@@ -44,9 +51,17 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
         var toolCalls = Interlocked.Add(ref _toolCalls, tools);
         var textChars = Interlocked.Add(ref _textChars, chars);
 
+        // New history since the last call (tool results, layer-added
+        // messages) + this response = the conversation as it stands.
+        for (var i = _seenHistory; i < incoming.Count; i++)
+            _liveTranscript.Add(incoming[i]);
+        _liveTranscript.AddRange(response.Messages);
+        _seenHistory = incoming.Count + response.Messages.Count;
+
         try
         {
             await _runs.UpdateProgressAsync(_runId, roundTrips, toolCalls, textChars,
+                transcriptJson: MafAgentRunner.BuildTranscriptJson(_liveTranscript),
                 ct: CancellationToken.None);
         }
         catch { /* best-effort — never break a run */ }

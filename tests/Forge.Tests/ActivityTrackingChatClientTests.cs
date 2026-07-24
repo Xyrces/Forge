@@ -53,6 +53,38 @@ public class ActivityTrackingChatClientTests : IDisposable
     }
 
     [Fact]
+    public async Task LiveTranscript_StreamsAssistantTurnsAndToolResults()
+    {
+        await _runs.StartAsync("run-live", "task-1", "CoreDev", "m");
+        var tracked = new ActivityTrackingChatClient(new StubChatClient(), "run-live", _runs);
+
+        // Turn 1: user prompt in, assistant turn (text + 2 tool calls) out.
+        var history = new List<ChatMessage> { new(ChatRole.User, "fix the thing") };
+        await tracked.GetResponseAsync(history);
+
+        // The function-invocation layer appends the assistant turn +
+        // tool results to the history; the next call carries them.
+        history.Add(new ChatMessage(ChatRole.Assistant,
+        [
+            new TextContent("working on it"),
+            new FunctionCallContent("call-1", "bash"),
+            new FunctionCallContent("call-2", "read"),
+        ]));
+        history.Add(new ChatMessage(ChatRole.Tool,
+        [
+            new FunctionResultContent("call-1", "edited 3 files"),
+            new FunctionResultContent("call-2", "file contents here"),
+        ]));
+        await tracked.GetResponseAsync(history);
+
+        var run = (await _runs.ListActiveAsync()).Single();
+        Assert.NotNull(run.TranscriptJson);
+        Assert.Contains("fix the thing", run.TranscriptJson);       // prompt (first-call history)
+        Assert.Contains("working on it", run.TranscriptJson);       // assistant turns
+        Assert.Contains("edited 3 files", run.TranscriptJson);      // tool RESULTS via next-call history
+    }
+
+    [Fact]
     public async Task TrackingFailure_DoesNotBreakTheCall()
     {
         // No StartAsync row — the UPDATE hits zero rows, and a broken

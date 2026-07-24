@@ -399,6 +399,7 @@ public async Task<AgentRunResult> RunAsync(
                 .Where(m => m.Role == ChatRole.Assistant)
                 .Sum(m => (m.Text ?? "").Length);
             await _runs.UpdateProgressAsync(runId, transcriptMessages.Count, toolCalls, textChars,
+                transcriptJson: BuildTranscriptJson(transcriptMessages),
                 ct: CancellationToken.None);
         }
         catch (Exception ex)

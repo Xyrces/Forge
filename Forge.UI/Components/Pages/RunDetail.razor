@@ -1,5 +1,6 @@
 @page "/runs/{RunId}"
 @inject HttpClient Http
+@implements IDisposable
 @using System.Net.Http.Json
 @using System.Text.Json
 
@@ -19,6 +20,14 @@
                 @v.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
                 · @(v.DurationMs is null ? "…" : Fmt(v.DurationMs.Value))
                 · @v.MessageCount msgs · @v.ToolCallCount tool calls
+                @if (v.Status == "running" && v.LastActivityAt is not null)
+                {
+                    <span class="pill pill--inprogress" style="margin-left:6px">LIVE · active @Ago(v.LastActivityAt.Value) ago</span>
+                }
+                else if (v.Status == "running")
+                {
+                    <span class="pill pill--warn" style="margin-left:6px">no activity yet</span>
+                }
             </div>
             <div class="page-header__actions">
                 @if (v.TaskId is not null)
@@ -37,10 +46,14 @@
 
         @if (_run.Transcript.ValueKind != JsonValueKind.Array || _run.Transcript.GetArrayLength() == 0)
         {
-            <div class="page-subtitle">@(v.Status == "running" ? "Run in flight — the transcript is persisted when it finishes." : "No transcript recorded.")</div>
+            <div class="page-subtitle">@(v.Status == "running" ? "Run in flight — waiting for the first model response…" : "No transcript recorded.")</div>
         }
         else
         {
+            @if (v.Status == "running")
+            {
+                <div class="page-subtitle" style="margin-bottom:8px">Streaming live — the conversation updates as the agent works (3s refresh).</div>
+            }
             <div style="display:flex;flex-direction:column;gap:8px;max-width:980px">
                 @foreach (var (msg, idx) in Messages().Select((m, i) => (m, i)))
                 {
@@ -103,13 +116,45 @@
     [Parameter] public string RunId { get; set; } = "";
 
     private RunDto? _run;
+    private readonly CancellationTokenSource _pollCts = new();
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        _ = PollLoopAsync();
+    }
+
+    private async Task PollLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_pollCts.Token))
+                await LoadAsync();
+        }
+        catch (OperationCanceledException) { }
+    }
 
     private async Task LoadAsync()
     {
-        try { _run = await Http.GetFromJsonAsync<RunDto>($"/api/agent-runs/{RunId}"); }
+        try
+        {
+            _run = await Http.GetFromJsonAsync<RunDto>($"/api/agent-runs/{RunId}");
+            await InvokeAsync(StateHasChanged);
+        }
         catch { /* not found or transient */ }
+    }
+
+    public void Dispose()
+    {
+        _pollCts.Cancel();
+        _pollCts.Dispose();
+    }
+
+    private static string Ago(DateTime when)
+    {
+        var e = DateTime.UtcNow - when;
+        return e.TotalMinutes >= 1 ? $"{(int)e.TotalMinutes}m{e.Seconds:D2}s" : $"{(int)e.TotalSeconds}s";
     }
 
     private sealed record RunDto(RunViewDto View, JsonElement Transcript);
@@ -117,7 +162,7 @@
         string Id, string? TaskId, string Role, string? Model, string Status,
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
-        string? Error, bool HasTranscript);
+        string? Error, bool HasTranscript, DateTime? LastActivityAt);
 
     private sealed record ChatMsg(string Kind, string Text, List<ToolCall> Calls);
     private sealed record ToolCall(string Name, string Args, string? Result);
