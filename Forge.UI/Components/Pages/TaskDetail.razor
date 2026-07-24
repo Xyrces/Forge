@@ -13,6 +13,7 @@
             @(Prop(_task, "title") ?? TaskId)
         </h1>
         <div class="page-header__actions">
+            <a class="btn" href="/flow?issue=@TaskId">View in flow</a>
             <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
         </div>
     </div>

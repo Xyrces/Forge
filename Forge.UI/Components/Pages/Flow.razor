@@ -1,0 +1,196 @@
+@page "/flow"
+@inject HttpClient Http
+@implements IDisposable
+@using System.Net.Http.Json
+
+<PageTitle>Flow</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Pipeline flow</h1>
+        <div class="page-header__meta">
+            @if (_fleet is not null)
+            {
+                <span>@_fleet.Nodes.Sum(n => n.Count) items in flight · refreshed @_lastFetch?.ToString("HH:mm:ss")</span>
+            }
+        </div>
+        <div class="page-header__actions">
+            <button class="btn" @onclick="LoadFleetAsync">Refresh</button>
+        </div>
+    </div>
+
+    @if (_fleet is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else
+    {
+        <div style="display:flex;gap:16px;align-items:flex-start">
+            <svg viewBox="0 0 740 480" style="flex:1;min-width:0;max-width:820px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:12px">
+                <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                        <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--outline-variant)" />
+                    </marker>
+                </defs>
+
+                @* Lane bands *@
+                <rect x="10" y="30" width="720" height="150" rx="10" fill="none" stroke="var(--outline-variant)" stroke-dasharray="4 4" opacity="0.5" />
+                @SvgText(24, 52, "var(--on-surface-variant)", 12, "start", "PLANNING — specs & grooming")
+                <rect x="10" y="230" width="720" height="230" rx="10" fill="none" stroke="var(--outline-variant)" stroke-dasharray="4 4" opacity="0.5" />
+                @SvgText(24, 252, "var(--on-surface-variant)", 12, "start", "IMPLEMENTATION — engineering tasks")
+
+                @* Edges under nodes *@
+                @foreach (var e in _fleet.Edges)
+                {
+                    var a = _fleet.Nodes.First(n => n.Id == e.From);
+                    var b = _fleet.Nodes.First(n => n.Id == e.To);
+                    var visited = _journey is not null && _journey.Visits.Any(v => v.Node == a.Id) && _journey.Visits.Any(v => v.Node == b.Id);
+                    <line x1="@a.X" y1="@a.Y" x2="@b.X" y2="@b.Y"
+                          stroke="@(visited ? "var(--primary)" : "var(--outline-variant)")"
+                          stroke-width="@(visited ? 2.5 : 1.2)" marker-end="url(#arrow)" opacity="@(visited ? 1 : 0.6)" />
+                }
+
+                @* Nodes *@
+                @foreach (var n in _fleet.Nodes)
+                {
+                    var selected = _selectedNode == n.Id;
+                    var inJourney = _journey?.Visits.Any(v => v.Node == n.Id) == true;
+                    var isCurrent = _journey?.CurrentNode == n.Id;
+                    <g style="cursor:pointer" @onclick="@(() => SelectNode(n.Id))">
+                        <rect x="@(n.X - 62)" y="@(n.Y - 24)" width="124" height="48" rx="9"
+                              fill="@(isCurrent ? "var(--primary-container, var(--surface))" : "var(--surface)")"
+                              stroke="@(isCurrent ? "var(--primary)" : inJourney ? "var(--primary)" : selected ? "var(--primary)" : "var(--outline-variant)")"
+                              stroke-width="@(isCurrent || selected ? 2.5 : inJourney ? 1.8 : 1.2)" />
+                        @SvgText(n.X, n.Y + 4, "var(--on-surface)", 12, "middle", n.Label)
+                        @if (n.Count > 0)
+                        {
+                            <circle cx="@(n.X + 52)" cy="@(n.Y - 18)" r="11" fill="var(--primary)" />
+                            @SvgText(n.X + 52, n.Y - 14, "var(--on-primary, #fff)", 11, "middle", n.Count.ToString(), bold: true)
+                        }
+                    </g>
+                }
+            </svg>
+
+            <div style="width:320px;flex-shrink:0">
+                @if (_journey is not null)
+                {
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <h3 style="margin:0">Journey</h3>
+                        <button class="btn" @onclick="ClearJourney">✕</button>
+                    </div>
+                    <div class="page-subtitle" style="margin:6px 0 10px">
+                        <a href="/tasks/@_journey.IssueId" class="mono">@_journey.IssueId</a> — @_journey.Title
+                    </div>
+                    <ol style="list-style:none;padding:0;margin:0">
+                        @foreach (var v in _journey.Visits)
+                        {
+                            var label = _fleet.Nodes.FirstOrDefault(n => n.Id == v.Node)?.Label ?? v.Node;
+                            <li style="padding:6px 0;border-bottom:1px solid var(--outline-variant)">
+                                <div style="display:flex;justify-content:space-between">
+                                    <span>@label@(v.Count > 1 ? $" ×{v.Count}" : "")</span>
+                                    <span class="mono" style="color:var(--on-surface-variant);font-size:12px">@v.At.ToString("MM-dd HH:mm")</span>
+                                </div>
+                                @if (v.Note is not null)
+                                {
+                                    <div style="color:var(--on-surface-variant);font-size:12px">@v.Note</div>
+                                }
+                            </li>
+                        }
+                    </ol>
+                }
+                else if (_selectedNode is not null)
+                {
+                    var node = _fleet.Nodes.First(n => n.Id == _selectedNode);
+                    <h3 style="margin-top:0">@node.Label <span style="color:var(--on-surface-variant)">(@node.Count)</span></h3>
+                    @if (node.Issues.Count == 0)
+                    {
+                        <div class="page-subtitle">Nothing at this stage.</div>
+                    }
+                    <ul style="list-style:none;padding:0;margin:0">
+                        @foreach (var i in node.Issues)
+                        {
+                            <li style="padding:6px 0;border-bottom:1px solid var(--outline-variant)">
+                                <a href="" @onclick:preventDefault @onclick="@(() => LoadJourneyAsync(i.Id))" class="mono">@i.Id</a>
+                                <span class="pill pill--@i.Status.ToLowerInvariant()" style="margin-left:6px">@i.Status</span>
+                                <div style="font-size:13px">@i.Title</div>
+                            </li>
+                        }
+                    </ul>
+                    @if (node.Count > node.Issues.Count)
+                    {
+                        <div class="page-subtitle">…and @(node.Count - node.Issues.Count) more</div>
+                    }
+                }
+                else
+                {
+                    <div class="page-subtitle">Select a node to see what's at that stage. Select an item to trace its full journey through the pipeline.</div>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, SupplyParameterFromQuery(Name = "issue")]
+    public string? InitialIssue { get; set; }
+
+    private FleetDto? _fleet;
+    private JourneyDto? _journey;
+    private string? _selectedNode;
+    private DateTime? _lastFetch;
+    private System.Threading.Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _timer = new System.Threading.Timer(_ => InvokeAsync(LoadFleetAsync), null,
+            TimeSpan.Zero, TimeSpan.FromSeconds(5));
+        if (!string.IsNullOrWhiteSpace(InitialIssue))
+        {
+            _ = LoadJourneyAsync(InitialIssue);
+        }
+    }
+
+    private async Task LoadFleetAsync()
+    {
+        try
+        {
+            _fleet = await Http.GetFromJsonAsync<FleetDto>("/api/flow");
+            _lastFetch = DateTime.Now;
+            StateHasChanged();
+        }
+        catch { /* keep last good frame */ }
+    }
+
+    private void SelectNode(string id)
+    {
+        _selectedNode = id;
+        _journey = null;
+    }
+
+    private async Task LoadJourneyAsync(string issueId)
+    {
+        try
+        {
+            _journey = await Http.GetFromJsonAsync<JourneyDto>($"/api/flow/issues/{issueId}");
+        }
+        catch { /* item may have left the fleet */ }
+    }
+
+    private void ClearJourney() => _journey = null;
+
+    public void Dispose() => _timer?.Dispose();
+
+    // SVG <text> collides with Razor's <text> tag — emit it raw.
+    private static MarkupString SvgText(int x, int y, string fill, int size, string anchor, string content, bool bold = false)
+        => new($"<text x=\"{x}\" y=\"{y}\" fill=\"{fill}\" font-size=\"{size}\" text-anchor=\"{anchor}\"" +
+               (bold ? " font-weight=\"600\"" : "") + $">{System.Net.WebUtility.HtmlEncode(content)}</text>");
+
+    private sealed record FleetDto(
+        string[] Lanes, List<NodeDto> Nodes, List<EdgeDto> Edges, string? ActiveSprintId);
+    private sealed record NodeDto(
+        string Id, string Label, string Lane, int X, int Y, int Count, List<IssueSampleDto> Issues);
+    private sealed record EdgeDto(string From, string To);
+    private sealed record IssueSampleDto(string Id, string Title, string Status);
+    private sealed record JourneyDto(
+        string IssueId, string Title, string Status, string? CurrentNode, int? PrNumber, List<VisitDto> Visits);
+    private sealed record VisitDto(string Node, DateTime At, string? Note, int Count);
+}
