@@ -443,7 +443,8 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 /* Role control surface (Agents page) — same visual language as the
    project drill-down: .card, .pill, .data-grid, .slot-card. Keep
    role presentation consistent everywhere; add new role UI here,
-   not inline. */
+   not inline. Layout follows the Stitch 'Fleet Control' design
+   (.e2e/stitch-agents.png): compact master rows, detail on expand. */
 .role-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .role-head__name { font-family: var(--font-mono); font-size: 16px; font-weight: 600; }
 .meta-text { font-size: 12px; color: var(--on-surface-variant); }
@@ -455,6 +456,27 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 }
 .role-model-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .role-model-edit input { min-width: 260px; }
+
+/* Agent fleet row: one compact, glanceable block per role. */
+.agent-row { cursor: pointer; }
+.agent-row__top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.agent-row__identity { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.agent-row__name { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--primary); }
+.agent-row__status { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; }
+.agent-row__statusline { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; }
+.agent-row__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: agent-pulse 2s ease-in-out infinite; }
+@keyframes agent-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.agent-row__statusline--running { color: var(--success); }
+.agent-row__sub { font-size: 10px; color: var(--on-surface-variant); }
+.agent-row__grid { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: end; }
+.agent-row__model { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; }
+.agent-row__meter { height: 6px; background: var(--surface-3); border-radius: var(--radius-pill); overflow: hidden; margin-top: 6px; }
+.agent-row__meter-fill { height: 100%; background: var(--primary); border-radius: var(--radius-pill); }
+.agent-row__meter-fill--full { background: var(--error); }
+.agent-row__meterlabels { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 9px; color: var(--on-surface-variant); margin-top: 3px; text-transform: uppercase; letter-spacing: .04em; }
+.agent-row__lastrun { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.agent-row__detail { margin-top: 4px; }
+.agent-row__chevron { color: var(--on-surface-variant); font-size: 10px; }
 
 .overview-section { margin-top: 24px; }
 .overview-section h2 {

@@ -7,7 +7,7 @@
 <div class="page">
     <div class="page-header">
         <h1>Agents</h1>
-        <div class="page-header__meta">@(_data?.Roles.Count ?? 0) roles · live status refreshes every 5s</div>
+        <div class="page-header__meta">@((_data?.Roles.Count ?? 0) + (_data?.Pipeline.Count ?? 0)) roles · live status refreshes every 5s</div>
         <div class="page-header__actions">
             <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
         </div>
@@ -24,203 +24,56 @@
     else
     {
         <section class="overview-section">
-            <h2>Engineering roles</h2>
-            <p class="page-subtitle page-subtitle--meta">Dispatched per task by the sprint loop. Models editable live; caps edited per project.</p>
-        </section>
-        @foreach (var role in _data.Roles)
-        {
-            <div class="card overview-section">
-                <div class="role-head">
-                    <span class="role-head__name">@role.Name</span>
-                    <span class="pill">@role.AgentType</span>
-                    @if (role.CurrentRun is not null)
-                    {
-                        <a href="/runs/@role.CurrentRun.Id" class="pill pill--inprogress" style="text-decoration:none;">
-                            RUNNING · @(role.CurrentRun.TaskId ?? "—") · @Elapsed(role.CurrentRun.StartedAt)
-                        </a>
-                        <span class="meta-text">@ProgressText(role.CurrentRun)</span>
-                        @if (role.CurrentRun.TaskId is not null)
-                        {
-                            <a href="/tasks/@role.CurrentRun.TaskId" class="meta-text">view task</a>
-                        }
-                    }
-                    else
-                    {
-                        <span class="pill">idle</span>
-                    }
-                    <span style="width:180px; margin-left:auto;">
-                        <RoleSlotMeter Role="@role.Name" InFlight="@role.Slot.InFlight" Max="@role.Slot.Max" />
-                    </span>
-                </div>
-
-                <table class="data-grid">
-                    <tbody>
-                        <tr>
-                            <td style="width:130px;" class="meta-text">Model</td>
-                            <td>
-                                @if (_editingRole == role.Name)
-                                {
-                                    <div class="role-model-edit">
-                                        <select class="mono" @bind="_editProvider">
-                                            @foreach (var p in _data.Providers)
-                                            {
-                                                <option value="@p">@p</option>
-                                            }
-                                        </select>
-                                        <input type="text" class="mono" @bind="_editModel" placeholder="model (e.g. kimi-k3)" />
-                                        <button class="btn btn--primary" @onclick="() => SaveModelAsync(role.Name)">Save</button>
-                                        <button class="btn" @onclick="() => _editingRole = null">Cancel</button>
-                                        @if (_editError is not null)
-                                        {
-                                            <span class="error-text">@_editError</span>
-                                        }
-                                    </div>
-                                }
-                                else
-                                {
-                                    <span class="mono">@role.Model.Provider / @role.Model.Model</span>
-                                    <span class="pill @(role.Model.Source == "override" ? "pill--primary" : "")" style="margin-left:8px; font-size:11px;">@role.Model.Source</span>
-                                    @if (_data.OverridesEditable)
-                                    {
-                                        <button class="btn" style="margin-left:8px; padding:2px 10px; font-size:12px;" @onclick="() => BeginEdit(role)">Edit</button>
-                                        @if (role.Model.Source == "override")
-                                        {
-                                            <button class="btn" style="margin-left:4px; padding:2px 10px; font-size:12px;" @onclick="() => ClearModelAsync(role.Name)">Clear override</button>
-                                        }
-                                    }
-                                }
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="meta-text">Territory</td>
-                            <td class="mono meta-text">@(string.IsNullOrWhiteSpace(role.Territory) ? "(whole repo)" : role.Territory)</td>
-                        </tr>
-                        <tr>
-                            <td class="meta-text">Tools</td>
-                            <td>
-                                @foreach (var t in role.Tools)
-                                {
-                                    <span class="pill" style="margin-right:4px; font-size:11px;">@t</span>
-                                }
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="meta-text">Concurrency</td>
-                            <td class="meta-text">
-                                @role.Slot.InFlight in flight · cap @role.Slot.Max
-                                <a href="/projects/forge/overview" style="margin-left:8px;">edit caps</a>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="meta-text">Last run</td>
-                            <td class="meta-text">
-                                @if (role.LastRun is null)
-                                {
-                                    <span>none yet</span>
-                                }
-                                else
-                                {
-                                    <a href="/runs/@role.LastRun.Id">
-                                        <span class="pill @(role.LastRun.Status == "succeeded" ? "pill--completed" : "pill--failed")">@role.LastRun.Status</span>
-                                    </a>
-                                    <span class="mono" style="margin-left:6px;">@(role.LastRun.TaskId ?? "—")</span>
-                                    <span style="margin-left:6px;">@FormatWhen(role.LastRun.FinishedAt) · @FormatDuration(role.LastRun.DurationMs)</span>
-                                    @if (!string.IsNullOrEmpty(role.LastRun.Error))
-                                    {
-                                        <div class="error-text mono">@Truncate(role.LastRun.Error, 160)</div>
-                                    }
-                                }
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="meta-text" style="vertical-align:top;">Role prompt</td>
-                            <td>
-                                <details>
-                                    <summary style="cursor:pointer;" class="meta-text">
-                                        <span class="pill" style="font-size:11px;">@role.Prompt.Source</span>
-                                        <span class="mono" style="margin-left:6px;">@role.Prompt.Path</span>
-                                    </summary>
-                                    @if (role.Prompt.Content is null)
-                                    {
-                                        <div class="page-subtitle">prompt file not found</div>
-                                    }
-                                    else
-                                    {
-                                        <pre class="prompt-block">@role.Prompt.Content</pre>
-                                    }
-                                </details>
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
+            <h2>Engineering roles <span class="meta-text">· @_data.Roles.Count total</span></h2>
+            <p class="page-subtitle page-subtitle--meta">Dispatched per task by the sprint loop. Click a row for tools, prompt, run history, and the model editor.</p>
+            <div style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
+                @foreach (var role in _data.Roles)
+                {
+                    <AgentRoleRow Name="@role.Name"
+                                  Kind="@role.AgentType"
+                                  Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
+                                  Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
+                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount))"
+                                  LastRun="@(role.LastRun is null ? null : new AgentRoleRow.LastRunInfo(role.LastRun.Id, role.LastRun.TaskId, role.LastRun.Status, role.LastRun.FinishedAt, role.LastRun.DurationMs, role.LastRun.Error))"
+                                  Territory="@role.Territory"
+                                  Tools="@role.Tools"
+                                  Prompt="@(new AgentRoleRow.PromptInfo(role.Prompt.Source, role.Prompt.Path, role.Prompt.Content))"
+                                  ModelEditable="true"
+                                  OverridesEditable="@_data.OverridesEditable"
+                                  Providers="@_data.Providers"
+                                  Editing="@(_editingRole == role.Name)"
+                                  EditError="@(_editingRole == role.Name ? _editError : null)"
+                                  OnBeginEdit="@(name => _editingRole = name)"
+                                  OnCancelEdit="@(_ => _editingRole = null)"
+                                  OnSaveModel="SaveModelAsync"
+                                  OnClearModel="ClearModelAsync" />
+                }
             </div>
-        }
+        </section>
 
         <section class="overview-section">
-            <h2>Pipeline roles</h2>
-            <p class="page-subtitle page-subtitle--meta">
-                Scheduler-side agents (intake, design, grooming, art) plus the dispatch loop itself.
-                Instructions live in code, not prompt files; designer/groomer/artist borrow coredev's model.
-            </p>
-        </section>
-        @foreach (var role in _data.Pipeline)
-        {
-            <div class="card overview-section">
-                <div class="role-head">
-                    <span class="role-head__name">@role.Name</span>
-                    <span class="pill">pipeline</span>
-                    <span class="meta-text">@role.Description</span>
-                    <a href="@role.Surface" class="meta-text" style="margin-left:auto;">view work →</a>
-                    <span style="width:180px;">
-                        <RoleSlotMeter Role="@role.Name" InFlight="@role.Slot.InFlight" Max="@role.Slot.Max" />
-                    </span>
-                </div>
-                <table class="data-grid">
-                    <tbody>
-                        <tr>
-                            <td style="width:130px;" class="meta-text">Model</td>
-                            <td>
-                                @if (_editingRole == role.Name)
-                                {
-                                    <div class="role-model-edit">
-                                        <select class="mono" @bind="_editProvider">
-                                            @foreach (var p in _data.Providers)
-                                            {
-                                                <option value="@p">@p</option>
-                                            }
-                                        </select>
-                                        <input type="text" class="mono" @bind="_editModel" placeholder="model (e.g. kimi-k3)" />
-                                        <button class="btn btn--primary" @onclick="() => SaveModelAsync(role.Name)">Save</button>
-                                        <button class="btn" @onclick="() => _editingRole = null">Cancel</button>
-                                        @if (_editError is not null)
-                                        {
-                                            <span class="error-text">@_editError</span>
-                                        }
-                                    </div>
-                                }
-                                else if (role.Model.Provider is null)
-                                {
-                                    <span class="meta-text">no LLM</span>
-                                }
-                                else
-                                {
-                                    <span class="mono">@role.Model.Provider / @role.Model.Model</span>
-                                    <span class="pill @(role.Model.Source == "override" ? "pill--primary" : "")" style="margin-left:8px; font-size:11px;">@role.Model.Source</span>
-                                    @if (_data.OverridesEditable && role.ModelEditable)
-                                    {
-                                        <button class="btn" style="margin-left:8px; padding:2px 10px; font-size:12px;" @onclick="() => BeginEditPipeline(role)">Edit</button>
-                                        @if (role.Model.Source == "override")
-                                        {
-                                            <button class="btn" style="margin-left:4px; padding:2px 10px; font-size:12px;" @onclick="() => ClearModelAsync(role.Name)">Clear override</button>
-                                        }
-                                    }
-                                }
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
+            <h2>Pipeline roles <span class="meta-text">· @_data.Pipeline.Count total</span></h2>
+            <p class="page-subtitle page-subtitle--meta">Scheduler-side agents plus the dispatch loop. Instructions live in code; designer/groomer/artist borrow coredev's model.</p>
+            <div style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
+                @foreach (var role in _data.Pipeline)
+                {
+                    <AgentRoleRow Name="@role.Name"
+                                  Kind="pipeline"
+                                  Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
+                                  Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
+                                  Surface="@role.Surface"
+                                  ModelEditable="@role.ModelEditable"
+                                  OverridesEditable="@_data.OverridesEditable"
+                                  Providers="@_data.Providers"
+                                  Editing="@(_editingRole == role.Name)"
+                                  EditError="@(_editingRole == role.Name ? _editError : null)"
+                                  OnBeginEdit="@(name => _editingRole = name)"
+                                  OnCancelEdit="@(_ => _editingRole = null)"
+                                  OnSaveModel="SaveModelAsync"
+                                  OnClearModel="ClearModelAsync" />
+                }
             </div>
-        }
+        </section>
     }
 </div>
 
@@ -228,8 +81,6 @@
     private RolesResponse? _data;
     private string? _error;
     private string? _editingRole;
-    private string _editProvider = "";
-    private string _editModel = "";
     private string? _editError;
     private readonly CancellationTokenSource _pollCts = new();
 
@@ -264,27 +115,11 @@
         }
     }
 
-    private void BeginEdit(RoleDto role)
-    {
-        _editingRole = role.Name;
-        _editProvider = role.Model.Provider ?? (_data?.Providers.FirstOrDefault() ?? "");
-        _editModel = role.Model.Model ?? "";
-        _editError = null;
-    }
-
-    private void BeginEditPipeline(PipelineRoleDto role)
-    {
-        _editingRole = role.Name;
-        _editProvider = role.Model.Provider ?? (_data?.Providers.FirstOrDefault() ?? "");
-        _editModel = role.Model.Model ?? "";
-        _editError = null;
-    }
-
-    private async Task SaveModelAsync(string roleName)
+    private async Task SaveModelAsync((string Role, string Provider, string Model) edit)
     {
         _editError = null;
-        var resp = await Http.PutAsJsonAsync($"/api/agents/roles/{roleName}/model",
-            new { provider = _editProvider, model = _editModel });
+        var resp = await Http.PutAsJsonAsync($"/api/agents/roles/{edit.Role}/model",
+            new { provider = edit.Provider, model = edit.Model });
         if (!resp.IsSuccessStatusCode)
         {
             _editError = await resp.Content.ReadAsStringAsync();
@@ -299,35 +134,6 @@
         await Http.DeleteAsync($"/api/agents/roles/{roleName}/model");
         await LoadAsync();
     }
-
-    private static string Elapsed(DateTime since)
-    {
-        var e = DateTime.UtcNow - since;
-        return e.TotalMinutes >= 1 ? $"{(int)e.TotalMinutes}m{e.Seconds:D2}s" : $"{(int)e.TotalSeconds}s";
-    }
-
-    private static string ProgressText(CurrentRunDto run)
-    {
-        var msgs = run.MessageCount ?? 0;
-        var tools = run.ToolCallCount ?? 0;
-        if (msgs == 0 && tools == 0)
-        {
-            var waiting = run.LastActivityAt is null ? Elapsed(run.StartedAt) : Elapsed(run.LastActivityAt.Value);
-            return $"no model output yet — waiting {waiting} (provider may be hanging)";
-        }
-        var ago = run.LastActivityAt is null ? "" : $" · active {Elapsed(run.LastActivityAt.Value)} ago";
-        return $"{msgs} messages · {tools} tool calls{ago}";
-    }
-
-    private static string FormatWhen(DateTime? when)
-        => when is null ? "—" : when.Value.ToString("MM-dd HH:mm:ss");
-
-    private static string FormatDuration(long? ms)
-        => ms is null ? "" : TimeSpan.FromMilliseconds(ms.Value).TotalMinutes >= 1
-            ? $"{TimeSpan.FromMilliseconds(ms.Value).TotalMinutes:F1}m"
-            : $"{TimeSpan.FromMilliseconds(ms.Value).TotalSeconds:F0}s";
-
-    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
     public void Dispose()
     {
