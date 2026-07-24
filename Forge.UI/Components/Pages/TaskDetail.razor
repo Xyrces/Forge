@@ -101,6 +101,38 @@
             </div>
         }
 
+        <div class="card" style="margin-bottom:14px">
+            <h2>Agent runs (@_runs.Count)</h2>
+            @if (_runs.Count == 0)
+            {
+                <p class="hint">No agent runs recorded for this task yet.</p>
+            }
+            else
+            {
+                <table class="data-grid">
+                    <thead>
+                        <tr><th>Status</th><th>Started</th><th>Duration</th><th>Progress</th><th>Error</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var r in _runs)
+                        {
+                            <tr>
+                                <td>
+                                    <a href="/runs/@r.Id">
+                                        <span class="pill @(r.Status == "succeeded" ? "pill--completed" : r.Status == "running" ? "pill--inprogress" : "pill--failed")">@r.Status</span>
+                                    </a>
+                                </td>
+                                <td class="mono">@r.StartedAt.ToString("MM-dd HH:mm:ss")</td>
+                                <td class="mono">@(r.DurationMs is null ? "…" : $"{TimeSpan.FromMilliseconds(r.DurationMs.Value).TotalSeconds:F0}s")</td>
+                                <td class="mono">@(r.MessageCount ?? 0) msgs · @(r.ToolCallCount ?? 0) tools</td>
+                                <td class="mono" style="font-size:11px; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="@r.Error">@(r.Error ?? "")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+
         <div class="card">
             <h2>Timeline (@_events.Count events)</h2>
             @if (_events.Count == 0)
@@ -138,6 +170,7 @@
     private JsonElement? _task;
     private JsonElement? _sprint;
     private List<EventVm> _events = new();
+    private List<RunVm> _runs = new();
     private string? _repoUrl;
     private string? _error;
 
@@ -184,6 +217,33 @@
                     Prop(e, "at") ?? "", Prop(e, "kind") ?? "", Prop(e, "detail") ?? "")).ToList()
                 : new List<EventVm>();
             _events.Reverse(); // API returns newest-first; show oldest-first
+
+            // Agent runs for this task (the "who worked on this and
+            // what did they actually do" trail). Same shape as /runs.
+            try
+            {
+                var runsDoc = await Http.GetFromJsonAsync<JsonElement>($"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}");
+                var runs = new List<RunVm>();
+                foreach (var bucket in new[] { "active", "recent" })
+                {
+                    if (runsDoc.TryGetProperty(bucket, out var arr))
+                    {
+                        foreach (var r in arr.EnumerateArray())
+                        {
+                            runs.Add(new RunVm(
+                                Id: Prop(r, "id") ?? "",
+                                Status: Prop(r, "status") ?? "",
+                                StartedAt: DateTime.TryParse(Prop(r, "startedAt"), out var sa) ? sa : DateTime.MinValue,
+                                DurationMs: long.TryParse(Prop(r, "durationMs"), out var dm) ? dm : null,
+                                MessageCount: int.TryParse(Prop(r, "messageCount"), out var mc) ? mc : null,
+                                ToolCallCount: int.TryParse(Prop(r, "toolCallCount"), out var tc) ? tc : null,
+                                Error: Prop(r, "error")));
+                        }
+                    }
+                }
+                _runs = runs.OrderByDescending(r => r.StartedAt).ToList();
+            }
+            catch { /* runs are additive — never break the task page */ }
             if (_repoUrl is null && !string.IsNullOrEmpty(projectId))
             {
                 var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
@@ -223,4 +283,7 @@
     }
 
     private sealed record EventVm(string At, string Kind, string Detail);
+
+    private sealed record RunVm(string Id, string Status, DateTime StartedAt,
+        long? DurationMs, int? MessageCount, int? ToolCallCount, string? Error);
 }

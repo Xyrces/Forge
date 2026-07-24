@@ -16,7 +16,7 @@ public static class AgentRunEndpoints
         app.MapGet("/api/agent-runs", async (string? taskId, CancellationToken ct) =>
         {
             var active = await runs.ListActiveAsync(ct);
-            var recent = await runs.ListRecentAsync(limit: 50, taskId: taskId, ct);
+            var recent = await runs.ListRecentAsync(limit: 50, taskId: taskId, ct: ct);
             return Results.Json(new
             {
                 active = active.Select(ToView),
@@ -54,5 +54,6 @@ public static class AgentRunEndpoints
         textChars = r.TextChars,
         error = r.Error,
         hasTranscript = r.TranscriptJson is not null,
+        lastActivityAt = r.LastActivityAt,
     };
 }

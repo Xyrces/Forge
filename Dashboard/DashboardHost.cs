@@ -59,6 +59,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ProjectCloner? _projectCloner;
     private readonly Forge.Core.SecretStore? _secretStore;
     private readonly AgentRunStore? _agentRuns;
+    private readonly Forge.Agents.LlmConfig? _llmConfig;
+    private readonly Forge.Agents.RoleModelOverrides? _roleModelOverrides;
     private readonly GitHubOptions? _githubOptions;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
@@ -107,7 +109,9 @@ public sealed class DashboardHost : IAsyncDisposable
         ProjectCloner? projectCloner = null,
         GitHubOptions? githubOptions = null,
         Forge.Core.SecretStore? secretStore = null,
-        AgentRunStore? agentRuns = null)
+        AgentRunStore? agentRuns = null,
+        Forge.Agents.LlmConfig? llmConfig = null,
+        Forge.Agents.RoleModelOverrides? roleModelOverrides = null)
     {
         _options = options;
         _headroom = headroom;
@@ -152,6 +156,8 @@ public sealed class DashboardHost : IAsyncDisposable
         _githubOptions = githubOptions;
         _logger = logger;
         _agentRuns = agentRuns;
+        _llmConfig = llmConfig;
+        _roleModelOverrides = roleModelOverrides;
     }
 
     public string BaseUrl => ResolveBaseUrl();
@@ -449,6 +455,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         {
             AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns);
         }
+        AgentsEndpoints.MapAgentsEndpoints(_app, new Agents.RoleAgentRegistry(),
+            _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory);
 
 if (_groomerRuns is not null)
             {

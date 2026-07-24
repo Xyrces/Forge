@@ -39,6 +39,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
     private readonly AgentRunStore? _runs;
+    private readonly RoleModelOverrides? _modelOverrides;
 
     /// <summary>
     /// Optional path for the per-run diagnostic side-channel log
@@ -68,7 +69,8 @@ public sealed class MafAgentRunner : IAgentRunner
         Func<ArtOutputStore?>? artOutputs = null,
         ISecretStore? secrets = null,
         IIssueStore? issues = null,
-        AgentRunStore? runs = null)
+        AgentRunStore? runs = null,
+        RoleModelOverrides? modelOverrides = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -84,6 +86,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _secrets = secrets;
         _issues = issues;
         _runs = runs;
+        _modelOverrides = modelOverrides;
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -188,8 +191,10 @@ public async Task<AgentRunResult> RunAsync(
         session ??= await agent.CreateSessionAsync(ct);
 
         // Run registry: visible in near real time as 'running'
-        // (who is doing what); the full transcript is persisted
-        // when the run finishes. Best-effort — never breaks a run.
+        // (who is doing what); progress heartbeats land after every
+        // model response and the full transcript is persisted when
+        // the run finishes (partial transcript on failure).
+        // Best-effort — never breaks a run.
         var runId = Guid.NewGuid().ToString("N")[..12];
         var runTaskId = ResolveContextString(context, "issueId");
         var startedAt = DateTime.UtcNow;
@@ -197,8 +202,8 @@ public async Task<AgentRunResult> RunAsync(
         {
             try
             {
-                await _runs.StartAsync(runId, runTaskId, role.ToString(),
-                    _config.Resolve(role).Model, ct);
+                var (_, runModel, _) = _config.ResolveEffective(role, _modelOverrides);
+                await _runs.StartAsync(runId, runTaskId, role.ToString(), runModel, ct);
             }
             catch (Exception ex)
             {
@@ -206,14 +211,19 @@ public async Task<AgentRunResult> RunAsync(
             }
         }
 
+        // Transcript accumulation: AgentResponse.Messages holds only
+        // the messages added by THAT call, so stitch the initial
+        // prompt + each continuation turn together. Declared outside
+        // the try so a mid-run failure still persists the partial
+        // transcript — an agent that dies on turn 8 of 10 leaves 8
+        // turns of auditable work, not nothing.
+        var transcriptMessages = new List<ChatMessage> { message };
+
         try
         {
             var response = await agent.RunAsync(message, session, cancellationToken: ct);
-            // Transcript accumulation: AgentResponse.Messages holds
-            // only the messages added by THAT call, so stitch the
-            // initial prompt + each continuation turn together.
-            var transcriptMessages = new List<ChatMessage> { message };
             transcriptMessages.AddRange(response.Messages);
+            await HeartbeatAsync(runId, transcriptMessages);
 
             // minimax-m3 quirk: near the end of long tool-call runs the
             // model sometimes emits its next tool call as literal text
@@ -238,6 +248,7 @@ public async Task<AgentRunResult> RunAsync(
                     session, cancellationToken: ct);
                 transcriptMessages.Add(nudge);
                 transcriptMessages.AddRange(response.Messages);
+                await HeartbeatAsync(runId, transcriptMessages);
             }
             var elapsed = DateTime.UtcNow - startedAt;
 
@@ -304,10 +315,22 @@ public async Task<AgentRunResult> RunAsync(
         {
             try
             {
+                // Partial transcript: whatever turns completed before
+                // the failure are still persisted — the operator can
+                // see exactly how far the agent got.
+                var partial = transcriptMessages.Count > 1
+                    ? BuildTranscriptJson(transcriptMessages)
+                    : null;
+                var toolCalls = transcriptMessages.Sum(m =>
+                    m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Count());
+                var textChars = transcriptMessages
+                    .Where(m => m.Role == ChatRole.Assistant)
+                    .Sum(m => (m.Text ?? "").Length);
                 await _runs.FinishAsync(runId, "failed",
                     (long)(DateTime.UtcNow - startedAt).TotalMilliseconds,
-                    0, 0, 0, $"{ex.GetType().Name}: {ex.Message}",
-                    transcriptJson: null, ct: CancellationToken.None);
+                    transcriptMessages.Count, toolCalls, textChars,
+                    $"{ex.GetType().Name}: {ex.Message}",
+                    transcriptJson: partial, ct: CancellationToken.None);
             }
             catch { /* best-effort */ }
             throw;
@@ -344,6 +367,31 @@ public async Task<AgentRunResult> RunAsync(
     /// so a pathological single message can't blow up a row; table
     /// size is bounded by AgentRunStore retention, not truncation.
     /// </summary>
+    /// <summary>
+    /// Mid-run progress heartbeat for the run registry: updates turn /
+    /// tool-call / text counts + last_activity_at so the dashboard can
+    /// tell "actively working" from "hung waiting on the provider".
+    /// Best-effort — never breaks a run.
+    /// </summary>
+    private async Task HeartbeatAsync(string runId, List<ChatMessage> transcriptMessages)
+    {
+        if (_runs is null) return;
+        try
+        {
+            var toolCalls = transcriptMessages.Sum(m =>
+                m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Count());
+            var textChars = transcriptMessages
+                .Where(m => m.Role == ChatRole.Assistant)
+                .Sum(m => (m.Text ?? "").Length);
+            await _runs.UpdateProgressAsync(runId, transcriptMessages.Count, toolCalls, textChars,
+                ct: CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "agent_run progress heartbeat failed for run {RunId}; continuing", runId);
+        }
+    }
+
     internal static string BuildTranscriptJson(IEnumerable<ChatMessage> messages)
     {
         using var stream = new MemoryStream();

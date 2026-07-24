@@ -53,9 +53,17 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// </summary>
     public CostTracker? CostTracker { get; set; }
 
+    /// <summary>
+    /// Live per-role model overrides (dashboard Agents page). When a
+    /// role has an override, <see cref="Create"/> resolves THAT
+    /// provider+model instead of appsettings llm.roles / the default.
+    /// Sync snapshot reads — set at startup by Program.cs.
+    /// </summary>
+    public RoleModelOverrides? Overrides { get; set; }
+
     public IChatClient Create(LlmConfig config, AgentType role)
     {
-        var (provider, model) = config.Resolve(role);
+        var (provider, model, _) = config.ResolveEffective(role, Overrides);
         if (string.IsNullOrEmpty(provider.ApiKey))
         {
             throw new InvalidOperationException(

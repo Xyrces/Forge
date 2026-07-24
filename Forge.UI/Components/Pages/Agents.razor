@@ -1,103 +1,274 @@
 @page "/agents"
-@inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
-@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
-@inject Fluxor.IDispatcher Dispatch
+@inject HttpClient Http
 @implements IDisposable
-@using Forge.Dashboard.Features.View
+@using System.Net.Http.Json
 
 <PageTitle>Agents</PageTitle>
 <div class="page">
     <div class="page-header">
         <h1>Agents</h1>
-        <div class="page-header__meta">@ViewStore.Value.Agents.Count registered · @ViewStore.Value.Agents.Count(a => a.Enabled) enabled</div>
+        <div class="page-header__meta">@(_data?.Roles.Count ?? 0) roles · live status refreshes every 5s</div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId)))">Refresh</button>
+            <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
         </div>
     </div>
 
-    @if (ViewStore.Value.Loading)
+    @if (_error is not null)
+    {
+        <div class="page-subtitle">Error: @_error</div>
+    }
+    else if (_data is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
-    else if (ViewStore.Value.Error is not null)
-    {
-        <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
-    }
     else
     {
-        <table class="data-grid">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Kilo Name</th>
-                    <th>Display Name</th>
-                    <th>Scope</th>
-                    <th>Enabled</th>
-                    <th>Updated</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var row in ViewStore.Value.Agents)
-                {
-                    <tr>
-                        <td class="mono">@row.Id</td>
-                        <td class="mono">@row.AgentName</td>
-                        <td>@row.DisplayName</td>
-                        <td>@row.Scope</td>
-                        <td>
-                            @if (row.Enabled)
-                            {
-                                <span class="pill pill--completed">on</span>
-                            }
-                            else
-                            {
-                                <span class="pill pill--failed">off</span>
-                            }
-                        </td>
-                        <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
-                    </tr>
-                }
-                @if (ViewStore.Value.Agents.Count == 0)
-                {
-                    <tr><td colspan="6"><div class="page-subtitle">No agents registered yet.</div></td></tr>
-                }
-            </tbody>
-        </table>
+        @foreach (var role in _data.Roles)
+        {
+            <div class="card" style="margin-bottom:16px; padding:16px; border:1px solid var(--border,#333); border-radius:8px;">
+                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <span class="mono" style="font-size:18px; font-weight:600;">@role.Name</span>
+                    <span class="pill">@role.AgentType</span>
+                    @if (role.CurrentRun is not null)
+                    {
+                        <a href="/runs/@role.CurrentRun.Id" class="pill pill--inprogress" style="text-decoration:none;">
+                            RUNNING · @(role.CurrentRun.TaskId ?? "—") · @Elapsed(role.CurrentRun.StartedAt)
+                        </a>
+                        <span style="font-size:12px; opacity:.8;">
+                            @ProgressText(role.CurrentRun)
+                        </span>
+                        @if (role.CurrentRun.TaskId is not null)
+                        {
+                            <a href="/tasks/@role.CurrentRun.TaskId" style="font-size:12px;">view task</a>
+                        }
+                    }
+                    else
+                    {
+                        <span class="pill">idle</span>
+                    }
+                    <span style="margin-left:auto; font-size:12px; opacity:.75;">
+                        slots @role.Slot.InFlight/@role.Slot.Max
+                    </span>
+                </div>
+
+                <table class="data-grid" style="margin-top:12px;">
+                    <tbody>
+                        <tr>
+                            <td style="width:130px; opacity:.7;">Model</td>
+                            <td>
+                                @if (_editingRole == role.Name)
+                                {
+                                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                        <select class="mono" @bind="_editProvider">
+                                            @foreach (var p in _data.Providers)
+                                            {
+                                                <option value="@p">@p</option>
+                                            }
+                                        </select>
+                                        <input class="mono" style="min-width:260px;" @bind="_editModel" placeholder="model (e.g. kimi-k3)" />
+                                        <button class="btn btn--primary" @onclick="() => SaveModelAsync(role.Name)">Save</button>
+                                        <button class="btn" @onclick="() => _editingRole = null">Cancel</button>
+                                        @if (_editError is not null)
+                                        {
+                                            <span style="color:var(--failed,#f66); font-size:12px;">@_editError</span>
+                                        }
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="mono">@role.Model.Provider / @role.Model.Model</span>
+                                    <span class="pill @(role.Model.Source == "override" ? "pill--primary" : "")" style="margin-left:8px; font-size:11px;">@role.Model.Source</span>
+                                    @if (_data.OverridesEditable)
+                                    {
+                                        <button class="btn" style="margin-left:8px; padding:2px 10px; font-size:12px;" @onclick="() => BeginEdit(role)">Edit</button>
+                                        @if (role.Model.Source == "override")
+                                        {
+                                            <button class="btn" style="margin-left:4px; padding:2px 10px; font-size:12px;" @onclick="() => ClearModelAsync(role.Name)">Clear override</button>
+                                        }
+                                    }
+                                }
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="opacity:.7;">Territory</td>
+                            <td class="mono" style="font-size:12px;">@(string.IsNullOrWhiteSpace(role.Territory) ? "(whole repo)" : role.Territory)</td>
+                        </tr>
+                        <tr>
+                            <td style="opacity:.7;">Tools</td>
+                            <td>
+                                @foreach (var t in role.Tools)
+                                {
+                                    <span class="pill" style="margin-right:4px; font-size:11px;">@t</span>
+                                }
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="opacity:.7;">Concurrency</td>
+                            <td style="font-size:12px;">
+                                @role.Slot.InFlight in flight · cap @role.Slot.Max
+                                <a href="/projects/forge" style="margin-left:8px;">edit caps</a>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="opacity:.7;">Last run</td>
+                            <td style="font-size:12px;">
+                                @if (role.LastRun is null)
+                                {
+                                    <span style="opacity:.6;">none yet</span>
+                                }
+                                else
+                                {
+                                    <a href="/runs/@role.LastRun.Id">
+                                        <span class="pill @(role.LastRun.Status == "succeeded" ? "pill--completed" : "pill--failed")">@role.LastRun.Status</span>
+                                    </a>
+                                    <span class="mono" style="margin-left:6px;">@(role.LastRun.TaskId ?? "—")</span>
+                                    <span style="margin-left:6px; opacity:.75;">@FormatWhen(role.LastRun.FinishedAt) · @FormatDuration(role.LastRun.DurationMs)</span>
+                                    @if (!string.IsNullOrEmpty(role.LastRun.Error))
+                                    {
+                                        <div style="opacity:.75; margin-top:2px;" class="mono">@Truncate(role.LastRun.Error, 160)</div>
+                                    }
+                                }
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="opacity:.7; vertical-align:top;">Role prompt</td>
+                            <td>
+                                <details>
+                                    <summary style="cursor:pointer; font-size:12px;">
+                                        <span class="pill" style="font-size:11px;">@role.Prompt.Source</span>
+                                        <span class="mono" style="margin-left:6px; font-size:11px; opacity:.7;">@role.Prompt.Path</span>
+                                    </summary>
+                                    @if (role.Prompt.Content is null)
+                                    {
+                                        <div class="page-subtitle">prompt file not found</div>
+                                    }
+                                    else
+                                    {
+                                        <pre class="mono" style="max-height:420px; overflow:auto; font-size:11px; padding:10px; border:1px solid var(--border,#333); border-radius:6px; white-space:pre-wrap;">@role.Prompt.Content</pre>
+                                    }
+                                </details>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        }
     }
 </div>
 
 @code {
-    private string? _loadedProject;
+    private RolesResponse? _data;
+    private string? _error;
+    private string? _editingRole;
+    private string _editProvider = "";
+    private string _editModel = "";
+    private string? _editError;
+    private readonly CancellationTokenSource _pollCts = new();
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
-        ViewStore.StateChanged += OnStateChanged;
-        ShellStore.StateChanged += OnShellChanged;
-        if (ViewStore.Value.LastFetchedAt is null)
+        await LoadAsync();
+        _ = PollLoopAsync();
+    }
+
+    private async Task PollLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
         {
-            LoadForCurrentProject();
+            while (await timer.WaitForNextTickAsync(_pollCts.Token))
+                await LoadAsync();
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _data = await Http.GetFromJsonAsync<RolesResponse>("/api/agents/roles?projectId=forge");
+            _error = null;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
         }
     }
 
-    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
-
-    private void OnShellChanged(object? sender, EventArgs e)
+    private void BeginEdit(RoleDto role)
     {
-        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+        _editingRole = role.Name;
+        _editProvider = role.Model.Provider ?? (_data?.Providers.FirstOrDefault() ?? "");
+        _editModel = role.Model.Model ?? "";
+        _editError = null;
+    }
+
+    private async Task SaveModelAsync(string roleName)
+    {
+        _editError = null;
+        var resp = await Http.PutAsJsonAsync($"/api/agents/roles/{roleName}/model",
+            new { provider = _editProvider, model = _editModel });
+        if (!resp.IsSuccessStatusCode)
         {
-            InvokeAsync(LoadForCurrentProject);
+            _editError = await resp.Content.ReadAsStringAsync();
+            return;
         }
+        _editingRole = null;
+        await LoadAsync();
     }
 
-    private void LoadForCurrentProject()
+    private async Task ClearModelAsync(string roleName)
     {
-        _loadedProject = ShellStore.Value.CurrentProjectId;
-        Dispatch.Dispatch(new ViewActions.LoadViewAction(_loadedProject));
+        await Http.DeleteAsync($"/api/agents/roles/{roleName}/model");
+        await LoadAsync();
     }
+
+    private static string Elapsed(DateTime since)
+    {
+        var e = DateTime.UtcNow - since;
+        return e.TotalMinutes >= 1 ? $"{(int)e.TotalMinutes}m{e.Seconds:D2}s" : $"{(int)e.TotalSeconds}s";
+    }
+
+    private static string ProgressText(CurrentRunDto run)
+    {
+        var msgs = run.MessageCount ?? 0;
+        var tools = run.ToolCallCount ?? 0;
+        if (msgs == 0 && tools == 0)
+        {
+            var waiting = run.LastActivityAt is null ? Elapsed(run.StartedAt) : Elapsed(run.LastActivityAt.Value);
+            return $"no model output yet — waiting {waiting} (provider may be hanging)";
+        }
+        var ago = run.LastActivityAt is null ? "" : $" · active {Elapsed(run.LastActivityAt.Value)} ago";
+        return $"{msgs} messages · {tools} tool calls{ago}";
+    }
+
+    private static string FormatWhen(DateTime? when)
+        => when is null ? "—" : when.Value.ToString("MM-dd HH:mm:ss");
+
+    private static string FormatDuration(long? ms)
+        => ms is null ? "" : TimeSpan.FromMilliseconds(ms.Value).TotalMinutes >= 1
+            ? $"{TimeSpan.FromMilliseconds(ms.Value).TotalMinutes:F1}m"
+            : $"{TimeSpan.FromMilliseconds(ms.Value).TotalSeconds:F0}s";
+
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
     public void Dispose()
     {
-        ViewStore.StateChanged -= OnStateChanged;
-        ShellStore.StateChanged -= OnShellChanged;
+        _pollCts.Cancel();
+        _pollCts.Dispose();
     }
+
+    private sealed record RolesResponse(List<RoleDto> Roles, string[] Providers, bool OverridesEditable);
+    private sealed record RoleDto(
+        string Name, string AgentType, string Territory, string[] Tools,
+        ModelDto Model, SlotDto Slot, PromptDto Prompt,
+        CurrentRunDto? CurrentRun, LastRunDto? LastRun);
+    private sealed record ModelDto(string? Provider, string? Model, string Source);
+    private sealed record SlotDto(int InFlight, int Max);
+    private sealed record PromptDto(string Source, string? Path, string? Content);
+    private sealed record CurrentRunDto(string Id, string? TaskId, DateTime StartedAt,
+        DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount);
+    private sealed record LastRunDto(string Id, string? TaskId, string Status,
+        DateTime? FinishedAt, long? DurationMs, string? Error);
 }

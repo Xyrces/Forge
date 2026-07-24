@@ -74,6 +74,19 @@ public sealed class RoleAgentRegistry
 
     public IEnumerable<AgentType> SupportedTypes => _roles.Keys;
 
+    /// <summary>All registered (AgentType, role) pairs — the Agents
+    /// page enumerates this to render one card per role.</summary>
+    public IReadOnlyDictionary<AgentType, RoleAgent> All() => _roles;
+
+    /// <summary>Reverse lookup: role descriptor → its AgentType.</summary>
+    public AgentType TypeOf(RoleAgent role)
+    {
+        foreach (var (type, r) in _roles)
+            if (ReferenceEquals(r, role) || string.Equals(r.AgentName, role.AgentName, StringComparison.Ordinal))
+                return type;
+        throw new InvalidOperationException($"Role '{role.AgentName}' is not registered");
+    }
+
     public static AgentType FromTaskType(string taskType) => taskType.ToLowerInvariant() switch
     {
         "ecs" or "systems" or "pathfinding" or "atmospherics" or "mcp" => AgentType.CoreDev,

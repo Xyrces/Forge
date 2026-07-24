@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 20;
+    public const int CurrentSchemaVersion = 21;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -326,7 +326,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 tool_call_count  INTEGER,
                 text_chars       INTEGER,
                 error            TEXT,
-                transcript_json  TEXT
+                transcript_json  TEXT,
+                last_activity_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_agent_run_started ON agent_run(started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run(task_id);
@@ -823,6 +824,21 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // caps. CREATE TABLE IF NOT EXISTS covers fresh DBs; existing
         // DBs need the guarded ALTER.
         ApplyV19ProjectRoles(conn);
+
+        // v21 (post-init): agent_run.last_activity_at — the heartbeat
+        // that makes "is this run alive or hung on the provider?"
+        // answerable from the dashboard.
+        ApplyV21AgentRunActivity(conn);
+    }
+
+    private void ApplyV21AgentRunActivity(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'last_activity_at' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE agent_run ADD COLUMN last_activity_at TEXT";
+        alter.ExecuteNonQuery();
     }
 
     private void ApplyV19ProjectRoles(SqliteConnection conn)

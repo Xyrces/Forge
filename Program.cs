@@ -1052,6 +1052,14 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory.CreateLogger("Forge.Bootstrap"));
         var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
 
+        // Live per-role model overrides (Agents page): DB-backed,
+        // consulted per run by the chat client factory + the run
+        // registry's model label. Snapshot rehydrates from the store.
+        var roleModelOverrides = new Agents.RoleModelOverrides(memoryStore);
+        await roleModelOverrides.LoadAsync(CancellationToken.None);
+        if (chatClientFactory is Agents.OpenAICompatibleChatClientFactory openAiFactory)
+            openAiFactory.Overrides = roleModelOverrides;
+
         // P5.5: auto-extract project memory from the model
         // response after each PR is opened. Audit log lives in
         // the same memory.db; the v13 migration in IssueStore
@@ -1082,7 +1090,8 @@ Console.Error.WriteLine(ex.ToString());
             artOutputs: () => artOutputs,
             secrets: secretStore,
             issues: issues,
-            runs: agentRunStore);
+            runs: agentRunStore,
+            modelOverrides: roleModelOverrides);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
@@ -1305,7 +1314,9 @@ Console.Error.WriteLine(ex.ToString());
             projectCloner: cloner,
             githubOptions: options.GitHub,
             secretStore: secretStore,
-            agentRuns: agentRunStore);
+            agentRuns: agentRunStore,
+            llmConfig: llmConfig,
+            roleModelOverrides: roleModelOverrides);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never

@@ -29,6 +29,36 @@ public class AgentRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateProgress_Heartbeat_SetsCountsAndActivity()
+    {
+        await _runs.StartAsync("run-hb", "task-1", "CoreDev", "minimax-m3");
+        var before = (await _runs.ListActiveAsync()).Single();
+        Assert.Null(before.LastActivityAt);
+        Assert.Null(before.MessageCount);
+
+        await _runs.UpdateProgressAsync("run-hb", messageCount: 5, toolCallCount: 2, textChars: 900);
+
+        var after = (await _runs.ListActiveAsync()).Single();
+        Assert.Equal(5, after.MessageCount);
+        Assert.Equal(2, after.ToolCallCount);
+        Assert.NotNull(after.LastActivityAt);
+        Assert.True(after.LastActivityAt >= after.StartedAt);
+    }
+
+    [Fact]
+    public async Task ListRecent_RoleFilter_OnlyThatRole()
+    {
+        await _runs.StartAsync("run-a", "task-1", "CoreDev", "m");
+        await _runs.StartAsync("run-b", "task-2", "Reviewer", "m");
+        await _runs.FinishAsync("run-a", "succeeded", 100, 1, 0, 10, null, null);
+        await _runs.FinishAsync("run-b", "failed", 100, 1, 0, 10, "boom", null);
+
+        var reviewerOnly = await _runs.ListRecentAsync(role: "Reviewer");
+        Assert.Single(reviewerOnly);
+        Assert.Equal("run-b", reviewerOnly[0].Id);
+    }
+
+    [Fact]
     public async Task StartThenFinish_RoundTrips_WithTranscript()
     {
         await _runs.StartAsync("run-1", "task-9", "CoreDev", "minimax-m3");

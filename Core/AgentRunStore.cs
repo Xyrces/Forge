@@ -45,7 +45,8 @@ public sealed class AgentRunStore : IDisposable
         int? ToolCallCount,
         int? TextChars,
         string? Error,
-        string? TranscriptJson);
+        string? TranscriptJson,
+        DateTime? LastActivityAt);
 
     public async Task StartAsync(string id, string? taskId, string role, string? model, CancellationToken ct = default)
     {
@@ -65,6 +66,32 @@ public sealed class AgentRunStore : IDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Mid-run heartbeat: updates turn/tool-call counts and stamps
+    /// last_activity_at so the dashboard can distinguish "agent is
+    /// actively working" from "run has been waiting on the provider
+    /// with no output for N minutes". Cheap single-row UPDATE; the
+    /// runner calls it after every model response.
+    /// </summary>
+    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, CancellationToken ct = default)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE agent_run SET
+                message_count = $msgs, tool_call_count = $tools,
+                text_chars = $chars, last_activity_at = $activity
+            WHERE id = $id
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$msgs", messageCount);
+        cmd.Parameters.AddWithValue("$tools", toolCallCount);
+        cmd.Parameters.AddWithValue("$chars", textChars);
+        cmd.Parameters.AddWithValue("$activity", DateTime.UtcNow.ToString(DateFormat));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task FinishAsync(
         string id, string status, long durationMs,
         int messageCount, int toolCallCount, int textChars,
@@ -77,7 +104,7 @@ public sealed class AgentRunStore : IDisposable
             UPDATE agent_run SET
                 status = $status, finished_at = $finished, duration_ms = $dur,
                 message_count = $msgs, tool_call_count = $tools, text_chars = $chars,
-                error = $err, transcript_json = $transcript
+                error = $err, transcript_json = $transcript, last_activity_at = $finished
             WHERE id = $id
             """;
         cmd.Parameters.AddWithValue("$id", id);
@@ -116,12 +143,13 @@ public sealed class AgentRunStore : IDisposable
     public async Task<IReadOnlyList<AgentRunRecord>> ListActiveAsync(CancellationToken ct = default)
         => await QueryAsync("WHERE status = 'running' ORDER BY started_at DESC", ct);
 
-    public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, CancellationToken ct = default)
-        => await QueryAsync(
-            taskId is null
-                ? $"WHERE status != 'running' ORDER BY started_at DESC LIMIT {Math.Clamp(limit, 1, 500)}"
-                : $"WHERE task_id = '{taskId.Replace("'", "''")}' ORDER BY started_at DESC LIMIT {Math.Clamp(limit, 1, 500)}",
-            ct);
+    public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, string? role = null, CancellationToken ct = default)
+    {
+        var where = "WHERE status != 'running'";
+        if (taskId is not null) where += $" AND task_id = '{taskId.Replace("'", "''")}'";
+        if (role is not null) where += $" AND role = '{role.Replace("'", "''")}'";
+        return await QueryAsync($"{where} ORDER BY started_at DESC LIMIT {Math.Clamp(limit, 1, 500)}", ct);
+    }
 
     public async Task<AgentRunRecord?> GetAsync(string id, CancellationToken ct = default)
         => (await QueryAsync($"WHERE id = '{id.Replace("'", "''")}' LIMIT 1", ct)).FirstOrDefault();
@@ -133,7 +161,8 @@ public sealed class AgentRunStore : IDisposable
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
             SELECT id, task_id, role, model, status, started_at, finished_at,
-                   duration_ms, message_count, tool_call_count, text_chars, error, transcript_json
+                   duration_ms, message_count, tool_call_count, text_chars, error, transcript_json,
+                   last_activity_at
             FROM agent_run {whereSql}
             """;
         var list = new List<AgentRunRecord>();
@@ -153,7 +182,8 @@ public sealed class AgentRunStore : IDisposable
                 ToolCallCount: rd.IsDBNull(9) ? null : rd.GetInt32(9),
                 TextChars: rd.IsDBNull(10) ? null : rd.GetInt32(10),
                 Error: rd.IsDBNull(11) ? null : rd.GetString(11),
-                TranscriptJson: rd.IsDBNull(12) ? null : rd.GetString(12)));
+                TranscriptJson: rd.IsDBNull(12) ? null : rd.GetString(12),
+                LastActivityAt: rd.IsDBNull(13) ? null : DateTime.ParseExact(rd.GetString(13), DateFormat, System.Globalization.CultureInfo.InvariantCulture)));
         }
         return list;
     }
