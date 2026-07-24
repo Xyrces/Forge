@@ -268,6 +268,28 @@ if (mode == CliMode.DashboardOnly)
     }
 
     /// <summary>
+    /// Build the shared per-(project, role) concurrency slot table.
+    /// Caps come from each project's persisted roles (roles_json) with
+    /// <see cref="DefaultProjectRoles"/> as the fallback. The same
+    /// instance is handed to the orchestrator (dispatch enforcement)
+    /// and the dashboard (live meters + role-cap edits).
+    /// </summary>
+    private static Orchestrator.Slots.SlotTable BuildSlotTable(IReadOnlyList<ProjectOptions> projects)
+    {
+        var slots = new Orchestrator.Slots.SlotTable();
+        var roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
+        foreach (var p in projects)
+        {
+            foreach (var role in roleFiller)
+            {
+                var max = DefaultProjectRoles.MaxFor(p.Roles, role);
+                slots.Configure(p.Id, role, max);
+            }
+        }
+        return slots;
+    }
+
+    /// <summary>
     /// Resolves Forgesystem options + runs the per-project bootstrap
     /// (create root dir, init git repo, allocate state DB). Returns the
     /// finalised project list (with Root rewritten to the bootstrap
@@ -1135,13 +1157,19 @@ Console.Error.WriteLine(ex.ToString());
             agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
             secrets: secretStore, gates: stageGates);
 
+        // Pre-size the shared per-(project, role) concurrency slot
+        // table BEFORE the orchestrator: its dispatch loop acquires a
+        // role slot per task run (per-role parallelism), and the
+        // dashboard exposes the same table's live meters.
+        var slots = BuildSlotTable(knownProjects);
         var orchestrator = new OrchestratorAgent(
             projectStore,
             dispatchBundleFactory,
             agentRunner, roleRegistry,
             messageBus, dispatcher, eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>(),
-            loggerFactory: loggerFactory);
+            loggerFactory: loggerFactory,
+            slots: slots);
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
@@ -1228,22 +1256,11 @@ Console.Error.WriteLine(ex.ToString());
 
         // v1 multi-project: build the registry from configuration
         // (back-compat shim to a single "default" project when only
-        // workspace.root is set), lazily construct per-project
-        // IssueStore bundles, and pre-size in-process concurrency
-        // slots per (projectId, role). The orchestrator dispatch
-        // loop still uses the legacy single-workspace path; this
-        // exposes multi-project info to the dashboard.
+        // workspace.root is set) and lazily construct per-project
+        // IssueStore bundles. The per-(project, role) SlotTable was
+        // created above (BuildSlotTable) and is shared with the
+        // orchestrator's dispatch loop.
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject);
-        var slots = new SlotTable();
-        var roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
-        foreach (var p in knownProjects)
-        {
-            foreach (var role in roleFiller)
-            {
-                var max = DefaultProjectRoles.MaxFor(p.Roles, role);
-                slots.Configure(p.Id, role, max);
-            }
-        }
         if (knownProjects.Count > 0)
         {
             logger.LogInformation(

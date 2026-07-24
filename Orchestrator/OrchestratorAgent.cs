@@ -22,7 +22,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ConcurrentDictionary<string, ProjectDispatchBundle> _bundles = new();
     private SpawnerOptions _spawnerOptions = new();
-    private SemaphoreSlim _concurrencyLimiter = new(4);
+    private readonly Slots.SlotTable _slots;
     private readonly int _maxRetryCount;
     // GitHub rate-limit cooldown for the PR-watch path. When Octokit
     // reports RateLimitExceeded, watch issues are skipped until this
@@ -48,8 +48,10 @@ public sealed class OrchestratorAgent : IAgent
     // guard, every poll tick can claim MORE work before an earlier
     // run fails (the 429 cooldown is only set when the run fails),
     // which produced burst 429s and same-task double-claims 1ms
-    // apart (observed live 2026-07-24). The cap enforces
-    // MaxConcurrentSessions across cycles, not just within one.
+    // apart (observed live 2026-07-24). Per-task dedup lives here;
+    // per-ROLE parallelism caps live in the SlotTable (a task only
+    // claims when its role has a free slot), so e.g. 2 coredevs can
+    // work two unblocked tasks while a clientdev slot stays open.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
 
     public string Id => "orchestrator";
@@ -66,7 +68,8 @@ public sealed class OrchestratorAgent : IAgent
         IWorkflowDispatcher dispatcher,
         IDashboardEventBus events,
         ILogger<OrchestratorAgent> logger,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        Slots.SlotTable? slots = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -77,7 +80,7 @@ public sealed class OrchestratorAgent : IAgent
         _events = events;
         _logger = logger;
         _loggerFactory = loggerFactory;
-        _concurrencyLimiter = new SemaphoreSlim(4);
+        _slots = slots ?? new Slots.SlotTable();
         _maxRetryCount = 1;
     }
 
@@ -170,39 +173,49 @@ public sealed class OrchestratorAgent : IAgent
                 // entire pipeline.) All other types dispatch,
                 // preserving operator-enqueued type names (dev, ecs,
                 // ui, bug, ...).
-                var devTasks = allReady.Where(i => i.Type != AgentTaskTypes.PrWatch
+                var ready = allReady.Where(i => i.Type != AgentTaskTypes.PrWatch
                     && !AgentTaskTypes.IsContainer(i.Type)
                     && sprintMemberIds.Contains(i.Id)
                     && !_inFlight.ContainsKey(i.Id))
-                    .Take(_spawnerOptions.MaxConcurrentSessions)
                     .ToList();
-                if (devTasks.Count > 0 && DateTime.UtcNow < _llmRateLimitedUntil)
+                if (ready.Count > 0 && DateTime.UtcNow < _llmRateLimitedUntil)
                 {
                     _logger.LogDebug("Dispatch cycle: skipping {N} dev tasks — LLM rate-limit cooldown until {Until:HH:mm:ss}",
-                        devTasks.Count, _llmRateLimitedUntil);
+                        ready.Count, _llmRateLimitedUntil);
                     continue;
                 }
-                if (devTasks.Count > 0 && _inFlight.Count >= _spawnerOptions.MaxConcurrentSessions)
+                // Per-role parallelism: every ready unblocked sprint
+                // task competes for ITS role's slot pool (coredev,
+                // clientdev, qa, reviewer). A full pool skips just
+                // that role's tasks — other roles keep claiming.
+                foreach (var dev in ready)
                 {
-                    _logger.LogDebug("Dispatch cycle: {N} runs in flight (cap {Cap}) — not claiming more",
-                        _inFlight.Count, _spawnerOptions.MaxConcurrentSessions);
-                    continue;
-                }
-                foreach (var dev in devTasks)
-                {
+                    var role = ResolveRoleName(dev.Type);
+                    EnsureSlotCap(bundle.Project, role);
+                    var slot = await _slots.TryAcquireAsync(bundle.Project.Id, role, TimeSpan.Zero, cancellationToken);
+                    if (slot is null)
+                    {
+                        _logger.LogDebug("Dispatch cycle: role '{Role}' at cap (project={Project}) — {Id} waits for a free slot",
+                            role, bundle.Project.Id, dev.Id);
+                        continue;
+                    }
                     if (!_inFlight.TryAdd(dev.Id, 0))
                     {
                         _logger.LogDebug("Dispatch cycle: {Id} already in flight — skipping double-claim", dev.Id);
+                        await slot.DisposeAsync();
                         continue;
                     }
                     _ = Task.Run(async () =>
                     {
-                        try { await DispatchSingleTaskAsync(dev, bundle, cancellationToken); }
-                        catch (Exception ex)
+                        await using (slot)
                         {
-                            _logger.LogError(ex, "Dispatch for {Id} faulted", dev.Id);
+                            try { await DispatchSingleTaskAsync(dev, bundle, cancellationToken); }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "Dispatch for {Id} faulted", dev.Id);
+                            }
+                            finally { _inFlight.TryRemove(dev.Id, out _); }
                         }
-                        finally { _inFlight.TryRemove(dev.Id, out _); }
                     }, cancellationToken);
                 }
             }
@@ -238,6 +251,7 @@ public sealed class OrchestratorAgent : IAgent
         RepoUrl = r.RepoUrl,
         DefaultBranch = r.DefaultBranch,
         Root = string.Empty,
+        Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
     };
 
     private static bool IsLlmRateLimited(Exception ex)
@@ -313,7 +327,8 @@ public sealed class OrchestratorAgent : IAgent
 
     public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
-        await _concurrencyLimiter.WaitAsync(cancellationToken);
+        // Concurrency is owned by the caller: the dispatch loop holds
+        // a per-role SlotTable slot for the whole run.
         var startedAt = DateTime.UtcNow;
         try
         {
@@ -449,17 +464,28 @@ public sealed class OrchestratorAgent : IAgent
             await SafeTransitionAsync(issue.Id, IssueStatus.Failed, "cancelled", bundle, cancellationToken);
             return new Result(false, "cancelled");
         }
-        finally
-        {
-            _concurrencyLimiter.Release();
-        }
     }
 
     internal void BindOptions(AgentOptions options)
     {
         _spawnerOptions = options.Spawner;
-        _concurrencyLimiter.Dispose();
-        _concurrencyLimiter = new SemaphoreSlim(Math.Max(1, options.Spawner.MaxConcurrentSessions));
+    }
+
+    /// <summary>Task type → slot-pool role name (coredev/clientdev/qa/reviewer).</summary>
+    private string ResolveRoleName(string taskType)
+        => _roleRegistry.ForType(RoleAgentRegistry.FromTaskType(taskType)).AgentName;
+
+    /// <summary>
+    /// Lazily configure a project's role pool from its persisted role
+    /// caps (falling back to <see cref="DefaultProjectRoles"/>). Startup
+    /// and the roles API pre-configure; this covers runtime-added
+    /// projects and ad-hoc role names (e.g. "qa") so TryAcquire never
+    /// throws on an unconfigured pool.
+    /// </summary>
+    private void EnsureSlotCap(Configuration.ProjectOptions project, string role)
+    {
+        if (_slots.MaxFor(project.Id, role) == 0)
+            _slots.Configure(project.Id, role, DefaultProjectRoles.MaxFor(project.Roles, role));
     }
 
     private async Task HandleFailureAsync(IssueRecord issue, Exception ex, ProjectDispatchBundle bundle, CancellationToken cancellationToken)

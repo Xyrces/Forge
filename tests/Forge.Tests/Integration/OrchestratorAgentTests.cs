@@ -428,12 +428,12 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task DispatchCycle_InFlightCap_SecondTaskWaitsForFirst()
+    public async Task DispatchCycle_RoleCaps_SameRoleRunsInParallelUpToCap()
     {
-        // Regression (observed live 2026-07-24): fire-and-forget
-        // Task.Run dispatch with no in-flight tracking let every
-        // poll tick claim more work before earlier runs finished —
-        // burst 429s and same-task double-claims 1ms apart.
+        // Per-role parallelism: the flat MaxConcurrentSessions cap was
+        // replaced by per-(project, role) SlotTable pools (default
+        // coredev=2). Two unblocked dev tasks must run CONCURRENTLY;
+        // the third waits for a same-role slot to free.
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var runner = new BlockingRunner(gate);
         await _projectStore.UpsertAsync(new NewProject(
@@ -443,26 +443,63 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         var first = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "first", Description: "x"));
         var second = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "second", Description: "x"));
-        await ActivateSprintWithAsync(first.Id, second.Id);
+        var third = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "third", Description: "x"));
+        await ActivateSprintWithAsync(first.Id, second.Id, third.Id);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var loop = orch.ExecuteAsync(cts.Token);
 
-        // First task gets claimed and its run blocks on the gate.
+        // Both free coredev slots fill — the two runs block on the gate.
         await WaitForAsync(async () =>
         {
             if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            return (await _issues.GetAsync(first.Id))!.Status == IssueStatus.InProgress;
-        }, TimeSpan.FromSeconds(12));
-        // While it is in flight, the second task must NOT be claimed
-        // (previously: claimed on the very next poll tick).
+            return (await _issues.GetAsync(first.Id))!.Status == IssueStatus.InProgress
+                && (await _issues.GetAsync(second.Id))!.Status == IssueStatus.InProgress;
+        }, TimeSpan.FromSeconds(15));
+        // Same-role cap reached: the third task must NOT be claimed.
         await Task.Delay(2500);
-        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(second.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(third.Id))!.Status);
 
         gate.SetResult();
         await WaitForAsync(async () =>
-            (await _issues.GetAsync(second.Id))!.Status != IssueStatus.Pending, TimeSpan.FromSeconds(10));
+            (await _issues.GetAsync(third.Id))!.Status != IssueStatus.Pending, TimeSpan.FromSeconds(15));
         cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+    }
+
+    [Fact]
+    public async Task DispatchCycle_RoleCaps_FullPoolDoesNotBlockOtherRoles()
+    {
+        // Operator model (2026-07-24): "if any task is unblocked, it
+        // should be picked up by a dev agent as soon as one is free."
+        // A full coredev pool must not starve a clientdev task.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new BlockingRunner(gate);
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        var orch = BuildOrchestrator(runner);
+        BindMaf(orch);
+
+        var dev1 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "dev1", Description: "x"));
+        var dev2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "dev2", Description: "x"));
+        var ui = await _issues.CreateAsync(new NewIssue(Type: "ui", Title: "ui task", Description: "x"));
+        await ActivateSprintWithAsync(dev1.Id, dev2.Id, ui.Id);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var loop = orch.ExecuteAsync(cts.Token);
+
+        // Both coredev slots are held — the clientdev task still claims.
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            return (await _issues.GetAsync(dev1.Id))!.Status == IssueStatus.InProgress
+                && (await _issues.GetAsync(dev2.Id))!.Status == IssueStatus.InProgress;
+        }, TimeSpan.FromSeconds(15));
+        await WaitForAsync(async () =>
+            (await _issues.GetAsync(ui.Id))!.Status == IssueStatus.InProgress, TimeSpan.FromSeconds(10));
+
+        cts.Cancel();
+        gate.SetResult();
         try { await loop; } catch (OperationCanceledException) { }
     }
 
