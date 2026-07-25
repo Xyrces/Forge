@@ -191,15 +191,33 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         }
         else
         {
-            logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
-                issue.Id, branch, input.Worktree.BaseBranch);
-            pr = await gitHub.CreatePullRequestAsync(
-                title: $"[{issue.Type}] {issue.Title}",
-                body: BuildPrBody(issue, headSha, input.Text),
-                headBranch: branch,
-                baseBranch: input.Worktree.BaseBranch,
-                cancellationToken: ct);
-            logger.LogInformation("CommitPushPr({Id}): PR #{N} opened", issue.Id, pr.Number);
+            // Orphan-PR reuse: the task never recorded a prNumber —
+            // the PR for this branch was opened OUTSIDE the pipeline
+            // (operator hand-created it, it was adopted via
+            // /adopt-pr, or the metadata was lost on a requeue).
+            // Creating a second PR for the same branch is a 422 that
+            // MAF's InProcessExecution swallows, leaving a silent
+            // mid-pipeline halt + infinite requeue loop (observed
+            // live 2026-07-25 on task-155 / PR #32). Look the branch
+            // up FIRST.
+            var existing = await gitHub.GetOpenPullRequestForBranchAsync(branch, ct);
+            if (existing is not null)
+            {
+                logger.LogInformation("CommitPushPr({Id}): reusing existing open PR #{Pr} found by branch (no prNumber metadata)", issue.Id, existing.Number);
+                pr = existing;
+            }
+            else
+            {
+                logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
+                    issue.Id, branch, input.Worktree.BaseBranch);
+                pr = await gitHub.CreatePullRequestAsync(
+                    title: $"[{issue.Type}] {issue.Title}",
+                    body: BuildPrBody(issue, headSha, input.Text),
+                    headBranch: branch,
+                    baseBranch: input.Worktree.BaseBranch,
+                    cancellationToken: ct);
+                logger.LogInformation("CommitPushPr({Id}): PR #{N} opened", issue.Id, pr.Number);
+            }
         }
 
         await UpdateMetadataAsync(issues, issue.Id, m =>

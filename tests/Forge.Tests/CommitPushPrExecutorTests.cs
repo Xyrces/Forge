@@ -83,11 +83,50 @@ public class CommitPushPrExecutorTests : IDisposable
     /// </summary>
     private sealed class StubGitHub : GitHubService
     {
+        public PullRequest? OpenPrForBranch;
         public StubGitHub() : base(new Configuration.AgentOptions().GitHub) { }
+        public override Task<PullRequest?> GetOpenPullRequestForBranchAsync(
+            string headBranch, CancellationToken cancellationToken = default)
+            => Task.FromResult(OpenPrForBranch);
         public override Task<PullRequest> CreatePullRequestAsync(
             string title, string body, string headBranch, string baseBranch,
             CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("CreatePullRequestAsync should not be called in this test");
+    }
+
+    [Fact]
+    public async Task NoRecordedPrNumber_OpenPrExistsForBranch_ReusesIt()
+    {
+        // Observed live 2026-07-25 (task-155 / PR #32): the PR for
+        // the branch was opened OUTSIDE the pipeline, so the task
+        // carries no prNumber. The executor must reuse the open PR
+        // found by branch instead of attempting creation (a 422
+        // that MAF swallows → silent mid-pipeline halt + requeue
+        // loop).
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, default);
+
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal("42", after!.GetMetadata("prNumber"));
+        Assert.Equal(DispatchCheckpoint.PrOpened, after.DispatchCheckpoint);
+        Assert.Equal(42, result.PrNumber);
     }
 
     [Fact]
