@@ -56,15 +56,23 @@
             .ToList();
         var selected = SelectedSprint(sprints);
 
-        @* Sprint switcher: Active pinned first, then newest. *@
-        <div class="filter-bar">
-            @foreach (var sp in sprints)
-            {
-                <button class="chip @(selected?.Id == sp.Id ? "chip--active" : "")"
-                        @onclick="@(() => _selectedSprintId = sp.Id)">
-                    @sp.Name @(sp.Status == "Active" ? "●" : "")
-                </button>
-            }
+        @* Sprint picker: a proper dropdown — scales past a handful
+           of sprints, type-ahead built in. (The old chip-per-sprint
+           row wrapped forever; operator 2026-07-25: 'tags/pills as
+           selectors is weird.') Active pinned first, then newest. *@
+        <div class="picker-bar">
+            <label class="picker-bar__label" for="sprint-picker">Sprint</label>
+            <select id="sprint-picker" class="picker-bar__select"
+                    value="@(selected?.Id ?? "")"
+                    @onchange="@((ChangeEventArgs e) => _selectedSprintId = e.Value?.ToString())">
+                @foreach (var sp in sprints)
+                {
+                    <option value="@sp.Id" selected="@(selected?.Id == sp.Id)">
+                        @(sp.Status == "Active" ? "● " : "")@sp.Name — @sp.Status.ToLowerInvariant()@Dates(sp)
+                    </option>
+                }
+            </select>
+            <span class="meta-text">@sprints.Count total</span>
         </div>
 
         @if (selected is not null)
@@ -210,6 +218,13 @@
 
     private string? PrUrl(string prNumber) =>
         _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+
+    private static string Dates(ViewSprint s)
+    {
+        var start = s.StartDate?.ToString("MMM d");
+        var end = s.EndDate?.ToString("MMM d");
+        return start is null ? "" : $" · {start}{(end is null ? "" : $" → {end}")}";
+    }
 
     private async Task LoadRepoUrlAsync()
     {
