@@ -37,7 +37,7 @@ public class DispatchCheckpointTests : IDisposable
 // v17 = project registry table for runtime project add/remove.
 // v18 = per-project encrypted secret store.
 // v19 = project.roles_json — DB-persisted per-project role caps.
-        Assert.Equal(19, IssueStore.CurrentSchemaVersion);
+        Assert.Equal(21, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

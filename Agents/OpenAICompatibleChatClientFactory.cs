@@ -53,9 +53,32 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// </summary>
     public CostTracker? CostTracker { get; set; }
 
+    /// <summary>
+    /// Live per-role model overrides (dashboard Agents page). When a
+    /// role has an override, <see cref="Create"/> resolves THAT
+    /// provider+model instead of appsettings llm.roles / the default.
+    /// Sync snapshot reads — set at startup by Program.cs.
+    /// </summary>
+    public RoleModelOverrides? Overrides { get; set; }
+
+    /// <summary>
+    /// Shared per-(provider, model) 429 cooldowns. When set, every
+    /// cached client is wrapped in <see cref="RateLimitAwareChatClient"/>:
+    /// fail-fast during cooldown, per-provider concurrency permit,
+    /// centralized 429 recording. Set at startup by Program.cs.
+    /// </summary>
+    public Core.ModelRateLimitTracker? RateLimits { get; set; }
+
+    /// <summary>Max simultaneous round-trips per provider (the
+    /// "several concurrent agents" cap). Default 2; 0 disables the
+    /// permit (cooldown tracking still applies).</summary>
+    public int MaxConcurrentRequests { get; set; } = 2;
+
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _permits = new(StringComparer.OrdinalIgnoreCase);
+
     public IChatClient Create(LlmConfig config, AgentType role)
     {
-        var (provider, model) = config.Resolve(role);
+        var (provider, model, _) = config.ResolveEffective(role, Overrides);
         if (string.IsNullOrEmpty(provider.ApiKey))
         {
             throw new InvalidOperationException(
@@ -127,8 +150,26 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
 
     private IChatClient GetOrCreate(ProviderConfig provider, string model)
     {
-        var key = provider.Name + "|" + model;
-        return _cache.GetOrAdd(key, _ => Build(provider, model));
+        // The cache key includes a short hash of the API key so a key
+        // change (operator rotation via the Secrets page, or the
+        // startup DB-secret substitution in Program.cs) never reuses
+        // a client built with the old credential. The raw key is
+        // never placed in the cache-key string.
+        var keyHash = string.IsNullOrEmpty(provider.ApiKey)
+            ? string.Empty
+            : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(provider.ApiKey)))[..12];
+        var key = provider.Name + "|" + model + "|" + keyHash;
+        return _cache.GetOrAdd(key, _ => WrapForRateLimits(Build(provider, model), provider, model));
+    }
+
+    private IChatClient WrapForRateLimits(IChatClient inner, ProviderConfig provider, string model)
+    {
+        if (RateLimits is null && MaxConcurrentRequests <= 0) return inner;
+        var permit = _permits.GetOrAdd(provider.Name,
+            _ => new SemaphoreSlim(Math.Max(1, MaxConcurrentRequests)));
+        return new RateLimitAwareChatClient(inner, provider.Name, model,
+            RateLimits ?? new Core.ModelRateLimitTracker(), permit);
     }
 
     private static IChatClient Build(ProviderConfig provider, string model)

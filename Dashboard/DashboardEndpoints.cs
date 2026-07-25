@@ -21,15 +21,25 @@ public static class DashboardEndpoints
         ISkillStore skills,
         ISprintStore sprints,
         AgentMessageBus messageBus,
-        ILogger logger)
+        ILogger logger,
+        Projects.ProjectContextFactory? projectContexts = null)
     {
         // ---- Issues (POST + PATCH) ----
-        app.MapPost("/api/state/issues", async (HttpContext ctx) =>
+        app.MapPost("/api/state/issues", async (HttpContext ctx, string? projectId) =>
         {
             var spec = await JsonSerializer.DeserializeAsync<NewIssue>(ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (spec is null || string.IsNullOrWhiteSpace(spec.Type) || string.IsNullOrWhiteSpace(spec.Title))
                 return Results.BadRequest(new { error = "type and title required" });
-            var created = await issues.CreateAsync(spec, ctx.RequestAborted);
+            // Multi-project: ?projectId= writes to that project's
+            // store; absent falls back to the injected primary store.
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var pctx = projectContexts.Find(projectId);
+                if (pctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = pctx.Issues;
+            }
+            var created = await store.CreateAsync(spec, ctx.RequestAborted);
             return Results.Json(ToIssueView(created), DashboardJson.Options, statusCode: 201);
         });
 

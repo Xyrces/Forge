@@ -44,4 +44,9 @@ public static class DashboardEventKind
     public const string IntakeRunStarted = "intake.run.started";
     public const string IntakeRunFailed = "intake.run.failed";
     public const string IntakeRunCompleted = "intake.run.completed";
+    // Sprint flow: emitted by SprintAssembler when a sprint's member
+    // tasks all reach terminal states (sprint.completed) and when the
+    // next sprint is assembled + activated (sprint.started).
+    public const string SprintCompleted = "sprint.completed";
+    public const string SprintStarted = "sprint.started";
 }

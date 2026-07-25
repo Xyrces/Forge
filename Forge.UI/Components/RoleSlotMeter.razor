@@ -1,0 +1,23 @@
+@* Canonical per-(project, role) concurrency meter. THE one rendering
+   of a role's slot usage — used by the project drill-down
+   (ProjectOverview) and the Agents control surface so a slot looks
+   the same everywhere. Styling: .slot-card in app.css. *@
+
+<div class="slot-card @(InFlight >= Max ? "slot-card--full" : "")">
+    <div class="slot-card__role">@Role</div>
+    <div class="slot-card__bar">
+        <div class="slot-card__fill" style="width: @Utilization%"></div>
+    </div>
+    <div class="slot-card__count">
+        <span class="@(InFlight >= Max ? "slot-card__in-flight--full" : "slot-card__in-flight")">@InFlight</span>
+        <span class="slot-card__max">/ @Max</span>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Role { get; set; } = "";
+    [Parameter] public int InFlight { get; set; }
+    [Parameter] public int Max { get; set; }
+
+    private int Utilization => Max <= 0 ? 0 : 100 * InFlight / Max;
+}

@@ -105,7 +105,7 @@ public class RunAgentExecutorTests : IDisposable
             worktree, _issues, runner, _roleRegistry, _ => null, _events,
             new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),
             new ArtOutputStore(Path.Combine(_workDir, "issues.db")),
-            NullLogger<RunAgentExecutor>.Instance, projectId: null, default);
+            NullLogger<RunAgentExecutor>.Instance, projectId: null, sprints: null, default);
 
         Assert.Equal(AgentResult.Ok, result.Result);
         Assert.Contains("I made the change", result.Text);
@@ -131,7 +131,7 @@ public class RunAgentExecutorTests : IDisposable
             worktreeSkipped, _issues, runner, _roleRegistry, _ => null, _events,
             new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),
             new ArtOutputStore(Path.Combine(_workDir, "issues.db")),
-            NullLogger<RunAgentExecutor>.Instance, projectId: null, default);
+            NullLogger<RunAgentExecutor>.Instance, projectId: null, sprints: null, default);
 
         Assert.Equal(AgentResult.Skipped, result.Result);
         Assert.Equal(string.Empty, result.Text);
@@ -168,7 +168,7 @@ public class RunAgentExecutorTests : IDisposable
                 new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),
                 new ArtOutputStore(Path.Combine(_workDir, "issues.db")),
                 NullLogger<RunAgentExecutor>.Instance,
-                projectId: null, CancellationToken.None,
+                projectId: null, sprints: null, CancellationToken.None,
                 timeoutMinutes: 0.02);
         });
 
@@ -200,7 +200,7 @@ public class RunAgentExecutorTests : IDisposable
             new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),
             new ArtOutputStore(Path.Combine(_workDir, "issues.db")),
             NullLogger<RunAgentExecutor>.Instance,
-            projectId: null, CancellationToken.None,
+            projectId: null, sprints: null, CancellationToken.None,
             timeoutMinutes: 1);
 
         Assert.Equal(AgentResult.Ok, result.Result);
