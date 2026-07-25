@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Forge;
 using Forge.AgentTools;
@@ -581,6 +581,86 @@ public sealed class OrchestratorAgentTests : IDisposable
             await Task.Delay(100);
         }
         Assert.Fail("condition not met within timeout");
+    }
+
+    [Fact]
+    public async Task DispatchSingleTask_ReworkRound_SyncsWorktreeToRemotePrHead()
+    {
+        // Rework-round dispatch: a task with prNumber + reworkAttempts > 0
+        // must have its worktree branch synced to the remote PR head before
+        // the agent runs, even when the local checkout has diverged.
+        // Use the issue's actual id as the branch name so the remote ref
+        // matches the workflow's convention: "agent/{issue.Id}".
+        var orch = BuildOrchestrator(new ScriptedRunner("verified, nothing to do. NO_CHANGES_NEEDED"));
+        BindMaf(orch);
+
+        var issue = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "rework round", Description: "sync test"));
+
+        // Set up a remote with a PR branch that matches the dispatch convention.
+        var taskId = issue.Id; // The workflow branch will be "agent/{issue.Id}"
+        var bareDir = Path.Combine(Path.GetTempPath(), "ph-orch-remote-" + Guid.NewGuid().ToString("N"));
+        RunGit(Path.GetTempPath(), "init", "-q --bare " + bareDir);
+        RunGit(_workDir, "remote", "add origin " + bareDir);
+        RunGit(_workDir, "push", "-u origin main");
+        var branch = "agent/" + taskId;
+        RunGit(_workDir, "checkout", "-b " + branch);
+        File.WriteAllText(Path.Combine(_workDir, "rework-content.txt"), "from-remote-pr-head");
+        RunGit(_workDir, "add", "rework-content.txt");
+        RunGit(_workDir, "commit", "-q -m PRhead");
+        RunGit(_workDir, "push", "-u origin " + branch);
+        RunGit(_workDir, "checkout", "main");
+
+        // Verify the remote PR head is different from main.
+        var remoteSha = RunGitCaptureSha(_workDir, "rev-parse origin/" + branch);
+        var mainSha = RunGitCaptureSha(_workDir, "rev-parse main");
+        Assert.NotEqual(remoteSha, mainSha);
+
+        // Now set the rework metadata on the issue.
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null, new Dictionary<string, object>
+        {
+            ["prNumber"] = "42",
+            ["reworkAttempts"] = "2",
+        });
+
+        // Dispatch.
+        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        Assert.True(result.Success, $"expected success, got: {result.Message}");
+
+        // Verify: after the workflow completes, the worktree
+        // should be at the remote PR head (not main).
+        var worktreePath = _worktrees.WorktreePathFor(issue.Id);
+        Assert.True(Directory.Exists(worktreePath),
+            "Worktree directory should exist after dispatch");
+
+        var wtSha = RunGitCaptureSha(worktreePath, "rev-parse HEAD");
+        Assert.Equal(remoteSha, wtSha);
+
+        Assert.True(File.Exists(Path.Combine(worktreePath, "rework-content.txt")),
+            "Worktree should have rework-content.txt from the remote PR head after sync");
+    }
+
+    /// <summary>Run git and capture trimmed output. Throws on non-zero exit.</summary>
+    private static string RunGitCaptureSha(string dir, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = dir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        using var p = Process.Start(psi)!;
+        var output = p.StandardOutput.ReadToEnd().Trim();
+        var err = p.StandardError.ReadToEnd();
+        p.WaitForExit(60_000);
+        if (p.ExitCode != 0)
+            throw new InvalidOperationException($"git {args} (cwd={dir}) failed (exit={p.ExitCode}): {err}");
+        return output;
     }
 
     private sealed class BlockingRunner : IAgentRunner
