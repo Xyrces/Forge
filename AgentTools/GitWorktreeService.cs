@@ -106,6 +106,8 @@ public sealed class GitWorktreeService
         _logger.LogInformation("Synced worktree {Path} branch {Branch} to remote ref {RemoteRef} via {LocalRef}",
             worktreePath, branch, remoteRef, localRef);
     }
+
+
     public async Task RemoveAsync(string taskId, CancellationToken cancellationToken = default)
     {
         var worktreePath = WorktreePathFor(taskId);

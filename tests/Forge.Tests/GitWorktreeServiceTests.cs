@@ -30,40 +30,6 @@ public class GitWorktreeServiceTests : IDisposable
         try { Directory.Delete(_bareDir, recursive: true); } catch { }
     }
 
-    private static void RunGit(string dir, string args)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "git",
-            Arguments = args,
-            WorkingDirectory = dir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi)!;
-        p.WaitForExit();
-    }
-
-
-    private void InitRepo(string dir)
-    {
-        // Initialize main repo
-        RunGit(dir, "init -q -b main");
-        RunGit(dir, "config user.email test@example.com");
-        RunGit(dir, "config user.name Test");
-        File.WriteAllText(Path.Combine(dir, "README.md"), "# init");
-        RunGit(dir, "add -A");
-        RunGit(dir, "commit -q -m initial");
-
-        // Create a bare clone so we have a valid 'origin' remote
-        // that the sync method can fetch from
-        RunGit(dir, $"clone --bare {dir} {_bareDir}");
-        RunGit(dir, $"remote add origin {_bareDir}");
-        RunGit(dir, "fetch origin");
-    }
-
     [Fact]
     public async Task Commit_WithNoChanges_ReturnsNoChangesOutcome()
     {
@@ -88,62 +54,6 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task SyncWorktreeToRef_DivergedBranch_SyncsToRemoteRef()
-    {
-        var worktreePath = _service.WorktreePathFor("t-diverged");
-        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
-        await _service.CreateAsync("t-diverged", "main");
-
-        var beforeSha = await GetHeadShaAsync(worktreePath);
-
-        // Advance the default branch (simulates external changes merged into main)
-        File.WriteAllText(Path.Combine(_workDir, "new-file.txt"), "external change");
-        RunGit(_workDir, "add -A");
-        RunGit(_workDir, "commit -q -m external");
-        // Push the new commit to the bare repo so sync can fetch it
-        RunGit(_workDir, "push origin main");
-
-        var defaultHeadSha = await GetHeadShaAsync(_workDir);
-
-        Assert.NotEqual(beforeSha, defaultHeadSha);
-
-        await _service.SyncWorktreeToRefAsync(worktreePath, "t-diverged", "origin/main");
-
-        var afterSha = await GetHeadShaAsync(worktreePath);
-        Assert.Equal(defaultHeadSha, afterSha);
-    }
-
-    [Fact]
-    public async Task SyncWorktreeToRef_FreshTaskWorktree_NoOpWhenAlreadyAtRef()
-    {
-        var worktreePath = _service.WorktreePathFor("t-fresh");
-        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
-        await _service.CreateAsync("t-fresh", "main");
-
-        var beforeSha = await GetHeadShaAsync(worktreePath);
-
-        await _service.SyncWorktreeToRefAsync(worktreePath, "t-fresh", "origin/main");
-
-        var afterSha = await GetHeadShaAsync(worktreePath);
-        Assert.Equal(beforeSha, afterSha);
-    }
-
-    [Fact]
-    public async Task SyncWorktreeToRef_DetachedHead_Throws()
-    {
-        var worktreePath = _service.WorktreePathFor("t-detached");
-        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
-        await _service.CreateAsync("t-detached", "main");
-
-        var sha = await GetHeadShaAsync(worktreePath);
-        RunGit(worktreePath, $"checkout --detach {sha}");
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _service.SyncWorktreeToRefAsync(worktreePath, "t-detached", "origin/main"));
-        Assert.Contains("detached HEAD", ex.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
     public async Task CreateAsync_FreshTask_WorktreeBranchAtDefaultTip()
     {
         var defaultHeadSha = await GetHeadShaAsync(_workDir);
@@ -154,6 +64,137 @@ public class GitWorktreeServiceTests : IDisposable
 
         var worktreeSha = await GetHeadShaAsync(worktreePath);
         Assert.Equal(defaultHeadSha, worktreeSha);
+    }
+
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_DivergedBranch_SyncsToRef()
+    {
+        // Record the initial commit SHA (the worktree will start here)
+        var initialSha = await GetHeadShaAsync(_workDir);
+
+        var worktreePath = _service.WorktreePathFor("t-diverged");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-diverged", "main");
+
+        // Create a feature branch with a new commit that diverges from the initial commit
+        // Use RunGitForOutputAsync to properly drain stdout/stderr before WaitForExit
+        RunGitForOutputAsync(_workDir, "checkout -b agent/task-X").GetAwaiter().GetResult();
+        File.WriteAllText(Path.Combine(_workDir, "task-x-feature.txt"), "feature work");
+        RunGitForOutputAsync(_workDir, "add -A").GetAwaiter().GetResult();
+        RunGitForOutputAsync(_workDir, "commit -q -m 'feature on agent/task-X'").GetAwaiter().GetResult();
+
+        // The feature branch now has a different SHA from initial
+        var featureBranchSha = await GetHeadShaAsync(_workDir);
+        Assert.NotEqual(initialSha, featureBranchSha);
+
+        // Push to bare repo so SyncWorktreeToRefAsync can fetch it
+        await RunGitForOutputAsync(_workDir, "push origin agent/task-X");
+
+        // Verify worktree is still at the initial commit (diverged from feature branch)
+        var beforeSha = await GetHeadShaAsync(worktreePath);
+        Assert.Equal(initialSha, beforeSha);
+        Assert.NotEqual(featureBranchSha, beforeSha);
+
+        // Sync the worktree to the remote feature branch ref
+        await _service.SyncWorktreeToRefAsync(worktreePath, "t-diverged", "origin/agent/task-X");
+
+        var afterSha = await GetHeadShaAsync(worktreePath);
+        Assert.Equal(featureBranchSha, afterSha);
+    }
+
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_FreshTask_NoOpWhenAlreadyAtRef()
+    {
+        var worktreePath = _service.WorktreePathFor("t-fresh-sync");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-fresh-sync", "main");
+
+        // Push main to bare repo so origin/main is available for fetch
+        await RunGitForOutputAsync(_workDir, "push origin main");
+
+        var beforeSha = await GetHeadShaAsync(worktreePath);
+
+        await _service.SyncWorktreeToRefAsync(worktreePath, "t-fresh-sync", "origin/main");
+
+        var afterSha = await GetHeadShaAsync(worktreePath);
+        Assert.Equal(beforeSha, afterSha);
+    }
+
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_DetachedHead_Throws()
+    {
+        var worktreePath = _service.WorktreePathFor("t-detached");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-detached", "main");
+
+        var sha = await GetHeadShaAsync(worktreePath);
+        await RunGitForOutputAsync(worktreePath, $"checkout --detach {sha}");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SyncWorktreeToRefAsync(worktreePath, "t-detached", "origin/main"));
+        Assert.Contains("detached HEAD", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void InitRepo(string dir)
+    {
+        RunGitSync(dir, "init -q -b main");
+        RunGitSync(dir, "config user.email test@example.com");
+        RunGitSync(dir, "config user.name Test");
+        File.WriteAllText(Path.Combine(dir, "README.md"), "# init");
+        RunGitSync(dir, "add -A");
+        RunGitSync(dir, "commit -q -m initial");
+
+        // Create a bare clone so we have a valid 'origin' remote
+        // that the sync method can fetch from
+        RunGitSync(dir, $"clone --bare {dir} {_bareDir}");
+        RunGitSync(dir, $"remote add origin {_bareDir}");
+        RunGitSync(dir, "fetch origin");
+    }
+
+    /// <summary>
+    /// Synchronous git helper that fully drains stdout/stderr before
+    /// WaitForExit to avoid deadlocks when output buffers fill.
+    /// </summary>
+    private static void RunGitSync(string dir, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = dir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        // Drain both streams to prevent deadlock
+        p.StandardOutput.ReadToEnd();
+        p.StandardError.ReadToEnd();
+        p.WaitForExit();
+    }
+
+    /// <summary>
+    /// Async git helper that drains both streams to avoid deadlocks.
+    /// </summary>
+    private static async Task RunGitForOutputAsync(string dir, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = dir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        var stdoutTask = p.StandardOutput.ReadToEndAsync();
+        var stderrTask = p.StandardError.ReadToEndAsync();
+        await p.WaitForExitAsync();
+        await stdoutTask;
+        await stderrTask;
     }
 
     private async Task<string> GetHeadShaAsync(string repoPath)
@@ -170,6 +211,7 @@ public class GitWorktreeServiceTests : IDisposable
         };
         using var p = Process.Start(psi)!;
         var stdout = await p.StandardOutput.ReadToEndAsync();
+        var stderr = await p.StandardError.ReadToEndAsync();
         await p.WaitForExitAsync();
         return stdout.Trim();
     }
