@@ -53,6 +53,27 @@ public sealed class GitWorktreeService
         return worktreePath;
     }
 
+    public async Task SyncWorktreeToDefaultBranchAsync(string worktreePath, string defaultBranch, CancellationToken cancellationToken = default)
+    {
+        var branchResult = await RunGitInAsync(worktreePath, "rev-parse --abbrev-ref HEAD", cancellationToken);
+        if (branchResult.ExitCode != 0)
+            throw new InvalidOperationException($"git rev-parse --abbrev-ref HEAD failed: {branchResult.Stderr}");
+
+        var branch = branchResult.Stdout.Trim();
+        if (branch.Equals("HEAD", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Cannot sync a detached HEAD worktree to the default branch");
+
+        var fetchResult = await RunGitInAsync(worktreePath, $"fetch origin {defaultBranch}:refs/forge/sync-base", cancellationToken);
+        if (fetchResult.ExitCode != 0)
+            throw new InvalidOperationException($"git fetch default branch failed (exit={fetchResult.ExitCode}): {fetchResult.Stderr}");
+
+        var resetResult = await RunGitInAsync(worktreePath, $"reset --hard refs/forge/sync-base", cancellationToken);
+        if (resetResult.ExitCode != 0)
+            throw new InvalidOperationException($"git reset --hard failed (exit={resetResult.ExitCode}): {resetResult.Stderr}");
+
+        _logger.LogInformation("Synced worktree {Path} branch {Branch} to {Base}", worktreePath, branch, defaultBranch);
+    }
+
     public async Task RemoveAsync(string taskId, CancellationToken cancellationToken = default)
     {
         var worktreePath = WorktreePathFor(taskId);
