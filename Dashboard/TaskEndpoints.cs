@@ -161,6 +161,52 @@ public static class TaskEndpoints
             }
         });
 
+        app.MapPost("/api/tasks/{id}/requeue", async (string id, string? projectId, CancellationToken ct) =>
+        {
+            // Operator requeue of a Failed task: the sanctioned path
+            // (IssueStore transition + metadata update — never direct
+            // SQL). Clears the failure bookkeeping (retryCount,
+            // lastError(+At), noProgressAttempts) so the retry budget
+            // starts fresh, and moves Failed -> Pending. Any other
+            // source state is rejected: requeueing a Completed or
+            // InProgress task would redispatch live/finished work.
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx = projectContexts.Find(projectId);
+                if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx.Issues;
+            }
+            try
+            {
+                var t = await store.GetAsync(id, ct);
+                if (t is null) return Results.NotFound(new { error = "task not found", id });
+                if (t.Status != IssueStatus.Failed)
+                    return Results.Conflict(new { error = $"only Failed tasks can be requeued (status is {t.Status})" });
+
+                // One atomic transition: Failed -> Pending + clear the
+                // failure bookkeeping so the retry budget starts fresh
+                // (upsert-merge only: JSON null is the delete idiom).
+                await store.TransitionAsync(id, IssueStatus.Pending,
+                    "operator requeue from Failed (failure bookkeeping cleared)",
+                    new Dictionary<string, object>
+                    {
+                        ["retryCount"] = null!,
+                        ["noProgressAttempts"] = null!,
+                        ["lastError"] = null!,
+                        ["lastErrorAt"] = null!,
+                        ["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O"),
+                    }, ct);
+                logger.LogInformation("POST /api/tasks/{Id}/requeue: Failed -> Pending, failure metadata cleared", id);
+                return Results.Json(new { taskId = id, status = "Pending" });
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "POST /api/tasks/{Id}/requeue failed", id);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+
         app.MapPost("/api/tasks/{id}/recover", async (string id, CancellationToken ct) =>
         {
             if (recovery is null) return Results.Problem(detail: "StartupRecovery not configured", statusCode: 503);
