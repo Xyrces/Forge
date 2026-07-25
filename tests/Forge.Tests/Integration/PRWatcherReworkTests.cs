@@ -118,6 +118,57 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
+    public async Task ConflictingPr_RequeuesSyncRework_WatchStaysLive()
+    {
+        // Observed live 2026-07-25 (PR #33): an APPROVED PR with
+        // merge conflicts gets no pull_request CI runs at all
+        // (GitHub can't build the test merge ref), so the merge gate
+        // waits forever. The watcher must dispatch a sync rework
+        // round (merge main into the same branch) instead.
+        var gh = new FakeGitHub { Ci = CommitState.Pending };   // no CI runs exist for conflicting PRs
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => false);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
+        var after = await _issues.GetAsync(task.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);       // requeued for the sync round
+        Assert.Equal("1", after.GetMetadata("reworkAttempts"));
+        Assert.Contains("conflicts with the base branch", after.GetMetadata("reworkReason"));
+        Assert.Contains("git merge origin/main", after.GetMetadata("reworkContext"));
+        // The watch stays live and marks this head so the next
+        // sweep doesn't re-trigger while the agent works.
+        var watchAfter = await _issues.GetAsync(watch.Id);
+        Assert.Equal("abc123", watchAfter!.GetMetadata("reworkInFlightSha"));
+        Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
+    public async Task MergeableNullWhileComputing_DoesNotFireConflictRework()
+    {
+        // GitHub computes mergeability asynchronously; null must
+        // mean "not yet known" (keep polling), never "conflicting".
+        var gh = new FakeGitHub { Ci = CommitState.Pending };
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => null);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        var after = await _issues.GetAsync(task.Id);
+        Assert.Null(after.GetMetadata("reworkAttempts"));
+        Assert.Null(after.GetMetadata("reworkReason"));
+        Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
     public async Task CiFailed_RequeuesTask_WithContext_WatchStaysLive()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure };

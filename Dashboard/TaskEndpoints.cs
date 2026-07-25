@@ -207,6 +207,51 @@ public static class TaskEndpoints
             }
         });
 
+        app.MapPost("/api/tasks/{id}/adopt-pr", async (string id, AdoptPrRequest? body, string? projectId, CancellationToken ct) =>
+        {
+            // Adopt an orphan PR into the watch loop: any PR opened
+            // outside the pipeline (operator hand-created, external
+            // tool, recovered work) gets a proper pr-watch issue so
+            // the reviewer/CI/merge loop OWNS it — the sanctioned
+            // alternative to hand-merging (operator rule 2026-07-25:
+            // no manual out-of-loop fixes).
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx = projectContexts.Find(projectId);
+                if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx.Issues;
+            }
+            try
+            {
+                if (body is null || body.PrNumber <= 0 || string.IsNullOrWhiteSpace(body.Branch))
+                    return Results.BadRequest(new { error = "prNumber (> 0) and branch are required" });
+                var t = await store.GetAsync(id, ct);
+                if (t is null) return Results.NotFound(new { error = "task not found", id });
+
+                var watch = await store.CreateAsync(new NewIssue(
+                    Type: AgentTaskTypes.PrWatch,
+                    Title: $"Watch PR #{body.PrNumber} for {id}",
+                    Description: $"Wait for PR #{body.PrNumber} to be reviewed.",
+                    Metadata: new Dictionary<string, object>
+                    {
+                        ["prNumber"] = body.PrNumber,
+                        ["branch"] = body.Branch,
+                        ["worktreePath"] = body.WorktreePath ?? string.Empty,
+                        ["taskId"] = id,
+                        ["adopted"] = "true",
+                    }), ct);
+                logger.LogInformation("POST /api/tasks/{Id}/adopt-pr: watch {WatchId} created for PR #{Pr}",
+                    id, watch.Id, body.PrNumber);
+                return Results.Json(new { taskId = id, watchId = watch.Id, prNumber = body.PrNumber });
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "POST /api/tasks/{Id}/adopt-pr failed", id);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+
         app.MapPost("/api/tasks/{id}/recover", async (string id, CancellationToken ct) =>
         {
             if (recovery is null) return Results.Problem(detail: "StartupRecovery not configured", statusCode: 503);
@@ -222,6 +267,8 @@ public static class TaskEndpoints
             }
         });
     }
+
+    public sealed record AdoptPrRequest(int PrNumber, string Branch, string? WorktreePath);
 
     private static Dictionary<string, object?> ParseMetadata(string? metadataJson)
     {

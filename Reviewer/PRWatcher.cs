@@ -74,7 +74,8 @@ public sealed class PRWatcher
         IssueRecord watchTask,
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
-        Func<PullRequest, string>? headShaOverride = null)
+        Func<PullRequest, string>? headShaOverride = null,
+        Func<PullRequest, bool?>? mergeableOverride = null)
     {
         var prText = watchTask.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
@@ -232,6 +233,31 @@ public sealed class PRWatcher
                 return WatchPollOutcome.Blocked;
             }
             return WatchPollOutcome.Pending;
+        }
+
+        // 2b. The PR conflicts with the base branch. GitHub refuses
+        //     the merge AND creates no pull_request CI runs for a
+        //     conflicting PR (the test merge ref can't be built), so
+        //     waiting on CI is futile — observed live 2026-07-25:
+        //     PR #33 sat approved-but-unmergeable with zero CI runs
+        //     and an operator merged main by hand. Operator rule
+        //     (same day): the loop must handle this, not a human.
+        //     Sync rework round: merge main into the SAME branch,
+        //     resolve conflicts, push. The head moves, CI runs, the
+        //     reviewer re-reviews, and the merge gate re-evaluates.
+        //     Mergeable is null while GitHub computes — skip those
+        //     sweeps rather than firing spurious rounds.
+        var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
+        if (mergeable == false)
+        {
+            return await ReworkOrTripAsync(
+                watchTask, taskId, worktreePath, sha,
+                reason: "PR conflicts with the base branch",
+                context: "The PR branch has merge conflicts with the base branch and cannot be merged — GitHub does not even run CI on a conflicting PR. Merge the base branch into your branch (git fetch origin && git merge origin/main), resolve the conflicts minimally, run the full test suite, and push to the SAME branch. Keep your earlier changes intact; do not restructure unrelated work.",
+                terminalStatus: IssueStatus.Blocked,
+                terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
+                terminalOutcome: WatchPollOutcome.Blocked,
+                cancellationToken);
         }
 
         // 3. Otherwise: CI pending, or review for the current head
