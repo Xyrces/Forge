@@ -62,8 +62,12 @@ public class OptionsLoaderTests : IDisposable
         }
         """);
         var savedCwd = Directory.GetCurrentDirectory();
+        var savedGhToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+        var savedGhDd = Environment.GetEnvironmentVariable("GitHub__Token");
         try
         {
+            Environment.SetEnvironmentVariable("GITHUB_TOKEN", null);
+            Environment.SetEnvironmentVariable("GitHub__Token", null);
             Directory.SetCurrentDirectory(_workDir);
             var options = OptionsLoader.Load();
             Assert.Equal("Xyrces", options.GitHub.Owner);
@@ -72,6 +76,8 @@ public class OptionsLoaderTests : IDisposable
         }
         finally
         {
+            Environment.SetEnvironmentVariable("GITHUB_TOKEN", savedGhToken);
+            Environment.SetEnvironmentVariable("GitHub__Token", savedGhDd);
             Directory.SetCurrentDirectory(savedCwd);
         }
     }
