@@ -1,27 +1,80 @@
 @page "/skills"
-@inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
-@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
-@inject Fluxor.IDispatcher Dispatch
-@implements IDisposable
-@using Forge.Dashboard.Features.View
+@inject HttpClient Http
+@using System.Net.Http.Json
 
 <PageTitle>Skills</PageTitle>
 <div class="page">
     <div class="page-header">
         <h1>Skills</h1>
-        <div class="page-header__meta">@ViewStore.Value.Skills.Count loaded · @ViewStore.Value.Skills.Count(s => s.Enabled) enabled</div>
+        <div class="page-header__meta">@(_skills?.Count ?? 0) skills · @(_skills?.Count(s => s.Enabled) ?? 0) enabled</div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId)))">Refresh</button>
+            <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
+            <button class="btn btn--primary" @onclick="BeginAdd">Add skill</button>
         </div>
     </div>
 
-    @if (ViewStore.Value.Loading)
+    @if (_error is not null)
+    {
+        <div class="banner banner--error"><span>@_error</span></div>
+    }
+
+    @if (_editing is not null)
+    {
+        <div class="card" style="margin-bottom:16px">
+            <h2>@(_editing.Id is null ? "New skill" : $"Edit {_editing.Name}")</h2>
+            <table class="data-grid">
+                <tbody>
+                    <tr>
+                        <td style="width:130px" class="meta-text">Name</td>
+                        <td><input type="text" class="mono" style="width:100%" @bind="_editing.Name" placeholder="forge-my-skill" /></td>
+                    </tr>
+                    <tr>
+                        <td class="meta-text">Assigned to</td>
+                        <td>
+                            <select class="mono" @bind="_editing.Role">
+                                <option value="">global (all roles)</option>
+                                @foreach (var r in _assignableRoles)
+                                {
+                                    <option value="@r">@r</option>
+                                }
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="meta-text">Description</td>
+                        <td><input type="text" style="width:100%" @bind="_editing.Description" placeholder="What this skill is for (one line)" /></td>
+                    </tr>
+                    <tr>
+                        <td class="meta-text" style="vertical-align:top">Body</td>
+                        <td>
+                            <textarea class="mono" style="width:100%; min-height:220px" @bind="_editing.Body"
+                                      placeholder="Markdown instructions injected into the agent's system context."></textarea>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="meta-text">Enabled</td>
+                        <td><input type="checkbox" @bind="_editing.Enabled" /></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div style="margin-top:10px; display:flex; gap:8px; align-items:center">
+                <button class="btn btn--primary" @onclick="SaveAsync" disabled="@string.IsNullOrWhiteSpace(_editing.Name)">Save</button>
+                <button class="btn" @onclick="() => _editing = null">Cancel</button>
+                @if (_editError is not null)
+                {
+                    <span class="error-text">@_editError</span>
+                }
+            </div>
+        </div>
+    }
+
+    @if (_skills is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
-    else if (ViewStore.Value.Error is not null)
+    else if (_skills.Count == 0)
     {
-        <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
+        <div class="page-subtitle">No skills yet. Startup seeds the pipeline-behavior skills and the repo's .kilo/skills; add your own above.</div>
     }
     else
     {
@@ -29,19 +82,29 @@
             <thead>
                 <tr>
                     <th>Name</th>
+                    <th>Assigned to</th>
                     <th>Description</th>
-                    <th>Agent</th>
                     <th>Enabled</th>
                     <th>Updated</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
-                @foreach (var row in ViewStore.Value.Skills)
+                @foreach (var row in _skills)
                 {
                     <tr>
                         <td class="mono">@row.Name</td>
-                        <td>@(row.Description ?? "—")</td>
-                        <td class="mono">@(row.AgentId ?? "—")</td>
+                        <td>
+                            @if (row.Role is null)
+                            {
+                                <span class="pill">global</span>
+                            }
+                            else
+                            {
+                                <span class="pill pill--primary">@row.Role</span>
+                            }
+                        </td>
+                        <td class="meta-text">@(row.Description ?? "—")</td>
                         <td>
                             @if (row.Enabled)
                             {
@@ -52,12 +115,12 @@
                                 <span class="pill pill--failed">off</span>
                             }
                         </td>
-                        <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td class="mono meta-text">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td style="white-space:nowrap">
+                            <button class="btn" style="padding:2px 10px; font-size:12px" @onclick="() => BeginEdit(row)">Edit</button>
+                            <button class="btn" style="padding:2px 10px; font-size:12px" @onclick="() => DeleteAsync(row)">Delete</button>
+                        </td>
                     </tr>
-                }
-                @if (ViewStore.Value.Skills.Count == 0)
-                {
-                    <tr><td colspan="5"><div class="page-subtitle">No skills loaded yet. Run SkillBootstrap to seed defaults.</div></td></tr>
                 }
             </tbody>
         </table>
@@ -65,37 +128,88 @@
 </div>
 
 @code {
-    private string? _loadedProject;
+    private static readonly string[] _assignableRoles = { "coredev", "clientdev", "qa", "reviewer", "intake" };
 
-    protected override void OnInitialized()
+    private List<SkillDto>? _skills;
+    private string? _error;
+    private EditModel? _editing;
+    private string? _editError;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
     {
-        ViewStore.StateChanged += OnStateChanged;
-        ShellStore.StateChanged += OnShellChanged;
-        if (ViewStore.Value.LastFetchedAt is null)
+        try
         {
-            LoadForCurrentProject();
+            _skills = await Http.GetFromJsonAsync<List<SkillDto>>("/api/skills");
+            _error = null;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
         }
     }
 
-    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
-
-    private void OnShellChanged(object? sender, EventArgs e)
+    private void BeginAdd()
     {
-        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+        _editing = new EditModel { Enabled = true };
+        _editError = null;
+    }
+
+    private void BeginEdit(SkillDto row)
+    {
+        _editing = new EditModel
         {
-            InvokeAsync(LoadForCurrentProject);
+            Id = row.Id,
+            Name = row.Name,
+            Description = row.Description ?? "",
+            Body = row.Body,
+            Role = row.Role ?? "",
+            Enabled = row.Enabled,
+        };
+        _editError = null;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_editing is null) return;
+        _editError = null;
+        var payload = new
+        {
+            name = _editing.Name.Trim(),
+            description = string.IsNullOrWhiteSpace(_editing.Description) ? null : _editing.Description.Trim(),
+            body = _editing.Body,
+            role = string.IsNullOrWhiteSpace(_editing.Role) ? null : _editing.Role,
+            enabled = _editing.Enabled,
+        };
+        HttpResponseMessage resp = _editing.Id is null
+            ? await Http.PostAsJsonAsync("/api/skills", payload)
+            : await Http.PatchAsJsonAsync($"/api/skills/{_editing.Id}", payload);
+        if (!resp.IsSuccessStatusCode)
+        {
+            _editError = await resp.Content.ReadAsStringAsync();
+            return;
         }
+        _editing = null;
+        await LoadAsync();
     }
 
-    private void LoadForCurrentProject()
+    private async Task DeleteAsync(SkillDto row)
     {
-        _loadedProject = ShellStore.Value.CurrentProjectId;
-        Dispatch.Dispatch(new ViewActions.LoadViewAction(_loadedProject));
+        await Http.DeleteAsync($"/api/skills/{row.Id}");
+        await LoadAsync();
     }
 
-    public void Dispose()
+    private sealed record SkillDto(string Id, string Name, string? Description, string Body,
+        string? AgentId, string? Role, bool Enabled, DateTime CreatedAt, DateTime UpdatedAt);
+
+    private sealed class EditModel
     {
-        ViewStore.StateChanged -= OnStateChanged;
-        ShellStore.StateChanged -= OnShellChanged;
+        public string? Id { get; set; }
+        public string Name { get; set; } = "";
+        public string Description { get; set; } = "";
+        public string Body { get; set; } = "";
+        public string Role { get; set; } = "";
+        public bool Enabled { get; set; } = true;
     }
 }

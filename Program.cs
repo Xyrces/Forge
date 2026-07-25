@@ -968,7 +968,15 @@ Console.Error.WriteLine(ex.ToString());
         var roleRegistry = new RoleAgentRegistry();
         var agentsStore = new Core.AgentStore(issues);
         var skillsStore = new Core.SkillStore(issues);
-        var skillSource = new SqliteSkillSource(agentsStore, skillsStore, roleRegistry);
+        var skillSource = new SqliteSkillSource(skillsStore, roleRegistry);
+        // Seed the skill catalog (seed-if-absent; operator edits via
+        // the dashboard win): pipeline-behavior skills per role +
+        // the repo's .kilo/skills imported as global skills.
+        await Agents.SkillSeeder.SeedAsync(
+            skillsStore,
+            Path.Combine(primary.Root, ".kilo", "skills"),
+            loggerFactory.CreateLogger("Forge.SkillSeeder"),
+            CancellationToken.None);
         // The memory table lives in IssueStore's schema (v7). Construct an
         // IssueStore against the memory DB once at startup so the schema
         // (and any future migrations) run before MemoryStore touches it.

@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 21;
+    public const int CurrentSchemaVersion = 22;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -830,6 +830,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // answerable from the dashboard.
         ApplyV21AgentRunActivity(conn);
 
+        // v22 (post-init): skill.role — role-name scoping for the
+        // skill catalog (the legacy agent_id FK resolves through the
+        // legacy agent table, which is empty in practice). NULL role
+        // = global skill.
+        ApplyV22SkillRole(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -850,6 +856,16 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         if (probe.ExecuteScalar() is not null) return;
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE agent_run ADD COLUMN last_activity_at TEXT";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV22SkillRole(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('skill') WHERE name = 'role' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE skill ADD COLUMN role TEXT";
         alter.ExecuteNonQuery();
     }
 

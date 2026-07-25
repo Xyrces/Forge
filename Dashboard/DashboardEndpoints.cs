@@ -156,9 +156,9 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         });
 
         // ---- Skills ----
-        app.MapGet("/api/skills", async (string? agent, string? global, CancellationToken ct) =>
+        app.MapGet("/api/skills", async (string? role, string? global, CancellationToken ct) =>
         {
-            var list = await skills.ListAsync(agent, global == "true", ct);
+            var list = await skills.ListByRoleAsync(role, global == "true", ct);
             return Results.Json(list.Select(ToSkillView).ToArray(), DashboardJson.Options);
         });
 
@@ -324,6 +324,7 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         description = s.Description,
         body = s.Body,
         agentId = s.AgentId,
+        role = s.Role,
         enabled = s.Enabled,
         createdAt = s.CreatedAt,
         updatedAt = s.UpdatedAt
