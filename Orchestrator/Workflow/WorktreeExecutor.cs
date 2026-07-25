@@ -88,7 +88,40 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 "Rework round detected for {Id} (prNumber={Pr}, reworkAttempts={NAttempts}): " +
                 "syncing worktree {Path} to remote ref {RemoteRef}",
                 input.Issue.Id, prNumber, reworkAttempts, worktreePath, remoteRef);
-            await worktrees.SyncWorktreeToRefAsync(worktreePath, input.Issue.Id, remoteRef, ct);
+            try
+            {
+                await worktrees.SyncWorktreeToRefAsync(worktreePath, input.Issue.Id, remoteRef, ct);
+            }
+            catch (Exception ex)
+            {
+                // Record the sync failure in issue metadata (lastError + lastErrorAt)
+                // BEFORE rethrowing, so that DispatchSingleTaskAsync's lastError path
+                // picks up the actual error (e.g. git fetch failure) and routes it
+                // through HandleFailureAsync (retryCount requeue) rather than leaving
+                // the issue InProgress with no error and the mid-pipeline guard falling
+                // back to a generic "workflow halted" message.
+                try
+                {
+                    var cur = await issues.GetAsync(input.Issue.Id, ct);
+                    if (cur is not null)
+                    {
+                        var meta = ParseMetadata(cur.MetadataJson);
+                        meta["lastError"] = ex.GetType().Name + ": " + ex.Message;
+                        meta["lastErrorAt"] = DateTime.UtcNow.ToString("O");
+                        await issues.TransitionAsync(input.Issue.Id, cur.Status,
+                            error: meta["lastError"]?.ToString(), metadata: meta, ct: ct);
+                        logger.LogWarning(ex,
+                            "Worktree sync failed for {Id} - recorded lastError and rethrowing",
+                            input.Issue.Id);
+                    }
+                }
+                catch (Exception inner)
+                {
+                    logger.LogWarning(inner,
+                        "Failed to record sync error metadata for {Id}", input.Issue.Id);
+                }
+                throw;
+            }
         }
 
         // P4 Stage A: advance the dispatch checkpoint BEFORE we

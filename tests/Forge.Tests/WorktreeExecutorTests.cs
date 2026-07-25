@@ -221,4 +221,40 @@ public class WorktreeExecutorTests : IDisposable
         Assert.Equal(WorktreeResult.Ok, result.Result);
         Assert.NotNull(result.WorktreePath);
     }
+    [Fact]
+    public async Task ReworkRound_SyncFailure_RecordsLastErrorAndThrows()
+    {
+        var taskId = "task-sync-fail";
+        SetupRemoteAndBranch(taskId);
+
+        // Break the remote so the subsequent git fetch in SyncWorktreeToRefAsync fails.
+        RunGit(_workDir, "remote remove origin");
+
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "sync-fail test"));
+        await _issues.ClaimAsync(issue.Id, "forge");
+        var meta = new Dictionary<string, object>
+        {
+            ["prNumber"] = "99",
+            ["reworkAttempts"] = "2",
+        };
+        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: meta);
+        var refreshed = await _issues.GetAsync(issue.Id);
+        var input = new ClaimedIssue(refreshed!, ClaimResult.Ok, null, "agent/" + taskId);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await WorktreeExecutor.HandleAsync(
+                input, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default));
+
+        // The exception must mention the fetch failure, not be a generic message.
+        Assert.Contains("fetch", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+        // The lastError must have been recorded in metadata BEFORE the rethrow,
+        // so the orchestrator's post-workflow lastError path (or mid-pipeline
+        // halt guard) surfaces the actual error to HandleFailureAsync.
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.NotNull(after);
+        Assert.NotNull(after!.GetMetadata("lastError"));
+        Assert.Contains("fetch", after!.GetMetadata("lastError")!, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(after!.GetMetadata("lastErrorAt"));
+    }
 }
