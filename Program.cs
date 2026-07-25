@@ -1130,7 +1130,8 @@ Console.Error.WriteLine(ex.ToString());
                 designArtifacts, artOutputs,
                 memoryExtractor, extractionStore,
                 loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
-                projectId: primary.Id)
+                projectId: primary.Id,
+                timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes)
                 .Build();
             var services = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -1164,7 +1165,8 @@ Console.Error.WriteLine(ex.ToString());
                         loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
                         projectId: bundle.Project.Id,
                         loggerFactory: loggerFactory,
-                        sprints: bundle.Sprints);
+                        sprints: bundle.Sprints,
+                        timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes);
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
