@@ -11,6 +11,20 @@ namespace Forge.Orchestrator.Workflow;
 /// the worktree path / branch / role in the issue's metadata, then
 /// returns a <see cref="WorktreeReady"/> with the worktree path +
 /// branch + base branch (for the eventual PR's base).
+///
+/// <para>
+/// On a rework round — detected by the presence of both
+/// <c>prNumber</c> and <c>reworkAttempts &gt; 0</c> in the issue's
+/// metadata — the worktree branch is synced to the PR head
+/// (<c>origin/agent/&lt;taskId&gt;</c>) before the agent runs.
+/// This ensures the agent always starts from the current PR head,
+/// even if the branch advanced between rounds (external pushes,
+/// prior round pushed from another checkout, etc.). Conflict rounds
+/// stay unchanged: the sync target is always the PR head, and the
+/// agent still merges the base branch itself per the prompt.
+/// First-time dispatches (no <c>prNumber</c>) keep the current
+/// behavior: create the worktree from the default branch.
+/// </para>
 /// </summary>
 public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeReady>
 {
@@ -50,19 +64,45 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             logger.LogWarning("WorktreeExecutor received AlreadyClaimed for {Id}", input.Issue.Id);
             return new WorktreeReady(input, WorktreeResult.AlreadyClaimed, null, defaultBranch);
         }
+
+        // Resolve the branch name (same convention throughout the pipeline).
+        var branch = input.Branch ?? $"agent/{input.Issue.Id}";
+
+        // Create (or reuse existing) worktree from the base branch.
         var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct);
+
+        // Detect rework round: prNumber is set and reworkAttempts > 0.
+        // The PRWatcher sets both metadata keys when it transitions the
+        // task back to Pending for a rework round. On a rework, sync the
+        // worktree branch to the PR head (origin/<branch>) so the agent
+        // always starts from the current PR head, even if the branch
+        // advanced between rounds.
+        var prNumber = input.Issue.GetMetadata("prNumber");
+        var reworkAttemptsRaw = input.Issue.GetMetadata("reworkAttempts");
+        if (!string.IsNullOrEmpty(prNumber)
+            && int.TryParse(reworkAttemptsRaw, out var reworkAttempts)
+            && reworkAttempts > 0)
+        {
+            var remoteRef = $"origin/{branch}";
+            logger.LogInformation(
+                "Rework round detected for {Id} (prNumber={Pr}, reworkAttempts={NAttempts}): " +
+                "syncing worktree {Path} to remote ref {RemoteRef}",
+                input.Issue.Id, prNumber, reworkAttempts, worktreePath, remoteRef);
+            await worktrees.SyncWorktreeToRefAsync(worktreePath, input.Issue.Id, remoteRef, ct);
+        }
+
         // P4 Stage A: advance the dispatch checkpoint BEFORE we
         // touch metadata. If we crash between CreateAsync and the
         // TransitionAsync below, the recoverer sees
         // worktree_acquired + a worktree directory on disk and
         // resumes from RunAgent (the LLM re-runs).
         await issues.SetCheckpointAsync(input.Issue.Id, DispatchCheckpoint.WorktreeAcquired, ct);
+
         // Persist the path/branch in metadata so the dashboard can
         // surface them even before the agent has run.
         var issue = await issues.GetAsync(input.Issue.Id, ct);
         if (issue is not null)
         {
-            var branch = input.Branch ?? $"agent/{input.Issue.Id}";
             var currentMetadata = ParseMetadata(issue.MetadataJson);
             currentMetadata["worktreePath"] = worktreePath;
             currentMetadata["branch"] = branch;
