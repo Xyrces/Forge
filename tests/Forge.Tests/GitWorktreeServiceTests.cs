@@ -46,23 +46,6 @@ public class GitWorktreeServiceTests : IDisposable
         p.WaitForExit();
     }
 
-    private static string RunGitCapture(string dir, string args)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "git",
-            Arguments = args,
-            WorkingDirectory = dir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi)!;
-        var stdout = p.StandardOutput.ReadToEnd();
-        p.WaitForExit();
-        return stdout.Trim();
-    }
 
     private void InitRepo(string dir)
     {
