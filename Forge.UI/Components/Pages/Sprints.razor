@@ -2,6 +2,9 @@
 @inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
+@inject HttpClient Http
+@inject NavigationManager Nav
+@using System.Net.Http.Json
 @implements IDisposable
 @using Forge.Dashboard.Features.View
 
@@ -15,6 +18,21 @@
         </div>
     </div>
 
+    @* Operator stage gates: hold a stage to pause its automatic
+       transition; release to let the pipeline continue. *@
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+        <span class="page-subtitle" style="margin-right:4px">Stage gates:</span>
+        @foreach (var stage in _gateStages)
+        {
+            var held = _gates.TryGetValue(stage, out var s) && s == "hold";
+            <button class="chip @(held ? "chip--active" : "")"
+                    title="@(held ? $"Held — {stage} transitions are paused. Click to release." : $"Open — {stage} runs automatically. Click to hold.")"
+                    @onclick="@(() => ToggleGateAsync(stage))">
+                @stage: @(held ? "held" : "open")
+            </button>
+        }
+    </div>
+
     @if (ViewStore.Value.Loading)
     {
         <div class="page-subtitle">Loading…</div>
@@ -23,41 +41,212 @@
     {
         <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
     }
+    else if (ViewStore.Value.Sprints.Count == 0)
+    {
+        @* Sprint flow: there is intentionally NO create button — the
+           SprintAssembler builds each sprint automatically when the
+           previous one completes, from groomed (or ad-hoc) work. *@
+        <div class="page-subtitle">No sprints yet. Sprints assemble automatically when groomed work becomes eligible.</div>
+    }
     else
     {
-        <div class="sprint-grid">
-            @foreach (var sp in ViewStore.Value.Sprints)
+        var sprints = ViewStore.Value.Sprints
+            .OrderByDescending(s => s.Status == "Active")
+            .ThenByDescending(s => s.StartDate)
+            .ToList();
+        var selected = SelectedSprint(sprints);
+
+        @* Sprint picker: a proper dropdown — scales past a handful
+           of sprints, type-ahead built in. (The old chip-per-sprint
+           row wrapped forever; operator 2026-07-25: 'tags/pills as
+           selectors is weird.') Active pinned first, then newest. *@
+        <div class="picker-bar">
+            <label class="picker-bar__label" for="sprint-picker">Sprint</label>
+            <select id="sprint-picker" class="picker-bar__select"
+                    value="@(selected?.Id ?? "")"
+                    @onchange="@((ChangeEventArgs e) => _selectedSprintId = e.Value?.ToString())">
+                @foreach (var sp in sprints)
+                {
+                    <option value="@sp.Id" selected="@(selected?.Id == sp.Id)">
+                        @(sp.Status == "Active" ? "● " : "")@sp.Name — @sp.Status.ToLowerInvariant()@Dates(sp)
+                    </option>
+                }
+            </select>
+            <span class="meta-text">@sprints.Count total</span>
+        </div>
+
+        @if (selected is not null)
+        {
+            var members = EnrichMembers(selected);
+            var done = members.Count(m => m.Status is "Completed" or "Closed");
+            var pct = members.Count == 0 ? 0 : (int)Math.Round(100.0 * done / members.Count);
+
+            <div class="sprint-hero">
+                <div class="sprint-hero__top">
+                    <span class="pill pill--@selected.Status.ToLowerInvariant()">@selected.Status</span>
+                    <strong class="sprint-hero__name">@selected.Name</strong>
+                    <span class="mono sprint-hero__dates">
+                        @(selected.StartDate?.ToString("MMM d") ?? "")
+                        @(selected.EndDate is not null ? $" → {selected.EndDate.Value:MMM d}" : "")
+                    </span>
+                    <span class="mono">@done/@members.Count tasks · @pct%</span>
+                </div>
+                @if (!string.IsNullOrEmpty(selected.Goal))
+                {
+                    <div class="sprint-hero__goal">@selected.Goal</div>
+                }
+                <div class="sprint-progress"><div class="sprint-progress__fill" style="width:@pct%"></div></div>
+            </div>
+
+            @if (selected.Status != "Active")
             {
-                <div class="sprint-card">
-                    <div class="sprint-card__header">
-                        <span class="mono sprint-card__id">@sp.Id</span>
-                        <span class="pill pill--@sp.Status.ToLowerInvariant()">@sp.Status</span>
-                    </div>
-                    <div class="sprint-card__name">@sp.Name</div>
-                    <div class="sprint-card__goal">@(sp.Goal ?? "(no goal)")</div>
-                    <div class="sprint-card__dates">
-                        @if (sp.StartDate is not null)
+                <div class="page-subtitle" style="margin:8px 0">Viewing a past sprint (read-only).</div>
+            }
+
+            @* Scrum board: every task in the sprint, grouped by state. *@
+            <div class="kanban">
+                @foreach (var col in Columns)
+                {
+                    var cards = members.Where(m => col.Match(m.Status)).ToList();
+                    <div class="kanban__col">
+                        <div class="kanban__col-header">
+                            <span>@col.Title</span>
+                            <span class="mono kanban__col-count">@cards.Count</span>
+                        </div>
+                        @if (cards.Count == 0)
                         {
-                            <span>@sp.StartDate.Value.ToString("MMM d")</span>
-                            @if (sp.EndDate is not null)
-                            {
-                                <span> → </span>
-                                <span>@sp.EndDate.Value.ToString("MMM d")</span>
-                            }
+                            <div class="kanban__empty">—</div>
+                        }
+                        @foreach (var card in cards)
+                        {
+                            <div class="kanban__card" style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{card.Id}"))">
+                                <div class="kanban__card-top">
+                                    <span class="mono kanban__card-id">@card.Id</span>
+                                    <span style="display:flex;gap:6px;align-items:center">
+                                        @if (card.ReworkAttempts is not null)
+                                        {
+                                            <span class="pill pill--blocked" title="Rework round @card.ReworkAttempts in the review loop">R@(card.ReworkAttempts)</span>
+                                        }
+                                        @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
+                                        {
+                                            <a href="@url" target="_blank" rel="noopener" @onclick:stopPropagation="true">PR #@card.PrNumber</a>
+                                        }
+                                    </span>
+                                </div>
+                                <div class="kanban__card-title">@card.Title</div>
+                                <div class="kanban__card-meta">
+                                    <span class="pill pill--@card.Status.ToLowerInvariant()">@card.Status</span>
+                                    @if (card.Assignee is not null)
+                                    {
+                                        <span class="mono">@card.Assignee</span>
+                                    }
+                                </div>
+                            </div>
                         }
                     </div>
-                </div>
-            }
-            @if (ViewStore.Value.Sprints.Count == 0)
-            {
-                <div class="page-subtitle">No sprints yet.</div>
-            }
-        </div>
+                }
+            </div>
+        }
     }
 </div>
 
 @code {
     private string? _loadedProject;
+    private string? _selectedSprintId;
+    private string? _repoUrl;
+
+    private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge" };
+    private Dictionary<string, string> _gates = new();
+    private System.Threading.Timer? _gateTimer;
+
+    private async Task LoadGatesAsync()
+    {
+        try
+        {
+            _gates = await Http.GetFromJsonAsync<Dictionary<string, string>>("/api/gates") ?? new();
+            StateHasChanged();
+        }
+        catch { /* gates endpoint absent on older backends */ }
+    }
+
+    private async Task ToggleGateAsync(string stage)
+    {
+        var held = _gates.TryGetValue(stage, out var s) && s == "hold";
+        var resp = await Http.PostAsync($"/api/gates/{stage}/{(held ? "release" : "hold")}", null);
+        if (resp.IsSuccessStatusCode) await LoadGatesAsync();
+    }
+
+    private sealed record Column(string Title, Func<string, bool> Match);
+    private static readonly Column[] Columns =
+    {
+        new("To do", s => s == "Pending"),
+        new("In progress", s => s == "InProgress"),
+        new("Blocked", s => s == "Blocked"),
+        new("Failed", s => s == "Failed"),
+        new("Done", s => s is "Completed" or "Closed"),
+    };
+
+    private sealed record Card(string Id, string Title, string Status, string? Assignee, string? PrNumber, string? ReworkAttempts);
+
+    private ViewSprint? SelectedSprint(List<ViewSprint> sprints)
+    {
+        // Default: the Active sprint; fall back to the newest.
+        if (_selectedSprintId is not null)
+        {
+            var hit = sprints.FirstOrDefault(s => s.Id == _selectedSprintId);
+            if (hit is not null) return hit;
+        }
+        return sprints.FirstOrDefault(s => s.Status == "Active") ?? sprints.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Sprint member rows carry id/title/status; enrich with the full
+    /// task view (assignee, prNumber from metadata) by cross-joining
+    /// the /api/state task list already in the store.
+    /// </summary>
+    private List<Card> EnrichMembers(ViewSprint sprint)
+    {
+        var byId = ViewStore.Value.Tasks.ToDictionary(t => t.Id);
+        return (sprint.Members ?? (IReadOnlyList<ViewSprintMember>)Array.Empty<ViewSprintMember>())
+            .Select(m =>
+            {
+                byId.TryGetValue(m.Id, out var t);
+                return new Card(m.Id, m.Title, m.Status, t?.Assignee, t?.PrNumber, t?.ReworkAttempts);
+            })
+            .ToList();
+    }
+
+    private string? PrUrl(string prNumber) =>
+        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+
+    private static string Dates(ViewSprint s)
+    {
+        var start = s.StartDate?.ToString("MMM d");
+        var end = s.EndDate?.ToString("MMM d");
+        return start is null ? "" : $" · {start}{(end is null ? "" : $" → {end}")}";
+    }
+
+    private async Task LoadRepoUrlAsync()
+    {
+        // Repo URL from the current project registration (never
+        // hardcoded); re-resolved on project switch.
+        var projectId = ShellStore.Value.CurrentProjectId;
+        if (string.IsNullOrEmpty(projectId)) return;
+        try
+        {
+            var projects = await Http.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/projects");
+            foreach (var p in projects.EnumerateArray())
+            {
+                if (p.TryGetProperty("id", out var id) && string.Equals(id.GetString(), projectId, StringComparison.OrdinalIgnoreCase)
+                    && p.TryGetProperty("repoUrl", out var url))
+                {
+                    _repoUrl = url.GetString()?.TrimEnd('/');
+                    break;
+                }
+            }
+        }
+        catch { /* PR links are best-effort */ }
+    }
 
     protected override void OnInitialized()
     {
@@ -67,6 +256,9 @@
         {
             LoadForCurrentProject();
         }
+        _ = LoadRepoUrlAsync();
+        _gateTimer = new System.Threading.Timer(_ => InvokeAsync(LoadGatesAsync), null,
+            TimeSpan.Zero, TimeSpan.FromSeconds(10));
     }
 
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
@@ -75,7 +267,10 @@
     {
         if (ShellStore.Value.CurrentProjectId != _loadedProject)
         {
+            _repoUrl = null;
+            _selectedSprintId = null;
             InvokeAsync(LoadForCurrentProject);
+            _ = LoadRepoUrlAsync();
         }
     }
 
@@ -87,6 +282,7 @@
 
     public void Dispose()
     {
+        _gateTimer?.Dispose();
         ViewStore.StateChanged -= OnStateChanged;
         ShellStore.StateChanged -= OnShellChanged;
     }

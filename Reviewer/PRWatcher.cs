@@ -16,6 +16,7 @@ public sealed class PRWatcher
     private readonly TimeSpan _pollInterval;
     private readonly TimeSpan _staleAfter;
     private readonly ILogger<PRWatcher> _logger;
+    private readonly StageGates? _gates;
     private readonly IDashboardEventBus _events;
 
     public PRWatcher(
@@ -25,7 +26,8 @@ public sealed class PRWatcher
         TimeSpan pollInterval,
         TimeSpan staleAfter,
         IDashboardEventBus events,
-        ILogger<PRWatcher> logger)
+        ILogger<PRWatcher> logger,
+        StageGates? gates = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -34,6 +36,328 @@ public sealed class PRWatcher
         _staleAfter = staleAfter;
         _events = events;
         _logger = logger;
+        _gates = gates;
+    }
+
+    /// <summary>
+    /// Outcome of a single watch poll (<see cref="PollWatchOnceAsync"/>).
+    /// </summary>
+    public enum WatchPollOutcome
+    {
+        /// <summary>Nothing terminal; the watch stays Pending for the next sweep.</summary>
+        Pending,
+        /// <summary>PR was merged (externally or by us); task + watch completed.</summary>
+        Merged,
+        /// <summary>Reviewer requested changes; task + watch blocked.</summary>
+        Blocked,
+        /// <summary>CI failed; task + watch failed.</summary>
+        CiFailed,
+        /// <summary>Watch exceeded its stale window; task + watch failed.</summary>
+        Stale,
+        /// <summary>CI failed / changes requested — task requeued for a rework round (watch stays live).</summary>
+        Reworking,
+        /// <summary>Unrecoverable input (missing prNumber); watch failed.</summary>
+        Error,
+    }
+
+    /// <summary>
+    /// ONE poll of a watched PR: fetch state, evaluate CI + reviews,
+    /// and apply any terminal transition (merged / changes-requested /
+    /// CI-failed / stale). Returns without retrying when nothing is
+    /// terminal yet — the caller (OrchestratorAgent's watch sweep)
+    /// re-polls on its own slow cadence. This is the quota-friendly
+    /// path: 3 API calls per watch per sweep, no internal loop. The
+    /// stale window is anchored to the watch issue's CreatedAt, so it
+    /// stays stable no matter which sweep picks the watch up.
+    /// </summary>
+    public async Task<WatchPollOutcome> PollWatchOnceAsync(
+        IssueRecord watchTask,
+        CancellationToken cancellationToken = default,
+        Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
+        Func<PullRequest, string>? headShaOverride = null,
+        Func<PullRequest, bool?>? mergeableOverride = null)
+    {
+        var prText = watchTask.GetMetadata("prNumber");
+        if (!int.TryParse(prText, out var prNumber))
+        {
+            _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
+            return WatchPollOutcome.Error;
+        }
+
+        var taskId = watchTask.GetMetadata("taskId") ?? watchTask.Id;
+        var branch = watchTask.GetMetadata("branch") ?? watchTask.Title;
+        var worktreePath = watchTask.GetMetadata("worktreePath");
+
+        if (DateTime.UtcNow - watchTask.CreatedAt > _staleAfter)
+        {
+            _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
+            await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
+            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+            return WatchPollOutcome.Stale;
+        }
+
+        var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+
+        // Externally merged (operator merged by hand, or the
+        // branch protection bot did): close the loop exactly as
+        // if we had merged it ourselves. Without this check the
+        // watch polls forever on CI+reviews of a dead PR.
+        if (pr.Merged)
+        {
+            _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
+            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
+            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
+                taskId, $"PR #{prNumber} merged externally; task completed"));
+            return WatchPollOutcome.Merged;
+        }
+
+        // P4 e2e-harness seam: tests can return the SHA
+        // directly without going through Octokit's
+        // PullRequest.Head (which has a private setter).
+        var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+        var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
+        // P4 e2e-harness seam: tests can pre-approve reviews
+        // without going through Octokit's sealed
+        // PullRequestReview ctor. Default = real GitHub call.
+        // Formal GitHub reviews count as an OPERATOR verdict
+        // (solo-identity: the operator approves via the GitHub UI).
+        var reviewStates = reviewsOverride is not null
+            ? reviewsOverride(prNumber)
+            : (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
+                .Select(r => r.State.Value).ToList();
+
+        // Reviewer-agent verdict from the watch's own metadata
+        // (ReviewerDispatcher records reviewSha/reviewVerdict/
+        // reviewNotes). Only counts against the CURRENT head SHA —
+        // a stale verdict from a prior head is ignored.
+        var agentVerdict = watchTask.GetMetadata("reviewVerdict");
+        var agentVerdictSha = watchTask.GetMetadata("reviewSha");
+        var agentVerdictCurrent = !string.IsNullOrEmpty(agentVerdict)
+            && string.Equals(agentVerdictSha, sha, StringComparison.Ordinal);
+
+        var operatorApproved = reviewStates.Any(s => s == PullRequestReviewState.Approved);
+        var operatorChangesRequested = reviewStates.Any(s => s == PullRequestReviewState.ChangesRequested);
+        var approved = operatorApproved
+            || (agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.Approve), StringComparison.Ordinal));
+        var changesRequested = operatorChangesRequested
+            || (agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.RequestChanges), StringComparison.Ordinal));
+        var reviewErrored = agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.Error), StringComparison.Ordinal);
+
+        var ciGreen = ci == CommitState.Success;
+        var ciFailed = ci is CommitState.Failure or CommitState.Error;
+
+        // Rework guard: a rework round was already queued FOR THIS
+        // HEAD (the task is back in the dispatch queue but the agent
+        // hasn't pushed yet). Don't re-trigger every sweep — wait
+        // for the head to move.
+        if (string.Equals(watchTask.GetMetadata("reworkInFlightSha"), sha, StringComparison.Ordinal))
+        {
+            return WatchPollOutcome.Pending;
+        }
+
+        _logger.LogDebug(
+            "PR #{PrNumber}: CI={Ci} approved={Approved} changesRequested={Changes} reviewError={Err} (agent verdict={V}@{VS}, head={Head})",
+            prNumber, ci, approved, changesRequested, reviewErrored, agentVerdict, agentVerdictSha, sha);
+
+        // 1. All gates green -> merge. (External-merge handled above.)
+        if (ciGreen && approved && !changesRequested)
+        {
+            // Operator merge gate: hold auto-merge without failing
+            // anything — the watch stays live and the next sweep
+            // re-evaluates (external merges are still detected).
+            if (_gates is not null && await _gates.IsHeldAsync(StageGates.Merge, cancellationToken))
+            {
+                _logger.LogInformation("PR #{PrNumber}: merge held by operator gate", prNumber);
+                return WatchPollOutcome.Pending;
+            }
+            var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
+            if (merged)
+            {
+                await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
+                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
+                    taskId, $"PR #{prNumber} merged and branch deleted"));
+                _logger.LogInformation("PR #{PrNumber} merged; task {TaskId} completed", prNumber, taskId);
+                return WatchPollOutcome.Merged;
+            }
+            _logger.LogWarning("PR #{PrNumber} merge returned false; will retry next poll", prNumber);
+            return WatchPollOutcome.Pending;
+        }
+
+        // 2. Gates failed -> rework loop with a circuit breaker.
+        //    The engineer gets the failure context and pushes to the
+        //    SAME branch/PR; the watch stays live. After
+        //    MaxReworkAttempts the circuit opens: terminal state for
+        //    the operator.
+        if (ciFailed)
+        {
+            return await ReworkOrTripAsync(
+                watchTask, taskId, worktreePath, sha,
+                reason: $"CI failed for {sha[..Math.Min(7, sha.Length)]}: {ci}",
+                context: $"CI checks failed ({ci}). Fix the build/tests on the same branch.",
+                terminalStatus: IssueStatus.Failed,
+                terminalError: $"CI failed after max rework attempts: {ci}",
+                terminalOutcome: WatchPollOutcome.CiFailed,
+                cancellationToken);
+        }
+        if (changesRequested)
+        {
+            var notes = watchTask.GetMetadata("reviewNotes");
+            return await ReworkOrTripAsync(
+                watchTask, taskId, worktreePath, sha,
+                reason: "reviewer requested changes",
+                context: $"The reviewer requested changes:\n{notes}",
+                terminalStatus: IssueStatus.Blocked,
+                terminalError: "changes-requested (circuit breaker tripped after max rework attempts)",
+                terminalOutcome: WatchPollOutcome.Blocked,
+                cancellationToken);
+        }
+        if (reviewErrored)
+        {
+            // Reviewer agent itself is failing (LLM outage, parse
+            // errors). Circuit-breaker on review rounds, then the
+            // operator must review by hand.
+            var rounds = int.TryParse(watchTask.GetMetadata("reviewRound"), out var r) ? r : 1;
+            if (rounds >= MaxReworkAttempts)
+            {
+                _logger.LogWarning("PR #{PrNumber}: reviewer unavailable after {Rounds} rounds; blocking for operator review", prNumber, rounds);
+                await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "reviewer unavailable — operator review required", ct: cancellationToken);
+                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "reviewer-error", ct: cancellationToken);
+                return WatchPollOutcome.Blocked;
+            }
+            return WatchPollOutcome.Pending;
+        }
+
+        // 2b. The PR conflicts with the base branch. GitHub refuses
+        //     the merge AND creates no pull_request CI runs for a
+        //     conflicting PR (the test merge ref can't be built), so
+        //     waiting on CI is futile — observed live 2026-07-25:
+        //     PR #33 sat approved-but-unmergeable with zero CI runs
+        //     and an operator merged main by hand. Operator rule
+        //     (same day): the loop must handle this, not a human.
+        //     Sync rework round: merge main into the SAME branch,
+        //     resolve conflicts, push. The head moves, CI runs, the
+        //     reviewer re-reviews, and the merge gate re-evaluates.
+        //     Mergeable is null while GitHub computes — skip those
+        //     sweeps rather than firing spurious rounds.
+        var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
+        if (mergeable == false)
+        {
+            return await ReworkOrTripAsync(
+                watchTask, taskId, worktreePath, sha,
+                reason: "PR conflicts with the base branch",
+                context: "The PR branch has merge conflicts with the base branch and cannot be merged — GitHub does not even run CI on a conflicting PR. Merge the base branch into your branch (git fetch origin && git merge origin/main), resolve the conflicts minimally, run the full test suite, and push to the SAME branch. Keep your earlier changes intact; do not restructure unrelated work.",
+                terminalStatus: IssueStatus.Blocked,
+                terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
+                terminalOutcome: WatchPollOutcome.Blocked,
+                cancellationToken);
+        }
+
+        // 3. Otherwise: CI pending, or review for the current head
+        //    hasn't landed yet. Keep polling.
+        return WatchPollOutcome.Pending;
+    }
+
+    /// <summary>
+    /// Circuit-breaker constant: maximum rework rounds (CI failures
+    /// + reviewer change requests share one counter) before the task
+    /// goes terminal for the operator.
+    /// </summary>
+    public const int MaxReworkAttempts = 3;
+
+    /// <summary>
+    /// Requeue the task for a rework round (Pending, with the failure
+    /// context the engineer's prompt will surface), keeping the watch
+    /// live and the worktree in place (the agent continues on the
+    /// same branch). When the circuit breaker trips, fall back to the
+    /// terminal transition instead.
+    /// </summary>
+    private async Task<WatchPollOutcome> ReworkOrTripAsync(
+        IssueRecord watchTask,
+        string taskId,
+        string? worktreePath,
+        string headSha,
+        string reason,
+        string context,
+        IssueStatus terminalStatus,
+        string terminalError,
+        WatchPollOutcome terminalOutcome,
+        CancellationToken cancellationToken)
+    {
+        var task = await _issues.GetAsync(taskId, cancellationToken);
+        var attempts = 0;
+        if (task is not null)
+        {
+            var raw = task.GetMetadata("reworkAttempts");
+            if (raw is not null) int.TryParse(raw, out attempts);
+        }
+
+        if (task is null || attempts >= MaxReworkAttempts)
+        {
+            _logger.LogWarning("PR watch {WatchId}: circuit breaker tripped for {TaskId} after {N} rework attempts ({Reason})",
+                watchTask.Id, taskId, attempts, reason);
+            await _issues.TransitionAsync(taskId, terminalStatus, terminalError, ct: cancellationToken);
+            await _issues.TransitionAsync(watchTask.Id, terminalStatus, terminalError, ct: cancellationToken);
+            if (terminalStatus == IssueStatus.Failed)
+            {
+                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+            }
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrFailed,
+                taskId, $"Circuit breaker: {reason} ({attempts} rework attempts)"));
+            return terminalOutcome;
+        }
+
+        // Rework round: task back to Pending (it remains a sprint
+        // member, so the dispatch gate passes it again), failure
+        // context in metadata for the agent prompt, watch untouched.
+        attempts++;
+        _logger.LogInformation(
+            "PR watch {WatchId}: rework round {N}/{Max} for {TaskId} — {Reason}",
+            watchTask.Id, attempts, MaxReworkAttempts, taskId, reason);
+        var metadata = ParseMetadataDict(task.MetadataJson);
+        metadata["reworkAttempts"] = attempts.ToString();
+        metadata["reworkReason"] = reason;
+        metadata["reworkContext"] = context.Length > 3000 ? context[..3000] : context;
+        await _issues.TransitionAsync(taskId, IssueStatus.Pending, error: null, metadata: metadata, ct: cancellationToken);
+
+        // Mark the watch so the NEXT sweep doesn't re-trigger the
+        // same failure while the agent is still working on this head
+        // (the marker clears itself when the head moves: the poll
+        // compares against the live head SHA).
+        var watchMeta = ParseMetadataDict(watchTask.MetadataJson);
+        watchMeta["reworkInFlightSha"] = headSha;
+        await _issues.TransitionAsync(watchTask.Id, IssueStatus.Pending, error: null, metadata: watchMeta, ct: cancellationToken);
+
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+            taskId, $"Rework round {attempts}/{MaxReworkAttempts}: {reason}"));
+        return WatchPollOutcome.Reworking;
+    }
+
+    private static Dictionary<string, object> ParseMetadataDict(string? metadataJson)
+    {
+        var metadata = new Dictionary<string, object>();
+        if (string.IsNullOrWhiteSpace(metadataJson)) return metadata;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                foreach (var p in doc.RootElement.EnumerateObject())
+                {
+                    metadata[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                        ? p.Value.GetString()! : p.Value.GetRawText();
+                }
+            }
+        }
+        catch { /* malformed metadata: start fresh */ }
+        return metadata;
     }
 
     public async Task<int> ProcessWatchTaskAsync(
@@ -43,82 +367,33 @@ public sealed class PRWatcher
         Func<PullRequest, string>? headShaOverride = null)
     {
         var prText = watchTask.GetMetadata("prNumber");
-        if (!int.TryParse(prText, out var prNumber))
+        if (!int.TryParse(prText, out _))
         {
             _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
             await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
             return 1;
         }
 
-        var taskId = watchTask.GetMetadata("taskId") ?? watchTask.Id;
-        var branch = watchTask.GetMetadata("branch") ?? watchTask.Title;
-        var worktreePath = watchTask.GetMetadata("worktreePath");
-
-        var startedAt = DateTime.UtcNow;
         while (!cancellationToken.IsCancellationRequested)
         {
-            if (DateTime.UtcNow - startedAt > _staleAfter)
+            var outcome = await PollWatchOnceAsync(
+                watchTask, cancellationToken, reviewsOverride, headShaOverride);
+            switch (outcome)
             {
-                _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
-                await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
-                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
-                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-                return 124;
-            }
-
-            var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
-            // P4 e2e-harness seam: tests can return the SHA
-            // directly without going through Octokit's
-            // PullRequest.Head (which has a private setter).
-            var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
-            var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
-            // P4 e2e-harness seam: tests can pre-approve reviews
-            // without going through Octokit's sealed
-            // PullRequestReview ctor. Default = real GitHub call.
-            var reviewStates = reviewsOverride is not null
-                ? reviewsOverride(prNumber)
-                : (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
-                    .Select(r => r.State.Value).ToList();
-            var verdict = EvaluateVerdictFromStates(ci, reviewStates);
-
-            _logger.LogDebug("PR #{PrNumber}: CI={Ci}, ReviewVerdict={Verdict}", prNumber, ci, verdict);
-
-            switch (verdict)
-            {
-                case ReviewVerdict.GreenAndApproved:
-                    var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
-                    if (merged)
-                    {
-                        await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-                        await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
-                        await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
-                        await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-                        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
-                            taskId, $"PR #{prNumber} merged and branch deleted"));
-                        _logger.LogInformation("PR #{PrNumber} merged; task {TaskId} completed", prNumber, taskId);
-                        return 0;
-                    }
-                    _logger.LogWarning("PR #{PrNumber} merge returned false; will retry next poll", prNumber);
-                    break;
-
-                case ReviewVerdict.GreenChangesRequested:
-                    await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "Reviewer requested changes", ct: cancellationToken);
-                    await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "changes-requested", ct: cancellationToken);
-                    _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrChangesRequested,
-                        taskId, $"PR #{prNumber} marked Blocked (changes requested)"));
-                    _logger.LogInformation("PR #{PrNumber} marked Blocked (changes requested)", prNumber);
+                case WatchPollOutcome.Merged:
+                case WatchPollOutcome.Blocked:
                     return 0;
-
-                case ReviewVerdict.CiFailed:
-                    await _issues.TransitionAsync(taskId, IssueStatus.Failed, $"CI failed for {sha}: {ci}", ct: cancellationToken);
-                    await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "ci-failed", ct: cancellationToken);
-                    await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-                    _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrFailed,
-                        taskId, $"PR #{prNumber} CI failed ({ci})"));
-                    _logger.LogInformation("PR #{PrNumber} CI failed; task {TaskId} failed", prNumber, taskId);
+                case WatchPollOutcome.Reworking:
+                    // Rework round queued; the loop's job is done for
+                    // now — the sweep (or a future harness invocation)
+                    // resumes polling once the head moves.
+                    return 0;
+                case WatchPollOutcome.CiFailed:
+                case WatchPollOutcome.Error:
                     return 1;
-
-                case ReviewVerdict.Pending:
+                case WatchPollOutcome.Stale:
+                    return 124;
+                case WatchPollOutcome.Pending:
                 default:
                     break;
             }

@@ -43,3 +43,7 @@ If the orchestrator injected secrets into your `bash` environment (`$GITHUB_TOKE
 3. NEVER copy a secret value into your report. Report "secret present/missing", never the value.
 
 If you cannot verify without editing code, report `needs-info` and stop.
+
+## Out-of-scope findings
+
+For defects outside your verification scope, call `file_followup` (self-contained title + description) instead of expanding your run. Follow-ups are groomed before scheduling; duplicates get closed.

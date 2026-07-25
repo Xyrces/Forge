@@ -164,6 +164,15 @@ public sealed record SpawnerOptions
     public int MaxConcurrentSessions { get; set; } = 4;
     public int PollIntervalSeconds { get; set; } = 3;
     public int StaleMinutes { get; set; } = 30;
+    /// <summary>
+    /// Hard wall-clock timeout for a single agent run (LLM call +
+    /// tool invocations). When exceeded, the run is cancelled and
+    /// the issue is left in Pending for retry (or Failed if retries
+    /// exhausted). A diagnostic entry ("agentTimeout") is recorded
+    /// in issue metadata. Set to 0 or negative to disable.
+    /// Default: 15 minutes.
+    /// </summary>
+    public double AgentRunTimeoutMinutes { get; set; } = 15.0;
 }
 
 public sealed record DashboardOptions
@@ -225,6 +234,11 @@ public sealed record LlmOptions
     public List<LlmProviderOptions> Providers { get; set; } = new();
     public string DefaultProvider { get; set; } = string.Empty;
     public Dictionary<string, LlmRoleModelOptions> Roles { get; set; } = new();
+
+    // Max simultaneous round-trips per provider across ALL subsystems
+    // (dev agents + groomer + designer + reviewer + intake). Guards
+    // account-level rate quotas against multi-agent bursts.
+    public int MaxConcurrentRequests { get; set; } = 2;
 
     // P2.b: Meshy config. The Meshy REST API is a different
     // service from the LLM providers; keep its config

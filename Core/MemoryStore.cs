@@ -178,10 +178,18 @@ public sealed class MemoryStore : IAsyncDisposable
     /// there are no memories (so callers can always concatenate).
     /// </summary>
     public static string RenderForPrompt(IReadOnlyList<MemoryRecord> memories)
+        => RenderSectionForPrompt("## Project memory", memories);
+
+    /// <summary>
+    /// Render one memory section with a caller-chosen header. Used
+    /// for the sprint-scoped block ("## Sprint memory") alongside the
+    /// global project block.
+    /// </summary>
+    public static string RenderSectionForPrompt(string header, IReadOnlyList<MemoryRecord> memories)
     {
         if (memories.Count == 0) return string.Empty;
         var sb = new StringBuilder();
-        sb.AppendLine("## Project memory");
+        sb.AppendLine(header);
         sb.AppendLine();
         sb.AppendLine("Persistent insights from past work. Apply where relevant; ");
         sb.AppendLine("do not quote verbatim unless the task asks.");

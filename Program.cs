@@ -25,6 +25,7 @@ public static class Program
     private static Orchestrator.ScheduledGroomer? _scheduledGroomer;
     private static Orchestrator.DesignerScheduler? _scheduledDesigner;
     private static Orchestrator.ArtistScheduler? _scheduledArtist;
+    private static Orchestrator.Sprint.SprintAssembler? _sprintAssembler;
     private static Orchestrator.StartupRecovery? _startupRecovery;
     private static IssuesJsonlMirror? _issuesJsonlMirror;
 
@@ -264,6 +265,27 @@ if (mode == CliMode.DashboardOnly)
             sb.Append(char.IsLetterOrDigit(ch) ? char.ToLowerInvariant(ch) : '-');
         var cleaned = sb.ToString().Trim('-');
         return cleaned.Length == 0 || cleaned.Length > 40 ? cleaned[..Math.Min(40, cleaned.Length)] : cleaned;
+    }
+
+    /// <summary>
+    /// Build the shared per-(project, role) concurrency slot table.
+    /// Caps come from each project's persisted roles (roles_json) with
+    /// <see cref="DefaultProjectRoles"/> as the fallback. The same
+    /// instance is handed to the orchestrator (dispatch enforcement)
+    /// and the dashboard (live meters + role-cap edits).
+    /// </summary>
+    private static Orchestrator.Slots.SlotTable BuildSlotTable(IReadOnlyList<ProjectOptions> projects)
+    {
+        var slots = new Orchestrator.Slots.SlotTable();
+        foreach (var p in projects)
+        {
+            foreach (var role in Agents.RoleAgentRegistry.AllSlotRoles)
+            {
+                var max = DefaultProjectRoles.MaxFor(p.Roles, role);
+                slots.Configure(p.Id, role, max);
+            }
+        }
+        return slots;
     }
 
     /// <summary>
@@ -671,8 +693,14 @@ Console.Error.WriteLine(ex.ToString());
             failures.Add($"memory.db: {ex.GetType().Name}: {ex.Message}");
         }
 
-        // 4. LLM provider + key configured
-        var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
+        // 4. LLM provider + key configured. The kilo gateway key is
+        //    operator-managed via the dashboard Secrets page (encrypted
+        //    per project); appsettings.json carries only the
+        //    KILO_GATEWAY_API_KEY placeholder. Resolve the DB secret
+        //    first so the auth probe below exercises the real key.
+        var llmConfig = await ResolveKiloGatewayKeyAsync(
+            LlmConfigAdapter.FromOptions(options.Llm), projects, secretStore,
+            loggerFactory.CreateLogger("Forge.Bootstrap"));
         if (string.IsNullOrEmpty(llmConfig.DefaultProvider))
         {
             failures.Add("llm.defaultProvider is empty");
@@ -727,26 +755,59 @@ Console.Error.WriteLine(ex.ToString());
             }
         }
 
-        // 5. GitHub token + repo
-        if (string.IsNullOrEmpty(options.GitHub.Token) || options.GitHub.Token.StartsWith("GITHUB_TOKEN"))
+        // 5. GitHub token + repo. The token is operator-managed per
+        //    project via the dashboard Secrets page ('github_token');
+        //    appsettings.json github.token carries only a placeholder.
+        //    Resolve the DB secret first (same pattern as the kilo
+        //    gateway key above) and probe the owning project's repo
+        //    (owner/repo parsed from its registered RepoUrl).
+        var ghToken = options.GitHub.Token;
+        var ghOwner = options.GitHub.Owner;
+        var ghRepo = options.GitHub.Repo;
+        if (string.IsNullOrEmpty(ghToken) || ghToken.StartsWith("GITHUB_TOKEN"))
         {
-            failures.Add("github.token looks unset (still a placeholder)");
+            foreach (var project in projects)
+            {
+                string? secret;
+                try
+                {
+                    secret = await secretStore.GetPlaintextAsync(
+                        project.Id, SecretKinds.GitHubToken, CancellationToken.None);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (string.IsNullOrEmpty(secret)) continue;
+
+                ghToken = secret;
+                if (ProjectDispatchBundleFactory.ParseGitHubOwnerRepo(project.RepoUrl) is { } parsed)
+                {
+                    ghOwner = parsed.Owner;
+                    ghRepo = parsed.Repo;
+                }
+                break;
+            }
+        }
+        if (string.IsNullOrEmpty(ghToken) || ghToken.StartsWith("GITHUB_TOKEN"))
+        {
+            failures.Add("github.token looks unset (still a placeholder) and no per-project 'github_token' secret is stored");
         }
         else
         {
             try
             {
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", options.GitHub.Token);
+                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", ghToken);
                 http.DefaultRequestHeaders.UserAgent.ParseAdd("Forge-Check");
-                var resp = await http.GetAsync($"https://api.github.com/repos/{options.GitHub.Owner}/{options.GitHub.Repo}");
+                var resp = await http.GetAsync($"https://api.github.com/repos/{ghOwner}/{ghRepo}");
                 if (resp.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"  [ok] GitHub repo {options.GitHub.Owner}/{options.GitHub.Repo} reachable");
+                    Console.WriteLine($"  [ok] GitHub repo {ghOwner}/{ghRepo} reachable");
                 }
                 else if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    failures.Add($"GitHub repo {options.GitHub.Owner}/{options.GitHub.Repo} not found (or token lacks access)");
+                    failures.Add($"GitHub repo {ghOwner}/{ghRepo} not found (or token lacks access)");
                 }
                 else if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                 {
@@ -775,6 +836,58 @@ Console.Error.WriteLine(ex.ToString());
             Console.Error.WriteLine($"  - {f}");
         }
         return 1;
+    }
+
+    /// <summary>
+    /// The kilo gateway API key is operator-managed via the dashboard
+    /// Secrets page (stored encrypted, per project) — appsettings.json
+    /// carries only the <c>KILO_GATEWAY_API_KEY</c> placeholder, which
+    /// authenticates free-tier models but is rejected by paid models
+    /// (HTTP 401 PAID_MODEL_AUTH_REQUIRED). Resolve the first stored
+    /// key across registered projects and substitute it into the
+    /// kilo-gateway provider entry so every chat client (engineering
+    /// dispatch, intake, groomer, memory extractor) authenticates.
+    /// Key rotation via the UI takes effect on restart. The key value
+    /// is never logged.
+    /// </summary>
+    private static async Task<LlmConfig> ResolveKiloGatewayKeyAsync(
+        LlmConfig config,
+        IReadOnlyList<ProjectOptions> projects,
+        SecretStore secretStore,
+        ILogger logger)
+    {
+        if (!config.Providers.Any(p => string.Equals(p.Name, LlmProviders.KiloGateway, StringComparison.OrdinalIgnoreCase)))
+        {
+            return config;
+        }
+
+        foreach (var project in projects)
+        {
+            string? key;
+            try
+            {
+                key = await secretStore.GetPlaintextAsync(
+                    project.Id, SecretKinds.KiloGatewayApiKey, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Failed to read {Kind} secret for project {ProjectId}; trying next project",
+                    SecretKinds.KiloGatewayApiKey, project.Id);
+                continue;
+            }
+            if (string.IsNullOrEmpty(key)) continue;
+
+            logger.LogInformation(
+                "kilo gateway api key resolved from project '{ProjectId}' secret store", project.Id);
+            var providers = config.Providers
+                .Select(p => string.Equals(p.Name, LlmProviders.KiloGateway, StringComparison.OrdinalIgnoreCase)
+                    ? p with { ApiKey = key }
+                    : p)
+                .ToList();
+            return config with { Providers = providers };
+        }
+        return config;
     }
 
     /// <summary>
@@ -855,7 +968,15 @@ Console.Error.WriteLine(ex.ToString());
         var roleRegistry = new RoleAgentRegistry();
         var agentsStore = new Core.AgentStore(issues);
         var skillsStore = new Core.SkillStore(issues);
-        var skillSource = new SqliteSkillSource(agentsStore, skillsStore, roleRegistry);
+        var skillSource = new SqliteSkillSource(skillsStore, roleRegistry);
+        // Seed the skill catalog (seed-if-absent; operator edits via
+        // the dashboard win): pipeline-behavior skills per role +
+        // the repo's .kilo/skills imported as global skills.
+        await Agents.SkillSeeder.SeedAsync(
+            skillsStore,
+            Path.Combine(primary.Root, ".kilo", "skills"),
+            loggerFactory.CreateLogger("Forge.SkillSeeder"),
+            CancellationToken.None);
         // The memory table lives in IssueStore's schema (v7). Construct an
         // IssueStore against the memory DB once at startup so the schema
         // (and any future migrations) run before MemoryStore touches it.
@@ -863,6 +984,14 @@ Console.Error.WriteLine(ex.ToString());
         var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
         var memoryBootstrap = new Core.IssueStore(memoryDbPath);
         var memoryStore = new MemoryStore(memoryDbPath);
+        // Agent run registry + transcripts (schema v20 table on the
+        // primary project's issues.db): who ran what, when, and the
+        // full conversation for the run-detail view.
+        var agentRunStore = new Core.AgentRunStore(primaryDb);
+        // Optional operator review gates at the major automatic
+        // transitions (design / groom / sprint / merge). v1: backed
+        // by the primary project's memory store.
+        var stageGates = new Core.StageGates(memoryStore);
 
         // Phase 4: JSONL mirror of the issue store. Background service
         // rewrites the file every 5s so it's safe to tail -f.
@@ -895,6 +1024,12 @@ Console.Error.WriteLine(ex.ToString());
         // 'vision/master' key, and pass it to the dashboard so the
         // Vision tab can surface it.
         var vision = new VisionStore(primary.Root, options.Vision.Path);
+        // Role prompts resolve per-project (<root>/agents) with a
+        // fallback to the built-in defaults shipped next to the app,
+        // so a project whose repo has no agents/ dir still gets the
+        // real role instructions instead of the degraded fallback.
+        var rolePromptsRoot = Agents.RolePromptRoot.Resolve(primary.Root);
+        logger.LogInformation("Role prompts root: {RolePromptsRoot}", rolePromptsRoot);
         var visionSnapshot = vision.Reload();
         if (visionSnapshot.Exists)
         {
@@ -919,8 +1054,28 @@ Console.Error.WriteLine(ex.ToString());
         var skillBootstrap = new Agents.SkillBootstrap(
             memoryStore, loggerFactory.CreateLogger<Agents.SkillBootstrap>());
         await skillBootstrap.SeedAsync();
-        var llmConfig = LlmConfigAdapter.FromOptions(options.Llm);
+        var llmConfig = await ResolveKiloGatewayKeyAsync(
+            LlmConfigAdapter.FromOptions(options.Llm), knownProjects, secretStore,
+            loggerFactory.CreateLogger("Forge.Bootstrap"));
         var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
+
+        // Live per-role model overrides (Agents page): DB-backed,
+        // consulted per run by the chat client factory + the run
+        // registry's model label. Snapshot rehydrates from the store.
+        var roleModelOverrides = new Agents.RoleModelOverrides(memoryStore);
+        await roleModelOverrides.LoadAsync(CancellationToken.None);
+        // ONE shared 429 tracker for the whole process: a 429 from
+        // ANY subsystem (dev run, groomer, designer, reviewer sweep)
+        // cools that model for ALL of them, and every factory-built
+        // client fails fast during cooldown + runs under the
+        // per-provider concurrency permit.
+        var modelRateLimits = new Core.ModelRateLimitTracker();
+        if (chatClientFactory is Agents.OpenAICompatibleChatClientFactory openAiFactory)
+        {
+            openAiFactory.Overrides = roleModelOverrides;
+            openAiFactory.RateLimits = modelRateLimits;
+            openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
+        }
 
         // P5.5: auto-extract project memory from the model
         // response after each PR is opened. Audit log lives in
@@ -932,29 +1087,35 @@ Console.Error.WriteLine(ex.ToString());
         var sprintPropose = new Orchestrator.SprintProposeService(issues, sprints, scorer, sprintProposalAudit);
         var memoryExtractor = new Orchestrator.MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
-            loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>());
+            loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>(),
+            sprints: sprints);
         // Late-binding holder for specStore. Created before
         // MafAgentRunner ctor, populated after specStore is
         // constructed (the runner builds its tool list per call,
         // so a forward-reference is enough).
         var specStoreRef = new Core.SpecStoreHolder();
+        MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
         var agentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
-            rolePromptsRoot: Path.Combine(primary.Root, "agents"),
+            rolePromptsRoot: rolePromptsRoot,
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,
             specs: () => specStoreRef.Value,
             artOutputs: () => artOutputs,
-            secrets: secretStore);
+            secrets: secretStore,
+            issues: issues,
+            runs: agentRunStore,
+            modelOverrides: roleModelOverrides);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30),
             eventBus,
-            loggerFactory.CreateLogger<PRWatcher>());
+            loggerFactory.CreateLogger<PRWatcher>(),
+            gates: stageGates);
         // P4 Stage B — pick the workflow runtime based on
 // appsettings.json. The InProcess dispatcher (default) is a
 // thin lambda over the existing EngineeringDispatchWorkflow +
@@ -977,7 +1138,8 @@ Console.Error.WriteLine(ex.ToString());
                 designArtifacts, artOutputs,
                 memoryExtractor, extractionStore,
                 loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
-                projectId: primary.Id)
+                projectId: primary.Id,
+                timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes)
                 .Build();
             var services = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -1010,7 +1172,9 @@ Console.Error.WriteLine(ex.ToString());
                         memoryExtractor, extractionStore,
                         loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
                         projectId: bundle.Project.Id,
-                        loggerFactory: loggerFactory);
+                        loggerFactory: loggerFactory,
+                        sprints: bundle.Sprints,
+                        timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes);
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
@@ -1019,14 +1183,22 @@ Console.Error.WriteLine(ex.ToString());
         var dispatchBundleFactory = new ProjectDispatchBundleFactory(
             options, orchDataRoot, projectStore, cloner,
             agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
-            secrets: secretStore);
+            secrets: secretStore, gates: stageGates);
 
+        // Pre-size the shared per-(project, role) concurrency slot
+        // table BEFORE the orchestrator: its dispatch loop acquires a
+        // role slot per task run (per-role parallelism), and the
+        // dashboard exposes the same table's live meters.
+        var slots = BuildSlotTable(knownProjects);
         var orchestrator = new OrchestratorAgent(
             projectStore,
             dispatchBundleFactory,
             agentRunner, roleRegistry,
             messageBus, dispatcher, eventBus,
-            loggerFactory.CreateLogger<OrchestratorAgent>());
+            loggerFactory.CreateLogger<OrchestratorAgent>(),
+            loggerFactory: loggerFactory,
+            slots: slots,
+            modelCooldowns: modelRateLimits);
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
@@ -1043,7 +1215,7 @@ Console.Error.WriteLine(ex.ToString());
                 eventBus,
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
-                rolePromptsRoot: Path.Combine(primary.Root, "agents"),
+                rolePromptsRoot: rolePromptsRoot,
                 specs: specStoreRef.Value));
         var specExtractionReader = new Core.SpecExtractionReader(issues);
         var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
@@ -1053,7 +1225,7 @@ Console.Error.WriteLine(ex.ToString());
         var productAgentFactory = new Agents.ProductAgentFactory(
             specStore, issues, projectContextSource, chatClientFactory, llmConfig,
             roleRegistry, eventBus, skillSource, loggerFactory,
-            Path.Combine(primary.Root, "agents"));
+            rolePromptsRoot);
         var productRefinementQueue = new Agents.ProductRefinementQueue(
             productAgentFactory, specStore, eventBus,
             loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
@@ -1062,7 +1234,8 @@ Console.Error.WriteLine(ex.ToString());
         // event subscription dies.
         _productRefinementQueue = productRefinementQueue;
         var groomerFactory = new Agents.GroomerAgentFactory(
-            issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory);
+            issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
+            memory: memoryStore, projectRoot: primary.Root);
         // P2.a: Designer pipeline. The hygiene checker is shared
         // between the manual endpoint, the scheduled run, and the
         // agent's first step. The factory builds fresh DesignerAgent
@@ -1071,7 +1244,8 @@ Console.Error.WriteLine(ex.ToString());
             specStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root);
         var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
             specStore, designArtifacts, designerRuns, memoryStore, designHygiene,
-            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,
+            rolePromptsRoot);
         // P2.b: Meshy client + Artist pipeline. The Meshy client
         // uses a plain SocketsHttpHandler in production; the
         // injection seam (HttpMessageHandler) lets tests stub the
@@ -1111,22 +1285,11 @@ Console.Error.WriteLine(ex.ToString());
 
         // v1 multi-project: build the registry from configuration
         // (back-compat shim to a single "default" project when only
-        // workspace.root is set), lazily construct per-project
-        // IssueStore bundles, and pre-size in-process concurrency
-        // slots per (projectId, role). The orchestrator dispatch
-        // loop still uses the legacy single-workspace path; this
-        // exposes multi-project info to the dashboard.
+        // workspace.root is set) and lazily construct per-project
+        // IssueStore bundles. The per-(project, role) SlotTable was
+        // created above (BuildSlotTable) and is shared with the
+        // orchestrator's dispatch loop.
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject);
-        var slots = new SlotTable();
-        var roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
-        foreach (var p in knownProjects)
-        {
-            foreach (var role in roleFiller)
-            {
-                var max = DefaultProjectRoles.MaxFor(p.Roles, role);
-                slots.Configure(p.Id, role, max);
-            }
-        }
         if (knownProjects.Count > 0)
         {
             logger.LogInformation(
@@ -1170,7 +1333,10 @@ Console.Error.WriteLine(ex.ToString());
             projectStore: projectStore,
             projectCloner: cloner,
             githubOptions: options.GitHub,
-            secretStore: secretStore);
+            secretStore: secretStore,
+            agentRuns: agentRunStore,
+            llmConfig: llmConfig,
+            roleModelOverrides: roleModelOverrides);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never
@@ -1238,7 +1404,8 @@ try
             var scheduledGroomer = new Orchestrator.ScheduledGroomer(
                 specStore, groomerFactory, groomerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
-                interval: TimeSpan.FromMinutes(5));
+                interval: TimeSpan.FromMinutes(5),
+                issues: issues, sprints: sprints, gates: stageGates);
             _ = scheduledGroomer.RunAsync(shutdownCts.Token);
             _scheduledGroomer = scheduledGroomer;
 
@@ -1249,7 +1416,8 @@ try
             var scheduledDesigner = new Orchestrator.DesignerScheduler(
                 specStore, designerAgentFactory, designerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.DesignerScheduler>(),
-                interval: TimeSpan.FromMinutes(5));
+                interval: TimeSpan.FromMinutes(5),
+                gates: stageGates);
             _ = scheduledDesigner.RunAsync(shutdownCts.Token);
             _scheduledDesigner = scheduledDesigner;
 
@@ -1263,6 +1431,20 @@ try
                 interval: TimeSpan.FromMinutes(5));
             _ = scheduledArtist.RunAsync(shutdownCts.Token);
             _scheduledArtist = scheduledArtist;
+
+            // Sprint flow: the assembler wakes up every 5 minutes per
+            // project, completes the Active sprint when all its tasks
+            // are terminal, and assembles + activates the next one
+            // from eligible (groomed or ad-hoc) Pending tasks. ALL
+            // engineering work happens inside a sprint — dispatch is
+            // gated on an active sprint in OrchestratorAgent.
+            var sprintAssembler = new Orchestrator.Sprint.SprintAssembler(
+                projectFactory, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.Sprint.SprintAssembler>(),
+                interval: TimeSpan.FromMinutes(5),
+                gates: stageGates);
+            _ = sprintAssembler.RunAsync(shutdownCts.Token);
+            _sprintAssembler = sprintAssembler;
 
             logger.LogInformation("Orchestrator starting");
             await orchestrator.ExecuteAsync(shutdownCts.Token);

@@ -2,8 +2,12 @@
 @inject IDispatcher Dispatcher
 
 <section class="nav-group">
+    <NavLink class="nav-item" href="/now" Match="NavLinkMatch.All"><span class="nav-item__icon">●</span><span>Now</span></NavLink>
+</section>
+
+<section class="nav-group">
     <div class="nav-group__label">IDEATION</div>
-    <NavLink class="nav-item" href="/intake" Match="NavLinkMatch.All"><span class="nav-item__icon">◆</span><span>Intake</span></NavLink>
+    <NavLink class="nav-item" href="/intake"><span class="nav-item__icon">◆</span><span>Intake</span></NavLink>
     <NavLink class="nav-item" href="/vision"><span class="nav-item__icon">◇</span><span>Vision Board</span></NavLink>
 </section>
 
@@ -19,6 +23,8 @@
     <NavLink class="nav-item" href="/backlog"><span class="nav-item__icon">▢</span><span>Backlog</span></NavLink>
     <NavLink class="nav-item" href="/sprints"><span class="nav-item__icon">▣</span><span>Sprints</span></NavLink>
     <NavLink class="nav-item" href="/tasks"><span class="nav-item__icon">▥</span><span>Tasks</span></NavLink>
+    <NavLink class="nav-item" href="/flow"><span class="nav-item__icon">⇄</span><span>Flow</span></NavLink>
+    <NavLink class="nav-item" href="/runs"><span class="nav-item__icon">▶</span><span>Runs</span></NavLink>
 </section>
 
 <section class="nav-group">

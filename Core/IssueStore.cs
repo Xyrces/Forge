@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 19;
+    public const int CurrentSchemaVersion = 23;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -302,6 +302,35 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE,
                 UNIQUE (project_id, kind)
             );
+
+            -- v20: agent run registry + transcripts. One row per
+            -- agent run (engineering roles via MafAgentRunner):
+            -- written at run start (status='running') so the
+            -- dashboard sees who is doing what in near real time,
+            -- finished with outcome + the FULL conversation
+            -- transcript (roles, text, tool calls + results) for the
+            -- run-detail view. Retention (AgentRunStore.FinishAsync):
+            -- 30 days / newest 50 per task — transcripts are the
+            -- high-volume data and the 35GB budget is protected by
+            -- pruning, not by truncating content.
+            CREATE TABLE IF NOT EXISTS agent_run (
+                id               TEXT PRIMARY KEY,
+                task_id          TEXT,
+                role             TEXT NOT NULL,
+                model            TEXT,
+                status           TEXT NOT NULL,
+                started_at       TEXT NOT NULL,
+                finished_at      TEXT,
+                duration_ms      INTEGER,
+                message_count    INTEGER,
+                tool_call_count  INTEGER,
+                text_chars       INTEGER,
+                error            TEXT,
+                transcript_json  TEXT,
+                last_activity_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_run_started ON agent_run(started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run(task_id);
 
             CREATE TABLE IF NOT EXISTS skill (
                 id           TEXT PRIMARY KEY,
@@ -795,6 +824,92 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // caps. CREATE TABLE IF NOT EXISTS covers fresh DBs; existing
         // DBs need the guarded ALTER.
         ApplyV19ProjectRoles(conn);
+
+        // v21 (post-init): agent_run.last_activity_at — the heartbeat
+        // that makes "is this run alive or hung on the provider?"
+        // answerable from the dashboard.
+        ApplyV21AgentRunActivity(conn);
+
+        // v22 (post-init): skill.role — role-name scoping for the
+        // skill catalog (the legacy agent_id FK resolves through the
+        // legacy agent table, which is empty in practice). NULL role
+        // = global skill.
+        ApplyV22SkillRole(conn);
+
+        // v23 (post-init): skill.roles (JSON array) replaces the
+        // single-valued role — skills are MANY-TO-MANY (one skill can
+        // be given to any set of roles; an empty set means global).
+        ApplyV23SkillRoles(conn);
+
+        // Stamp AFTER migrations, as its own statement: the batch's
+        // INSERT OR IGNORE does not reliably take effect on existing
+        // DBs (observed live 2026-07-24: forge DB stamped v19 while
+        // v21 columns were present and in use). Idempotent.
+        using (var stamp = conn.CreateCommand())
+        {
+            stamp.CommandText = "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES ($version, $now)";
+            stamp.Parameters.AddWithValue("$version", CurrentSchemaVersion);
+            stamp.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
+            stamp.ExecuteNonQuery();
+        }
+    }
+
+    private void ApplyV21AgentRunActivity(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'last_activity_at' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE agent_run ADD COLUMN last_activity_at TEXT";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV22SkillRole(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('skill') WHERE name = 'role' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE skill ADD COLUMN role TEXT";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV23SkillRoles(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('skill') WHERE name = 'roles' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        // 1. Add the JSON-array column; migrate the single-valued role.
+        using (var alter = conn.CreateCommand())
+        {
+            alter.CommandText = """
+                ALTER TABLE skill ADD COLUMN roles TEXT;
+                UPDATE skill SET roles = json_array(role) WHERE role IS NOT NULL;
+                """;
+            alter.ExecuteNonQuery();
+        }
+        // 2. Collapse the duplicates the single-role model forced
+        //    (e.g. forge-completion-contract existed once per role):
+        //    merge every same-name group into one row whose roles is
+        //    the union, then delete the extras (keep the oldest row).
+        using (var merge = conn.CreateCommand())
+        {
+            merge.CommandText = """
+                UPDATE skill SET roles = (
+                    SELECT json_group_array(value)
+                    FROM (SELECT DISTINCT je.value AS value
+                          FROM skill s2, json_each(s2.roles) je
+                          WHERE s2.name = skill.name))
+                WHERE EXISTS (SELECT 1 FROM skill s3 WHERE s3.name = skill.name AND s3.id <> skill.id);
+                DELETE FROM skill WHERE rowid NOT IN (SELECT MIN(rowid) FROM skill GROUP BY name);
+                """;
+            merge.ExecuteNonQuery();
+        }
+        // 3. Drop the single-valued column.
+        using var drop = conn.CreateCommand();
+        drop.CommandText = "ALTER TABLE skill DROP COLUMN role";
+        drop.ExecuteNonQuery();
     }
 
     private void ApplyV19ProjectRoles(SqliteConnection conn)

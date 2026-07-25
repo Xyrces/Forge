@@ -48,18 +48,21 @@ public sealed class MemoryExtractor : IMemoryExtractor
     private readonly IChatClientFactory _chatClientFactory;
     private readonly LlmConfig _llmConfig;
     private readonly MemoryStore _memories;
+    private readonly ISprintStore? _sprints;
     private readonly ILogger<MemoryExtractor> _logger;
 
     public MemoryExtractor(
         IChatClientFactory chatClientFactory,
         LlmConfig llmConfig,
         MemoryStore memories,
-        ILogger<MemoryExtractor> logger)
+        ILogger<MemoryExtractor> logger,
+        ISprintStore? sprints = null)
     {
         _chatClientFactory = chatClientFactory;
         _llmConfig = llmConfig;
         _memories = memories;
         _logger = logger;
+        _sprints = sprints;
     }
 
     /// <summary>
@@ -112,6 +115,29 @@ public sealed class MemoryExtractor : IMemoryExtractor
         }
 
         var persisted = new List<string>(items.Count);
+        // Sprint flow: when the issue belongs to the ACTIVE sprint,
+        // each extracted memory is ALSO persisted under the shared
+        // sprint namespace so sibling (and later) tasks in the same
+        // sprint recall it via the `sprint/{id}/` prefix. Upsert by
+        // key means later tasks enrich the same slot — that's the
+        // shared-memory semantics.
+        string? sprintPrefix = null;
+        if (_sprints is not null)
+        {
+            try
+            {
+                var active = await _sprints.GetActiveAsync(ct);
+                if (active is not null
+                    && (await _sprints.GetIssueIdsAsync(active.Id, ct)).Contains(issueId))
+                {
+                    sprintPrefix = $"sprint/{active.Id}/";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Sprint membership lookup failed for {Id}; skipping sprint memory", issueId);
+            }
+        }
         foreach (var item in items)
         {
             // Namespace under issueId so a future extractor run for a different
@@ -128,6 +154,20 @@ public sealed class MemoryExtractor : IMemoryExtractor
             {
                 _logger.LogWarning(ex,
                     "Memory persist failed for {Id}/{Key}; skipping", issueId, namespacedKey);
+            }
+            if (sprintPrefix is not null && !string.IsNullOrEmpty(item.Key))
+            {
+                var sprintKey = sprintPrefix + SanitizeKey(item.Key);
+                try
+                {
+                    await _memories.RememberAsync(sprintKey, item.Value, ttlDays: null, ct);
+                    persisted.Add(sprintKey);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Sprint memory persist failed for {Id}/{Key}; skipping", issueId, sprintKey);
+                }
             }
         }
         return new ExtractionResult(

@@ -35,6 +35,12 @@ public sealed class ScheduledGroomer
     private readonly IDashboardEventBus _events;
     private readonly ILogger<ScheduledGroomer> _logger;
     private readonly TimeSpan _interval;
+    private readonly IIssueStore? _issues;
+    private readonly ISprintStore? _sprints;
+    private readonly StageGates? _gates;
+
+    /// <summary>Max ad-hoc tasks groomed per tick (LLM cost bound).</summary>
+    internal const int MaxTaskGroomsPerTick = 3;
 
     public ScheduledGroomer(
         ISpecStore specs,
@@ -42,7 +48,10 @@ public sealed class ScheduledGroomer
         IssueGroomerRunStore runStore,
         IDashboardEventBus events,
         ILogger<ScheduledGroomer> logger,
-        TimeSpan? interval = null)
+        TimeSpan? interval = null,
+        IIssueStore? issues = null,
+        ISprintStore? sprints = null,
+        StageGates? gates = null)
     {
         _specs = specs;
         _groomerFactory = groomerFactory;
@@ -50,6 +59,9 @@ public sealed class ScheduledGroomer
         _events = events;
         _logger = logger;
         _interval = interval ?? TimeSpan.FromMinutes(5);
+        _issues = issues;
+        _sprints = sprints;
+        _gates = gates;
     }
 
     public TimeSpan Interval => _interval;
@@ -80,18 +92,29 @@ public sealed class ScheduledGroomer
 
     public async Task TickAsync(CancellationToken ct)
     {
+        if (_gates is not null && await _gates.IsHeldAsync(StageGates.Groom, ct))
+        {
+            _logger.LogInformation("ScheduledGroomer: held by operator gate; skipping tick");
+            return;
+        }
+
         IReadOnlyList<SpecRecord> candidates;
         try
         {
             // P2.a / P2.b: pull all specs and filter in C#. The
-            // Groomer gate accepts Designed | AssetReady | Approved
-            // | Groomed (the widening is in GroomerAgent itself;
-            // this scheduler just hands candidates to it).
+            // candidate set is the "ready to groom" statuses:
+            // Designed (Designer approved), AssetReady, Approved
+            // (operator fast-path). Groomed is deliberately NOT
+            // auto-groomed: grooming appends stories/tasks, so a
+            // terminal spec in the candidate set gets re-decomposed
+            // every interval forever (observed 2026-07-22: ~27 runs
+            // → 83 stories / 147 tasks / 28 PRs for one spec).
+            // Intentional re-decomposition goes through the manual
+            // endpoint with ?force=true.
             var all = await _specs.ListAsync(projectId: null, status: null, ct);
             candidates = all.Where(s => s.Status is SpecStatus.Designed
                 or SpecStatus.AssetReady
-                or SpecStatus.Approved
-                or SpecStatus.Groomed).ToList();
+                or SpecStatus.Approved).ToList();
         }
         catch (Exception ex)
         {
@@ -109,6 +132,68 @@ public sealed class ScheduledGroomer
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "ScheduledGroomer: spec {Id} failed; continuing", spec.Id);
+            }
+        }
+
+        await GroomAdHocTasksAsync(ct);
+    }
+
+    /// <summary>
+    /// Technical grooming for ad-hoc tasks (operator-enqueued or
+    /// agent-filed follow-ups). The sprint assembler refuses ad-hoc
+    /// tasks until this pass marks them groomed — no task enters a
+    /// sprint without grooming. Bounded at
+    /// <see cref="MaxTaskGroomsPerTick"/> per tick (LLM cost);
+    /// leftovers are picked up next tick, oldest first.
+    /// </summary>
+    private async Task GroomAdHocTasksAsync(CancellationToken ct)
+    {
+        if (_issues is null) return;
+        List<IssueRecord> pending;
+        try
+        {
+            pending = (await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct)).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ScheduledGroomer: list issues failed; skipping ad-hoc sweep");
+            return;
+        }
+
+        var byId = (await _issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
+        var sprinted = new HashSet<string>(StringComparer.Ordinal);
+        if (_sprints is not null)
+        {
+            foreach (var s in await _sprints.ListAsync(activeOnly: false, ct))
+            {
+                foreach (var id in await _sprints.GetIssueIdsAsync(s.Id, ct))
+                {
+                    sprinted.Add(id);
+                }
+            }
+        }
+
+        var ungroomed = pending
+            .Where(i => !AgentTaskTypes.IsContainer(i.Type)
+                && i.Type != AgentTaskTypes.PrWatch
+                && !sprinted.Contains(i.Id)
+                && Sprint.SprintAssembler.ResolveGroupKey(i, byId) == Sprint.SprintAssembler.AdHocGroupName
+                && !string.Equals(i.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(i => i.CreatedAt)
+            .Take(MaxTaskGroomsPerTick)
+            .ToList();
+
+        foreach (var task in ungroomed)
+        {
+            try
+            {
+                var groomer = _groomerFactory.Create();
+                var outcome = await groomer.GroomTaskAsync(task.Id, ct);
+                _logger.LogInformation("ScheduledGroomer: ad-hoc task {Id} groom outcome={Outcome}", task.Id, outcome ?? "no-decision");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "ScheduledGroomer: ad-hoc task {Id} groom failed; continuing", task.Id);
             }
         }
     }
@@ -138,21 +223,17 @@ public sealed class ScheduledGroomer
         try
         {
             var groomer = _groomerFactory.Create();
-            await groomer.GroomAsync(spec.Id, ct);
+            var result = await groomer.GroomAsync(spec.Id, ct);
             var duration = DateTime.UtcNow - startedAt;
-            // We don't have a clean way to count stories + tasks
-            // produced by the groomer from here; the GroomerAgent
-            // itself doesn't return them. The dashboard's Groomer
-            // timeline shows the started + succeeded/failed pair,
-            // and the spec's child-issue count can be read off the
-            // spec page.
             await _runStore.FinishAsync(
                 run.Id, GroomerRunStatus.Succeeded,
-                storiesProduced: 0, tasksProduced: 0,
+                storiesProduced: result?.StoryIds.Count ?? 0,
+                tasksProduced: result?.TaskIds.Count ?? 0,
                 error: null,
                 duration: duration,
                 ct: ct);
-            _logger.LogInformation("ScheduledGroomer: spec {SpecId} groomed in {Ms}ms", spec.Id, duration.TotalMilliseconds);
+            _logger.LogInformation("ScheduledGroomer: spec {SpecId} groomed in {Ms}ms ({Stories} stories, {Tasks} tasks)",
+                spec.Id, duration.TotalMilliseconds, result?.StoryIds.Count ?? 0, result?.TaskIds.Count ?? 0);
         }
         catch (Exception ex)
         {
