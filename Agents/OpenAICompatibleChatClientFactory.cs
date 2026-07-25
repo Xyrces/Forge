@@ -61,6 +61,21 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// </summary>
     public RoleModelOverrides? Overrides { get; set; }
 
+    /// <summary>
+    /// Shared per-(provider, model) 429 cooldowns. When set, every
+    /// cached client is wrapped in <see cref="RateLimitAwareChatClient"/>:
+    /// fail-fast during cooldown, per-provider concurrency permit,
+    /// centralized 429 recording. Set at startup by Program.cs.
+    /// </summary>
+    public Core.ModelRateLimitTracker? RateLimits { get; set; }
+
+    /// <summary>Max simultaneous round-trips per provider (the
+    /// "several concurrent agents" cap). Default 2; 0 disables the
+    /// permit (cooldown tracking still applies).</summary>
+    public int MaxConcurrentRequests { get; set; } = 2;
+
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _permits = new(StringComparer.OrdinalIgnoreCase);
+
     public IChatClient Create(LlmConfig config, AgentType role)
     {
         var (provider, model, _) = config.ResolveEffective(role, Overrides);
@@ -145,7 +160,16 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
             : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(provider.ApiKey)))[..12];
         var key = provider.Name + "|" + model + "|" + keyHash;
-        return _cache.GetOrAdd(key, _ => Build(provider, model));
+        return _cache.GetOrAdd(key, _ => WrapForRateLimits(Build(provider, model), provider, model));
+    }
+
+    private IChatClient WrapForRateLimits(IChatClient inner, ProviderConfig provider, string model)
+    {
+        if (RateLimits is null && MaxConcurrentRequests <= 0) return inner;
+        var permit = _permits.GetOrAdd(provider.Name,
+            _ => new SemaphoreSlim(Math.Max(1, MaxConcurrentRequests)));
+        return new RateLimitAwareChatClient(inner, provider.Name, model,
+            RateLimits ?? new Core.ModelRateLimitTracker(), permit);
     }
 
     private static IChatClient Build(ProviderConfig provider, string model)

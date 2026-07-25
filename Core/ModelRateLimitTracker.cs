@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 
-namespace Forge.Orchestrator;
+namespace Forge.Core;
 
 /// <summary>
 /// Per-(provider, model) LLM 429 cooldowns. Rate-limit quotas live at

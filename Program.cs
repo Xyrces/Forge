@@ -1056,8 +1056,18 @@ Console.Error.WriteLine(ex.ToString());
         // registry's model label. Snapshot rehydrates from the store.
         var roleModelOverrides = new Agents.RoleModelOverrides(memoryStore);
         await roleModelOverrides.LoadAsync(CancellationToken.None);
+        // ONE shared 429 tracker for the whole process: a 429 from
+        // ANY subsystem (dev run, groomer, designer, reviewer sweep)
+        // cools that model for ALL of them, and every factory-built
+        // client fails fast during cooldown + runs under the
+        // per-provider concurrency permit.
+        var modelRateLimits = new Core.ModelRateLimitTracker();
         if (chatClientFactory is Agents.OpenAICompatibleChatClientFactory openAiFactory)
+        {
             openAiFactory.Overrides = roleModelOverrides;
+            openAiFactory.RateLimits = modelRateLimits;
+            openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
+        }
 
         // P5.5: auto-extract project memory from the model
         // response after each PR is opened. Audit log lives in
@@ -1177,7 +1187,8 @@ Console.Error.WriteLine(ex.ToString());
             messageBus, dispatcher, eventBus,
             loggerFactory.CreateLogger<OrchestratorAgent>(),
             loggerFactory: loggerFactory,
-            slots: slots);
+            slots: slots,
+            modelCooldowns: modelRateLimits);
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);

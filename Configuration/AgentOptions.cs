@@ -226,6 +226,11 @@ public sealed record LlmOptions
     public string DefaultProvider { get; set; } = string.Empty;
     public Dictionary<string, LlmRoleModelOptions> Roles { get; set; } = new();
 
+    // Max simultaneous round-trips per provider across ALL subsystems
+    // (dev agents + groomer + designer + reviewer + intake). Guards
+    // account-level rate quotas against multi-agent bursts.
+    public int MaxConcurrentRequests { get; set; } = 2;
+
     // P2.b: Meshy config. The Meshy REST API is a different
     // service from the LLM providers; keep its config
     // top-level under llm.* for ease of operator editing.
