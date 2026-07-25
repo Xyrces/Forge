@@ -168,7 +168,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 22;
+    public const int CurrentSchemaVersion = 23;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly string _connectionString;
@@ -836,6 +836,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // = global skill.
         ApplyV22SkillRole(conn);
 
+        // v23 (post-init): skill.roles (JSON array) replaces the
+        // single-valued role — skills are MANY-TO-MANY (one skill can
+        // be given to any set of roles; an empty set means global).
+        ApplyV23SkillRoles(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -867,6 +872,44 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE skill ADD COLUMN role TEXT";
         alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV23SkillRoles(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('skill') WHERE name = 'roles' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        // 1. Add the JSON-array column; migrate the single-valued role.
+        using (var alter = conn.CreateCommand())
+        {
+            alter.CommandText = """
+                ALTER TABLE skill ADD COLUMN roles TEXT;
+                UPDATE skill SET roles = json_array(role) WHERE role IS NOT NULL;
+                """;
+            alter.ExecuteNonQuery();
+        }
+        // 2. Collapse the duplicates the single-role model forced
+        //    (e.g. forge-completion-contract existed once per role):
+        //    merge every same-name group into one row whose roles is
+        //    the union, then delete the extras (keep the oldest row).
+        using (var merge = conn.CreateCommand())
+        {
+            merge.CommandText = """
+                UPDATE skill SET roles = (
+                    SELECT json_group_array(value)
+                    FROM (SELECT DISTINCT je.value AS value
+                          FROM skill s2, json_each(s2.roles) je
+                          WHERE s2.name = skill.name))
+                WHERE EXISTS (SELECT 1 FROM skill s3 WHERE s3.name = skill.name AND s3.id <> skill.id);
+                DELETE FROM skill WHERE rowid NOT IN (SELECT MIN(rowid) FROM skill GROUP BY name);
+                """;
+            merge.ExecuteNonQuery();
+        }
+        // 3. Drop the single-valued column.
+        using var drop = conn.CreateCommand();
+        drop.CommandText = "ALTER TABLE skill DROP COLUMN role";
+        drop.ExecuteNonQuery();
     }
 
     private void ApplyV19ProjectRoles(SqliteConnection conn)

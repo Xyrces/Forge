@@ -4,9 +4,12 @@ namespace Forge.Agents;
 
 /// <summary>
 /// SQLite-backed skill source. Loads global + role-scoped skills from
-/// <see cref="ISkillStore"/> keyed by the canonical role NAME
-/// (schema v22 <c>skill.role</c>) — the legacy AgentRecord
-/// indirection is gone (the agent table is empty in practice).
+/// <see cref="ISkillStore"/> (schema v23 <c>skill.roles</c> JSON
+/// array): a role sees every GLOBAL skill (empty role set) plus every
+/// skill whose role set contains its canonical name. Skills are
+/// many-to-many — the same skill row can be given to any set of
+/// roles. The legacy AgentRecord indirection is gone (the agent table
+/// is empty in practice).
 /// </summary>
 public sealed class SqliteSkillSource : ISkillSource
 {

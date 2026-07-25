@@ -35,12 +35,19 @@ public class SkillSeederTests : IDisposable
     {
         var seeded = await SkillSeeder.SeedAsync(_skills, kiloSkillsDir: null,
             NullLogger.Instance, CancellationToken.None);
-        Assert.True(seeded >= 5); // completion-contract ×2, rework ×2, review ×1
+        Assert.Equal(3, seeded); // one row per skill — roles live ON the row (many-to-many)
 
         var coredev = await _skills.ListByRoleAsync("coredev", globalOnly: false, CancellationToken.None);
         Assert.Contains(coredev, s => s.Name == "forge-completion-contract");
         Assert.Contains(coredev, s => s.Name == "forge-rework-protocol");
         Assert.DoesNotContain(coredev, s => s.Name == "forge-review-standards");
+
+        var clientdev = await _skills.ListByRoleAsync("clientdev", globalOnly: false, CancellationToken.None);
+        Assert.Contains(clientdev, s => s.Name == "forge-completion-contract");
+
+        // Shared skill = ONE row visible to both roles, not duplicates.
+        var all = await _skills.ListByRoleAsync(null, globalOnly: false, CancellationToken.None);
+        Assert.Equal(1, all.Count(s => s.Name == "forge-completion-contract"));
 
         var reviewer = await _skills.ListByRoleAsync("reviewer", globalOnly: false, CancellationToken.None);
         Assert.Contains(reviewer, s => s.Name == "forge-review-standards");
@@ -79,7 +86,7 @@ public class SkillSeederTests : IDisposable
         var imported = Assert.Single(globals, s => s.Name == "my-tool");
         Assert.Equal("How to use my tool", imported.Description);
         Assert.Contains("Do the thing.", imported.Body);
-        Assert.Null(imported.Role);
+        Assert.True(imported.IsGlobal);
     }
 
     [Fact]

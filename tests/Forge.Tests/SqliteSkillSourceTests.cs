@@ -84,11 +84,11 @@ public class SqliteSkillSourceTests : IDisposable
     [Fact]
     public async Task LoadForRole_RoleScopedSkills_AreIsolatedToThatRole()
     {
-        // Role-NAME scoping (schema v22): coredev skill only shows up
+        // Role-set scoping (schema v23): coredev skill only shows up
         // for CoreDev; reviewer skill only for Reviewer — no agent
         // table involved.
-        await _skills.CreateAsync(new NewSkill(Name: "ecs-style", Body: "X", Role: "coredev"));
-        await _skills.CreateAsync(new NewSkill(Name: "tone-of-voice", Body: "Y", Role: "reviewer"));
+        await _skills.CreateAsync(new NewSkill(Name: "ecs-style", Body: "X", Roles: new[] { "coredev" }));
+        await _skills.CreateAsync(new NewSkill(Name: "tone-of-voice", Body: "Y", Roles: new[] { "reviewer" }));
         await _skills.CreateAsync(new NewSkill(Name: "global-rule", Body: "Z"));
 
         var coreSkills = await _source.LoadForRoleAsync(AgentType.CoreDev);
@@ -118,10 +118,27 @@ public class SqliteSkillSourceTests : IDisposable
     }
 
     [Fact]
+    public async Task LoadForRole_SharedSkill_OneRowVisibleToBothRoles()
+    {
+        // Many-to-many (schema v23): a skill given to BOTH coredev and
+        // clientdev is ONE row that both roles see.
+        await _skills.CreateAsync(new NewSkill(
+            Name: "shared-contract", Body: "X", Roles: new[] { "coredev", "clientdev" }));
+
+        var core = await _source.LoadForRoleAsync(AgentType.CoreDev);
+        var client = await _source.LoadForRoleAsync(AgentType.ClientDev);
+        var qa = await _source.LoadForRoleAsync(AgentType.QA);
+
+        Assert.Contains(core, s => s.Name == "shared-contract");
+        Assert.Contains(client, s => s.Name == "shared-contract");
+        Assert.DoesNotContain(qa, s => s.Name == "shared-contract");
+    }
+
+    [Fact]
     public async Task LoadForRole_SkillNameCollision_GlobalThenRole_RoleWins()
     {
         await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "GLOBAL VERSION"));
-        await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "ROLE VERSION", Role: "coredev"));
+        await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "ROLE VERSION", Roles: new[] { "coredev" }));
 
         var skills = await _source.LoadForRoleAsync(AgentType.CoreDev);
         Assert.Single(skills);

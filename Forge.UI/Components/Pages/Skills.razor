@@ -29,15 +29,16 @@
                         <td><input type="text" class="mono" style="width:100%" @bind="_editing.Name" placeholder="forge-my-skill" /></td>
                     </tr>
                     <tr>
-                        <td class="meta-text">Assigned to</td>
+                        <td class="meta-text">Applies to</td>
                         <td>
-                            <select class="mono" @bind="_editing.Role">
-                                <option value="">global (all roles)</option>
-                                @foreach (var r in _assignableRoles)
-                                {
-                                    <option value="@r">@r</option>
-                                }
-                            </select>
+                            @foreach (var r in _assignableRoles)
+                            {
+                                <label style="margin-right:14px">
+                                    <input type="checkbox" checked="@_editing.Roles.Contains(r)"
+                                           @onchange="e => ToggleRole(r, e)" /> @r
+                                </label>
+                            }
+                            <div class="meta-text" style="margin-top:4px">No boxes checked = global (every role). A skill can apply to any set of roles.</div>
                         </td>
                     </tr>
                     <tr>
@@ -82,7 +83,7 @@
             <thead>
                 <tr>
                     <th>Name</th>
-                    <th>Assigned to</th>
+                    <th>Applies to</th>
                     <th>Description</th>
                     <th>Enabled</th>
                     <th>Updated</th>
@@ -95,13 +96,16 @@
                     <tr>
                         <td class="mono">@row.Name</td>
                         <td>
-                            @if (row.Role is null)
+                            @if (row.Roles is null || row.Roles.Length == 0)
                             {
                                 <span class="pill">global</span>
                             }
                             else
                             {
-                                <span class="pill pill--primary">@row.Role</span>
+                                @foreach (var r in row.Roles)
+                                {
+                                    <span class="pill pill--primary" style="margin-right:4px">@r</span>
+                                }
                             }
                         </td>
                         <td class="meta-text">@(row.Description ?? "—")</td>
@@ -164,10 +168,18 @@
             Name = row.Name,
             Description = row.Description ?? "",
             Body = row.Body,
-            Role = row.Role ?? "",
+            Roles = (row.Roles ?? []).ToList(),
             Enabled = row.Enabled,
         };
         _editError = null;
+    }
+
+    private void ToggleRole(string role, ChangeEventArgs e)
+    {
+        if (_editing is null) return;
+        var on = e.Value is true;
+        if (on && !_editing.Roles.Contains(role)) _editing.Roles.Add(role);
+        else if (!on) _editing.Roles.Remove(role);
     }
 
     private async Task SaveAsync()
@@ -179,7 +191,7 @@
             name = _editing.Name.Trim(),
             description = string.IsNullOrWhiteSpace(_editing.Description) ? null : _editing.Description.Trim(),
             body = _editing.Body,
-            role = string.IsNullOrWhiteSpace(_editing.Role) ? null : _editing.Role,
+            roles = _editing.Roles.Count == 0 ? null : _editing.Roles.ToArray(),
             enabled = _editing.Enabled,
         };
         HttpResponseMessage resp = _editing.Id is null
@@ -201,7 +213,7 @@
     }
 
     private sealed record SkillDto(string Id, string Name, string? Description, string Body,
-        string? AgentId, string? Role, bool Enabled, DateTime CreatedAt, DateTime UpdatedAt);
+        string? AgentId, string[]? Roles, bool Enabled, DateTime CreatedAt, DateTime UpdatedAt);
 
     private sealed class EditModel
     {
@@ -209,7 +221,7 @@
         public string Name { get; set; } = "";
         public string Description { get; set; } = "";
         public string Body { get; set; } = "";
-        public string Role { get; set; } = "";
+        public List<string> Roles { get; set; } = new();
         public bool Enabled { get; set; } = true;
     }
 }

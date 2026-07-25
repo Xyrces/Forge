@@ -5,14 +5,16 @@ namespace Forge.Agents;
 
 /// <summary>
 /// Seeds the skill catalog on startup with seed-if-absent semantics:
-/// a skill row is created ONLY when (name, role) has no row yet —
-/// operator edits made via the dashboard are never overwritten.
+/// a skill row is created ONLY when no row with that NAME exists —
+/// operator edits (body, description, AND the role set) made via the
+/// dashboard are never overwritten.
 ///
 /// Two sources:
 /// <list type="number">
 /// <item>Pipeline-behavior skills (canonical text embedded here) —
-/// the orchestration's behavioral contract, assigned per role
-/// (completion contract, rework protocol, review standards).</item>
+/// the orchestration's behavioral contract, assigned to a SET of
+/// roles (skills are many-to-many: one row per skill, a role list
+/// on it; an empty set means global).</item>
 /// <item>The project's <c>.kilo/skills/&lt;name&gt;/SKILL.md</c>
 /// files — imported as global skills (dogfooding knowledge that
 /// ships with the repo).</item>
@@ -24,19 +26,16 @@ public static class SkillSeeder
         ISkillStore skills, string? kiloSkillsDir, ILogger logger, CancellationToken ct = default)
     {
         var existing = (await skills.ListByRoleAsync(role: null, globalOnly: false, ct))
-            .Select(s => (s.Name, s.Role ?? ""))
-            .ToHashSet();
+            .Select(s => s.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var seeded = 0;
         foreach (var (name, description, body, roles) in BehaviorSkills)
         {
-            foreach (var role in roles)
-            {
-                if (existing.Contains((name, role))) continue;
-                await skills.CreateAsync(new NewSkill(
-                    Name: name, Body: body, Description: description, Role: role), ct);
-                seeded++;
-            }
+            if (existing.Contains(name)) continue;
+            await skills.CreateAsync(new NewSkill(
+                Name: name, Body: body, Description: description, Roles: roles), ct);
+            seeded++;
         }
 
         if (kiloSkillsDir is not null && Directory.Exists(kiloSkillsDir))
@@ -46,7 +45,7 @@ public static class SkillSeeder
                 var file = Path.Combine(dir, "SKILL.md");
                 if (!File.Exists(file)) continue;
                 var (name, description, body) = ParseSkillMd(await File.ReadAllTextAsync(file, ct));
-                if (name is null || existing.Contains((name, ""))) continue;
+                if (name is null || existing.Contains(name)) continue;
                 await skills.CreateAsync(new NewSkill(Name: name, Body: body, Description: description), ct);
                 seeded++;
             }
