@@ -25,7 +25,6 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     private readonly ArtOutputStore _artOutputs;
     private readonly ILogger<RunAgentExecutor> _logger;
     private readonly string? _projectId;
-    private readonly double _timeoutMinutes;
 
     public RunAgentExecutor(
         IIssueStore issues,
@@ -54,7 +53,6 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         _artOutputs = artOutputs;
         _logger = logger;
         _projectId = projectId;
-        _timeoutMinutes = timeoutMinutes > 0.0 ? timeoutMinutes : 0.0;
     }
 
     public static async ValueTask<AgentCompleted> HandleAsync(

@@ -158,7 +158,7 @@ public class RunAgentExecutorTests : IDisposable
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
-        // Use a very short timeout (1 minute) so the test completes quickly.
+        // Use a very short timeout (0.02 minutes ≈ 1.2s) so the test completes quickly.
         // The test uses CancellationToken.None for the outer CT so only
         // the timeout triggers.
         var ex = await Assert.ThrowsAsync<TimeoutException>(async () =>

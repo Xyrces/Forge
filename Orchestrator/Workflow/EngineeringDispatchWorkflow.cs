@@ -27,7 +27,6 @@ public sealed class EngineeringDispatchWorkflow
     private readonly RunAgentExecutor _runAgent;
     private readonly CommitPushPrExecutor _commitPushPr;
     private readonly EnqueueWatchExecutor _enqueueWatch;
-    private readonly double _timeoutMinutes;
     private readonly ILogger<EngineeringDispatchWorkflow> _logger;
 
     public EngineeringDispatchWorkflow(
@@ -63,7 +62,6 @@ public sealed class EngineeringDispatchWorkflow
             nullFactory.CreateLogger<CommitPushPrExecutor>());
         _enqueueWatch = new EnqueueWatchExecutor(issues,
             nullFactory.CreateLogger<EnqueueWatchExecutor>());
-        _timeoutMinutes = timeoutMinutes;
         _logger = logger;
     }
 
