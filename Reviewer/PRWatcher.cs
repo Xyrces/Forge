@@ -10,11 +10,21 @@ namespace Forge.Reviewer;
 
 public sealed class PRWatcher
 {
+    /// <summary>Grace window for a consumed rework round to move the
+    /// PR head before the round is treated as stalled (no-op
+    /// completion or a died run). Must exceed the agent run timeout
+    /// (default 15m; operator-tuned via spawner.agentRunTimeoutMinutes,
+    /// currently 30m) so a legitimate long run is never re-fired
+    /// mid-flight. Coupled to that config — if the timeout is raised
+    /// past 30m, raise this too.</summary>
+    private static readonly TimeSpan ReworkRoundGrace = TimeSpan.FromMinutes(35);
+
     private readonly GitHubService _gitHub;
     private readonly GitWorktreeService _worktrees;
     private readonly IIssueStore _issues;
     private readonly TimeSpan _pollInterval;
     private readonly TimeSpan _staleAfter;
+    private readonly TimeSpan _reworkRoundGrace;
     private readonly ILogger<PRWatcher> _logger;
     private readonly StageGates? _gates;
     private readonly IDashboardEventBus _events;
@@ -27,13 +37,15 @@ public sealed class PRWatcher
         TimeSpan staleAfter,
         IDashboardEventBus events,
         ILogger<PRWatcher> logger,
-        StageGates? gates = null)
+        StageGates? gates = null,
+        TimeSpan? reworkRoundGrace = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
         _issues = issues;
         _pollInterval = pollInterval;
         _staleAfter = staleAfter;
+        _reworkRoundGrace = reworkRoundGrace ?? ReworkRoundGrace;
         _events = events;
         _logger = logger;
         _gates = gates;
@@ -155,10 +167,33 @@ public sealed class PRWatcher
         // HEAD (the task is back in the dispatch queue but the agent
         // hasn't pushed yet). Don't re-trigger every sweep — wait
         // for the head to move.
+        //
+        // STALL BREAKER: the guard assumed every consumed round ends
+        // with a push. A no-op round (agent concludes the failure is
+        // pre-existing and emits NO_CHANGES_NEEDED) or a run that
+        // died mid-round (restart, timeout) leaves head == marker
+        // forever — the breaker never increments, the task never
+        // goes terminal, and the sprint can never complete. If the
+        // task is still Pending it is legitimately queued for a
+        // dispatch slot: keep waiting. If it has been claimed but
+        // untouched longer than the agent-run window, the round
+        // ended without a push: fall through and let the failure
+        // path fire the next strike (or trip the breaker).
         if (string.Equals(watchTask.GetMetadata("reworkInFlightSha"), sha, StringComparison.Ordinal))
         {
-            return WatchPollOutcome.Pending;
-        }
+            var stalledTask = await _issues.GetAsync(taskId, cancellationToken);
+            var untouchedFor = stalledTask is null ? TimeSpan.MaxValue
+                : DateTime.UtcNow - stalledTask.UpdatedAt;
+            var roundStalled = stalledTask is not null
+                && stalledTask.Status == IssueStatus.InProgress
+                && untouchedFor > _reworkRoundGrace;
+            if (!roundStalled)
+            {
+                return WatchPollOutcome.Pending;
+            }
+            _logger.LogWarning(
+                "PR watch {WatchId}: rework round for {TaskId} stalled — no push and no task update for {Minutes:F0}m (head still {Sha}); re-firing as another strike",
+                watchTask.Id, taskId, untouchedFor.TotalMinutes, sha);        }
 
         _logger.LogDebug(
             "PR #{PrNumber}: CI={Ci} approved={Approved} changesRequested={Changes} reviewError={Err} (agent verdict={V}@{VS}, head={Head})",

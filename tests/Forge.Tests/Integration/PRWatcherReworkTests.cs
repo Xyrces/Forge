@@ -206,6 +206,66 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
+    public async Task StalledRound_TaskInProgressUntouched_RefiresAsAnotherStrike()
+    {
+        // Observed live 2026-07-25 (task-160/161): a consumed rework
+        // round whose run no-ops (NO_CHANGES_NEEDED) or dies
+        // mid-round (restart/timeout) never moves the PR head, so
+        // reworkInFlightSha == head forever and the watch stalled —
+        // breaker never incremented, sprint could never complete.
+        // With the round stale past the grace window, the watcher
+        // must re-fire (another strike) instead of waiting forever.
+        var gh = new FakeGitHub { Ci = CommitState.Failure };
+        var (task, watch) = await SeedAsync();
+        var watcher = new PRWatcher(gh,
+            worktrees: new AgentTools.GitWorktreeService(
+                new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+                NullLogger<AgentTools.GitWorktreeService>.Instance),
+            issues: _issues,
+            pollInterval: TimeSpan.FromSeconds(1),
+            staleAfter: TimeSpan.FromHours(1),
+            events: _events,
+            logger: NullLogger<PRWatcher>.Instance,
+            reworkRoundGrace: TimeSpan.Zero);   // every consumed round is instantly "stale"
+
+        // Round 1 fires normally.
+        await watcher.PollWatchOnceAsync(watch, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+
+        // Simulate the round being claimed and then dying without a
+        // push (task InProgress, head unmoved).
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, ct: CancellationToken.None);
+        var watchAfter = (await _issues.GetAsync(watch.Id))!;
+        var second = await watcher.PollWatchOnceAsync(watchAfter, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, second);
+        Assert.Equal("2", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task ConsumedRound_TaskInProgressRecentlyTouched_NoRefire()
+    {
+        // A legitimately-running rework round (task claimed, head not
+        // yet moved, still inside the grace window) must NOT be
+        // re-fired — that would double-strike a healthy round.
+        var gh = new FakeGitHub { Ci = CommitState.Failure };
+        var (task, watch) = await SeedAsync();
+        var watcher = NewWatcher(gh);   // default 35m grace
+
+        await watcher.PollWatchOnceAsync(watch, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, ct: CancellationToken.None);
+        var watchAfter = (await _issues.GetAsync(watch.Id))!;
+        var second = await watcher.PollWatchOnceAsync(watchAfter, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, second);
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
     public async Task CircuitBreaker_FourthFailure_TerminalFailed()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure };
