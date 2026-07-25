@@ -171,10 +171,17 @@ public sealed class SprintAssembler
         var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
 
         // Eligible: Pending + not a container + not a watch + not
-        // already linked to any sprint (Active/Completed both count —
-        // re-ingesting history would resurrect finished work).
+        // already linked to an ACTIVE sprint (never double-stage work
+        // that's already on a live board). Completed-sprint membership
+        // is NOT disqualifying: a sprint only completes when every
+        // member is terminal, so a Pending task whose sole membership
+        // is a Completed sprint is definitionally an operator requeue
+        // (e.g. /api/tasks/{id}/requeue from Failed) — excluding it
+        // would strand requeued work forever (observed live
+        // 2026-07-24: task-158 requeued after its sprint completed
+        // and never re-assembled).
         var sprinted = new HashSet<string>();
-        foreach (var s in await sprints.ListAsync(activeOnly: false, ct))
+        foreach (var s in await sprints.ListAsync(activeOnly: true, ct))
         {
             foreach (var id in await sprints.GetIssueIdsAsync(s.Id, ct))
             {

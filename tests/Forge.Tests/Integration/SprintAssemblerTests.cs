@@ -249,6 +249,36 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task RequeuedTask_FromCompletedSprint_IsReassembled()
+    {
+        // Operator requeue flow (observed live 2026-07-24, task-158):
+        // a task fails, its sprint completes (all members terminal),
+        // the operator requeues it to Pending. Completed-sprint
+        // membership must NOT strand it — it is definitionally
+        // requeued work, not history to protect from resurrection
+        // (terminal tasks are already excluded by the Pending filter).
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await Tick();
+        var first = await _sprints.GetActiveAsync();
+        Assert.NotNull(first);
+
+        // Fail the task; the sprint completes (all terminal).
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
+        await Tick();
+        Assert.Null(await _sprints.GetActiveAsync());
+
+        // Operator requeue: Failed -> Pending. Next tick must assemble
+        // a NEW sprint containing it (previously: stranded forever).
+        await _issues.TransitionAsync(task.Id, IssueStatus.Pending, "operator requeue");
+        await Tick();
+        var second = await _sprints.GetActiveAsync();
+        Assert.NotNull(second);
+        Assert.NotEqual(first!.Id, second!.Id);
+        Assert.Contains(task.Id, await _sprints.GetIssueIdsAsync(second.Id));
+    }
+
+    [Fact]
     public async Task EmptySprint_IsImmediatelyCompleted_AndDoesNotBlockAssembly()
     {
         // Defensive: an active sprint with no task members (e.g. only
