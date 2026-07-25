@@ -829,6 +829,18 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // that makes "is this run alive or hung on the provider?"
         // answerable from the dashboard.
         ApplyV21AgentRunActivity(conn);
+
+        // Stamp AFTER migrations, as its own statement: the batch's
+        // INSERT OR IGNORE does not reliably take effect on existing
+        // DBs (observed live 2026-07-24: forge DB stamped v19 while
+        // v21 columns were present and in use). Idempotent.
+        using (var stamp = conn.CreateCommand())
+        {
+            stamp.CommandText = "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES ($version, $now)";
+            stamp.Parameters.AddWithValue("$version", CurrentSchemaVersion);
+            stamp.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
+            stamp.ExecuteNonQuery();
+        }
     }
 
     private void ApplyV21AgentRunActivity(SqliteConnection conn)
