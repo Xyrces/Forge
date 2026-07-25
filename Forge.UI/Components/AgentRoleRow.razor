@@ -10,7 +10,7 @@
 @using System.Net.Http.Json
 
 <div class="card agent-row">
-    <div @onclick="() => _expanded = !_expanded">
+    <div @onclick="ToggleExpandAsync">
         <div class="agent-row__top">
             <div class="agent-row__identity">
                 <span class="agent-row__name">@Name</span>
@@ -144,6 +144,47 @@
                         </td>
                     </tr>
                     <tr>
+                        <td class="meta-text" style="vertical-align:top;">Skills</td>
+                        <td>
+                            @if (_skillsError is not null)
+                            {
+                                <span class="error-text">@_skillsError</span>
+                            }
+                            else if (_skills is null)
+                            {
+                                <span class="meta-text">loading…</span>
+                            }
+                            else
+                            {
+                                <div class="chip-row">
+                                    <span class="chip-row__label">assigned</span>
+                                    @foreach (var s in _skills.Where(s => s.Roles is { Length: > 0 }))
+                                    {
+                                        var applies = s.Roles!.Contains(Name);
+                                        <button type="button" class="chip @(applies ? "chip--active" : "")"
+                                                disabled="@_skillToggling"
+                                                title="@(s.Enabled ? "" : "disabled — won't load until re-enabled")"
+                                                @onclick="() => ToggleSkillAsync(s)">@s.Name@(s.Enabled ? "" : " (off)")</button>
+                                    }
+                                    @if (_skills.All(s => s.Roles is not { Length: > 0 }))
+                                    {
+                                        <span class="meta-text">none</span>
+                                    }
+                                </div>
+                                <div class="chip-row" style="margin-top:6px;">
+                                    <span class="chip-row__label">global</span>
+                                    @foreach (var s in _skills.Where(s => s.Roles is not { Length: > 0 }))
+                                    {
+                                        <span class="pill pill--outline">@s.Name</span>
+                                    }
+                                </div>
+                                <div class="chip-row__hint" style="margin:6px 0 0;">
+                                    Every role also loads the global skills. Toggle an assigned skill to add/remove this role from its set; edit the set or make a skill global on the <a href="/skills">Skills page</a>.
+                                </div>
+                            }
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="meta-text">Concurrency</td>
                         <td class="meta-text">
                             @Slot.InFlight in flight · cap @Slot.Max
@@ -225,6 +266,65 @@
     private string _editProvider = "";
     private string _editModel = "";
     private string[] _availableModels = Array.Empty<string>();
+    private List<SkillDto>? _skills;
+    private string? _skillsError;
+    private bool _skillToggling;
+
+    /// <summary>Expanding the row lazily loads the skill catalog once
+    /// (the page polls roles every 5s — skill loads must NOT ride
+    /// that poll).</summary>
+    private async Task ToggleExpandAsync()
+    {
+        _expanded = !_expanded;
+        if (_expanded && _skills is null && _skillsError is null)
+            await LoadSkillsAsync();
+    }
+
+    private async Task LoadSkillsAsync()
+    {
+        try
+        {
+            _skills = await Http.GetFromJsonAsync<List<SkillDto>>("/api/skills");
+            _skillsError = null;
+        }
+        catch (Exception ex)
+        {
+            _skillsError = ex.Message;
+        }
+    }
+
+    /// <summary>Add/remove THIS role from a skill's role set. The
+    /// skill row is the source of truth — we PATCH the whole set
+    /// (many-to-many lives on the skill, not the role).</summary>
+    private async Task ToggleSkillAsync(SkillDto skill)
+    {
+        if (_skillToggling || skill.Roles is null) return;
+        _skillToggling = true;
+        try
+        {
+            var roles = skill.Roles.Contains(Name)
+                ? skill.Roles.Where(r => r != Name).ToArray()
+                : skill.Roles.Append(Name).OrderBy(r => r).ToArray();
+            var resp = await Http.PatchAsJsonAsync($"/api/skills/{skill.Id}", new { roles });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _skillsError = await resp.Content.ReadAsStringAsync();
+                return;
+            }
+            _skillsError = null;
+            _skills = await Http.GetFromJsonAsync<List<SkillDto>>("/api/skills");
+        }
+        catch (Exception ex)
+        {
+            _skillsError = ex.Message;
+        }
+        finally
+        {
+            _skillToggling = false;
+        }
+    }
+
+    private sealed record SkillDto(string Id, string Name, string[]? Roles, bool Enabled);
 
     protected override async Task OnParametersSetAsync()
     {

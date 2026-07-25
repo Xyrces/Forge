@@ -31,14 +31,17 @@
                     <tr>
                         <td class="meta-text">Applies to</td>
                         <td>
-                            @foreach (var r in _assignableRoles)
-                            {
-                                <label style="margin-right:14px">
-                                    <input type="checkbox" checked="@_editing.Roles.Contains(r)"
-                                           @onchange="e => ToggleRole(r, e)" /> @r
-                                </label>
-                            }
-                            <div class="meta-text" style="margin-top:4px">No boxes checked = global (every role). A skill can apply to any set of roles.</div>
+                            <div class="chip-row">
+                                @foreach (var r in _assignableRoles)
+                                {
+                                    <button type="button" class="chip @(_editing.Roles.Contains(r) ? "chip--active" : "")"
+                                            @onclick="() => ToggleRole(r)">@r</button>
+                                }
+                                @if (_editing.Roles.Count == 0)
+                                {
+                                    <span class="chip-row__hint">none selected — global, every role loads this skill</span>
+                                }
+                            </div>
                         </td>
                     </tr>
                     <tr>
@@ -96,17 +99,19 @@
                     <tr>
                         <td class="mono">@row.Name</td>
                         <td>
-                            @if (row.Roles is null || row.Roles.Length == 0)
-                            {
-                                <span class="pill">global</span>
-                            }
-                            else
-                            {
-                                @foreach (var r in row.Roles)
+                            <div class="chip-row">
+                                @if (row.Roles is null || row.Roles.Length == 0)
                                 {
-                                    <span class="pill pill--primary" style="margin-right:4px">@r</span>
+                                    <span class="pill">global</span>
                                 }
-                            }
+                                else
+                                {
+                                    @foreach (var r in row.Roles)
+                                    {
+                                        <span class="pill pill--primary">@r</span>
+                                    }
+                                }
+                            </div>
                         </td>
                         <td class="meta-text">@(row.Description ?? "—")</td>
                         <td>
@@ -174,12 +179,10 @@
         _editError = null;
     }
 
-    private void ToggleRole(string role, ChangeEventArgs e)
+    private void ToggleRole(string role)
     {
         if (_editing is null) return;
-        var on = e.Value is true;
-        if (on && !_editing.Roles.Contains(role)) _editing.Roles.Add(role);
-        else if (!on) _editing.Roles.Remove(role);
+        if (!_editing.Roles.Remove(role)) _editing.Roles.Add(role);
     }
 
     private async Task SaveAsync()
