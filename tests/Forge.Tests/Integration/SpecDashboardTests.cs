@@ -392,7 +392,7 @@ public class SpecGroomerEndpointTests : IDisposable
         SpecEndpoints.MapSpecEndpoints(
             app, _specs, new SpecExtractionReader(_issues),
             NullLogger<DashboardHost>.Instance, new Core.IntakeStore(_issues),
-            groomerFactory);
+            groomerFactory, issues: _issues);
         return app;
     }
 
@@ -428,7 +428,7 @@ public class SpecGroomerEndpointTests : IDisposable
 
         // The agent runs on a background task; poll the spec until it
         // moves to Grooming (or give up after a few seconds).
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
         SpecStatus? finalStatus = null;
         while (DateTime.UtcNow < deadline)
         {
@@ -439,8 +439,16 @@ public class SpecGroomerEndpointTests : IDisposable
         }
         Assert.Equal(SpecStatus.Grooming, finalStatus);
 
-        // At least one story was created and linked to the spec.
-        var issues = await _issues.ListAsync(new IssueFilter { Type = "story" });
+        // Stories are created DURING Grooming, so reaching the status
+        // doesn't mean the story exists yet — poll for it (CI runners
+        // are slower than dev boxes; the immediate assert was racy).
+        IReadOnlyList<IssueRecord> issues = Array.Empty<IssueRecord>();
+        while (DateTime.UtcNow < deadline)
+        {
+            issues = await _issues.ListAsync(new IssueFilter { Type = "story" });
+            if (issues.Count > 0) break;
+            await Task.Delay(100);
+        }
         Assert.Single(issues);
         Assert.Equal(id, issues[0].ParentIssueId);
     }
@@ -460,8 +468,84 @@ public class SpecGroomerEndpointTests : IDisposable
     [Fact]
     public async Task Groom_MissingSpec_Returns404()
     {
-        var resp = await _client.PostAsync("/api/specs/spec-missing/groom", content: null);
+        var resp = await _client.PostAsync($"/api/specs/spec-missing/groom", content: null);
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Tree_UnknownSpec_Returns404()
+    {
+        var resp = await _client.GetAsync("/api/specs/spec-missing/tree");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Tree_GroomedSpec_GroupsStoriesWithTasks()
+    {
+        var id = await CreateApprovedSpecAsync();
+        var story = await _issues.CreateAsync(new NewIssue(
+            Type: "story", Title: "story A", ParentId: id));
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "task A1", ParentId: story.Id,
+            Metadata: new Dictionary<string, object> { ["prNumber"] = 7 }));
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "task A2", ParentId: story.Id));
+        // Noise that must NOT leak into the tree: another spec's
+        // story, a container-less watch, an epic.
+        await _issues.CreateAsync(new NewIssue(Type: "story", Title: "other spec story", ParentId: "spec-other"));
+        await _issues.CreateAsync(new NewIssue(Type: "pr-watch", Title: "watch"));
+        await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "container"));
+
+        var tree = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}/tree");
+
+        Assert.Equal(id, tree.GetProperty("spec").GetProperty("id").GetString());
+        var stories = tree.GetProperty("stories").EnumerateArray().ToArray();
+        Assert.Single(stories);
+        Assert.Equal(story.Id, stories[0].GetProperty("id").GetString());
+        var tasks = stories[0].GetProperty("tasks").EnumerateArray().ToArray();
+        Assert.Equal(2, tasks.Length);
+        Assert.Equal("7", tasks.First(t => t.GetProperty("title").GetString() == "task A1")
+            .GetProperty("prNumber").GetString());
+        Assert.Equal(JsonValueKind.Null, tasks.First(t => t.GetProperty("title").GetString() == "task A2")
+            .GetProperty("prNumber").ValueKind);
+        Assert.Empty(tree.GetProperty("orphanTasks").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task Actions_DraftSpec_IncludesSendToDesign()
+    {
+        var created = await _client.PostAsJsonAsync("/api/specs",
+            new { projectId = "P", title = "Draft", body = "x" });
+        var spec = await created.Content.ReadFromJsonAsync<JsonElement>();
+        var id = spec.GetProperty("id").GetString()!;
+
+        var actions = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}/actions");
+        Assert.True(actions.GetProperty("canSendToDesign").GetBoolean());
+        Assert.True(actions.GetProperty("canApprove").GetBoolean());
+        Assert.False(actions.GetProperty("canShip").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Groom_GroomedSpecWithStories_Returns409_UnlessForced()
+    {
+        // Grooming APPENDS stories/tasks; re-grooming an already-groomed
+        // spec without ?force=true is the accumulation bug observed
+        // 2026-07-22 (~27 repeat grooms → 83 stories / 147 tasks / 28 PRs
+        // for one spec).
+        var id = await CreateApprovedSpecAsync();
+        await _specs.SetStatusAsync(id, SpecStatus.Grooming);
+        await _specs.SetStatusAsync(id, SpecStatus.Groomed);
+        await _issues.CreateAsync(new NewIssue(
+            Type: "story", Title: "Existing story", ParentId: id));
+
+        var conflict = await _client.PostAsync($"/api/specs/{id}/groom", content: null);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        var body = await conflict.Content.ReadAsStringAsync();
+        Assert.Contains("spec_already_groomed", body);
+
+        // Explicit operator re-decompose still works.
+        var forced = await _client.PostAsync($"/api/specs/{id}/groom?force=true", content: null);
+        Assert.Equal(HttpStatusCode.Accepted, forced.StatusCode);
     }
 }
 

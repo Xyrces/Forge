@@ -101,7 +101,7 @@ public class GitWorktreeServiceTests : IDisposable
         RunGit(_workDir, "add -A");
         var msgPath = Path.Combine(Path.GetTempPath(), "cm-" + Guid.NewGuid().ToString("N") + ".txt");
         File.WriteAllText(msgPath, "external agent work on PR head");
-        RunGit(_workDir, $"commit -q -F \{msgPath}\");
+        RunGit(_workDir, "commit -q -F " + msgPath);
         File.Delete(msgPath);
         RunGit(_workDir, $"push origin setupsyncbranch:{remoteBranch}");
         RunGit(_workDir, "fetch origin");

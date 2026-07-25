@@ -3,36 +3,31 @@ using Forge.Core;
 namespace Forge.Agents;
 
 /// <summary>
-/// SQLite-backed skill source. Resolves a role to its
-/// <c>AgentRecord.Id</c> via <see cref="IAgentStore.GetByNameAsync"/>,
-/// then loads global + per-agent skills from <see cref="ISkillStore"/>.
+/// SQLite-backed skill source. Loads global + role-scoped skills from
+/// <see cref="ISkillStore"/> (schema v23 <c>skill.roles</c> JSON
+/// array): a role sees every GLOBAL skill (empty role set) plus every
+/// skill whose role set contains its canonical name. Skills are
+/// many-to-many — the same skill row can be given to any set of
+/// roles. The legacy AgentRecord indirection is gone (the agent table
+/// is empty in practice).
 /// </summary>
 public sealed class SqliteSkillSource : ISkillSource
 {
-    private readonly IAgentStore _agents;
     private readonly ISkillStore _skills;
     private readonly RoleAgentRegistry _roles;
 
-    public SqliteSkillSource(IAgentStore agents, ISkillStore skills, RoleAgentRegistry roles)
+    public SqliteSkillSource(ISkillStore skills, RoleAgentRegistry roles)
     {
-        _agents = agents;
         _skills = skills;
         _roles = roles;
     }
 
     public async Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, CancellationToken ct = default)
     {
-        var roleDef = _roles.ForType(role);
-        var agent = await _agents.GetByNameAsync(roleDef.AgentName, ct);
-        var agentId = agent?.Id;
+        var roleName = _roles.ForType(role).AgentName;
 
-        // Global skills.
-        var globals = await _skills.ListAsync(agentId: null, globalOnly: true, ct);
-
-        // Per-agent skills (only if the AgentStore has a row for this role).
-        IReadOnlyList<SkillRecord> roleSkills = agentId is null
-            ? Array.Empty<SkillRecord>()
-            : await _skills.ListAsync(agentId: agentId, globalOnly: false, ct);
+        var globals = await _skills.ListByRoleAsync(role: null, globalOnly: true, ct);
+        var roleSkills = await _skills.ListByRoleAsync(role: roleName, globalOnly: false, ct);
 
         // Merge + filter enabled. Global first, then role-specific, both
         // sorted by name. Duplicates (same name in global + role) are

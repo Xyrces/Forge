@@ -58,6 +58,9 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly IProjectStore? _projectStore;
     private readonly ProjectCloner? _projectCloner;
     private readonly Forge.Core.SecretStore? _secretStore;
+    private readonly AgentRunStore? _agentRuns;
+    private readonly Forge.Agents.LlmConfig? _llmConfig;
+    private readonly Forge.Agents.RoleModelOverrides? _roleModelOverrides;
     private readonly GitHubOptions? _githubOptions;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
@@ -105,7 +108,10 @@ public sealed class DashboardHost : IAsyncDisposable
         IProjectStore? projectStore = null,
         ProjectCloner? projectCloner = null,
         GitHubOptions? githubOptions = null,
-        Forge.Core.SecretStore? secretStore = null)
+        Forge.Core.SecretStore? secretStore = null,
+        AgentRunStore? agentRuns = null,
+        Forge.Agents.LlmConfig? llmConfig = null,
+        Forge.Agents.RoleModelOverrides? roleModelOverrides = null)
     {
         _options = options;
         _headroom = headroom;
@@ -149,6 +155,9 @@ public sealed class DashboardHost : IAsyncDisposable
         _secretStore = secretStore;
         _githubOptions = githubOptions;
         _logger = logger;
+        _agentRuns = agentRuns;
+        _llmConfig = llmConfig;
+        _roleModelOverrides = roleModelOverrides;
     }
 
     public string BaseUrl => ResolveBaseUrl();
@@ -233,9 +242,12 @@ public sealed class DashboardHost : IAsyncDisposable
         Forge.Reviewer.ReviewerDispatcher? reviewerDispatcherForBuild = null;
         if (_projectFactory is not null && _gitHub is not null && _reviewerRunner is not null)
         {
-            string? ResolveReviewerToken() => System.Environment.GetEnvironmentVariable("FORGE_REVIEWER_TOKEN");
+            // Reviewer verdicts are recorded in queue metadata (the
+            // machine record) with a GitHub comment as audit — no
+            // separate reviewer token is required in the
+            // solo-identity model.
             var d = new Forge.Reviewer.ReviewerDispatcher(
-                _issues, _gitHub, _reviewerRunner, ResolveReviewerToken,
+                _issues, _gitHub, _reviewerRunner,
                 _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
                     ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance);
             builder.Services.AddSingleton(d);
@@ -281,6 +293,36 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
                 var agents = await _agents.ListAsync(ct);
                 var skills = await _skills.ListAsync(null, globalOnly: false, ct);
                 var sprints = await sprintStore.ListAsync(activeOnly: false, ct);
+                // Sprint rollups: member tasks (containers/watches
+                // excluded) + terminal counts so the Sprints page can
+                // render progress without a second query round-trip.
+                var statusById = tasks.ToDictionary(t => t.Id);
+                var sprintViews = new List<object>();
+                foreach (var sp in sprints)
+                {
+                    var memberIds = await sprintStore.GetIssueIdsAsync(sp.Id, ct);
+                    var members = memberIds
+                        .Select(id => statusById.TryGetValue(id, out var t) ? t : null)
+                        .Where(t => t is not null
+                            && !AgentTaskTypes.IsContainer(t.Type)
+                            && t.Type != AgentTaskTypes.PrWatch)
+                        .Select(t => new { id = t!.Id, title = t.Title, status = t.Status.ToString() })
+                        .ToArray();
+                    sprintViews.Add(new
+                    {
+                        id = sp.Id,
+                        name = sp.Name,
+                        goal = sp.Goal,
+                        startDate = sp.StartDate,
+                        endDate = sp.EndDate,
+                        status = sp.Status.ToString(),
+                        createdAt = sp.CreatedAt,
+                        updatedAt = sp.UpdatedAt,
+                        issueCount = members.Length,
+                        doneCount = members.Count(m => m.status is "Completed" or "Closed"),
+                        members,
+                    });
+                }
                 var view = new
                 {
                     tasks = tasks.Select(t => new
@@ -298,6 +340,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
                         dispatchCheckpoint = t.DispatchCheckpoint?.ToString(),
                         checkpointAt = (DateTime?)null,
                         recoveryAttempts = t.RecoveryAttempts,
+                        parentIssueId = t.ParentIssueId,
                         prUrl = (string?)null,
                         branch = (string?)null,
                         worktreePath = (string?)null,
@@ -326,17 +369,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
                         createdAt = s.CreatedAt,
                         updatedAt = s.UpdatedAt
                     }).ToArray(),
-                    sprints = sprints.Select(s => new
-                    {
-                        id = s.Id,
-                        name = s.Name,
-                        goal = s.Goal,
-                        startDate = s.StartDate,
-                        endDate = s.EndDate,
-                        status = s.Status.ToString(),
-                        createdAt = s.CreatedAt,
-                        updatedAt = s.UpdatedAt
-                    }).ToArray(),
+                    sprints = sprintViews.ToArray(),
                     lastHeartbeat = DateTime.UtcNow,
                     completedTasks = tasks.Count(t => t.Status == IssueStatus.Completed),
                     failedTasks = tasks.Count(t => t.Status == IssueStatus.Failed),
@@ -351,7 +384,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             }
         });
 
-        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger);
+        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory);
 
         if (_projectFactory is not null && _slots is not null)
         {
@@ -380,6 +413,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         // they're wired; otherwise it returns placeholders.
         HealthEndpoint.MapHealthEndpoint(_app, new DefaultHealthSnapshotFactory());
 
+        MetaEndpoints.MapMetaEndpoints(_app);
+
         AppShellEndpoints.MapAppShellEndpoints(_app, _issues, _sprints, _specs, _memory, _logger, _projectFactory);
 
         if (_intakeRegistry is not null)
@@ -387,7 +422,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues);
 
         if (_memory is not null)
         {
@@ -406,8 +441,22 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_vision is not null)
         {
-            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger);
+            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger, _memory, _issues);
         }
+
+        if (_memory is not null)
+        {
+            GateEndpoints.MapGateEndpoints(_app, new StageGates(_memory), _logger);
+        }
+
+        FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions);
+        NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory);
+        if (_agentRuns is not null)
+        {
+            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns);
+        }
+        AgentsEndpoints.MapAgentsEndpoints(_app, new Agents.RoleAgentRegistry(),
+            _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory);
 
 if (_groomerRuns is not null)
             {
@@ -453,8 +502,10 @@ if (_groomerRuns is not null)
                 SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger);
             }
 
-            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory);
+            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints);
         }
+
+        _app.MapBuildInfoEndpoint();
 
         _app.MapGet("/api/agents", () =>
         {

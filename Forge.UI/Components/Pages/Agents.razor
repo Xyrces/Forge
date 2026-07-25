@@ -1,103 +1,159 @@
 @page "/agents"
-@inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
-@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
-@inject Fluxor.IDispatcher Dispatch
+@inject HttpClient Http
 @implements IDisposable
-@using Forge.Dashboard.Features.View
+@using System.Net.Http.Json
 
 <PageTitle>Agents</PageTitle>
 <div class="page">
     <div class="page-header">
         <h1>Agents</h1>
-        <div class="page-header__meta">@ViewStore.Value.Agents.Count registered · @ViewStore.Value.Agents.Count(a => a.Enabled) enabled</div>
+        <div class="page-header__meta">@((_data?.Roles.Count ?? 0) + (_data?.Pipeline.Count ?? 0)) roles · live status refreshes every 5s</div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId)))">Refresh</button>
+            <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
         </div>
     </div>
 
-    @if (ViewStore.Value.Loading)
+    @if (_error is not null)
+    {
+        <div class="banner banner--error"><span>@_error</span></div>
+    }
+    else if (_data is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
-    else if (ViewStore.Value.Error is not null)
-    {
-        <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
-    }
     else
     {
-        <table class="data-grid">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Kilo Name</th>
-                    <th>Display Name</th>
-                    <th>Scope</th>
-                    <th>Enabled</th>
-                    <th>Updated</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var row in ViewStore.Value.Agents)
+        <section class="overview-section">
+            <h2>Engineering roles <span class="meta-text">· @_data.Roles.Count total</span></h2>
+            <p class="page-subtitle page-subtitle--meta">Dispatched per task by the sprint loop. Click a row for tools, prompt, run history, and the model editor.</p>
+            <div style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
+                @foreach (var role in _data.Roles)
                 {
-                    <tr>
-                        <td class="mono">@row.Id</td>
-                        <td class="mono">@row.AgentName</td>
-                        <td>@row.DisplayName</td>
-                        <td>@row.Scope</td>
-                        <td>
-                            @if (row.Enabled)
-                            {
-                                <span class="pill pill--completed">on</span>
-                            }
-                            else
-                            {
-                                <span class="pill pill--failed">off</span>
-                            }
-                        </td>
-                        <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
-                    </tr>
+                    <AgentRoleRow Name="@role.Name"
+                                  Kind="@role.AgentType"
+                                  Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
+                                  Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
+                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount))"
+                                  LastRun="@(role.LastRun is null ? null : new AgentRoleRow.LastRunInfo(role.LastRun.Id, role.LastRun.TaskId, role.LastRun.Status, role.LastRun.FinishedAt, role.LastRun.DurationMs, role.LastRun.Error))"
+                                  Territory="@role.Territory"
+                                  Tools="@role.Tools"
+                                  Prompt="@(new AgentRoleRow.PromptInfo(role.Prompt.Source, role.Prompt.Path, role.Prompt.Content))"
+                                  ModelEditable="true"
+                                  OverridesEditable="@_data.OverridesEditable"
+                                  Providers="@_data.Providers"
+                                  Editing="@(_editingRole == role.Name)"
+                                  EditError="@(_editingRole == role.Name ? _editError : null)"
+                                  OnBeginEdit="@(name => _editingRole = name)"
+                                  OnCancelEdit="@(_ => _editingRole = null)"
+                                  OnSaveModel="SaveModelAsync"
+                                  OnClearModel="ClearModelAsync" />
                 }
-                @if (ViewStore.Value.Agents.Count == 0)
+            </div>
+        </section>
+
+        <section class="overview-section">
+            <h2>Pipeline roles <span class="meta-text">· @_data.Pipeline.Count total</span></h2>
+            <p class="page-subtitle page-subtitle--meta">Scheduler-side agents plus the dispatch loop. Instructions live in code; designer/groomer/artist borrow coredev's model.</p>
+            <div style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
+                @foreach (var role in _data.Pipeline)
                 {
-                    <tr><td colspan="6"><div class="page-subtitle">No agents registered yet.</div></td></tr>
+                    <AgentRoleRow Name="@role.Name"
+                                  Kind="pipeline"
+                                  Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
+                                  Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
+                                  Surface="@role.Surface"
+                                  ModelEditable="@role.ModelEditable"
+                                  OverridesEditable="@_data.OverridesEditable"
+                                  Providers="@_data.Providers"
+                                  Editing="@(_editingRole == role.Name)"
+                                  EditError="@(_editingRole == role.Name ? _editError : null)"
+                                  OnBeginEdit="@(name => _editingRole = name)"
+                                  OnCancelEdit="@(_ => _editingRole = null)"
+                                  OnSaveModel="SaveModelAsync"
+                                  OnClearModel="ClearModelAsync" />
                 }
-            </tbody>
-        </table>
+            </div>
+        </section>
     }
 </div>
 
 @code {
-    private string? _loadedProject;
+    private RolesResponse? _data;
+    private string? _error;
+    private string? _editingRole;
+    private string? _editError;
+    private readonly CancellationTokenSource _pollCts = new();
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
-        ViewStore.StateChanged += OnStateChanged;
-        ShellStore.StateChanged += OnShellChanged;
-        if (ViewStore.Value.LastFetchedAt is null)
+        await LoadAsync();
+        _ = PollLoopAsync();
+    }
+
+    private async Task PollLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
         {
-            LoadForCurrentProject();
+            while (await timer.WaitForNextTickAsync(_pollCts.Token))
+                await LoadAsync();
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _data = await Http.GetFromJsonAsync<RolesResponse>("/api/agents/roles?projectId=forge");
+            _error = null;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
         }
     }
 
-    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
-
-    private void OnShellChanged(object? sender, EventArgs e)
+    private async Task SaveModelAsync((string Role, string Provider, string Model) edit)
     {
-        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+        _editError = null;
+        var resp = await Http.PutAsJsonAsync($"/api/agents/roles/{edit.Role}/model",
+            new { provider = edit.Provider, model = edit.Model });
+        if (!resp.IsSuccessStatusCode)
         {
-            InvokeAsync(LoadForCurrentProject);
+            _editError = await resp.Content.ReadAsStringAsync();
+            return;
         }
+        _editingRole = null;
+        await LoadAsync();
     }
 
-    private void LoadForCurrentProject()
+    private async Task ClearModelAsync(string roleName)
     {
-        _loadedProject = ShellStore.Value.CurrentProjectId;
-        Dispatch.Dispatch(new ViewActions.LoadViewAction(_loadedProject));
+        await Http.DeleteAsync($"/api/agents/roles/{roleName}/model");
+        await LoadAsync();
     }
 
     public void Dispose()
     {
-        ViewStore.StateChanged -= OnStateChanged;
-        ShellStore.StateChanged -= OnShellChanged;
+        _pollCts.Cancel();
+        _pollCts.Dispose();
     }
+
+    private sealed record RolesResponse(List<RoleDto> Roles, List<PipelineRoleDto> Pipeline, string[] Providers, bool OverridesEditable);
+    private sealed record RoleDto(
+        string Name, string AgentType, string Territory, string[] Tools,
+        ModelDto Model, SlotDto Slot, PromptDto Prompt,
+        CurrentRunDto? CurrentRun, LastRunDto? LastRun);
+    private sealed record PipelineRoleDto(
+        string Name, string Description, string Surface,
+        ModelDto Model, bool ModelEditable, SlotDto Slot);
+    private sealed record ModelDto(string? Provider, string? Model, string Source);
+    private sealed record SlotDto(int InFlight, int Max);
+    private sealed record PromptDto(string Source, string? Path, string? Content);
+    private sealed record CurrentRunDto(string Id, string? TaskId, DateTime StartedAt,
+        DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount);
+    private sealed record LastRunDto(string Id, string? TaskId, string Status,
+        DateTime? FinishedAt, long? DurationMs, string? Error);
 }

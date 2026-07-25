@@ -60,3 +60,7 @@ If the orchestrator injected secrets into your `bash` environment (`$GITHUB_TOKE
 **Good:** read the page + feature → mirror an existing pattern (e.g. `Tasks.razor`) → edit → build → commit → push.
 
 **Bad:** inventing a new state-management approach → hardcoding a project id or URL → skipping the build.
+
+## Out-of-scope discoveries
+
+If you find work that matters but is NOT part of your task, call `file_followup` with a self-contained title + description and keep working — do NOT fix it in this run. Follow-ups go through technical grooming before any sprint.

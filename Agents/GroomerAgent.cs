@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel;
+using System.Text;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -39,6 +40,8 @@ public sealed class GroomerAgent
     private readonly IChatClientFactory _chatClientFactory;
     private readonly LlmConfig _config;
     private readonly ILogger<GroomerAgent> _logger;
+    private readonly MemoryStore? _memory;
+    private readonly string? _projectRoot;
     private readonly string _runId;
 
     public GroomerAgent(
@@ -48,7 +51,9 @@ public sealed class GroomerAgent
         IChatClientFactory chatClientFactory,
         LlmConfig config,
         ILogger<GroomerAgent> logger,
-        string? runId = null)
+        string? runId = null,
+        MemoryStore? memory = null,
+        string? projectRoot = null)
     {
         _issues = issues;
         _specs = specs;
@@ -56,6 +61,8 @@ public sealed class GroomerAgent
         _chatClientFactory = chatClientFactory;
         _config = config;
         _logger = logger;
+        _memory = memory;
+        _projectRoot = projectRoot;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
     }
 
@@ -65,7 +72,7 @@ public sealed class GroomerAgent
     /// Groom a spec. Returns the list of new story issue ids, or
     /// null if the agent didn't call any create_story.
     /// </summary>
-    public async Task<IReadOnlyList<string>?> GroomAsync(string specId, CancellationToken ct = default)
+    public async Task<GroomResult?> GroomAsync(string specId, CancellationToken ct = default)
     {
         var spec = await _specs.GetAsync(specId, ct);
         if (spec is null)
@@ -89,26 +96,49 @@ public sealed class GroomerAgent
             return null;
         }
 
+        // Entry transition into the grooming state so the terminal
+        // set_spec_status("Groomed") call is a legal move
+        // (Approved|Designed|AssetReady -> Grooming -> Groomed;
+        // re-decompose from Groomed is idempotent per the machine).
+        if (spec.Status is not SpecStatus.Groomed)
+        {
+            await _specs.SetStatusAsync(specId, SpecStatus.Grooming, ct);
+        }
+
         var createdStoryIds = new List<string>();
+        var createdTaskIds = new List<string>();
+        var taskCountByStory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         List<string> CreateStoryList() => createdStoryIds;
+
+        var grounding = await BuildGroundingBlockAsync(spec.ProjectId, ct);
 
         var systemPrompt = $"""
             You are the GroomerAgent for project {spec.ProjectId}. Given an
             Approved spec, decompose it into 1-3 stories of 1-3 tasks each.
 
             Rules:
+            - VERIFY AGAINST THE VISION first: every story you create
+              must serve the project vision below. If the spec (or part
+              of it) contradicts or lies outside the vision, do not
+              invent stories for that part — note it in your reply.
+            - PLAN AGAINST CURRENT STATE: the open-work digest below
+              is what is already planned or in flight. Do not re-plan
+              work that already exists; build on it.
             - Each story is type=story, has parent_id=SPEC_ID, and is
               sized for a single engineering agent run (1-3 tasks).
             - Each task is type=task, has parent_id=STORY_ID, and
               has parent_id=SPEC_ID as well (we mirror the chain).
             - Each task title comes from a spec acceptance criterion.
-            - Don't go over 1-3 stories, 1-3 tasks each.
-            - When done, call `set_spec_status` with "Grooming".
+            - Don't go over 1-3 stories, 1-3 tasks each. The tools
+              enforce these caps and return limit errors.
+            - When done, call `set_spec_status` with "Groomed".
 
             Use the `create_story` tool for each story and
             `create_task` for each task. You may call them in any
             order. After all stories + tasks are created, call
             `set_spec_status`.
+
+            {grounding}
             """;
 
         var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
@@ -127,16 +157,16 @@ public sealed class GroomerAgent
              [Description("Story id this task belongs to.")] string storyId,
              [Description("Optional 1-paragraph description.")] string? description = null,
              [Description("Priority 1-5; defaults to 2.")] int? priority = null) =>
-                CreateTaskAsync(specId, storyId, title, description, priority, createdStoryIds, ct),
+                CreateTaskAsync(specId, storyId, title, description, priority, createdStoryIds, createdTaskIds, taskCountByStory, ct),
             name: "create_task",
             description: "Create a task issue linked to the story AND the spec. " +
                          "Returns the new task's issue id.");
 
         var setStatusTool = AIFunctionFactory.Create(
-            ([Description("Status: 'Draft', 'Approved', 'Superseded', 'Archived', or 'Grooming'.")] string status) =>
+            ([Description("Status: 'Draft', 'Approved', 'Groomed', 'Superseded', or 'Archived'.")] string status) =>
                 SetStatusAsync(specId, status, ct),
             name: "set_spec_status",
-            description: "Move the spec to a new status. Use 'Grooming' " +
+            description: "Move the spec to a new status. Use 'Groomed' " +
                          "after all stories + tasks are created.");
 
         var tools = new List<AITool> { createStoryTool, createTaskTool, setStatusTool };
@@ -150,7 +180,7 @@ public sealed class GroomerAgent
         var userMessage = new ChatMessage(ChatRole.User, $"""
             Decompose this Approved spec into 1-3 stories + tasks.
             After creating the stories and tasks, call set_spec_status
-            to "Grooming".
+            to "Groomed".
 
             Spec title: {spec.Title}
             Spec body:
@@ -169,14 +199,14 @@ public sealed class GroomerAgent
             var refreshed = await _specs.GetAsync(specId, ct);
             _events.Publish(new DashboardEvent(DateTime.UtcNow,
                 "groomer.run.completed", specId,
-                $"status={refreshed?.Status} stories={createdStoryIds.Count}",
+                $"status={refreshed?.Status} stories={createdStoryIds.Count} tasks={createdTaskIds.Count}",
                 new Dictionary<string, object?>
                 {
                     ["specId"] = specId,
                     ["runId"] = _runId,
                     ["storyIds"] = string.Join(",", createdStoryIds),
                 }));
-            return createdStoryIds.Count == 0 ? null : createdStoryIds;
+            return createdStoryIds.Count == 0 ? null : new GroomResult(createdStoryIds, createdTaskIds);
         }
         catch (Exception ex)
         {
@@ -195,6 +225,9 @@ public sealed class GroomerAgent
         List<string> createdStoryIds, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(title)) return "title_required";
+        // Structural cap — the prompt's 1-3 story limit is enforced
+        // here because weaker models ignore prompt constraints.
+        if (createdStoryIds.Count >= 3) return "story_limit_reached";
         var story = await _issues.CreateAsync(new NewIssue(
             Type: "story", Title: title, Description: description ?? "",
             ParentId: specIdArg, Priority: 2), ct);
@@ -204,13 +237,20 @@ public sealed class GroomerAgent
 
     private async Task<string> CreateTaskAsync(
         string specIdArg, string storyId, string title, string? description, int? priority,
-        List<string> createdStoryIds, CancellationToken ct)
+        List<string> createdStoryIds, List<string> createdTaskIds,
+        Dictionary<string, int> taskCountByStory, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(title)) return "title_required";
         if (string.IsNullOrWhiteSpace(storyId)) return "story_id_required";
+        // Structural cap: 3 tasks per story (same rationale as the
+        // story cap).
+        var forStory = taskCountByStory.GetValueOrDefault(storyId, 0);
+        if (forStory >= 3) return "task_limit_reached_for_story";
         var task = await _issues.CreateAsync(new NewIssue(
             Type: "task", Title: title, Description: description ?? "",
             ParentId: storyId, Priority: priority ?? 2), ct);
+        createdTaskIds.Add(task.Id);
+        taskCountByStory[storyId] = forStory + 1;
         return task.Id;
     }
 
@@ -218,7 +258,7 @@ public sealed class GroomerAgent
         string specIdArg, string status, CancellationToken ct)
     {
         if (!Enum.TryParse<SpecStatus>(status, ignoreCase: true, out var newStatus))
-            return $"status_must_be_one_of_draft_approved_grooming_superseded_archived";
+            return $"status_must_be_one_of_draft_approved_groomed_superseded_archived";
         try
         {
             var refreshed = await _specs.SetStatusAsync(specIdArg, newStatus, ct);
@@ -231,4 +271,251 @@ public sealed class GroomerAgent
             return $"error: {ex.Message}";
         }
     }
+
+    /// <summary>
+    /// Technical grooming for a single ad-hoc task (operator-enqueued
+    /// or agent-filed follow-up). The sprint assembler refuses
+    /// ad-hoc tasks until this pass marks them <c>groomed=true</c>:
+    /// the groomer verifies the task against the project vision and
+    /// plans it against the current state (open work + repo shape),
+    /// then either approves it for sprint ingest or closes it as
+    /// obsolete/duplicate/out-of-vision.
+    /// Returns "groomed" | "closed" | "skipped" | null (LLM failure).
+    /// </summary>
+    public async Task<string?> GroomTaskAsync(string issueId, CancellationToken ct = default)
+    {
+        var issue = await _issues.GetAsync(issueId, ct);
+        if (issue is null)
+        {
+            _logger.LogWarning("GroomerAgent.GroomTaskAsync: {Id} not found", issueId);
+            return null;
+        }
+        if (issue.Status != IssueStatus.Pending
+            || AgentTaskTypes.IsContainer(issue.Type)
+            || issue.Type == AgentTaskTypes.PrWatch
+            || issue.ParentIssueId is not null
+            || string.Equals(issue.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            return "skipped";
+        }
+
+        var grounding = await BuildGroundingBlockAsync(projectId: null, ct, excludeIssueId: issue.Id);
+
+        var approveTool = AIFunctionFactory.Create(
+            ([Description("One sentence: why this task serves the vision and how it fits current state.")] string note) =>
+                ApproveTaskAsync(issue.Id, note, ct),
+            name: "approve_task",
+            description: "Mark the task groomed (eligible for sprint ingest).");
+        var closeTool = AIFunctionFactory.Create(
+            ([Description("Why the task is being closed: obsolete, duplicate of existing work, or outside the vision.")] string reason) =>
+                CloseTaskAsync(issue.Id, reason, ct),
+            name: "close_task",
+            description: "Close the task as obsolete, duplicate, or out-of-vision.");
+
+        var systemPrompt = $"""
+            You are the GroomerAgent performing TECHNICAL GROOMING of one
+            ad-hoc task. The task is not sprint-eligible until you approve it.
+
+            Steps:
+            1. VERIFY AGAINST THE VISION: does the task serve the project
+               vision below? If it contradicts the vision or lies outside
+               it, call close_task.
+            2. PLAN AGAINST CURRENT STATE: is the work already planned or
+               done (see the open-work digest + repo shape below)? If it
+               duplicates existing work or is obsolete, call close_task.
+            3. Otherwise call approve_task with a one-sentence note
+               recording why it belongs and any sizing/approach guidance
+               for the engineering agent.
+
+            Call exactly one tool, then stop.
+
+            {grounding}
+            """;
+
+        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
+        chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
+        var agent = new ChatClientAgent(
+            chatClient,
+            instructions: systemPrompt,
+            name: "task-groomer",
+            description: $"Task groomer for {issue.Id}",
+            tools: new List<AITool> { approveTool, closeTool });
+
+        var followUpOf = issue.GetMetadata("followUpOf");
+        var userMessage = new ChatMessage(ChatRole.User, $"""
+            Groom this ad-hoc task. Call approve_task or close_task.
+
+            Task {issue.Id} (priority {issue.Priority}): {issue.Title}
+            Description:
+            ```
+            {issue.Description ?? "(none)"}
+            ```
+            Filed by: {issue.GetMetadata("source") ?? "operator"}{(followUpOf is not null ? $" — follow-up of {followUpOf}" : "")}
+            """);
+
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, "groomer.task.started",
+            issue.Id, $"runId={_runId}", new Dictionary<string, object?>
+            { ["issueId"] = issue.Id, ["runId"] = _runId }));
+
+        string? outcome = null;
+        try
+        {
+            await agent.RunAsync(userMessage, cancellationToken: ct);
+            var after = await _issues.GetAsync(issue.Id, ct);
+            outcome = after is null ? null
+                : after.Status == IssueStatus.Closed ? "closed"
+                : string.Equals(after.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase) ? "groomed"
+                : null;
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, "groomer.task.completed",
+                issue.Id, $"outcome={outcome ?? "no-decision"} runId={_runId}",
+                new Dictionary<string, object?>
+                { ["issueId"] = issue.Id, ["runId"] = _runId, ["outcome"] = outcome }));
+            return outcome;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GroomerAgent.GroomTaskAsync failed for {Id}", issue.Id);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, "groomer.task.failed",
+                issue.Id, ex.Message, new Dictionary<string, object?>
+                { ["issueId"] = issue.Id, ["runId"] = _runId, ["error"] = ex.Message }));
+            throw;
+        }
+    }
+
+    private async Task<string> ApproveTaskAsync(string issueId, string note, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(note)) return "note_required";
+        var cur = await _issues.GetAsync(issueId, ct);
+        if (cur is null) return "issue_not_found";
+        var meta = ReadMetadata(cur);
+        meta["groomed"] = "true";
+        meta["groomedAt"] = DateTime.UtcNow.ToString("O");
+        meta["groomNote"] = note;
+        meta["groomRunId"] = _runId;
+        await _issues.TransitionAsync(issueId, cur.Status, error: null, metadata: meta, ct: ct);
+        _logger.LogInformation("Task {Id} groomed (approved): {Note}", issueId, note);
+        return "approved";
+    }
+
+    private async Task<string> CloseTaskAsync(string issueId, string reason, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) return "reason_required";
+        var cur = await _issues.GetAsync(issueId, ct);
+        if (cur is null) return "issue_not_found";
+        var meta = ReadMetadata(cur);
+        meta["groomedAt"] = DateTime.UtcNow.ToString("O");
+        meta["groomCloseReason"] = reason;
+        meta["groomRunId"] = _runId;
+        await _issues.TransitionAsync(issueId, IssueStatus.Closed, error: null, metadata: meta, ct: ct);
+        _logger.LogInformation("Task {Id} closed by grooming: {Reason}", issueId, reason);
+        return "closed";
+    }
+
+    /// <summary>
+    /// The grooming ground truth: project vision (from the
+    /// <c>vision/master</c> memory key) + a digest of open work (so
+    /// the groomer doesn't re-plan what exists) + the repo shape (so
+    /// plans reflect the real codebase). Missing pieces degrade to
+    /// explicit "none" markers rather than silence.
+    /// </summary>
+    private async Task<string> BuildGroundingBlockAsync(string? projectId, CancellationToken ct, string? excludeIssueId = null)
+    {
+        var sb = new StringBuilder();
+
+        sb.AppendLine("## Project vision");
+        var vision = _memory is null ? null : (await _memory.RecallAsync("vision/master", ct)).FirstOrDefault()?.Body;
+        sb.AppendLine(string.IsNullOrWhiteSpace(vision)
+            ? "(no vision document — the operator has not written one; judge against the spec/task text alone)"
+            : vision.Length > 4000 ? vision[..4000] + "\n...[truncated]..." : vision);
+
+        sb.AppendLine();
+        sb.AppendLine("## Open work (already planned or in flight — do not re-plan)");
+        var open = new List<IssueRecord>();
+        open.AddRange(await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct));
+        open.AddRange(await _issues.ListAsync(new IssueFilter { Status = IssueStatus.InProgress }, ct));
+        // Never list the candidate itself: seeing itself in the digest
+        // makes the model close its own task as a "duplicate of
+        // existing work" (observed live, task-152).
+        open.RemoveAll(i => i.Id == excludeIssueId);
+        if (open.Count == 0)
+        {
+            sb.AppendLine("(none)");
+        }
+        else
+        {
+            foreach (var i in open.Take(60))
+            {
+                sb.AppendLine($"- {i.Id} [{i.Type}/{i.Status}] {i.Title}");
+            }
+            if (open.Count > 60) sb.AppendLine($"- ...and {open.Count - 60} more");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("## Repo shape (top levels of the current codebase)");
+        sb.AppendLine(BuildRepoShape());
+
+        return sb.ToString();
+    }
+
+    private string BuildRepoShape()
+    {
+        if (string.IsNullOrWhiteSpace(_projectRoot) || !Directory.Exists(_projectRoot))
+        {
+            return "(unavailable)";
+        }
+        var skip = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { ".git", "bin", "obj", "node_modules", ".forge", ".portHorizon", ".vs" };
+        var lines = new List<string>();
+        try
+        {
+            foreach (var dir in Directory.GetDirectories(_projectRoot).OrderBy(d => d))
+            {
+                var name = Path.GetFileName(dir);
+                if (skip.Contains(name)) continue;
+                lines.Add($"{name}/");
+                if (lines.Count >= 80) break;
+                foreach (var sub in Directory.GetDirectories(dir).OrderBy(d => d).Take(8))
+                {
+                    var subName = Path.GetFileName(sub);
+                    if (skip.Contains(subName)) continue;
+                    lines.Add($"  {subName}/");
+                }
+            }
+            foreach (var file in Directory.GetFiles(_projectRoot).OrderBy(f => f).Take(20))
+            {
+                lines.Add(Path.GetFileName(file));
+            }
+        }
+        catch (Exception ex)
+        {
+            return $"(unavailable: {ex.Message})";
+        }
+        return lines.Count == 0 ? "(empty)" : string.Join("\n", lines.Take(100));
+    }
+
+    private static Dictionary<string, object> ReadMetadata(IssueRecord issue)
+    {
+        var meta = new Dictionary<string, object>();
+        if (!string.IsNullOrWhiteSpace(issue.MetadataJson))
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(issue.MetadataJson);
+                if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    foreach (var p in doc.RootElement.EnumerateObject())
+                    {
+                        meta[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                            ? p.Value.GetString()!
+                            : p.Value.GetRawText();
+                    }
+                }
+            }
+            catch { /* malformed metadata: start fresh */ }
+        }
+        return meta;
+    }
 }
+
+/// <summary>Stories + tasks created by a groom run (ids).</summary>
+public sealed record GroomResult(IReadOnlyList<string> StoryIds, IReadOnlyList<string> TaskIds);

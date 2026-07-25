@@ -15,7 +15,15 @@ The path a single engineering task takes, end to end, in the production code pat
 
 Production is `OrchestratorAgent.DispatchSingleTaskAsync` (`Orchestrator/OrchestratorAgent.cs`), which claims the issue up-front and then hands it to `IWorkflowDispatcher.DispatchAsync`. The default dispatcher is `InProcessDispatcher`, which builds `Orchestrator/Workflow/EngineeringDispatchWorkflow` per dispatch and runs it via MAF `InProcessExecution` — **the workflow executors ARE the production path**. With `Orchestrator:Execution=Durable`, the same workflow runs on the DTS sidecar (P4 Stage B — see `forge-recovery`).
 
-Multi-project note: `OrchestratorAgent` iterates the registered projects each cycle and claims from each project's own `IssueStore` (via cached `ProjectDispatchBundle`s). However the dispatcher's workflow executors are constructed once at startup with the **primary** project's stores — per-store workflow wiring for non-primary projects is a known follow-up. Reason accordingly when debugging a non-primary project.
+Multi-project note: `OrchestratorAgent` iterates the registered projects each cycle and claims from each project's own `IssueStore` (via cached `ProjectDispatchBundle`s). The `InProcessDispatcher` builds the workflow per dispatch from the task's bundle (`Program.cs`), so non-primary projects dispatch against their own repo/stores. The legacy `DurableDispatcher` path remains startup-store-bound (known gap).
+
+## Sprint gate (fundamental)
+
+ALL engineering work happens inside a sprint. `Orchestrator/Sprint/SprintAssembler.cs` (5-min tick per project) completes the Active sprint when every member task is terminal, then assembles + activates the next sprint from eligible Pending tasks: grouped by groomed spec (task→story→spec parent walk) FIFO, ad-hoc parentless tasks last ("Ad-hoc work" group), containers (`epic`/`story`) and `pr-watch` never ingested, already-sprinted tasks never re-ingested. Stories are linked for progress display but don't gate completion.
+
+`OrchestratorAgent` gates dispatch: no Active sprint → no dev dispatch; otherwise only sprint members (`SprintStore.GetIssueIdsAsync`) pass the filter. `pr-watch` issues sweep from the full ready queue regardless (lifecycle subscriptions, never sprint members). `StartupRecovery` is unaffected (in-flight items requeue regardless of membership).
+
+Agent runs inside a sprint carry shared context: `RunAgentExecutor` adds `sprintId/sprintName/sprintGoal/sprintRoster` to the run context; `MafAgentRunner` renders a `## Sprint` block + recalls `sprint/{sprintId}/` memory keys (`## Sprint memory`) before global project memory. `MemoryExtractor` dual-persists extracted memories under `sprint/{sprintId}/` when the issue is in the Active sprint.
 
 ## Stage 1 — Claim
 
@@ -76,14 +84,13 @@ The dispatcher's `ClaimExecutor` short-circuits when the input is already `InPro
 - Title: `Watch PR #<n> for <devIssueId>`.
 - The orchestrator's next dispatch cycle sees it in `ReadyAsync` and hands it to `PRWatcher.ProcessWatchTaskAsync`.
 
-## PRWatcher — what watches the watch
+## PRWatcher — review loop, rework, merge
 
-`Orchestrator/PRWatcher.cs`:
+The sequential sweep (`OrchestratorAgent.RunWatchSweepAsync`, every 15 min; NOT a per-watch poll loop) runs **review-then-poll** per watch:
 
-- Polls GitHub every 30s (`Spawner.PollIntervalSeconds` is 3s for dispatch, but PRWatcher is a separate cadence).
-- **Green CI + approval:** Octokit merges the PR, deletes the branch, removes the worktree via `GitWorktreeService.RemoveAsync`, transitions the dev task to `Completed`.
-- **`REQUEST_CHANGES`:** transitions to `Blocked`.
-- **Red CI:** transitions to `Failed`.
+1. **Review** (`Reviewer/ReviewerDispatcher.cs::ReviewOnceAsync`): fetches the PR diff, runs the Reviewer role, records the verdict in watch metadata (`reviewSha`/`reviewVerdict`/`reviewNotes`/`reviewRound` — the machine record), posts a GitHub comment (the audit). Per-head-SHA dedupe; `Error` verdicts retry next sweep. Formal review submission is opportunistic (solo-identity 422 tolerated — the local verdict is authoritative).
+2. **Poll** (`Reviewer/PRWatcher.cs::PollWatchOnceAsync`): reads CI from **check runs** (legacy combined statuses don't see GitHub Actions) and merges when: CI green AND (formal Approved review OR reviewer-agent `Approve` at the current head). External merge (operator) also closes the loop.
+3. **Rework loop**: CI failure or changes-requested → task back to `Pending` with `reworkAttempts`/`reworkContext` metadata (the agent prompt surfaces it as "## Rework required"), watch stays live, worktree kept, `reworkInFlightSha` prevents re-triggering on the same head. Circuit breaker at `PRWatcher.MaxReworkAttempts` (3) → terminal `Failed` (CI) / `Blocked` (review) for the operator. Reviewer-error also breaks to `Blocked` (manual review). The reworked task pushes to the SAME branch — `CommitPushPrExecutor` reuses the existing PR; `EnqueueWatchExecutor` dedupes watches per PR.
 
 ## Retry / failure semantics
 
