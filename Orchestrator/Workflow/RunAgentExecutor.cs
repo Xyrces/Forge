@@ -25,6 +25,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     private readonly ArtOutputStore _artOutputs;
     private readonly ILogger<RunAgentExecutor> _logger;
     private readonly string? _projectId;
+    private readonly double _timeoutMinutes;
 
     public RunAgentExecutor(
         IIssueStore issues,
@@ -35,10 +36,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         DesignArtifactStore designArtifacts,
         ArtOutputStore artOutputs,
         ILogger<RunAgentExecutor> logger,
-        string? projectId = null)
+        string? projectId = null,
+        double timeoutMinutes = 15.0)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, ct, timeoutMinutes),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -52,6 +54,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         _artOutputs = artOutputs;
         _logger = logger;
         _projectId = projectId;
+        _timeoutMinutes = timeoutMinutes > 0.0 ? timeoutMinutes : 0.0;
     }
 
     public static async ValueTask<AgentCompleted> HandleAsync(
@@ -65,7 +68,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         ArtOutputStore artOutputs,
         ILogger logger,
         string? projectId,
-        CancellationToken ct)
+        CancellationToken ct,
+        double timeoutMinutes = 15.0)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
         {
@@ -90,6 +94,14 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             : prompt + "\n\n## Operator messages\n" + queued + "\n\nAddress these messages before working on the task.";
 
         AgentRunResult result;
+        CancellationToken effectiveCt = ct;
+        CancellationTokenSource? timeoutCts = null;
+        if (timeoutMinutes > 0)
+        {
+            timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
+            effectiveCt = timeoutCts.Token;
+        }
         try
         {
             result = await runner.RunAsync(
@@ -105,7 +117,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     // runner skips env when absent.
                     ["projectId"] = projectId ?? string.Empty,
                 },
-                ct);
+                effectiveCt);
             // DIAGNOSTIC: surface what the agent returned so we can
             // debug the "empty modelResponse" bug. Will be removed
             // once we find the root cause.
@@ -119,6 +131,22 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     "Inspect MafAgentRunner.RunAsync to see if response.Messages contains tool calls only.",
                     issue.Id, fullPrompt.Length);
             }
+        }
+        catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true && !ct.IsCancellationRequested)
+        {
+            var timeoutMsg = $"Agent run timed out after {timeoutMinutes} minute(s)";
+            logger.LogWarning("RunAgent({Id}): {Msg}", issue.Id, timeoutMsg);
+            var cur = await issues.GetAsync(issue.Id, ct);
+            if (cur is not null)
+            {
+                var meta = ParseMetadata(cur.MetadataJson);
+                meta["lastError"] = timeoutMsg;
+                meta["modelResponse"] = $"<timed out after {timeoutMinutes}m>";
+                meta["agentTimeout"] = "true";
+                await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                    error: timeoutMsg, metadata: meta, ct: ct);
+            }
+            throw new TimeoutException(timeoutMsg);
         }
         catch (Exception ex)
         {
@@ -140,6 +168,10 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     error: meta["lastError"]?.ToString(), metadata: meta, ct: ct);
             }
             throw;
+        }
+        finally
+        {
+            timeoutCts?.Dispose();
         }
         // Record the model response in issue metadata so the
         // dashboard can show what the agent said, even when

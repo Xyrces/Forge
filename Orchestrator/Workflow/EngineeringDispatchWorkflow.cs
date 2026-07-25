@@ -27,6 +27,7 @@ public sealed class EngineeringDispatchWorkflow
     private readonly RunAgentExecutor _runAgent;
     private readonly CommitPushPrExecutor _commitPushPr;
     private readonly EnqueueWatchExecutor _enqueueWatch;
+    private readonly double _timeoutMinutes;
     private readonly ILogger<EngineeringDispatchWorkflow> _logger;
 
     public EngineeringDispatchWorkflow(
@@ -44,6 +45,7 @@ public sealed class EngineeringDispatchWorkflow
         MemoryExtractionStore extractionStore,
         ILogger<EngineeringDispatchWorkflow> logger,
         string? projectId = null,
+        double timeoutMinutes = 15.0,
         ILoggerFactory? loggerFactory = null)
     {
         // Executor loggers: production passes the real factory so
@@ -55,12 +57,13 @@ public sealed class EngineeringDispatchWorkflow
             nullFactory.CreateLogger<WorktreeExecutor>());
         _runAgent = new RunAgentExecutor(issues, agentRunner, roleRegistry,
             drainMessageBus, events, designArtifacts, artOutputs,
-            nullFactory.CreateLogger<RunAgentExecutor>(), projectId);
+            nullFactory.CreateLogger<RunAgentExecutor>(), projectId, timeoutMinutes);
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
             memoryExtractor, extractionStore,
             nullFactory.CreateLogger<CommitPushPrExecutor>());
         _enqueueWatch = new EnqueueWatchExecutor(issues,
             nullFactory.CreateLogger<EnqueueWatchExecutor>());
+        _timeoutMinutes = timeoutMinutes;
         _logger = logger;
     }
 
