@@ -91,7 +91,12 @@ public sealed class TaskStateMachine
         Add(TaskEvent.RunDied, TaskLifecycleState.StalledRework,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
-        Add(TaskEvent.PrOpened, TaskLifecycleState.PROpen, TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
+        Add(TaskEvent.PrOpened, TaskLifecycleState.PROpen,
+            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
+            // A rework round's workflow re-uses the open PR — the
+            // dispatch-completed report observes PrOpened while the
+            // round record is live (observed live 2026-07-26).
+            TaskLifecycleState.ReworkRunning);
         Add(TaskEvent.ReworkFired, TaskLifecycleState.ReworkQueued,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady, TaskLifecycleState.StalledRework,
             TaskLifecycleState.ParkedInfra, TaskLifecycleState.ReworkQueued);
