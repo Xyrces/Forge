@@ -19,7 +19,12 @@ public static class AgentRunEndpoints
             var recent = await runs.ListRecentAsync(limit: 50, taskId: taskId, ct: ct);
             return Results.Json(new
             {
-                active = active.Select(ToView),
+                // The task detail page renders BOTH buckets — the
+                // active list must honor the same filter or a
+                // concurrent run for an unrelated task shows up as a
+                // phantom "running" row (observed live: task-174's
+                // CoreDev run rendered on task-167's page).
+                active = active.Where(r => taskId is null || r.TaskId == taskId).Select(ToView),
                 recent = recent.Select(ToView),
             });
         });

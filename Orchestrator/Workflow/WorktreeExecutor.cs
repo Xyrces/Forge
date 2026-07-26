@@ -106,6 +106,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             var currentMetadata = ParseMetadata(issue.MetadataJson);
             currentMetadata["worktreePath"] = worktreePath;
             currentMetadata["branch"] = branch;
+
             await issues.TransitionAsync(input.Issue.Id, issue.Status, error: null,
                 metadata: currentMetadata, ct: ct);
         }
@@ -122,10 +123,29 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 return new();
             var d = new Dictionary<string, object>();
             foreach (var p in doc.RootElement.EnumerateObject())
+            {
+                // JSON null = cleared key (delete idiom): absent, not
+                // the literal string "null".
+                if (p.Value.ValueKind == System.Text.Json.JsonValueKind.Null) continue;
                 d[p.Name] = System.Text.Json.JsonSerializer.Deserialize<object>(p.Value.GetRawText())!;
+            }
             return d;
         }
         catch { return new(); }
+    }
+
+    /// <summary>
+    /// Strips characters invalid in git ref names from the task id so it
+    /// can be safely used as a branch name suffix or remote ref segment.
+    /// Reuses the same sanitization logic as <see cref="GitWorktreeService"/>.
+    /// </summary>
+    private static string Sanitize(string s)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var c in s)
+            sb.Append(System.Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+        return sb.ToString();
     }
 }
 

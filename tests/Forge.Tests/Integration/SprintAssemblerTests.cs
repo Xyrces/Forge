@@ -108,6 +108,69 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task BlockerTask_JoinsActiveSprint_WithoutWaitingForDrain()
+    {
+        // Blocker absorption (operator direction 2026-07-25): an
+        // urgent groomed ad-hoc task must join the ACTIVE sprint
+        // immediately — waiting for the current sprint to drain
+        // burned hours + tokens when an infra fix (task-166) queued
+        // behind six doomed tasks.
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var blocker = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "infra blocker fix", Priority: 1,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        var normal = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "normal ad-hoc", Priority: 3,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+
+        await Tick();
+
+        var activeAfter = (await _sprints.GetActiveAsync())!;
+        Assert.Equal(active.Id, activeAfter.Id);                    // sprint NOT replaced
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(blocker.Id, members);                       // blocker absorbed
+        Assert.DoesNotContain(normal.Id, members);                  // P3 ad-hoc waits for assembly
+        // The in-flight tasks are untouched.
+        foreach (var id in aTasks) Assert.Contains(id, members);
+    }
+
+    [Fact]
+    public async Task BlockerFlag_MetadataBlockerTrue_AlsoAbsorbed()
+    {
+        var (_, _, _) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var flagged = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "groomer-flagged blocker", Priority: 3,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["blocker"] = "true" }));
+
+        await Tick();
+
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(flagged.Id, members);
+    }
+
+    [Fact]
+    public async Task UngroomedP1Task_IsNotAbsorbed()
+    {
+        var (_, _, _) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var ungroomed = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "urgent but ungroomed", Priority: 1));
+
+        await Tick();
+
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.DoesNotContain(ungroomed.Id, members);   // grooming gate still applies
+    }
+
+    [Fact]
     public async Task CompletesSprint_WhenMembersTerminal_ThenAssemblesNext()
     {
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
