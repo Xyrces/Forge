@@ -137,20 +137,21 @@ public sealed class GitWorktreeService
         await RunGitAsync("worktree prune", cancellationToken);
 
         // Clean up any per-task sync-base ref created by
-        // SyncWorktreeToRefAsync (task-163).  This is best-effort:
-        // if the ref does not exist (fresh task, or old shared ref
-        // path), git update-ref -d silently returns non-zero which
-        // we swallow at debug level.
+        // SyncWorktreeToRefAsync (task-163).  Check whether the ref
+        // exists first (show-ref --verify --quiet exits 0 when present),
+        // then only delete and log at info if it does.  git update-ref -d
+        // is idempotent (exits 0 even when absent), so we cannot use its
+        // exit code to infer existence.
         var syncRef = "refs/forge/sync-base/" + Sanitize(taskId);
-        var delResult = await RunGitAsync("update-ref -d " + syncRef, cancellationToken);
-        if (delResult.ExitCode != 0)
+        var verifyResult = await RunGitAsync("show-ref --verify --quiet " + syncRef, cancellationToken);
+        if (verifyResult.ExitCode == 0)
         {
-            _logger.LogDebug("Sync-base ref {Ref} not present or already deleted ({Exit})",
-                syncRef, delResult.ExitCode);
+            await RunGitAsync("update-ref -d " + syncRef, cancellationToken);
+            _logger.LogInformation("Deleted per-task sync-base ref {Ref}", syncRef);
         }
         else
         {
-            _logger.LogInformation("Deleted per-task sync-base ref {Ref}", syncRef);
+            _logger.LogDebug("Sync-base ref {Ref} not present; skipping cleanup", syncRef);
         }
     }
 
