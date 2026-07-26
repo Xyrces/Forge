@@ -1,0 +1,128 @@
+@page "/runs"
+@inject HttpClient Http
+@inject NavigationManager Nav
+@implements IDisposable
+@using System.Net.Http.Json
+
+<PageTitle>Agent runs</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Agent runs</h1>
+        <div class="page-header__meta">@(_data is null ? "loading…" : $"{_data.Active.Count} active · {_data.Recent.Count} recent")</div>
+        <div class="page-header__actions">
+            <button class="btn" @onclick="LoadAsync">Refresh</button>
+        </div>
+    </div>
+
+    @if (_data is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else
+    {
+        @if (_data.Active.Count > 0)
+        {
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px;margin-bottom:18px">
+                @foreach (var r in _data.Active)
+                {
+                    <div style="border:1px solid var(--primary);border-radius:10px;padding:12px 14px">
+                        <div style="display:flex;justify-content:space-between;align-items:center">
+                            <span style="display:flex;gap:8px;align-items:center">
+                                <span style="width:8px;height:8px;border-radius:50%;background:var(--primary)"></span>
+                                <strong>@r.Role</strong>
+                            </span>
+                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Elapsed(r)</span>
+                        </div>
+                        <div style="margin-top:6px;font-size:13px">
+                            @if (r.TaskId is not null)
+                            {
+                                <a href="/tasks/@r.TaskId" class="mono">@r.TaskId</a>
+                            }
+                            else
+                            {
+                                <span class="mono">(no task)</span>
+                            }
+                            <span style="color:var(--on-surface-variant)"> · @r.Model</span>
+                        </div>
+                        <div class="mono" style="font-size:11px;color:var(--on-surface-variant);margin-top:4px">run @r.Id · started @r.StartedAt.ToLocalTime().ToString("HH:mm:ss")</div>
+                    </div>
+                }
+            </div>
+        }
+        else
+        {
+            <div class="page-subtitle" style="margin-bottom:14px">No agent runs in flight.</div>
+        }
+
+        <table class="data-table" style="width:100%">
+            <thead>
+                <tr>
+                    <th>When</th><th>Role</th><th>Task</th><th>Duration</th>
+                    <th>Msgs</th><th>Tools</th><th>Status</th><th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _data.Recent)
+                {
+                    <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/runs/{r.Id}"))">
+                        <td class="mono">@r.StartedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                        <td>@r.Role</td>
+                        <td class="mono">@(r.TaskId ?? "—")</td>
+                        <td class="mono">@(r.DurationMs is null ? "—" : Fmt(r.DurationMs.Value))</td>
+                        <td class="mono">@(r.MessageCount?.ToString() ?? "—")</td>
+                        <td class="mono">@(r.ToolCallCount?.ToString() ?? "—")</td>
+                        <td>
+                            <span class="pill @(r.Status == "succeeded" ? "pill--completed" : "pill--failed")">@r.Status</span>
+                            @if (r.Error is not null)
+                            {
+                                <span style="font-size:11px;color:var(--on-surface-variant)" title="@r.Error"> ⚠</span>
+                            }
+                        </td>
+                        <td>@(r.HasTranscript ? "transcript →" : "")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private RunsDto? _data;
+    private System.Threading.Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _timer = new System.Threading.Timer(_ => InvokeAsync(LoadAsync), null,
+            TimeSpan.Zero, TimeSpan.FromSeconds(5));
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _data = await Http.GetFromJsonAsync<RunsDto>("/api/agent-runs");
+            StateHasChanged();
+        }
+        catch { /* keep last good */ }
+    }
+
+    private static string Elapsed(RunViewDto r)
+        => Fmt((long)(DateTime.UtcNow - r.StartedAt).TotalMilliseconds);
+
+    private static string Fmt(long ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes}m";
+        if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m {ts.Seconds}s";
+        return $"{(int)ts.TotalSeconds}s";
+    }
+
+    public void Dispose() => _timer?.Dispose();
+
+    private sealed record RunsDto(List<RunViewDto> Active, List<RunViewDto> Recent);
+    private sealed record RunViewDto(
+        string Id, string? TaskId, string Role, string? Model, string Status,
+        DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
+        int? MessageCount, int? ToolCallCount, int? TextChars,
+        string? Error, bool HasTranscript);
+}

@@ -1,0 +1,401 @@
+@* One compact, glanceable agent-role row (Stitch 'Fleet Control'
+   layout): identity + live status up top; model + concurrency meter
+   + last run in one grid line; heavy detail (territory, tools, model
+   editor, prompt, run history) behind the expand. Used for BOTH
+   engineering and pipeline roles on /agents so every role row reads
+   the same. The parent owns WHICH role is being model-edited
+   (Editing/EditError); the row owns the in-progress input values
+   and reports them via OnSaveModel. *@
+@inject HttpClient Http
+@using System.Net.Http.Json
+
+<div class="card agent-row">
+    <div @onclick="ToggleExpandAsync">
+        <div class="agent-row__top">
+            <div class="agent-row__identity">
+                <span class="agent-row__name">@Name</span>
+                <span class="pill">@Kind</span>
+            </div>
+            <div class="agent-row__status">
+                @if (CurrentRun is not null)
+                {
+                    <div class="agent-row__statusline agent-row__statusline--running">
+                        <span class="agent-row__dot"></span>
+                        <span>Running (@Elapsed(CurrentRun.StartedAt))</span>
+                    </div>
+                    <span class="agent-row__sub">@ProgressText(CurrentRun)</span>
+                    <span class="agent-row__sub">
+                        <a href="/runs/@CurrentRun.Id">run</a>
+                        @if (CurrentRun.TaskId is not null)
+                        {
+                            <text> · <a href="/tasks/@CurrentRun.TaskId">@CurrentRun.TaskId</a></text>
+                        }
+                    </span>
+                }
+                else
+                {
+                    <span class="agent-row__sub" style="font-size:12px;">Idle</span>
+                }
+            </div>
+        </div>
+
+        <div class="agent-row__grid">
+            <div>
+                <div class="agent-row__model">
+                    @if (Model.Provider is null)
+                    {
+                        <span class="agent-row__sub">no LLM</span>
+                    }
+                    else
+                    {
+                        <span class="agent-row__sub">model</span>
+                        <span>@Model.Provider / @Model.Model</span>
+                        <span class="pill @(Model.Source == "override" ? "pill--primary" : "")" style="height:16px; padding:0 6px; font-size:9px;">@Model.Source</span>
+                    }
+                </div>
+                <div class="agent-row__meter">
+                    <div class="agent-row__meter-fill @(Slot.InFlight >= Slot.Max ? "agent-row__meter-fill--full" : "")"
+                         style="width: @(Slot.Max <= 0 ? 0 : 100 * Slot.InFlight / Slot.Max)%"></div>
+                </div>
+                <div class="agent-row__meterlabels">
+                    <span>concurrency</span>
+                    <span>@Slot.InFlight/@Slot.Max</span>
+                </div>
+            </div>
+            <div class="agent-row__lastrun">
+                @if (LastRun is not null)
+                {
+                    <span class="pill @(LastRun.Status == "succeeded" ? "pill--completed" : "pill--failed")">@LastRun.Status</span>
+                    <span class="agent-row__sub">@FormatWhen(LastRun.FinishedAt) · @FormatDuration(LastRun.DurationMs)</span>
+                }
+                else
+                {
+                    <span class="agent-row__sub">no runs yet</span>
+                }
+            </div>
+        </div>
+        <div class="agent-row__chevron">@(_expanded ? "▲ less" : "▼ details")</div>
+    </div>
+
+    @if (_expanded)
+    {
+        <div class="agent-row__detail" @onclick:stopPropagation="true">
+            <table class="data-grid">
+                <tbody>
+                    @if (!string.IsNullOrWhiteSpace(Territory))
+                    {
+                        <tr>
+                            <td style="width:130px;" class="meta-text">Territory</td>
+                            <td class="mono meta-text">@Territory</td>
+                        </tr>
+                    }
+                    @if (Tools is { Length: > 0 })
+                    {
+                        <tr>
+                            <td class="meta-text">Tools</td>
+                            <td>
+                                @foreach (var t in Tools)
+                                {
+                                    <span class="pill" style="margin-right:4px; font-size:11px;">@t</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                    <tr>
+                        <td class="meta-text">Model</td>
+                        <td>
+                            @if (Editing)
+                            {
+                                <div class="role-model-edit">
+                                    <select class="mono" @bind="_editProvider" @bind:after="LoadModelsAsync">
+                                        @foreach (var p in Providers)
+                                        {
+                                            <option value="@p">@p</option>
+                                        }
+                                    </select>
+                                    <input type="text" class="mono" list="models-@Name" @bind="_editModel"
+                                           placeholder="@(_availableModels.Length > 0 ? $"search {_availableModels.Length} models or type any id…" : "model (e.g. kimi-k3)")" />
+                                    <datalist id="models-@Name">
+                                        @foreach (var m in _availableModels)
+                                        {
+                                            <option value="@m"></option>
+                                        }
+                                    </datalist>
+                                    <button class="btn btn--primary" @onclick="SaveModelAsync">Save</button>
+                                    <button class="btn" @onclick="() => OnCancelEdit.InvokeAsync(Name)">Cancel</button>
+                                    @if (EditError is not null)
+                                    {
+                                        <span class="error-text">@EditError</span>
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <span class="mono meta-text">@(Model.Provider is null ? "no LLM" : $"{Model.Provider} / {Model.Model}")</span>
+                                @if (ModelEditable && OverridesEditable)
+                                {
+                                    <button class="btn" style="margin-left:8px; padding:2px 10px; font-size:12px;" @onclick="() => OnBeginEdit.InvokeAsync(Name)">Edit</button>
+                                    @if (Model.Source == "override")
+                                    {
+                                        <button class="btn" style="margin-left:4px; padding:2px 10px; font-size:12px;" @onclick="() => OnClearModel.InvokeAsync(Name)">Clear override</button>
+                                    }
+                                }
+                            }
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="meta-text" style="vertical-align:top;">Skills</td>
+                        <td>
+                            @if (_skillsError is not null)
+                            {
+                                <span class="error-text">@_skillsError</span>
+                            }
+                            else if (_skills is null)
+                            {
+                                <span class="meta-text">loading…</span>
+                            }
+                            else
+                            {
+                                <div class="chip-row">
+                                    <span class="chip-row__label">assigned</span>
+                                    @foreach (var s in _skills.Where(s => s.Roles is { Length: > 0 }))
+                                    {
+                                        var applies = s.Roles!.Contains(Name);
+                                        <button type="button" class="chip @(applies ? "chip--active" : "")"
+                                                disabled="@_skillToggling"
+                                                title="@(s.Enabled ? "" : "disabled — won't load until re-enabled")"
+                                                @onclick="() => ToggleSkillAsync(s)">@s.Name@(s.Enabled ? "" : " (off)")</button>
+                                    }
+                                    @if (_skills.All(s => s.Roles is not { Length: > 0 }))
+                                    {
+                                        <span class="meta-text">none</span>
+                                    }
+                                </div>
+                                <div class="chip-row" style="margin-top:6px;">
+                                    <span class="chip-row__label">global</span>
+                                    @foreach (var s in _skills.Where(s => s.Roles is not { Length: > 0 }))
+                                    {
+                                        <span class="pill pill--outline">@s.Name</span>
+                                    }
+                                </div>
+                                <div class="chip-row__hint" style="margin:6px 0 0;">
+                                    Every role also loads the global skills. Toggle an assigned skill to add/remove this role from its set; edit the set or make a skill global on the <a href="/skills">Skills page</a>.
+                                </div>
+                            }
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="meta-text">Concurrency</td>
+                        <td class="meta-text">
+                            @Slot.InFlight in flight · cap @Slot.Max
+                            <a href="/projects/forge/overview" style="margin-left:8px;">edit caps</a>
+                        </td>
+                    </tr>
+                    @if (Surface is not null)
+                    {
+                        <tr>
+                            <td class="meta-text">Work surface</td>
+                            <td><a href="@Surface" class="meta-text">@Surface</a></td>
+                        </tr>
+                    }
+                    @if (LastRun is not null)
+                    {
+                        <tr>
+                            <td class="meta-text">Last run</td>
+                            <td class="meta-text">
+                                <a href="/runs/@LastRun.Id">@LastRun.Id</a> · @(LastRun.TaskId ?? "—")
+                                @if (!string.IsNullOrEmpty(LastRun.Error))
+                                {
+                                    <div class="error-text mono">@Truncate(LastRun.Error, 160)</div>
+                                }
+                            </td>
+                        </tr>
+                    }
+                    @if (Prompt is not null)
+                    {
+                        <tr>
+                            <td class="meta-text" style="vertical-align:top;">Role prompt</td>
+                            <td>
+                                <details>
+                                    <summary style="cursor:pointer;" class="meta-text">
+                                        <span class="pill" style="font-size:11px;">@Prompt.Source</span>
+                                        <span class="mono" style="margin-left:6px;">@Prompt.Path</span>
+                                    </summary>
+                                    @if (Prompt.Content is null)
+                                    {
+                                        <div class="page-subtitle">prompt file not found</div>
+                                    }
+                                    else
+                                    {
+                                        <pre class="prompt-block">@Prompt.Content</pre>
+                                    }
+                                </details>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Name { get; set; } = "";
+    [Parameter, EditorRequired] public string Kind { get; set; } = "";
+    [Parameter, EditorRequired] public ModelInfo Model { get; set; } = new(null, null, "none");
+    [Parameter, EditorRequired] public SlotInfo Slot { get; set; } = new(0, 1);
+    [Parameter] public RunInfo? CurrentRun { get; set; }
+    [Parameter] public LastRunInfo? LastRun { get; set; }
+    [Parameter] public string? Territory { get; set; }
+    [Parameter] public string[]? Tools { get; set; }
+    [Parameter] public PromptInfo? Prompt { get; set; }
+    [Parameter] public string? Surface { get; set; }
+
+    [Parameter] public bool ModelEditable { get; set; }
+    [Parameter] public bool OverridesEditable { get; set; }
+    [Parameter] public string[] Providers { get; set; } = Array.Empty<string>();
+    [Parameter] public bool Editing { get; set; }
+    [Parameter] public string? EditError { get; set; }
+    [Parameter] public EventCallback<string> OnBeginEdit { get; set; }
+    [Parameter] public EventCallback<string> OnCancelEdit { get; set; }
+    [Parameter] public EventCallback<(string Role, string Provider, string Model)> OnSaveModel { get; set; }
+    [Parameter] public EventCallback<string> OnClearModel { get; set; }
+
+    private bool _expanded;
+    private bool _wasEditing;
+    private string _editProvider = "";
+    private string _editModel = "";
+    private string[] _availableModels = Array.Empty<string>();
+    private List<SkillDto>? _skills;
+    private string? _skillsError;
+    private bool _skillToggling;
+
+    /// <summary>Expanding the row lazily loads the skill catalog once
+    /// (the page polls roles every 5s — skill loads must NOT ride
+    /// that poll).</summary>
+    private async Task ToggleExpandAsync()
+    {
+        _expanded = !_expanded;
+        if (_expanded && _skills is null && _skillsError is null)
+            await LoadSkillsAsync();
+    }
+
+    private async Task LoadSkillsAsync()
+    {
+        try
+        {
+            _skills = await Http.GetFromJsonAsync<List<SkillDto>>("/api/skills");
+            _skillsError = null;
+        }
+        catch (Exception ex)
+        {
+            _skillsError = ex.Message;
+        }
+    }
+
+    /// <summary>Add/remove THIS role from a skill's role set. The
+    /// skill row is the source of truth — we PATCH the whole set
+    /// (many-to-many lives on the skill, not the role).</summary>
+    private async Task ToggleSkillAsync(SkillDto skill)
+    {
+        if (_skillToggling || skill.Roles is null) return;
+        _skillToggling = true;
+        try
+        {
+            var roles = skill.Roles.Contains(Name)
+                ? skill.Roles.Where(r => r != Name).ToArray()
+                : skill.Roles.Append(Name).OrderBy(r => r).ToArray();
+            var resp = await Http.PatchAsJsonAsync($"/api/skills/{skill.Id}", new { roles });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _skillsError = await resp.Content.ReadAsStringAsync();
+                return;
+            }
+            _skillsError = null;
+            _skills = await Http.GetFromJsonAsync<List<SkillDto>>("/api/skills");
+        }
+        catch (Exception ex)
+        {
+            _skillsError = ex.Message;
+        }
+        finally
+        {
+            _skillToggling = false;
+        }
+    }
+
+    private sealed record SkillDto(string Id, string Name, string[]? Roles, bool Enabled);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // Entering edit mode: seed the inputs from the current model
+        // and load the provider's available-model catalog.
+        if (Editing && !_wasEditing)
+        {
+            _editProvider = Model.Provider ?? (Providers.FirstOrDefault() ?? "");
+            _editModel = Model.Model ?? "";
+            await LoadModelsAsync();
+        }
+        _wasEditing = Editing;
+    }
+
+    /// <summary>Available models for the selected provider, fetched
+    /// lazily (only while editing — the page polls roles every 5s,
+    /// and this must NOT ride that poll).</summary>
+    private async Task LoadModelsAsync()
+    {
+        try
+        {
+            var resp = await Http.GetFromJsonAsync<ProviderModelsResponse>(
+                $"/api/agents/providers/{Uri.EscapeDataString(_editProvider)}/models");
+            _availableModels = resp?.Models ?? Array.Empty<string>();
+        }
+        catch
+        {
+            _availableModels = Array.Empty<string>();
+        }
+        StateHasChanged();
+    }
+
+    private sealed record ProviderModelsResponse(string Provider, string[] Models);
+
+    private Task SaveModelAsync()
+        => OnSaveModel.InvokeAsync((Name, _editProvider, _editModel));
+
+    private static string Elapsed(DateTime since)
+    {
+        var e = DateTime.UtcNow - since;
+        return e.TotalMinutes >= 1 ? $"{(int)e.TotalMinutes}m{e.Seconds:D2}s" : $"{(int)e.TotalSeconds}s";
+    }
+
+    private static string ProgressText(RunInfo run)
+    {
+        var msgs = run.MessageCount ?? 0;
+        var tools = run.ToolCallCount ?? 0;
+        if (msgs == 0 && tools == 0)
+        {
+            var waiting = run.LastActivityAt is null ? Elapsed(run.StartedAt) : Elapsed(run.LastActivityAt.Value);
+            return $"no model output yet — waiting {waiting} (provider may be hanging)";
+        }
+        var ago = run.LastActivityAt is null ? "" : $" · active {Elapsed(run.LastActivityAt.Value)} ago";
+        return $"{msgs} msgs · {tools} tools{ago}";
+    }
+
+    private static string FormatWhen(DateTime? when)
+        => when is null ? "—" : when.Value.ToString("MM-dd HH:mm:ss");
+
+    private static string FormatDuration(long? ms)
+        => ms is null ? "" : TimeSpan.FromMilliseconds(ms.Value).TotalMinutes >= 1
+            ? $"{TimeSpan.FromMilliseconds(ms.Value).TotalMinutes:F1}m"
+            : $"{TimeSpan.FromMilliseconds(ms.Value).TotalSeconds:F0}s";
+
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
+
+    public sealed record ModelInfo(string? Provider, string? Model, string Source);
+    public sealed record SlotInfo(int InFlight, int Max);
+    public sealed record RunInfo(string Id, string? TaskId, DateTime StartedAt,
+        DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount);
+    public sealed record LastRunInfo(string Id, string? TaskId, string Status,
+        DateTime? FinishedAt, long? DurationMs, string? Error);
+    public sealed record PromptInfo(string Source, string? Path, string? Content);
+}

@@ -3,6 +3,7 @@
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @inject HttpClient Http
+@inject NavigationManager Nav
 @implements IDisposable
 @using Forge.Dashboard.Features.Specs
 @using System.Net.Http.Json
@@ -59,7 +60,10 @@
             <tbody>
                 @foreach (var row in SpecsStore.Value.Rows.Take(50))
                 {
-                    <tr>
+                    @* Row click drills into the spec detail (decomposition
+                       tree, groom runs, full action bar); the inline
+                       buttons stop propagation so they don't navigate. *@
+                    <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/specs/{row.Id}"))">
                         <td class="mono">@row.Id</td>
                         <td>@row.Title</td>
                         <td>
@@ -68,11 +72,12 @@
                         <td class="mono">v@row.CurrentVersion</td>
                         <td class="mono">@(row.ParentIssueId ?? row.ParentSpecId ?? "—")</td>
                         <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
-                        <td>
-                            @* Non-visual fast-path: Draft -> Approved (operator review),
-                               then Approved/Designed/AssetReady -> Groom (decompose into
-                               stories/tasks). Mirrors /api/specs/{id}/actions. *@
-                            @if (string.Equals(row.Status, "Draft", StringComparison.OrdinalIgnoreCase))
+                        <td @onclick:stopPropagation="true">
+                            @* Non-visual fast-path: Draft | ReadyForDesign | NeedsRevision
+                               -> Approved (operator review), then
+                               Approved/Designed/AssetReady -> Groom (decompose
+                               into stories/tasks). Mirrors /api/specs/{id}/actions. *@
+                            @if (row.Status is "Draft" or "ReadyForDesign" or "NeedsRevision")
                             {
                                 <button class="btn btn--small btn--primary" @onclick="@(() => Approve(row.Id))" disabled="@_acting">
                                     Approve

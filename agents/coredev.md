@@ -70,3 +70,7 @@ Rules:
 **Good:** read the endpoint file → grep the store method → edit → `dotnet build` → `dotnet test` → commit → push.
 
 **Bad:** rewriting a file you haven't read → batch-editing five files in one tool call → skipping the build → pushing without tests.
+
+## Out-of-scope discoveries
+
+If you find work that matters but is NOT part of your task (a bug elsewhere, tech debt, a missing test for adjacent code), do NOT fix it in this run — call `file_followup` with a self-contained title + description and keep working. Filed follow-ups go through technical grooming before any sprint; the groomer closes duplicates. Never file a follow-up for work your current task already covers.

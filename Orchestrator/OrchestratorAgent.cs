@@ -19,15 +19,44 @@ public sealed class OrchestratorAgent : IAgent
     private readonly IWorkflowDispatcher _dispatcher;
     private readonly IDashboardEventBus _events;
     private readonly ILogger<OrchestratorAgent> _logger;
+    private readonly ILoggerFactory? _loggerFactory;
     private readonly ConcurrentDictionary<string, ProjectDispatchBundle> _bundles = new();
     private SpawnerOptions _spawnerOptions = new();
-    private SemaphoreSlim _concurrencyLimiter = new(4);
+    private readonly Slots.SlotTable _slots;
     private readonly int _maxRetryCount;
     // GitHub rate-limit cooldown for the PR-watch path. When Octokit
     // reports RateLimitExceeded, watch issues are skipped until this
     // time so the loop doesn't hammer the API every dispatch cycle.
     private DateTime _githubRateLimitedUntil = DateTime.MinValue;
     private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
+    // Watch sweep cadence. Previously every dispatch cycle spawned a
+    // parallel Task.Run per Pending watch, and ProcessWatchTaskAsync
+    // looped internally every 30s with 3 API calls per iteration —
+    // loops multiplied unboundedly (watches are never claimed, so they
+    // stay Pending) and vaporized the 5000-req/hr GitHub quota. Now
+    // watches are polled in ONE sequential sweep every WatchSweepInterval:
+    // 3 calls per watch per sweep (2 watches -> ~24 calls/hr).
+    private DateTime _nextWatchSweepUtc = DateTime.MinValue;
+    private static readonly TimeSpan WatchSweepInterval = TimeSpan.FromMinutes(15);
+    // LLM 429 cooldowns for the engineering dispatch path, keyed by
+    // (provider, model) — quotas live at that boundary, so a 429 from
+    // minimax must not freeze tasks that would run on a different
+    // model (e.g. kimi-k3 reserved for grooming/review). A 429
+    // re-queues the task (not a code failure) and pauses new
+    // dispatches FOR THAT MODEL ONLY.
+    private readonly ModelRateLimitTracker _modelCooldowns;
+    private Agents.LlmConfig? _llmConfig;
+    private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
+    // In-flight dev dispatches. The cycle fire-and-forgets runs via
+    // Task.Run so the watch sweep isn't starved — but without this
+    // guard, every poll tick can claim MORE work before an earlier
+    // run fails (the 429 cooldown is only set when the run fails),
+    // which produced burst 429s and same-task double-claims 1ms
+    // apart (observed live 2026-07-24). Per-task dedup lives here;
+    // per-ROLE parallelism caps live in the SlotTable (a task only
+    // claims when its role has a free slot), so e.g. 2 coredevs can
+    // work two unblocked tasks while a clientdev slot stays open.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -42,7 +71,10 @@ public sealed class OrchestratorAgent : IAgent
         AgentMessageBus messageBus,
         IWorkflowDispatcher dispatcher,
         IDashboardEventBus events,
-        ILogger<OrchestratorAgent> logger)
+        ILogger<OrchestratorAgent> logger,
+        ILoggerFactory? loggerFactory = null,
+        Slots.SlotTable? slots = null,
+        ModelRateLimitTracker? modelCooldowns = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -52,7 +84,9 @@ public sealed class OrchestratorAgent : IAgent
         _dispatcher = dispatcher;
         _events = events;
         _logger = logger;
-        _concurrencyLimiter = new SemaphoreSlim(4);
+        _loggerFactory = loggerFactory;
+        _slots = slots ?? new Slots.SlotTable();
+        _modelCooldowns = modelCooldowns ?? new ModelRateLimitTracker();
         _maxRetryCount = 1;
     }
 
@@ -99,18 +133,43 @@ public sealed class OrchestratorAgent : IAgent
             try
             {
                 var activeSprint = await bundle.Sprints.GetActiveAsync(cancellationToken);
-                var ready = await bundle.IssueStore.ReadyAsync(_spawnerOptions.MaxConcurrentSessions, activeSprint?.Id, cancellationToken);
-                if (ready.Count == 0) continue;
 
-                var watchTasks = ready.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
+                // Fetch the full ready queue (limit 0) and filter in
+                // memory: containers (epic/story) clog the queue head
+                // when the LIMIT is applied before filtering, so real
+                // tasks behind them never dispatch (found live: 7
+                // stories + a watch starved 4 feature tasks).
+                var allReady = await bundle.IssueStore.ReadyAsync(0, sprintId: null, cancellationToken);
+
+                // Watches are lifecycle subscriptions, not sprint
+                // work: they sweep from the FULL queue regardless of
+                // sprint state (a sprint-scoped fetch would starve
+                // them — watches are never linked to sprints).
+                var watchTasks = allReady.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
                 if (watchTasks.Count > 0 && DateTime.UtcNow < _githubRateLimitedUntil)
                 {
                     _logger.LogDebug("Dispatch cycle: skipping {N} watch issues — GitHub rate-limit cooldown until {Until:HH:mm:ss}",
                         watchTasks.Count, _githubRateLimitedUntil);
                     watchTasks = new List<IssueRecord>();
                 }
-                foreach (var watch in watchTasks)
-                    _ = Task.Run(() => ProcessWatchIssueAsync(watch, bundle, cancellationToken), cancellationToken);
+                if (watchTasks.Count > 0 && DateTime.UtcNow >= _nextWatchSweepUtc)
+                {
+                    _nextWatchSweepUtc = DateTime.UtcNow + WatchSweepInterval;
+                    await RunWatchSweepAsync(watchTasks, bundle, cancellationToken);
+                }
+
+                // Sprint flow gate: ALL engineering work happens inside
+                // a sprint. No active sprint => the SprintAssembler
+                // hasn't ingested work yet (or nothing is eligible);
+                // until then only design/planning stages run.
+                if (activeSprint is null)
+                {
+                    _logger.LogDebug("Dispatch cycle: no active sprint (project={Project}) — engineering dispatch gated off", bundle.Project.Id);
+                    continue;
+                }
+                var sprintMemberIds = new HashSet<string>(
+                    await bundle.Sprints.GetIssueIdsAsync(activeSprint.Id, cancellationToken),
+                    StringComparer.Ordinal);
 
                 // Engineering dispatch skips pipeline containers.
                 // Epics and stories feed the spec -> groom chain;
@@ -120,14 +179,64 @@ public sealed class OrchestratorAgent : IAgent
                 // entire pipeline.) All other types dispatch,
                 // preserving operator-enqueued type names (dev, ecs,
                 // ui, bug, ...).
-                var devTasks = ready.Where(i => !AgentTaskTypes.IsContainer(i.Type)).ToList();
-                var skipped = ready.Count - watchTasks.Count - devTasks.Count;
-                if (skipped > 0)
+                var ready = allReady.Where(i => i.Type != AgentTaskTypes.PrWatch
+                    && !AgentTaskTypes.IsContainer(i.Type)
+                    && sprintMemberIds.Contains(i.Id)
+                    && !_inFlight.ContainsKey(i.Id))
+                    .ToList();
+                // Per-(provider, model) 429 cooldowns: skip only the
+                // tasks whose model is cooling down. A minimax 429
+                // must not starve a task that would run on kimi-k3.
+                var coolingModels = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+                var claimable = new List<IssueRecord>(ready.Count);
+                foreach (var t in ready)
                 {
-                    _logger.LogDebug("Dispatch cycle: skipped {N} pipeline container issues (epic/story are not dispatchable)", skipped);
+                    var mk = ResolveModelKey(t.Type);
+                    var until = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
+                    if (until is null) claimable.Add(t);
+                    else coolingModels[mk.Provider + "/" + mk.Model] = until.Value;
                 }
-                foreach (var dev in devTasks)
-                    _ = Task.Run(() => DispatchSingleTaskAsync(dev, bundle, cancellationToken), cancellationToken);
+                if (claimable.Count == 0 && coolingModels.Count > 0)
+                {
+                    foreach (var (model, until) in coolingModels)
+                        _logger.LogDebug("Dispatch cycle: {N} dev task(s) skipped — model {Model} cooling down until {Until:HH:mm:ss}",
+                            ready.Count, model, until);
+                    continue;
+                }
+                // Per-role parallelism: every ready unblocked sprint
+                // task competes for ITS role's slot pool (coredev,
+                // clientdev, qa, reviewer). A full pool skips just
+                // that role's tasks — other roles keep claiming.
+                foreach (var dev in claimable)
+                {
+                    var role = ResolveRoleName(dev.Type);
+                    EnsureSlotCap(bundle.Project, role);
+                    var slot = await _slots.TryAcquireAsync(bundle.Project.Id, role, TimeSpan.Zero, cancellationToken);
+                    if (slot is null)
+                    {
+                        _logger.LogDebug("Dispatch cycle: role '{Role}' at cap (project={Project}) — {Id} waits for a free slot",
+                            role, bundle.Project.Id, dev.Id);
+                        continue;
+                    }
+                    if (!_inFlight.TryAdd(dev.Id, 0))
+                    {
+                        _logger.LogDebug("Dispatch cycle: {Id} already in flight — skipping double-claim", dev.Id);
+                        await slot.DisposeAsync();
+                        continue;
+                    }
+                    _ = Task.Run(async () =>
+                    {
+                        await using (slot)
+                        {
+                            try { await DispatchSingleTaskAsync(dev, bundle, cancellationToken); }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "Dispatch for {Id} faulted", dev.Id);
+                            }
+                            finally { _inFlight.TryRemove(dev.Id, out _); }
+                        }
+                    }, cancellationToken);
+                }
             }
             catch (Exception ex)
             {
@@ -161,34 +270,84 @@ public sealed class OrchestratorAgent : IAgent
         RepoUrl = r.RepoUrl,
         DefaultBranch = r.DefaultBranch,
         Root = string.Empty,
+        Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
     };
 
-    private async Task<Result> ProcessWatchIssueAsync(IssueRecord watchIssue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    private static bool IsLlmRateLimited(Exception ex)
     {
-        try
+        for (var e = ex; e is not null; e = e.InnerException)
         {
-            await bundle.PrWatcher.ProcessWatchTaskAsync(watchIssue, cancellationToken);
-            return new Result(true, $"Watch {watchIssue.Id} complete");
+            if (e is System.ClientModel.ClientResultException cre && cre.Status == 429) return true;
+            var msg = e.Message;
+            if (!msg.Contains("429")) continue;
+            if (msg.Contains("Too Many Requests", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("TooManyRequests", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Status: 429"))
+                return true;
         }
-        catch (Exception ex)
+        return false;
+    }
+
+    /// <summary>
+    /// One sequential poll over every Pending watch issue — a single
+    /// GitHub burst per <see cref="WatchSweepInterval"/> instead of
+    /// unbounded parallel poll loops. Each watch first gets its
+    /// reviewer pass (ReviewerDispatcher records the verdict in the
+    /// watch metadata), then the merge/rework decision
+    /// (PRWatcher.PollWatchOnceAsync). A 429 aborts the sweep early
+    /// and arms the cooldown. Watch issues stay Pending between
+    /// sweeps (by design: the watch IS a long-lived subscription).
+    /// </summary>
+    private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Watch sweep: polling {N} watch issue(s) (project={Project})",
+            watchTasks.Count, bundle.Project.Id);
+        foreach (var watch in watchTasks)
         {
-            if (ex is Octokit.RateLimitExceededException)
+            if (cancellationToken.IsCancellationRequested) return;
+            try
+            {
+                // Review first (verdict metadata), then decide. The
+                // reviewer is constructed per sweep — it shares the
+                // bundle's stores + the shared agent runner.
+                var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+                    bundle.IssueStore, bundle.GitHub, _runner,
+                    _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
+                        ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance);
+                var fresh = watch;
+                var outcome = await reviewer.ReviewOnceAsync(watch, cancellationToken);
+                if (outcome is not null)
+                {
+                    // The review updated the watch's metadata; re-read
+                    // so the poll sees the fresh verdict.
+                    fresh = await bundle.IssueStore.GetAsync(watch.Id, cancellationToken) ?? watch;
+                }
+                var poll = await bundle.PrWatcher.PollWatchOnceAsync(fresh, cancellationToken);
+                _logger.LogDebug("Watch {Id}: {Outcome}", watch.Id, poll);
+            }
+            catch (Octokit.RateLimitExceededException)
             {
                 _githubRateLimitedUntil = DateTime.UtcNow + GitHubRateLimitCooldown;
-                _logger.LogWarning("Watch issue {Id}: GitHub rate limit exceeded; backing off watch processing for {Cooldown} (project={Project})",
-                    watchIssue.Id, GitHubRateLimitCooldown, bundle.Project.Id);
+                _logger.LogWarning("Watch sweep: GitHub rate limit exceeded; backing off for {Cooldown} (project={Project})",
+                    GitHubRateLimitCooldown, bundle.Project.Id);
+                return;
             }
-            else
+            catch (Exception ex)
             {
-                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watchIssue.Id, bundle.Project.Id);
+                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watch.Id, bundle.Project.Id);
             }
-            return new Result(false, ex.Message);
+            // Courtesy delay: GitHub's secondary rate limit dislikes
+            // rapid-fire request bursts even well under the quota.
+            try { await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken); }
+            catch (OperationCanceledException) { return; }
         }
     }
 
     public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
-        await _concurrencyLimiter.WaitAsync(cancellationToken);
+        // Concurrency is owned by the caller: the dispatch loop holds
+        // a per-role SlotTable slot for the whole run.
         var startedAt = DateTime.UtcNow;
         try
         {
@@ -220,6 +379,15 @@ public sealed class OrchestratorAgent : IAgent
             }
             catch (Exception ex)
             {
+                if (IsLlmRateLimited(ex))
+                {
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
+                    return new Result(false, "llm-rate-limited");
+                }
                 _logger.LogError(ex, "Workflow dispatch for {Id} threw", preClaimed.Id);
                 await HandleFailureAsync(preClaimed, ex, bundle, cancellationToken);
                 return new Result(false, ex.Message);
@@ -229,8 +397,54 @@ public sealed class OrchestratorAgent : IAgent
             // Result message (preserves the old sequential contract).
             var after = await bundle.IssueStore.GetAsync(preClaimed.Id, cancellationToken);
             var lastError = after?.GetMetadata("lastError");
+            // lastError is written by RunAgentExecutor on a failed
+            // run and NEVER cleared by requeues — so a value from an
+            // EARLIER dispatch must not fail THIS one (observed live:
+            // task-153 completed as a verified no-op, then flipped to
+            // Failed over a stale error from yesterday's run). Only a
+            // failure stamped during this dispatch counts.
+            var lastErrorFresh =
+                DateTimeOffset.TryParse(after?.GetMetadata("lastErrorAt"), out var lea)
+                && lea.UtcDateTime >= startedAt.AddSeconds(-2);
+            if (!string.IsNullOrEmpty(lastError) && !lastErrorFresh)
+            {
+                _logger.LogInformation("Issue {Id}: ignoring stale lastError from {At} (this dispatch started {Started:O})",
+                    preClaimed.Id, after?.GetMetadata("lastErrorAt"), startedAt);
+                await UpdateMetadataAsync(preClaimed.Id, m =>
+                {
+                    // metadata is upsert-merge only: JSON null is the
+                    // delete idiom (GetMetadata surfaces it as empty).
+                    m["lastError"] = null!;
+                    m["lastErrorAt"] = null!;
+                    return m;
+                }, bundle, cancellationToken);
+                lastError = null;
+            }
             if (!string.IsNullOrEmpty(lastError))
             {
+                // A recorded 429 with a completed PR is noise: the
+                // agent's LLM call rate-limited mid-conversation but
+                // the workflow still committed + pushed + opened the
+                // PR. Never requeue those — that would redispatch
+                // finished work (observed live: two tasks requeued
+                // with PRs #6/#7 already open). Also never requeue a
+                // task that is ALREADY terminal: a stale long-running
+                // dispatch can finish minutes after the watch merged
+                // its PR (observed live 2026-07-23: the 18-minute
+                // rework run for task-10 finished after the merge and
+                // the 429 path flipped Completed back to Pending,
+                // leaving a completed sprint with a todo task).
+                var reachedPr = after?.DispatchCheckpoint >= DispatchCheckpoint.PrOpened;
+                var alreadyTerminal = after?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed;
+                if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
+                {
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
+                    return new Result(false, "llm-rate-limited");
+                }
                 _logger.LogWarning("Workflow dispatch for {Id} reported failure: {Err}",
                     preClaimed.Id, lastError);
                 var ex = new InvalidOperationException(lastError);
@@ -271,17 +485,58 @@ public sealed class OrchestratorAgent : IAgent
             await SafeTransitionAsync(issue.Id, IssueStatus.Failed, "cancelled", bundle, cancellationToken);
             return new Result(false, "cancelled");
         }
-        finally
-        {
-            _concurrencyLimiter.Release();
-        }
     }
 
     internal void BindOptions(AgentOptions options)
     {
         _spawnerOptions = options.Spawner;
-        _concurrencyLimiter.Dispose();
-        _concurrencyLimiter = new SemaphoreSlim(Math.Max(1, options.Spawner.MaxConcurrentSessions));
+        // Provider+model map for per-model 429 cooldowns. Only names
+        // are used (cooldown keys) — secret resolution stays with the
+        // real chat-client factory. Invalid/absent config degrades to
+        // a single "default" bucket (the old global-cooldown behavior).
+        try { _llmConfig = Agents.LlmConfigAdapter.FromOptions(options.Llm); }
+        catch (Exception ex)
+        {
+            _llmConfig = null;
+            _logger.LogWarning("LLM role-model config unusable ({Err}) — per-model 429 cooldowns degrade to a single global bucket", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Resolve the (provider, model) a task would run on — the cooldown
+    /// key. Falls back to ("default","default") when no LLM config is
+    /// bound (tests) or the role's entry is broken, which reproduces
+    /// the pre-per-model global cooldown for that bucket.
+    /// </summary>
+    private (string Provider, string Model) ResolveModelKey(string taskType)
+    {
+        if (_llmConfig is null) return ("default", "default");
+        try
+        {
+            var (provider, model) = _llmConfig.Resolve(RoleAgentRegistry.FromTaskType(taskType));
+            return (provider.Name, model);
+        }
+        catch (InvalidOperationException)
+        {
+            return ("default", "default");
+        }
+    }
+
+    /// <summary>Task type → slot-pool role name (coredev/clientdev/qa/reviewer).</summary>
+    private string ResolveRoleName(string taskType)
+        => _roleRegistry.ForType(RoleAgentRegistry.FromTaskType(taskType)).AgentName;
+
+    /// <summary>
+    /// Lazily configure a project's role pool from its persisted role
+    /// caps (falling back to <see cref="DefaultProjectRoles"/>). Startup
+    /// and the roles API pre-configure; this covers runtime-added
+    /// projects and ad-hoc role names (e.g. "qa") so TryAcquire never
+    /// throws on an unconfigured pool.
+    /// </summary>
+    private void EnsureSlotCap(Configuration.ProjectOptions project, string role)
+    {
+        if (_slots.MaxFor(project.Id, role) == 0)
+            _slots.Configure(project.Id, role, DefaultProjectRoles.MaxFor(project.Roles, role));
     }
 
     private async Task HandleFailureAsync(IssueRecord issue, Exception ex, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
