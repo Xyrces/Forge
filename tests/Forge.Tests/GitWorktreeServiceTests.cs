@@ -30,6 +30,60 @@ public class GitWorktreeServiceTests : IDisposable
         try { Directory.Delete(_bareDir, recursive: true); } catch { }
     }
 
+    private static int RunGit(string dir, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = dir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        return p.ExitCode;
+    }
+
+    private static GitResult RunGitForResult(string dir, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = dir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        p.WaitForExit();
+        return new GitResult(p.ExitCode, p.StandardOutput.ReadToEnd().Trim());
+    }
+
+    private readonly record struct GitResult(int ExitCode, string Stdout);
+
+    private void InitRepo(string dir)
+    {
+        RunGit(dir, "init -q -b main");
+        RunGit(dir, "config user.email test@example.com");
+        RunGit(dir, "config user.name Test");
+        File.WriteAllText(Path.Combine(dir, "README.md"), "# init");
+        RunGit(dir, "add -A");
+        RunGit(dir, "commit -q -m initial");
+
+        // Create a bare clone so we have a valid 'origin' remote
+        // that the sync method can fetch from
+        RunGit(dir, $"clone --bare {dir} {_bareDir}");
+        RunGit(dir, $"remote add origin {_bareDir}");
+        RunGit(dir, "fetch origin");
+    }
+
     [Fact]
     public async Task Commit_WithNoChanges_ReturnsNoChangesOutcome()
     {
@@ -130,6 +184,40 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RemoveAsync_DeletesSyncBaseRef_WhenPresent()
+    {
+        var taskId = "t-sync-cleanup";
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync(taskId, "main");
+
+        // Plant a per-task sync-base ref, exactly as SyncWorktreeToRefAsync would.
+        var localRef = "refs/forge/sync-base/" + taskId;
+        RunGit(_workDir, $"update-ref {localRef} HEAD");
+
+        // Confirm the ref exists before removal.
+        var beforeVerify = RunGitForResult(_workDir, $"show-ref --verify {localRef}");
+        Assert.Equal(0, beforeVerify.ExitCode);
+
+        await _service.RemoveAsync(taskId);
+
+        // Confirm the ref is gone after removal.
+        var afterVerify = RunGitForResult(_workDir, $"show-ref --verify {localRef}");
+        Assert.NotEqual(0, afterVerify.ExitCode);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_DoesNotThrow_WhenSyncBaseRefAbsent()
+    {
+        var taskId = "t-no-sync-ref";
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync(taskId, "main");
+
+        // No sync-base ref planted — should not throw.
+        var ex = await Record.ExceptionAsync(() => _service.RemoveAsync(taskId));
+        Assert.Null(ex);
+    }
+
+    [Fact]
     public async Task SyncWorktreeToRefAsync_DivergedBranch_SyncsToRef()
     {
         var initialSha = await GetHeadShaAsync(_workDir);
@@ -200,61 +288,6 @@ public class GitWorktreeServiceTests : IDisposable
         Assert.Contains("detached HEAD", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    private void InitRepo(string dir)
-    {
-        RunGit(dir, "init -q -b main");
-        RunGit(dir, "config user.email test@example.com");
-        RunGit(dir, "config user.name Test");
-        File.WriteAllText(Path.Combine(dir, "README.md"), "# init");
-        RunGit(dir, "add -A");
-        RunGit(dir, "commit -q -m initial");
-
-        RunGit(dir, $"clone --bare {dir} {_bareDir}");
-        RunGit(dir, $"remote add origin {_bareDir}");
-        RunGit(dir, "fetch origin");
-    }
-
-    /// <summary>
-    /// Synchronous git helper. Drains both stdout and stderr before
-    /// WaitForExit to prevent pipe-buffer deadlocks.
-    /// </summary>
-    private static int RunGit(string dir, string args)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "git",
-            Arguments = args,
-            WorkingDirectory = dir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi)!;
-        var stdout = p.StandardOutput.ReadToEnd();
-        var stderr = p.StandardError.ReadToEnd();
-        p.WaitForExit();
-        return p.ExitCode;
-    }
-
-    private async Task<string> GetHeadShaAsync(string repoPath)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "git",
-            Arguments = "rev-parse HEAD",
-            WorkingDirectory = repoPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi)!;
-        var stdout = await p.StandardOutput.ReadToEndAsync();
-        var stderr = await p.StandardError.ReadToEndAsync();
-        await p.WaitForExitAsync();
-        return stdout.Trim();
-    }
     [Fact]
     public async Task SyncWorktreeToRefAsync_ForceUpdatedRef_SyncsAgain()
     {
@@ -304,5 +337,24 @@ public class GitWorktreeServiceTests : IDisposable
         await _service.SyncWorktreeToRefAsync(worktreePath, "t-force", "origin/agent/task-force");
         var afterSecondSync = await GetHeadShaAsync(worktreePath);
         Assert.Equal(round2Sha, afterSecondSync);
+    }
+
+    private async Task<string> GetHeadShaAsync(string repoPath)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = "rev-parse HEAD",
+            WorkingDirectory = repoPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        var stdout = await p.StandardOutput.ReadToEndAsync();
+        var stderr = await p.StandardError.ReadToEndAsync();
+        await p.WaitForExitAsync();
+        return stdout.Trim();
     }
 }
