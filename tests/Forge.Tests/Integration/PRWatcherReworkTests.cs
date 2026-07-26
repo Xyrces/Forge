@@ -93,6 +93,52 @@ public class PRWatcherReworkTests : IDisposable
     private static PullRequest Pr(int n) => new(n);
 
     [Fact]
+    public async Task GreenApprovedButConflicting_RoutesToConflictRework_NoMergeAttempt()
+    {
+        // Observed live 2026-07-26 (PRs #42/#43): green + approved at
+        // the current head, but CONFLICTING after a sibling PR merged
+        // — Octokit's merge returns false and the watch retried the
+        // doomed merge every sweep for 8+ hours (sprint could never
+        // complete). The green path must route to the conflict sync
+        // round, and must NOT attempt the merge.
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => false);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
+        Assert.Equal(0, gh.MergeCalls);                              // no doomed merge attempt
+        var taskAfter = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Pending, taskAfter.Status);
+        Assert.Equal("1", taskAfter.GetMetadata("reworkAttempts"));
+        Assert.Contains("conflicts with the base branch", taskAfter.GetMetadata("reworkReason"));
+    }
+
+    [Fact]
+    public async Task MergeRefusedThenMergeableResolvesFalse_RoutesToConflictRework()
+    {
+        // Mergeable was null at first read (still computing); the
+        // merge attempt 405s; the re-check lands as conflicting.
+        var gh = new FakeGitHub { Ci = CommitState.Success, MergeResult = false };
+        var (task, watch) = await SeedAsync();
+        var calls = 0;
+
+        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => ++calls == 1 ? null : false);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
+        Assert.Equal(1, gh.MergeCalls);                              // one attempt, then routed
+        Assert.Contains("conflicts", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkReason"));
+    }
+
+    [Fact]
     public async Task MergeGreen_GateHeld_NoMerge_WatchAndTaskUntouched_ThenReleaseMerges()
     {
         var bootstrap = new Forge.Core.IssueStore(Path.Combine(_workDir, "memory.db"));

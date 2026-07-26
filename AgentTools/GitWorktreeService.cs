@@ -53,7 +53,6 @@ public sealed class GitWorktreeService
         return worktreePath;
     }
 
-
     /// <summary>
     /// Syncs an existing worktree's branch to a given remote ref by
     /// fetching into a per-task ref namespace and resetting --hard.
@@ -116,6 +115,7 @@ public sealed class GitWorktreeService
         _logger.LogInformation("Synced worktree {Path} branch {Branch} to remote ref {RemoteRef} via {LocalRef}",
             worktreePath, branch, remoteRef, localRef);
     }
+
 
     public async Task RemoveAsync(string taskId, CancellationToken cancellationToken = default)
     {
@@ -302,13 +302,7 @@ public sealed class GitWorktreeService
     }
 
     private static string Sanitize(string s)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sb = new StringBuilder(s.Length);
-        foreach (var c in s)
-            sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
-        return sb.ToString();
-    }
+        => GitRefNames.Sanitize(s);
 
     private readonly record struct GitResult(int ExitCode, string Stdout, string Stderr);
 }
