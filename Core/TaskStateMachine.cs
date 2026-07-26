@@ -82,7 +82,12 @@ public sealed class TaskStateMachine
         };
 
         Add(TaskEvent.Dispatched, TaskLifecycleState.Dispatching,
-            TaskLifecycleState.Pending, TaskLifecycleState.ReworkQueued);
+            TaskLifecycleState.Pending, TaskLifecycleState.ReworkQueued,
+            // Re-dispatch after a died/timed-out run (the task
+            // requeues and is claimed again — observed live
+            // 2026-07-26: Dispatching+Dispatched and
+            // StalledRework+Dispatched violations).
+            TaskLifecycleState.Dispatching, TaskLifecycleState.StalledRework);
         Add(TaskEvent.RunCompletedDiff, TaskLifecycleState.PROpen,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);

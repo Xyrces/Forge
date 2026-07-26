@@ -46,6 +46,9 @@ public class TaskStateMachineTests : IDisposable
     [Theory]
     // Happy paths from the 2026-07-25/26 incident trail.
     [InlineData(TaskEvent.Dispatched, TaskLifecycleState.Pending, TaskLifecycleState.Dispatching, true)]
+    [InlineData(TaskEvent.Dispatched, TaskLifecycleState.ReworkQueued, TaskLifecycleState.Dispatching, true)]
+    [InlineData(TaskEvent.Dispatched, TaskLifecycleState.Dispatching, TaskLifecycleState.Dispatching, true)]
+    [InlineData(TaskEvent.Dispatched, TaskLifecycleState.StalledRework, TaskLifecycleState.Dispatching, true)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen, true)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.ReworkRunning, TaskLifecycleState.PROpen, true)]
     [InlineData(TaskEvent.CiRedOnPr, TaskLifecycleState.PROpen, TaskLifecycleState.ReworkQueued, true)]
