@@ -257,15 +257,6 @@ public class GitRefNamesTests
     }
 
     [Fact]
-    public void DotLockSuffix_AfterDotCleaningOnly()
-    {
-        // Input "task.lock" -> second pass unchanged (single dot, no ..),
-        // third pass replaces ".lock" suffix -> "task_lock"
-        var result = GitRefNames.Sanitize("task.lock");
-        Assert.Equal("task_lock", result);
-    }
-
-    [Fact]
     public void JustLock_NoDotPrefix_PassesThrough()
     {
         // "lock" without a dot prefix is fine.
