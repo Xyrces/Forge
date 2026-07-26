@@ -698,7 +698,7 @@ Console.Error.WriteLine(ex.ToString());
         //    per project); appsettings.json carries only the
         //    KILO_GATEWAY_API_KEY placeholder. Resolve the DB secret
         //    first so the auth probe below exercises the real key.
-        var llmConfig = await ResolveKiloGatewayKeyAsync(
+        var llmConfig = await ResolveProviderApiKeysAsync(
             LlmConfigAdapter.FromOptions(options.Llm), projects, secretStore,
             loggerFactory.CreateLogger("Forge.Bootstrap"));
         if (string.IsNullOrEmpty(llmConfig.DefaultProvider))
@@ -839,55 +839,54 @@ Console.Error.WriteLine(ex.ToString());
     }
 
     /// <summary>
-    /// The kilo gateway API key is operator-managed via the dashboard
+    /// Provider API keys are operator-managed via the dashboard
     /// Secrets page (stored encrypted, per project) — appsettings.json
-    /// carries only the <c>KILO_GATEWAY_API_KEY</c> placeholder, which
-    /// authenticates free-tier models but is rejected by paid models
-    /// (HTTP 401 PAID_MODEL_AUTH_REQUIRED). Resolve the first stored
-    /// key across registered projects and substitute it into the
-    /// kilo-gateway provider entry so every chat client (engineering
-    /// dispatch, intake, groomer, memory extractor) authenticates.
-    /// Key rotation via the UI takes effect on restart. The key value
-    /// is never logged.
+    /// carries only placeholders. For every provider whose ApiKey is
+    /// empty or a UPPER_SNAKE placeholder, resolve the first stored
+    /// secret named <c>&lt;provider&gt;_api_key</c> (provider name
+    /// lowercased, dashes to underscores — kilo-gateway →
+    /// kilo_gateway_api_key, kimi → kimi_api_key) across registered
+    /// projects and substitute it. Key rotation via the UI takes
+    /// effect on restart. Values are never logged.
     /// </summary>
-    private static async Task<LlmConfig> ResolveKiloGatewayKeyAsync(
+    private static async Task<LlmConfig> ResolveProviderApiKeysAsync(
         LlmConfig config,
         IReadOnlyList<ProjectOptions> projects,
         SecretStore secretStore,
         ILogger logger)
     {
-        if (!config.Providers.Any(p => string.Equals(p.Name, LlmProviders.KiloGateway, StringComparison.OrdinalIgnoreCase)))
+        var providers = config.Providers.ToList();
+        var changed = false;
+        for (var i = 0; i < providers.Count; i++)
         {
-            return config;
-        }
+            var p = providers[i];
+            var needsKey = string.IsNullOrEmpty(p.ApiKey)
+                || (p.ApiKey.ToUpperInvariant() == p.ApiKey && p.ApiKey.Contains('_') && !p.ApiKey.StartsWith("sk-"));
+            if (!needsKey) continue;
 
-        foreach (var project in projects)
-        {
-            string? key;
-            try
+            var kind = p.Name.ToLowerInvariant().Replace('-', '_') + "_api_key";
+            foreach (var project in projects)
             {
-                key = await secretStore.GetPlaintextAsync(
-                    project.Id, SecretKinds.KiloGatewayApiKey, CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex,
-                    "Failed to read {Kind} secret for project {ProjectId}; trying next project",
-                    SecretKinds.KiloGatewayApiKey, project.Id);
-                continue;
-            }
-            if (string.IsNullOrEmpty(key)) continue;
+                string? key;
+                try
+                {
+                    key = await secretStore.GetPlaintextAsync(project.Id, kind, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to read {Kind} secret for project {ProjectId}; trying next project", kind, project.Id);
+                    continue;
+                }
+                if (string.IsNullOrEmpty(key)) continue;
 
-            logger.LogInformation(
-                "kilo gateway api key resolved from project '{ProjectId}' secret store", project.Id);
-            var providers = config.Providers
-                .Select(p => string.Equals(p.Name, LlmProviders.KiloGateway, StringComparison.OrdinalIgnoreCase)
-                    ? p with { ApiKey = key }
-                    : p)
-                .ToList();
-            return config with { Providers = providers };
+                logger.LogInformation("provider '{Provider}' api key resolved from project '{ProjectId}' secret store ({Kind})",
+                    p.Name, project.Id, kind);
+                providers[i] = p with { ApiKey = key };
+                changed = true;
+                break;
+            }
         }
-        return config;
+        return changed ? config with { Providers = providers } : config;
     }
 
     /// <summary>
@@ -1054,7 +1053,7 @@ Console.Error.WriteLine(ex.ToString());
         var skillBootstrap = new Agents.SkillBootstrap(
             memoryStore, loggerFactory.CreateLogger<Agents.SkillBootstrap>());
         await skillBootstrap.SeedAsync();
-        var llmConfig = await ResolveKiloGatewayKeyAsync(
+        var llmConfig = await ResolveProviderApiKeysAsync(
             LlmConfigAdapter.FromOptions(options.Llm), knownProjects, secretStore,
             loggerFactory.CreateLogger("Forge.Bootstrap"));
         var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
