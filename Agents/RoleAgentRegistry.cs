@@ -5,7 +5,13 @@ namespace Forge.Agents;
 public sealed record RoleAgent(
     string AgentName,
     string ProjectSubdir,
-    IReadOnlyList<string> AllowedTools);
+    IReadOnlyList<string> AllowedTools,
+    // Structured territory for the deterministic plan-territory
+    // gate: repo-relative path prefixes the role may touch, plus
+    // whether repo-root files are allowed. ProjectSubdir stays the
+    // prose form for prompts.
+    IReadOnlyList<string>? TerritoryPrefixes = null,
+    bool TerritoryAllowsRootFiles = false);
 
 public sealed class RoleAgentRegistry
 {
@@ -20,8 +26,11 @@ public sealed class RoleAgentRegistry
             // description metadata and the dispatch prompt's boundary
             // rule; the authoritative boundary prose lives in the
             // repo's agents/<role>.md role prompt.
-            [AgentType.CoreDev]   = new("coredev",   "Forge backend (Core/, Agents/, Orchestrator/, Dashboard/, Configuration/, Projects/, AgentTools/)", new[] { "bash", "read", "edit", "grep", "glob", "webfetch" }),
-            [AgentType.ClientDev] = new("clientdev", "Forge.UI/", new[] { "bash", "read", "edit", "grep", "glob", "webfetch" }),
+            [AgentType.CoreDev]   = new("coredev",   "Forge backend (Core/, Agents/, Orchestrator/, Dashboard/, Configuration/, Projects/, AgentTools/)", new[] { "bash", "read", "edit", "grep", "glob", "webfetch" },
+                TerritoryPrefixes: new[] { "Core/", "Agents/", "Orchestrator/", "Dashboard/", "Configuration/", "Projects/", "AgentTools/", "Reviewer/", "DeploymentPipeline/", "tests/", "tools/", "deploy/", "scripts/", ".github/", "docs/", "agents/", ".kilo/" },
+                TerritoryAllowsRootFiles: true),
+            [AgentType.ClientDev] = new("clientdev", "Forge.UI/", new[] { "bash", "read", "edit", "grep", "glob", "webfetch" },
+                TerritoryPrefixes: new[] { "Forge.UI/", "tests/" }),
             [AgentType.QA]        = new("qa",        "",                   new[] { "bash", "read", "grep", "glob" }),
             [AgentType.Reviewer]  = new("reviewer",  "",                   new[] { "read", "grep", "glob", "webfetch" }),
         };

@@ -32,6 +32,7 @@ public sealed class BashTool
     private readonly string _workingDirectory;
     private readonly TimeSpan _defaultTimeout;
     private readonly IReadOnlyDictionary<string, string>? _envVars;
+    private readonly Func<bool>? _mutationsAllowed;
 
     /// <param name="envVars">
     /// Extra environment variables injected into every spawned
@@ -39,13 +40,20 @@ public sealed class BashTool
     /// Values are never logged; the model sees only the variable
     /// names in its own commands.
     /// </param>
+    /// <param name="mutationsAllowed">
+    /// Plan-gate hook: when set, commands classified as mutating by
+    /// <see cref="ShellMutationClassifier"/> are refused until the
+    /// predicate returns true (plan approved). Read/explore/build/
+    /// test commands are never gated.
+    /// </param>
     public BashTool(string workingDirectory, TimeSpan? defaultTimeout = null, ILogger<BashTool>? logger = null,
-        IReadOnlyDictionary<string, string>? envVars = null)
+        IReadOnlyDictionary<string, string>? envVars = null, Func<bool>? mutationsAllowed = null)
     {
         _workingDirectory = workingDirectory;
         _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(30);
         _logger = logger;
         _envVars = envVars;
+        _mutationsAllowed = mutationsAllowed;
     }
 
     public string WorkingDirectory => _workingDirectory;
@@ -64,6 +72,17 @@ public sealed class BashTool
     {
         if (string.IsNullOrWhiteSpace(command))
             return "exit=-1\nstdout:\nstderr: command is required";
+
+        // Plan gate (hard enforcement): mutating commands are
+        // refused until submit_plan returns approved. Read/explore/
+        // build/test commands pass ungated so the agent can ground
+        // its plan in the actual repo.
+        if (_mutationsAllowed is not null && !_mutationsAllowed()
+            && ShellMutationClassifier.IsMutating(command))
+        {
+            _logger?.LogInformation("BashTool: refused mutating command pre-plan-approval: {Cmd}", command);
+            return "exit=-1\nstdout:\nstderr: REFUSED — no approved plan yet. Explore the repo (read-only commands are fine), then call submit_plan with your structured plan (goal / files / approach / test / done). Mutating commands unlock after approval.";
+        }
 
         var cwd = string.IsNullOrWhiteSpace(workingDirectory) ? _workingDirectory : workingDirectory;
         if (!Directory.Exists(cwd))

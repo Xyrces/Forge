@@ -73,6 +73,39 @@
                     {
                         <tr><td>Rework context</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@reworkCtx</pre></td></tr>
                     }
+                    @if (PlanGate is { } pg)
+                    {
+                        <tr>
+                            <td>Plan gate</td>
+                            <td>
+                                @if (pg.Approved)
+                                {
+                                    <span class="pill pill--success">approved</span>
+                                }
+                                else if (pg.Failed)
+                                {
+                                    <span class="pill pill--blocked">rejected</span>
+                                }
+                                else
+                                {
+                                    <span class="pill">pending</span>
+                                }
+                                @if (pg.FastPath) { <span class="pill">fast-path</span> }
+                                <span class="meta-text"> @pg.Revisions revision(s)</span>
+                            </td>
+                        </tr>
+                        @foreach (var v in pg.Verdicts)
+                        {
+                            <tr>
+                                <td class="meta-text">gate: @v.Gate</td>
+                                <td><span class="pill pill--@(v.Outcome == "Approve" ? "success" : "blocked")">@v.Outcome</span> <span class="meta-text">@v.Feedback</span></td>
+                            </tr>
+                        }
+                        @if (!string.IsNullOrWhiteSpace(pg.Plan))
+                        {
+                            <tr><td>Plan</td><td><pre class="mono" style="white-space:pre-wrap; max-height:220px; overflow:auto">@pg.Plan</pre></td></tr>
+                        }
+                    }
                     @if (_sprint is not null)
                     {
                         <tr>
@@ -269,6 +302,40 @@
 
     private string? PrUrl(string prNumber) =>
         _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+
+    private PlanGateVm? PlanGate
+    {
+        get
+        {
+            var raw = Meta("planGate");
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(raw);
+                var r = doc.RootElement;
+                var verdicts = new List<PlanGateVerdictVm>();
+                if (r.TryGetProperty("verdicts", out var vs) && vs.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var v in vs.EnumerateArray())
+                    {
+                        verdicts.Add(new PlanGateVerdictVm(
+                            Prop(v, "gate") ?? "", Prop(v, "outcome") ?? "", Prop(v, "feedback") ?? ""));
+                    }
+                }
+                return new PlanGateVm(
+                    Approved: r.TryGetProperty("approved", out var ap) && ap.GetBoolean(),
+                    Failed: r.TryGetProperty("failed", out var f) && f.GetBoolean(),
+                    FastPath: r.TryGetProperty("fastPath", out var fp) && fp.GetBoolean(),
+                    Revisions: r.TryGetProperty("revisions", out var rv) ? rv.GetInt32() : 0,
+                    Plan: Prop(r, "plan"),
+                    Verdicts: verdicts);
+            }
+            catch { return null; }
+        }
+    }
+
+    private sealed record PlanGateVerdictVm(string Gate, string Outcome, string Feedback);
+    private sealed record PlanGateVm(bool Approved, bool Failed, bool FastPath, int Revisions, string? Plan, List<PlanGateVerdictVm> Verdicts);
 
     private static string? Prop(JsonElement? e, string name)
     {

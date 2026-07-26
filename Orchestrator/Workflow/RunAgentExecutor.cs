@@ -101,6 +101,13 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 $"Your previous attempt produced a PR that did NOT pass review/CI. " +
                 $"Fix the following on the SAME branch (do not restructure unrelated work):\n\n{reworkContext}";
         }
+        // Plan-gate fast path: mechanical rework rounds (conflict
+        // sync, infra retrigger) have their exact steps prescribed by
+        // the watcher — evaluating a plan against an LLM critic
+        // would waste tokens. The gate still records the plan.
+        var planFastPath = (issue.GetMetadata("reworkReason") ?? "") is { } reason
+            && (reason.Contains("conflicts with the base branch", StringComparison.OrdinalIgnoreCase)
+                || reason.Contains("base-branch CI recovered", StringComparison.OrdinalIgnoreCase));
         var queued = drainMessageBus(roleAgent.AgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)
             ? prompt
@@ -126,6 +133,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 // injection (FORGE_SECRET_*). Null-safe: the
                 // runner skips env when absent.
                 ["projectId"] = projectId ?? string.Empty,
+                ["planFastPath"] = planFastPath ? "true" : "false",
             };
             // Sprint flow: when the issue belongs to the ACTIVE
             // sprint, the runner gets the sprint id (drives the

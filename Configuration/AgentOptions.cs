@@ -13,6 +13,12 @@ public sealed record AgentOptions
     public LlmOptions Llm { get; set; } = new();
     public VisionOptions Vision { get; set; } = new();
     /// <summary>
+    /// Quality-gate configuration (ordered gate names per
+    /// checkpoint). DB overrides (memory keys gates/run/*) win over
+    /// this config; built-in defaults apply when both are empty.
+    /// </summary>
+    public GateOptions Gates { get; set; } = new();
+    /// <summary>
     /// v1 multi-project registry. When non-empty, the dashboard
     /// lists and exposes each project; when empty the legacy
     /// <see cref="WorkspaceOptions.Root"/> is shimmed as a single
