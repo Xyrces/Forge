@@ -98,6 +98,17 @@ public static class TaskStateProjector
                 substate, $"dev agent ({substate})", strikes, MaxStrikes);
         }
 
+        // Authority semantics (Phase 3): the machine's recorded state
+        // is the freshest event-sourced truth for everything else.
+        // Flag-derivation below is only the bootstrap for entities
+        // that predate the machine — stale flags (reworkReason
+        // persists after the round pushes) would otherwise pin the
+        // task in ReworkRunning forever (observed live 2026-07-26).
+        if (Enum.TryParse<TaskLifecycleState>(machineState, out var recordedState))
+        {
+            return new(recordedState, null, WaitingOnFor(recordedState), strikes, MaxStrikes);
+        }
+
         // Rework bookkeeping without a live run.
         if (inFlightSha is not null || (prNumber is not null && reworkReason is not null))
         {
@@ -145,6 +156,25 @@ public static class TaskStateProjector
         return new(TaskLifecycleState.Dispatching, null,
             "workflow (between steps)", strikes, MaxStrikes);
     }
+
+    private static string WaitingOnFor(TaskLifecycleState state) => state switch
+    {
+        TaskLifecycleState.Pending => "dispatch slot (first run)",
+        TaskLifecycleState.Dispatching => "workflow (between steps)",
+        TaskLifecycleState.AgentRunning => "dev agent",
+        TaskLifecycleState.ReworkQueued => "dispatch slot (rework round queued)",
+        TaskLifecycleState.ReworkRunning => "dev agent (rework round)",
+        TaskLifecycleState.StalledRework => "stalled — stall-breaker re-fires as a strike",
+        TaskLifecycleState.PROpen => "CI + reviewer verdict",
+        TaskLifecycleState.ParkedInfra => "base-branch CI recovery (parked — no strikes burning)",
+        TaskLifecycleState.MergeReady => "merge gate",
+        TaskLifecycleState.Merged => "done",
+        TaskLifecycleState.Completed => "done",
+        TaskLifecycleState.BlockedOperator => "operator decision required",
+        TaskLifecycleState.Failed => "operator (failed — inspect, then requeue or close)",
+        TaskLifecycleState.Closed => "closed",
+        _ => "unknown",
+    };
 
     private static string SubstateOf(IssueRecord task)
     {
