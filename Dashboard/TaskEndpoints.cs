@@ -42,8 +42,49 @@ public static class TaskEndpoints
         Orchestrator.StartupRecovery? recovery,
         ILogger logger,
         Projects.ProjectContextFactory? projectContexts = null,
-        ISprintStore? sprints = null)
+        ISprintStore? sprints = null,
+        AgentRunStore? runs = null)
     {
+        // Derived lifecycle state (Phase 1 read-model): what the task
+        // is doing + what it's waiting on, projected from the task,
+        // its PR-watch, and the live-run registry.
+        app.MapGet("/api/tasks/{id}/state", async (string id, string? projectId, CancellationToken ct) =>
+        {
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx = projectContexts.Find(projectId);
+                if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx.Issues;
+            }
+            var task = await store.GetAsync(id, ct);
+            if (task is null) return Results.NotFound(new { error = "task not found", id });
+
+            IssueRecord? watch = null;
+            if (task.GetMetadata("prNumber") is not null)
+            {
+                var watches = await store.ListAsync(new IssueFilter { Type = AgentTaskTypes.PrWatch }, ct);
+                watch = watches.FirstOrDefault(w =>
+                    string.Equals(w.GetMetadata("taskId"), id, StringComparison.Ordinal)
+                    && w.Status is not (IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed));
+            }
+            var hasActiveDevRun = runs is not null
+                && (await runs.ListActiveAsync(ct)).Any(r =>
+                    string.Equals(r.TaskId, id, StringComparison.Ordinal)
+                    && r.Role is "CoreDev" or "ClientDev");
+
+            var info = TaskStateProjector.Derive(task, watch, hasActiveDevRun, DateTime.UtcNow);
+            return Results.Json(new
+            {
+                taskId = id,
+                state = info.State.ToString(),
+                substate = info.Substate,
+                waitingOn = info.WaitingOn,
+                strikes = info.Strikes,
+                maxStrikes = info.MaxStrikes,
+            });
+        });
+
         // Single-task drill-down: the full row + parsed metadata +
         // the issue_event audit timeline + sprint membership. Powers
         // the /tasks/{id} page; every list view links here.

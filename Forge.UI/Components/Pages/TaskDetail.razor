@@ -31,6 +31,15 @@
         <div class="card" style="margin-bottom:14px">
             <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
                 <span class="pill pill--@StatusCss">@Prop(_task, "status")</span>
+                @if (_state is not null)
+                {
+                    <span class="pill pill--primary">@_state.State@(_state.Substate is not null ? $" · {_state.Substate}" : "")</span>
+                    <span class="meta-text">waiting on: @_state.WaitingOn</span>
+                    @if (_state.Strikes > 0)
+                    {
+                        <span class="pill pill--blocked">@_state.Strikes/@_state.MaxStrikes strikes</span>
+                    }
+                }
                 <span class="mono">@Prop(_task, "type")</span>
                 <span class="mono">@TaskId</span>
                 <span class="mono">priority @Prop(_task, "priority")</span>
@@ -201,6 +210,7 @@
     [Parameter] public string TaskId { get; set; } = "";
 
     private JsonElement? _task;
+    private StateVm? _state;
     private JsonElement? _sprint;
     private List<EventVm> _events = new();
     private List<RunVm> _runs = new();
@@ -250,6 +260,20 @@
                     Prop(e, "at") ?? "", Prop(e, "kind") ?? "", Prop(e, "detail") ?? "")).ToList()
                 : new List<EventVm>();
             _events.Reverse(); // API returns newest-first; show oldest-first
+
+            // Derived lifecycle state (what it's doing + waiting on).
+            try
+            {
+                var stateUrl = string.IsNullOrEmpty(projectId)
+                    ? $"/api/tasks/{TaskId}/state"
+                    : $"/api/tasks/{TaskId}/state?projectId={Uri.EscapeDataString(projectId)}";
+                var sd = await Http.GetFromJsonAsync<JsonElement>(stateUrl);
+                _state = new StateVm(
+                    Prop(sd, "state") ?? "", Prop(sd, "substate"), Prop(sd, "waitingOn") ?? "",
+                    sd.TryGetProperty("strikes", out var st) && st.TryGetInt32(out var si) ? si : 0,
+                    sd.TryGetProperty("maxStrikes", out var ms) && ms.TryGetInt32(out var msi) ? msi : 3);
+            }
+            catch { _state = null; /* state is additive */ }
 
             // Agent runs for this task (the "who worked on this and
             // what did they actually do" trail). Same shape as /runs.
@@ -350,6 +374,8 @@
     }
 
     private sealed record EventVm(string At, string Kind, string Detail);
+
+    private sealed record StateVm(string State, string? Substate, string WaitingOn, int Strikes, int MaxStrikes);
 
     private sealed record RunVm(string Id, string Status, DateTime StartedAt,
         long? DurationMs, int? MessageCount, int? ToolCallCount, string? Error);
