@@ -35,6 +35,11 @@ public sealed class ReviewerDispatcher
     private readonly IIssueStore _issues;
     private readonly GitHubService _gitHub;
     private readonly IAgentRunner _agentRunner;
+
+    /// <summary>Hard cap on one reviewer LLM call. Reviewer prompts
+    /// are small (one diff); 3 minutes is generous. See the call
+    /// site for why this must be bounded (main-loop freeze).</summary>
+    private static readonly TimeSpan ReviewRunTimeout = TimeSpan.FromMinutes(3);
     private readonly ILogger<ReviewerDispatcher> _logger;
 
     public ReviewerDispatcher(
@@ -137,8 +142,18 @@ public sealed class ReviewerDispatcher
             {
                 ["issueId"] = watchTask.GetMetadata("taskId") ?? watchTask.Id,
             };
+            // Bounded call: the reviewer runs inside the watch sweep,
+            // which shares the orchestrator's main loop — an
+            // unbounded LLM hang (SDK retries × 5-min network
+            // timeout) freezes dispatch AND all watches (observed
+            // live 2026-07-26: 20+ min frozen loop on a hung kimi
+            // call). A timeout is an Error verdict (no silent
+            // approval), retried next sweep, bounded by the existing
+            // review circuit breaker.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(ReviewRunTimeout);
             var result = await _agentRunner.RunAsync(
-                AgentType.Reviewer, prompt, sessionId: null, context: reviewContext, ct: cancellationToken);
+                AgentType.Reviewer, prompt, sessionId: null, context: reviewContext, ct: timeoutCts.Token);
             (verdict, body) = ParseReviewerOutput(result.Text);
         }
         catch (Exception ex)

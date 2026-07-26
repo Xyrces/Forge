@@ -13,17 +13,16 @@ namespace Forge.Orchestrator.Workflow;
 /// branch + base branch (for the eventual PR's base).
 ///
 /// <para>
-/// On a rework round — detected by the presence of both
-/// <c>prNumber</c> and <c>reworkAttempts &gt; 0</c> in the issue's
-/// metadata — the worktree branch is synced to the PR head
-/// (<c>origin/agent/&lt;taskId&gt;</c>) before the agent runs.
-/// This ensures the agent always starts from the current PR head,
-/// even if the branch advanced between rounds (external pushes,
-/// prior round pushed from another checkout, etc.). Conflict rounds
-/// stay unchanged: the sync target is always the PR head, and the
-/// agent still merges the base branch itself per the prompt.
-/// First-time dispatches (no <c>prNumber</c>) keep the current
-/// behavior: create the worktree from the default branch.
+/// <strong>Rework detection.</strong> When the issue has both
+/// <c>prNumber</c> and <c>reworkAttempts</c> in its metadata (set
+/// by the Reviewer / PRWatcher on requeue), this executor syncs the
+/// worktree branch to the PR head (<c>origin/agent/&lt;id&gt;</c>)
+/// BEFORE the agent runs. This ensures the agent starts on the
+/// same commit the PR is at, even if the branch head moved after
+/// an external push or a prior rework round. First-time dispatches
+/// (no PR metadata) keep the existing behavior: create from the
+/// default branch. Conflict rework rounds are unchanged — the
+/// agent still merges <c>origin/main</c> itself per the prompt.
 /// </para>
 /// </summary>
 public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeReady>
@@ -64,48 +63,55 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             logger.LogWarning("WorktreeExecutor received AlreadyClaimed for {Id}", input.Issue.Id);
             return new WorktreeReady(input, WorktreeResult.AlreadyClaimed, null, defaultBranch);
         }
-
-        // Resolve the branch name (same convention throughout the pipeline).
-        var branch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
-
-        // Create (or reuse existing) worktree from the base branch.
         var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct);
-
-        // Detect rework round: prNumber is set and reworkAttempts > 0.
-        // The PRWatcher sets both metadata keys when it transitions the
-        // task back to Pending for a rework round. On a rework, sync the
-        // worktree branch to the PR head (origin/<branch>) so the agent
-        // always starts from the current PR head, even if the branch
-        // advanced between rounds.
-        var prNumber = input.Issue.GetMetadata("prNumber");
-        var reworkAttemptsRaw = input.Issue.GetMetadata("reworkAttempts");
-        if (!string.IsNullOrEmpty(prNumber)
-            && int.TryParse(reworkAttemptsRaw, out var reworkAttempts)
-            && reworkAttempts > 0)
-        {
-            var remoteRef = $"origin/{branch}";
-            logger.LogInformation(
-                "Rework round detected for {Id} (prNumber={Pr}, reworkAttempts={NAttempts}): " +
-                "syncing worktree {Path} to remote ref {RemoteRef}",
-                input.Issue.Id, prNumber, reworkAttempts, worktreePath, remoteRef);
-            await worktrees.SyncWorktreeToRefAsync(worktreePath, input.Issue.Id, remoteRef, ct);
-        }
-
         // P4 Stage A: advance the dispatch checkpoint BEFORE we
         // touch metadata. If we crash between CreateAsync and the
         // TransitionAsync below, the recoverer sees
         // worktree_acquired + a worktree directory on disk and
         // resumes from RunAgent (the LLM re-runs).
         await issues.SetCheckpointAsync(input.Issue.Id, DispatchCheckpoint.WorktreeAcquired, ct);
-
         // Persist the path/branch in metadata so the dashboard can
         // surface them even before the agent has run.
         var issue = await issues.GetAsync(input.Issue.Id, ct);
         if (issue is not null)
         {
+            var branch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
             var currentMetadata = ParseMetadata(issue.MetadataJson);
             currentMetadata["worktreePath"] = worktreePath;
             currentMetadata["branch"] = branch;
+
+            // Rework detection: if the issue has both prNumber and
+            // reworkAttempts in metadata (set by Reviewer/PRWatcher
+            // when it requeues for a rework round), sync the worktree
+            // branch to the PR head so the agent starts on the same
+            // commit the PR is at. First-time dispatches (no PR yet)
+            // skip the sync and create from the default branch.
+            // Conflict rework rounds stay unchanged — the agent merges
+            // origin/main itself per the rework prompt.
+            var prNumber = issue.GetMetadata("prNumber");
+            var reworkAttempts = issue.GetMetadata("reworkAttempts");
+            if (!string.IsNullOrEmpty(prNumber) && int.TryParse(reworkAttempts, out var reworkCount) && reworkCount > 0)
+            {
+                var remoteRef = $"origin/{branch}";
+                logger.LogInformation(
+                    "Rework round detected for {Id}: prNumber={Pr} reworkAttempts={Rw}. " +
+                    "Syncing worktree branch to PR head via {RemoteRef}",
+                    input.Issue.Id, prNumber, reworkAttempts, remoteRef);
+                try
+                {
+                    await worktrees.SyncWorktreeToRefAsync(
+                        worktreePath, input.Issue.Id, remoteRef, ct);
+                }
+                catch (Exception ex)
+                {
+                    // Sync failure must surface through the workflow
+                    // halt guard so the orchestrator can requeue.
+                    logger.LogError(ex,
+                        "Failed to sync worktree to PR head for rework round {Id}; " +
+                        "will not start agent on a stale checkout", input.Issue.Id);
+                    throw;
+                }
+            }
 
             await issues.TransitionAsync(input.Issue.Id, issue.Status, error: null,
                 metadata: currentMetadata, ct: ct);
@@ -134,6 +140,19 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         catch { return new(); }
     }
 
+    /// <summary>
+    /// Strips characters invalid in git ref names from the task id so it
+    /// can be safely used as a branch name suffix or remote ref segment.
+    /// Reuses the same sanitization logic as <see cref="GitWorktreeService"/>.
+    /// </summary>
+    private static string Sanitize(string s)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var c in s)
+            sb.Append(System.Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+        return sb.ToString();
+    }
 }
 
 public enum WorktreeResult

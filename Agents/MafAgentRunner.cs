@@ -40,6 +40,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly IIssueStore? _issues;
     private readonly AgentRunStore? _runs;
     private readonly RoleModelOverrides? _modelOverrides;
+    private readonly Configuration.GateOptions _gateOptions;
 
     /// <summary>
     /// Optional path for the per-run diagnostic side-channel log
@@ -70,7 +71,8 @@ public sealed class MafAgentRunner : IAgentRunner
         ISecretStore? secrets = null,
         IIssueStore? issues = null,
         AgentRunStore? runs = null,
-        RoleModelOverrides? modelOverrides = null)
+        RoleModelOverrides? modelOverrides = null,
+        Configuration.GateOptions? gates = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -87,6 +89,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _issues = issues;
         _runs = runs;
         _modelOverrides = modelOverrides;
+        _gateOptions = gates ?? new Configuration.GateOptions();
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -126,10 +129,43 @@ public async Task<AgentRunResult> RunAsync(
         // orchestrator passes one in `context["worktreePath"]`.
         var tools = new List<AITool>();
         var bashWorkingDir = ResolveWorktreePath(context);
+        Gates.RunGateState? gateState = null;
         if (!string.IsNullOrWhiteSpace(bashWorkingDir))
         {
             var secretEnv = await ResolveSecretEnvAsync(context, ct);
-            tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv).AsAIFunction());
+
+            // Plan gate (engineering roles): the agent must submit a
+            // structured plan and have it approved BEFORE mutating
+            // commands work — hard-enforced at the bash tool via a
+            // deterministic mutation classifier. Fast-path (mechanical
+            // rework rounds) auto-approves on submit.
+            Func<bool>? mutationsAllowed = null;
+            if (role is AgentType.CoreDev or AgentType.ClientDev)
+            {
+                gateState = new Gates.RunGateState
+                {
+                    FastPath = string.Equals(
+                        ResolveContextString(context, "planFastPath"), "true", StringComparison.OrdinalIgnoreCase),
+                };
+                var gatePipeline = new Gates.RunGatePipeline(
+                    _gateOptions, _memory, name => BuildRunGate(name), _logger);
+                var gateContext = new Gates.RunGateContext(
+                    TaskId: ResolveContextString(context, "issueId") ?? "unknown",
+                    RoleName: roleDef.AgentName,
+                    TerritoryPrefixes: roleDef.TerritoryPrefixes ?? Array.Empty<string>(),
+                    TerritoryAllowsRootFiles: roleDef.TerritoryAllowsRootFiles,
+                    WorktreePath: bashWorkingDir,
+                    TaskText: prompt.Length > 4000 ? prompt[..4000] : prompt,
+                    Plan: "",
+                    Ct: ct);
+                tools.Add(new AgentTools.SubmitPlanTool(
+                    gateState, gatePipeline, gateContext,
+                    logger: _logger).AsAIFunction());
+                mutationsAllowed = () => gateState.PlanApproved;
+            }
+
+            tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv,
+                mutationsAllowed: mutationsAllowed).AsAIFunction());
         }
 
         // P5.1 — ArtifactReadTool is always available when the
@@ -267,6 +303,20 @@ public async Task<AgentRunResult> RunAsync(
             }
             var elapsed = DateTime.UtcNow - startedAt;
 
+            // Plan gate: a final rejection fails the run even though
+            // the model conversation completed — the throw lands in
+            // the catch below, which records 'failed' with the
+            // partial transcript. The orchestrator's normal retry
+            // machinery takes it from there.
+            if (gateState?.PlanFailed == true)
+            {
+                await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
+                throw new InvalidOperationException(
+                    $"Plan rejected after {Gates.RunGateState.MaxRevisions} revisions: " +
+                    (gateState.Verdicts.LastOrDefault().Feedback ?? "no feedback"));
+            }
+            await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
+
             var text = string.Concat(response.Messages
                 .Where(m => m.Role == ChatRole.Assistant)
                 .Select(m => m.Text));
@@ -367,6 +417,50 @@ public async Task<AgentRunResult> RunAsync(
         if (context is null) return null;
         if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
         return raw.ToString();
+    }
+
+    /// <summary>Gate factory for the run-gate pipeline. Unknown names
+    /// return null (the pipeline skips them with a warning).</summary>
+    private Gates.IRunGate? BuildRunGate(string name) => name switch
+    {
+        Gates.PlanSchemaGate.GateName => new Gates.PlanSchemaGate(),
+        Gates.PlanTerritoryGate.GateName => new Gates.PlanTerritoryGate(),
+        Gates.PlanLlmReviewGate.GateName => new Gates.PlanLlmReviewGate(
+            () => _chatClientFactory.Create(_config, AgentType.Reviewer), _logger),
+        _ => null,
+    };
+
+    /// <summary>Persist the plan-gate audit trail to the task's
+    /// metadata (best-effort, never breaks a run). The TaskDetail
+    /// page renders it.</summary>
+    private async Task PersistGateRecordAsync(
+        Gates.RunGateState? gateState, string? issueId, CancellationToken ct)
+    {
+        if (gateState is null || issueId is null || _issues is null) return;
+        if (gateState.Verdicts.Count == 0) return;
+        try
+        {
+            var task = await _issues.GetAsync(issueId, ct);
+            if (task is null) return;
+            var record = new
+            {
+                approved = gateState.PlanApproved,
+                fastPath = gateState.FastPath,
+                revisions = gateState.Revisions,
+                failed = gateState.PlanFailed,
+                plan = gateState.PlanText is { Length: > 3000 } p ? p[..3000] : gateState.PlanText,
+                verdicts = gateState.Verdicts.Select(v => new { gate = v.Gate, outcome = v.Outcome.ToString(), feedback = v.Feedback.Length > 500 ? v.Feedback[..500] : v.Feedback }).ToList(),
+            };
+            await _issues.TransitionAsync(issueId, task.Status, error: null,
+                metadata: new Dictionary<string, object>
+                {
+                    ["planGate"] = System.Text.Json.JsonSerializer.Serialize(record),
+                }, ct: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "plan-gate record persist failed for {IssueId}; continuing", issueId);
+        }
     }
 
     private static string? ResolveContextString(IReadOnlyDictionary<string, object>? context, string key)

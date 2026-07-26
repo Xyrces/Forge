@@ -1108,7 +1108,8 @@ Console.Error.WriteLine(ex.ToString());
             secrets: secretStore,
             issues: issues,
             runs: agentRunStore,
-            modelOverrides: roleModelOverrides);
+            modelOverrides: roleModelOverrides,
+            gates: options.Gates);
         var eventBus = new InMemoryDashboardEventBus();
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
