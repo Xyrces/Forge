@@ -1,6 +1,6 @@
 ﻿using System.Diagnostics;
-using System.Text;
 using Microsoft.Extensions.Logging;
+using System.Text;
 using Forge.Configuration;
 
 namespace Forge.AgentTools;
@@ -217,13 +217,7 @@ public sealed class GitWorktreeService
     }
 
     private static string Sanitize(string s)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sb = new StringBuilder(s.Length);
-        foreach (var c in s)
-            sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
-        return sb.ToString();
-    }
+        => GitRefNames.Sanitize(s);
 
     private readonly record struct GitResult(int ExitCode, string Stdout, string Stderr);
 }
