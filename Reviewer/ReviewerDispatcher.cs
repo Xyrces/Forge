@@ -112,10 +112,8 @@ public sealed class ReviewerDispatcher
         // HEAD and the dev agent hasn't pushed yet. Reviewing now
         // wastes a full review on a head that's about to be replaced
         // — the verdict is sha-stamped, so it would be discarded the
-        // moment the rework push lands. Wait for the new head.
-        // Phase 3: the round record lives on the TASK via the
-        // machine (reworkForSha); the legacy watch flag is the
-        // migration fallback.
+        // moment the rework push lands. Wait for the new head. The
+        // round record lives on the TASK via the machine.
         string? reworkSha = null;
         var taskIdForSha = watchTask.GetMetadata("taskId");
         if (taskIdForSha is not null)
@@ -123,7 +121,6 @@ public sealed class ReviewerDispatcher
             var t = await _issues.GetAsync(taskIdForSha, cancellationToken);
             reworkSha = t?.GetMetadata("reworkForSha");
         }
-        reworkSha ??= watchTask.GetMetadata("reworkInFlightSha");   // fallback
         if (string.Equals(reworkSha, headSha, StringComparison.Ordinal))
         {
             return null;

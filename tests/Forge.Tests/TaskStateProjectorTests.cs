@@ -74,10 +74,10 @@ public class TaskStateProjectorTests
     public void ReworkFired_TaskPending_ReworkQueued()
     {
         // Watch consumed round 1, task back to Pending waiting for a
-        // slot (every CI-failure rework round this week).
+        // slot (every CI-failure rework round this week). Pre-machine
+        // derivation: prNumber + persisted reworkReason.
         var task = Task(IssueStatus.Pending, new() { ["prNumber"] = "34", ["reworkAttempts"] = "1", ["reworkReason"] = "CI failed for c138594" });
-        var watch = Watch(new() { ["reworkInFlightSha"] = "c138594" });
-        var info = TaskStateProjector.Derive(task, watch, false, Now);
+        var info = TaskStateProjector.Derive(task, null, false, Now);
         Assert.Equal(TaskLifecycleState.ReworkQueued, info.State);
         Assert.Equal(1, info.Strikes);
     }
@@ -95,14 +95,13 @@ public class TaskStateProjectorTests
     [Fact]
     public void NoOpRound_MarkerEqualsHead_StaleTask_StalledRework()
     {
-        // task-161 (2026-07-25): the no-op rework round — marker set,
+        // task-161 (2026-07-25): the no-op rework round — round fired,
         // no push, task InProgress and untouched for hours. The
         // sprint deadlocked until the stall-breaker shipped.
         var task = Task(IssueStatus.InProgress,
-            new() { ["prNumber"] = "34", ["reworkAttempts"] = "1" },
+            new() { ["prNumber"] = "34", ["reworkAttempts"] = "1", ["reworkReason"] = "CI failed" },
             updatedAt: Now.AddHours(-3));
-        var watch = Watch(new() { ["reworkInFlightSha"] = "c138594" });
-        var info = TaskStateProjector.Derive(task, watch, false, Now);
+        var info = TaskStateProjector.Derive(task, null, false, Now);
         Assert.Equal(TaskLifecycleState.StalledRework, info.State);
         Assert.Contains("stalled", info.WaitingOn);
     }
@@ -110,21 +109,24 @@ public class TaskStateProjectorTests
     [Fact]
     public void ClaimedRound_FreshUpdate_ReworkRunning()
     {
-        var task = Task(IssueStatus.InProgress, new() { ["prNumber"] = "34", ["reworkAttempts"] = "1" },
+        var task = Task(IssueStatus.InProgress, new() { ["prNumber"] = "34", ["reworkAttempts"] = "1", ["reworkReason"] = "CI failed" },
             updatedAt: Now.AddMinutes(-3));
-        var watch = Watch(new() { ["reworkInFlightSha"] = "c138594" });
-        var info = TaskStateProjector.Derive(task, watch, false, Now);
+        var info = TaskStateProjector.Derive(task, null, false, Now);
         Assert.Equal(TaskLifecycleState.ReworkRunning, info.State);
     }
 
     [Fact]
     public void InfraRedMain_ParkedInfra()
     {
-        // The harness-red-main scenario: watch parked, zero strikes
-        // burning while the base is broken.
-        var task = Task(IssueStatus.InProgress, new() { ["prNumber"] = "40" });
-        var watch = Watch(new() { ["parkedOnMainCiSha"] = "0b5ab06" });
-        var info = TaskStateProjector.Derive(task, watch, false, Now);
+        // The harness-red-main scenario: parked on the machine
+        // record, zero strikes burning while the base is broken.
+        var task = Task(IssueStatus.InProgress, new()
+        {
+            ["prNumber"] = "40",
+            ["state"] = "ParkedInfra",
+            ["parkedForSha"] = "0b5ab06",
+        });
+        var info = TaskStateProjector.Derive(task, null, false, Now);
         Assert.Equal(TaskLifecycleState.ParkedInfra, info.State);
         Assert.Contains("base-branch CI recovery", info.WaitingOn);
     }

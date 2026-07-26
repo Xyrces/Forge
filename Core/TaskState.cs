@@ -58,13 +58,12 @@ public static class TaskStateProjector
         var prNumber = task.GetMetadata("prNumber");
         var reworkReason = task.GetMetadata("reworkReason");
         var strikes = int.TryParse(task.GetMetadata("reworkAttempts"), out var s) ? s : 0;
-        var inFlightSha = watch?.GetMetadata("reworkInFlightSha");
-        // Phase 3: the machine's record on the task is primary for
-        // the park state; the legacy watch flag is the fallback.
+        // The machine's record on the task is authoritative for the
+        // park state (and preferred over derivation below).
         var machineState = task.GetMetadata("state");
         var parked = string.Equals(machineState, nameof(TaskLifecycleState.ParkedInfra), StringComparison.Ordinal)
             ? task.GetMetadata("parkedForSha") ?? "parked"
-            : watch?.GetMetadata("parkedOnMainCiSha");
+            : null;
 
         // Terminal states first.
         switch (task.Status)
@@ -94,7 +93,7 @@ public static class TaskStateProjector
         if (hasActiveDevRun)
         {
             var substate = SubstateOf(task);
-            return new(strikes > 0 || inFlightSha is not null ? TaskLifecycleState.ReworkRunning : TaskLifecycleState.AgentRunning,
+            return new(strikes > 0 ? TaskLifecycleState.ReworkRunning : TaskLifecycleState.AgentRunning,
                 substate, $"dev agent ({substate})", strikes, MaxStrikes);
         }
 
@@ -110,7 +109,7 @@ public static class TaskStateProjector
         }
 
         // Rework bookkeeping without a live run.
-        if (inFlightSha is not null || (prNumber is not null && reworkReason is not null))
+        if (prNumber is not null && reworkReason is not null)
         {
             if (task.Status == IssueStatus.Pending)
             {

@@ -146,6 +146,26 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
+    public async Task WatchedTaskTerminal_ClosesWatch_SkipsEverything()
+    {
+        // Orphan guard (observed live 2026-07-26: pr-watch-44 kept
+        // polling after task-161 + PR #34 were closed — a CI-failure
+        // fire would have resurrected the Closed task to Pending).
+        var gh = new FakeGitHub { Ci = CommitState.Failure };
+        var (task, watch) = await SeedAsync();
+        await _issues.TransitionAsync(task.Id, IssueStatus.Closed, "operator closeout");
+
+        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
+            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(watch.Id))!.Status);
+        // The task is untouched — critically, NOT resurrected to Pending.
+        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
     public async Task MergeGreen_GateHeld_NoMerge_WatchAndTaskUntouched_ThenReleaseMerges()
     {
         var bootstrap = new Forge.Core.IssueStore(Path.Combine(_workDir, "memory.db"));
@@ -320,7 +340,11 @@ public class PRWatcherReworkTests : IDisposable
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Failure };
         var (task, watch) = await SeedAsync(
-            watchMeta: new Dictionary<string, object> { ["parkedOnMainCiSha"] = "abc123" });
+            taskMeta: new Dictionary<string, object>
+            {
+                ["state"] = "ParkedInfra",
+                ["parkedForSha"] = "abc123",
+            });
 
         var outcome = await NewWatcher(gh).PollWatchOnceAsync(
             watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
@@ -328,7 +352,7 @@ public class PRWatcherReworkTests : IDisposable
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
         Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
-        Assert.Equal("abc123", (await _issues.GetAsync(watch.Id))!.GetMetadata("parkedOnMainCiSha"));
+        Assert.Equal("ParkedInfra", (await _issues.GetAsync(task.Id))!.GetMetadata("state"));
     }
 
     [Fact]
@@ -336,11 +360,15 @@ public class PRWatcherReworkTests : IDisposable
     {
         // Base is green again: the parked PR needs a fresh head to
         // retrigger CI — fire ONE refresh round WITHOUT consuming
-        // breaker budget, and clear the parked marker.
+        // breaker budget; the machine record moves to ReworkQueued.
         var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Success };
         var (task, watch) = await SeedAsync(
-            taskMeta: new Dictionary<string, object> { ["reworkAttempts"] = "2" },
-            watchMeta: new Dictionary<string, object> { ["parkedOnMainCiSha"] = "abc123" });
+            taskMeta: new Dictionary<string, object>
+            {
+                ["reworkAttempts"] = "2",
+                ["state"] = "ParkedInfra",
+                ["parkedForSha"] = "abc123",
+            });
 
         var outcome = await NewWatcher(gh).PollWatchOnceAsync(
             watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
@@ -352,9 +380,6 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal("2", taskAfter.GetMetadata("reworkAttempts"));  // NOT incremented
         Assert.Contains("recovered", taskAfter.GetMetadata("reworkReason"));
         Assert.Contains("retrigger", taskAfter.GetMetadata("reworkContext"));
-        // The machine record moved past ParkedInfra (refresh round
-        // fired); the seeded legacy watch flag remains but is ignored
-        // once a machine state exists.
         Assert.Equal("ReworkQueued", taskAfter.GetMetadata("state"));
         Assert.Equal("abc123", taskAfter.GetMetadata("reworkForSha"));
     }

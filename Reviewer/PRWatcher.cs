@@ -104,6 +104,23 @@ public sealed class PRWatcher
         var branch = watchTask.GetMetadata("branch") ?? watchTask.Title;
         var worktreePath = watchTask.GetMetadata("worktreePath");
 
+        // Orphan guard: a watch whose task is already terminal
+        // (operator closeout, breaker, or external resolution) must
+        // not drive the task — a CI-failure fire would transition a
+        // CLOSED task back to Pending (resurrection). Close the
+        // watch and skip. Observed live 2026-07-26: pr-watch-44
+        // kept polling after task-161 + PR #34 were closed.
+        var watchedTask = await _issues.GetAsync(taskId, cancellationToken);
+        if (watchedTask is null || watchedTask.Status is IssueStatus.Closed or IssueStatus.Completed)
+        {
+            _logger.LogInformation(
+                "PR watch {WatchId}: watched task {TaskId} is {Status} — closing watch",
+                watchTask.Id, taskId, watchedTask?.Status.ToString() ?? "missing");
+            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Closed,
+                $"watched task {taskId} is terminal", ct: cancellationToken);
+            return WatchPollOutcome.Merged;
+        }
+
         if (DateTime.UtcNow - watchTask.CreatedAt > _staleAfter)
         {
             _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
@@ -175,24 +192,16 @@ public sealed class PRWatcher
         var ciFailed = ci is CommitState.Failure or CommitState.Error;
 
         // Rework guard: a rework round was already queued FOR THIS
-        // HEAD. Phase 3: the guard reads the MACHINE's record on the
-        // task (state + reworkForSha + stateEnteredAt, written by
-        // ReworkOrTripAsync's ReworkFired report) instead of the
-        // legacy watch flag. A round that's queued (task Pending) or
-        // claimed inside the grace window (stateEnteredAt) blocks
-        // re-fire; a claimed round past grace is stalled (no-op or
-        // died run) and falls through to fire another strike.
-        // MIGRATION FALLBACK (delete after one clean deploy): tasks
-        // whose rounds predate the machine still carry the watch
-        // flag reworkInFlightSha.
+        // HEAD. The guard reads the MACHINE's record on the task
+        // (reworkForSha + stateEnteredAt, written by
+        // ReworkOrTripAsync's ReworkFired report). A round that's
+        // queued (task Pending) or claimed inside the grace window
+        // blocks re-fire; a claimed round past grace is stalled
+        // (no-op or died run) and falls through to fire another
+        // strike.
         {
             var guardTask = await _issues.GetAsync(taskId, cancellationToken);
-            // Legacy fallback only when the task has NO machine
-            // record at all (round predates the machine) — a stale
-            // legacy marker must never override live machine state.
-            var recordedSha = guardTask?.GetMetadata("state") is null
-                ? watchTask.GetMetadata("reworkInFlightSha")
-                : guardTask.GetMetadata("reworkForSha");
+            var recordedSha = guardTask?.GetMetadata("reworkForSha");
             if (string.Equals(recordedSha, sha, StringComparison.Ordinal))
             {
                 var enteredRaw = guardTask?.GetMetadata("stateEnteredAt");
@@ -304,16 +313,10 @@ public sealed class PRWatcher
             // watch flag is the migration fallback.
             var baseBranch = pr.Base?.Ref ?? "main";
             var parkTask = await _issues.GetAsync(taskId, cancellationToken);
-            var parkState = parkTask?.GetMetadata("state");
-            var parkedSha = parkState is null
-                // Legacy fallback: only when the task has NO machine
-                // record at all (round predates the machine). A stale
-                // legacy flag must never override a live machine state
-                // — it would re-fire refresh rounds forever.
-                ? watchTask.GetMetadata("parkedOnMainCiSha")
-                : string.Equals(parkState, nameof(Forge.Core.TaskLifecycleState.ParkedInfra), StringComparison.Ordinal)
-                    ? parkTask!.GetMetadata("parkedForSha")
-                    : null;
+            var parkedSha = parkTask is not null
+                && string.Equals(parkTask.GetMetadata("state"), nameof(Forge.Core.TaskLifecycleState.ParkedInfra), StringComparison.Ordinal)
+                ? parkTask.GetMetadata("parkedForSha")
+                : null;
             if (string.Equals(parkedSha, sha, StringComparison.Ordinal))
             {
                 var baseHead = await _gitHub.GetBranchHeadShaAsync(baseBranch, cancellationToken);
