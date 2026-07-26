@@ -202,6 +202,27 @@ public sealed class PRWatcher
         // 1. All gates green -> merge. (External-merge handled above.)
         if (ciGreen && approved && !changesRequested)
         {
+            // Green + approved but CONFLICTING: the base moved after
+            // the approval (a sibling PR merged) and Octokit's merge
+            // 405/409s into a false return. Without this branch the
+            // watch retried the doomed merge every sweep forever —
+            // observed live 2026-07-26: PRs #42/#43 spun 8+ hours,
+            // sprint unable to complete. Route to the conflict sync
+            // round instead. Mergeable==null means "still computing"
+            // — attempt the merge and re-check on failure.
+            var mergeableGreen = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
+            if (mergeableGreen == false)
+            {
+                return await ReworkOrTripAsync(
+                    watchTask, taskId, worktreePath, sha,
+                    reason: "PR conflicts with the base branch",
+                    context: ConflictContext,
+                    terminalStatus: IssueStatus.Blocked,
+                    terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
+                    terminalOutcome: WatchPollOutcome.Blocked,
+                    cancellationToken);
+            }
+
             // Operator merge gate: hold auto-merge without failing
             // anything — the watch stays live and the next sweep
             // re-evaluates (external merges are still detected).
@@ -221,6 +242,21 @@ public sealed class PRWatcher
                     taskId, $"PR #{prNumber} merged and branch deleted"));
                 _logger.LogInformation("PR #{PrNumber} merged; task {TaskId} completed", prNumber, taskId);
                 return WatchPollOutcome.Merged;
+            }
+            // Merge refused with mergeable previously unknown: the
+            // computation may have landed by now — a conflict gets
+            // the sync round, anything else retries next sweep.
+            var mergeableAfter = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
+            if (mergeableAfter == false)
+            {
+                return await ReworkOrTripAsync(
+                    watchTask, taskId, worktreePath, sha,
+                    reason: "PR conflicts with the base branch",
+                    context: ConflictContext,
+                    terminalStatus: IssueStatus.Blocked,
+                    terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
+                    terminalOutcome: WatchPollOutcome.Blocked,
+                    cancellationToken);
             }
             _logger.LogWarning("PR #{PrNumber} merge returned false; will retry next poll", prNumber);
             return WatchPollOutcome.Pending;
@@ -345,7 +381,7 @@ public sealed class PRWatcher
             return await ReworkOrTripAsync(
                 watchTask, taskId, worktreePath, sha,
                 reason: "PR conflicts with the base branch",
-                context: "The PR branch has merge conflicts with the base branch and cannot be merged — GitHub does not even run CI on a conflicting PR. Merge the base branch into your branch (git fetch origin && git merge origin/main), resolve the conflicts minimally, run the full test suite, and push to the SAME branch. Keep your earlier changes intact; do not restructure unrelated work.",
+                context: ConflictContext,
                 terminalStatus: IssueStatus.Blocked,
                 terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                 terminalOutcome: WatchPollOutcome.Blocked,
@@ -363,6 +399,12 @@ public sealed class PRWatcher
     /// goes terminal for the operator.
     /// </summary>
     public const int MaxReworkAttempts = 3;
+
+    /// <summary>Shared context for conflict sync rounds (used by the
+    /// green+approved-conflicting route and the non-green conflict
+    /// check).</summary>
+    private const string ConflictContext =
+        "The PR branch has merge conflicts with the base branch and cannot be merged — GitHub does not even run CI on a conflicting PR. Merge the base branch into your branch (git fetch origin && git merge origin/main), resolve the conflicts minimally, run the full test suite, and push to the SAME branch. Keep your earlier changes intact; do not restructure unrelated work.";
 
     /// <summary>
     /// Requeue the task for a rework round (Pending, with the failure
