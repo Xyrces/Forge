@@ -62,7 +62,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         var issue = await issues.GetAsync(input.Issue.Id, ct);
         if (issue is not null)
         {
-            var branch = input.Branch ?? $"agent/{Forge.AgentTools.GitRefNames.Sanitize(input.Issue.Id)}";
+            var branch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
             var currentMetadata = ParseMetadata(issue.MetadataJson);
             currentMetadata["worktreePath"] = worktreePath;
             currentMetadata["branch"] = branch;
