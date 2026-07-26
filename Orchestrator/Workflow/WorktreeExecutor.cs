@@ -90,9 +90,9 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             // origin/main itself per the rework prompt.
             var prNumber = issue.GetMetadata("prNumber");
             var reworkAttempts = issue.GetMetadata("reworkAttempts");
-            if (!string.IsNullOrEmpty(prNumber) && !string.IsNullOrEmpty(reworkAttempts))
+            if (!string.IsNullOrEmpty(prNumber) && int.TryParse(reworkAttempts, out var reworkCount) && reworkCount > 0)
             {
-                var remoteRef = $"origin/agent/{Sanitize(input.Issue.Id)}";
+                var remoteRef = $"origin/{branch}";
                 logger.LogInformation(
                     "Rework round detected for {Id}: prNumber={Pr} reworkAttempts={Rw}. " +
                     "Syncing worktree branch to PR head via {RemoteRef}",
