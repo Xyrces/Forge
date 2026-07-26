@@ -56,6 +56,7 @@ public class WorktreeExecutorTests : IDisposable
     {
         var bareDir = Path.Combine(Path.GetTempPath(), "ph-wtexec-remote-" + Guid.NewGuid().ToString("N"));
         RunGit(Path.GetTempPath(), "init -q --bare " + bareDir);
+        _bareRemoteDirs.Add(bareDir);
         RunGit(_workDir, "remote add origin " + bareDir);
         RunGit(_workDir, "push -u origin main");
         var branch = "agent/" + taskId;
