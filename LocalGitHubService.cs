@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Linq;
 using System.Diagnostics;
 using Octokit;
 
@@ -106,6 +107,17 @@ public sealed class LocalGitHubService : GitHubService
 
     public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
         => Task.FromResult<IReadOnlyList<PullRequestReview>>(Array.Empty<PullRequestReview>());
+
+    public override Task<PullRequest?> GetOpenPullRequestForBranchAsync(
+        string headBranch, CancellationToken cancellationToken = default)
+    {
+        var match = _prStore.PrInfo.FirstOrDefault(kvp =>
+            string.Equals(kvp.Value.HeadBranch, headBranch, StringComparison.OrdinalIgnoreCase) &&
+            !_prStore.WasMerged(kvp.Key));
+        if (match.Value is null)
+            return Task.FromResult<PullRequest?>(null);
+        return Task.FromResult<PullRequest?>(_prStore.GetPr(match.Key));
+    }
 
     public override Task<PullRequest> GetPullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
         => Task.FromResult(_prStore.GetPr(prNumber));
