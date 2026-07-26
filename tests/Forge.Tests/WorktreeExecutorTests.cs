@@ -18,7 +18,6 @@ public class WorktreeExecutorTests : IDisposable
     private readonly string _workDir;
     private readonly IssueStore _issues;
     private readonly GitWorktreeService _worktrees;
-    private readonly List<string> _bareRemoteDirs = new();
 
     public WorktreeExecutorTests()
     {
@@ -35,10 +34,6 @@ public class WorktreeExecutorTests : IDisposable
     {
         _issues.Dispose();
         try { Directory.Delete(_workDir, recursive: true); } catch { }
-        foreach (var dir in _bareRemoteDirs)
-        {
-            try { Directory.Delete(dir, recursive: true); } catch { }
-        }
     }
 
     private static void InitRepo(string dir)
