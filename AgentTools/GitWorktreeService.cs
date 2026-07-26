@@ -95,7 +95,7 @@ public sealed class GitWorktreeService
         // Use a per-task ref namespace so concurrent syncs don't clobber each other.
         var localRef = $"refs/forge/sync-base/{Sanitize(taskId)}";
 
-        var fetchResult = await RunGitInAsync(worktreePath, $"fetch {remoteName} {refPath}:{localRef}", cancellationToken);
+        var fetchResult = await RunGitInAsync(worktreePath, $"fetch {remoteName} +{refPath}:{localRef}", cancellationToken);
         if (fetchResult.ExitCode != 0)
             throw new InvalidOperationException($"git fetch remote ref failed (exit={fetchResult.ExitCode}): {fetchResult.Stderr}");
 

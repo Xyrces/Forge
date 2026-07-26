@@ -192,4 +192,54 @@ public class GitWorktreeServiceTests : IDisposable
         await p.WaitForExitAsync();
         return stdout.Trim();
     }
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_ForceUpdatedRef_SyncsAgain()
+    {
+        var initialSha = await GetHeadShaAsync(_workDir);
+
+        var worktreePath = _service.WorktreePathFor("t-force");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-force", "main");
+
+        // Create a feature branch, add a commit, push it — simulates first round
+        var rc = RunGit(_workDir, "checkout -b agent/task-force");
+        Assert.Equal(0, rc);
+
+        File.WriteAllText(Path.Combine(_workDir, "round1.txt"), "first round");
+        rc = RunGit(_workDir, "add round1.txt");
+        Assert.Equal(0, rc);
+        rc = RunGit(_workDir, "commit -q -m round1");
+        Assert.Equal(0, rc);
+        rc = RunGit(_workDir, "push origin agent/task-force");
+        Assert.Equal(0, rc);
+
+        var round1Sha = await GetHeadShaAsync(_workDir);
+        Assert.NotEqual(initialSha, round1Sha);
+
+        // First sync — worktree moves to round1
+        await _service.SyncWorktreeToRefAsync(worktreePath, "t-force", "origin/agent/task-force");
+        var afterFirstSync = await GetHeadShaAsync(worktreePath);
+        Assert.Equal(round1Sha, afterFirstSync);
+
+        // Simulate a force-push (rebase): amend the commit on the feature branch
+        rc = RunGit(_workDir, "reset --soft HEAD~1");
+        Assert.Equal(0, rc);
+        File.WriteAllText(Path.Combine(_workDir, "round2.txt"), "second round (force-pushed)");
+        rc = RunGit(_workDir, "add round2.txt");
+        Assert.Equal(0, rc);
+        rc = RunGit(_workDir, "commit -q -m round2-rebased");
+        Assert.Equal(0, rc);
+
+        var round2Sha = await GetHeadShaAsync(_workDir);
+        Assert.NotEqual(round1Sha, round2Sha);
+
+        // Force-push to the same remote branch
+        rc = RunGit(_workDir, "push --force origin agent/task-force");
+        Assert.Equal(0, rc);
+
+        // Second sync — worktree must move to round2 (force-updated ref)
+        await _service.SyncWorktreeToRefAsync(worktreePath, "t-force", "origin/agent/task-force");
+        var afterSecondSync = await GetHeadShaAsync(worktreePath);
+        Assert.Equal(round2Sha, afterSecondSync);
+    }
 }
