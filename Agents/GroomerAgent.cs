@@ -505,6 +505,7 @@ public sealed class GroomerAgent
                 {
                     foreach (var p in doc.RootElement.EnumerateObject())
                     {
+                        if (p.Value.ValueKind == System.Text.Json.JsonValueKind.Null) continue;
                         meta[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String
                             ? p.Value.GetString()!
                             : p.Value.GetRawText();
