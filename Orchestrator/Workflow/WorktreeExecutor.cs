@@ -129,7 +129,12 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 return new();
             var d = new Dictionary<string, object>();
             foreach (var p in doc.RootElement.EnumerateObject())
+            {
+                // JSON null = cleared key (delete idiom): absent, not
+                // the literal string "null".
+                if (p.Value.ValueKind == System.Text.Json.JsonValueKind.Null) continue;
                 d[p.Name] = System.Text.Json.JsonSerializer.Deserialize<object>(p.Value.GetRawText())!;
+            }
             return d;
         }
         catch { return new(); }
