@@ -92,6 +92,23 @@ public sealed class GitWorktreeService
             catch (Exception ex) { _logger.LogWarning(ex, "Manual delete of worktree path failed"); }
         }
         await RunGitAsync("worktree prune", cancellationToken);
+
+        // Clean up any per-task sync-base ref created by
+        // SyncWorktreeToRefAsync (task-163).  This is best-effort:
+        // if the ref does not exist (fresh task, or old shared ref
+        // path), git update-ref -d silently returns non-zero which
+        // we swallow at debug level.
+        var syncRef = "refs/forge/sync-base/" + Sanitize(taskId);
+        var delResult = await RunGitAsync("update-ref -d " + syncRef, cancellationToken);
+        if (delResult.ExitCode != 0)
+        {
+            _logger.LogDebug("Sync-base ref {Ref} not present or already deleted ({Exit})",
+                syncRef, delResult.ExitCode);
+        }
+        else
+        {
+            _logger.LogInformation("Deleted per-task sync-base ref {Ref}", syncRef);
+        }
     }
 
     public async Task<DiffStats> GetDiffStatsAsync(string worktreePath, string baseBranch, CancellationToken cancellationToken = default)
