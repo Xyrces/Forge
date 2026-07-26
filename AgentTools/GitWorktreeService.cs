@@ -72,6 +72,39 @@ public sealed class GitWorktreeService
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="InvalidOperationException">Thrown on detached
     /// HEAD, invalid remoteRef, fetch failure, or reset failure.</exception>
+    /// <summary>
+    /// Count commits on the worktree HEAD that are NOT on
+    /// <paramref name="baseRef"/> (e.g. "origin/main"). Used by the
+    /// dispatch path to decide whether a reused worktree is merely
+    /// stale (0 = safe to reset to the base) or carries local-only
+    /// work from a died run (&gt;0 = leave it for the agent).
+    /// </summary>
+    public async Task<int> CountCommitsAheadAsync(
+        string worktreePath, string baseRef, CancellationToken cancellationToken = default)
+    {
+        var result = await RunGitInAsync(worktreePath,
+            $"rev-list --count {baseRef}..HEAD", cancellationToken);
+        if (result.ExitCode != 0)
+        {
+            // A missing base ref means we cannot prove safety —
+            // report "has local work" so callers keep the worktree.
+            _logger?.LogWarning("git rev-list --count {BaseRef}..HEAD failed in {Path}: {Err}",
+                baseRef, worktreePath, result.Stderr);
+            return int.MaxValue;
+        }
+        return int.TryParse(result.Stdout.Trim(), out var n) ? n : int.MaxValue;
+    }
+
+    /// <summary>
+    /// Sync a worktree's branch to a REMOTE ref (e.g.
+    /// <c>origin/agent/task-42</c> for a rework round, or
+    /// <c>origin/main</c> for a stale first-time reuse) via fetch
+    /// into a per-task ref + reset --hard. Replaces the removed
+    /// <c>SyncWorktreeToDefaultBranchAsync</c> which used a SHARED
+    /// ref (cross-worktree clobbering) and targeted the default
+    /// branch only. Throws on any failure — callers must NOT start
+    /// the agent on a stale checkout.
+    /// </summary>
     public async Task SyncWorktreeToRefAsync(string worktreePath, string taskId, string remoteRef, CancellationToken cancellationToken = default)
     {
         // Reject detached HEAD -- the agent must be on a branch before syncing.

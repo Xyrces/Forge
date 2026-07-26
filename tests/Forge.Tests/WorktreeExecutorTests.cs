@@ -106,4 +106,91 @@ public class WorktreeExecutorTests : IDisposable
         Assert.Equal(WorktreeResult.AlreadyClaimed, result.Result);
         Assert.Null(result.WorktreePath);
     }
+
+    // ---- Stale-reuse sync (observed live 2026-07-26: tasks
+    // 185/186/189 died at the plan gate because their reused
+    // worktrees predated files that landed on main) ----
+
+    private string InitRepoWithOrigin()
+    {
+        // Re-root the fixture repo with a bare origin so fetches and
+        // origin/main refs work.
+        var bare = _workDir + "-bare.git";
+        Run("git", $"clone --bare {_workDir} {bare}", _workDir);
+        Run("git", "remote add origin " + bare, _workDir);
+        Run("git", "fetch origin", _workDir);
+        Run("git", "branch --set-upstream-to=origin/main main", _workDir);
+        return bare;
+    }
+
+    private async Task<IssueRecord> DispatchOnceAsync(string title = "x")
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: title));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var result = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        Assert.Equal(WorktreeResult.Ok, result.Result);
+        return (await _issues.GetAsync(issue.Id))!;
+    }
+
+    private void AdvanceOriginMain(string bare, string fileName)
+    {
+        // Commit a new file directly into the bare repo's main via a
+        // throwaway clone (bare repos have no worktree).
+        var tmp = Path.Combine(_workDir, "adv");
+        Run("git", $"clone -q {bare} {tmp}", _workDir);
+        Run("git", "config user.email test@test", tmp);
+        Run("git", "config user.name Test", tmp);
+        File.WriteAllText(Path.Combine(tmp, fileName), "new on main");
+        Run("git", "add " + fileName, tmp);
+        Run("git", "commit -q -m advance", tmp);
+        Run("git", "push -q origin main", tmp);
+        Directory.Delete(tmp, recursive: true);
+    }
+
+    [Fact]
+    public async Task ReusedWorktree_NoLocalCommits_SyncedToOriginMain()
+    {
+        InitRepoWithOrigin();
+        var issue = await DispatchOnceAsync();
+        var wt = _worktrees.WorktreePathFor(issue.Id);
+
+        AdvanceOriginMain(_workDir + "-bare.git", "NewFile.cs");
+
+        // Re-dispatch the same issue (still no prNumber): the stale
+        // worktree must be synced to the current base.
+        var claimed2 = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        await WorktreeExecutor.HandleAsync(
+            claimed2, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+
+        Assert.True(File.Exists(Path.Combine(wt, "NewFile.cs")),
+            "stale reused worktree was not synced to origin/main");
+    }
+
+    [Fact]
+    public async Task ReusedWorktree_WithLocalCommits_LeftAlone()
+    {
+        InitRepoWithOrigin();
+        var issue = await DispatchOnceAsync();
+        var wt = _worktrees.WorktreePathFor(issue.Id);
+
+        // Simulate a died run's partial work: a local-only commit.
+        File.WriteAllText(Path.Combine(wt, "partial.cs"), "local work");
+        Run("git", "add partial.cs", wt);
+        Run("git", "commit -q -m partial", wt);
+
+        AdvanceOriginMain(_workDir + "-bare.git", "NewFile.cs");
+
+        var claimed2 = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        await WorktreeExecutor.HandleAsync(
+            claimed2, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+
+        Assert.True(File.Exists(Path.Combine(wt, "partial.cs")),
+            "local-only work from the died run was wiped");
+        Assert.False(File.Exists(Path.Combine(wt, "NewFile.cs")),
+            "worktree with local commits must not be reset to base");
+    }
 }

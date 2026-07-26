@@ -63,6 +63,13 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             logger.LogWarning("WorktreeExecutor received AlreadyClaimed for {Id}", input.Issue.Id);
             return new WorktreeReady(input, WorktreeResult.AlreadyClaimed, null, defaultBranch);
         }
+        // Reuse detection BEFORE CreateAsync: the service short-
+        // circuits on an existing worktree ("reusing"), which is
+        // where staleness comes from (observed live 2026-07-26:
+        // tasks 185/186/189 burned their whole plan-gate revision
+        // budget because plans referenced files that landed on main
+        // AFTER their worktrees were created, then died on requeue).
+        var reused = Directory.Exists(worktrees.WorktreePathFor(input.Issue.Id));
         var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct);
         // P4 Stage A: advance the dispatch checkpoint BEFORE we
         // touch metadata. If we crash between CreateAsync and the
@@ -110,6 +117,41 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                         "Failed to sync worktree to PR head for rework round {Id}; " +
                         "will not start agent on a stale checkout", input.Issue.Id);
                     throw;
+                }
+            }
+            else if (reused)
+            {
+                // Stale-reuse sync (no PR): a re-dispatched task whose
+                // earlier run died before opening a PR. If the
+                // worktree carries no local-only commits, it is
+                // merely stale — reset it to the current base. Local
+                // commits mean the died run left work behind; keep it
+                // for the agent to continue from.
+                var ahead = await worktrees.CountCommitsAheadAsync(
+                    worktreePath, $"origin/{defaultBranch}", ct);
+                if (ahead == 0)
+                {
+                    logger.LogInformation(
+                        "Stale worktree reuse for {Id} (no local commits) — syncing to origin/{Base}",
+                        input.Issue.Id, defaultBranch);
+                    try
+                    {
+                        await worktrees.SyncWorktreeToRefAsync(
+                            worktreePath, input.Issue.Id, $"origin/{defaultBranch}", ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex,
+                            "Failed to sync stale worktree for {Id}; will not start agent on a stale checkout",
+                            input.Issue.Id);
+                        throw;
+                    }
+                }
+                else
+                {
+                    logger.LogInformation(
+                        "Reusing worktree for {Id} with {Ahead} local-only commit(s) — leaving as-is",
+                        input.Issue.Id, ahead);
                 }
             }
 
