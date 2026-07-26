@@ -105,6 +105,28 @@ public class ReviewerDispatcherTests : IDisposable
     }
 
     [Fact]
+    public async Task ReviewOnce_ReworkInFlightForThisHead_SkipsReview()
+    {
+        // Token-saving: a rework round is queued/in-flight for this
+        // exact head — the dev agent's push will replace it, and the
+        // sha-stamped verdict would be discarded. Don't review a head
+        // that's about to change.
+        var gh = new FakeGitHub();
+        var runner = new ScriptedRunner("REVIEWER_VERDICT: APPROVE");
+        var dispatcher = new ReviewerDispatcher(_issues, gh, runner, NullLogger<ReviewerDispatcher>.Instance);
+        var watch = await SeedWatchAsync();
+        await _issues.TransitionAsync(watch.Id, IssueStatus.Pending, null,
+            new Dictionary<string, object> { ["reworkInFlightSha"] = "abc123" });
+
+        var outcome = await dispatcher.ReviewOnceAsync(
+            (await _issues.GetAsync(watch.Id))!, headShaOverride: _ => "abc123");
+
+        Assert.Null(outcome);
+        Assert.Equal(0, runner.Calls);
+        Assert.Equal(0, gh.CommentCalls);
+    }
+
+    [Fact]
     public async Task ReviewOnce_LlmThrows_ErrorVerdict_NoSilentApprove()
     {
         var gh = new FakeGitHub();

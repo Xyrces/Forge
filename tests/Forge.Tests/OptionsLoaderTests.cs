@@ -63,7 +63,7 @@ public class OptionsLoaderTests : IDisposable
         """);
         var savedCwd = Directory.GetCurrentDirectory();
         var savedGhToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
-        var savedGhDd = Environment.GetEnvironmentVariable("GitHub__Token");
+        var savedGhTokenConfig = Environment.GetEnvironmentVariable("GitHub__Token");
         try
         {
             Environment.SetEnvironmentVariable("GITHUB_TOKEN", null);
@@ -77,7 +77,7 @@ public class OptionsLoaderTests : IDisposable
         finally
         {
             Environment.SetEnvironmentVariable("GITHUB_TOKEN", savedGhToken);
-            Environment.SetEnvironmentVariable("GitHub__Token", savedGhDd);
+            Environment.SetEnvironmentVariable("GitHub__Token", savedGhTokenConfig);
             Directory.SetCurrentDirectory(savedCwd);
         }
     }
