@@ -1,5 +1,14 @@
 namespace Forge.Configuration;
 
+/// <summary>Lifecycle state machine options.</summary>
+public sealed class StateOptions
+{
+    /// <summary>false = shadow mode (log warnings, allow); true =
+    /// authority mode (log errors, flag stateViolation metadata).
+    /// Never throws in production paths either way.</summary>
+    public bool WriteAuthority { get; set; }
+}
+
 /// <summary>
 /// Quality-gate configuration: ordered gate names per checkpoint.
 /// Resolution order per checkpoint: DB override (memory key

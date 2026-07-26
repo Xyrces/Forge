@@ -19,6 +19,13 @@ public sealed record AgentOptions
     /// </summary>
     public GateOptions Gates { get; set; } = new();
     /// <summary>
+    /// Lifecycle state machine (Phase 2). WriteAuthority=false
+    /// (default): shadow mode — illegal transitions logged as
+    /// warnings but allowed. true: authority mode — illegal
+    /// transitions logged as errors and flagged in metadata.
+    /// </summary>
+    public StateOptions State { get; set; } = new();
+    /// <summary>
     /// v1 multi-project registry. When non-empty, the dashboard
     /// lists and exposes each project; when empty the legacy
     /// <see cref="WorkspaceOptions.Root"/> is shimmed as a single

@@ -28,6 +28,7 @@ public sealed class PRWatcher
     private readonly ILogger<PRWatcher> _logger;
     private readonly StageGates? _gates;
     private readonly IDashboardEventBus _events;
+    private readonly Forge.Core.TaskStateMachine? _lifecycle;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -38,7 +39,8 @@ public sealed class PRWatcher
         IDashboardEventBus events,
         ILogger<PRWatcher> logger,
         StageGates? gates = null,
-        TimeSpan? reworkRoundGrace = null)
+        TimeSpan? reworkRoundGrace = null,
+        Forge.Core.TaskStateMachine? lifecycle = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -49,6 +51,7 @@ public sealed class PRWatcher
         _events = events;
         _logger = logger;
         _gates = gates;
+        _lifecycle = lifecycle;
     }
 
     /// <summary>
@@ -119,6 +122,7 @@ public sealed class PRWatcher
         if (pr.Merged)
         {
             _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
+            await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
             await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
             await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
@@ -127,11 +131,18 @@ public sealed class PRWatcher
                 taskId, $"PR #{prNumber} merged externally; task completed"));
             return WatchPollOutcome.Merged;
         }
-
         // P4 e2e-harness seam: tests can return the SHA
         // directly without going through Octokit's
         // PullRequest.Head (which has a private setter).
         var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+
+        // Phase 2 shadow authority: report observed events to the
+        // lifecycle machine BEFORE the watcher's own transitions (the
+        // machine derives the pre-transition state itself). Awaited —
+        // never fire-and-forget. Best-effort: machine failures must
+        // not break the watch loop.
+        async Task ReportAsync(Forge.Core.TaskEvent evt)
+            => await ReportLifecycleAsync(watchTask, taskId, evt, cancellationToken);
         var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
         // P4 e2e-harness seam: tests can pre-approve reviews
         // without going through Octokit's sealed
@@ -191,6 +202,7 @@ public sealed class PRWatcher
             {
                 return WatchPollOutcome.Pending;
             }
+            await ReportAsync(Forge.Core.TaskEvent.StallDetected);
             _logger.LogWarning(
                 "PR watch {WatchId}: rework round for {TaskId} stalled — no push and no task update for {Minutes:F0}m (head still {Sha}); re-firing as another strike",
                 watchTask.Id, taskId, untouchedFor.TotalMinutes, sha);        }
@@ -202,6 +214,7 @@ public sealed class PRWatcher
         // 1. All gates green -> merge. (External-merge handled above.)
         if (ciGreen && approved && !changesRequested)
         {
+            await ReportAsync(Forge.Core.TaskEvent.CiGreen);
             // Green + approved but CONFLICTING: the base moved after
             // the approval (a sibling PR merged) and Octokit's merge
             // 405/409s into a false return. Without this branch the
@@ -213,6 +226,7 @@ public sealed class PRWatcher
             var mergeableGreen = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
             if (mergeableGreen == false)
             {
+                await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
                     watchTask, taskId, worktreePath, sha,
                     reason: "PR conflicts with the base branch",
@@ -234,6 +248,7 @@ public sealed class PRWatcher
             var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
             if (merged)
             {
+                await ReportAsync(Forge.Core.TaskEvent.Merged);
                 await _gitHub.DeleteBranchAsync(branch, cancellationToken);
                 await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
                 await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
@@ -249,6 +264,7 @@ public sealed class PRWatcher
             var mergeableAfter = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
             if (mergeableAfter == false)
             {
+                await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
                     watchTask, taskId, worktreePath, sha,
                     reason: "PR conflicts with the base branch",
@@ -289,6 +305,7 @@ public sealed class PRWatcher
                 }
                 // Base recovered: fire the refresh round (no strike)
                 // and clear the parked marker.
+                await ReportAsync(Forge.Core.TaskEvent.BaseRecovered);
                 var watchMetaParked = ParseMetadataDict(watchTask.MetadataJson);
                 watchMetaParked["parkedOnMainCiSha"] = null!;
                 await _issues.TransitionAsync(watchTask.Id, watchTask.Status, error: null, metadata: watchMetaParked, ct: cancellationToken);
@@ -311,6 +328,7 @@ public sealed class PRWatcher
                     _logger.LogWarning(
                         "PR #{PrNumber}: CI failure is pre-existing on {Base} (base head {Sha} also red) — parking watch without a strike until the base recovers",
                         prNumber, baseBranch, baseHead);
+                    await ReportAsync(Forge.Core.TaskEvent.ParkedOnInfra);
                     var watchMeta = ParseMetadataDict(watchTask.MetadataJson);
                     watchMeta["parkedOnMainCiSha"] = sha;
                     await _issues.TransitionAsync(watchTask.Id, watchTask.Status, error: null, metadata: watchMeta, ct: cancellationToken);
@@ -322,6 +340,7 @@ public sealed class PRWatcher
             // Genuine PR failure (base is green): strike, with the
             // failing check-run details so the rework agent doesn't
             // have to guess what broke.
+            await ReportAsync(Forge.Core.TaskEvent.CiRedOnPr);
             var failing = await _gitHub.GetFailedCheckRunSummariesAsync(sha, cancellationToken);
             var detail = failing.Count > 0
                 ? " Failing checks:\n" + string.Join("\n", failing.Select(f => $"- {f}"))
@@ -337,6 +356,7 @@ public sealed class PRWatcher
         }
         if (changesRequested)
         {
+            await ReportAsync(Forge.Core.TaskEvent.ReviewChangesRequested);
             var notes = watchTask.GetMetadata("reviewNotes");
             return await ReworkOrTripAsync(
                 watchTask, taskId, worktreePath, sha,
@@ -378,6 +398,7 @@ public sealed class PRWatcher
         var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
         if (mergeable == false)
         {
+            await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
             return await ReworkOrTripAsync(
                 watchTask, taskId, worktreePath, sha,
                 reason: "PR conflicts with the base branch",
@@ -405,6 +426,27 @@ public sealed class PRWatcher
     /// check).</summary>
     private const string ConflictContext =
         "The PR branch has merge conflicts with the base branch and cannot be merged — GitHub does not even run CI on a conflicting PR. Merge the base branch into your branch (git fetch origin && git merge origin/main), resolve the conflicts minimally, run the full test suite, and push to the SAME branch. Keep your earlier changes intact; do not restructure unrelated work.";
+
+    /// <summary>Phase 2 shadow-authority helper: report an observed
+    /// event to the lifecycle machine. Best-effort — never breaks the
+    /// watch loop.</summary>
+    private async Task ReportLifecycleAsync(
+        IssueRecord watchTask, string taskId, Forge.Core.TaskEvent evt, CancellationToken cancellationToken)
+    {
+        if (_lifecycle is null) return;
+        try
+        {
+            var task = await _issues.GetAsync(taskId, cancellationToken);
+            if (task is not null)
+            {
+                await _lifecycle.ReportAsync(task, evt, watchTask, hasActiveDevRun: false, cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "lifecycle report {Event} failed for {TaskId}; continuing", evt, taskId);
+        }
+    }
 
     /// <summary>
     /// Requeue the task for a rework round (Pending, with the failure
@@ -438,6 +480,7 @@ public sealed class PRWatcher
         {
             _logger.LogWarning("PR watch {WatchId}: circuit breaker tripped for {TaskId} after {N} rework attempts ({Reason})",
                 watchTask.Id, taskId, attempts, reason);
+            await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.BreakerTripped, cancellationToken);
             await _issues.TransitionAsync(taskId, terminalStatus, terminalError, ct: cancellationToken);
             await _issues.TransitionAsync(watchTask.Id, terminalStatus, terminalError, ct: cancellationToken);
             if (terminalStatus == IssueStatus.Failed)
@@ -458,6 +501,7 @@ public sealed class PRWatcher
         _logger.LogInformation(
             "PR watch {WatchId}: rework round {N}/{Max} for {TaskId} — {Reason}",
             watchTask.Id, attempts, MaxReworkAttempts, taskId, reason);
+        await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.ReworkFired, cancellationToken);
         var metadata = ParseMetadataDict(task.MetadataJson);
         metadata["reworkAttempts"] = attempts.ToString();
         metadata["reworkReason"] = reason;

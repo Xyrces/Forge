@@ -1111,12 +1111,16 @@ Console.Error.WriteLine(ex.ToString());
             modelOverrides: roleModelOverrides,
             gates: options.Gates);
         var eventBus = new InMemoryDashboardEventBus();
+        var lifecycle = new Core.TaskStateMachine(
+            issues, options.State.WriteAuthority,
+            loggerFactory.CreateLogger<Core.TaskStateMachine>());
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30),
             eventBus,
             loggerFactory.CreateLogger<PRWatcher>(),
-            gates: stageGates);
+            gates: stageGates,
+            lifecycle: lifecycle);
         // P4 Stage B — pick the workflow runtime based on
 // appsettings.json. The InProcess dispatcher (default) is a
 // thin lambda over the existing EngineeringDispatchWorkflow +
