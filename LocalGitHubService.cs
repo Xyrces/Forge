@@ -108,6 +108,13 @@ public sealed class LocalGitHubService : GitHubService
     public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
         => Task.FromResult<IReadOnlyList<PullRequestReview>>(Array.Empty<PullRequestReview>());
 
+    /// <summary>
+    /// Queries the local <see cref="LocalPrStore.PrInfo"/> for an open
+    /// pull request whose head branch matches <paramref name="headBranch"/>.
+    /// The match is case-insensitive (<see cref="StringComparison.OrdinalIgnoreCase"/>)
+    /// and excludes already-merged PRs. Returns <c>null</c> when no
+    /// open PR matches.
+    /// </summary>
     public override Task<PullRequest?> GetOpenPullRequestForBranchAsync(
         string headBranch, CancellationToken cancellationToken = default)
     {

@@ -46,6 +46,9 @@ public class TaskStateMachineTests : IDisposable
     [Theory]
     // Happy paths from the 2026-07-25/26 incident trail.
     [InlineData(TaskEvent.Dispatched, TaskLifecycleState.Pending, TaskLifecycleState.Dispatching, true)]
+    [InlineData(TaskEvent.Dispatched, TaskLifecycleState.ReworkQueued, TaskLifecycleState.Dispatching, true)]
+    [InlineData(TaskEvent.Dispatched, TaskLifecycleState.Dispatching, TaskLifecycleState.Dispatching, true)]
+    [InlineData(TaskEvent.Dispatched, TaskLifecycleState.StalledRework, TaskLifecycleState.Dispatching, true)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen, true)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.ReworkRunning, TaskLifecycleState.PROpen, true)]
     [InlineData(TaskEvent.CiRedOnPr, TaskLifecycleState.PROpen, TaskLifecycleState.ReworkQueued, true)]
@@ -115,10 +118,32 @@ public class TaskStateMachineTests : IDisposable
     }
 
     [Fact]
+    public async Task Report_RecordedState_WinsOverStaleFlagDerivation()
+    {
+        // Observed live 2026-07-26 (task-183): after a rework round
+        // pushes, reworkReason persists on the task, so flag-
+        // derivation keeps saying ReworkRunning and the next verdict
+        // flags a false violation. The machine must trust its own
+        // recorded state (PROpen after the push) instead.
+        var task = await SeedTaskAsync(IssueStatus.InProgress, new()
+        {
+            ["prNumber"] = "47",
+            ["reworkReason"] = "CI failed",          // stale flag
+            ["reworkAttempts"] = "1",
+            ["state"] = "PROpen",                     // machine record (post-push)
+        });
+        var next = await Machine().ReportAsync(task, TaskEvent.ReviewApproved, null, false, CancellationToken.None);
+
+        Assert.Equal(TaskLifecycleState.MergeReady, next);
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("stateViolation"));
+        Assert.Equal("MergeReady", (await _issues.GetAsync(task.Id))!.GetMetadata("state"));
+    }
+
+    [Fact]
     public async Task Report_RealisticSequence_TracksThrough()
     {
-        // Dispatch -> PR open -> CI red -> rework -> head moved
-        // (push) -> green -> merged: the canonical happy path.
+        // Dispatch -> PR open -> CI red -> rework -> push (head
+        // moved) -> green -> merged: the canonical happy path.
         var task = await SeedTaskAsync(IssueStatus.Pending);
         var m = Machine();
 
@@ -129,6 +154,12 @@ public class TaskStateMachineTests : IDisposable
             await m.ReportAsync(await Reload(task), TaskEvent.PrOpened, null, false, CancellationToken.None));
         Assert.Equal(TaskLifecycleState.ReworkQueued,
             await m.ReportAsync(await Reload(task), TaskEvent.CiRedOnPr, null, false, CancellationToken.None));
+        // The rework round: claimed (Dispatched), pushes (PrOpened —
+        // production observes it via the dispatch-completed report).
+        Assert.Equal(TaskLifecycleState.Dispatching,
+            await m.ReportAsync(await Reload(task), TaskEvent.Dispatched, null, false, CancellationToken.None));
+        Assert.Equal(TaskLifecycleState.PROpen,
+            await m.ReportAsync(await Reload(task), TaskEvent.PrOpened, null, false, CancellationToken.None));
         Assert.Equal(TaskLifecycleState.MergeReady,
             await m.ReportAsync(await Reload(task), TaskEvent.CiGreen, null, false, CancellationToken.None));
         Assert.Equal(TaskLifecycleState.Merged,
