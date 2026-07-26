@@ -44,7 +44,6 @@ public class SqliteSkillSourceTests : IDisposable
 {
     private readonly string _dbPath;
     private readonly IssueStore _issues;
-    private readonly AgentStore _agents;
     private readonly SkillStore _skills;
     private readonly RoleAgentRegistry _roles;
     private readonly SqliteSkillSource _source;
@@ -53,10 +52,9 @@ public class SqliteSkillSourceTests : IDisposable
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"ph-skills-{Guid.NewGuid():N}.db");
         _issues = new IssueStore(_dbPath);
-        _agents = new AgentStore(_issues);
         _skills = new SkillStore(_issues);
         _roles = new RoleAgentRegistry();
-        _source = new SqliteSkillSource(_agents, _skills, _roles);
+        _source = new SqliteSkillSource(_skills, _roles);
     }
 
     public void Dispose()
@@ -65,17 +63,9 @@ public class SqliteSkillSourceTests : IDisposable
         try { File.Delete(_dbPath); } catch { }
     }
 
-    private async Task<string> SeedAgentAsync(string agentName, string displayName)
-    {
-        var rec = await _agents.CreateAsync(new NewAgent(
-            AgentName: agentName, DisplayName: displayName));
-        return rec.Id;
-    }
-
     [Fact]
     public async Task LoadForRole_NoSkills_ReturnsEmpty()
     {
-        await SeedAgentAsync("coredev", "Core Dev");
         var skills = await _source.LoadForRoleAsync(AgentType.CoreDev);
         Assert.Empty(skills);
     }
@@ -94,15 +84,11 @@ public class SqliteSkillSourceTests : IDisposable
     [Fact]
     public async Task LoadForRole_RoleScopedSkills_AreIsolatedToThatRole()
     {
-        // coredev skill only shows up for CoreDev; reviewer skill only for Reviewer.
-        await SeedAgentAsync("coredev", "Core Dev");
-        await SeedAgentAsync("reviewer", "Reviewer");
-
-        var coredevId = (await _agents.GetByNameAsync("coredev"))!.Id;
-        var reviewerId = (await _agents.GetByNameAsync("reviewer"))!.Id;
-
-        await _skills.CreateAsync(new NewSkill(Name: "ecs-style", Body: "X", AgentId: coredevId));
-        await _skills.CreateAsync(new NewSkill(Name: "tone-of-voice", Body: "Y", AgentId: reviewerId));
+        // Role-set scoping (schema v23): coredev skill only shows up
+        // for CoreDev; reviewer skill only for Reviewer — no agent
+        // table involved.
+        await _skills.CreateAsync(new NewSkill(Name: "ecs-style", Body: "X", Roles: new[] { "coredev" }));
+        await _skills.CreateAsync(new NewSkill(Name: "tone-of-voice", Body: "Y", Roles: new[] { "reviewer" }));
         await _skills.CreateAsync(new NewSkill(Name: "global-rule", Body: "Z"));
 
         var coreSkills = await _source.LoadForRoleAsync(AgentType.CoreDev);
@@ -132,25 +118,27 @@ public class SqliteSkillSourceTests : IDisposable
     }
 
     [Fact]
-    public async Task LoadForRole_RoleWithNoAgentEntry_ReturnsOnlyGlobals()
+    public async Task LoadForRole_SharedSkill_OneRowVisibleToBothRoles()
     {
-        // If a role has no row in AgentStore (e.g. fresh install before
-        // the bootstrap creates one), the runner must still see global
-        // skills rather than fail the dispatch.
-        await _skills.CreateAsync(new NewSkill(Name: "global-rule", Body: "Z"));
-        var skills = await _source.LoadForRoleAsync(AgentType.CoreDev);
-        Assert.Single(skills);
-        Assert.Equal("global-rule", skills[0].Name);
+        // Many-to-many (schema v23): a skill given to BOTH coredev and
+        // clientdev is ONE row that both roles see.
+        await _skills.CreateAsync(new NewSkill(
+            Name: "shared-contract", Body: "X", Roles: new[] { "coredev", "clientdev" }));
+
+        var core = await _source.LoadForRoleAsync(AgentType.CoreDev);
+        var client = await _source.LoadForRoleAsync(AgentType.ClientDev);
+        var qa = await _source.LoadForRoleAsync(AgentType.QA);
+
+        Assert.Contains(core, s => s.Name == "shared-contract");
+        Assert.Contains(client, s => s.Name == "shared-contract");
+        Assert.DoesNotContain(qa, s => s.Name == "shared-contract");
     }
 
     [Fact]
     public async Task LoadForRole_SkillNameCollision_GlobalThenRole_RoleWins()
     {
-        await SeedAgentAsync("coredev", "Core Dev");
-        var coredevId = (await _agents.GetByNameAsync("coredev"))!.Id;
-
-        await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "GLOBAL VERSION", AgentId: null));
-        await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "ROLE VERSION", AgentId: coredevId));
+        await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "GLOBAL VERSION"));
+        await _skills.CreateAsync(new NewSkill(Name: "build-style", Body: "ROLE VERSION", Roles: new[] { "coredev" }));
 
         var skills = await _source.LoadForRoleAsync(AgentType.CoreDev);
         Assert.Single(skills);

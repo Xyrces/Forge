@@ -11,6 +11,19 @@ namespace Forge.Orchestrator.Workflow;
 /// the worktree path / branch / role in the issue's metadata, then
 /// returns a <see cref="WorktreeReady"/> with the worktree path +
 /// branch + base branch (for the eventual PR's base).
+///
+/// <para>
+/// <strong>Rework detection.</strong> When the issue has both
+/// <c>prNumber</c> and <c>reworkAttempts</c> in its metadata (set
+/// by the Reviewer / PRWatcher on requeue), this executor syncs the
+/// worktree branch to the PR head (<c>origin/agent/&lt;id&gt;</c>)
+/// BEFORE the agent runs. This ensures the agent starts on the
+/// same commit the PR is at, even if the branch head moved after
+/// an external push or a prior rework round. First-time dispatches
+/// (no PR metadata) keep the existing behavior: create from the
+/// default branch. Conflict rework rounds are unchanged — the
+/// agent still merges <c>origin/main</c> itself per the prompt.
+/// </para>
 /// </summary>
 public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeReady>
 {
@@ -62,10 +75,44 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         var issue = await issues.GetAsync(input.Issue.Id, ct);
         if (issue is not null)
         {
-            var branch = input.Branch ?? $"agent/{input.Issue.Id}";
+            var branch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
             var currentMetadata = ParseMetadata(issue.MetadataJson);
             currentMetadata["worktreePath"] = worktreePath;
             currentMetadata["branch"] = branch;
+
+            // Rework detection: if the issue has both prNumber and
+            // reworkAttempts in metadata (set by Reviewer/PRWatcher
+            // when it requeues for a rework round), sync the worktree
+            // branch to the PR head so the agent starts on the same
+            // commit the PR is at. First-time dispatches (no PR yet)
+            // skip the sync and create from the default branch.
+            // Conflict rework rounds stay unchanged — the agent merges
+            // origin/main itself per the rework prompt.
+            var prNumber = issue.GetMetadata("prNumber");
+            var reworkAttempts = issue.GetMetadata("reworkAttempts");
+            if (!string.IsNullOrEmpty(prNumber) && int.TryParse(reworkAttempts, out var reworkCount) && reworkCount > 0)
+            {
+                var remoteRef = $"origin/{branch}";
+                logger.LogInformation(
+                    "Rework round detected for {Id}: prNumber={Pr} reworkAttempts={Rw}. " +
+                    "Syncing worktree branch to PR head via {RemoteRef}",
+                    input.Issue.Id, prNumber, reworkAttempts, remoteRef);
+                try
+                {
+                    await worktrees.SyncWorktreeToRefAsync(
+                        worktreePath, input.Issue.Id, remoteRef, ct);
+                }
+                catch (Exception ex)
+                {
+                    // Sync failure must surface through the workflow
+                    // halt guard so the orchestrator can requeue.
+                    logger.LogError(ex,
+                        "Failed to sync worktree to PR head for rework round {Id}; " +
+                        "will not start agent on a stale checkout", input.Issue.Id);
+                    throw;
+                }
+            }
+
             await issues.TransitionAsync(input.Issue.Id, issue.Status, error: null,
                 metadata: currentMetadata, ct: ct);
         }
@@ -82,10 +129,29 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 return new();
             var d = new Dictionary<string, object>();
             foreach (var p in doc.RootElement.EnumerateObject())
+            {
+                // JSON null = cleared key (delete idiom): absent, not
+                // the literal string "null".
+                if (p.Value.ValueKind == System.Text.Json.JsonValueKind.Null) continue;
                 d[p.Name] = System.Text.Json.JsonSerializer.Deserialize<object>(p.Value.GetRawText())!;
+            }
             return d;
         }
         catch { return new(); }
+    }
+
+    /// <summary>
+    /// Strips characters invalid in git ref names from the task id so it
+    /// can be safely used as a branch name suffix or remote ref segment.
+    /// Reuses the same sanitization logic as <see cref="GitWorktreeService"/>.
+    /// </summary>
+    private static string Sanitize(string s)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var c in s)
+            sb.Append(System.Array.IndexOf(invalid, c) >= 0 ? '_' : c);
+        return sb.ToString();
     }
 }
 

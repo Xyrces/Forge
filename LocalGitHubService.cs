@@ -23,7 +23,7 @@ namespace Forge;
 /// Implemented as a <see cref="GitHubService"/> subclass so
 /// the orchestrator's call sites don't change; the harness
 /// swaps the constructor argument for an instance of this
-/// class. All 7 public methods on the base class are
+/// class. All 13 public methods on the base class are
 /// <c>virtual</c> to enable the override.
 /// </para>
 ///
@@ -124,6 +124,39 @@ public sealed class LocalGitHubService : GitHubService
 
     public override Task<bool> DeleteBranchAsync(string branchName, CancellationToken cancellationToken = default)
         => Task.FromResult(true);
+    public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default)
+        => Task.FromResult(_prStore.GetBranchSha(branch) ?? $"local-{branch}-head");
+
+    public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+
+    /// <summary>
+    /// Post a comment on a PR issue. Stored in-memory; no-op
+    /// for the e2e harness (the harness asserts on PR creation
+    /// and merge, not on comments).
+    /// </summary>
+    public override Task<long> CreateIssueCommentAsync(
+        long issueNumber, string body, CancellationToken cancellationToken = default)
+        => Task.FromResult(0L);
+
+    /// <summary>
+    /// Submit a structured review event. Stored in-memory; no-op
+    /// for the e2e harness.
+    /// </summary>
+    public override Task<long> SubmitReviewAsync(
+        int prNumber, string headSha, string body,
+        PullRequestReviewState state, CancellationToken cancellationToken = default)
+        => Task.FromResult(0L);
+
+    /// <summary>
+    /// Fetch the unified diff text for a PR. The harness stores
+    /// the PR's metadata; for a real diff, the orchestrator would
+    /// need to git-diff the head vs base. For now, return empty
+    /// (the e2e harness doesn't drive the reviewer loop).
+    /// </summary>
+    public override Task<string> GetPullRequestDiffAsync(
+        int prNumber, CancellationToken cancellationToken = default)
+        => Task.FromResult(string.Empty);
 }
 
 /// <summary>
@@ -193,6 +226,9 @@ public sealed class LocalPrStore
             tcs.TrySetResult(sha);
         }
     }
+
+    public string? GetBranchSha(string branch)
+        => _branchShas.TryGetValue(branch, out var s) ? s : null;
 
     public Task<string> WaitForBranchShaAsync(string branch, TimeSpan timeout, CancellationToken ct)
     {

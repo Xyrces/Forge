@@ -42,6 +42,10 @@
   -->
   <ItemGroup>
     <Content Include="Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
+    <!-- Built-in MAF role prompts: copied next to the app so any
+         project without its own agents/ dir still gets real role
+         instructions (see Agents/RolePromptRoot.cs). -->
+    <Content Include="agents\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="agents\%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>

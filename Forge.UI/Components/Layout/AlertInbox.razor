@@ -1,0 +1,91 @@
+@inject HttpClient Http
+@inject NavigationManager Nav
+@implements IDisposable
+@using System.Net.Http.Json
+
+<div class="alert-inbox" style="position:relative">
+    <button class="icon-btn alert-inbox__bell" title="Needs attention" @onclick="Toggle">
+        🔔
+        @if (_items.Count > 0)
+        {
+            <span class="alert-inbox__badge">@(_items.Count > 99 ? "99+" : _items.Count)</span>
+        }
+    </button>
+
+    @if (_open)
+    {
+        <div class="alert-inbox__backdrop" @onclick="Close"></div>
+        <div class="alert-inbox__panel">
+            <div class="alert-inbox__panel-header">
+                <span>Needs attention</span>
+                <span class="alert-inbox__count">@_items.Count</span>
+            </div>
+            @if (_items.Count == 0)
+            {
+                <div class="alert-inbox__empty">Nothing needs you. The machine is running.</div>
+            }
+            @foreach (var a in _items.Take(20))
+            {
+                <button class="alert-inbox__row" @onclick="@(() => Go(a.Link))">
+                    <span class="alert-inbox__dot" style="background:@Dot(a.Severity)"></span>
+                    <span class="alert-inbox__text">
+                        <span class="alert-inbox__title">@a.Title</span>
+                        @if (a.Detail is not null)
+                        {
+                            <span class="alert-inbox__detail">@a.Detail</span>
+                        }
+                    </span>
+                    <span class="alert-inbox__chev">›</span>
+                </button>
+            }
+            @if (_items.Count > 20)
+            {
+                <div class="alert-inbox__empty">+@(_items.Count - 20) more — see /now</div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private List<AttentionDto> _items = new();
+    private bool _open;
+    private System.Threading.Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _timer = new System.Threading.Timer(_ => InvokeAsync(LoadAsync), null,
+            TimeSpan.Zero, TimeSpan.FromSeconds(10));
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            var feed = await Http.GetFromJsonAsync<NowFeedDto>("/api/now");
+            _items = feed?.Attention ?? new();
+            StateHasChanged();
+        }
+        catch { /* keep last good */ }
+    }
+
+    private void Toggle() => _open = !_open;
+    private void Close() => _open = false;
+
+    private void Go(string link)
+    {
+        _open = false;
+        Nav.NavigateTo(link);
+    }
+
+    private static string Dot(string severity) => severity switch
+    {
+        "fail" => "#c62828",
+        "warn" => "#ef6c00",
+        _ => "#1565c0",
+    };
+
+    public void Dispose() => _timer?.Dispose();
+
+    private sealed record NowFeedDto(List<AttentionDto> Attention);
+    private sealed record AttentionDto(string Severity, string Kind, string Title, string? Detail, string? IssueId, string Link);
+}

@@ -249,14 +249,20 @@ public class StartupRecoveryTests : IDisposable
     }
 
     [Fact]
-    public async Task Replay_WorktreeAcquired_LeavesAloneForDispatchLoop()
+    public async Task Replay_WorktreeAcquired_RequeuesToPending()
     {
+        // New contract: the dispatch loop only claims Pending
+        // issues, so worktree_acquired orphans are transitioned
+        // back to Pending for re-dispatch (the worktree itself is
+        // reused; the LLM re-runs from scratch).
         var id = await SeedIssueAsync(DispatchCheckpoint.WorktreeAcquired);
         var issue = (await _issues.GetAsync(id))!;
         var action = await _recovery.ReplayAsync(issue);
-        Assert.Equal("left_alone", action.Action);
+        Assert.Equal("requeued", action.Action);
         Assert.Equal(0, _gitHub.CallCount);
-        Assert.Equal(DispatchCheckpoint.WorktreeAcquired, (await _issues.GetAsync(id))!.DispatchCheckpoint);
+        var after = (await _issues.GetAsync(id))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal(DispatchCheckpoint.WorktreeAcquired, after.DispatchCheckpoint);
     }
 
     [Fact]
@@ -295,7 +301,7 @@ public class StartupRecoveryTests : IDisposable
     {
         // Build 6 issues in different states:
         //  1. claimed (just claimed, no worktree yet) -> left alone
-        //  2. worktree_acquired (worktree exists) -> left alone
+        //  2. worktree_acquired (worktree exists) -> requeued to Pending
         //  3. worktree_acquired (worktree missing) -> failed
         //  4. agent_completed -> replay -> pr_opened
         //  5. push_done -> replay -> pr_opened
@@ -331,7 +337,8 @@ public class StartupRecoveryTests : IDisposable
 
         // Verify each issue's final state.
         Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(claimedOnly.Id))!.Status);
-        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(wtOk))!.Status);
+        // wtOk is requeued to Pending for re-dispatch.
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(wtOk))!.Status);
         // wt_missing is left_alone (recoveryAttempts < MaxAttempts -> retry).
         Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(wtMissing))!.Status);
         Assert.Equal(1, (await _issues.GetAsync(wtMissing))!.RecoveryAttempts);

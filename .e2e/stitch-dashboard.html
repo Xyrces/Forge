@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Forge | AI Orchestrator Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "tertiary-fixed": "#ffdf97",
+                    "primary": "#b4c5ff",
+                    "on-primary-container": "#002f88",
+                    "tertiary-container": "#c89a00",
+                    "tertiary-fixed-dim": "#f2c035",
+                    "on-primary-fixed": "#00174c",
+                    "surface-variant": "#33343b",
+                    "primary-fixed-dim": "#b4c5ff",
+                    "surface-container-lowest": "#0c0e14",
+                    "outline": "#8e909e",
+                    "inverse-surface": "#e2e2ea",
+                    "on-tertiary-container": "#473500",
+                    "on-error": "#690005",
+                    "on-surface": "#e2e2ea",
+                    "on-background": "#e2e2ea",
+                    "surface-dim": "#121319",
+                    "on-tertiary": "#3e2e00",
+                    "surface-container-highest": "#33343b",
+                    "inverse-on-surface": "#2f3037",
+                    "secondary": "#bec6dc",
+                    "surface-bright": "#38393f",
+                    "surface": "#121319",
+                    "error-container": "#93000a",
+                    "on-secondary-container": "#acb5cb",
+                    "on-surface-variant": "#c4c6d4",
+                    "secondary-container": "#3e4759",
+                    "on-error-container": "#ffdad6",
+                    "on-primary-fixed-variant": "#163f9e",
+                    "surface-container-low": "#1a1b21",
+                    "on-tertiary-fixed-variant": "#5a4400",
+                    "surface-container-high": "#282a30",
+                    "on-primary": "#002979",
+                    "on-tertiary-fixed": "#251a00",
+                    "error": "#ffb4ab",
+                    "outline-variant": "#444652",
+                    "primary-fixed": "#dbe1ff",
+                    "inverse-primary": "#3658b7",
+                    "secondary-fixed-dim": "#bec6dc",
+                    "on-secondary-fixed": "#131c2c",
+                    "secondary-fixed": "#dae2f9",
+                    "on-secondary-fixed-variant": "#3e4759",
+                    "primary-container": "#7c9cff",
+                    "on-secondary": "#283142",
+                    "background": "#121319",
+                    "tertiary": "#f2c035",
+                    "surface-tint": "#b4c5ff",
+                    "surface-container": "#1e1f25"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "component-padding": "12px",
+                    "rail-width": "220px",
+                    "gutter": "24px",
+                    "stack-gap": "16px",
+                    "margin-page": "32px",
+                    "topbar-height": "56px"
+            },
+            "fontFamily": {
+                    "title-sm": ["Inter"],
+                    "label-caps": ["Inter"],
+                    "headline-md": ["Inter"],
+                    "display-lg": ["Inter"],
+                    "body-sm": ["Inter"],
+                    "mono-data": ["JetBrains Mono"],
+                    "body-md": ["Inter"]
+            },
+            "fontSize": {
+                    "title-sm": ["18px", {"lineHeight": "24px", "fontWeight": "600"}],
+                    "label-caps": ["11px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "700"}],
+                    "headline-md": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                    "display-lg": ["32px", {"lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "body-sm": ["12px", {"lineHeight": "18px", "fontWeight": "400"}],
+                    "mono-data": ["13px", {"lineHeight": "16px", "fontWeight": "500"}],
+                    "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body { background-color: #121319; color: #e2e2ea; font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .pulse-green { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.2); } 100% { opacity: 1; transform: scale(1); } }
+        .glow-border { box-shadow: 0 0 10px rgba(180, 197, 255, 0.1); }
+    </style>
+</head>
+<body class="overflow-hidden">
+<!-- TopNavBar -->
+<header class="fixed top-0 left-0 w-full z-50 flex items-center justify-between px-gutter bg-surface-container dark:bg-surface-container border-b border-outline-variant dark:border-outline-variant h-[56px]">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2 cursor-pointer hover:bg-surface-bright p-1.5 rounded transition-colors group">
+<span class="text-title-sm font-title-sm font-black tracking-tighter text-on-surface dark:text-on-surface">forge</span>
+<span class="material-symbols-outlined text-on-surface-variant group-hover:text-primary transition-colors">expand_more</span>
+</div>
+<div class="h-4 w-px bg-outline-variant mx-2"></div>
+<nav class="hidden md:flex items-center gap-6">
+<span class="text-body-md font-body-md text-primary dark:text-primary font-bold">Sprint 14</span>
+<span class="text-body-md font-body-md text-on-surface-variant dark:text-on-surface-variant hover:text-on-surface cursor-pointer">ok</span>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<div class="relative group">
+<button class="p-2 rounded-full hover:bg-surface-bright text-on-surface-variant transition-colors relative">
+<span class="material-symbols-outlined">notifications</span>
+<span class="absolute top-2 right-2 w-2 h-2 bg-error rounded-full border-2 border-surface-container"></span>
+</button>
+<!-- Dropdown Overlay -->
+<div class="absolute right-0 mt-2 w-[380px] bg-surface-container-high border border-outline-variant rounded-lg shadow-2xl overflow-hidden opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 translate-y-2 group-hover:translate-y-0 z-50">
+<div class="p-4 border-b border-outline-variant bg-surface-container-highest">
+<h3 class="text-label-caps font-label-caps text-on-surface">Needs attention</h3>
+</div>
+<div class="max-h-[400px] overflow-y-auto no-scrollbar">
+<!-- Alert 1 -->
+<div class="p-4 border-b border-outline-variant hover:bg-surface-bright cursor-pointer flex gap-3 items-start">
+<div class="w-2 h-2 bg-error rounded-full mt-2 shrink-0"></div>
+<div class="flex-1">
+<div class="text-body-md font-bold text-on-surface">task-9 failed: implement /api/meta/buildinfo</div>
+<div class="text-body-sm text-on-surface-variant">HTTP 401 — see task events</div>
+</div>
+<span class="material-symbols-outlined text-on-surface-variant">chevron_right</span>
+</div>
+<!-- Alert 2 -->
+<div class="p-4 border-b border-outline-variant hover:bg-surface-bright cursor-pointer flex gap-3 items-start">
+<div class="w-2 h-2 bg-tertiary rounded-full mt-2 shrink-0"></div>
+<div class="flex-1">
+<div class="text-body-md font-bold text-on-surface">Gate held: merge — PRs will not auto-merge until released</div>
+<div class="text-body-sm text-on-surface-variant">Manual override active</div>
+</div>
+<span class="material-symbols-outlined text-on-surface-variant">chevron_right</span>
+</div>
+<!-- Alert 3 -->
+<div class="p-4 hover:bg-surface-bright cursor-pointer flex gap-3 items-start">
+<div class="w-2 h-2 bg-primary rounded-full mt-2 shrink-0"></div>
+<div class="flex-1">
+<div class="text-body-md font-bold text-on-surface">task-122: Review requested</div>
+<div class="text-body-sm text-on-surface-variant">@sys_op_1 completed implementation</div>
+</div>
+<span class="material-symbols-outlined text-on-surface-variant">chevron_right</span>
+</div>
+</div>
+</div>
+</div>
+<button class="p-2 rounded-full hover:bg-surface-bright text-on-surface-variant transition-colors">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<div class="w-8 h-8 rounded-lg overflow-hidden border border-outline-variant">
+<img class="w-full h-full object-cover" data-alt="A professional headshot of a technical operator in a dimly lit, blue-toned command center environment. The operator wears sleek, dark tactical-style workwear with a subtle matte finish. Soft rim lighting highlights their features against a background of glowing server racks and digital interfaces. The overall mood is serious, competent, and high-tech." src="https://lh3.googleusercontent.com/aida-public/AB6AXuB3cNIPihbm2nLq9xlsaXudpd-WYR37EYJbGMSSBZa-5SMA9MN9P7wNC2WBxtiTb3wXEq4QiXZQcUwLw_bYHMwv8w6H8A9gDZKlhUl_fmznjzRBgEuI8D_-uMoEJO1BbxbK2AGKmBdYXiFVRSjL7y_NM1N0KThTEbndWWyIgS4K_NH8LHjhc-fNazbzCUJ_W9gx9f_RS7NSicIqbRqwurpWxU19HUakHymwmXdUAvh1WRRBZK3Gx96osszO4kQZOwfe4-cTmJAaXko"/>
+</div>
+</div>
+</header>
+<!-- SideNavBar -->
+<aside class="fixed left-0 top-0 h-screen w-rail flex flex-col pt-topbar-height pb-4 z-40 overflow-y-auto bg-surface-container-low dark:bg-surface-container-low border-r border-outline-variant dark:border-outline-variant no-scrollbar">
+<div class="flex flex-col gap-1 p-2">
+<div class="flex items-center gap-3 bg-secondary-container dark:bg-secondary-container text-on-secondary-container dark:text-on-secondary-container border-l-4 border-primary px-3 py-2 transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">dashboard</span>
+<span class="text-label-caps font-label-caps">Board</span>
+</div>
+<div class="flex items-center gap-3 text-on-surface-variant dark:text-on-surface-variant px-3 py-2 hover:bg-surface-container-high transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">input</span>
+<span class="text-label-caps font-label-caps">Intake</span>
+</div>
+<div class="flex items-center gap-3 text-on-surface-variant dark:text-on-surface-variant px-3 py-2 hover:bg-surface-container-high transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">architecture</span>
+<span class="text-label-caps font-label-caps">Designs</span>
+</div>
+<div class="flex items-center gap-3 text-on-surface-variant dark:text-on-surface-variant px-3 py-2 hover:bg-surface-container-high transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">directions_run</span>
+<span class="text-label-caps font-label-caps">Sprints</span>
+</div>
+<div class="flex items-center gap-3 text-on-surface-variant dark:text-on-surface-variant px-3 py-2 hover:bg-surface-container-high transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">smart_toy</span>
+<span class="text-label-caps font-label-caps">Agents</span>
+</div>
+<div class="flex items-center gap-3 text-on-surface-variant dark:text-on-surface-variant px-3 py-2 hover:bg-surface-container-high transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">rocket_launch</span>
+<span class="text-label-caps font-label-caps">Deployments</span>
+</div>
+</div>
+<div class="mt-auto px-4 py-2">
+<button class="w-full bg-primary hover:bg-primary-container text-on-primary-fixed py-2 rounded-lg text-label-caps font-label-caps transition-colors flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-[16px]">add</span>
+                New Agent
+            </button>
+</div>
+<div class="flex flex-col gap-1 p-2 mt-4 border-t border-outline-variant">
+<div class="flex items-center gap-3 text-on-surface-variant px-3 py-2 hover:bg-surface-container-high transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">settings</span>
+<span class="text-label-caps font-label-caps">Settings</span>
+</div>
+<div class="flex items-center gap-3 text-on-surface-variant px-3 py-2 hover:bg-surface-container-high transition-all cursor-pointer">
+<span class="material-symbols-outlined text-[20px]">help</span>
+<span class="text-label-caps font-label-caps">Support</span>
+</div>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="ml-rail pt-topbar-height h-screen overflow-y-auto p-gutter bg-background">
+<div class="max-w-[1600px] mx-auto space-y-gutter">
+<!-- ROW 1: KPI Tiles -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-gutter">
+<!-- Active Sprint -->
+<div class="bg-surface-container-low border border-outline-variant rounded-lg p-component-padding flex flex-col justify-between h-[120px] hover:border-primary transition-colors cursor-pointer group">
+<div>
+<span class="text-label-caps font-label-caps text-on-surface-variant">Active Sprint</span>
+<h4 class="text-body-md font-bold text-on-surface mt-1">Dispatcher resilience</h4>
+</div>
+<div class="space-y-2">
+<div class="w-full h-1 bg-surface-container-highest rounded-full overflow-hidden">
+<div class="w-[12.5%] h-full bg-primary rounded-full"></div>
+</div>
+<div class="flex justify-between items-center">
+<span class="text-body-sm text-on-surface-variant">1/8 tasks</span>
+<span class="text-mono-data font-mono-data text-primary text-[11px]">sprint-0e93a9</span>
+</div>
+</div>
+</div>
+<!-- Agent runs -->
+<div class="bg-surface-container-low border border-outline-variant rounded-lg p-component-padding flex flex-col justify-between h-[120px] hover:border-primary transition-colors cursor-pointer group">
+<span class="text-label-caps font-label-caps text-on-surface-variant">Agent runs</span>
+<div class="flex items-baseline gap-2">
+<span class="text-display-lg font-mono-data text-on-surface">1</span>
+<span class="text-body-sm text-primary animate-pulse">● Running</span>
+</div>
+<span class="text-body-sm text-on-surface-variant">task-156 running · 38s</span>
+</div>
+<!-- Waiting -->
+<div class="bg-surface-container-low border border-outline-variant rounded-lg p-component-padding flex flex-col justify-between h-[120px] hover:border-primary transition-colors cursor-pointer group">
+<span class="text-label-caps font-label-caps text-on-surface-variant">Waiting</span>
+<span class="text-display-lg font-mono-data text-on-surface">4</span>
+<span class="text-body-sm text-error">3 retrying after rate limit</span>
+</div>
+<!-- Stage gates -->
+<div class="bg-surface-container-low border border-outline-variant rounded-lg p-component-padding flex flex-col justify-between h-[120px] hover:border-primary transition-colors cursor-pointer group">
+<span class="text-label-caps font-label-caps text-on-surface-variant">Stage gates</span>
+<div class="flex flex-wrap gap-2">
+<span class="px-2 py-1 rounded bg-primary/10 border border-primary/20 text-[10px] font-bold uppercase text-primary">Design</span>
+<span class="px-2 py-1 rounded bg-primary/10 border border-primary/20 text-[10px] font-bold uppercase text-primary">Groom</span>
+<span class="px-2 py-1 rounded bg-primary/10 border border-primary/20 text-[10px] font-bold uppercase text-primary">Sprint</span>
+<span class="px-2 py-1 rounded bg-tertiary/10 border border-tertiary/20 text-[10px] font-bold uppercase text-tertiary">Merge: held</span>
+</div>
+<span class="text-body-sm text-on-surface-variant">System status: Degraded</span>
+</div>
+</div>
+<!-- ROW 2: Two side-by-side panels -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-gutter">
+<!-- Happening now -->
+<section class="bg-surface-container border border-outline-variant rounded-lg flex flex-col overflow-hidden">
+<div class="p-4 border-b border-outline-variant bg-surface-container-high flex justify-between items-center">
+<h3 class="text-label-caps font-label-caps text-on-surface">Happening now</h3>
+<span class="material-symbols-outlined text-[18px] text-on-surface-variant">more_horiz</span>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="text-label-caps font-label-caps text-on-surface-variant border-b border-outline-variant">
+<th class="p-4 font-normal">ID</th>
+<th class="p-4 font-normal">Title</th>
+<th class="p-4 font-normal">Stage</th>
+<th class="p-4 font-normal text-right">Elapsed</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant/50">
+<tr class="hover:bg-surface-bright/50 transition-colors cursor-pointer group">
+<td class="p-4 font-mono-data text-primary text-[12px] flex items-center gap-2">
+<div class="w-1.5 h-1.5 bg-primary rounded-full pulse-green"></div>
+                                        task-156
+                                    </td>
+<td class="p-4 text-body-md text-on-surface truncate max-w-[200px]">Refactor auth middleware...</td>
+<td class="p-4">
+<div class="flex items-center gap-2 text-body-sm text-on-surface-variant">
+<span class="material-symbols-outlined text-[16px]">smart_toy</span>
+                                            agent running
+                                        </div>
+</td>
+<td class="p-4 font-mono-data text-right text-on-surface-variant text-[12px]">00:42</td>
+</tr>
+<tr class="hover:bg-surface-bright/50 transition-colors cursor-pointer group">
+<td class="p-4 font-mono-data text-primary text-[12px] flex items-center gap-2">
+<div class="w-1.5 h-1.5 bg-primary rounded-full pulse-green"></div>
+                                        task-158
+                                    </td>
+<td class="p-4 text-body-md text-on-surface truncate max-w-[200px]">Update swagger documentation</td>
+<td class="p-4">
+<div class="flex items-center gap-2 text-body-sm text-on-surface-variant">
+<span class="material-symbols-outlined text-[16px]">description</span>
+                                            generating specs
+                                        </div>
+</td>
+<td class="p-4 font-mono-data text-right text-on-surface-variant text-[12px]">01:15</td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<!-- Waiting — and why -->
+<section class="bg-surface-container border border-outline-variant rounded-lg flex flex-col overflow-hidden">
+<div class="p-4 border-b border-outline-variant bg-surface-container-high flex justify-between items-center">
+<h3 class="text-label-caps font-label-caps text-on-surface">Waiting — and why</h3>
+<span class="material-symbols-outlined text-[18px] text-on-surface-variant">history</span>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left border-collapse">
+<thead>
+<tr class="text-label-caps font-label-caps text-on-surface-variant border-b border-outline-variant">
+<th class="p-4 font-normal">ID</th>
+<th class="p-4 font-normal">Title</th>
+<th class="p-4 font-normal">Reason</th>
+<th class="p-4 font-normal text-right">Duration</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-outline-variant/50">
+<tr class="hover:bg-surface-bright/50 transition-colors cursor-pointer group">
+<td class="p-4 font-mono-data text-on-surface-variant text-[12px]">task-142</td>
+<td class="p-4 text-body-md text-on-surface truncate max-w-[150px]">K8s manifest update</td>
+<td class="p-4">
+<div class="text-body-sm text-error/80 flex items-center gap-1">
+<span class="material-symbols-outlined text-[16px]">warning</span>
+                                            retrying after LLM rate limit (429)
+                                        </div>
+</td>
+<td class="p-4 font-mono-data text-right text-on-surface-variant text-[12px]">14m</td>
+</tr>
+<tr class="hover:bg-surface-bright/50 transition-colors cursor-pointer group">
+<td class="p-4 font-mono-data text-on-surface-variant text-[12px]">task-139</td>
+<td class="p-4 text-body-md text-on-surface truncate max-w-[150px]">Image resizing service</td>
+<td class="p-4 text-body-sm text-on-surface-variant">Pending human review (@lead_dev)</td>
+<td class="p-4 font-mono-data text-right text-on-surface-variant text-[12px]">2h 12m</td>
+</tr>
+<tr class="hover:bg-surface-bright/50 transition-colors cursor-pointer group">
+<td class="p-4 font-mono-data text-on-surface-variant text-[12px]">task-150</td>
+<td class="p-4 text-body-md text-on-surface truncate max-w-[150px]">Database migration v4</td>
+<td class="p-4 text-body-sm text-on-surface-variant">Waiting for dependency task-149</td>
+<td class="p-4 font-mono-data text-right text-on-surface-variant text-[12px]">38m</td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+</div>
+<!-- ROW 3: Pipeline flow (Node Graph) -->
+<section class="bg-surface-container border border-outline-variant rounded-lg p-6">
+<div class="flex items-center justify-between mb-8">
+<h3 class="text-label-caps font-label-caps text-on-surface">Pipeline flow</h3>
+<div class="flex gap-4">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-primary"></div>
+<span class="text-body-sm text-on-surface-variant">Planning</span>
+</div>
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-secondary"></div>
+<span class="text-body-sm text-on-surface-variant">Implementation</span>
+</div>
+</div>
+</div>
+<div class="flex flex-col gap-12 relative">
+<!-- LANE 1: PLANNING -->
+<div class="flex items-center justify-between relative">
+<div class="absolute top-1/2 left-0 w-full h-[1px] bg-outline-variant -z-10"></div>
+<!-- Intake -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative group">
+                                INTAKE
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">0</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- Design -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative">
+                                DESIGN
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">0</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- Groom -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative">
+                                GROOM
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">1</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- Backlog -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative">
+                                BACKLOG
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">12</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- Sprint -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-highest border border-primary/50 rounded text-[11px] font-bold text-primary hover:border-primary transition-all cursor-pointer relative ring-2 ring-primary/10" id="sprint-node">
+                                SPRINT
+                                <span class="absolute -top-2 -right-2 bg-primary text-[9px] px-1.5 py-0.5 rounded-full text-on-primary-fixed font-black">2</span>
+</div>
+</div>
+</div>
+<!-- Connectors and Rework Loop -->
+<div class="h-8 flex justify-center items-center">
+<span class="material-symbols-outlined text-outline-variant transform rotate-90">link</span>
+</div>
+<!-- LANE 2: IMPLEMENTATION -->
+<div class="flex items-center justify-between relative">
+<div class="absolute top-1/2 left-0 w-full h-[1px] bg-outline-variant -z-10"></div>
+<!-- Setup -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative">
+                                SETUP
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">0</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- Agent -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-highest border border-primary rounded text-[11px] font-bold text-primary hover:bg-primary/10 transition-all cursor-pointer relative" id="agent-node">
+                                AGENT
+                                <span class="absolute -top-2 -right-2 bg-primary text-[9px] px-1 rounded text-on-primary-fixed">1</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- PR -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative">
+                                PR
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">3</span>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- Review -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative" id="review-node">
+                                REVIEW
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">1</span>
+<!-- Rework Loop UI -->
+<div class="absolute -bottom-8 left-1/2 -translate-x-1/2 w-[240px] h-[32px] border-b-2 border-l-2 border-outline-variant/30 rounded-bl-xl pointer-events-none">
+<span class="absolute -left-1 bottom-6 material-symbols-outlined text-outline-variant/50 text-[18px] rotate-180">undo</span>
+<span class="absolute left-1/2 -bottom-5 text-[9px] text-outline-variant uppercase font-bold tracking-widest -translate-x-1/2">Rework Loop</span>
+</div>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant">trending_flat</span>
+<!-- Done -->
+<div class="flex flex-col items-center gap-2">
+<div class="px-4 py-2 bg-surface-container-high border border-outline-variant rounded text-[11px] font-bold text-on-surface-variant hover:border-primary transition-all cursor-pointer relative">
+                                DONE
+                                <span class="absolute -top-2 -right-2 bg-outline-variant text-[9px] px-1 rounded text-surface">244</span>
+</div>
+</div>
+</div>
+</div>
+</section>
+</div>
+</main>
+<script>
+        // Micro-interaction for the alert box toggle simulation
+        // (Handled by CSS hover in this implementation, but can be expanded)
+        document.querySelectorAll('.hover\\:border-primary').forEach(el => {
+            el.addEventListener('mouseenter', () => {
+                el.classList.add('glow-border');
+            });
+            el.addEventListener('mouseleave', () => {
+                el.classList.remove('glow-border');
+            });
+        });
+
+        // Pulsing background effect for nodes that are "active"
+        const nodes = ['sprint-node', 'agent-node'];
+        nodes.forEach(id => {
+            const node = document.getElementById(id);
+            if(node) {
+                node.style.boxShadow = '0 0 0px 0px rgba(180, 197, 255, 0)';
+                let growing = true;
+                let shadowSize = 0;
+                setInterval(() => {
+                    if(growing) {
+                        shadowSize += 0.5;
+                        if(shadowSize >= 8) growing = false;
+                    } else {
+                        shadowSize -= 0.5;
+                        if(shadowSize <= 0) growing = true;
+                    }
+                    node.style.boxShadow = `0 0 ${shadowSize}px rgba(180, 197, 255, 0.2)`;
+                }, 50);
+            }
+        });
+    </script>
+</body></html>

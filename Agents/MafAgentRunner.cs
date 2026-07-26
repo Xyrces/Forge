@@ -37,6 +37,20 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
     private readonly ISecretStore? _secrets;
+    private readonly IIssueStore? _issues;
+    private readonly AgentRunStore? _runs;
+    private readonly RoleModelOverrides? _modelOverrides;
+    private readonly Configuration.GateOptions _gateOptions;
+
+    /// <summary>
+    /// Optional path for the per-run diagnostic side-channel log
+    /// (message roles, text lengths, tool-call names). Set by
+    /// Program.cs to a file under the Forgesystem state root. When
+    /// null the diagnostic write is skipped. Replaces the historical
+    /// hardcoded <c>C:\ProgramData\Forge\agent.log</c>, which was
+    /// silently swallowed on Linux.
+    /// </summary>
+    public static string? DiagnosticLogPath { get; set; }
 
     public MafAgentRunner(
         IChatClientFactory chatClientFactory,
@@ -54,7 +68,11 @@ public sealed class MafAgentRunner : IAgentRunner
         Func<DesignArtifactStore?>? designArtifacts = null,
         Func<ISpecStore?>? specs = null,
         Func<ArtOutputStore?>? artOutputs = null,
-        ISecretStore? secrets = null)
+        ISecretStore? secrets = null,
+        IIssueStore? issues = null,
+        AgentRunStore? runs = null,
+        RoleModelOverrides? modelOverrides = null,
+        Configuration.GateOptions? gates = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -68,6 +86,10 @@ public sealed class MafAgentRunner : IAgentRunner
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
         _secrets = secrets;
+        _issues = issues;
+        _runs = runs;
+        _modelOverrides = modelOverrides;
+        _gateOptions = gates ?? new Configuration.GateOptions();
     }
 
 public async Task<AgentRunResult> RunAsync(
@@ -88,11 +110,12 @@ public async Task<AgentRunResult> RunAsync(
             : await BuildSkillInstructionsAsync(role, ct);
         var memoryInstructions = _memory is null
             ? string.Empty
-            : await BuildMemoryInstructionsAsync(ct);
+            : await BuildMemoryInstructionsAsync(context, ct);
         var instructions = string.Join("\n\n", new[]
         {
             roleInstructions,
             skillInstructions,
+            BuildSprintBlock(context),
             memoryInstructions,
         }.Where(s => !string.IsNullOrEmpty(s)));
         // P1 fix: instructions go to the agent's instructions: parameter,
@@ -106,10 +129,43 @@ public async Task<AgentRunResult> RunAsync(
         // orchestrator passes one in `context["worktreePath"]`.
         var tools = new List<AITool>();
         var bashWorkingDir = ResolveWorktreePath(context);
+        Gates.RunGateState? gateState = null;
         if (!string.IsNullOrWhiteSpace(bashWorkingDir))
         {
             var secretEnv = await ResolveSecretEnvAsync(context, ct);
-            tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv).AsAIFunction());
+
+            // Plan gate (engineering roles): the agent must submit a
+            // structured plan and have it approved BEFORE mutating
+            // commands work — hard-enforced at the bash tool via a
+            // deterministic mutation classifier. Fast-path (mechanical
+            // rework rounds) auto-approves on submit.
+            Func<bool>? mutationsAllowed = null;
+            if (role is AgentType.CoreDev or AgentType.ClientDev)
+            {
+                gateState = new Gates.RunGateState
+                {
+                    FastPath = string.Equals(
+                        ResolveContextString(context, "planFastPath"), "true", StringComparison.OrdinalIgnoreCase),
+                };
+                var gatePipeline = new Gates.RunGatePipeline(
+                    _gateOptions, _memory, name => BuildRunGate(name), _logger);
+                var gateContext = new Gates.RunGateContext(
+                    TaskId: ResolveContextString(context, "issueId") ?? "unknown",
+                    RoleName: roleDef.AgentName,
+                    TerritoryPrefixes: roleDef.TerritoryPrefixes ?? Array.Empty<string>(),
+                    TerritoryAllowsRootFiles: roleDef.TerritoryAllowsRootFiles,
+                    WorktreePath: bashWorkingDir,
+                    TaskText: prompt.Length > 4000 ? prompt[..4000] : prompt,
+                    Plan: "",
+                    Ct: ct);
+                tools.Add(new AgentTools.SubmitPlanTool(
+                    gateState, gatePipeline, gateContext,
+                    logger: _logger).AsAIFunction());
+                mutationsAllowed = () => gateState.PlanApproved;
+            }
+
+            tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv,
+                mutationsAllowed: mutationsAllowed).AsAIFunction());
         }
 
         // P5.1 — ArtifactReadTool is always available when the
@@ -128,13 +184,51 @@ public async Task<AgentRunResult> RunAsync(
             tools.Add(readTool.AsAIFunction());
         }
 
+        // Follow-up filing: engineering + review roles can file
+        // out-of-scope discoveries as tasks. Filed follow-ups are
+        // NOT sprint-eligible — they land parentless with no groomed
+        // marker and wait for the groomer's ad-hoc pass (operator
+        // rule: no task enters a sprint without technical grooming).
+        if (_issues is not null
+            && role is AgentType.CoreDev or AgentType.ClientDev or AgentType.QA or AgentType.Reviewer
+            && context is not null
+            && context.TryGetValue("issueId", out var issueIdObj)
+            && issueIdObj is string followUpSource
+            && !string.IsNullOrWhiteSpace(followUpSource))
+        {
+            tools.Add(new FollowUpTool(_issues, followUpSource, role.ToString()).AsAIFunction());
+        }
+
+        // Run identity + start timestamp must exist BEFORE the chat
+        // client is built: the activity tracker below wraps the raw
+        // provider client and heartbeats per round-trip against this
+        // run id. (The 'running' row itself is still written after
+        // agent construction — a client-construction failure then
+        // leaves no stale row.)
+        var runId = Guid.NewGuid().ToString("N")[..12];
+        var runTaskId = ResolveContextString(context, "issueId");
+        var startedAt = DateTime.UtcNow;
+
         var chatClient = _chatClientFactory.Create(_config, role);
+        // Per-round-trip activity heartbeat. Wraps the RAW provider
+        // client so MAF's internal model→tool→model loop (inside one
+        // agent.RunAsync) is visible in near-real-time; wrapping the
+        // outer client would only fire once per RunAsync call.
+        var trackedClient = _runs is null
+            ? chatClient
+            : new ActivityTrackingChatClient(chatClient, runId, _runs);
         // Wrap with function invocation so MAF actually executes the
         // tools the model calls (instead of just leaving them in the
-        // response).
+        // response). Cap raised from the 40 default: complex tasks
+        // legitimately spend 40+ calls exploring before the first
+        // edit — at 40 every run "completed" with 0 edits and the
+        // no-diff path marked the task done (observed live: all six
+        // tasks of the dispatcher-resilience sprint hollow-completed).
         var chatClientWithTools = tools.Count > 0
-            ? new ChatClientBuilder(chatClient).UseFunctionInvocation().Build()
-            : chatClient;
+            ? new ChatClientBuilder(trackedClient)
+                .UseFunctionInvocation(configure: c => c.MaximumIterationsPerRequest = 200)
+                .Build()
+            : trackedClient;
 
         var agent = new ChatClientAgent(
             chatClientWithTools,
@@ -145,14 +239,83 @@ public async Task<AgentRunResult> RunAsync(
 
         var message = new ChatMessage(ChatRole.User, fullPrompt);
         var session = await DeserializeSessionAsync(agent, sessionId, ct);
+        // Always run with a session so leaked-markup continuations below
+        // keep the full conversation history.
+        session ??= await agent.CreateSessionAsync(ct);
+
+        // Run registry: visible in near real time as 'running'
+        // (who is doing what); progress heartbeats land after every
+        // model response (per-round-trip via the activity tracker,
+        // plus a coarser stitch here after each continuation) and the
+        // full transcript is persisted when the run finishes (partial
+        // transcript on failure). Best-effort — never breaks a run.
+        if (_runs is not null)
+        {
+            try
+            {
+                var (_, runModel, _) = _config.ResolveEffective(role, _modelOverrides);
+                await _runs.StartAsync(runId, runTaskId, role.ToString(), runModel, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "agent_run start record failed for {Role}; continuing", role);
+            }
+        }
+
+        // Transcript accumulation: AgentResponse.Messages holds only
+        // the messages added by THAT call, so stitch the initial
+        // prompt + each continuation turn together. Declared outside
+        // the try so a mid-run failure still persists the partial
+        // transcript — an agent that dies on turn 8 of 10 leaves 8
+        // turns of auditable work, not nothing.
+        var transcriptMessages = new List<ChatMessage> { message };
 
         try
         {
-            var startedAt = DateTime.UtcNow;
-            var response = session is null
-                ? await agent.RunAsync(message, cancellationToken: ct)
-                : await agent.RunAsync(message, session, cancellationToken: ct);
+            var response = await agent.RunAsync(message, session, cancellationToken: ct);
+            transcriptMessages.AddRange(response.Messages);
+            await HeartbeatAsync(runId, transcriptMessages);
+
+            // minimax-m3 quirk: near the end of long tool-call runs the
+            // model sometimes emits its next tool call as literal text
+            // markup ("]<]minimax[>[<tool_call>...<invoke name=...") in
+            // the assistant content instead of a structured tool_calls
+            // entry. MAF sees no tool calls and ends the loop
+            // prematurely — the run "completes" with prose (+markup) as
+            // the final answer and zero edits made. Detect the leak and
+            // nudge the model to re-issue properly; bounded so a
+            // persistently-degrading model cannot loop forever.
+            const int maxContinuations = 3;
+            for (var continuation = 0;
+                 continuation < maxContinuations && HasLeakedToolCallMarkup(LastAssistantText(response));
+                 continuation++)
+            {
+                _logger.LogWarning(
+                    "Role {Role}: tool-call markup leaked into response text; nudging model to continue ({N}/{Max})",
+                    role, continuation + 1, maxContinuations);
+                var nudge = new ChatMessage(ChatRole.User, LeakedToolCallContinuationPrompt);
+                response = await agent.RunAsync(
+                    nudge,
+                    session, cancellationToken: ct);
+                transcriptMessages.Add(nudge);
+                transcriptMessages.AddRange(response.Messages);
+                await HeartbeatAsync(runId, transcriptMessages);
+            }
             var elapsed = DateTime.UtcNow - startedAt;
+
+            // Plan gate: a final rejection fails the run even though
+            // the model conversation completed — the throw lands in
+            // the catch below, which records 'failed' with the
+            // partial transcript. The orchestrator's normal retry
+            // machinery takes it from there.
+            if (gateState?.PlanFailed == true)
+            {
+                await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
+                throw new InvalidOperationException(
+                    $"Plan rejected after {Gates.RunGateState.MaxRevisions} revisions: " +
+                    (gateState.Verdicts.LastOrDefault().Feedback ?? "no feedback"));
+            }
+            await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
 
             var text = string.Concat(response.Messages
                 .Where(m => m.Role == ChatRole.Assistant)
@@ -160,28 +323,50 @@ public async Task<AgentRunResult> RunAsync(
             var newSessionId = await SerializeSessionAsync(response, agent, session, ct);
 
             // DIAGNOSTIC: append to a side-channel log so we can
-            // diagnose the silent-agent bug even when the SCM swallows
-            // stdout. The file lives in C:\ProgramData\Forge\agent.log
-            // and is appended on every agent run.
+            // diagnose the silent-agent bug even when the host swallows
+            // stdout. Path is set by Program.cs (state root); skipped
+            // when unset. Best-effort: never breaks a run.
             try
             {
-                var diagLog = @"C:\ProgramData\Forge\agent.log";
-                using var sw = new StreamWriter(diagLog, append: true);
-                sw.WriteLine($"--- {DateTime.Now:O} role={role} msgs={response.Messages.Count} text_len={text.Length} tool_msgs={response.Messages.Count(m => m.Role == ChatRole.Tool)} session_id={newSessionId ?? "<null>"} ---");
-                foreach (var m in response.Messages)
+                var diagLog = DiagnosticLogPath;
+                if (!string.IsNullOrEmpty(diagLog))
                 {
-                    var preview = (m.Text ?? "");
-                    if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
-                    var toolCalls = m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>()
-                        .Select(c => $"{c.Name}({string.Join(",", c.Arguments?.Keys ?? new System.Collections.Generic.List<string>())})")
-                        .ToList();
-                    sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} tool_calls=[{string.Join(";", toolCalls)}] preview={preview}");
+                    Directory.CreateDirectory(Path.GetDirectoryName(diagLog)!);
+                    using var sw = new StreamWriter(diagLog, append: true);
+                    sw.WriteLine($"--- {DateTime.Now:O} role={role} msgs={response.Messages.Count} text_len={text.Length} tool_msgs={response.Messages.Count(m => m.Role == ChatRole.Tool)} session_id={newSessionId ?? "<null>"} ---");
+                    foreach (var m in response.Messages)
+                    {
+                        var preview = (m.Text ?? "");
+                        if (preview.Length > 400) preview = preview.Substring(0, 400) + "...";
+                        var toolCalls = m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>()
+                            .Select(c => $"{c.Name}({string.Join(",", c.Arguments?.Keys ?? new System.Collections.Generic.List<string>())})")
+                            .ToList();
+                        sw.WriteLine($"  msg role={m.Role} text_len={(m.Text ?? "").Length} tool_calls=[{string.Join(";", toolCalls)}] preview={preview}");
+                    }
+                    sw.Flush();
                 }
-                sw.Flush();
             }
             catch
             {
                 // best-effort
+            }
+
+            if (_runs is not null)
+            {
+                try
+                {
+                    var transcript = BuildTranscriptJson(transcriptMessages);
+                    var toolCalls = transcriptMessages.Sum(m =>
+                        m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Count());
+                    await _runs.FinishAsync(runId, "succeeded",
+                        (long)elapsed.TotalMilliseconds,
+                        transcriptMessages.Count, toolCalls, text.Length,
+                        error: null, transcriptJson: transcript, ct: CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "agent_run finish record failed for {Role}; continuing", role);
+                }
             }
 
             return new AgentRunResult(
@@ -191,7 +376,31 @@ public async Task<AgentRunResult> RunAsync(
     OutputTokens: 0,
     Elapsed: elapsed);
         }
-finally
+        catch (Exception ex) when (_runs is not null)
+        {
+            try
+            {
+                // Partial transcript: whatever turns completed before
+                // the failure are still persisted — the operator can
+                // see exactly how far the agent got.
+                var partial = transcriptMessages.Count > 1
+                    ? BuildTranscriptJson(transcriptMessages)
+                    : null;
+                var toolCalls = transcriptMessages.Sum(m =>
+                    m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Count());
+                var textChars = transcriptMessages
+                    .Where(m => m.Role == ChatRole.Assistant)
+                    .Sum(m => (m.Text ?? "").Length);
+                await _runs.FinishAsync(runId, "failed",
+                    (long)(DateTime.UtcNow - startedAt).TotalMilliseconds,
+                    transcriptMessages.Count, toolCalls, textChars,
+                    $"{ex.GetType().Name}: {ex.Message}",
+                    transcriptJson: partial, ct: CancellationToken.None);
+            }
+            catch { /* best-effort */ }
+            throw;
+        }
+        finally
         {
             // MAF ChatClientAgent does not implement IDisposable; chatClient is the
             // resource, and our stubbed IChatClient (Microsoft.Extensions.AI) is
@@ -209,6 +418,146 @@ finally
         if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
         return raw.ToString();
     }
+
+    /// <summary>Gate factory for the run-gate pipeline. Unknown names
+    /// return null (the pipeline skips them with a warning).</summary>
+    private Gates.IRunGate? BuildRunGate(string name) => name switch
+    {
+        Gates.PlanSchemaGate.GateName => new Gates.PlanSchemaGate(),
+        Gates.PlanTerritoryGate.GateName => new Gates.PlanTerritoryGate(),
+        Gates.PlanLlmReviewGate.GateName => new Gates.PlanLlmReviewGate(
+            () => _chatClientFactory.Create(_config, AgentType.Reviewer), _logger),
+        _ => null,
+    };
+
+    /// <summary>Persist the plan-gate audit trail to the task's
+    /// metadata (best-effort, never breaks a run). The TaskDetail
+    /// page renders it.</summary>
+    private async Task PersistGateRecordAsync(
+        Gates.RunGateState? gateState, string? issueId, CancellationToken ct)
+    {
+        if (gateState is null || issueId is null || _issues is null) return;
+        if (gateState.Verdicts.Count == 0) return;
+        try
+        {
+            var task = await _issues.GetAsync(issueId, ct);
+            if (task is null) return;
+            var record = new
+            {
+                approved = gateState.PlanApproved,
+                fastPath = gateState.FastPath,
+                revisions = gateState.Revisions,
+                failed = gateState.PlanFailed,
+                plan = gateState.PlanText is { Length: > 3000 } p ? p[..3000] : gateState.PlanText,
+                verdicts = gateState.Verdicts.Select(v => new { gate = v.Gate, outcome = v.Outcome.ToString(), feedback = v.Feedback.Length > 500 ? v.Feedback[..500] : v.Feedback }).ToList(),
+            };
+            await _issues.TransitionAsync(issueId, task.Status, error: null,
+                metadata: new Dictionary<string, object>
+                {
+                    ["planGate"] = System.Text.Json.JsonSerializer.Serialize(record),
+                }, ct: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "plan-gate record persist failed for {IssueId}; continuing", issueId);
+        }
+    }
+
+    private static string? ResolveContextString(IReadOnlyDictionary<string, object>? context, string key)
+    {
+        if (context is null) return null;
+        return context.TryGetValue(key, out var raw) ? raw?.ToString() : null;
+    }
+
+    /// <summary>
+    /// Serialize a run's full conversation for the run-detail view:
+    /// roles, text, tool calls (name + args), and tool results.
+    /// Full-fidelity with per-field caps (50KB text, 20KB results)
+    /// so a pathological single message can't blow up a row; table
+    /// size is bounded by AgentRunStore retention, not truncation.
+    /// </summary>
+    /// <summary>
+    /// Mid-run progress heartbeat for the run registry: updates turn /
+    /// tool-call / text counts + last_activity_at so the dashboard can
+    /// tell "actively working" from "hung waiting on the provider".
+    /// Best-effort — never breaks a run.
+    /// </summary>
+    private async Task HeartbeatAsync(string runId, List<ChatMessage> transcriptMessages)
+    {
+        if (_runs is null) return;
+        try
+        {
+            var toolCalls = transcriptMessages.Sum(m =>
+                m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Count());
+            var textChars = transcriptMessages
+                .Where(m => m.Role == ChatRole.Assistant)
+                .Sum(m => (m.Text ?? "").Length);
+            await _runs.UpdateProgressAsync(runId, transcriptMessages.Count, toolCalls, textChars,
+                transcriptJson: BuildTranscriptJson(transcriptMessages),
+                ct: CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "agent_run progress heartbeat failed for run {RunId}; continuing", runId);
+        }
+    }
+
+    internal static string BuildTranscriptJson(IEnumerable<ChatMessage> messages)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new System.Text.Json.Utf8JsonWriter(stream))
+        {
+            writer.WriteStartArray();
+            foreach (var m in messages)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("role", m.Role.Value);
+                writer.WritePropertyName("contents");
+                writer.WriteStartArray();
+                foreach (var c in m.Contents)
+                {
+                    switch (c)
+                    {
+                        case Microsoft.Extensions.AI.TextReasoningContent thinking:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "thinking");
+                            writer.WriteString("text", Cap(thinking.Text, 50_000));
+                            writer.WriteEndObject();
+                            break;
+                        case Microsoft.Extensions.AI.TextContent text:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "text");
+                            writer.WriteString("text", Cap(text.Text, 50_000));
+                            writer.WriteEndObject();
+                            break;
+                        case Microsoft.Extensions.AI.FunctionCallContent call:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "tool_call");
+                            writer.WriteString("name", call.Name);
+                            writer.WriteString("callId", call.CallId);
+                            writer.WriteString("args", Cap(JsonSerializer.Serialize(call.Arguments), 20_000));
+                            writer.WriteEndObject();
+                            break;
+                        case Microsoft.Extensions.AI.FunctionResultContent result:
+                            writer.WriteStartObject();
+                            writer.WriteString("type", "tool_result");
+                            writer.WriteString("callId", result.CallId);
+                            writer.WriteString("result", Cap(
+                                result.Result?.ToString() ?? "", 20_000));
+                            writer.WriteEndObject();
+                            break;
+                    }
+                }
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string Cap(string? s, int n)
+        => s is null ? "" : s.Length <= n ? s : s[..n] + "…[truncated]";
 
     /// <summary>
     /// Build the secrets-by-reference environment for the agent's bash
@@ -304,8 +653,70 @@ finally
         return sb.ToString().TrimEnd();
     }
 
-    private async Task<string> BuildMemoryInstructionsAsync(CancellationToken ct)
+    /// <summary>
+    /// Sprint flow: when the dispatch context carries sprint fields
+    /// (RunAgentExecutor sets them for issues in the ACTIVE sprint),
+    /// render the shared sprint context — goal + sibling roster — so
+    /// every agent in the sprint works toward the same goal with
+    /// visibility of each other's tasks.
+    /// </summary>
+    private static string BuildSprintBlock(IReadOnlyDictionary<string, object>? context)
     {
+        if (context is null) return string.Empty;
+        if (!context.TryGetValue("sprintId", out var rawId) || rawId is null) return string.Empty;
+        var sprintId = rawId.ToString();
+        if (string.IsNullOrWhiteSpace(sprintId)) return string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## Sprint");
+        sb.AppendLine();
+        if (context.TryGetValue("sprintName", out var rawName) && rawName?.ToString() is { Length: > 0 } name)
+        {
+            sb.Append("You are working in sprint **").Append(name).Append("**");
+        }
+        else
+        {
+            sb.Append("You are working in sprint `").Append(sprintId).Append('`');
+        }
+        if (context.TryGetValue("sprintGoal", out var rawGoal) && rawGoal?.ToString() is { Length: > 0 } goal)
+        {
+            sb.Append(". Goal: ").AppendLine(goal);
+        }
+        else
+        {
+            sb.AppendLine(".");
+        }
+        if (context.TryGetValue("sprintRoster", out var rawRoster) && rawRoster?.ToString() is { Length: > 0 } roster)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Sibling tasks in this sprint (coordinate; don't duplicate their work):");
+            sb.AppendLine(roster);
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    private async Task<string> BuildMemoryInstructionsAsync(
+        IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+    {
+        var sections = new List<string>();
+        // Sprint-scoped memory first: memories persisted by sibling
+        // tasks under `sprint/{id}/` (MemoryExtractor dual-persists
+        // when the issue is in the ACTIVE sprint).
+        if (context is not null
+            && context.TryGetValue("sprintId", out var rawSprint) && rawSprint is not null
+            && rawSprint.ToString() is { Length: > 0 } sprintId)
+        {
+            try
+            {
+                var sprintMemories = await _memory!.RecallAsync($"sprint/{sprintId}/", ct);
+                var rendered = MemoryStore.RenderSectionForPrompt("## Sprint memory", sprintMemories);
+                if (!string.IsNullOrEmpty(rendered)) sections.Add(rendered);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to recall sprint memory; continuing without it");
+            }
+        }
         IReadOnlyList<MemoryRecord> memories;
         try
         {
@@ -316,9 +727,16 @@ finally
             // Memory recall must never break a dispatch. Errors are
             // logged and the agent runs without the memory block.
             _logger.LogWarning(ex, "Failed to recall project memory; continuing without it");
-            return string.Empty;
+            return string.Join("\n\n", sections);
         }
-        return MemoryStore.RenderForPrompt(memories);
+        // Sprint keys already have their own section above; keep the
+        // global block free of duplicates.
+        var globalOnly = memories
+            .Where(m => !m.Key.StartsWith("sprint/", StringComparison.Ordinal))
+            .ToList();
+        var globalRendered = MemoryStore.RenderForPrompt(globalOnly);
+        if (!string.IsNullOrEmpty(globalRendered)) sections.Add(globalRendered);
+        return string.Join("\n\n", sections);
     }
 
     private string LoadRoleInstructions(string agentName)
@@ -327,7 +745,7 @@ finally
         if (!File.Exists(path))
         {
             _logger.LogWarning("role prompt file not found at {Path}; using fallback instructions", path);
-            return $"You are the {agentName} agent for the PortHorizon project.";
+            return $"You are the {agentName} agent.";
         }
         // Minimal YAML frontmatter parser: the file is `--- description: ...\n rest`. We
         // return the description field as the MAF instructions. Multi-line YAML,
@@ -349,7 +767,7 @@ finally
                 desc.AppendLine(line["description:".Length..].Trim());
             }
         }
-        if (desc.Length == 0) desc.AppendLine($"You are the {agentName} agent for the PortHorizon project.");
+        if (desc.Length == 0) desc.AppendLine($"You are the {agentName} agent.");
         return desc.ToString().Trim();
     }
 
@@ -368,6 +786,29 @@ finally
             return null;
         }
     }
+
+    /// <summary>
+    /// Nudge sent when the model emits a tool call as plain-text markup
+    /// (see the minimax-m3 note in RunAsync). Deliberately short: the
+    /// model has the full conversation in its session already.
+    /// </summary>
+    private const string LeakedToolCallContinuationPrompt =
+        "Your previous message contained a tool call emitted as plain-text markup, which cannot be executed. " +
+        "If you intended to call a tool, re-issue it now as a proper tool call. " +
+        "If you have already completed the task, reply with a brief summary of what you changed (no markup).";
+
+    private static string LastAssistantText(AgentResponse response) =>
+        response.Messages.LastOrDefault(m => m.Role == ChatRole.Assistant)?.Text ?? string.Empty;
+
+    /// <summary>
+    /// True when assistant text contains tool-call markup that leaked
+    /// into the content channel instead of arriving as structured
+    /// tool_calls. Internal for tests.
+    /// </summary>
+    internal static bool HasLeakedToolCallMarkup(string text) =>
+        text.Contains("]<]minimax[>", StringComparison.Ordinal) ||
+        text.Contains("<tool_call>", StringComparison.Ordinal) ||
+        text.Contains("<invoke name=", StringComparison.Ordinal);
 
     private async Task<string?> SerializeSessionAsync(
         AgentResponse response, ChatClientAgent agent, AgentSession? session, CancellationToken ct)

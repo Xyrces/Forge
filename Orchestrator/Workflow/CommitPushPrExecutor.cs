@@ -48,6 +48,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         _logger = logger;
     }
 
+    /// <summary>Circuit breaker for no-progress runs (no diff and no
+    /// explicit NO_CHANGES_NEEDED): requeue this many times before
+    /// failing the task for the operator.</summary>
+    public const int MaxNoProgressAttempts = 3;
+
     public static async ValueTask<PrOpened> HandleAsync(
         AgentCompleted input,
         IIssueStore issues,
@@ -69,14 +74,90 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
 
         var commit = await worktrees.CommitAllAsync(
             worktreePath, $"Task({issue.Id}): {issue.Title}", ct);
-        if (!commit.HasChanges)
+        // An agent that commits its own work via bash during the run
+        // (the prompt's contract) leaves "nothing to commit" for
+        // CommitAllAsync — which is NOT the same as "no work
+        // produced". Check whether the branch is actually ahead of
+        // base before declaring a no-diff run. (Observed live
+        // 2026-07-24: task-155's run committed +149 lines of real
+        // tests, then got requeued as 'no diff (attempt 1)' and was
+        // two strikes from Failed despite the work being real.)
+        var hasChanges = commit.HasChanges;
+        if (!hasChanges)
         {
-            logger.LogWarning("Issue {Id}: model produced no diff. Marking Completed.", issue.Id);
+            var ahead = await worktrees.GetDiffStatsAsync(worktreePath, input.Worktree.BaseBranch, ct);
+            if (!string.IsNullOrWhiteSpace(ahead.Summary))
+            {
+                hasChanges = true;
+                logger.LogInformation(
+                    "CommitPushPr({Id}): nothing to commit but branch is ahead of {Base} — agent self-committed ({Summary}); proceeding to push/PR",
+                    issue.Id, input.Worktree.BaseBranch, ahead.Summary);
+            }
+        }
+        if (!hasChanges)
+        {
+            // Stale-dispatch guard: a long agent run can finish AFTER
+            // the watch already merged this task's PR (the rework
+            // loop reuses the branch). Never stomp a terminal state
+            // with a fresh transition.
+            var current = await issues.GetAsync(issue.Id, ct);
+            if (current?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed)
+            {
+                logger.LogInformation(
+                    "Issue {Id}: no diff, but the task is already {Status} (watch closed the loop meanwhile) — leaving it alone",
+                    issue.Id, current!.Status);
+                return new PrOpened(input, PrResult.NoDiff, 0, null);
+            }
+
+            // A no-diff run is only a legitimate completion when the
+            // agent EXPLICITLY concluded no changes were needed (the
+            // prompt's completion contract). Anything else — iteration-
+            // cap truncation, stuck-in-exploration loops — is a failed
+            // attempt: requeue with a circuit breaker. (Observed live:
+            // all six tasks of a sprint hollow-completed when the MAF
+            // 40-iteration default cut every run during exploration.)
+            var explicitNoOp = (input.Text ?? "")
+                .Contains("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase);
+            if (!explicitNoOp)
+            {
+                var attempts = int.TryParse(current?.GetMetadata("noProgressAttempts"), out var n) ? n + 1 : 1;
+                if (attempts >= MaxNoProgressAttempts)
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Failed,
+                        $"agent produced no diff in {attempts} attempts (last response truncated)",
+                        new Dictionary<string, object> { ["noProgressAttempts"] = attempts.ToString() }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Failed (no progress in {attempts} attempts)",
+                        new Dictionary<string, object?> { ["response"] = Truncate(input.Text ?? "", 400) }));
+                    logger.LogError("Issue {Id}: no diff after {Attempts} attempts — Failed for operator review", issue.Id, attempts);
+                }
+                else
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
+                        new Dictionary<string, object> { ["noProgressAttempts"] = attempts.ToString() }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Requeued (no progress, attempt {attempts})",
+                        new Dictionary<string, object?> { ["response"] = Truncate(input.Text ?? "", 400) }));
+                    logger.LogWarning("Issue {Id}: no diff without NO_CHANGES_NEEDED — requeued (attempt {Attempts})", issue.Id, attempts);
+                }
+                return new PrOpened(input, PrResult.NoDiff, 0, null);
+            }
+            logger.LogInformation(
+                "Issue {Id}: agent explicitly concluded NO_CHANGES_NEEDED. Marking Completed.", issue.Id);
             await issues.TransitionAsync(issue.Id, IssueStatus.Completed,
-                "no changes (agent made 0 edits)", ct: ct);
+                "no changes needed (agent verified)", ct: ct);
+            await UpdateMetadataAsync(issues, issue.Id, m =>
+            {
+                m["lastError"] = null!;
+                m["lastErrorAt"] = null!;
+                return m;
+            }, ct);
             events.Publish(new DashboardEvent(
                 DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                issue.Id, "Completed (no-op)",
+                issue.Id, "Completed (verified no-op)",
                 new Dictionary<string, object?>
                 {
                     ["response"] = Truncate(input.Text ?? "", 400),
@@ -97,20 +178,57 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         var headSha = await worktrees.GetHeadShaAsync(worktreePath, ct);
         logger.LogInformation("CommitPushPr({Id}): got head sha {Sha}", issue.Id, headSha);
 
-        logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
-            issue.Id, branch, input.Worktree.BaseBranch);
-        var pr = await gitHub.CreatePullRequestAsync(
-            title: $"[{issue.Type}] {issue.Title}",
-            body: BuildPrBody(issue, headSha, input.Text),
-            headBranch: branch,
-            baseBranch: input.Worktree.BaseBranch,
-            cancellationToken: ct);
-        logger.LogInformation("CommitPushPr({Id}): PR #{N} opened", issue.Id, pr.Number);
+        // Rework loop: the issue may already carry a prNumber (its
+        // earlier dispatch opened the PR; this run pushed new commits
+        // to the same branch). Reuse that PR — creating a second one
+        // for the same branch is rejected by GitHub.
+        var existingPrText = issue.GetMetadata("prNumber");
+        Octokit.PullRequest pr;
+        if (int.TryParse(existingPrText, out var existingPrNumber))
+        {
+            logger.LogInformation("CommitPushPr({Id}): rework — reusing PR #{Pr} (push updated the branch)", issue.Id, existingPrNumber);
+            pr = await gitHub.GetPullRequestAsync(existingPrNumber, ct);
+        }
+        else
+        {
+            // Orphan-PR reuse: the task never recorded a prNumber —
+            // the PR for this branch was opened OUTSIDE the pipeline
+            // (operator hand-created it, it was adopted via
+            // /adopt-pr, or the metadata was lost on a requeue).
+            // Creating a second PR for the same branch is a 422 that
+            // MAF's InProcessExecution swallows, leaving a silent
+            // mid-pipeline halt + infinite requeue loop (observed
+            // live 2026-07-25 on task-155 / PR #32). Look the branch
+            // up FIRST.
+            var existing = await gitHub.GetOpenPullRequestForBranchAsync(branch, ct);
+            if (existing is not null)
+            {
+                logger.LogInformation("CommitPushPr({Id}): reusing existing open PR #{Pr} found by branch (no prNumber metadata)", issue.Id, existing.Number);
+                pr = existing;
+            }
+            else
+            {
+                logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
+                    issue.Id, branch, input.Worktree.BaseBranch);
+                pr = await gitHub.CreatePullRequestAsync(
+                    title: $"[{issue.Type}] {issue.Title}",
+                    body: BuildPrBody(issue, headSha, input.Text),
+                    headBranch: branch,
+                    baseBranch: input.Worktree.BaseBranch,
+                    cancellationToken: ct);
+                logger.LogInformation("CommitPushPr({Id}): PR #{N} opened", issue.Id, pr.Number);
+            }
+        }
 
         await UpdateMetadataAsync(issues, issue.Id, m =>
         {
             m["prNumber"] = pr.Number;
             m["branchSha"] = headSha;
+            // Success clears any stale run-failure record (requeues
+            // never remove it; metadata is upsert-merge only, so
+            // JSON null is the delete idiom).
+            m["lastError"] = null!;
+            m["lastErrorAt"] = null!;
             return m;
         }, ct);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
