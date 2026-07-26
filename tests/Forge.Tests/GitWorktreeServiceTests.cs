@@ -53,6 +53,69 @@ public class GitWorktreeServiceTests : IDisposable
         Assert.True(result.HasChanges);
     }
 
+
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_RejectsRemoteRefStartingWithDash()
+    {
+        var worktreePath = _service.WorktreePathFor("t-inject-dash");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-inject-dash", "main");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SyncWorktreeToRefAsync(worktreePath, "t-inject-dash", "origin/--upload-pack=malicious"));
+        Assert.Contains("must not start with '-'", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+        // Also test leading dash on remoteName portion (after split)
+        var ex2 = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SyncWorktreeToRefAsync(worktreePath, "t-inject-dash-2", "-origin/main"));
+        Assert.Contains("must not start with '-'", ex2.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_RejectsRemoteRefWithWhitespace()
+    {
+        var worktreePath = _service.WorktreePathFor("t-inject-ws");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-inject-ws", "main");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SyncWorktreeToRefAsync(worktreePath, "t-inject-ws", "origin/agent/task x"));
+        Assert.Contains("must not contain whitespace", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+        // Tab variant (newline in refPath after split)
+        var ex2 = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SyncWorktreeToRefAsync(worktreePath, "t-inject-ws-2", "ori/gin\tagent/task"));
+        Assert.Contains("must not contain whitespace", ex2.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_RejectsRefPathContainingOnlyDash()
+    {
+        var worktreePath = _service.WorktreePathFor("t-inject-dash-only");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-inject-dash-only", "main");
+
+        // After splitting "origin/-", refPath is "-" which starts with '-'
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SyncWorktreeToRefAsync(worktreePath, "t-inject-dash-only", "origin/-"));
+        Assert.Contains("must not start with '-'", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SyncWorktreeToRefAsync_RejectsEmptyRefPath()
+    {
+        var worktreePath = _service.WorktreePathFor("t-inject-empty");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-inject-empty", "main");
+
+        // remoteRef "origin/" splits to remoteName="origin", refPath=""
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SyncWorktreeToRefAsync(worktreePath, "t-inject-empty", "origin/"));
+        Assert.Contains("must not be empty", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+
+
     [Fact]
     public async Task CreateAsync_FreshTask_WorktreeBranchAtDefaultTip()
     {

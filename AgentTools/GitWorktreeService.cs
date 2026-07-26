@@ -71,7 +71,7 @@ public sealed class GitWorktreeService
     /// '/' to extract the remote name and the ref path.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="InvalidOperationException">Thrown on detached
-    /// HEAD, fetch failure, or reset failure.</exception>
+    /// HEAD, invalid remoteRef, fetch failure, or reset failure.</exception>
     public async Task SyncWorktreeToRefAsync(string worktreePath, string taskId, string remoteRef, CancellationToken cancellationToken = default)
     {
         // Reject detached HEAD -- the agent must be on a branch before syncing.
@@ -92,9 +92,18 @@ public sealed class GitWorktreeService
         var remoteName = remoteRef.Substring(0, slashIndex);
         var refPath = remoteRef.Substring(slashIndex + 1);
 
+        // Harden against git-argument injection: remoteName and refPath
+        // are interpolated directly into the git fetch command. Reject
+        // values that could be interpreted as git options (leading '-')
+        // or would split into multiple arguments (whitespace).
+        ValidateGitComponent(remoteName, "remote name");
+        ValidateGitComponent(refPath, "ref path");
+
         // Use a per-task ref namespace so concurrent syncs don't clobber each other.
         var localRef = $"refs/forge/sync-base/{Sanitize(taskId)}";
 
+        // Force-update prefix '+' ensures the fetch succeeds even after
+        // a force-push or rebase on the remote branch (rework flow).
         var fetchResult = await RunGitInAsync(worktreePath, $"fetch {remoteName} +{refPath}:{localRef}", cancellationToken);
         if (fetchResult.ExitCode != 0)
             throw new InvalidOperationException($"git fetch remote ref failed (exit={fetchResult.ExitCode}): {fetchResult.Stderr}");
@@ -269,6 +278,27 @@ public sealed class GitWorktreeService
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
         return new GitResult(proc.ExitCode, stdout, stderr);
+    }
+
+    /// <summary>
+    /// Validates a git argument component for injection safety.
+    /// Rejects empty, leading-dash (git interprets as option), or
+    /// whitespace-containing values that could split or smuggle
+    /// arguments in interpolated git command strings.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown when the
+    /// component fails validation.</exception>
+    private static void ValidateGitComponent(string component, string label)
+    {
+        if (string.IsNullOrEmpty(component))
+            throw new InvalidOperationException($"GitWorktreeService: {label} must not be empty");
+        if (component[0] == '-')
+            throw new InvalidOperationException($"GitWorktreeService: {label} must not start with '-' (got '{component}')");
+        foreach (var c in component)
+        {
+            if (char.IsWhiteSpace(c))
+                throw new InvalidOperationException($"GitWorktreeService: {label} must not contain whitespace (got '{component}')");
+        }
     }
 
     private static string Sanitize(string s)
