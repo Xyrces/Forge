@@ -112,6 +112,12 @@ public sealed class LocalGitHubService : GitHubService
 
     public override Task<bool> DeleteBranchAsync(string branchName, CancellationToken cancellationToken = default)
         => Task.FromResult(true);
+
+    public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default)
+        => Task.FromResult(_prStore.GetBranchSha(branch) ?? $"local-{branch}-head");
+
+    public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
 }
 
 /// <summary>
@@ -181,6 +187,9 @@ public sealed class LocalPrStore
             tcs.TrySetResult(sha);
         }
     }
+
+    public string? GetBranchSha(string branch)
+        => _branchShas.TryGetValue(branch, out var s) ? s : null;
 
     public Task<string> WaitForBranchShaAsync(string branch, TimeSpan timeout, CancellationToken ct)
     {

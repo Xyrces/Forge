@@ -233,10 +233,67 @@ public sealed class PRWatcher
         //    the operator.
         if (ciFailed)
         {
+            // Pre-existing-failure park (observed live 2026-07-25:
+            // the e2e harness broke on main and EVERY PR burned 3
+            // doomed rework rounds each before tripping the breaker
+            // — 18 rounds of pure token waste). A check that is also
+            // red on the base branch's own head is an infra failure,
+            // not this PR's: park the watch (no strike, no rework)
+            // until the base goes green, then fire ONE no-strike
+            // refresh round so the PR retriggers CI on a fresh head.
+            var baseBranch = pr.Base?.Ref ?? "main";
+            var parkedSha = watchTask.GetMetadata("parkedOnMainCiSha");
+            if (string.Equals(parkedSha, sha, StringComparison.Ordinal))
+            {
+                var baseHead = await _gitHub.GetBranchHeadShaAsync(baseBranch, cancellationToken);
+                var baseCi = await _gitHub.GetCommitStatusAsync(baseHead, cancellationToken);
+                if (baseCi is CommitState.Failure or CommitState.Error)
+                {
+                    return WatchPollOutcome.Pending;   // still parked; infra still red
+                }
+                // Base recovered: fire the refresh round (no strike)
+                // and clear the parked marker.
+                var watchMetaParked = ParseMetadataDict(watchTask.MetadataJson);
+                watchMetaParked["parkedOnMainCiSha"] = null!;
+                await _issues.TransitionAsync(watchTask.Id, watchTask.Status, error: null, metadata: watchMetaParked, ct: cancellationToken);
+                return await ReworkOrTripAsync(
+                    watchTask, taskId, worktreePath, sha,
+                    reason: "base-branch CI recovered — retrigger PR CI",
+                    context: $"The failing CI on this PR was pre-existing breakage on the base branch ({baseBranch}), not caused by your diff — the base is green again now. Bring your branch up to date so CI retriggers: git fetch origin && git merge origin/{baseBranch}, run the full test suite, and push to the SAME branch. Do not restructure your earlier work.",
+                    terminalStatus: IssueStatus.Failed,
+                    terminalError: "post-recovery refresh rounds exhausted",
+                    terminalOutcome: WatchPollOutcome.CiFailed,
+                    cancellationToken,
+                    countAsStrike: false);
+            }
+            if (!string.Equals(parkedSha, sha, StringComparison.Ordinal))
+            {
+                var baseHead = await _gitHub.GetBranchHeadShaAsync(baseBranch, cancellationToken);
+                var baseCi = await _gitHub.GetCommitStatusAsync(baseHead, cancellationToken);
+                if (baseCi is CommitState.Failure or CommitState.Error)
+                {
+                    _logger.LogWarning(
+                        "PR #{PrNumber}: CI failure is pre-existing on {Base} (base head {Sha} also red) — parking watch without a strike until the base recovers",
+                        prNumber, baseBranch, baseHead);
+                    var watchMeta = ParseMetadataDict(watchTask.MetadataJson);
+                    watchMeta["parkedOnMainCiSha"] = sha;
+                    await _issues.TransitionAsync(watchTask.Id, watchTask.Status, error: null, metadata: watchMeta, ct: cancellationToken);
+                    _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        taskId, $"Watch parked: CI failure is pre-existing on {baseBranch}; merge pipeline paused until base recovers"));
+                    return WatchPollOutcome.Pending;
+                }
+            }
+            // Genuine PR failure (base is green): strike, with the
+            // failing check-run details so the rework agent doesn't
+            // have to guess what broke.
+            var failing = await _gitHub.GetFailedCheckRunSummariesAsync(sha, cancellationToken);
+            var detail = failing.Count > 0
+                ? " Failing checks:\n" + string.Join("\n", failing.Select(f => $"- {f}"))
+                : "";
             return await ReworkOrTripAsync(
                 watchTask, taskId, worktreePath, sha,
                 reason: $"CI failed for {sha[..Math.Min(7, sha.Length)]}: {ci}",
-                context: $"CI checks failed ({ci}). Fix the build/tests on the same branch.",
+                context: $"CI checks failed ({ci}). Fix the build/tests on the same branch.{detail}",
                 terminalStatus: IssueStatus.Failed,
                 terminalError: $"CI failed after max rework attempts: {ci}",
                 terminalOutcome: WatchPollOutcome.CiFailed,
@@ -324,7 +381,8 @@ public sealed class PRWatcher
         IssueStatus terminalStatus,
         string terminalError,
         WatchPollOutcome terminalOutcome,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool countAsStrike = true)
     {
         var task = await _issues.GetAsync(taskId, cancellationToken);
         var attempts = 0;
@@ -334,7 +392,7 @@ public sealed class PRWatcher
             if (raw is not null) int.TryParse(raw, out attempts);
         }
 
-        if (task is null || attempts >= MaxReworkAttempts)
+        if (task is null || (countAsStrike && attempts >= MaxReworkAttempts))
         {
             _logger.LogWarning("PR watch {WatchId}: circuit breaker tripped for {TaskId} after {N} rework attempts ({Reason})",
                 watchTask.Id, taskId, attempts, reason);
@@ -352,7 +410,9 @@ public sealed class PRWatcher
         // Rework round: task back to Pending (it remains a sprint
         // member, so the dispatch gate passes it again), failure
         // context in metadata for the agent prompt, watch untouched.
-        attempts++;
+        // countAsStrike=false is the post-infra-recovery refresh
+        // round: it must not consume breaker budget.
+        if (countAsStrike) attempts++;
         _logger.LogInformation(
             "PR watch {WatchId}: rework round {N}/{Max} for {TaskId} — {Reason}",
             watchTask.Id, attempts, MaxReworkAttempts, taskId, reason);
@@ -365,8 +425,11 @@ public sealed class PRWatcher
         // Mark the watch so the NEXT sweep doesn't re-trigger the
         // same failure while the agent is still working on this head
         // (the marker clears itself when the head moves: the poll
-        // compares against the live head SHA).
-        var watchMeta = ParseMetadataDict(watchTask.MetadataJson);
+        // compares against the live head SHA). Re-read the watch:
+        // the caller may have transitioned it above (parked-marker
+        // clear) and its in-memory copy would resurrect stale keys.
+        var freshWatch = await _issues.GetAsync(watchTask.Id, cancellationToken) ?? watchTask;
+        var watchMeta = ParseMetadataDict(freshWatch.MetadataJson);
         watchMeta["reworkInFlightSha"] = headSha;
         await _issues.TransitionAsync(watchTask.Id, IssueStatus.Pending, error: null, metadata: watchMeta, ct: cancellationToken);
 
@@ -386,6 +449,10 @@ public sealed class PRWatcher
             {
                 foreach (var p in doc.RootElement.EnumerateObject())
                 {
+                    // JSON null is the delete idiom: a cleared key is
+                    // ABSENT, not the literal string "null" (GetRawText
+                    // would resurrect it as one on the next write).
+                    if (p.Value.ValueKind == System.Text.Json.JsonValueKind.Null) continue;
                     metadata[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String
                         ? p.Value.GetString()! : p.Value.GetRawText();
                 }

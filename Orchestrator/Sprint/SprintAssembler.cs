@@ -121,7 +121,19 @@ public sealed class SprintAssembler
         var active = await sprints.GetActiveAsync(ct);
         if (active is not null)
         {
-            if (!await IsCompleteAsync(active, issues, sprints, ct)) return;
+            if (!await IsCompleteAsync(active, issues, sprints, ct))
+            {
+                // Blocker absorption: a groomed, operator-urgent
+                // (P1) ad-hoc task joins the ACTIVE sprint
+                // immediately instead of waiting for the current
+                // sprint to drain. Motivation (observed live
+                // 2026-07-25): an infra fix that unblocks the merge
+                // gate (task-166) had to wait for six tasks to burn
+                // all their doomed rework rounds first — hours and
+                // tokens wasted on a queue ordering technicality.
+                await AbsorbBlockersAsync(active, issues, sprints, ct);
+                return;
+            }
             await sprints.UpdateAsync(active.Id,
                 new Dictionary<string, object?> { ["status"] = nameof(SprintStatus.Completed) }, ct);
             _logger.LogInformation("Sprint {SprintId} ({Name}) completed — all member tasks terminal (project={Project})",
@@ -163,6 +175,40 @@ public sealed class SprintAssembler
             }
         }
         return true;
+    }
+
+    /// <summary>
+    /// Link groomed blocker tasks into the ACTIVE sprint. A blocker
+    /// is an ad-hoc (parentless) task that is groomed AND marked
+    /// urgent: priority 1 (operator-set, e.g. at enqueue) or
+    /// metadata blocker=true (groomer-set). Spec-chain tasks are
+    /// excluded — they flow through normal sprint assembly with
+    /// their group. Absorption never completes, replaces, or
+    /// reorders the sprint; it only adds work that by definition
+    /// outranks everything in flight.
+    /// </summary>
+    private async Task AbsorbBlockersAsync(
+        SprintRecord active, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
+    {
+        var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
+        var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
+        foreach (var task in pending)
+        {
+            if (AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
+            if (task.ParentIssueId is not null) continue;   // spec-chain work waits for assembly
+            if (memberIds.Contains(task.Id)) continue;
+            if (!string.Equals(task.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)) continue;
+            var isBlocker = task.Priority == 1
+                || string.Equals(task.GetMetadata("blocker"), "true", StringComparison.OrdinalIgnoreCase);
+            if (!isBlocker) continue;
+
+            await sprints.AddIssueAsync(active.Id, task.Id, ct);
+            _logger.LogInformation(
+                "Sprint {SprintId}: absorbed blocker task {TaskId} ({Title}) into the active sprint",
+                active.Id, task.Id, task.Title);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                task.Id, $"Blocker task absorbed into active sprint '{active.Name}'"));
+        }
     }
 
     private async Task AssembleNextAsync(string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
