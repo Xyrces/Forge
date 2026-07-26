@@ -35,6 +35,7 @@ public sealed class ReviewerDispatcher
     private readonly IIssueStore _issues;
     private readonly GitHubService _gitHub;
     private readonly IAgentRunner _agentRunner;
+    private readonly Forge.Core.TaskStateMachine? _lifecycle;
 
     /// <summary>Hard cap on one reviewer LLM call. Reviewer prompts
     /// are small (one diff); 3 minutes is generous. See the call
@@ -46,12 +47,14 @@ public sealed class ReviewerDispatcher
         IIssueStore issues,
         GitHubService gitHub,
         IAgentRunner agentRunner,
-        ILogger<ReviewerDispatcher> logger)
+        ILogger<ReviewerDispatcher> logger,
+        Forge.Core.TaskStateMachine? lifecycle = null)
     {
         _issues = issues;
         _gitHub = gitHub;
         _agentRunner = agentRunner;
         _logger = logger;
+        _lifecycle = lifecycle;
     }
 
     public sealed record ReviewOutcome(
@@ -217,6 +220,31 @@ public sealed class ReviewerDispatcher
 
         _logger.LogInformation("PR #{Pr}: reviewer verdict {Verdict} (round {Round}, sha {Sha})",
             prNumber, verdict, round, headSha[..Math.Min(7, headSha.Length)]);
+
+        // Phase 2 shadow authority: report the verdict to the
+        // lifecycle machine (best-effort; never breaks a review).
+        if (_lifecycle is not null
+            && verdict is ReviewerVerdict.Approve or ReviewerVerdict.RequestChanges)
+        {
+            try
+            {
+                var taskId = watchTask.GetMetadata("taskId") ?? watchTask.Id;
+                var task = await _issues.GetAsync(taskId, cancellationToken);
+                var freshWatch = await _issues.GetAsync(watchTask.Id, cancellationToken) ?? watchTask;
+                if (task is not null)
+                {
+                    await _lifecycle.ReportAsync(task,
+                        verdict == ReviewerVerdict.Approve
+                            ? Forge.Core.TaskEvent.ReviewApproved
+                            : Forge.Core.TaskEvent.ReviewChangesRequested,
+                        freshWatch, hasActiveDevRun: false, cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "lifecycle report for PR #{Pr} verdict failed; continuing", prNumber);
+            }
+        }
         return new ReviewOutcome(verdict, body, headSha, error);
     }
 

@@ -45,6 +45,7 @@ public sealed class OrchestratorAgent : IAgent
     // re-queues the task (not a code failure) and pauses new
     // dispatches FOR THAT MODEL ONLY.
     private readonly ModelRateLimitTracker _modelCooldowns;
+    private readonly Core.TaskStateMachine? _lifecycle;
     private Agents.LlmConfig? _llmConfig;
     private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
     // In-flight dev dispatches. The cycle fire-and-forgets runs via
@@ -74,7 +75,8 @@ public sealed class OrchestratorAgent : IAgent
         ILogger<OrchestratorAgent> logger,
         ILoggerFactory? loggerFactory = null,
         Slots.SlotTable? slots = null,
-        ModelRateLimitTracker? modelCooldowns = null)
+        ModelRateLimitTracker? modelCooldowns = null,
+        Core.TaskStateMachine? lifecycle = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -87,6 +89,7 @@ public sealed class OrchestratorAgent : IAgent
         _loggerFactory = loggerFactory;
         _slots = slots ?? new Slots.SlotTable();
         _modelCooldowns = modelCooldowns ?? new ModelRateLimitTracker();
+        _lifecycle = lifecycle;
         _maxRetryCount = 1;
     }
 
@@ -314,7 +317,8 @@ public sealed class OrchestratorAgent : IAgent
                 var reviewer = new Forge.Reviewer.ReviewerDispatcher(
                     bundle.IssueStore, bundle.GitHub, _runner,
                     _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
-                        ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance);
+                        ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
+                    lifecycle: _lifecycle);
                 var fresh = watch;
                 var outcome = await reviewer.ReviewOnceAsync(watch, cancellationToken);
                 if (outcome is not null)
@@ -355,6 +359,9 @@ public sealed class OrchestratorAgent : IAgent
             // Workflows pipeline. ClaimExecutor detects the
             // pre-claim (InProgress + assignee=forge) and passes
             // through; otherwise it claims itself.
+            // Report BEFORE the claim changes the record (derivation
+            // must see the pre-claim state: Pending or ReworkQueued).
+            await ReportLifecycleAsync(issue, Core.TaskEvent.Dispatched, bundle, cancellationToken);
             var claimed = await bundle.IssueStore.ClaimAsync(issue.Id, "forge", cancellationToken);
             if (claimed is null)
             {
@@ -389,6 +396,7 @@ public sealed class OrchestratorAgent : IAgent
                     return new Result(false, "llm-rate-limited");
                 }
                 _logger.LogError(ex, "Workflow dispatch for {Id} threw", preClaimed.Id);
+                await ReportLifecycleAsync(preClaimed, Core.TaskEvent.RunDied, bundle, cancellationToken);
                 await HandleFailureAsync(preClaimed, ex, bundle, cancellationToken);
                 return new Result(false, ex.Message);
             }
@@ -448,6 +456,7 @@ public sealed class OrchestratorAgent : IAgent
                 _logger.LogWarning("Workflow dispatch for {Id} reported failure: {Err}",
                     preClaimed.Id, lastError);
                 var ex = new InvalidOperationException(lastError);
+                await ReportLifecycleAsync(preClaimed, Core.TaskEvent.RunDied, bundle, cancellationToken);
                 await HandleFailureAsync(preClaimed, ex, bundle, cancellationToken);
                 return new Result(false, lastError);
             }
@@ -456,10 +465,12 @@ public sealed class OrchestratorAgent : IAgent
                 preClaimed.Id, (DateTime.UtcNow - startedAt).TotalMilliseconds, after?.Status, prNumber);
             if (!string.IsNullOrEmpty(prNumber))
             {
+                await ReportLifecycleAsync(after ?? preClaimed, Core.TaskEvent.PrOpened, bundle, cancellationToken);
                 return new Result(true, $"PR #{prNumber} opened");
             }
             if (after?.Status == IssueStatus.Completed)
             {
+                await ReportLifecycleAsync(after, Core.TaskEvent.RunCompletedNoDiff, bundle, cancellationToken);
                 return new Result(true, "completed with no diff");
             }
             // Mid-pipeline halt detection: the workflow run returned
@@ -475,6 +486,7 @@ public sealed class OrchestratorAgent : IAgent
             {
                 var msg = $"workflow halted mid-pipeline at checkpoint {after.DispatchCheckpoint} without surfacing an error";
                 _logger.LogWarning("Workflow dispatch for {Id}: {Msg}", preClaimed.Id, msg);
+                await ReportLifecycleAsync(preClaimed, Core.TaskEvent.RunDied, bundle, cancellationToken);
                 await HandleFailureAsync(preClaimed, new InvalidOperationException(msg), bundle, cancellationToken);
                 return new Result(false, msg);
             }
@@ -482,8 +494,30 @@ public sealed class OrchestratorAgent : IAgent
         }
         catch (OperationCanceledException)
         {
+            await ReportLifecycleAsync(issue, Core.TaskEvent.RunDied, bundle, cancellationToken);
             await SafeTransitionAsync(issue.Id, IssueStatus.Failed, "cancelled", bundle, cancellationToken);
             return new Result(false, "cancelled");
+        }
+    }
+
+    /// <summary>Phase 2 shadow authority: report an observed dispatch
+    /// event to the lifecycle machine. Best-effort — never breaks a
+    /// dispatch.</summary>
+    private async Task ReportLifecycleAsync(
+        IssueRecord task, Core.TaskEvent evt, ProjectDispatchBundle bundle, CancellationToken ct)
+    {
+        if (_lifecycle is null) return;
+        try
+        {
+            // Derivation input: the machine re-reads the task itself;
+            // the watch is not loaded here (null is fine — watch-side
+            // states are driven by PRWatcher's own reports).
+            var fresh = await bundle.IssueStore.GetAsync(task.Id, ct) ?? task;
+            await _lifecycle.ReportAsync(fresh, evt, watch: null, hasActiveDevRun: false, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "lifecycle report {Event} failed for {TaskId}; continuing", evt, task.Id);
         }
     }
 

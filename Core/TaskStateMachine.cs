@@ -83,12 +83,14 @@ public sealed class TaskStateMachine
 
         Add(TaskEvent.Dispatched, TaskLifecycleState.Dispatching,
             TaskLifecycleState.Pending, TaskLifecycleState.ReworkQueued);
-        Add(TaskEvent.RunCompletedDiff, TaskLifecycleState.Dispatching,
-            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Dispatching);
-        Add(TaskEvent.RunCompletedNoDiff, TaskLifecycleState.StalledRework,
-            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning);
+        Add(TaskEvent.RunCompletedDiff, TaskLifecycleState.PROpen,
+            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
+            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
+        Add(TaskEvent.RunCompletedNoDiff, TaskLifecycleState.Completed,
+            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Completed);
         Add(TaskEvent.RunDied, TaskLifecycleState.StalledRework,
-            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Dispatching);
+            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
+            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
         Add(TaskEvent.PrOpened, TaskLifecycleState.PROpen, TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
         Add(TaskEvent.ReworkFired, TaskLifecycleState.ReworkQueued,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady, TaskLifecycleState.StalledRework,

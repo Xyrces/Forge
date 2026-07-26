@@ -61,6 +61,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly AgentRunStore? _agentRuns;
     private readonly Forge.Agents.LlmConfig? _llmConfig;
     private readonly Forge.Agents.RoleModelOverrides? _roleModelOverrides;
+    private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly GitHubOptions? _githubOptions;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
@@ -111,7 +112,8 @@ public sealed class DashboardHost : IAsyncDisposable
         Forge.Core.SecretStore? secretStore = null,
         AgentRunStore? agentRuns = null,
         Forge.Agents.LlmConfig? llmConfig = null,
-        Forge.Agents.RoleModelOverrides? roleModelOverrides = null)
+        Forge.Agents.RoleModelOverrides? roleModelOverrides = null,
+        Forge.Core.TaskStateMachine? lifecycle = null)
     {
         _options = options;
         _headroom = headroom;
@@ -158,6 +160,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _agentRuns = agentRuns;
         _llmConfig = llmConfig;
         _roleModelOverrides = roleModelOverrides;
+        _lifecycle = lifecycle;
     }
 
     public string BaseUrl => ResolveBaseUrl();
@@ -249,7 +252,8 @@ public sealed class DashboardHost : IAsyncDisposable
             var d = new Forge.Reviewer.ReviewerDispatcher(
                 _issues, _gitHub, _reviewerRunner,
                 _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
-                    ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance);
+                    ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
+                lifecycle: _lifecycle);
             builder.Services.AddSingleton(d);
             reviewerDispatcherForBuild = d;
         }

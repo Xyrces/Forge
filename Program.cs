@@ -1203,7 +1203,8 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory.CreateLogger<OrchestratorAgent>(),
             loggerFactory: loggerFactory,
             slots: slots,
-            modelCooldowns: modelRateLimits);
+            modelCooldowns: modelRateLimits,
+            lifecycle: lifecycle);
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
@@ -1341,7 +1342,8 @@ Console.Error.WriteLine(ex.ToString());
             secretStore: secretStore,
             agentRuns: agentRunStore,
             llmConfig: llmConfig,
-            roleModelOverrides: roleModelOverrides);
+            roleModelOverrides: roleModelOverrides,
+            lifecycle: lifecycle);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never
