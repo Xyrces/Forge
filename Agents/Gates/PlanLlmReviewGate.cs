@@ -22,6 +22,10 @@ public sealed class PlanLlmReviewGate : IRunGate
     private readonly Func<IChatClient> _clientFactory;
     private readonly ILogger _logger;
 
+    /// <summary>Hard cap on the critic call (2 min — the prompt is
+    /// small and the deterministic gates front-run it).</summary>
+    private static readonly TimeSpan CriticTimeout = TimeSpan.FromMinutes(2);
+
     public PlanLlmReviewGate(Func<IChatClient> clientFactory, ILogger logger)
     {
         _clientFactory = clientFactory;
@@ -57,7 +61,13 @@ public sealed class PlanLlmReviewGate : IRunGate
         try
         {
             var client = _clientFactory();
-            var response = await client.GetResponseAsync(prompt, cancellationToken: ctx.Ct);
+            // Bounded call: the critic shares the reviewer model,
+            // and a hung provider (observed live 2026-07-26: kimi-k3
+            // connections open but never respond) must not eat the
+            // agent run's own time budget. Timeout = fail open.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Ct);
+            timeoutCts.CancelAfter(CriticTimeout);
+            var response = await client.GetResponseAsync(prompt, cancellationToken: timeoutCts.Token);
             text = response.Text ?? "";
         }
         catch (Exception ex)
