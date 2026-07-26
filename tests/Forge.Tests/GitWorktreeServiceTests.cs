@@ -46,6 +46,24 @@ public class GitWorktreeServiceTests : IDisposable
         p.WaitForExit();
     }
 
+    private static GitResult RunGitForResult(string dir, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = dir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        p.WaitForExit();
+        return new GitResult(p.ExitCode, p.StandardOutput.ReadToEnd().Trim());
+    }
+
+    private readonly record struct GitResult(int ExitCode, string Stdout);
 
     private void InitRepo(string dir)
     {
@@ -154,6 +172,40 @@ public class GitWorktreeServiceTests : IDisposable
 
         var worktreeSha = await GetHeadShaAsync(worktreePath);
         Assert.Equal(defaultHeadSha, worktreeSha);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_DeletesSyncBaseRef_WhenPresent()
+    {
+        var taskId = "t-sync-cleanup";
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync(taskId, "main");
+
+        // Plant a per-task sync-base ref, exactly as SyncWorktreeToRefAsync would.
+        var localRef = "refs/forge/sync-base/" + taskId;
+        RunGit(_workDir, $"update-ref {localRef} HEAD");
+
+        // Confirm the ref exists before removal.
+        var beforeVerify = RunGitForResult(_workDir, $"show-ref --verify {localRef}");
+        Assert.Equal(0, beforeVerify.ExitCode);
+
+        await _service.RemoveAsync(taskId);
+
+        // Confirm the ref is gone after removal.
+        var afterVerify = RunGitForResult(_workDir, $"show-ref --verify {localRef}");
+        Assert.NotEqual(0, afterVerify.ExitCode);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_DoesNotThrow_WhenSyncBaseRefAbsent()
+    {
+        var taskId = "t-no-sync-ref";
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync(taskId, "main");
+
+        // No sync-base ref planted — should not throw.
+        var ex = await Record.ExceptionAsync(() => _service.RemoveAsync(taskId));
+        Assert.Null(ex);
     }
 
     private async Task<string> GetHeadShaAsync(string repoPath)
