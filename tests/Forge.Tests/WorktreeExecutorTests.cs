@@ -226,4 +226,46 @@ public class WorktreeExecutorTests : IDisposable
         Assert.Equal(WorktreeResult.Ok, result.Result);
         Assert.NotNull(result.WorktreePath);
     }
+
+    [Fact]
+    public async Task SyncFailure_MissingRemoteRef_ThrowsAndSurfaces()
+    {
+        var taskId = "task-200";
+        SetupRemoteAndBranch(taskId);
+
+        // Verify the remote branch exists before deletion
+        var beforeDelete = RunGitWithOutput(_workDir, "ls-remote origin agent/" + taskId);
+        Assert.NotEmpty(beforeDelete);
+
+        // Delete the remote branch so the sync fetch will fail
+        RunGitWithOutput(_workDir, "push origin --delete agent/" + taskId);
+
+        // Verify it's gone
+        var afterDelete = RunGitWithOutput(_workDir, "ls-remote origin agent/" + taskId);
+        Assert.Empty(afterDelete);
+
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "sync-fail"));
+        await _issues.ClaimAsync(issue.Id, "forge");
+        var meta = new Dictionary<string, object>
+        {
+            ["prNumber"] = "200",
+            ["reworkAttempts"] = "1",
+        };
+        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: meta);
+        var refreshed = await _issues.GetAsync(issue.Id);
+
+        var input = new ClaimedIssue(refreshed!, ClaimResult.Ok, null, "agent/" + taskId);
+
+        var ex = await Record.ExceptionAsync(async () =>
+            await WorktreeExecutor.HandleAsync(
+                input, _issues, _worktrees, "main",
+                NullLogger<WorktreeExecutor>.Instance, default));
+
+        Assert.NotNull(ex);
+        Assert.IsType<InvalidOperationException>(ex);
+        // The exception must come from SyncWorktreeToRefAsync (the sync
+        // failure). The message should mention fetch failure or remote
+        // ref not found.
+        Assert.Contains("fetch", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }
