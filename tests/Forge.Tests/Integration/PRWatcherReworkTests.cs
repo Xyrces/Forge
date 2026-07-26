@@ -73,14 +73,21 @@ public class PRWatcherReworkTests : IDisposable
         staleAfter: TimeSpan.FromHours(1),
         events: _events,
         logger: NullLogger<PRWatcher>.Instance,
-        gates: gates);
+        gates: gates,
+        lifecycle: new Forge.Core.TaskStateMachine(_issues, writeAuthority: false, NullLogger.Instance));
 
     private async Task<(IssueRecord task, IssueRecord watch)> SeedAsync(
         Dictionary<string, object>? taskMeta = null,
         Dictionary<string, object>? watchMeta = null)
     {
+        // Production shape at watch time: the task is InProgress and
+        // carries prNumber on its OWN metadata (written by the
+        // dispatch executors) — the machine's derivation reads it.
+        var tm = taskMeta ?? new Dictionary<string, object>();
+        tm["prNumber"] = "42";
         var task = await _issues.CreateAsync(new Forge.Core.NewIssue(
-            Type: "task", Title: "implement X", Metadata: taskMeta));
+            Type: "task", Title: "implement X", Metadata: tm));
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null);
         var meta = watchMeta ?? new Dictionary<string, object>();
         meta["prNumber"] = 42;
         meta["taskId"] = task.Id;
@@ -156,7 +163,9 @@ public class PRWatcherReworkTests : IDisposable
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, held);
         Assert.Equal(0, gh.MergeCalls);
-        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(task.Id))!.Status);
+        // Task untouched (production shape: InProgress while the
+        // gate holds the merge).
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
 
         await gates.ReleaseAsync(Forge.Core.StageGates.Merge);
         var released = await watcher.PollWatchOnceAsync(
@@ -192,10 +201,11 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal("1", after.GetMetadata("reworkAttempts"));
         Assert.Contains("conflicts with the base branch", after.GetMetadata("reworkReason"));
         Assert.Contains("git merge origin/main", after.GetMetadata("reworkContext"));
-        // The watch stays live and marks this head so the next
-        // sweep doesn't re-trigger while the agent works.
-        var watchAfter = await _issues.GetAsync(watch.Id);
-        Assert.Equal("abc123", watchAfter!.GetMetadata("reworkInFlightSha"));
+        // The round record lives on the TASK via the machine
+        // (state + reworkForSha) so the next sweep doesn't
+        // re-trigger while the agent works.
+        Assert.Equal("ReworkQueued", after.GetMetadata("state"));
+        Assert.Equal("abc123", after.GetMetadata("reworkForSha"));
         Assert.Equal(0, gh.MergeCalls);
     }
 
@@ -237,7 +247,9 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Contains("CI", taskAfter.GetMetadata("reworkContext"));
         var watchAfter = (await _issues.GetAsync(watch.Id))!;
         Assert.Equal(IssueStatus.Pending, watchAfter.Status);
-        Assert.Equal("abc123", watchAfter.GetMetadata("reworkInFlightSha"));
+        // Round record on the task via the machine (Phase 3).
+        Assert.Equal("abc123", taskAfter.GetMetadata("reworkForSha"));
+        Assert.Equal("ReworkQueued", taskAfter.GetMetadata("state"));
     }
 
     [Fact]
@@ -274,8 +286,9 @@ public class PRWatcherReworkTests : IDisposable
         var taskAfter = (await _issues.GetAsync(task.Id))!;
         Assert.Null(taskAfter.GetMetadata("reworkAttempts"));       // NO strike
         Assert.Null(taskAfter.GetMetadata("reworkReason"));
-        var watchAfter = (await _issues.GetAsync(watch.Id))!;
-        Assert.Equal("abc123", watchAfter.GetMetadata("parkedOnMainCiSha"));
+        // Park record on the task via the machine (Phase 3).
+        Assert.Equal("ParkedInfra", taskAfter.GetMetadata("state"));
+        Assert.Equal("abc123", taskAfter.GetMetadata("parkedForSha"));
     }
 
     [Fact]
@@ -339,7 +352,11 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal("2", taskAfter.GetMetadata("reworkAttempts"));  // NOT incremented
         Assert.Contains("recovered", taskAfter.GetMetadata("reworkReason"));
         Assert.Contains("retrigger", taskAfter.GetMetadata("reworkContext"));
-        Assert.Null((await _issues.GetAsync(watch.Id))!.GetMetadata("parkedOnMainCiSha"));
+        // The machine record moved past ParkedInfra (refresh round
+        // fired); the seeded legacy watch flag remains but is ignored
+        // once a machine state exists.
+        Assert.Equal("ReworkQueued", taskAfter.GetMetadata("state"));
+        Assert.Equal("abc123", taskAfter.GetMetadata("reworkForSha"));
     }
 
     [Fact]

@@ -175,37 +175,43 @@ public sealed class PRWatcher
         var ciFailed = ci is CommitState.Failure or CommitState.Error;
 
         // Rework guard: a rework round was already queued FOR THIS
-        // HEAD (the task is back in the dispatch queue but the agent
-        // hasn't pushed yet). Don't re-trigger every sweep — wait
-        // for the head to move.
-        //
-        // STALL BREAKER: the guard assumed every consumed round ends
-        // with a push. A no-op round (agent concludes the failure is
-        // pre-existing and emits NO_CHANGES_NEEDED) or a run that
-        // died mid-round (restart, timeout) leaves head == marker
-        // forever — the breaker never increments, the task never
-        // goes terminal, and the sprint can never complete. If the
-        // task is still Pending it is legitimately queued for a
-        // dispatch slot: keep waiting. If it has been claimed but
-        // untouched longer than the agent-run window, the round
-        // ended without a push: fall through and let the failure
-        // path fire the next strike (or trip the breaker).
-        if (string.Equals(watchTask.GetMetadata("reworkInFlightSha"), sha, StringComparison.Ordinal))
+        // HEAD. Phase 3: the guard reads the MACHINE's record on the
+        // task (state + reworkForSha + stateEnteredAt, written by
+        // ReworkOrTripAsync's ReworkFired report) instead of the
+        // legacy watch flag. A round that's queued (task Pending) or
+        // claimed inside the grace window (stateEnteredAt) blocks
+        // re-fire; a claimed round past grace is stalled (no-op or
+        // died run) and falls through to fire another strike.
+        // MIGRATION FALLBACK (delete after one clean deploy): tasks
+        // whose rounds predate the machine still carry the watch
+        // flag reworkInFlightSha.
         {
-            var stalledTask = await _issues.GetAsync(taskId, cancellationToken);
-            var untouchedFor = stalledTask is null ? TimeSpan.MaxValue
-                : DateTime.UtcNow - stalledTask.UpdatedAt;
-            var roundStalled = stalledTask is not null
-                && stalledTask.Status == IssueStatus.InProgress
-                && untouchedFor > _reworkRoundGrace;
-            if (!roundStalled)
+            var guardTask = await _issues.GetAsync(taskId, cancellationToken);
+            // Legacy fallback only when the task has NO machine
+            // record at all (round predates the machine) — a stale
+            // legacy marker must never override live machine state.
+            var recordedSha = guardTask?.GetMetadata("state") is null
+                ? watchTask.GetMetadata("reworkInFlightSha")
+                : guardTask.GetMetadata("reworkForSha");
+            if (string.Equals(recordedSha, sha, StringComparison.Ordinal))
             {
-                return WatchPollOutcome.Pending;
+                var enteredRaw = guardTask?.GetMetadata("stateEnteredAt");
+                var enteredAt = DateTimeOffset.TryParse(enteredRaw, out var ts)
+                    ? ts.UtcDateTime : guardTask?.UpdatedAt ?? DateTime.MinValue;
+                var untouchedFor = DateTime.UtcNow - enteredAt;
+                var roundStalled = guardTask is not null
+                    && guardTask.Status == IssueStatus.InProgress
+                    && untouchedFor > _reworkRoundGrace;
+                if (!roundStalled)
+                {
+                    return WatchPollOutcome.Pending;
+                }
+                await ReportAsync(Forge.Core.TaskEvent.StallDetected);
+                _logger.LogWarning(
+                    "PR watch {WatchId}: rework round for {TaskId} stalled — no push and no task update for {Minutes:F0}m (head still {Sha}); re-firing as another strike",
+                    watchTask.Id, taskId, untouchedFor.TotalMinutes, sha);
             }
-            await ReportAsync(Forge.Core.TaskEvent.StallDetected);
-            _logger.LogWarning(
-                "PR watch {WatchId}: rework round for {TaskId} stalled — no push and no task update for {Minutes:F0}m (head still {Sha}); re-firing as another strike",
-                watchTask.Id, taskId, untouchedFor.TotalMinutes, sha);        }
+        }
 
         _logger.LogDebug(
             "PR #{PrNumber}: CI={Ci} approved={Approved} changesRequested={Changes} reviewError={Err} (agent verdict={V}@{VS}, head={Head})",
@@ -293,8 +299,21 @@ public sealed class PRWatcher
             // not this PR's: park the watch (no strike, no rework)
             // until the base goes green, then fire ONE no-strike
             // refresh round so the PR retriggers CI on a fresh head.
+            // Phase 3: the parked record lives on the TASK via the
+            // machine (state=ParkedInfra + parkedForSha); the legacy
+            // watch flag is the migration fallback.
             var baseBranch = pr.Base?.Ref ?? "main";
-            var parkedSha = watchTask.GetMetadata("parkedOnMainCiSha");
+            var parkTask = await _issues.GetAsync(taskId, cancellationToken);
+            var parkState = parkTask?.GetMetadata("state");
+            var parkedSha = parkState is null
+                // Legacy fallback: only when the task has NO machine
+                // record at all (round predates the machine). A stale
+                // legacy flag must never override a live machine state
+                // — it would re-fire refresh rounds forever.
+                ? watchTask.GetMetadata("parkedOnMainCiSha")
+                : string.Equals(parkState, nameof(Forge.Core.TaskLifecycleState.ParkedInfra), StringComparison.Ordinal)
+                    ? parkTask!.GetMetadata("parkedForSha")
+                    : null;
             if (string.Equals(parkedSha, sha, StringComparison.Ordinal))
             {
                 var baseHead = await _gitHub.GetBranchHeadShaAsync(baseBranch, cancellationToken);
@@ -303,12 +322,10 @@ public sealed class PRWatcher
                 {
                     return WatchPollOutcome.Pending;   // still parked; infra still red
                 }
-                // Base recovered: fire the refresh round (no strike)
-                // and clear the parked marker.
+                // Base recovered: fire the refresh round (no strike).
+                // The ReworkFired report below overwrites the parked
+                // state on the machine record.
                 await ReportAsync(Forge.Core.TaskEvent.BaseRecovered);
-                var watchMetaParked = ParseMetadataDict(watchTask.MetadataJson);
-                watchMetaParked["parkedOnMainCiSha"] = null!;
-                await _issues.TransitionAsync(watchTask.Id, watchTask.Status, error: null, metadata: watchMetaParked, ct: cancellationToken);
                 return await ReworkOrTripAsync(
                     watchTask, taskId, worktreePath, sha,
                     reason: "base-branch CI recovered — retrigger PR CI",
@@ -328,10 +345,11 @@ public sealed class PRWatcher
                     _logger.LogWarning(
                         "PR #{PrNumber}: CI failure is pre-existing on {Base} (base head {Sha} also red) — parking watch without a strike until the base recovers",
                         prNumber, baseBranch, baseHead);
-                    await ReportAsync(Forge.Core.TaskEvent.ParkedOnInfra);
-                    var watchMeta = ParseMetadataDict(watchTask.MetadataJson);
-                    watchMeta["parkedOnMainCiSha"] = sha;
-                    await _issues.TransitionAsync(watchTask.Id, watchTask.Status, error: null, metadata: watchMeta, ct: cancellationToken);
+                    // The machine records the park on the task
+                    // (state=ParkedInfra + parkedForSha) — no watch
+                    // flag write anymore.
+                    await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.ParkedOnInfra, cancellationToken,
+                        extraMetadata: new Dictionary<string, object> { ["parkedForSha"] = sha });
                     _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
                         taskId, $"Watch parked: CI failure is pre-existing on {baseBranch}; merge pipeline paused until base recovers"));
                     return WatchPollOutcome.Pending;
@@ -431,7 +449,8 @@ public sealed class PRWatcher
     /// event to the lifecycle machine. Best-effort — never breaks the
     /// watch loop.</summary>
     private async Task ReportLifecycleAsync(
-        IssueRecord watchTask, string taskId, Forge.Core.TaskEvent evt, CancellationToken cancellationToken)
+        IssueRecord watchTask, string taskId, Forge.Core.TaskEvent evt, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, object>? extraMetadata = null)
     {
         if (_lifecycle is null) return;
         try
@@ -439,7 +458,7 @@ public sealed class PRWatcher
             var task = await _issues.GetAsync(taskId, cancellationToken);
             if (task is not null)
             {
-                await _lifecycle.ReportAsync(task, evt, watchTask, hasActiveDevRun: false, cancellationToken);
+                await _lifecycle.ReportAsync(task, evt, watchTask, hasActiveDevRun: false, cancellationToken, extraMetadata);
             }
         }
         catch (Exception ex)
@@ -501,23 +520,19 @@ public sealed class PRWatcher
         _logger.LogInformation(
             "PR watch {WatchId}: rework round {N}/{Max} for {TaskId} — {Reason}",
             watchTask.Id, attempts, MaxReworkAttempts, taskId, reason);
-        await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.ReworkFired, cancellationToken);
+        await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.ReworkFired, cancellationToken,
+            extraMetadata: new Dictionary<string, object> { ["reworkForSha"] = headSha });
         var metadata = ParseMetadataDict(task.MetadataJson);
         metadata["reworkAttempts"] = attempts.ToString();
         metadata["reworkReason"] = reason;
         metadata["reworkContext"] = context.Length > 3000 ? context[..3000] : context;
         await _issues.TransitionAsync(taskId, IssueStatus.Pending, error: null, metadata: metadata, ct: cancellationToken);
 
-        // Mark the watch so the NEXT sweep doesn't re-trigger the
-        // same failure while the agent is still working on this head
-        // (the marker clears itself when the head moves: the poll
-        // compares against the live head SHA). Re-read the watch:
-        // the caller may have transitioned it above (parked-marker
-        // clear) and its in-memory copy would resurrect stale keys.
-        var freshWatch = await _issues.GetAsync(watchTask.Id, cancellationToken) ?? watchTask;
-        var watchMeta = ParseMetadataDict(freshWatch.MetadataJson);
-        watchMeta["reworkInFlightSha"] = headSha;
-        await _issues.TransitionAsync(watchTask.Id, IssueStatus.Pending, error: null, metadata: watchMeta, ct: cancellationToken);
+        // The round record lives on the TASK via the machine
+        // (state=ReworkQueued + reworkForSha, written by the
+        // ReworkFired report above). No watch-flag write — the guard
+        // reads the machine record now (legacy reworkInFlightSha on
+        // old watches remains as the migration fallback).
 
         _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
             taskId, $"Rework round {attempts}/{MaxReworkAttempts}: {reason}"));

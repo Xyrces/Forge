@@ -59,7 +59,12 @@ public static class TaskStateProjector
         var reworkReason = task.GetMetadata("reworkReason");
         var strikes = int.TryParse(task.GetMetadata("reworkAttempts"), out var s) ? s : 0;
         var inFlightSha = watch?.GetMetadata("reworkInFlightSha");
-        var parked = watch?.GetMetadata("parkedOnMainCiSha");
+        // Phase 3: the machine's record on the task is primary for
+        // the park state; the legacy watch flag is the fallback.
+        var machineState = task.GetMetadata("state");
+        var parked = string.Equals(machineState, nameof(TaskLifecycleState.ParkedInfra), StringComparison.Ordinal)
+            ? task.GetMetadata("parkedForSha") ?? "parked"
+            : watch?.GetMetadata("parkedOnMainCiSha");
 
         // Terminal states first.
         switch (task.Status)
