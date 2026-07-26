@@ -36,6 +36,7 @@ public sealed class DesignerScheduler
     private readonly IDashboardEventBus _events;
     private readonly ILogger<DesignerScheduler> _logger;
     private readonly TimeSpan _interval;
+    private readonly Core.StageGates? _gates;
 
     public DesignerScheduler(
         ISpecStore specs,
@@ -43,7 +44,8 @@ public sealed class DesignerScheduler
         DesignerRunStore runs,
         IDashboardEventBus events,
         ILogger<DesignerScheduler> logger,
-        TimeSpan? interval = null)
+        TimeSpan? interval = null,
+        Core.StageGates? gates = null)
     {
         _specs = specs;
         _designerFactory = designerFactory;
@@ -51,6 +53,7 @@ public sealed class DesignerScheduler
         _events = events;
         _logger = logger;
         _interval = interval ?? TimeSpan.FromMinutes(5);
+        _gates = gates;
     }
 
     public TimeSpan Interval => _interval;
@@ -81,6 +84,12 @@ public sealed class DesignerScheduler
 
     public async Task TickAsync(CancellationToken ct)
     {
+        if (_gates is not null && await _gates.IsHeldAsync(Core.StageGates.Design, ct))
+        {
+            _logger.LogInformation("DesignerScheduler: held by operator gate; skipping tick");
+            return;
+        }
+
         IReadOnlyList<SpecRecord> candidates;
         try
         {
@@ -153,6 +162,7 @@ public sealed class DesignerAgentFactory
     private readonly RoleAgentRegistry _roles;
     private readonly IDashboardEventBus _events;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly string _rolePromptsRoot;
 
     public DesignerAgentFactory(
         ISpecStore specs,
@@ -164,7 +174,8 @@ public sealed class DesignerAgentFactory
         LlmConfig config,
         RoleAgentRegistry roles,
         IDashboardEventBus events,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        string rolePromptsRoot = "agents")
     {
         _specs = specs;
         _artifacts = artifacts;
@@ -176,9 +187,10 @@ public sealed class DesignerAgentFactory
         _roles = roles;
         _events = events;
         _loggerFactory = loggerFactory;
+        _rolePromptsRoot = rolePromptsRoot;
     }
 
     public DesignerAgent Create() => new(
         _specs, _artifacts, _runs, _memory, _hygiene, _chatClientFactory, _config, _roles, _events,
-        _loggerFactory.CreateLogger<DesignerAgent>());
+        _loggerFactory.CreateLogger<DesignerAgent>(), _rolePromptsRoot);
 }

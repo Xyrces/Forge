@@ -41,6 +41,20 @@ public sealed class EnqueueWatchExecutor : FunctionExecutor<PrOpened, WatchEnque
         var dev = input.Agent.Worktree.Claim.Issue;
         var branch = input.Agent.Worktree.Claim.Branch ?? $"agent/{dev.Id}";
         var worktreePath = input.Agent.Worktree.WorktreePath!;
+
+        // Rework loop: a reworked task re-runs this executor for the
+        // SAME PR. Don't stack duplicate watches — reuse the live one
+        // (it keeps its review history; the new head SHA triggers a
+        // fresh review round in the sweep).
+        var existing = (await issues.ListAsync(new IssueFilter { Type = AgentTaskTypes.PrWatch }, ct))
+            .FirstOrDefault(w => w.Status is IssueStatus.Pending or IssueStatus.InProgress
+                && w.GetMetadata("prNumber") == input.PrNumber.ToString());
+        if (existing is not null)
+        {
+            logger.LogInformation("Watch {Id} already live for PR #{Pr}; reusing (rework round)", existing.Id, input.PrNumber);
+            return new WatchEnqueued(input, existing.Id);
+        }
+
         var watch = await issues.CreateAsync(new NewIssue(
             Type: AgentTaskTypes.PrWatch,
             Title: $"Watch PR #{input.PrNumber} for {dev.Id}",
@@ -51,6 +65,7 @@ public sealed class EnqueueWatchExecutor : FunctionExecutor<PrOpened, WatchEnque
                 ["branch"] = branch,
                 ["worktreePath"] = worktreePath,
                 ["taskId"] = dev.Id,
+                ["taskTitle"] = dev.Title,
             }), ct);
         logger.LogInformation("Enqueued watch issue {Id} for PR #{Pr}", watch.Id, input.PrNumber);
         return new WatchEnqueued(input, watch.Id);

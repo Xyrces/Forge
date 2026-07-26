@@ -31,7 +31,31 @@ public sealed record ViewTask(
     string? DispatchCheckpoint,
     string? PrUrl,
     string? Branch,
-    string? WorktreePath);
+    string? WorktreePath,
+    string? ParentIssueId = null,
+    IReadOnlyDictionary<string, object?>? Parameters = null)
+{
+    /// <summary>prNumber from issue metadata, when the task has an open PR.</summary>
+    public string? PrNumber =>
+        Parameters is not null
+        && Parameters.TryGetValue("prNumber", out var raw)
+        && raw is not null
+            ? raw.ToString()
+            : null;
+
+    /// <summary>
+    /// Rework round from issue metadata ("1".."3"), when the task is
+    /// in the review/rework loop. A task showing Pending with a PR
+    /// number is queued for a rework round — this is the badge that
+    /// makes that visible.
+    /// </summary>
+    public string? ReworkAttempts =>
+        Parameters is not null
+        && Parameters.TryGetValue("reworkAttempts", out var raw)
+        && raw is not null
+            ? raw.ToString()
+            : null;
+}
 
 public sealed record ViewAgent(
     string Id,
@@ -60,6 +84,14 @@ public sealed record ViewSprint(
     string? Goal,
     DateTime? StartDate,
     DateTime? EndDate,
+    string Status,
+    int IssueCount = 0,
+    int DoneCount = 0,
+    IReadOnlyList<ViewSprintMember>? Members = null);
+
+public sealed record ViewSprintMember(
+    string Id,
+    string Title,
     string Status);
 
 public static class ViewActions
@@ -101,7 +133,9 @@ public sealed class ViewClient
                 t.dispatchCheckpoint,
                 t.prUrl,
                 t.branch,
-                t.worktreePath)).ToArray(),
+                t.worktreePath,
+                t.parentIssueId,
+                t.parameters)).ToArray(),
             Agents: resp.agents.Select(a => new ViewAgent(
                 a.id, a.agentName ?? "", a.displayName ?? "", a.scope ?? "",
                 a.description, a.enabled, a.configJson ?? "{}", a.createdAt, a.updatedAt)).ToArray(),
@@ -110,7 +144,10 @@ public sealed class ViewClient
                 s.enabled, s.createdAt, s.updatedAt)).ToArray(),
             Sprints: resp.sprints.Select(sp => new ViewSprint(
                 sp.id, sp.name, sp.goal, sp.startDate, sp.endDate,
-                sp.status ?? "Unknown")).ToArray(),
+                sp.status ?? "Unknown",
+                sp.issueCount, sp.doneCount,
+                (sp.members ?? Array.Empty<SprintMemberDto>())
+                    .Select(m => new ViewSprintMember(m.id, m.title, m.status)).ToArray())).ToArray(),
             CompletedTasks: resp.completedTasks,
             FailedTasks: resp.failedTasks);
         return snapshot;
@@ -139,7 +176,9 @@ public sealed class ViewClient
         string? dispatchCheckpoint,
         string? prUrl,
         string? branch,
-        string? worktreePath);
+        string? worktreePath,
+        string? parentIssueId = null,
+        Dictionary<string, object?>? parameters = null);
 
     private sealed record AgentDto(
         string id,
@@ -168,6 +207,14 @@ public sealed class ViewClient
         string? goal,
         DateTime? startDate,
         DateTime? endDate,
+        string status,
+        int issueCount = 0,
+        int doneCount = 0,
+        SprintMemberDto[]? members = null);
+
+    private sealed record SprintMemberDto(
+        string id,
+        string title,
         string status);
 }
 

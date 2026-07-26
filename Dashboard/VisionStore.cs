@@ -55,6 +55,23 @@ public sealed class VisionStore
             return _snapshot;
         }
     }
+
+    /// <summary>
+    /// Writes (creating parent dirs as needed) and reloads the
+    /// vision document. This is the dashboard editor's save path —
+    /// previously the file had to "magically exist" with no in-app
+    /// mechanism to create it.
+    /// </summary>
+    public VisionSnapshot Write(string content)
+    {
+        lock (_lock)
+        {
+            var dir = Path.GetDirectoryName(_filePath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(_filePath, content);
+        }
+        return Reload();
+    }
 }
 
 public sealed record VisionSnapshot(

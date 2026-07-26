@@ -1,0 +1,322 @@
+@page "/specs/{SpecId}"
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
+@inject HttpClient Http
+@inject NavigationManager Nav
+@using System.Net.Http.Json
+@using System.Text.Json
+
+<PageTitle>Spec @SpecId</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>
+            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/specs"))">← Specs</button>
+            @(SpecProp("title") ?? SpecId)
+        </h1>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
+        </div>
+    </div>
+
+    @if (_error is not null)
+    {
+        <div class="banner banner--error"><span>@_error</span></div>
+    }
+    @if (_actionError is not null)
+    {
+        <div class="banner banner--error">
+            <span>@_actionError</span>
+            @if (_offerForceGroom)
+            {
+                <button class="btn btn--small" @onclick="() => GroomAsync(force: true)" disabled="@_acting">Re-decompose anyway (force)</button>
+            }
+            <button class="btn btn--link" @onclick="() => { _actionError = null; _offerForceGroom = false; }">Dismiss</button>
+        </div>
+    }
+
+    @if (_spec is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else
+    {
+        <div class="card" style="margin-bottom:14px">
+            <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+                <span class="pill pill--@StatusCss">@SpecProp("status")</span>
+                <span class="mono">v@(SpecProp("currentVersion"))</span>
+                <span class="mono">@SpecId</span>
+                @if (!string.IsNullOrEmpty(SpecProp("parentIssueId")))
+                {
+                    <span class="mono">epic: @SpecProp("parentIssueId")</span>
+                }
+                <span class="mono">updated @SpecProp("updatedAt")</span>
+            </div>
+            @* Action bar — driven by /api/specs/{id}/actions so the UI
+               doesn't ship its own copy of the state machine. *@
+            <div style="display:flex; gap:8px; margin-top:10px">
+                @if (ActionFlag("canApprove"))
+                {
+                    <button class="btn btn--small btn--primary" @onclick='() => SetStatusAsync("Approved")' disabled="@_acting">Approve</button>
+                }
+                @if (ActionFlag("canSendToDesign"))
+                {
+                    <button class="btn btn--small" @onclick='() => SetStatusAsync("ReadyForDesign")' disabled="@_acting">Send to Designer</button>
+                }
+                @if (ActionFlag("canStartGrooming"))
+                {
+                    <button class="btn btn--small btn--primary" @onclick="() => GroomAsync(force: false)" disabled="@_acting">
+                        @(_acting ? "Working…" : "Groom")
+                    </button>
+                }
+                @if (ActionFlag("canShip"))
+                {
+                    <button class="btn btn--small btn--primary" @onclick='() => SetStatusAsync("Shipped")' disabled="@_acting">Ship</button>
+                }
+            </div>
+            @if (!string.IsNullOrEmpty(ActionProp("reason")))
+            {
+                <p class="hint" style="margin-top:6px">@ActionProp("reason")</p>
+            }
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+            <h2>Spec body</h2>
+            <pre class="mono" style="white-space:pre-wrap; max-height:320px; overflow:auto">@SpecProp("body")</pre>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+            <h2>Decomposition (@_stories.Count stories)</h2>
+            @if (_stories.Count == 0 && _orphanTasks.Count == 0)
+            {
+                <p class="hint">Not groomed yet — grooming decomposes the spec into stories and tasks.</p>
+            }
+            @foreach (var story in _stories)
+            {
+                <div style="margin:10px 0 4px">
+                    <span class="pill pill--@story.Status.ToLowerInvariant()">@story.Status</span>
+                    <span class="mono">@story.Id</span>
+                    <strong>@story.Title</strong>
+                </div>
+                <ul style="margin:0 0 8px 22px">
+                    @foreach (var task in story.Tasks)
+                    {
+                        <li style="margin:2px 0">
+                            <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
+                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
+                            <span>@task.Title</span>
+                            @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url)
+                            {
+                                <a href="@url" target="_blank" rel="noopener">PR #@task.PrNumber</a>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+            @if (_orphanTasks.Count > 0)
+            {
+                <div style="margin:10px 0 4px"><strong>Tasks without a story</strong></div>
+                <ul style="margin:0 0 8px 22px">
+                    @foreach (var task in _orphanTasks)
+                    {
+                        <li>
+                            <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
+                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
+                            <span>@task.Title</span>
+                            @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url2)
+                            {
+                                <a href="@url2" target="_blank" rel="noopener">PR #@task.PrNumber</a>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        @if (_groomRuns.Count > 0)
+        {
+            <div class="card">
+                <h2>Groom runs</h2>
+                <table class="data-grid">
+                    <thead>
+                        <tr><th>When</th><th>Trigger</th><th>Status</th><th>Stories</th><th>Tasks</th><th>Duration</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var run in _groomRuns)
+                        {
+                            <tr>
+                                <td class="mono">@run.Ts</td>
+                                <td class="mono">@run.Trigger</td>
+                                <td><span class="pill pill--@run.Status.ToLowerInvariant()">@run.Status</span></td>
+                                <td>@run.Stories</td>
+                                <td>@run.Tasks</td>
+                                <td class="mono">@run.Duration</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public string SpecId { get; set; } = "";
+
+    private JsonElement? _spec;
+    private JsonElement? _actions;
+    private List<StoryVm> _stories = new();
+    private List<TaskVm> _orphanTasks = new();
+    private List<GroomRunVm> _groomRuns = new();
+    private string? _repoUrl;
+    private string? _error;
+    private string? _actionError;
+    private bool _acting;
+    private bool _offerForceGroom;
+
+    private string StatusCss => SpecProp("status")?.ToLowerInvariant() ?? "unknown";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private string? SpecProp(string name) => _spec is null ? null : GetProp(_spec.Value, name);
+    private string? ActionProp(string name) => _actions is null ? null : GetProp(_actions.Value, name);
+    private bool ActionFlag(string name) =>
+        _actions is not null
+        && _actions.Value.ValueKind == JsonValueKind.Object
+        && _actions.Value.TryGetProperty(name, out var v)
+        && v.ValueKind == JsonValueKind.True;
+
+    private static string? GetProp(JsonElement e, string name)
+    {
+        if (e.ValueKind != JsonValueKind.Object) return null;
+        if (!e.TryGetProperty(name, out var v)) return null;
+        return v.ValueKind switch
+        {
+            JsonValueKind.String => v.GetString(),
+            JsonValueKind.Null => null,
+            _ => v.ToString(),
+        };
+    }
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        try
+        {
+            var tree = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/tree");
+            _spec = tree.GetProperty("spec");
+            _stories = tree.GetProperty("stories").EnumerateArray().Select(StoryVm.From).ToList();
+            _orphanTasks = tree.GetProperty("orphanTasks").EnumerateArray().Select(TaskVm.From).ToList();
+            _groomRuns = tree.GetProperty("groomRuns").EnumerateArray().Select(GroomRunVm.From).ToList();
+            try { _actions = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/actions"); }
+            catch { _actions = null; }
+            if (_repoUrl is null)
+            {
+                // PR links derive from the registered project's repo —
+                // never hardcoded.
+                var projectId = ShellStore.Value.CurrentProjectId;
+                if (!string.IsNullOrEmpty(projectId))
+                {
+                    var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
+                    foreach (var p in projects.EnumerateArray())
+                    {
+                        if (string.Equals(GetProp(p, "id"), projectId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _repoUrl = GetProp(p, "repoUrl")?.TrimEnd('/');
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+
+    private string? PrUrl(string prNumber) =>
+        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+
+    private async Task SetStatusAsync(string status)
+    {
+        _acting = true;
+        try
+        {
+            var resp = await Http.PatchAsJsonAsync($"/api/specs/{SpecId}", new { op = "set_status", status });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _actionError = $"{status} failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                return;
+            }
+            _actionError = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) { _actionError = ex.Message; }
+        finally { _acting = false; }
+    }
+
+    private async Task GroomAsync(bool force)
+    {
+        _acting = true;
+        _offerForceGroom = false;
+        try
+        {
+            var url = force ? $"/api/specs/{SpecId}/groom?force=true" : $"/api/specs/{SpecId}/groom";
+            var resp = await Http.PostAsync(url, null);
+            if (resp.StatusCode == System.Net.HttpStatusCode.Conflict && !force)
+            {
+                // Already groomed — the operator chooses whether to
+                // re-decompose (appends new stories/tasks).
+                _actionError = $"Already groomed: {await resp.Content.ReadAsStringAsync()}";
+                _offerForceGroom = true;
+                return;
+            }
+            if (!resp.IsSuccessStatusCode)
+            {
+                _actionError = $"Groom failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                return;
+            }
+            _actionError = null;
+            await LoadAsync();
+            // The groomer runs in the background; poll so the tree
+            // fills in without leaving the page.
+            for (var i = 0; i < 8; i++)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(15));
+                await LoadAsync();
+            }
+        }
+        catch (Exception ex) { _actionError = ex.Message; }
+        finally { _acting = false; }
+    }
+
+    private sealed record StoryVm(string Id, string Title, string Status, List<TaskVm> Tasks)
+    {
+        public static StoryVm From(JsonElement e) => new(
+            GetProp(e, "id") ?? "",
+            GetProp(e, "title") ?? "",
+            GetProp(e, "status") ?? "",
+            e.ValueKind == JsonValueKind.Object && e.TryGetProperty("tasks", out var tasks)
+                ? tasks.EnumerateArray().Select(TaskVm.From).ToList()
+                : new List<TaskVm>());
+    }
+
+    private sealed record TaskVm(string Id, string Title, string Status, string? PrNumber)
+    {
+        public static TaskVm From(JsonElement e) => new(
+            GetProp(e, "id") ?? "",
+            GetProp(e, "title") ?? "",
+            GetProp(e, "status") ?? "",
+            GetProp(e, "prNumber"));
+    }
+
+    private sealed record GroomRunVm(string Ts, string Trigger, string Status, int Stories, int Tasks, string Duration)
+    {
+        public static GroomRunVm From(JsonElement e) => new(
+            GetProp(e, "ts") ?? "",
+            GetProp(e, "trigger") ?? "",
+            GetProp(e, "status") ?? "",
+            e.TryGetProperty("storiesProduced", out var sp) ? sp.GetInt32() : 0,
+            e.TryGetProperty("tasksProduced", out var tp) ? tp.GetInt32() : 0,
+            e.TryGetProperty("durationMs", out var d) ? $"{d.GetInt64() / 1000.0:F1}s" : "");
+    }
+}

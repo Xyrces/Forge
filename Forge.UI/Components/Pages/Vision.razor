@@ -14,8 +14,11 @@
             </div>
         }
         <div class="page-header__actions">
-            <button class="btn" @onclick="RefreshAsync" disabled="@_refreshing">Export</button>
-            <button class="btn btn--primary" @onclick="RefreshAsync" disabled="@_refreshing">Trigger Re-plan</button>
+            <button class="btn" @onclick="RefreshAsync" disabled="@(_refreshing || _editing)">Refresh</button>
+            @if (!_editing)
+            {
+                <button class="btn btn--primary" @onclick="StartEdit">@(_snapshot?.Exists == true ? "Edit" : "Create")</button>
+            }
         </div>
     </div>
 
@@ -23,9 +26,48 @@
     {
         <div class="page-subtitle">Loading…</div>
     }
+    else if (_editing)
+    {
+        <div style="display:flex;flex-direction:column;gap:10px">
+            <div class="page-subtitle">
+                Editing <span class="mono">@_snapshot.Path</span> — saved to the project root and
+                injected into every agent prompt as the <span class="mono">vision/master</span> memory key.
+            </div>
+            <textarea class="mono" style="min-height:55vh;resize:vertical"
+                      @bind="_editContent" placeholder="# Master Design&#10;&#10;The north-star design every agent run is anchored to."></textarea>
+            <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn btn--primary" @onclick="SaveAsync" disabled="@_saving">@(_saving ? "Saving…" : "Save")</button>
+                <button class="btn" @onclick="CancelEdit" disabled="@_saving">Cancel</button>
+                @if (_saveError is not null)
+                {
+                    <span class="text-danger">@_saveError</span>
+                }
+            </div>
+        </div>
+    }
     else if (!_snapshot.Exists)
     {
-        <div class="page-subtitle">No vision file at @_snapshot.Path</div>
+        <div class="page-subtitle">
+            No vision file yet. Create one to give every agent run a north-star design anchor —
+            its content is injected into prompts as the <span class="mono">vision/master</span> memory key.
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
+            <button class="btn btn--primary" @onclick="StartEdit">Write it now</button>
+            <button class="btn" @onclick="RequestDraftAsync" disabled="@_drafting">
+                @(_drafting ? "Filing…" : "Draft from codebase")
+            </button>
+            @if (_draftTaskId is not null)
+            {
+                <span class="page-subtitle">
+                    Task <a href="/tasks/@_draftTaskId" class="mono">@_draftTaskId</a> filed —
+                    it goes through grooming, then a sprint, then a PR. This page fills in when it merges.
+                </span>
+            }
+            @if (_draftError is not null)
+            {
+                <span class="text-danger">@_draftError</span>
+            }
+        </div>
     }
     else
     {
@@ -81,6 +123,13 @@
     private List<string> _headings = new();
     private string? _activeHeading;
     private bool _refreshing;
+    private bool _editing;
+    private bool _saving;
+    private string _editContent = "";
+    private string? _saveError;
+    private bool _drafting;
+    private string? _draftTaskId;
+    private string? _draftError;
 
     public sealed record SnapshotDto(bool Exists, string Path, string? Content, DateTime? LastModifiedUtc);
 
@@ -112,6 +161,70 @@
         }
         finally { _refreshing = false; }
     }
+
+    private void StartEdit()
+    {
+        _editContent = _snapshot?.Content ?? "";
+        _saveError = null;
+        _editing = true;
+    }
+
+    private void CancelEdit()
+    {
+        _editing = false;
+        _saveError = null;
+    }
+
+    private async Task SaveAsync()
+    {
+        _saving = true;
+        _saveError = null;
+        try
+        {
+            var resp = await Http.PutAsJsonAsync("/api/vision", new { content = _editContent });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _saveError = $"save failed: {(int)resp.StatusCode}";
+                return;
+            }
+            _editing = false;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _saveError = $"save failed: {ex.Message}";
+        }
+        finally { _saving = false; }
+    }
+
+    private async Task RequestDraftAsync()
+    {
+        _drafting = true;
+        _draftError = null;
+        try
+        {
+            var resp = await Http.PostAsync("/api/vision/draft-request", null);
+            if (resp.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                _draftError = "a vision draft task is already open";
+                return;
+            }
+            if (!resp.IsSuccessStatusCode)
+            {
+                _draftError = $"request failed: {(int)resp.StatusCode}";
+                return;
+            }
+            var payload = await resp.Content.ReadFromJsonAsync<DraftResponse>();
+            _draftTaskId = payload?.TaskId;
+        }
+        catch (Exception ex)
+        {
+            _draftError = $"request failed: {ex.Message}";
+        }
+        finally { _drafting = false; }
+    }
+
+    private sealed record DraftResponse(string TaskId, string Status);
 
     private void Parse()
     {

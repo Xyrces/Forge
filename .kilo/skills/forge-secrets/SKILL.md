@@ -19,7 +19,7 @@ Per-project credential storage and consumption. The design goal: **agents and ru
 | Kind | Consumer |
 |---|---|
 | `github_token` | `ProjectDispatchBundleFactory` — per-project GitHub PAT for `GitWorktreeService` (push) and `GitHubService` (PRs). Overrides global `GITHUB_TOKEN` env / `github.token` config. Also injected into the bash env as `GITHUB_TOKEN`. |
-| `kilo_gateway_api_key` | LLM provider key (kilo-gateway). Global fallback today; per-project override of the chat client is a noted follow-up. |
+| `kilo_gateway_api_key` | Chat-client auth for the kilo gateway. Resolved at startup by `Program.cs::ResolveKiloGatewayKeyAsync` (first stored key across registered projects wins) and substituted into the `LlmConfig` kilo-gateway provider entry — the appsettings `apiKey` is only the `KILO_GATEWAY_API_KEY` placeholder. Free-tier models tolerate the placeholder; paid models (e.g. `minimax/minimax-m3`) 401 with `PAID_MODEL_AUTH_REQUIRED` without the real key. **Rotation takes effect on service restart.** |
 | `meshy_api_key` | `MeshyClient` for the Designer/Artist 3D pipeline. |
 | custom (any `[a-z0-9][a-z0-9_-]{0,63}`) | Injected into the agent bash environment only. |
 
