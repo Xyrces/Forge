@@ -22,7 +22,7 @@ namespace Forge;
 /// Implemented as a <see cref="GitHubService"/> subclass so
 /// the orchestrator's call sites don't change; the harness
 /// swaps the constructor argument for an instance of this
-/// class. All 7 public methods on the base class are
+/// class. All 11 public methods on the base class are
 /// <c>virtual</c> to enable the override.
 /// </para>
 ///
@@ -112,6 +112,51 @@ public sealed class LocalGitHubService : GitHubService
 
     public override Task<bool> DeleteBranchAsync(string branchName, CancellationToken cancellationToken = default)
         => Task.FromResult(true);
+
+    /// <summary>
+    /// Find the OPEN PR whose head branch matches
+    /// <paramref name="headBranch"/>, or null. Queries the
+    /// in-memory <see cref="LocalPrStore.PrInfo"/> side-channel
+    /// (Octokit's PullRequest fields are read-only / empty in
+    /// harness-created PRs). Case-insensitive match.
+    /// </summary>
+    public override Task<PullRequest?> GetOpenPullRequestForBranchAsync(
+        string headBranch, CancellationToken cancellationToken = default)
+    {
+        var match = _prStore.PrInfo.FirstOrDefault(kvp =>
+            string.Equals(kvp.Value.HeadBranch, headBranch, StringComparison.OrdinalIgnoreCase));
+        if (match.Value is null)
+            return Task.FromResult<PullRequest?>(null);
+        return Task.FromResult<PullRequest?>(_prStore.GetPr(match.Key));
+    }
+
+    /// <summary>
+    /// Post a comment on a PR issue. Stored in-memory; no-op
+    /// for the e2e harness (the harness asserts on PR creation
+    /// and merge, not on comments).
+    /// </summary>
+    public override Task<long> CreateIssueCommentAsync(
+        long issueNumber, string body, CancellationToken cancellationToken = default)
+        => Task.FromResult(0L);
+
+    /// <summary>
+    /// Submit a structured review event. Stored in-memory; no-op
+    /// for the e2e harness.
+    /// </summary>
+    public override Task<long> SubmitReviewAsync(
+        int prNumber, string headSha, string body,
+        PullRequestReviewState state, CancellationToken cancellationToken = default)
+        => Task.FromResult(0L);
+
+    /// <summary>
+    /// Fetch the unified diff text for a PR. The harness stores
+    /// the PR's metadata; for a real diff, the orchestrator would
+    /// need to git-diff the head vs base. For now, return empty
+    /// (the e2e harness doesn't drive the reviewer loop).
+    /// </summary>
+    public override Task<string> GetPullRequestDiffAsync(
+        int prNumber, CancellationToken cancellationToken = default)
+        => Task.FromResult(string.Empty);
 }
 
 /// <summary>
