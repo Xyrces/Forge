@@ -22,7 +22,7 @@ namespace Forge;
 /// Implemented as a <see cref="GitHubService"/> subclass so
 /// the orchestrator's call sites don't change; the harness
 /// swaps the constructor argument for an instance of this
-/// class. All 11 public methods on the base class are
+/// class. All 13 public methods on the base class are
 /// <c>virtual</c> to enable the override.
 /// </para>
 ///
@@ -113,13 +113,7 @@ public sealed class LocalGitHubService : GitHubService
     public override Task<bool> DeleteBranchAsync(string branchName, CancellationToken cancellationToken = default)
         => Task.FromResult(true);
 
-    /// <summary>
-    /// Find the OPEN PR whose head branch matches
     /// <paramref name="headBranch"/>, or null. Queries the
-    /// in-memory <see cref="LocalPrStore.PrInfo"/> side-channel
-    /// (Octokit's PullRequest fields are read-only / empty in
-    /// harness-created PRs). Case-insensitive match.
-    /// </summary>
     public override Task<PullRequest?> GetOpenPullRequestForBranchAsync(
         string headBranch, CancellationToken cancellationToken = default)
     {
@@ -129,6 +123,11 @@ public sealed class LocalGitHubService : GitHubService
             return Task.FromResult<PullRequest?>(null);
         return Task.FromResult<PullRequest?>(_prStore.GetPr(match.Key));
     }
+    public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default)
+        => Task.FromResult(_prStore.GetBranchSha(branch) ?? $"local-{branch}-head");
+
+    public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
 
     /// <summary>
     /// Post a comment on a PR issue. Stored in-memory; no-op
@@ -226,6 +225,9 @@ public sealed class LocalPrStore
             tcs.TrySetResult(sha);
         }
     }
+
+    public string? GetBranchSha(string branch)
+        => _branchShas.TryGetValue(branch, out var s) ? s : null;
 
     public Task<string> WaitForBranchShaAsync(string branch, TimeSpan timeout, CancellationToken ct)
     {

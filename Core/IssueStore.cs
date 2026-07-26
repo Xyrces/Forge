@@ -36,7 +36,10 @@ public sealed record IssueRecord(
         try
         {
             using var doc = JsonDocument.Parse(string.IsNullOrEmpty(MetadataJson) ? "{}" : MetadataJson);
-            return doc.RootElement.TryGetProperty(key, out var v) ? v.ToString() : null;
+            if (!doc.RootElement.TryGetProperty(key, out var v)) return null;
+            // JSON null is the delete idiom: a cleared key reads as
+            // absent, not as the literal string "null".
+            return v.ValueKind == JsonValueKind.Null ? null : v.ToString();
         }
         catch
         {

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 using Forge.Agents;
 using Forge.Core;
 using Forge.Orchestrator;
@@ -161,22 +162,43 @@ public static class TaskEndpoints
             }
         });
 
-        app.MapPost("/api/tasks/{id}/requeue", async (string id, string? projectId, CancellationToken ct) =>
+        app.MapPost("/api/tasks/{id}/requeue", async (string id, string? projectId, HttpContext ctx, CancellationToken ct) =>
         {
             // Operator requeue of a Failed task: the sanctioned path
             // (IssueStore transition + metadata update — never direct
             // SQL). Clears the failure bookkeeping (retryCount,
-            // lastError(+At), noProgressAttempts) so the retry budget
-            // starts fresh, and moves Failed -> Pending. Any other
-            // source state is rejected: requeueing a Completed or
-            // InProgress task would redispatch live/finished work.
+            // lastError(+At), noProgressAttempts) AND the rework
+            // bookkeeping (reworkAttempts/Reason/Context) so both
+            // breaker budgets start fresh — requeueing a
+            // breaker-tripped task without clearing reworkAttempts
+            // would let the next watch sweep re-trip it immediately.
+            // Optional JSON body { reason, context }: seeds a guided
+            // rework round (the dispatch prompt renders them as
+            // "## Rework required") — used when the operator knows
+            // exactly what the redispatch must do (e.g. "your PR is
+            // approved, the worktree was rebuilt from main; fetch
+            // your branch, merge main, push to retrigger CI").
             var store = issues;
             if (projectId is not null && projectContexts is not null)
             {
-                var ctx = projectContexts.Find(projectId);
-                if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
-                store = ctx.Issues;
+                var ctx2 = projectContexts.Find(projectId);
+                if (ctx2 is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx2.Issues;
             }
+            string? guideReason = null, guideContext = null;
+            try
+            {
+                if (ctx.Request.ContentLength > 0)
+                {
+                    using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ct);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    {
+                        if (doc.RootElement.TryGetProperty("reason", out var rEl)) guideReason = rEl.GetString();
+                        if (doc.RootElement.TryGetProperty("context", out var cEl)) guideContext = cEl.GetString();
+                    }
+                }
+            }
+            catch (JsonException) { return Results.BadRequest(new { error = "invalid JSON body" }); }
             try
             {
                 var t = await store.GetAsync(id, ct);
@@ -187,17 +209,23 @@ public static class TaskEndpoints
                 // One atomic transition: Failed -> Pending + clear the
                 // failure bookkeeping so the retry budget starts fresh
                 // (upsert-merge only: JSON null is the delete idiom).
+                var meta = new Dictionary<string, object>
+                {
+                    ["retryCount"] = null!,
+                    ["noProgressAttempts"] = null!,
+                    ["lastError"] = null!,
+                    ["lastErrorAt"] = null!,
+                    ["reworkAttempts"] = null!,
+                    ["reworkReason"] = null!,
+                    ["reworkContext"] = null!,
+                    ["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O"),
+                };
+                if (!string.IsNullOrWhiteSpace(guideReason)) meta["reworkReason"] = guideReason;
+                if (!string.IsNullOrWhiteSpace(guideContext)) meta["reworkContext"] = guideContext;
                 await store.TransitionAsync(id, IssueStatus.Pending,
-                    "operator requeue from Failed (failure bookkeeping cleared)",
-                    new Dictionary<string, object>
-                    {
-                        ["retryCount"] = null!,
-                        ["noProgressAttempts"] = null!,
-                        ["lastError"] = null!,
-                        ["lastErrorAt"] = null!,
-                        ["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O"),
-                    }, ct);
-                logger.LogInformation("POST /api/tasks/{Id}/requeue: Failed -> Pending, failure metadata cleared", id);
+                    "operator requeue from Failed (failure + rework bookkeeping cleared)",
+                    meta, ct);
+                logger.LogInformation("POST /api/tasks/{Id}/requeue: Failed -> Pending, failure + rework metadata cleared (guided={Guided})", id, guideReason is not null);
                 return Results.Json(new { taskId = id, status = "Pending" });
             }
             catch (Exception ex)
