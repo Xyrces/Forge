@@ -135,4 +135,71 @@ public class TaskStateMachineTests : IDisposable
     }
 
     private async Task<IssueRecord> Reload(IssueRecord t) => (await _issues.GetAsync(t.Id))!;
+
+    /// <summary>
+    /// Exhaustive static table properties — the deterministic Phase
+    /// 3 gate. The table is the contract the collapse relies on;
+    /// these invariants must hold for it to be safe.
+    /// </summary>
+    [Fact]
+    public void ExhaustiveTable_StaticInvariants()
+    {
+        var states = Enum.GetValues<TaskLifecycleState>();
+        var events = Enum.GetValues<TaskEvent>();
+        var terminal = new[]
+        {
+            TaskLifecycleState.Merged, TaskLifecycleState.Completed,
+            TaskLifecycleState.Closed,
+        };
+
+        var legalPairs = 0;
+        foreach (var from in states)
+        {
+            var outgoing = events.Count(evt => ProbeTo(evt, from));
+            legalPairs += outgoing;
+
+            if (terminal.Contains(from))
+            {
+                // Terminal states: only idempotent self-reports
+                // (after-the-fact observation), never a transition
+                // OUT to a different state.
+                var exits = events.Where(evt => ProbeTo(evt, from))
+                    .Where(evt => !TaskStateMachine.IsLegal(evt, from, from))
+                    .ToList();
+                Assert.True(exits.Count == 0,
+                    $"terminal state {from} must not exit to another state, exits via [{string.Join(",", exits)}]");
+            }
+            else if (from is TaskLifecycleState.Failed or TaskLifecycleState.BlockedOperator)
+            {
+                // Operator-terminal: exactly one way out — the
+                // operator requeue. Nothing else may leave.
+                var exits = events.Where(evt => ProbeTo(evt, from)).ToList();
+                Assert.True(exits.Count == 1 && exits[0] == TaskEvent.OperatorRequeue,
+                    $"{from} must exit only via OperatorRequeue, has [{string.Join(",", exits)}]");
+            }
+            else
+            {
+                Assert.True(outgoing > 0, $"working state {from} has no outgoing events");
+            }
+        }
+
+        // Every event is reachable from at least one state.
+        foreach (var evt in events)
+        {
+            Assert.True(states.Any(s => ProbeTo(evt, s)),
+                $"event {evt} is unreachable (no legal source state)");
+        }
+
+        Assert.True(legalPairs > 30, $"expected a non-trivial table, got {legalPairs} entries");
+    }
+
+    /// <summary>Whether the table has ANY entry for (evt, from).</summary>
+    private static bool ProbeTo(TaskEvent evt, TaskLifecycleState from)
+    {
+        foreach (var to in Enum.GetValues<TaskLifecycleState>())
+        {
+            if (TaskStateMachine.IsLegal(evt, from, to)) return true;
+        }
+        return false;
+    }
 }
