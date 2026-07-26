@@ -27,7 +27,8 @@ public static class SpecEndpoints
         Forge.Core.IIntakeStore? intakeStore = null,
         GroomerAgentFactory? groomerFactory = null,
         IssueGroomerRunStore? groomerRuns = null,
-        Projects.ProjectContextFactory? projectContexts = null)
+        Projects.ProjectContextFactory? projectContexts = null,
+        Forge.Core.IIssueStore? issues = null)
     {
         // Multi-project: when ?project= names a registered project and the
         // factory is available, read from THAT project's spec store (spec
@@ -72,6 +73,68 @@ public static class SpecEndpoints
         {
             var versions = await specs.ListVersionsAsync(id, ct);
             return Results.Json(versions.Select(ToVersionView).ToArray(), DashboardJson.Options);
+        });
+
+        // Spec drill-down: the decomposition tree the groomer
+        // produced (stories -> tasks, via parent_issue_id) plus the
+        // groom-run history. Powers the /specs/{id} detail page.
+        app.MapGet("/api/specs/{id}/tree", async (string id, CancellationToken ct) =>
+        {
+            var spec = await specs.GetAsync(id, ct);
+            if (spec is null) return Results.NotFound();
+
+            var storyViews = new List<object>();
+            var orphanTaskViews = new List<object>();
+            var groomRunViews = new List<object>();
+            if (issues is not null)
+            {
+                var all = await issues.ListAsync(new Forge.Core.IssueFilter(), ct);
+                var stories = all.Where(i => string.Equals(i.Type, "story", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(i.ParentIssueId, spec.Id, StringComparison.Ordinal)).ToList();
+                var tasks = all.Where(i => !Forge.Core.AgentTaskTypes.IsContainer(i.Type)
+                    && i.Type != Forge.Core.AgentTaskTypes.PrWatch).ToList();
+                foreach (var story in stories)
+                {
+                    var children = tasks.Where(t => string.Equals(t.ParentIssueId, story.Id, StringComparison.Ordinal));
+                    storyViews.Add(new
+                    {
+                        id = story.Id,
+                        title = story.Title,
+                        status = story.Status.ToString(),
+                        tasks = children.Select(ToTaskView).ToArray(),
+                    });
+                }
+                // Tasks parented directly to the spec (no story) —
+                // unusual, but show them rather than dropping them.
+                foreach (var t in tasks.Where(t => string.Equals(t.ParentIssueId, spec.Id, StringComparison.Ordinal)))
+                {
+                    orphanTaskViews.Add(ToTaskView(t));
+                }
+            }
+            if (groomerRuns is not null)
+            {
+                var runs = await groomerRuns.ListAsync(specId: spec.Id, limit: 20, ct);
+                foreach (var r in runs)
+                {
+                    groomRunViews.Add(new
+                    {
+                        ts = r.Ts,
+                        trigger = r.Trigger.ToString(),
+                        status = r.Status.ToString(),
+                        storiesProduced = r.StoriesProduced,
+                        tasksProduced = r.TasksProduced,
+                        error = r.Error,
+                        durationMs = r.DurationMs,
+                    });
+                }
+            }
+            return Results.Json(new
+            {
+                spec = ToSpecView(spec),
+                stories = storyViews,
+                orphanTasks = orphanTaskViews,
+                groomRuns = groomRunViews,
+            }, DashboardJson.Options);
         });
 
         // Phase 2b: extracted-tables reads. The dashboard's Spec
@@ -201,7 +264,7 @@ public static class SpecEndpoints
         // (groomer.run.started / completed / failed) as it works.
         if (groomerFactory is not null)
         {
-            app.MapPost("/api/specs/{id}/groom", async (string id, CancellationToken ct) =>
+            app.MapPost("/api/specs/{id}/groom", async (string id, string? force, CancellationToken ct) =>
             {
                 var spec = await specs.GetAsync(id, ct);
                 if (spec is null)
@@ -222,6 +285,28 @@ public static class SpecEndpoints
                     });
                 }
 
+                // Idempotency guard: grooming APPENDS stories/tasks.
+                // A Groomed spec that already has stories was already
+                // decomposed; re-grooming without an explicit force
+                // piles up duplicates (observed 2026-07-22: ~27 repeat
+                // grooms of one spec → 83 stories / 147 tasks / 28 PRs).
+                // Intentional re-decomposition passes ?force=true.
+                if (spec.Status == SpecStatus.Groomed
+                    && issues is not null
+                    && !string.Equals(force, "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    var existing = await issues.ListAsync(
+                        new Forge.Core.IssueFilter { Type = "story" }, ct);
+                    if (existing.Any(s => string.Equals(s.ParentIssueId, spec.Id, StringComparison.Ordinal)))
+                    {
+                        return Results.Conflict(new
+                        {
+                            error = "spec_already_groomed",
+                            detail = "spec already has stories from a previous groom; re-run with ?force=true to re-decompose (appends new stories/tasks)"
+                        });
+                    }
+                }
+
                 // Fire-and-forget on a background task. The HTTP
                 // request returns immediately so the UI can refresh
                 // and watch the event stream. The manual run is
@@ -237,11 +322,13 @@ public static class SpecEndpoints
                     var startedAt = DateTime.UtcNow;
                     try
                     {
-                        await agent.GroomAsync(id);
+                        var result = await agent.GroomAsync(id);
                         if (runs is not null && run is not null)
                         {
                             await runs.FinishAsync(run.Id, GroomerRunStatus.Succeeded,
-                                storiesProduced: 0, tasksProduced: 0, error: null,
+                                storiesProduced: result?.StoryIds.Count ?? 0,
+                                tasksProduced: result?.TaskIds.Count ?? 0,
+                                error: null,
                                 duration: DateTime.UtcNow - startedAt,
                                 ct: CancellationToken.None);
                         }
@@ -276,18 +363,50 @@ public static class SpecEndpoints
             var canApprove = spec.Status == SpecStatus.Draft;
             var canStartGrooming = spec.Status is SpecStatus.Approved or SpecStatus.Designed or SpecStatus.AssetReady;
             var canShip = spec.Status == SpecStatus.Groomed;
+            // Designer path: a Draft spec can be sent to the Designer
+            // agent (Draft -> ReadyForDesign; the DesignerScheduler
+            // picks it up automatically and populates the design
+            // board).
+            var canSendToDesign = spec.Status == SpecStatus.Draft;
 
             return Results.Json(new
             {
                 canApprove,
                 canStartGrooming,
                 canShip,
+                canSendToDesign,
                 reason = canApprove ? "draft is ready for approval"
                     : canStartGrooming ? "designed/approved specs feed the groomer"
                     : canShip ? "groomer has decomposed into stories/tasks"
                     : $"status {spec.Status} has no available actions",
             });
         });
+    }
+
+    private static object ToTaskView(Forge.Core.IssueRecord t)
+    {
+        string? prNumber = null;
+        string? branch = null;
+        try
+        {
+            if (!string.IsNullOrEmpty(t.MetadataJson) && t.MetadataJson != "{}")
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(t.MetadataJson);
+                if (doc.RootElement.TryGetProperty("prNumber", out var pr)) prNumber = pr.ToString();
+                if (doc.RootElement.TryGetProperty("branch", out var br)) branch = br.GetString();
+            }
+        }
+        catch { /* metadata is advisory; never break the view */ }
+        return new
+        {
+            id = t.Id,
+            title = t.Title,
+            status = t.Status.ToString(),
+            priority = t.Priority,
+            assignee = t.Assignee,
+            prNumber,
+            branch,
+        };
     }
 
     private static object ToSpecView(SpecRecord s) => new

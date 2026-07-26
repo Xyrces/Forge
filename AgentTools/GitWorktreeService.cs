@@ -53,6 +53,70 @@ public sealed class GitWorktreeService
         return worktreePath;
     }
 
+    /// <summary>
+    /// Syncs an existing worktree's branch to a given remote ref by
+    /// fetching into a per-task ref namespace and resetting --hard.
+    /// This is the safe replacement for the removed
+    /// <c>SyncWorktreeToDefaultBranchAsync</c> which used a SHARED
+    /// refs/forge/sync-base namespace that could clobber PR branches
+    /// in rework dispatch. Each task gets its own ref
+    /// <c>refs/forge/sync-base/{taskId}</c> so concurrent agent
+    /// syncs cannot interfere.
+    /// </summary>
+    /// <param name="worktreePath">Path to the existing worktree.</param>
+    /// <param name="taskId">The task identifier; used to construct the
+    /// per-task ref namespace <c>refs/forge/sync-base/{taskId}</c>.</param>
+    /// <param name="remoteRef">The remote ref to fetch, e.g.
+    /// <c>origin/agent/task-42</c>. The method splits on the first
+    /// '/' to extract the remote name and the ref path.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="InvalidOperationException">Thrown on detached
+    /// HEAD, invalid remoteRef, fetch failure, or reset failure.</exception>
+    public async Task SyncWorktreeToRefAsync(string worktreePath, string taskId, string remoteRef, CancellationToken cancellationToken = default)
+    {
+        // Reject detached HEAD -- the agent must be on a branch before syncing.
+        var branchResult = await RunGitInAsync(worktreePath, "rev-parse --abbrev-ref HEAD", cancellationToken);
+        if (branchResult.ExitCode != 0)
+            throw new InvalidOperationException($"git rev-parse --abbrev-ref HEAD failed: {branchResult.Stderr}");
+
+        var branch = branchResult.Stdout.Trim();
+        if (branch.Equals("HEAD", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Cannot sync a detached HEAD worktree to a remote ref");
+
+        // Split the remoteRef into remote name and ref path.
+        // remoteRef is expected in the form "origin/agent/task-42".
+        var slashIndex = remoteRef.IndexOf('/');
+        if (slashIndex <= 0)
+            throw new InvalidOperationException($"Invalid remoteRef format '{remoteRef}': expected '<remote>/<ref>'");
+
+        var remoteName = remoteRef.Substring(0, slashIndex);
+        var refPath = remoteRef.Substring(slashIndex + 1);
+
+        // Harden against git-argument injection: remoteName and refPath
+        // are interpolated directly into the git fetch command. Reject
+        // values that could be interpreted as git options (leading '-')
+        // or would split into multiple arguments (whitespace).
+        ValidateGitComponent(remoteName, "remote name");
+        ValidateGitComponent(refPath, "ref path");
+
+        // Use a per-task ref namespace so concurrent syncs don't clobber each other.
+        var localRef = $"refs/forge/sync-base/{Sanitize(taskId)}";
+
+        // Force-update prefix '+' ensures the fetch succeeds even after
+        // a force-push or rebase on the remote branch (rework flow).
+        var fetchResult = await RunGitInAsync(worktreePath, $"fetch {remoteName} +{refPath}:{localRef}", cancellationToken);
+        if (fetchResult.ExitCode != 0)
+            throw new InvalidOperationException($"git fetch remote ref failed (exit={fetchResult.ExitCode}): {fetchResult.Stderr}");
+
+        var resetResult = await RunGitInAsync(worktreePath, $"reset --hard {localRef}", cancellationToken);
+        if (resetResult.ExitCode != 0)
+            throw new InvalidOperationException($"git reset --hard failed (exit={resetResult.ExitCode}): {resetResult.Stderr}");
+
+        _logger.LogInformation("Synced worktree {Path} branch {Branch} to remote ref {RemoteRef} via {LocalRef}",
+            worktreePath, branch, remoteRef, localRef);
+    }
+
+
     public async Task RemoveAsync(string taskId, CancellationToken cancellationToken = default)
     {
         var worktreePath = WorktreePathFor(taskId);
@@ -71,6 +135,23 @@ public sealed class GitWorktreeService
             catch (Exception ex) { _logger.LogWarning(ex, "Manual delete of worktree path failed"); }
         }
         await RunGitAsync("worktree prune", cancellationToken);
+
+        // Clean up any per-task sync-base ref created by
+        // SyncWorktreeToRefAsync (task-163).  This is best-effort:
+        // if the ref does not exist (fresh task, or old shared ref
+        // path), git update-ref -d silently returns non-zero which
+        // we swallow at debug level.
+        var syncRef = "refs/forge/sync-base/" + Sanitize(taskId);
+        var delResult = await RunGitAsync("update-ref -d " + syncRef, cancellationToken);
+        if (delResult.ExitCode != 0)
+        {
+            _logger.LogDebug("Sync-base ref {Ref} not present or already deleted ({Exit})",
+                syncRef, delResult.ExitCode);
+        }
+        else
+        {
+            _logger.LogInformation("Deleted per-task sync-base ref {Ref}", syncRef);
+        }
     }
 
     public async Task<DiffStats> GetDiffStatsAsync(string worktreePath, string baseBranch, CancellationToken cancellationToken = default)
@@ -216,14 +297,29 @@ public sealed class GitWorktreeService
         return new GitResult(proc.ExitCode, stdout, stderr);
     }
 
-    private static string Sanitize(string s)
+    /// <summary>
+    /// Validates a git argument component for injection safety.
+    /// Rejects empty, leading-dash (git interprets as option), or
+    /// whitespace-containing values that could split or smuggle
+    /// arguments in interpolated git command strings.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown when the
+    /// component fails validation.</exception>
+    private static void ValidateGitComponent(string component, string label)
     {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sb = new StringBuilder(s.Length);
-        foreach (var c in s)
-            sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
-        return sb.ToString();
+        if (string.IsNullOrEmpty(component))
+            throw new InvalidOperationException($"GitWorktreeService: {label} must not be empty");
+        if (component[0] == '-')
+            throw new InvalidOperationException($"GitWorktreeService: {label} must not start with '-' (got '{component}')");
+        foreach (var c in component)
+        {
+            if (char.IsWhiteSpace(c))
+                throw new InvalidOperationException($"GitWorktreeService: {label} must not contain whitespace (got '{component}')");
+        }
     }
+
+    private static string Sanitize(string s)
+        => GitRefNames.Sanitize(s);
 
     private readonly record struct GitResult(int ExitCode, string Stdout, string Stderr);
 }

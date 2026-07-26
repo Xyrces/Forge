@@ -45,6 +45,66 @@ public class GitHubService
         return await _client.PullRequest.Create(_owner, _repo, pr);
     }
 
+    /// <summary>
+    /// Find the OPEN pull request whose head branch is
+    /// <paramref name="headBranch"/>, or null. Used by the rework
+    /// loop: a reworked task pushes to its existing branch, so the PR
+    /// already exists and must be reused, not re-created (Octokit's
+    /// Create throws ValidationException in that case).
+    /// </summary>
+    public virtual async Task<PullRequest?> GetOpenPullRequestForBranchAsync(
+        string headBranch, CancellationToken cancellationToken = default)
+    {
+        var request = new PullRequestRequest { State = ItemStateFilter.Open };
+        var open = await _client.PullRequest.GetAllForRepository(_owner, _repo, request);
+        // Head.Ref is the branch name for same-repo PRs; match
+        // case-insensitively (git refs are case-sensitive but the
+        // orchestrator normalizes branch names at creation).
+        return open.FirstOrDefault(p =>
+            string.Equals(p.Head.Ref, headBranch, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Head SHA of a branch (e.g. the PR's base branch).
+    /// The PRWatcher uses this to compare a PR's failing CI against
+    /// the base branch's own CI state: a check that is red on the
+    /// base too is pre-existing and must NOT cost the PR a rework
+    /// strike.</summary>
+    public virtual async Task<string> GetBranchHeadShaAsync(
+        string branch, CancellationToken cancellationToken = default)
+    {
+        var reference = await _client.Git.Reference.Get(_owner, _repo, $"heads/{branch}");
+        return reference.Object.Sha;
+    }
+
+    /// <summary>One-line summaries of the FAILED check runs on a
+    /// commit ("name: conclusion — output summary", bounded), for
+    /// the rework prompt. "CI checks failed (Failure)" alone forced
+    /// rework agents to guess the failing check — observed live
+    /// 2026-07-25: an agent blamed the wrong pre-existing test and
+    /// no-oped instead of fixing the real failure.</summary>
+    public virtual async Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(
+        string sha, CancellationToken cancellationToken = default)
+    {
+        var runs = await _client.Check.Run.GetAllForReference(_owner, _repo, sha);
+        var failed = runs.CheckRuns
+            .Where(r => r.Conclusion == CheckConclusion.Failure || r.Conclusion == CheckConclusion.TimedOut
+                || r.Conclusion == CheckConclusion.ActionRequired || r.Conclusion == CheckConclusion.Cancelled)
+            .Take(5)
+            .Select(r =>
+            {
+                var summary = r.Output?.Summary;
+                string snippet = "";
+                if (!string.IsNullOrWhiteSpace(summary))
+                {
+                    var flat = summary.Replace("\r", " ").Replace("\n", " ");
+                    snippet = $" — {flat[..Math.Min(200, flat.Length)]}";
+                }
+                return $"{r.Name}: {r.Conclusion}{snippet}";
+            })
+            .ToList();
+        return failed;
+    }
+
     public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
     {
         try
@@ -58,6 +118,32 @@ public class GitHubService
 
     public virtual async Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
     {
+        // GitHub Actions reports via CHECK RUNS, not legacy commit
+        // statuses — the combined-status endpoint returns 'pending'
+        // forever for check-run-only CI (observed 2026-07-23:
+        // approved PRs never auto-merged, CI failures never fed the
+        // rework loop). Read check runs first; fall back to legacy
+        // statuses for repos that still use them.
+        var checkRuns = await _client.Check.Run.GetAllForReference(_owner, _repo, sha);
+        if (checkRuns.TotalCount > 0)
+        {
+            var runs = checkRuns.CheckRuns;
+            if (runs.Any(r => r.Status.Value is not CheckStatus.Completed))
+            {
+                return CommitState.Pending;
+            }
+            // Cancelled / Neutral / Skipped are acceptable (a
+            // cancelled run is usually superseded by a newer push,
+            // which has its own runs on the new head).
+            if (runs.Any(r => r.Conclusion?.Value
+                    is CheckConclusion.Failure
+                    or CheckConclusion.TimedOut
+                    or CheckConclusion.ActionRequired))
+            {
+                return CommitState.Failure;
+            }
+            return CommitState.Success;
+        }
         var response = await _client.Repository.Status.GetCombined(_owner, _repo, sha);
         return response.State.Value;
     }

@@ -13,6 +13,19 @@ public sealed record AgentOptions
     public LlmOptions Llm { get; set; } = new();
     public VisionOptions Vision { get; set; } = new();
     /// <summary>
+    /// Quality-gate configuration (ordered gate names per
+    /// checkpoint). DB overrides (memory keys gates/run/*) win over
+    /// this config; built-in defaults apply when both are empty.
+    /// </summary>
+    public GateOptions Gates { get; set; } = new();
+    /// <summary>
+    /// Lifecycle state machine (Phase 2). WriteAuthority=false
+    /// (default): shadow mode — illegal transitions logged as
+    /// warnings but allowed. true: authority mode — illegal
+    /// transitions logged as errors and flagged in metadata.
+    /// </summary>
+    public StateOptions State { get; set; } = new();
+    /// <summary>
     /// v1 multi-project registry. When non-empty, the dashboard
     /// lists and exposes each project; when empty the legacy
     /// <see cref="WorkspaceOptions.Root"/> is shimmed as a single
@@ -164,6 +177,15 @@ public sealed record SpawnerOptions
     public int MaxConcurrentSessions { get; set; } = 4;
     public int PollIntervalSeconds { get; set; } = 3;
     public int StaleMinutes { get; set; } = 30;
+    /// <summary>
+    /// Hard wall-clock timeout for a single agent run (LLM call +
+    /// tool invocations). When exceeded, the run is cancelled and
+    /// the issue is left in Pending for retry (or Failed if retries
+    /// exhausted). A diagnostic entry ("agentTimeout") is recorded
+    /// in issue metadata. Set to 0 or negative to disable.
+    /// Default: 15 minutes.
+    /// </summary>
+    public double AgentRunTimeoutMinutes { get; set; } = 15.0;
 }
 
 public sealed record DashboardOptions
@@ -225,6 +247,11 @@ public sealed record LlmOptions
     public List<LlmProviderOptions> Providers { get; set; } = new();
     public string DefaultProvider { get; set; } = string.Empty;
     public Dictionary<string, LlmRoleModelOptions> Roles { get; set; } = new();
+
+    // Max simultaneous round-trips per provider across ALL subsystems
+    // (dev agents + groomer + designer + reviewer + intake). Guards
+    // account-level rate quotas against multi-agent bursts.
+    public int MaxConcurrentRequests { get; set; } = 2;
 
     // P2.b: Meshy config. The Meshy REST API is a different
     // service from the LLM providers; keep its config

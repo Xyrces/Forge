@@ -67,17 +67,7 @@
             <div class="slot-grid">
                 @foreach (var s in proj.Slots)
                 {
-                    var utilization = s.Max == 0 ? 0 : (100 * s.InFlight / s.Max);
-                    <div class="slot-card @(s.InFlight >= s.Max ? "slot-card--full" : "")">
-                        <div class="slot-card__role">@s.Role</div>
-                        <div class="slot-card__bar">
-                            <div class="slot-card__fill" style="width: @utilization%"></div>
-                        </div>
-                        <div class="slot-card__count">
-                            <span class="@(s.InFlight >= s.Max ? "slot-card__in-flight--full" : "slot-card__in-flight")">@s.InFlight</span>
-                            <span class="slot-card__max">/ @s.Max</span>
-                        </div>
-                    </div>
+                    <RoleSlotMeter Role="@s.Role" InFlight="@s.InFlight" Max="@s.Max" />
                 }
             </div>
         </section>
@@ -87,6 +77,7 @@
             <p class="page-subtitle page-subtitle--meta">
                 Saved to the project row in SQLite and applied to the live slot table immediately.
                 Values equal to the built-in default are stored as "no override".
+                Per-role <strong>models &amp; prompts</strong> are configured on the <a href="/agents">Agents page</a>.
             </p>
 
             @if (ProjectsStore.Value.RolesSaveError is not null)
