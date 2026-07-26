@@ -101,7 +101,11 @@ public sealed class TaskStateMachine
             // A rework round's workflow re-uses the open PR — the
             // dispatch-completed report observes PrOpened while the
             // round record is live (observed live 2026-07-26).
-            TaskLifecycleState.ReworkRunning);
+            TaskLifecycleState.ReworkRunning,
+            // A push after approval: the new head invalidates the
+            // approval — back to PROpen (observed live: task-193,
+            // MergeReady+PrOpened).
+            TaskLifecycleState.MergeReady);
         Add(TaskEvent.ReworkFired, TaskLifecycleState.ReworkQueued,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady, TaskLifecycleState.StalledRework,
             TaskLifecycleState.ParkedInfra, TaskLifecycleState.ReworkQueued);
