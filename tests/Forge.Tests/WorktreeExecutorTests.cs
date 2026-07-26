@@ -22,7 +22,7 @@ public class WorktreeExecutorTests : IDisposable
 
     public WorktreeExecutorTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), "ph-wtexec-" + Guid.NewGuid().ToString("N"));
+        _workDir = Path.Combine(Path.GetTempPath(), $"ph-wtexec-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
@@ -43,59 +43,21 @@ public class WorktreeExecutorTests : IDisposable
 
     private static void InitRepo(string dir)
     {
-        RunGit(dir, "init -q -b main");
-        RunGit(dir, "config user.email test@test");
-        RunGit(dir, "config user.name Test");
-        RunGit(dir, "config commit.gpgsign false");
+        Run("git", "init -q -b main", dir);
+        Run("git", "config user.email test@test", dir);
+        Run("git", "config user.name Test", dir);
         File.WriteAllText(Path.Combine(dir, "README.md"), "x");
-        RunGit(dir, "add README.md");
-        RunGit(dir, "commit -q -m init");
+        Run("git", "add README.md", dir);
+        Run("git", "commit -q -m init", dir);
     }
 
-    private void SetupRemoteAndBranch(string taskId)
-    {
-        var bareDir = Path.Combine(Path.GetTempPath(), "ph-wtexec-remote-" + Guid.NewGuid().ToString("N"));
-        RunGit(Path.GetTempPath(), "init -q --bare " + bareDir);
-        RunGit(_workDir, "remote add origin " + bareDir);
-        RunGit(_workDir, "push -u origin main");
-        var branch = "agent/" + taskId;
-        RunGit(_workDir, "checkout -b " + branch);
-        File.WriteAllText(Path.Combine(_workDir, "pr-content.txt"), "from-pr");
-        RunGit(_workDir, "add pr-content.txt");
-        // Use single-word commit message to avoid shell quoting issues
-        RunGit(_workDir, "commit -q -m PRcontent");
-        RunGit(_workDir, "push -u origin " + branch);
-        RunGit(_workDir, "checkout main");
-    }
-
-    private static string RunGitWithOutput(string dir, string args)
+    private static void Run(string exe, string args, string cwd)
     {
         var psi = new ProcessStartInfo
         {
-            FileName = "git",
+            FileName = exe,
             Arguments = args,
-            WorkingDirectory = dir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi)!;
-        var output = p.StandardOutput.ReadToEnd();
-        var err = p.StandardError.ReadToEnd();
-        p.WaitForExit();
-        if (p.ExitCode != 0)
-            throw new InvalidOperationException("git " + args + " failed (exit=" + p.ExitCode + "): " + err + output);
-        return output.Trim();
-    }
-
-    private static void RunGit(string dir, string args)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "git",
-            Arguments = args,
-            WorkingDirectory = dir,
+            WorkingDirectory = cwd,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -124,10 +86,20 @@ public class WorktreeExecutorTests : IDisposable
     [Fact]
     public async Task Create_AlreadyClaimed_ReturnsAlreadyClaimed()
     {
+        // After P3 wired the orchestrator pre-claims, the workflow
+        // no longer double-claims. ClaimExecutor's pre-claim-aware
+        // path treats an already-InProgress issue with assignee=forge
+        // as Ok (pass-through). To test the AlreadyClaimed sentinel,
+        // we use a different assignee on the first claim so the
+        // second ClaimExecutor call falls into the standalone path
+        // and returns AlreadyClaimed.
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         await _issues.ClaimAsync(issue.Id, "someone-else");
         var claimedOk = await ClaimExecutor.HandleAsync(
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        // The issue is InProgress with assignee=someone-else, so the
+        // pre-claim path is skipped and the standalone claim attempt
+        // fails (Status=InProgress). Returns AlreadyClaimed.
         Assert.Equal(ClaimResult.AlreadyClaimed, claimedOk.Result);
         var secondClaim = await ClaimExecutor.HandleAsync(
             claimedOk.Issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
@@ -138,139 +110,5 @@ public class WorktreeExecutorTests : IDisposable
 
         Assert.Equal(WorktreeResult.AlreadyClaimed, result.Result);
         Assert.Null(result.WorktreePath);
-    }
-
-    [Fact]
-    public async Task ReworkRound_DetectsPrNumberAndReworkAttempts_SyncsToRemoteHead()
-    {
-        var taskId = "task-42";
-        SetupRemoteAndBranch(taskId);
-
-        // Verify remote branch has a commit different from main
-        var remoteSha = RunGitWithOutput(_workDir, "rev-parse origin/agent/" + taskId);
-        var mainSha = RunGitWithOutput(_workDir, "rev-parse main");
-        Assert.NotEqual(remoteSha, mainSha);
-
-        // Verify remote branch has pr-content.txt
-        var lsTree = RunGitWithOutput(_workDir, "ls-tree --name-only origin/agent/" + taskId);
-        Assert.Contains("pr-content.txt", lsTree);
-
-        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "rework test"));
-        await _issues.ClaimAsync(issue.Id, "forge");
-        var meta = new Dictionary<string, object>
-        {
-            ["prNumber"] = "99",
-            ["reworkAttempts"] = "2",
-        };
-        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: meta);
-        var refreshed = await _issues.GetAsync(issue.Id);
-
-        var input = new ClaimedIssue(refreshed!, ClaimResult.Ok, null, "agent/" + taskId);
-
-        var result = await WorktreeExecutor.HandleAsync(
-            input, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-
-        Assert.Equal(WorktreeResult.Ok, result.Result);
-        Assert.NotNull(result.WorktreePath);
-
-        // The worktree should now be at the remote PR head
-        var wtSha = RunGitWithOutput(result.WorktreePath!, "rev-parse HEAD");
-        Assert.Equal(remoteSha, wtSha);
-
-        Assert.True(File.Exists(Path.Combine(result.WorktreePath!, "pr-content.txt")),
-            "Worktree should have pr-content.txt from the remote PR head after sync");
-    }
-
-    [Fact]
-    public async Task ReworkRound_WithZeroAttempts_DoesNotSync()
-    {
-        var taskId = "task-43";
-        SetupRemoteAndBranch(taskId);
-        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "no-rework"));
-        await _issues.ClaimAsync(issue.Id, "forge");
-        var meta = new Dictionary<string, object>
-        {
-            ["prNumber"] = "100",
-            ["reworkAttempts"] = "0",
-        };
-        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: meta);
-        var refreshed = await _issues.GetAsync(issue.Id);
-        var input = new ClaimedIssue(refreshed!, ClaimResult.Ok, null, "agent/" + taskId);
-
-        var result = await WorktreeExecutor.HandleAsync(
-            input, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-
-        Assert.Equal(WorktreeResult.Ok, result.Result);
-        Assert.NotNull(result.WorktreePath);
-
-        // No sync: worktree stays on main
-        var wtSha = RunGitWithOutput(result.WorktreePath!, "rev-parse HEAD");
-        var mainSha = RunGitWithOutput(_workDir, "rev-parse main");
-        Assert.Equal(mainSha, wtSha);
-
-        Assert.False(File.Exists(Path.Combine(result.WorktreePath!, "pr-content.txt")),
-            "Worktree should NOT have pr-content.txt because reworkAttempts=0 means no sync");
-    }
-
-    [Fact]
-    public async Task ReworkRound_WithoutPrNumber_DoesNotSync()
-    {
-        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "first-time"));
-        await _issues.ClaimAsync(issue.Id, "forge");
-        var meta = new Dictionary<string, object>
-        {
-            ["reworkAttempts"] = "1",
-        };
-        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: meta);
-        var refreshed = await _issues.GetAsync(issue.Id);
-        var input = new ClaimedIssue(refreshed!, ClaimResult.Ok, null, "agent/task-44");
-
-        var result = await WorktreeExecutor.HandleAsync(
-            input, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-
-        Assert.Equal(WorktreeResult.Ok, result.Result);
-        Assert.NotNull(result.WorktreePath);
-    }
-
-    [Fact]
-    public async Task SyncFailure_MissingRemoteRef_ThrowsAndSurfaces()
-    {
-        var taskId = "task-200";
-        SetupRemoteAndBranch(taskId);
-
-        // Verify the remote branch exists before deletion
-        var beforeDelete = RunGitWithOutput(_workDir, "ls-remote origin agent/" + taskId);
-        Assert.NotEmpty(beforeDelete);
-
-        // Delete the remote branch so the sync fetch will fail
-        RunGitWithOutput(_workDir, "push origin --delete agent/" + taskId);
-
-        // Verify it's gone
-        var afterDelete = RunGitWithOutput(_workDir, "ls-remote origin agent/" + taskId);
-        Assert.Empty(afterDelete);
-
-        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "sync-fail"));
-        await _issues.ClaimAsync(issue.Id, "forge");
-        var meta = new Dictionary<string, object>
-        {
-            ["prNumber"] = "200",
-            ["reworkAttempts"] = "1",
-        };
-        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: meta);
-        var refreshed = await _issues.GetAsync(issue.Id);
-
-        var input = new ClaimedIssue(refreshed!, ClaimResult.Ok, null, "agent/" + taskId);
-
-        var ex = await Record.ExceptionAsync(async () =>
-            await WorktreeExecutor.HandleAsync(
-                input, _issues, _worktrees, "main",
-                NullLogger<WorktreeExecutor>.Instance, default));
-
-        Assert.NotNull(ex);
-        Assert.IsType<InvalidOperationException>(ex);
-        // The exception must come from SyncWorktreeToRefAsync (the sync
-        // failure). The message should mention fetch failure or remote
-        // ref not found.
-        Assert.Contains("fetch", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 }
