@@ -100,6 +100,16 @@ public sealed class ReviewerDispatcher
             return null;
         }
 
+        // Rework-in-flight skip: a rework round was queued FOR THIS
+        // HEAD and the dev agent hasn't pushed yet. Reviewing now
+        // wastes a full review on a head that's about to be replaced
+        // — the verdict is sha-stamped, so it would be discarded the
+        // moment the rework push lands. Wait for the new head.
+        if (string.Equals(watchTask.GetMetadata("reworkInFlightSha"), headSha, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
         string diff;
         try
         {
@@ -224,6 +234,7 @@ public sealed class ReviewerDispatcher
                 {
                     foreach (var p in doc.RootElement.EnumerateObject())
                     {
+                        if (p.Value.ValueKind == System.Text.Json.JsonValueKind.Null) continue;
                         current[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String
                             ? p.Value.GetString()!
                             : p.Value.GetRawText();

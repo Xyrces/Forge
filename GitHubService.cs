@@ -64,6 +64,47 @@ public class GitHubService
             string.Equals(p.Head.Ref, headBranch, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>Head SHA of a branch (e.g. the PR's base branch).
+    /// The PRWatcher uses this to compare a PR's failing CI against
+    /// the base branch's own CI state: a check that is red on the
+    /// base too is pre-existing and must NOT cost the PR a rework
+    /// strike.</summary>
+    public virtual async Task<string> GetBranchHeadShaAsync(
+        string branch, CancellationToken cancellationToken = default)
+    {
+        var reference = await _client.Git.Reference.Get(_owner, _repo, $"heads/{branch}");
+        return reference.Object.Sha;
+    }
+
+    /// <summary>One-line summaries of the FAILED check runs on a
+    /// commit ("name: conclusion — output summary", bounded), for
+    /// the rework prompt. "CI checks failed (Failure)" alone forced
+    /// rework agents to guess the failing check — observed live
+    /// 2026-07-25: an agent blamed the wrong pre-existing test and
+    /// no-oped instead of fixing the real failure.</summary>
+    public virtual async Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(
+        string sha, CancellationToken cancellationToken = default)
+    {
+        var runs = await _client.Check.Run.GetAllForReference(_owner, _repo, sha);
+        var failed = runs.CheckRuns
+            .Where(r => r.Conclusion == CheckConclusion.Failure || r.Conclusion == CheckConclusion.TimedOut
+                || r.Conclusion == CheckConclusion.ActionRequired || r.Conclusion == CheckConclusion.Cancelled)
+            .Take(5)
+            .Select(r =>
+            {
+                var summary = r.Output?.Summary;
+                string snippet = "";
+                if (!string.IsNullOrWhiteSpace(summary))
+                {
+                    var flat = summary.Replace("\r", " ").Replace("\n", " ");
+                    snippet = $" — {flat[..Math.Min(200, flat.Length)]}";
+                }
+                return $"{r.Name}: {r.Conclusion}{snippet}";
+            })
+            .ToList();
+        return failed;
+    }
+
     public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
     {
         try
