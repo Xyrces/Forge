@@ -123,7 +123,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var workflow = new EngineeringDispatchWorkflow(
             issues: _issues,
-            agentRunner: ScriptedRunner("done."),
+            agentRunner: ScriptedRunner("done. NO_CHANGES_NEEDED"),
             worktrees: _worktrees,
             gitHub: new StubGitHub(),
             roleRegistry: _roleRegistry,
@@ -152,7 +152,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var workflow = new EngineeringDispatchWorkflow(
             issues: _issues,
-            agentRunner: ScriptedRunner("nothing to do"),
+            agentRunner: ScriptedRunner("nothing to do. NO_CHANGES_NEEDED"),
             worktrees: _worktrees,
             gitHub: new StubGitHub(),
             roleRegistry: _roleRegistry,

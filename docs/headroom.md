@@ -5,6 +5,18 @@ between the orchestrator and the kilo gateway to compress
 context and hit provider KV-caches more often. Default mode is
 `token`; CCR is on by default.
 
+> **Live deployment note (2026-07-24):** the production host has
+> no container runtime, so the proxy runs via `uv tool install
+> --python 3.13 "headroom-ai[proxy,code]"` as the systemd user
+> unit **`forge-headroom.service`**:
+> `headroom proxy --port 8787 --mode token --no-rate-limit
+> --stateless --openai-api-url https://api.kilo.ai/api/gateway
+> --provider-name kilo-gateway`. Auth is forwarded per-request
+> from the orchestrator's chat client (no key in the proxy env);
+> Forge-side rate limiting stays with `ModelRateLimitTracker`
+> (the proxy's own limiter is disabled). Stats:
+> `curl 127.0.0.1:8787/stats`.
+
 ## What Headroom does
 
 Headroom sits between your app and the LLM provider as a

@@ -1,0 +1,270 @@
+@page "/runs/{RunId}"
+@inject HttpClient Http
+@implements IDisposable
+@using System.Net.Http.Json
+@using System.Text.Json
+
+<PageTitle>Run @RunId</PageTitle>
+<div class="page">
+    @if (_run is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else
+    {
+        var v = _run.View;
+        <div class="page-header">
+            <h1>@v.Role <span style="font-weight:400;color:var(--on-surface-variant)">run</span></h1>
+            <div class="page-header__meta">
+                <span class="pill @(v.Status == "succeeded" ? "pill--completed" : v.Status == "running" ? "pill--inprogress" : "pill--failed")">@v.Status</span>
+                @v.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+                · @(v.DurationMs is null ? "…" : Fmt(v.DurationMs.Value))
+                · @v.MessageCount msgs · @v.ToolCallCount tool calls
+                @if (v.Status == "running" && v.LastActivityAt is not null)
+                {
+                    <span class="pill pill--inprogress" style="margin-left:6px">LIVE · active @Ago(v.LastActivityAt.Value) ago</span>
+                }
+                else if (v.Status == "running")
+                {
+                    <span class="pill pill--warn" style="margin-left:6px">no activity yet</span>
+                }
+            </div>
+            <div class="page-header__actions">
+                @if (v.TaskId is not null)
+                {
+                    <a class="btn" href="/tasks/@v.TaskId">Task @v.TaskId</a>
+                }
+                <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
+            </div>
+        </div>
+        @if (v.Error is not null)
+        {
+            <div style="padding:10px 14px;border:1px solid var(--outline-variant);border-left:4px solid #c62828;border-radius:8px;margin-bottom:12px">
+                <strong>Error:</strong> @v.Error
+            </div>
+        }
+
+        @if (_run.Transcript.ValueKind != JsonValueKind.Array || _run.Transcript.GetArrayLength() == 0)
+        {
+            <div class="page-subtitle">@(v.Status == "running" ? "Run in flight — waiting for the first model response…" : "No transcript recorded.")</div>
+        }
+        else
+        {
+            @if (v.Status == "running")
+            {
+                <div class="page-subtitle" style="margin-bottom:8px">Streaming live — the conversation updates as the agent works (3s refresh).</div>
+            }
+            <div style="display:flex;flex-direction:column;gap:8px;max-width:980px">
+                @foreach (var (msg, idx) in Messages().Select((m, i) => (m, i)))
+                {
+                    @switch (msg.Kind)
+                    {
+                        case "user":
+                            <details style="border:1px solid var(--outline-variant);border-radius:8px">
+                                <summary style="cursor:pointer;padding:8px 12px">
+                                    <span class="pill" style="background:var(--surface-2,rgba(255,255,255,.08))">user</span>
+                                    <span style="color:var(--on-surface-variant);font-size:12px;margin-left:8px">task prompt (@msg.Text.Length chars — expand to read)</span>
+                                </summary>
+                                <pre style="margin:0;padding:12px;white-space:pre-wrap;font-size:13px;border-top:1px solid var(--outline-variant)">@msg.Text</pre>
+                            </details>
+                            break;
+                        case "thinking":
+                            <details style="border:1px solid var(--outline-variant);border-left:3px solid var(--outline-variant);border-radius:8px">
+                                <summary style="cursor:pointer;padding:8px 12px;color:var(--on-surface-variant)">
+                                    <span class="pill" style="font-size:11px">thinking</span>
+                                    <span style="font-size:12px;margin-left:8px">model reasoning (@msg.Text.Length chars)</span>
+                                </summary>
+                                <pre style="margin:0;padding:12px;white-space:pre-wrap;font-size:12px;color:var(--on-surface-variant);border-top:1px solid var(--outline-variant)">@msg.Text</pre>
+                            </details>
+                            break;
+                        case "assistant":
+                            <div style="border:1px solid var(--outline-variant);border-left:3px solid var(--primary);border-radius:8px;padding:10px 14px">
+                                <span class="pill pill--primary" style="font-size:11px">assistant</span>
+                                @foreach (var block in MarkdownBlocks(msg.Text))
+                                {
+                                    if (block.IsCode)
+                                    {
+                                        <pre style="background:rgba(255,255,255,.05);padding:10px;border-radius:6px;overflow-x:auto;font-size:12.5px">@block.Text</pre>
+                                    }
+                                    else
+                                    {
+                                        <div style="white-space:pre-wrap;font-size:14px;margin-top:6px">@block.Text</div>
+                                    }
+                                }
+                            </div>
+                            break;
+                        case "tools":
+                            <details style="border:1px solid var(--outline-variant);border-radius:8px">
+                                <summary style="cursor:pointer;padding:8px 12px;color:var(--on-surface-variant)">
+                                    🔧 @msg.Calls.Count tool call@(msg.Calls.Count == 1 ? "" : "s"): @string.Join(", ", msg.Calls.Select(c => c.Name).Distinct())
+                                </summary>
+                                <div style="border-top:1px solid var(--outline-variant)">
+                                    @foreach (var call in msg.Calls)
+                                    {
+                                        <div style="padding:10px 12px;border-bottom:1px solid var(--outline-variant)">
+                                            <div class="mono" style="font-size:12px;color:var(--primary)">@call.Name</div>
+                                            <pre style="margin:6px 0 0;font-size:12px;white-space:pre-wrap;color:var(--on-surface-variant)">@call.Args</pre>
+                                            @if (call.Result is not null)
+                                            {
+                                                <pre style="margin:6px 0 0;font-size:12px;white-space:pre-wrap;max-height:300px;overflow-y:auto;background:rgba(255,255,255,.04);padding:8px;border-radius:6px">@call.Result</pre>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                            </details>
+                            break;
+                    }
+                    idx.ToString();
+                }
+            </div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public string RunId { get; set; } = "";
+
+    private RunDto? _run;
+    private readonly CancellationTokenSource _pollCts = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        _ = PollLoopAsync();
+    }
+
+    private async Task PollLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_pollCts.Token))
+                await LoadAsync();
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _run = await Http.GetFromJsonAsync<RunDto>($"/api/agent-runs/{RunId}");
+            await InvokeAsync(StateHasChanged);
+        }
+        catch { /* not found or transient */ }
+    }
+
+    public void Dispose()
+    {
+        _pollCts.Cancel();
+        _pollCts.Dispose();
+    }
+
+    private static string Ago(DateTime when)
+    {
+        var e = DateTime.UtcNow - when;
+        return e.TotalMinutes >= 1 ? $"{(int)e.TotalMinutes}m{e.Seconds:D2}s" : $"{(int)e.TotalSeconds}s";
+    }
+
+    private sealed record RunDto(RunViewDto View, JsonElement Transcript);
+    private sealed record RunViewDto(
+        string Id, string? TaskId, string Role, string? Model, string Status,
+        DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
+        int? MessageCount, int? ToolCallCount, int? TextChars,
+        string? Error, bool HasTranscript, DateTime? LastActivityAt);
+
+    private sealed record ChatMsg(string Kind, string Text, List<ToolCall> Calls);
+    private sealed record ToolCall(string Name, string Args, string? Result);
+
+    private List<ChatMsg> Messages()
+    {
+        var resultsByCallId = new Dictionary<string, string>();
+        var raw = new List<(string role, List<JsonElement> contents)>();
+        foreach (var m in _run!.Transcript.EnumerateArray())
+        {
+            var role = m.GetProperty("role").GetString() ?? "?";
+            var contents = m.GetProperty("contents").EnumerateArray().ToList();
+            raw.Add((role, contents));
+            foreach (var c in contents)
+            {
+                if (c.TryGetProperty("type", out var t) && t.GetString() == "tool_result")
+                {
+                    resultsByCallId[c.GetProperty("callId").GetString() ?? ""] =
+                        c.GetProperty("result").GetString() ?? "";
+                }
+            }
+        }
+
+        var msgs = new List<ChatMsg>();
+        foreach (var (role, contents) in raw)
+        {
+            var thinking = string.Concat(contents
+                .Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "thinking")
+                .Select(c => c.GetProperty("text").GetString()));
+            var text = string.Concat(contents
+                .Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "text")
+                .Select(c => c.GetProperty("text").GetString()));
+            var calls = contents
+                .Where(c => c.TryGetProperty("type", out var t) && t.GetString() == "tool_call")
+                .Select(c => new ToolCall(
+                    c.GetProperty("name").GetString() ?? "?",
+                    PrettyArgs(c.GetProperty("args").GetString()),
+                    resultsByCallId.GetValueOrDefault(c.GetProperty("callId").GetString() ?? "")))
+                .ToList();
+
+            if (!string.IsNullOrWhiteSpace(thinking))
+            {
+                msgs.Add(new ChatMsg("thinking", thinking, new()));
+            }
+            if (calls.Count > 0)
+            {
+                msgs.Add(new ChatMsg("tools", "", calls));
+            }
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                msgs.Add(new ChatMsg(role == "user" ? "user" : "assistant", text, new()));
+            }
+        }
+        return msgs;
+    }
+
+    private static string PrettyArgs(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            return JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true });
+        }
+        catch { return raw; }
+    }
+
+    private static List<(bool IsCode, string Text)> MarkdownBlocks(string text)
+    {
+        var blocks = new List<(bool, string)>();
+        var parts = text.Split("```", StringSplitOptions.None);
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var p = parts[i];
+            if (string.IsNullOrWhiteSpace(p)) continue;
+            if (i % 2 == 1)
+            {
+                var nl = p.IndexOf('\n');
+                blocks.Add((true, nl > 0 ? p[(nl + 1)..] : p));
+            }
+            else
+            {
+                blocks.Add((false, p.Trim()));
+            }
+        }
+        return blocks;
+    }
+
+    private static string Fmt(long ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes}m";
+        if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m {ts.Seconds}s";
+        return $"{(int)ts.TotalSeconds}s";
+    }
+}

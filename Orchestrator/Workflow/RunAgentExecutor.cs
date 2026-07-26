@@ -25,6 +25,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
     private readonly ArtOutputStore _artOutputs;
     private readonly ILogger<RunAgentExecutor> _logger;
     private readonly string? _projectId;
+    private readonly ISprintStore? _sprints;
 
     public RunAgentExecutor(
         IIssueStore issues,
@@ -35,10 +36,12 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         DesignArtifactStore designArtifacts,
         ArtOutputStore artOutputs,
         ILogger<RunAgentExecutor> logger,
-        string? projectId = null)
+        string? projectId = null,
+        ISprintStore? sprints = null,
+        double timeoutMinutes = 15.0)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -52,6 +55,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         _artOutputs = artOutputs;
         _logger = logger;
         _projectId = projectId;
+        _sprints = sprints;
     }
 
     public static async ValueTask<AgentCompleted> HandleAsync(
@@ -65,7 +69,9 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         ArtOutputStore artOutputs,
         ILogger logger,
         string? projectId,
-        CancellationToken ct)
+        ISprintStore? sprints,
+        CancellationToken ct,
+        double timeoutMinutes = 15.0)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
         {
@@ -84,28 +90,87 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
         var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
+        // Rework loop: a task requeued by the PRWatcher carries the
+        // failure context (CI failure or reviewer notes) — surface it
+        // prominently so the agent fixes THAT, not re-explores.
+        var reworkContext = issue.GetMetadata("reworkContext");
+        if (!string.IsNullOrWhiteSpace(reworkContext))
+        {
+            var round = issue.GetMetadata("reworkAttempts") ?? "1";
+            prompt += $"\n\n## Rework required (round {round})\n" +
+                $"Your previous attempt produced a PR that did NOT pass review/CI. " +
+                $"Fix the following on the SAME branch (do not restructure unrelated work):\n\n{reworkContext}";
+        }
         var queued = drainMessageBus(roleAgent.AgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)
             ? prompt
             : prompt + "\n\n## Operator messages\n" + queued + "\n\nAddress these messages before working on the task.";
 
         AgentRunResult result;
+        CancellationToken effectiveCt = ct;
+        CancellationTokenSource? timeoutCts = null;
+        if (timeoutMinutes > 0)
+        {
+            timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
+            effectiveCt = timeoutCts.Token;
+        }
         try
         {
+            var context = new Dictionary<string, object>
+            {
+                ["worktreePath"] = worktreePath,
+                ["branch"] = branch,
+                ["issueId"] = issue.Id,
+                // Drives the runner's secrets-by-reference env
+                // injection (FORGE_SECRET_*). Null-safe: the
+                // runner skips env when absent.
+                ["projectId"] = projectId ?? string.Empty,
+            };
+            // Sprint flow: when the issue belongs to the ACTIVE
+            // sprint, the runner gets the sprint id (drives the
+            // `sprint/{id}/` memory recall), the sprint goal, and a
+            // roster of sibling tasks — the shared context that makes
+            // a sprint more than a label.
+            if (sprints is not null)
+            {
+                try
+                {
+                    var active = await sprints.GetActiveAsync(ct);
+                    if (active is not null)
+                    {
+                        var memberIds = await sprints.GetIssueIdsAsync(active.Id, ct);
+                        if (memberIds.Contains(issue.Id))
+                        {
+                            context["sprintId"] = active.Id;
+                            context["sprintName"] = active.Name;
+                            context["sprintGoal"] = active.Goal;
+                            var roster = new List<string>();
+                            foreach (var memberId in memberIds)
+                            {
+                                if (memberId == issue.Id) continue;
+                                var sibling = await issues.GetAsync(memberId, ct);
+                                if (sibling is not null && !AgentTaskTypes.IsContainer(sibling.Type))
+                                {
+                                    roster.Add($"- {sibling.Id} [{sibling.Status}] {sibling.Title}");
+                                }
+                            }
+                            context["sprintRoster"] = string.Join("\n", roster);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Sprint context is advisory; a lookup failure must
+                    // never break a dispatch.
+                    logger.LogWarning(ex, "RunAgent({Id}): sprint context lookup failed; continuing without it", issue.Id);
+                }
+            }
             result = await runner.RunAsync(
                 role, fullPrompt,
                 sessionId: null,
-                context: new Dictionary<string, object>
-                {
-                    ["worktreePath"] = worktreePath,
-                    ["branch"] = branch,
-                    ["issueId"] = issue.Id,
-                    // Drives the runner's secrets-by-reference env
-                    // injection (FORGE_SECRET_*). Null-safe: the
-                    // runner skips env when absent.
-                    ["projectId"] = projectId ?? string.Empty,
-                },
-                ct);
+                context: context,
+                effectiveCt);
             // DIAGNOSTIC: surface what the agent returned so we can
             // debug the "empty modelResponse" bug. Will be removed
             // once we find the root cause.
@@ -119,6 +184,22 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     "Inspect MafAgentRunner.RunAsync to see if response.Messages contains tool calls only.",
                     issue.Id, fullPrompt.Length);
             }
+        }
+        catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true && !ct.IsCancellationRequested)
+        {
+            var timeoutMsg = $"Agent run timed out after {timeoutMinutes} minute(s)";
+            logger.LogWarning("RunAgent({Id}): {Msg}", issue.Id, timeoutMsg);
+            var cur = await issues.GetAsync(issue.Id, ct);
+            if (cur is not null)
+            {
+                var meta = ParseMetadata(cur.MetadataJson);
+                meta["lastError"] = timeoutMsg;
+                meta["modelResponse"] = $"<timed out after {timeoutMinutes}m>";
+                meta["agentTimeout"] = "true";
+                await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                    error: timeoutMsg, metadata: meta, ct: ct);
+            }
+            throw new TimeoutException(timeoutMsg);
         }
         catch (Exception ex)
         {
@@ -135,11 +216,16 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             {
                 var meta = ParseMetadata(cur.MetadataJson);
                 meta["lastError"] = $"{ex.GetType().Name}: {ex.Message}";
+                meta["lastErrorAt"] = DateTime.UtcNow.ToString("O");
                 meta["modelResponse"] = $"<threw: {ex.GetType().Name}: {ex.Message}>";
                 await issues.TransitionAsync(issue.Id, cur.Status,
                     error: meta["lastError"]?.ToString(), metadata: meta, ct: ct);
             }
             throw;
+        }
+        finally
+        {
+            timeoutCts?.Dispose();
         }
         // Record the model response in issue metadata so the
         // dashboard can show what the agent said, even when
@@ -250,6 +336,15 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
 
             Working directory: {worktreePath}
             Branch: {branch} (base: {baseBranch}){designSection}{artSection}
+
+            ## Completion contract
+            Do the work: explore, then EDIT, then build/test. If — and
+            only if — you conclude the task genuinely requires no code
+            changes (already implemented, verification-only), end your
+            final message with the exact marker NO_CHANGES_NEEDED plus
+            a one-sentence justification. A run that produces no diff
+            without that marker is treated as a failed attempt and
+            re-queued (circuit breaker applies).
             """;
     }
 

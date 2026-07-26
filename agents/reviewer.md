@@ -42,3 +42,13 @@ One sentence explaining the decision.
 ```
 
 If you find zero violations, approve. If any high-severity violation exists, request changes regardless of total count.
+
+## Deferring non-blocking findings
+
+`REQUEST_CHANGES` is for violations that must block THIS PR. For findings that matter but are out of scope — pre-existing tech debt the PR touches, a missing test for adjacent code, a refactor that would balloon the diff — **approve the PR and file a follow-up** instead of blocking it:
+
+- Call the `file_followup` tool once per deferred finding: title states the work; description cites file:line evidence and why it matters. A future engineering run has never seen this review — write the description so it stands alone.
+- Mention the filed follow-up ids in your review comment under `### Deferred`.
+- Filed follow-ups are not scheduled immediately: they go through technical grooming (vision + current-state check) before any sprint. Do not file duplicates of work that is already planned — the groomer closes duplicates, but each one costs a run.
+
+Never use `file_followup` for something this PR itself broke or omitted — that is `REQUEST_CHANGES`.
