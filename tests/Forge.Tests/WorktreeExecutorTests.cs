@@ -8,6 +8,11 @@ using Xunit;
 
 namespace Forge.Tests;
 
+/// <summary>
+/// P3 checkpoint 3: WorktreeExecutor creates a git worktree on a
+/// per-issue branch. Tests use a real (temp) git repo since the
+/// service shells out to <c>git worktree add</c>.
+/// </summary>
 public class WorktreeExecutorTests : IDisposable
 {
     private readonly string _workDir;

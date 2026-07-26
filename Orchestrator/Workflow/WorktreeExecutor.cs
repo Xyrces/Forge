@@ -66,7 +66,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         }
 
         // Resolve the branch name (same convention throughout the pipeline).
-        var branch = input.Branch ?? $"agent/{input.Issue.Id}";
+        var branch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
 
         // Create (or reuse existing) worktree from the base branch.
         var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct);
@@ -134,19 +134,6 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         catch { return new(); }
     }
 
-    /// <summary>
-    /// Strips characters invalid in git ref names from the task id so it
-    /// can be safely used as a branch name suffix or remote ref segment.
-    /// Reuses the same sanitization logic as <see cref="GitWorktreeService"/>.
-    /// </summary>
-    private static string Sanitize(string s)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sb = new System.Text.StringBuilder(s.Length);
-        foreach (var c in s)
-            sb.Append(System.Array.IndexOf(invalid, c) >= 0 ? '_' : c);
-        return sb.ToString();
-    }
 }
 
 public enum WorktreeResult
