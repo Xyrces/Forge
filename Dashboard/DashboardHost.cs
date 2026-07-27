@@ -452,6 +452,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         {
             GateEndpoints.MapGateEndpoints(_app, new StageGates(_memory), _logger);
         }
+        GateVerdictEndpoints.MapGateVerdictEndpoints(_app, _issues, _logger);
 
         FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions);
         NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory);
