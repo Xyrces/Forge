@@ -113,6 +113,8 @@ public static class RunGateCatalogEndpoints
             return new { name, kind, description, source };
         }).ToList();
 
-        return Results.Json(new { checkpoint, source, gates }, DashboardJson.Options);
+        var unknownNames = names.Where(n => !RunGatePipeline.GateCatalog.ContainsKey(n)).ToList();
+
+        return Results.Json(new { checkpoint, source, gates, unknownNames }, DashboardJson.Options);
     }
 }
