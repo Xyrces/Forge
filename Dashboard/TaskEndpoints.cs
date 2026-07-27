@@ -244,8 +244,8 @@ public static class TaskEndpoints
             {
                 var t = await store.GetAsync(id, ct);
                 if (t is null) return Results.NotFound(new { error = "task not found", id });
-                if (t.Status != IssueStatus.Failed)
-                    return Results.Conflict(new { error = $"only Failed tasks can be requeued (status is {t.Status})" });
+                if (t.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
+                    return Results.Conflict(new { error = $"only Failed or Blocked tasks can be requeued (status is {t.Status})" });
 
                 // One atomic transition: Failed -> Pending + clear the
                 // failure bookkeeping so the retry budget starts fresh

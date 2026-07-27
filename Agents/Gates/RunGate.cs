@@ -2,6 +2,13 @@ using Microsoft.Extensions.Logging;
 
 namespace Forge.Agents.Gates;
 
+/// <summary>Deterministic or LLM-powered quality gate.</summary>
+public enum GateKind
+{
+    Deterministic,
+    Llm,
+}
+
 /// <summary>Outcome of a single quality-gate evaluation.</summary>
 public enum GateOutcome
 {
@@ -26,13 +33,6 @@ public sealed record RunGateContext(
     string Plan,
     CancellationToken Ct);
 
-/// <summary>Whether a gate is deterministic (zero LLM) or uses an LLM call.</summary>
-public enum GateKind
-{
-    Deterministic,
-    Llm,
-}
-
 /// <summary>
 /// One deterministic-or-LLM quality gate. Gates are ordered per
 /// checkpoint and short-circuit on the first non-Approve verdict.
@@ -43,7 +43,7 @@ public enum GateKind
 public interface IRunGate
 {
     string Name { get; }
-    string Description { get; }
     GateKind Kind { get; }
+    string Description { get; }
     Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx);
 }

@@ -9,11 +9,10 @@ using Forge.Core;
 namespace Forge.Dashboard;
 
 /// <summary>
-/// Read-only endpoint that returns the resolved ordered gate list
-/// for a checkpoint, with each gate's name, kind, description, and
-/// resolution source. Also provides PUT (override) and DELETE
-/// (reset) for operator control over the ordered gate list.
-/// Used by the run-quality-gates dashboard page.
+/// Read-only and write endpoints for the run-quality-gate catalog.
+/// GET returns the resolved ordered gate list with resolution source.
+/// PUT writes a DB override via memory store. DELETE removes the
+/// override, restoring config/built-in default resolution.
 /// </summary>
 public static class RunGateCatalogEndpoints
 {
@@ -25,12 +24,9 @@ public static class RunGateCatalogEndpoints
         MemoryStore? memory,
         ILogger logger)
     {
-        // GET — resolved gate catalog with source annotation.
+        // GET — resolved gate list with source annotation.
         app.MapGet("/api/gates/{checkpoint}", async (string checkpoint, CancellationToken ct) =>
         {
-            if (memory is null)
-                return Results.StatusCode(503);
-
             var pipeline = new RunGatePipeline(
                 options,
                 memory,
@@ -47,15 +43,32 @@ public static class RunGateCatalogEndpoints
             return ToResolvedResponse(checkpoint, names, source);
         });
 
-        // PUT — persist an ordered gate list override via memory key.
+        // PUT — write a DB override for this checkpoint.
         app.MapPut("/api/gates/{checkpoint}", async (string checkpoint, PutGateOverrideRequest request, CancellationToken ct) =>
         {
             if (memory is null)
-                return Results.StatusCode(503);
+                return Results.Problem("Memory store not available", statusCode: 503);
+
+            if (request.Gates is null || request.Gates.Length == 0)
+                return Results.BadRequest(new { error = "gates must not be empty" });
+
+            // Warn about unknown names but don't reject (the pipeline already skips them).
+            var unknown = request.Gates
+                .Where(n => !RunGatePipeline.GateCatalog.ContainsKey(n))
+                .ToList();
+            if (unknown.Count > 0)
+            {
+                logger.LogWarning(
+                    "Gate override for {Checkpoint} contains unknown gate names: {Unknown}",
+                    checkpoint, string.Join(", ", unknown));
+            }
 
             var json = JsonSerializer.Serialize(request.Gates, DashboardJson.Options);
             await memory.RememberAsync($"gates/run/{checkpoint}", json, ct: ct);
-            logger.LogInformation("Run-gate override set for checkpoint {Checkpoint}: [{Gates}]", checkpoint, string.Join(", ", request.Gates));
+
+            logger.LogInformation(
+                "Gate override saved for {Checkpoint}: {Names}",
+                checkpoint, string.Join(", ", request.Gates));
 
             // Return the resolved state after the mutation.
             var pipeline = new RunGatePipeline(options, memory, _ => null, logger);
@@ -63,23 +76,24 @@ public static class RunGateCatalogEndpoints
             return ToResolvedResponse(checkpoint, names, source);
         });
 
-        // DELETE — remove the memory-key override, restoring config -> built-in default.
+        // DELETE — remove the DB override, resetting to config/built-in defaults.
         app.MapDelete("/api/gates/{checkpoint}", async (string checkpoint, CancellationToken ct) =>
         {
             if (memory is null)
-                return Results.StatusCode(503);
+                return Results.Problem("Memory store not available", statusCode: 503);
 
-            await memory.ForgetAsync($"gates/run/{checkpoint}", ct);
-            logger.LogInformation("Run-gate override removed for checkpoint {Checkpoint}, reverting to config/default", checkpoint);
+            var removed = await memory.ForgetAsync($"gates/run/{checkpoint}", ct);
+            if (!removed)
+                return Results.NotFound(new { error = "no_override_found", checkpoint });
+
+            logger.LogInformation("Gate override removed for {Checkpoint} — reset to defaults", checkpoint);
 
             // Return the resolved state (will now come from config or defaults).
             var pipeline = new RunGatePipeline(options, memory, _ => null, logger);
             var (names, source) = await pipeline.ResolveWithSourceAsync(checkpoint, ct);
 
             if (names.Count == 0 && source == "unknown")
-            {
                 return Results.NotFound(new { error = "unknown_checkpoint", checkpoint });
-            }
 
             return ToResolvedResponse(checkpoint, names, source);
         });

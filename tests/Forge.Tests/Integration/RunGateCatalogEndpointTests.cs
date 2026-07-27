@@ -189,30 +189,14 @@ public class RunGateCatalogEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task Put_EmptyArrayIsAccepted_AndDoesNotOverride()
+    public async Task Put_EmptyArray_ReturnsBadRequest()
     {
-        // An empty array is stored but the resolver skips it (names is { Length: > 0 } is false),
-        // so the effective gate list falls through to config -> builtin_default.
-        // The request should still succeed (200) without error.
-
-        // Act: PUT with empty array
+        // The endpoint rejects empty arrays with 400.
         var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = Array.Empty<string>() });
-        Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
-
-        // The PUT response shows the resolved state after mutation.
-        // Since the empty array resolves as a no-op, source is builtin_default with all 3 gates.
-        var putBody = await putResp.Content.ReadFromJsonAsync<CatalogResponse>();
-        Assert.NotNull(putBody);
-        Assert.Equal("builtin_default", putBody!.Source);
-        Assert.Equal(3, putBody.Gates.Count);
-
-        // GET also reflects the no-op resolution
-        var getResp = await _client.GetAsync("/api/gates/preImplementation");
-        var getBody = await getResp.Content.ReadFromJsonAsync<CatalogResponse>();
-        Assert.Equal("builtin_default", getBody!.Source);
-        Assert.Equal(3, getBody.Gates.Count);
+        Assert.Equal(HttpStatusCode.BadRequest, putResp.StatusCode);
     }
 
+    [Fact]
     [Fact]
     public async Task Delete_RevertsToBuiltinDefault()
     {

@@ -1,0 +1,334 @@
+@page "/ops/gates"
+@inject HttpClient Http
+@rendermode InteractiveServer
+@using System.Net.Http.Json
+@using System.Text.Json
+
+<PageTitle>Run quality gates</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Run quality gates</h1>
+        <div class="page-header__meta">
+            @_checkpoint
+            @if (_source is not null)
+            {
+                <span class="pill pill--source-@_source.ToLowerInvariant().Replace("_", "-")">@_source</span>
+            }
+        </div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="ResetToDefaultAsync" disabled="@(_loading || _saving)">
+                Reset to defaults
+            </button>
+            <button class="btn" @onclick="LoadAsync" disabled="@_loading">Refresh</button>
+        </div>
+    </div>
+
+    @if (_error is not null)
+    {
+        <div class="banner banner--error">
+            <span>@_error</span>
+            <button class="btn btn--link" @onclick="() => _error = null">Dismiss</button>
+        </div>
+    }
+
+    @if (_loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (_gates is null || _gates.Count == 0)
+    {
+        <div class="page-subtitle">No gates configured for this checkpoint.</div>
+    }
+    else
+    {
+        <div class="page-subtitle page-subtitle--meta" style="margin-bottom:8px">
+            Gates are evaluated in order; the first non-approve short-circuits.
+            Drag rows or use the arrows to reorder. Toggle a gate off to skip it.
+        </div>
+
+        <div class="gate-list">
+            @for (int i = 0; i < _gates.Count; i++)
+            {
+                var gate = _gates[i];
+                var index = i;
+                <div class="gate-row"
+                     draggable="true"
+                     @ondragstart="(e) => OnDragStart(e, index)"
+                     @ondragover:preventDefault
+                     @ondrop="(e) => OnDropAsync(e, index)"
+                     @ondragend="OnDragEnd">
+                    <div class="gate-row__drag" title="Drag to reorder">⠿</div>
+                    <div class="gate-row__body">
+                        <div class="gate-row__top">
+                            <span class="gate-row__name">@gate.Name</span>
+                            <span class="pill pill--@GateKindPillClass(gate.Kind)">@(gate.Kind ?? "unknown")</span>
+                        </div>
+                        <div class="gate-row__desc">@gate.Description</div>
+                    </div>
+                    <div class="gate-row__actions">
+                        <button class="icon-btn" title="Move up"
+                                disabled="@(index == 0)"
+                                @onclick="() => MoveGateAsync(index, index - 1)">↑</button>
+                        <button class="icon-btn" title="Move down"
+                                disabled="@(index == _gates.Count - 1)"
+                                @onclick="() => MoveGateAsync(index, index + 1)">↓</button>
+                        @if (GateIsInDefaultSet(gate.Name) && !_activeGateNames.Contains(gate.Name))
+                        {
+                            <button class="btn btn--small" @onclick="() => EnableGateAsync(gate.Name)">Enable</button>
+                        }
+                        else
+                        {
+                            <button class="btn btn--small btn--ghost"
+                                    @onclick="() => DisableGateAsync(gate.Name)"
+                                    disabled="@(!CanDisable())">Disable</button>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* Disabled gates section *@
+        @if (_disabledGates.Count > 0)
+        {
+            <div class="overview-section" style="margin-top:24px">
+                <h2>Disabled gates (available to enable)</h2>
+                <p class="page-subtitle page-subtitle--meta" style="margin-bottom:8px">
+                    These gates are in the catalog but not in the current order. Click Enable to add them back.
+                </p>
+                <div class="gate-list">
+                    @foreach (var gate in _disabledGates)
+                    {
+                        <div class="gate-row gate-row--disabled">
+                            <div class="gate-row__drag" style="visibility:hidden">⠿</div>
+                            <div class="gate-row__body">
+                                <div class="gate-row__top">
+                                    <span class="gate-row__name" style="color:var(--on-surface-variant)">@gate.Name</span>
+                                    <span class="pill pill--@GateKindPillClass(gate.Kind)">@(gate.Kind ?? "unknown")</span>
+                                </div>
+                                <div class="gate-row__desc">@gate.Description</div>
+                            </div>
+                            <div class="gate-row__actions">
+                                <button class="btn btn--small" @onclick="() => EnableGateAsync(gate.Name)">Enable</button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private const string Checkpoint = "preImplementation";
+    private string _checkpoint = Checkpoint;
+    private string? _source;
+    private List<GateView>? _gates;
+    private List<GateView> _disabledGates = new();
+    private HashSet<string> _activeGateNames = new();
+    private bool _loading = true;
+    private bool _saving;
+    private string? _error;
+
+    // Drag state
+    private int? _dragSourceIndex;
+
+    /// <summary>
+    /// The default gate order for preImplementation, used to determine
+    /// where to insert re-enabled gates.
+    /// </summary>
+    private static readonly string[] DefaultGateOrder =
+        { "plan-schema", "plan-territory", "plan-llm-review" };
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            var response = await Http.GetFromJsonAsync<JsonElement>($"/api/gates/{Checkpoint}");
+            if (response.ValueKind == JsonValueKind.Undefined)
+                throw new Exception("No response from server");
+
+            _checkpoint = response.GetProperty("checkpoint").GetString() ?? Checkpoint;
+            _source = response.TryGetProperty("source", out var src) ? src.GetString() : null;
+
+            var gatesJson = response.GetProperty("gates");
+            var loaded = new List<GateView>();
+            var activeNames = new HashSet<string>();
+            foreach (var g in gatesJson.EnumerateArray())
+            {
+                var name = g.GetProperty("name").GetString() ?? "";
+                var kind = g.TryGetProperty("kind", out var k) ? k.GetString() : null;
+                var desc = g.TryGetProperty("description", out var d) ? d.GetString() : null;
+                loaded.Add(new GateView(name, kind, desc));
+                activeNames.Add(name);
+            }
+            _gates = loaded;
+            _activeGateNames = activeNames;
+
+            // Build disabled list from the full catalog
+            _disabledGates = _allCatalogGates
+                .Where(c => !activeNames.Contains(c.Name))
+                .Select(c => new GateView(c.Name, c.Kind, c.Description))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _error = $"Failed to load gates: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SaveOrderAsync(List<string> gateNames)
+    {
+        _saving = true;
+        _error = null;
+        try
+        {
+            var body = new { gateNames };
+            var resp = await Http.PutAsJsonAsync($"/api/gates/{Checkpoint}", body);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                _error = $"Save failed: {resp.StatusCode} {err}";
+                return;
+            }
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = $"Save failed: {ex.Message}";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task ResetToDefaultAsync()
+    {
+        _saving = true;
+        _error = null;
+        try
+        {
+            var resp = await Http.DeleteAsync($"/api/gates/{Checkpoint}");
+            if (!resp.IsSuccessStatusCode && resp.StatusCode != System.Net.HttpStatusCode.NotFound)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                _error = $"Reset failed: {resp.StatusCode} {err}";
+                return;
+            }
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = $"Reset failed: {ex.Message}";
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task MoveGateAsync(int from, int to)
+    {
+        if (_gates is null || from < 0 || to < 0 || from >= _gates.Count || to >= _gates.Count)
+            return;
+
+        var names = _gates.Select(g => g.Name).ToList();
+        (names[from], names[to]) = (names[to], names[from]);
+
+        await SaveOrderAsync(names);
+    }
+
+    private async Task EnableGateAsync(string name)
+    {
+        if (_gates is null) return;
+
+        var names = _gates.Select(g => g.Name).ToList();
+
+        // Insert at the default position; if not in defaults, append.
+        var defaultIdx = Array.IndexOf(DefaultGateOrder, name);
+        if (defaultIdx >= 0)
+        {
+            // Find where gates before this default position end
+            var insertAt = 0;
+            for (int i = 0; i < defaultIdx; i++)
+            {
+                var preceding = DefaultGateOrder[i];
+                var foundIdx = names.IndexOf(preceding);
+                if (foundIdx >= 0) insertAt = Math.Max(insertAt, foundIdx + 1);
+            }
+            names.Insert(insertAt, name);
+        }
+        else
+        {
+            names.Add(name);
+        }
+
+        await SaveOrderAsync(names);
+    }
+
+    private async Task DisableGateAsync(string name)
+    {
+        if (_gates is null) return;
+
+        var names = _gates.Select(g => g.Name).Where(n => n != name).ToList();
+        await SaveOrderAsync(names);
+    }
+
+    private bool CanDisable() => _gates is not null && _gates.Count > 1;
+
+    private bool GateIsInDefaultSet(string name)
+        => DefaultGateOrder.Contains(name);
+
+    // Drag and drop
+    private void OnDragStart(DragEventArgs e, int index)
+    {
+        _dragSourceIndex = index;
+    }
+
+
+    private async Task OnDropAsync(DragEventArgs e, int targetIndex)
+    {
+        if (_dragSourceIndex is null) return;
+        var source = _dragSourceIndex.Value;
+        _dragSourceIndex = null;
+
+        if (source == targetIndex) return;
+        await MoveGateAsync(source, targetIndex);
+    }
+
+    private void OnDragEnd(DragEventArgs e)
+    {
+        _dragSourceIndex = null;
+    }
+
+    private static string GateKindPillClass(string? kind) => kind switch
+    {
+        "Deterministic" => "success",
+        "Llm" => "warn",
+        _ => "outline"
+    };
+
+    /// <summary>
+    /// Full gate catalog known to the system (from the resolved GET).
+    /// We populate this on first load for the disabled-list computation.
+    /// </summary>
+    private static readonly List<(string Name, string? Kind, string? Description)> _allCatalogGates = new()
+    {
+        ("plan-schema", "Deterministic", "Validates plan structure: required sections (goal, files, approach, test, done) and minimum length."),
+        ("plan-territory", "Deterministic", "Checks plan stays within project territory: only allowed directories and file patterns."),
+        ("plan-llm-review", "Llm", "LLM reviews the plan for completeness, feasibility, and consistency with the task."),
+    };
+
+    private sealed record GateView(string Name, string? Kind, string? Description);
+}
