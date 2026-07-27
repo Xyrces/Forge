@@ -17,6 +17,8 @@ namespace Forge.Dashboard;
 /// </summary>
 public static class RunGateCatalogEndpoints
 {
+    private sealed record PutGateOverrideRequest(string[] Gates);
+
     public static void MapRunGateCatalogEndpoints(
         WebApplication app,
         GateOptions options,
@@ -46,14 +48,14 @@ public static class RunGateCatalogEndpoints
         });
 
         // PUT — persist an ordered gate list override via memory key.
-        app.MapPut("/api/gates/{checkpoint}", async (string checkpoint, string[] gates, CancellationToken ct) =>
+        app.MapPut("/api/gates/{checkpoint}", async (string checkpoint, PutGateOverrideRequest request, CancellationToken ct) =>
         {
             if (memory is null)
                 return Results.StatusCode(503);
 
-            var json = JsonSerializer.Serialize(gates, DashboardJson.Options);
+            var json = JsonSerializer.Serialize(request.Gates, DashboardJson.Options);
             await memory.RememberAsync($"gates/run/{checkpoint}", json, ct: ct);
-            logger.LogInformation("Run-gate override set for checkpoint {Checkpoint}: [{Gates}]", checkpoint, string.Join(", ", gates));
+            logger.LogInformation("Run-gate override set for checkpoint {Checkpoint}: [{Gates}]", checkpoint, string.Join(", ", request.Gates));
 
             // Return the resolved state after the mutation.
             var pipeline = new RunGatePipeline(options, memory, _ => null, logger);

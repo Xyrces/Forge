@@ -169,7 +169,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         var overrideGates = new[] { "plan-territory" };
 
         // Act: PUT the override
-        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", overrideGates);
+        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = overrideGates });
         Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
 
         // Verify the PUT response body shows the overridden state
@@ -196,7 +196,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         // The request should still succeed (200) without error.
 
         // Act: PUT with empty array
-        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", Array.Empty<string>());
+        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = Array.Empty<string>() });
         Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
 
         // The PUT response shows the resolved state after mutation.
@@ -218,7 +218,7 @@ public class RunGateCatalogEndpointTests : IDisposable
     {
         // Arrange: first write an override
         var overrideGates = new[] { "plan-schema" };
-        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", overrideGates);
+        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = overrideGates });
         Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
 
         // Verify override is in effect
@@ -271,7 +271,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
 
         // Act
-        var putResp = await client.PutAsJsonAsync("/api/gates/preImplementation", new[] { "plan-schema" });
+        var putResp = await client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = new[] { "plan-schema" } });
         Assert.Equal(HttpStatusCode.ServiceUnavailable, putResp.StatusCode);
 
         await app.StopAsync();
@@ -309,7 +309,7 @@ public class RunGateCatalogEndpointTests : IDisposable
     public async Task Put_ThenDelete_ThenPutAgain_RoundTripWorks()
     {
         // PUT override
-        var put1 = await _client.PutAsJsonAsync("/api/gates/preImplementation", new[] { "plan-llm-review" });
+        var put1 = await _client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = new[] { "plan-llm-review" } });
         Assert.Equal(HttpStatusCode.OK, put1.StatusCode);
         var body1 = await put1.Content.ReadFromJsonAsync<CatalogResponse>();
         Assert.Equal("db_override", body1!.Source);
@@ -323,7 +323,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         Assert.Equal("builtin_default", bodyDel!.Source);
 
         // PUT again with different gates
-        var put2 = await _client.PutAsJsonAsync("/api/gates/preImplementation", new[] { "plan-schema", "plan-territory" });
+        var put2 = await _client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = new[] { "plan-schema", "plan-territory" } });
         Assert.Equal(HttpStatusCode.OK, put2.StatusCode);
         var body2 = await put2.Content.ReadFromJsonAsync<CatalogResponse>();
         Assert.Equal("db_override", body2!.Source);
