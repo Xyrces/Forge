@@ -123,15 +123,15 @@ public sealed class SprintAssembler
         {
             if (!await IsCompleteAsync(active, issues, sprints, ct))
             {
-                // Blocker absorption: a groomed, operator-urgent
-                // (P1) ad-hoc task joins the ACTIVE sprint
-                // immediately instead of waiting for the current
-                // sprint to drain. Motivation (observed live
-                // 2026-07-25): an infra fix that unblocks the merge
-                // gate (task-166) had to wait for six tasks to burn
-                // all their doomed rework rounds first — hours and
-                // tokens wasted on a queue ordering technicality.
-                await AbsorbBlockersAsync(active, issues, sprints, ct);
+                // Ad-hoc injection (operator rule 2026-07-27): a
+                // groomed ad-hoc task joins the ACTIVE sprint when it
+                // BELONGS there — it is part of the same work (its
+                // followUpOf chain reaches a sprint member) or it
+                // enables/unblocks the ongoing work (a blocks edge to
+                // a member, or an operator P1/blocker flag). Ad-hoc
+                // tasks never form their own sprint; unrelated ones
+                // wait in the backlog for intake promotion.
+                await InjectAdHocAsync(active, issues, sprints, ct);
                 return;
             }
             await sprints.UpdateAsync(active.Id,
@@ -178,37 +178,90 @@ public sealed class SprintAssembler
     }
 
     /// <summary>
-    /// Link groomed blocker tasks into the ACTIVE sprint. A blocker
-    /// is an ad-hoc (parentless) task that is groomed AND marked
-    /// urgent: priority 1 (operator-set, e.g. at enqueue) or
-    /// metadata blocker=true (groomer-set). Spec-chain tasks are
-    /// excluded — they flow through normal sprint assembly with
-    /// their group. Absorption never completes, replaces, or
-    /// reorders the sprint; it only adds work that by definition
-    /// outranks everything in flight.
+    /// Inject groomed ad-hoc tasks that BELONG to the active sprint
+    /// (operator rule 2026-07-27). A sprint is a coherent deployable
+    /// unit — ad-hoc work may join it, but only when it is part of
+    /// the same work or it enables/unblocks it. Three triggers,
+    /// all requiring groomed=true:
+    /// <list type="number">
+    /// <item><b>Same work</b>: the task's followUpOf chain reaches a
+    /// member of the active sprint (a follow-up filed from the
+    /// sprint's own work).</item>
+    /// <item><b>Unblocks</b>: a <c>blocks</c> dependency edge has the
+    /// task blocking an active sprint member (the member cannot
+    /// proceed until it lands — e.g. the merge-gate harness fix).</item>
+    /// <item><b>Operator-urgent</b>: priority 1 or metadata
+    /// blocker=true (the operator's explicit inject signal).</item>
+    /// </list>
+    /// Injection never completes, replaces, or reorders the sprint.
     /// </summary>
-    private async Task AbsorbBlockersAsync(
+    private async Task InjectAdHocAsync(
         SprintRecord active, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
     {
         var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
+        var all = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
+        var blockersOfMembers = await issues.ListBlockersOfAsync(memberIds, ct);
+
         foreach (var task in pending)
         {
             if (AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
-            if (task.ParentIssueId is not null) continue;   // spec-chain work waits for assembly
+            if (task.ParentIssueId is not null) continue;   // spec-chain work flows through assembly
             if (memberIds.Contains(task.Id)) continue;
             if (!string.Equals(task.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)) continue;
-            var isBlocker = task.Priority == 1
-                || string.Equals(task.GetMetadata("blocker"), "true", StringComparison.OrdinalIgnoreCase);
-            if (!isBlocker) continue;
+
+            var reason = InjectionReason(task, memberIds, all, blockersOfMembers);
+            if (reason is null) continue;
 
             await sprints.AddIssueAsync(active.Id, task.Id, ct);
             _logger.LogInformation(
-                "Sprint {SprintId}: absorbed blocker task {TaskId} ({Title}) into the active sprint",
-                active.Id, task.Id, task.Title);
+                "Sprint {SprintId}: injected ad-hoc task {TaskId} ({Title}) — {Reason}",
+                active.Id, task.Id, task.Title, reason);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                task.Id, $"Blocker task absorbed into active sprint '{active.Name}'"));
+                task.Id, $"Injected into active sprint '{active.Name}' — {reason}"));
         }
+    }
+
+    private static string? InjectionReason(
+        IssueRecord task,
+        HashSet<string> memberIds,
+        Dictionary<string, IssueRecord> all,
+        HashSet<string> blockersOfMembers)
+    {
+        // Same work: walk the followUpOf chain; a hit on any sprint
+        // member means this task is a continuation of the sprint's
+        // own work.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var cur = task.GetMetadata("followUpOf");
+        while (cur is not null && seen.Add(cur))
+        {
+            if (memberIds.Contains(cur))
+            {
+                return $"same work (follow-up of {cur})";
+            }
+            cur = all.TryGetValue(cur, out var parent) ? parent.GetMetadata("followUpOf") : null;
+        }
+        // Unblocks: a blocks edge has this task blocking a sprint
+        // member — the member cannot proceed until it lands.
+        if (blockersOfMembers.Contains(task.Id))
+        {
+            return "unblocks ongoing work";
+        }
+        // Operator-urgent.
+        if (task.Priority == 1
+            || string.Equals(task.GetMetadata("blocker"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            return "operator-flagged blocker";
+        }
+        // Operator requeue: an ad-hoc task the operator explicitly
+        // requeued from Failed/Blocked carries operator intent to
+        // run — inject it (otherwise ad-hoc work never assembles and
+        // the sanctioned requeue path would strand it forever).
+        if (task.GetMetadata("requeuedFromFailedAt") is not null)
+        {
+            return "operator requeue";
+        }
+        return null;
     }
 
     private async Task AssembleNextAsync(string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
@@ -241,15 +294,14 @@ public sealed class SprintAssembler
                 && !sprinted.Contains(i.Id))
             .ToList();
 
-        // Grooming gate: a task whose parent chain never reaches a
-        // groomed spec (ad-hoc) is eligible only after technical
-        // grooming approves it (metadata groomed=true, set by the
-        // ScheduledGroomer task pass). Spec-chain tasks were groomed
-        // with their spec. Operator-enqueued and agent-filed
-        // follow-ups wait for grooming like everything else.
+        // Eligible for ASSEMBLY: spec-chain groups only. Ad-hoc
+        // (parentless) tasks never form their own sprint (operator
+        // rule 2026-07-27: no grab-bag sprints) — they enter the
+        // ACTIVE sprint only by injection (related to or unblocking
+        // the ongoing work), or wait in the backlog for the operator
+        // to promote them through intake as an epic.
         eligible = eligible
-            .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName
-                || string.Equals(t.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
+            .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName)
             .ToList();
         if (eligible.Count == 0) return;
 
@@ -309,23 +361,6 @@ public sealed class SprintAssembler
             .First();
         var chosen = groups[chosenKey];
         var (name, goal, _) = described[chosenKey];
-
-        // Ad-hoc tasks NEVER share a sprint (operator rule
-        // 2026-07-27): bundling unrelated parentless work into one
-        // "Ad-hoc work" sprint mixed deployable states, created
-        // intra-sprint file conflicts, and confused the board. Each
-        // groomed ad-hoc task assembles as its OWN one-task sprint —
-        // a sprint is a coherent, independently deployable unit:
-        // either one spec-chain group or one ad-hoc task. The oldest
-        // ad-hoc task goes first; the next tick assembles the next.
-        if (chosenKey == AdHocGroupName)
-        {
-            var single = chosen.OrderBy(t => t.CreatedAt).First();
-            chosen = new List<IssueRecord> { single };
-            name = single.Title;
-            goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
-                ?? $"Complete {single.Id}: {single.Title}";
-        }
 
         var start = DateTime.UtcNow;
         var sprint = await sprints.CreateAsync(new NewSprint(

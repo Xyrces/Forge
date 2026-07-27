@@ -158,6 +158,15 @@ public interface IIssueStore
     /// operator clears it). Cheap: indexed lookup, single round-trip.
     /// </summary>
     Task<bool> IsBlockedAsync(string id, CancellationToken ct = default);
+    /// <summary>
+    /// The set of OPEN blocker ids across all <c>blocks</c> edges
+    /// pointing at any of <paramref name="blockedIds"/> — used by
+    /// sprint injection to find ad-hoc tasks that unblock ongoing
+    /// sprint work. Open = blocker status NOT IN
+    /// ('Completed','Closed') (Failed stays open until the operator
+    /// clears it, per the ReadyAsync rule).
+    /// </summary>
+    Task<HashSet<string>> ListBlockersOfAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -1383,6 +1392,31 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         cmd.Parameters.AddWithValue("$id", id);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is not null;
+    }
+
+    public async Task<HashSet<string>> ListBlockersOfAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (blockedIds.Count == 0) return set;
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        // IN-list built from parameters (blockedIds are internal
+        // sprint-member ids, never user text).
+        var names = blockedIds.Select((_, i) => $"$id{i}").ToArray();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT DISTINCT d.blocker_id
+            FROM issue_dep d
+            INNER JOIN issue b ON b.id = d.blocker_id
+            WHERE d.blocked_id IN ({string.Join(",", names)})
+              AND d.kind = 'blocks'
+              AND b.status NOT IN ('Completed', 'Closed')
+            """;
+        var i = 0;
+        foreach (var id in blockedIds) cmd.Parameters.AddWithValue(names[i++], id);
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct)) set.Add(rd.GetString(0));
+        return set;
     }
 
     private static async Task<int> NextShortIdAsync(SqliteConnection conn, SqliteTransaction tx, string type)

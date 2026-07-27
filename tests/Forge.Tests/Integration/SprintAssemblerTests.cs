@@ -194,21 +194,21 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task AdHocTask_GetsOwnSprint_AfterSpecGroups()
+    public async Task AdHocTask_IsNeverAssembled_EvenAfterSpecSprintDrains()
     {
+        // Operator rule 2026-07-27: no ad-hoc sprints of any size. A
+        // groomed but UNRELATED ad-hoc task never assembles — it
+        // waits in the backlog for injection (related / unblocks /
+        // operator requeue) or operator promotion through intake.
         await SeedGroomedSpecAsync("Pipeline work", 1);
-        // Ad-hoc tasks need technical grooming before sprint ingest
-        // (operator rule 2026-07-23): the groomed marker stands in
-        // for the ScheduledGroomer's ad-hoc pass here.
         var adhoc = await _issues.CreateAsync(new NewIssue(
-            Type: "task", Title: "operator one-off",
+            Type: "task", Title: "unrelated one-off",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
 
-        await Tick(); // spec group wins
-        var first = await _sprints.GetActiveAsync();
-        Assert.Equal("Pipeline work", first!.Name);
+        await Tick();
+        var first = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Pipeline work", first.Name);
 
-        // Complete the first sprint's tasks; next tick assembles ad-hoc.
         foreach (var id in await _sprints.GetIssueIdsAsync(first.Id))
         {
             var issue = await _issues.GetAsync(id);
@@ -217,60 +217,97 @@ public class SprintAssemblerTests : IDisposable
         }
         await Tick();
 
-        var active = await _sprints.GetActiveAsync();
-        Assert.Equal("operator one-off", active!.Name);   // ad-hoc single: sprint named after the task
-        var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Equal(new[] { adhoc.Id }, members.ToList());   // one task, no bundling
+        Assert.Null(await _sprints.GetActiveAsync());   // the ad-hoc task did NOT assemble
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(adhoc.Id))!.Status);
     }
 
     [Fact]
-    public async Task AdHocTasks_NeverShareASprint_OldestFirst()
+    public async Task AdHocFollowUp_InjectsIntoActiveSprint_UnrelatedStaysOut()
     {
-        // Operator rule 2026-07-27: ad-hoc tasks NEVER bundle —
-        // each groomed ad-hoc task assembles as its own one-task
-        // sprint. Two eligible tasks => two sequential sprints.
-        var older = await _issues.CreateAsync(new NewIssue(
-            Type: "task", Title: "first one-off",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        var newer = await _issues.CreateAsync(new NewIssue(
-            Type: "task", Title: "second one-off",
+        // Injection trigger 1: the task's followUpOf chain reaches a
+        // sprint member — it is a continuation of the sprint's work.
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var followUp = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "follow-up of sprint work",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = aTasks[0] }));
+        var unrelated = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "unrelated one-off",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
 
         await Tick();
-        var first = await _sprints.GetActiveAsync();
-        Assert.Equal("first one-off", first!.Name);
-        var firstMembers = await _sprints.GetIssueIdsAsync(first.Id);
-        Assert.Contains(older.Id, firstMembers);
-        Assert.DoesNotContain(newer.Id, firstMembers);
 
-        await _issues.TransitionAsync(older.Id, IssueStatus.Completed, null);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(followUp.Id, members);
+        Assert.DoesNotContain(unrelated.Id, members);
+    }
+
+    [Fact]
+    public async Task AdHocUnblocker_InjectsIntoActiveSprint()
+    {
+        // Injection trigger 2: a blocks edge has the ad-hoc task
+        // blocking a sprint member — the member cannot proceed
+        // until it lands (the merge-gate harness-fix case).
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var fixer = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "merge-gate fix",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await _issues.AddDependencyAsync(fixer.Id, aTasks[0], IssueDepKind.Blocks, CancellationToken.None);
+
         await Tick();
 
-        var second = await _sprints.GetActiveAsync();
-        Assert.NotEqual(first.Id, second!.Id);
-        Assert.Equal("second one-off", second.Name);
-        var secondMembers = await _sprints.GetIssueIdsAsync(second.Id);
-        Assert.Contains(newer.Id, secondMembers);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(fixer.Id, members);
+    }
+
+    [Fact]
+    public async Task RequeuedAdHoc_InjectsIntoActiveSprint()
+    {
+        // Injection trigger 3b: an operator requeue carries intent
+        // to run — otherwise an ad-hoc task requeued from Failed
+        // would strand forever (no assembly path).
+        var (_, _, _) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var requeued = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "operator-requeued one-off",
+            Metadata: new Dictionary<string, object>
+            {
+                ["groomed"] = "true",
+                ["requeuedFromFailedAt"] = "2026-07-27T00:00:00Z",
+            }));
+        var unrelated = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "unrelated one-off",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+
+        await Tick();
+
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(requeued.Id, members);
+        Assert.DoesNotContain(unrelated.Id, members);
     }
 
     [Fact]
     public async Task UngroomedAdHocTask_IsNeverIngested()
     {
         // Operator rule 2026-07-23: no task enters a sprint without
-        // technical grooming. An ad-hoc Pending task with no
-        // groomed marker blocks nothing — the assembler simply
-        // sees no eligible work.
+        // technical grooming — and (2026-07-27) ad-hoc tasks never
+        // assemble at all; even a groomed unrelated one waits for
+        // injection or intake promotion.
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "ungroomed one-off"));
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync());
 
-        // Grooming marks it; next tick it is assembled.
         await _issues.TransitionAsync(task.Id, IssueStatus.Pending, null,
             metadata: new Dictionary<string, object> { ["groomed"] = "true" });
         await Tick();
-        var active = await _sprints.GetActiveAsync();
-        Assert.NotNull(active);
-        Assert.Contains(task.Id, await _sprints.GetIssueIdsAsync(active!.Id));
+        Assert.Null(await _sprints.GetActiveAsync());   // groomed but unrelated: still no sprint
     }
 
     [Fact]
@@ -317,20 +354,22 @@ public class SprintAssemblerTests : IDisposable
     public async Task ContainersWatchesAndSprintedTasks_AreNeverIngested()
     {
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "container"));
-        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "container"));
+        var storyContainer = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "container"));
         var watch = await _issues.CreateAsync(new NewIssue(Type: "pr-watch", Title: "watch"));
 
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync()); // nothing eligible
 
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        // Spec-chain task (assembly path; ad-hoc never assembles).
+        var (specId, _, _) = await SeedGroomedSpecAsync("real work", 0);
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "real story", ParentId: specId));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real", ParentId: story.Id));
         await Tick();
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
         var members = await _sprints.GetIssueIdsAsync(active!.Id);
         Assert.DoesNotContain(epic.Id, members);
-        Assert.DoesNotContain(story.Id, members);
+        Assert.DoesNotContain(storyContainer.Id, members);
         Assert.DoesNotContain(watch.Id, members);
 
         // Complete it; the same tasks must not be re-ingested into a
@@ -350,25 +389,26 @@ public class SprintAssemblerTests : IDisposable
         // membership must NOT strand it — it is definitionally
         // requeued work, not history to protect from resurrection
         // (terminal tasks are already excluded by the Pending filter).
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        // Spec-chain variant: reassembly goes through group assembly.
+        var (_, _, taskIds) = await SeedGroomedSpecAsync("requeue work", 1);
+        var taskId = taskIds[0];
         await Tick();
         var first = await _sprints.GetActiveAsync();
         Assert.NotNull(first);
 
         // Fail the task; the sprint completes (all terminal).
-        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
+        await _issues.TransitionAsync(taskId, IssueStatus.Failed, "boom");
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync());
 
         // Operator requeue: Failed -> Pending. Next tick must assemble
         // a NEW sprint containing it (previously: stranded forever).
-        await _issues.TransitionAsync(task.Id, IssueStatus.Pending, "operator requeue");
+        await _issues.TransitionAsync(taskId, IssueStatus.Pending, "operator requeue");
         await Tick();
         var second = await _sprints.GetActiveAsync();
         Assert.NotNull(second);
         Assert.NotEqual(first!.Id, second!.Id);
-        Assert.Contains(task.Id, await _sprints.GetIssueIdsAsync(second.Id));
+        Assert.Contains(taskId, await _sprints.GetIssueIdsAsync(second.Id));
     }
 
     [Fact]
@@ -380,8 +420,10 @@ public class SprintAssemblerTests : IDisposable
             Name: "empty", Goal: "g", StartDate: DateTime.UtcNow,
             EndDate: DateTime.UtcNow.AddDays(1), Status: SprintStatus.Active));
 
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        // Spec-chain task (assembly path; ad-hoc never assembles).
+        var (specId, _, _) = await SeedGroomedSpecAsync("real", 0);
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "s", ParentId: specId));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real", ParentId: story.Id));
         await Tick();
 
         var all = await _sprints.ListAsync(activeOnly: false);
