@@ -4,6 +4,7 @@ using Forge.AgentTools;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Core.Workflow;
 using Forge.Dashboard;
 using Forge.Reviewer;
 
@@ -46,6 +47,7 @@ public sealed class OrchestratorAgent : IAgent
     // dispatches FOR THAT MODEL ONLY.
     private readonly ModelRateLimitTracker _modelCooldowns;
     private readonly Core.TaskStateMachine? _lifecycle;
+    private readonly Core.Workflow.WorkflowResolver? _workflow;
     private Agents.LlmConfig? _llmConfig;
     private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
     // In-flight dev dispatches. The cycle fire-and-forgets runs via
@@ -76,7 +78,8 @@ public sealed class OrchestratorAgent : IAgent
         ILoggerFactory? loggerFactory = null,
         Slots.SlotTable? slots = null,
         ModelRateLimitTracker? modelCooldowns = null,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Core.Workflow.WorkflowResolver? workflow = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -90,6 +93,7 @@ public sealed class OrchestratorAgent : IAgent
         _slots = slots ?? new Slots.SlotTable();
         _modelCooldowns = modelCooldowns ?? new ModelRateLimitTracker();
         _lifecycle = lifecycle;
+        _workflow = workflow;
         _maxRetryCount = 1;
     }
 
@@ -313,19 +317,27 @@ public sealed class OrchestratorAgent : IAgent
             {
                 // Review first (verdict metadata), then decide. The
                 // reviewer is constructed per sweep — it shares the
-                // bundle's stores + the shared agent runner.
-                var reviewer = new Forge.Reviewer.ReviewerDispatcher(
-                    bundle.IssueStore, bundle.GitHub, _runner,
-                    _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
-                        ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
-                    lifecycle: _lifecycle);
+                // bundle's stores + the shared agent runner. Review
+                // step disabled in the workflow definition (pass 4):
+                // no reviewer-agent runs — merges require a formal
+                // review at the current head.
                 var fresh = watch;
-                var outcome = await reviewer.ReviewOnceAsync(watch, cancellationToken);
-                if (outcome is not null)
+                var reviewEnabled = _workflow is null
+                    || (await _workflow.ResolveAsync(cancellationToken)).IsStepEnabled("review");
+                if (reviewEnabled)
                 {
-                    // The review updated the watch's metadata; re-read
-                    // so the poll sees the fresh verdict.
-                    fresh = await bundle.IssueStore.GetAsync(watch.Id, cancellationToken) ?? watch;
+                    var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+                        bundle.IssueStore, bundle.GitHub, _runner,
+                        _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
+                            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
+                        lifecycle: _lifecycle);
+                    var outcome = await reviewer.ReviewOnceAsync(watch, cancellationToken);
+                    if (outcome is not null)
+                    {
+                        // The review updated the watch's metadata; re-read
+                        // so the poll sees the fresh verdict.
+                        fresh = await bundle.IssueStore.GetAsync(watch.Id, cancellationToken) ?? watch;
+                    }
                 }
                 var poll = await bundle.PrWatcher.PollWatchOnceAsync(fresh, cancellationToken);
                 _logger.LogDebug("Watch {Id}: {Outcome}", watch.Id, poll);

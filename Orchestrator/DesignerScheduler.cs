@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using Forge.Agents;
 using Forge.Core;
+using Forge.Core.Workflow;
 using Forge.Dashboard;
 
 namespace Forge.Orchestrator;
@@ -37,6 +38,7 @@ public sealed class DesignerScheduler
     private readonly ILogger<DesignerScheduler> _logger;
     private readonly TimeSpan _interval;
     private readonly Core.StageGates? _gates;
+    private readonly Core.Workflow.WorkflowResolver? _workflow;
 
     public DesignerScheduler(
         ISpecStore specs,
@@ -45,8 +47,10 @@ public sealed class DesignerScheduler
         IDashboardEventBus events,
         ILogger<DesignerScheduler> logger,
         TimeSpan? interval = null,
-        Core.StageGates? gates = null)
+        Core.StageGates? gates = null,
+        Core.Workflow.WorkflowResolver? workflow = null)
     {
+        _workflow = workflow;
         _specs = specs;
         _designerFactory = designerFactory;
         _runs = runs;
@@ -87,6 +91,15 @@ public sealed class DesignerScheduler
         if (_gates is not null && await _gates.IsHeldAsync(Core.StageGates.Design, ct))
         {
             _logger.LogInformation("DesignerScheduler: held by operator gate; skipping tick");
+            return;
+        }
+        // Design step disabled in the workflow definition (pass 4):
+        // the pipeline runs the intake -> groom fast path only; no
+        // designer runs at all.
+        if (_workflow is not null
+            && !(await _workflow.ResolveAsync(ct)).IsStepEnabled("design"))
+        {
+            _logger.LogInformation("DesignerScheduler: design step disabled in the workflow definition; skipping tick");
             return;
         }
 

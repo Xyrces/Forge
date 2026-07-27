@@ -172,6 +172,34 @@ public class DesignerSchedulerTests : IDisposable
         NullLoggerFactory.Instance);
 
     [Fact]
+    public async Task Tick_DesignStepDisabled_SkipsEverything()
+    {
+        // Pass 4 structural edit: design disabled in the workflow
+        // definition = the pipeline runs the intake -> groom fast
+        // path only; the scheduler must not run the designer at all.
+        var spec = await CreateReadySpecAsync("No design pass");
+        var disabled = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Steps = Forge.Core.Workflow.WorkflowDefaults.Definition.Steps
+                .Select(s => s.Id == "design" ? s with { Enabled = false } : s).ToList(),
+        };
+        await _memory.RememberAsync(Forge.Core.Workflow.WorkflowResolver.LiveKey,
+            Forge.Core.Workflow.WorkflowResolver.Serialize(disabled));
+        var factory = NewDesignerFactory(new DesignerSuccessScript(spec.Id));
+        var scheduler = new DesignerScheduler(
+            _specs, factory, _designerRuns, _events,
+            NullLogger<DesignerScheduler>.Instance,
+            interval: TimeSpan.FromMinutes(5),
+            workflow: new Forge.Core.Workflow.WorkflowResolver(_memory));
+
+        await scheduler.TickAsync(default);
+
+        var after = (await _specs.GetAsync(spec.Id))!;
+        Assert.Equal(SpecStatus.ReadyForDesign, after.Status);   // untouched
+        Assert.Empty(await _designerRuns.ListAsync(specId: spec.Id, limit: 1, default));
+    }
+
+    [Fact]
     public async Task Tick_FindsReadyForDesignSpecs_AndRunsThem()
     {
         var spec = await CreateReadySpecAsync("Inventory HUD");

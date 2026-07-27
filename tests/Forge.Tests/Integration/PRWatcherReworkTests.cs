@@ -81,7 +81,6 @@ public class PRWatcherReworkTests : IDisposable
 
     private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
     {
-        var memory = new MemoryStore(_dbPath);
         var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
         {
             Policies = new Dictionary<string, string>(Forge.Core.Workflow.WorkflowDefaults.Definition.Policies)
@@ -89,6 +88,12 @@ public class PRWatcherReworkTests : IDisposable
                 [key] = value,
             },
         };
+        return ResolverWith(def);
+    }
+
+    private Forge.Core.Workflow.WorkflowResolver ResolverWith(Forge.Core.Workflow.WorkflowDefinition def)
+    {
+        var memory = new MemoryStore(_dbPath);
         memory.RememberAsync(Forge.Core.Workflow.WorkflowResolver.LiveKey,
             Forge.Core.Workflow.WorkflowResolver.Serialize(def)).GetAwaiter().GetResult();
         return new Forge.Core.Workflow.WorkflowResolver(memory);
@@ -244,6 +249,62 @@ public class PRWatcherReworkTests : IDisposable
         // re-trigger while the agent works.
         Assert.Equal("ReworkQueued", after.GetMetadata("state"));
         Assert.Equal("abc123", after.GetMetadata("reworkForSha"));
+        Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
+    public async Task Structure_CiRedBranchBlock_CiFailure_GoesTerminalBlocked()
+    {
+        // Pass 4 branch option: CI-red switched from rework to block —
+        // a genuine CI failure goes straight to terminal Blocked for
+        // the operator, no rework round, no strike.
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Edges = Forge.Core.Workflow.WorkflowDefaults.Definition.Edges
+                .Select(e => e is { From: "pr", To: "rework" } ? e with { Selected = "block" } : e)
+                .ToList(),
+        };
+        var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Success };
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWith(def)).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Blocked, after.Status);
+        Assert.Null(after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task Structure_ReviewStepDisabled_AgentVerdictIgnored()
+    {
+        // Pass 4 step toggle: review disabled = the reviewer-agent
+        // verdict doesn't count. CI green + agent Approve at the
+        // current head but NO formal review -> NOT merged (merge now
+        // requires a formal review at the current head).
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Steps = Forge.Core.Workflow.WorkflowDefaults.Definition.Steps
+                .Select(s => s.Id == "review" ? s with { Enabled = false } : s).ToList(),
+        };
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var (task, watch) = await SeedAsync(
+            watchMeta: new Dictionary<string, object>
+            {
+                ["reviewVerdict"] = "Approve",
+                ["reviewSha"] = "abc123",
+            });
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWith(def)).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => true);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
         Assert.Equal(0, gh.MergeCalls);
     }
 

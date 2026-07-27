@@ -267,6 +267,13 @@ else if (_working is not null)
                     <span class="pill pill--blocked">disabled</span>
                 }
                 <span style="flex:1"></span>
+                @if (step.Optional)
+                {
+                    <button class="btn btn--small" @onclick="@(() => ToggleStepEnabled(step))" disabled="@_busy"
+                            title="Draft — takes effect at publish. Only optional steps can be disabled.">
+                        @(step.Enabled ? "Disable" : "Enable")
+                    </button>
+                }
                 <span class="pill pill--outline">@step.Lane</span>
             </div>
 
@@ -299,6 +306,17 @@ else if (_working is not null)
                             @onclick="@(() => { if (expandableChips) ToggleExpanded(key); })">
                         @(edge.Label ?? edge.Kind) → @(target?.Label ?? edge.To)
                     </button>
+                    @if (edge.Options is { Count: > 0 })
+                    {
+                        <select class="mono" value="@edge.Selected"
+                                @onchange="@(e => SetEdgeSelection(edge, e.Value?.ToString()))"
+                                title="Branch behavior — draft, takes effect at publish">
+                            @foreach (var opt in edge.Options)
+                            {
+                                <option value="@opt">@opt</option>
+                            }
+                        </select>
+                    }
                     @if (expandableChips && _expanded.Contains(key) && target is not null)
                     {
                         <div class="wf-branch__nested">
@@ -346,6 +364,20 @@ else if (_working is not null)
     private void DetachGate(StepDto step, string gate)
     {
         step.Gates.Remove(gate);
+        _dirty = true;
+    }
+
+    private void ToggleStepEnabled(StepDto step)
+    {
+        step.Enabled = !step.Enabled;
+        _dirty = true;
+        RebuildSpine();
+    }
+
+    private void SetEdgeSelection(EdgeDto edge, string? selected)
+    {
+        if (selected is null) return;
+        edge.Selected = selected;
         _dirty = true;
     }
 
@@ -525,5 +557,7 @@ else if (_working is not null)
         public string Kind { get; set; } = "";
         public string? Label { get; set; }
         public string? Condition { get; set; }
+        public List<string>? Options { get; set; }
+        public string? Selected { get; set; }
     }
 }

@@ -168,6 +168,69 @@ public sealed class WorkflowValidatorTests : IDisposable
     }
 
     [Fact]
+    public void Validate_EdgeSelectionOutsideCatalog_Rejected()
+    {
+        var d = WorkflowDefaults.Definition with
+        {
+            Edges = WorkflowDefaults.Definition.Edges
+                .Select(e => e is { From: "pr", To: "rework" } ? e with { Selected = "explode" } : e).ToList(),
+        };
+        Assert.Contains(WorkflowValidator.Validate(d), e => e.Contains("'explode' is not one of"));
+    }
+
+    [Fact]
+    public void Validate_EdgeSelectionOnPlainEdge_Rejected()
+    {
+        var d = WorkflowDefaults.Definition with
+        {
+            Edges = WorkflowDefaults.Definition.Edges
+                .Select(e => e is { From: "groom", To: "backlog" } ? e with { Selected = "rework" } : e).ToList(),
+        };
+        Assert.Contains(WorkflowValidator.Validate(d), e => e.Contains("no option catalog"));
+    }
+
+    [Fact]
+    public void Validate_EdgeSelectionBlock_Allowed()
+    {
+        var d = WorkflowDefaults.Definition with
+        {
+            Edges = WorkflowDefaults.Definition.Edges
+                .Select(e => e is { From: "pr", To: "rework" } ? e with { Selected = "block" } : e).ToList(),
+        };
+        Assert.Empty(WorkflowValidator.Validate(d));
+    }
+
+    [Fact]
+    public void Extensions_StepEnabledAndEdgeSelection()
+    {
+        var d = WorkflowDefaults.Definition;
+        Assert.True(d.IsStepEnabled("design"));
+        Assert.False(d.IsStepEnabled("nonexistent"));
+        Assert.Equal("rework", d.GetEdgeSelection("pr", "rework", "fallback"));
+        // Plain edge (no option catalog) -> the caller's fallback.
+        Assert.Equal("fallback", d.GetEdgeSelection("groom", "backlog", "fallback"));
+        // Selection outside the catalog (hand-edited key) -> fallback.
+        var corrupt = d with
+        {
+            Edges = d.Edges.Select(e => e is { From: "pr", To: "rework" }
+                ? e with { Selected = "explode" } : e).ToList(),
+        };
+        Assert.Equal("fallback", corrupt.GetEdgeSelection("pr", "rework", "fallback"));
+    }
+
+    [Fact]
+    public void Diff_BranchSelectionChange_Reported()
+    {
+        var draft = WorkflowDefaults.Definition with
+        {
+            Edges = WorkflowDefaults.Definition.Edges
+                .Select(e => e is { From: "pr", To: "rework" } ? e with { Selected = "block" } : e).ToList(),
+        };
+        Assert.Contains(WorkflowValidator.Diff(WorkflowDefaults.Definition, draft),
+            l => l.Contains("pr") && l.Contains("rework") && l.Contains("block"));
+    }
+
+    [Fact]
     public async Task StageGates_NullResolver_LegacyBehavior()
     {
         var memory = NewMemory();

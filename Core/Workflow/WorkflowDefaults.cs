@@ -46,7 +46,11 @@ public static class WorkflowDefaults
             new("agent",  "done",    WorkflowEdgeKinds.Branch, "no changes",        "verified NO_CHANGES_NEEDED"),
             new("agent",  "blocked", WorkflowEdgeKinds.Failure, null,               "no-progress breaker / unrecoverable"),
             new("pr",     "review",  WorkflowEdgeKinds.Happy,  null,                "CI green + approval"),
-            new("pr",     "rework",  WorkflowEdgeKinds.Branch, "on CI failure / changes requested / conflict", "rework round"),
+            new("pr",     "rework",  WorkflowEdgeKinds.Branch, "on CI failure / changes requested / conflict", "rework round",
+                // CI-red branch behavior: rework (default) gives the
+                // engineer a bounded fix round; block goes straight to
+                // terminal Blocked for the operator.
+                Options: new[] { "rework", "block" }, Selected: "rework"),
             new("pr",     "parked",  WorkflowEdgeKinds.Branch, "on pre-existing base CI failure", "park until base recovers"),
             new("parked", "rework",  WorkflowEdgeKinds.Loop,   "base recovered",    "no-strike refresh round"),
             new("review", "done",    WorkflowEdgeKinds.Happy,  null,                "merge"),

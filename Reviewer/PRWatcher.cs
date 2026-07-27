@@ -2,6 +2,7 @@
 using Octokit;
 using Forge.AgentTools;
 using Forge.Core;
+using Forge.Core.Workflow;
 using Forge.Dashboard;
 using static Octokit.CommitState;
 using static Octokit.PullRequestReviewState;
@@ -183,6 +184,12 @@ public sealed class PRWatcher
             || Forge.Core.Workflow.WorkflowPolicyReader.GetBool(wf, Forge.Core.Workflow.WorkflowPolicies.ParkOnInfra, true);
         var autoMerge = wf is null
             || Forge.Core.Workflow.WorkflowPolicyReader.GetBool(wf, Forge.Core.Workflow.WorkflowPolicies.AutoMerge, true);
+        // Structural edits (pass 4): review step disabled = the
+        // reviewer-agent verdict doesn't count (merge then requires a
+        // formal review at the current head); the CI-red branch can
+        // be switched from rework to block.
+        var reviewEnabled = wf is null || wf.IsStepEnabled("review");
+        var ciRedOutcome = wf?.GetEdgeSelection("pr", "rework", "rework") ?? "rework";
 
         var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
         // P4 e2e-harness seam: tests can pre-approve reviews
@@ -207,7 +214,8 @@ public sealed class PRWatcher
         // a stale verdict from a prior head is ignored.
         var agentVerdict = watchTask.GetMetadata("reviewVerdict");
         var agentVerdictSha = watchTask.GetMetadata("reviewSha");
-        var agentVerdictCurrent = !string.IsNullOrEmpty(agentVerdict)
+        var agentVerdictCurrent = reviewEnabled
+            && !string.IsNullOrEmpty(agentVerdict)
             && string.Equals(agentVerdictSha, sha, StringComparison.Ordinal);
 
         var operatorApproved = reviewStates.Any(s => s == PullRequestReviewState.Approved);
@@ -418,8 +426,21 @@ public sealed class PRWatcher
             }
             // Genuine PR failure (base is green): strike, with the
             // failing check-run details so the rework agent doesn't
-            // have to guess what broke.
+            // have to guess what broke. Branch option "block" (pass
+            // 4): no rework round — straight to terminal Blocked.
             await ReportAsync(Forge.Core.TaskEvent.CiRedOnPr);
+            if (string.Equals(ciRedOutcome, "block", StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "PR #{PrNumber}: CI failed and the workflow's CI-red branch is 'block' — no rework round; task Blocked for the operator",
+                    prNumber);
+                await _issues.TransitionAsync(taskId, IssueStatus.Blocked,
+                    $"CI failed ({ci}); workflow branch 'on CI failure' = block", ct: cancellationToken);
+                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "ci-failed-block", ct: cancellationToken);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrFailed,
+                    taskId, $"CI failed ({ci}) — workflow branch set to block"));
+                return WatchPollOutcome.Blocked;
+            }
             var failing = await _gitHub.GetFailedCheckRunSummariesAsync(sha, cancellationToken);
             var detail = failing.Count > 0
                 ? " Failing checks:\n" + string.Join("\n", failing.Select(f => $"- {f}"))

@@ -1209,7 +1209,8 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory: loggerFactory,
             slots: slots,
             modelCooldowns: modelRateLimits,
-            lifecycle: lifecycle);
+            lifecycle: lifecycle,
+            workflow: new Core.Workflow.WorkflowResolver(memoryStore));
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
@@ -1431,7 +1432,8 @@ try
                 specStore, designerAgentFactory, designerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.DesignerScheduler>(),
                 interval: TimeSpan.FromMinutes(5),
-                gates: stageGates);
+                gates: stageGates,
+                workflow: new Core.Workflow.WorkflowResolver(memoryStore));
             _ = scheduledDesigner.RunAsync(shutdownCts.Token);
             _scheduledDesigner = scheduledDesigner;
 

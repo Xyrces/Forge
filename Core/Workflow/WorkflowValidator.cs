@@ -64,6 +64,27 @@ public static class WorkflowValidator
             {
                 errors.Add($"edge references unknown step '{e.To}'");
             }
+            // Branch options: only edges that declare a catalog in the
+            // built-in default may carry options, and the selection
+            // must be inside it.
+            var catalogEdge = WorkflowDefaults.Definition.Edges.FirstOrDefault(x =>
+                string.Equals(x.From, e.From, StringComparison.Ordinal)
+                && string.Equals(x.To, e.To, StringComparison.Ordinal));
+            if (e.Options is { Count: > 0 } && catalogEdge?.Options is not { Count: > 0 })
+            {
+                errors.Add($"edge '{e.From}' → '{e.To}' does not support branch options");
+            }
+            if (e.Selected is not null)
+            {
+                if (catalogEdge?.Options is not { Count: > 0 })
+                {
+                    errors.Add($"edge '{e.From}' → '{e.To}' has a selection but no option catalog");
+                }
+                else if (!catalogEdge.Options.Contains(e.Selected, StringComparer.Ordinal))
+                {
+                    errors.Add($"edge '{e.From}' → '{e.To}' selection '{e.Selected}' is not one of {string.Join("/", catalogEdge.Options)}");
+                }
+            }
         }
 
         foreach (var (key, value) in d.Policies)
@@ -136,6 +157,17 @@ public static class WorkflowValidator
         foreach (var id in fromSteps.Keys.Except(toSteps.Keys, StringComparer.Ordinal))
         {
             lines.Add($"step '{id}' removed");
+        }
+
+        foreach (var te in to.Edges)
+        {
+            var fe = from.Edges.FirstOrDefault(x =>
+                string.Equals(x.From, te.From, StringComparison.Ordinal)
+                && string.Equals(x.To, te.To, StringComparison.Ordinal));
+            if (!string.Equals(fe?.Selected, te.Selected, StringComparison.Ordinal))
+            {
+                lines.Add($"branch '{te.From}' → '{te.To}': {fe?.Selected ?? "—"} → {te.Selected ?? "—"}");
+            }
         }
 
         var keys = from.Policies.Keys.Union(to.Policies.Keys, StringComparer.Ordinal);

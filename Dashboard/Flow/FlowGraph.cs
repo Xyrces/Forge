@@ -23,12 +23,15 @@ public static class FlowGraph
     /// <summary>
     /// Classify a spec into its planning-lane node, or null when the
     /// spec has left planning (Groomed and beyond — its tasks carry
-    /// the flow from there).
+    /// the flow from there). When the design step is disabled in the
+    /// workflow definition (pass 4), a ReadyForDesign spec has
+    /// nowhere to go — it classifies back to intake, where the
+    /// operator's fast path (approve) lives.
     /// </summary>
-    public static string? ClassifySpec(SpecStatus status) => status switch
+    public static string? ClassifySpec(SpecStatus status, bool designEnabled = true) => status switch
     {
         SpecStatus.Draft => "intake",
-        SpecStatus.ReadyForDesign => "design",
+        SpecStatus.ReadyForDesign => designEnabled ? "design" : "intake",
         SpecStatus.Designed => "groom",
         SpecStatus.AssetReady => "groom",
         SpecStatus.Approved => "groom",

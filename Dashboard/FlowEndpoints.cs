@@ -46,10 +46,12 @@ public static class FlowEndpoints
                 }
             }
 
-            // Planning lane: specs still in planning.
+            // Planning lane: specs still planning. Classification
+            // honors disabled steps (pass 4).
+            var designEnabled = definition.IsStepEnabled("design");
             foreach (var spec in await specs.ListAsync(projectId: null, status: null, ct))
             {
-                var node = FlowGraph.ClassifySpec(spec.Status);
+                var node = FlowGraph.ClassifySpec(spec.Status, designEnabled);
                 if (node is not null) Add(node, spec.Id, spec.Title, spec.Status.ToString());
             }
 

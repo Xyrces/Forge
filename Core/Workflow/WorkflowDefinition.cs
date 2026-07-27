@@ -26,7 +26,13 @@ public sealed record WorkflowEdge(
     string To,
     string Kind,
     string? Label,
-    string? Condition);
+    string? Condition,
+    // Bounded branch behavior (pass 4): edges that offer a choice
+    // declare the allowed values in Options; Selected is the active
+    // one. Both null on plain edges. Reporters switch on the
+    // selection — the option catalog stays code-owned.
+    IReadOnlyList<string>? Options = null,
+    string? Selected = null);
 
 public sealed record WorkflowDefinition(
     int Version,
