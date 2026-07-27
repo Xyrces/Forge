@@ -18,18 +18,50 @@ public class FlowClassifierTests
         string? pr = null,
         string? groomed = null,
         string type = "task",
-        string? parent = null)
+        string? parent = null,
+        string? state = null)
         => new(
             Id: "task-1", ShortId: "1", Type: type, Title: "t",
             Description: null, Status: status, Priority: 2, Assignee: null,
             CreatedAt: DateTime.UtcNow, UpdatedAt: DateTime.UtcNow, ClosedAt: null,
-            MetadataJson: (pr is not null || groomed is not null)
+            MetadataJson: (pr is not null || groomed is not null || state is not null)
                 ? System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object>
                 {
-                    ["prNumber"] = pr!, ["groomed"] = groomed!,
+                    ["prNumber"] = pr!, ["groomed"] = groomed!, ["state"] = state!,
                 }.Where(kv => kv.Value is not null).ToDictionary(kv => kv.Key, kv => kv.Value))
                 : "{}",
             ParentIssueId: parent, DispatchCheckpoint: ckpt);
+
+    // Machine-record classification (authoritative): the recorded
+    // lifecycle state drives the node, not status/checkpoint.
+    [Theory]
+    [InlineData("Dispatching", "setup")]
+    [InlineData("AgentRunning", "agent")]
+    [InlineData("ReworkQueued", "rework")]
+    [InlineData("ReworkRunning", "rework")]
+    [InlineData("StalledRework", "rework")]
+    [InlineData("PROpen", "pr")]
+    [InlineData("MergeReady", "review")]
+    [InlineData("ParkedInfra", "parked")]
+    [InlineData("Merged", "done")]
+    [InlineData("Failed", "blocked")]
+    [InlineData("BlockedOperator", "blocked")]
+    public void RecordedState_DrivesNode(string state, string expectedNode)
+    {
+        // Status deliberately disagrees with the machine record —
+        // the record must win.
+        Assert.Equal(expectedNode,
+            FlowGraph.ClassifyIssue(Issue(IssueStatus.InProgress, state: state), false, false));
+    }
+
+    [Fact]
+    public void RecordedPending_PlanningClassificationStillApplies()
+    {
+        Assert.Equal("sprint",
+            FlowGraph.ClassifyIssue(Issue(IssueStatus.Pending, state: "Pending"), inActiveSprint: true, hasSpecChain: true));
+        Assert.Equal("groom",
+            FlowGraph.ClassifyIssue(Issue(IssueStatus.Pending, state: "Pending"), inActiveSprint: false, hasSpecChain: false));
+    }
 
     [Fact]
     public void PendingAdHocUngroomed_IsInGroomQueue()

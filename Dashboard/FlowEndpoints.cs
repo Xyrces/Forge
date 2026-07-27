@@ -207,6 +207,14 @@ public static class FlowEndpoints
                 reviewNotes = watch?.GetMetadata("reviewNotes"),
                 reviewedSha = watch?.GetMetadata("reviewSha"),
             },
+            "parked" => new
+            {
+                // Parked on pre-existing base-branch CI failure:
+                // waiting for the base to recover; no strikes burn.
+                parkedForSha = Meta("parkedForSha"),
+                parkedAt = Meta("stateEnteredAt"),
+                prNumber = Meta("prNumber"),
+            },
             "rework" => new
             {
                 attempts = Meta("reworkAttempts"),
