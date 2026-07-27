@@ -197,7 +197,6 @@ public class RunGateCatalogEndpointTests : IDisposable
     }
 
     [Fact]
-    [Fact]
     public async Task Delete_RevertsToBuiltinDefault()
     {
         // Arrange: first write an override
