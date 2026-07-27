@@ -38,10 +38,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         ILogger<RunAgentExecutor> logger,
         string? projectId = null,
         ISprintStore? sprints = null,
-        double timeoutMinutes = 15.0)
+        double timeoutMinutes = 15.0,
+        Core.TaskStateMachine? lifecycle = null)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -71,7 +72,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         string? projectId,
         ISprintStore? sprints,
         CancellationToken ct,
-        double timeoutMinutes = 15.0)
+        double timeoutMinutes = 15.0,
+        Core.TaskStateMachine? lifecycle = null)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
         {
@@ -172,6 +174,24 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     // Sprint context is advisory; a lookup failure must
                     // never break a dispatch.
                     logger.LogWarning(ex, "RunAgent({Id}): sprint context lookup failed; continuing without it", issue.Id);
+                }
+            }
+            // RunStarted: the model run is about to begin. Advances
+            // the recorded lifecycle state (Dispatching ->
+            // AgentRunning) and refreshes stateEnteredAt so the
+            // stall guard's clock measures from run-start, not from
+            // the rework fire (observed live 2026-07-27: retried
+            // stalls looked frozen at Dispatching for the whole run).
+            if (lifecycle is not null)
+            {
+                try
+                {
+                    var fresh = await issues.GetAsync(issue.Id, ct) ?? issue;
+                    await lifecycle.ReportAsync(fresh, Core.TaskEvent.RunStarted, watch: null, hasActiveDevRun: true, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "lifecycle RunStarted report failed for {Id}; continuing", issue.Id);
                 }
             }
             result = await runner.RunAsync(

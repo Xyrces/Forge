@@ -29,6 +29,7 @@ public sealed class PRWatcher
     private readonly StageGates? _gates;
     private readonly IDashboardEventBus _events;
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
+    private readonly AgentRunStore? _runs;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -40,7 +41,8 @@ public sealed class PRWatcher
         ILogger<PRWatcher> logger,
         StageGates? gates = null,
         TimeSpan? reworkRoundGrace = null,
-        Forge.Core.TaskStateMachine? lifecycle = null)
+        Forge.Core.TaskStateMachine? lifecycle = null,
+        AgentRunStore? runs = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -52,6 +54,7 @@ public sealed class PRWatcher
         _logger = logger;
         _gates = gates;
         _lifecycle = lifecycle;
+        _runs = runs;
     }
 
     /// <summary>
@@ -204,6 +207,22 @@ public sealed class PRWatcher
             var recordedSha = guardTask?.GetMetadata("reworkForSha");
             if (string.Equals(recordedSha, sha, StringComparison.Ordinal))
             {
+                // Run-registry first: an active dev run for this task
+                // means the round is definitionally not stalled —
+                // regardless of how long the queue + run have taken
+                // (observed live 2026-07-27: the clock measured from
+                // rework-fire time and could re-fire against a
+                // healthy 30-min run).
+                if (_runs is not null)
+                {
+                    var activeRun = (await _runs.ListActiveAsync(cancellationToken))
+                        .Any(r => string.Equals(r.TaskId, taskId, StringComparison.Ordinal)
+                            && r.Role is "CoreDev" or "ClientDev");
+                    if (activeRun)
+                    {
+                        return WatchPollOutcome.Pending;
+                    }
+                }
                 var enteredRaw = guardTask?.GetMetadata("stateEnteredAt");
                 var enteredAt = DateTimeOffset.TryParse(enteredRaw, out var ts)
                     ? ts.UtcDateTime : guardTask?.UpdatedAt ?? DateTime.MinValue;

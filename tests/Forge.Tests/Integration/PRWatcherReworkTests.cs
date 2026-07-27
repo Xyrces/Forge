@@ -445,6 +445,43 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
+    public async Task ConsumedRound_ActiveRunInRegistry_NeverStalls_EvenPastGrace()
+    {
+        // The 2026-07-27 false-stall: clock measured from rework-fire
+        // time could exceed grace while a healthy run was still
+        // working (queue + 30-min run). With an active run in the
+        // registry, the guard must NOT re-fire regardless of age.
+        var gh = new FakeGitHub { Ci = CommitState.Failure };
+        var (task, watch) = await SeedAsync();
+        // The agent_run table lives in IssueStore's schema — bootstrap it.
+        await using (var bootstrap = new IssueStore(Path.Combine(_workDir, "runs.db"))) { }
+        var runs = new Forge.Core.AgentRunStore(Path.Combine(_workDir, "runs.db"));
+        await runs.StartAsync("run-1", task.Id, "CoreDev", "test-model");
+        var watcher = new PRWatcher(gh,
+            worktrees: new AgentTools.GitWorktreeService(
+                new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+                NullLogger<AgentTools.GitWorktreeService>.Instance),
+            issues: _issues,
+            pollInterval: TimeSpan.FromSeconds(1),
+            staleAfter: TimeSpan.FromHours(1),
+            events: _events,
+            logger: NullLogger<PRWatcher>.Instance,
+            lifecycle: new Forge.Core.TaskStateMachine(_issues, writeAuthority: false, NullLogger.Instance),
+            runs: runs,
+            reworkRoundGrace: TimeSpan.Zero);   // would "stall" instantly without the run check
+
+        await watcher.PollWatchOnceAsync(watch, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, ct: CancellationToken.None);
+        var watchAfter = (await _issues.GetAsync(watch.Id))!;
+        var second = await watcher.PollWatchOnceAsync(watchAfter, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, second);   // NOT re-fired
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
     public async Task CircuitBreaker_FourthFailure_TerminalFailed()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure };

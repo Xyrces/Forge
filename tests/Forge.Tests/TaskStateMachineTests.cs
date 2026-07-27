@@ -49,6 +49,7 @@ public class TaskStateMachineTests : IDisposable
     [InlineData(TaskEvent.Dispatched, TaskLifecycleState.ReworkQueued, TaskLifecycleState.Dispatching, true)]
     [InlineData(TaskEvent.Dispatched, TaskLifecycleState.Dispatching, TaskLifecycleState.Dispatching, true)]
     [InlineData(TaskEvent.Dispatched, TaskLifecycleState.StalledRework, TaskLifecycleState.Dispatching, true)]
+    [InlineData(TaskEvent.RunStarted, TaskLifecycleState.Dispatching, TaskLifecycleState.AgentRunning, true)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen, true)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.ReworkRunning, TaskLifecycleState.PROpen, true)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.MergeReady, TaskLifecycleState.PROpen, true)]

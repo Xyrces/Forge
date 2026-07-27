@@ -1120,7 +1120,8 @@ Console.Error.WriteLine(ex.ToString());
             eventBus,
             loggerFactory.CreateLogger<PRWatcher>(),
             gates: stageGates,
-            lifecycle: lifecycle);
+            lifecycle: lifecycle,
+            runs: agentRunStore);
         // P4 Stage B — pick the workflow runtime based on
 // appsettings.json. The InProcess dispatcher (default) is a
 // thin lambda over the existing EngineeringDispatchWorkflow +
@@ -1144,7 +1145,8 @@ Console.Error.WriteLine(ex.ToString());
                 memoryExtractor, extractionStore,
                 loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
                 projectId: primary.Id,
-                timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes)
+                timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
+                lifecycle: lifecycle)
                 .Build();
             var services = new ServiceCollection()
                 .AddSingleton(workflow)

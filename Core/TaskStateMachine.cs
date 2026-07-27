@@ -9,6 +9,7 @@ namespace Forge.Core;
 public enum TaskEvent
 {
     Dispatched,
+    RunStarted,
     RunCompletedDiff,
     RunCompletedNoDiff,
     RunDied,
@@ -88,6 +89,13 @@ public sealed class TaskStateMachine
             // 2026-07-26: Dispatching+Dispatched and
             // StalledRework+Dispatched violations).
             TaskLifecycleState.Dispatching, TaskLifecycleState.StalledRework);
+        Add(TaskEvent.RunStarted, TaskLifecycleState.AgentRunning,
+            // The model run actually begins — advances the recorded
+            // state and (critically) refreshes stateEnteredAt, so the
+            // stall guard's clock measures from run-start, not from
+            // the rework fire (observed live 2026-07-27: retried
+            // stalls looked frozen at Dispatching for the whole run).
+            TaskLifecycleState.Dispatching, TaskLifecycleState.AgentRunning);
         Add(TaskEvent.RunCompletedDiff, TaskLifecycleState.PROpen,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
