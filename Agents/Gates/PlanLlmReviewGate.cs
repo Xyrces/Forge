@@ -19,6 +19,12 @@ public sealed class PlanLlmReviewGate : IRunGate
     public const string GateName = "plan-llm-review";
     public string Name => GateName;
 
+    /// <summary>One-line description for the catalog UI.</summary>
+    public const string DescriptionText =
+        "LLM critic that judges whether the plan solves the task with a sound, minimal, process-compliant approach.";
+    public string Description => DescriptionText;
+    public GateKind Kind => GateKind.Llm;
+
     private readonly Func<IChatClient> _clientFactory;
     private readonly ILogger _logger;
 
