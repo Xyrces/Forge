@@ -70,6 +70,7 @@ public static class FlowEndpoints
                 if (node is not null) Add(node, issue.Id, issue.Title, issue.Status.ToString());
             }
 
+            var layout = DirectedFlowLayout.Compute(definition);
             return Results.Json(new
             {
                 lanes = new[] { WorkflowLanes.Planning, WorkflowLanes.Implementation },
@@ -84,6 +85,27 @@ public static class FlowEndpoints
                     issues = samples[n.Id],
                 }),
                 edges = definition.Edges.Select(e => new { from = e.From, to = e.To, kind = e.Kind, label = e.Label }),
+                // Deterministic directed layout (centered spine,
+                // straight forward edges, framed loops) — the UI
+                // renders this directly, no client-side engine.
+                layout = new
+                {
+                    width = layout.Width,
+                    height = layout.Height,
+                    laneDividerY = layout.LaneDividerY,
+                    nodes = layout.Nodes.ToDictionary(
+                        n => n.Id,
+                        n => new { x = n.X, y = n.Y, w = n.W, h = n.H },
+                        StringComparer.Ordinal),
+                    edges = layout.Edges.Select(e => new
+                    {
+                        from = e.From,
+                        to = e.To,
+                        kind = e.Kind,
+                        label = e.Label,
+                        points = e.Points.Select(p => new { x = p.X, y = p.Y }),
+                    }),
+                },
                 activeSprintId = active?.Id,
                 // Issue-first picker: every traceable work item (newest
                 // activity first), capped for payload size.

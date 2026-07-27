@@ -1,7 +1,6 @@
 @page "/flow"
 @inject HttpClient Http
 @inject NavigationManager Nav
-@inject IJSRuntime JS
 @implements IDisposable
 @using System.Net.Http.Json
 @using System.Text
@@ -83,11 +82,10 @@
         </div>
 
         <div style="display:flex;gap:16px;align-items:flex-start">
-            @* Directed layout: dagre (vendored, js/flowLayout.js)
-               computes the vertical layered graph — branches fan out
-               and loop edges (rework → agent) arc back around the
-               spine. Counts refresh every poll; the layout only
-               recomputes when the graph SHAPE changes. *@
+            @* Directed layout, computed server-side
+               (DirectedFlowLayout): centered vertical spine with
+               straight forward edges, sinks in fixed side columns,
+               loops on fixed outer margins — framed by construction. *@
             <div class="flow-canvas">
             <svg viewBox="0 0 @F(_svgWidth) @F(_svgHeight)">
                 <defs>
@@ -128,8 +126,8 @@
                 @* Nodes *@
                 @foreach (var n in _fleet.Nodes)
                 {
-                    var pos = NodePos(n.Id, n.X, n.Y);
-                    var (w, h) = NodeSize(n.Label);
+                    var pos = NodePos(n.Id, n.X, n.Y, n.Label);
+                    var (w, h) = (pos.W, pos.H);
                     var selected = _selectedNode == n.Id;
                     var inJourney = _journey?.Visits.Any(v => v.Node == n.Id) == true;
                     var isCurrent = _journey?.CurrentNode == n.Id;
@@ -348,86 +346,71 @@
             _fleet = await Http.GetFromJsonAsync<FleetDto>("/api/flow");
             _lastFetch = DateTime.Now;
             _loadError = null;
-            await EnsureLayoutAsync();
+            ApplyLayout();
             StateHasChanged();
         }
         catch (Exception ex) { _loadError = ex.Message; /* keep last good frame */ }
     }
 
-    // ---- Directed layout (dagre via JS interop) ----
+    // ---- Directed layout (computed server-side, rendered as-is) ----
 
     private LayoutResult? _layout;
-    private string? _layoutSignature;
     private double _svgWidth = 740;
     private double _svgHeight = 480;
     private double? _laneDividerY;
 
     private List<LayoutEdgeDto> LayoutEdges => _layout?.Edges ?? new();
 
-    private async Task EnsureLayoutAsync()
+    private void ApplyLayout()
     {
-        if (_fleet is null) return;
-        // Layout depends only on the graph SHAPE — counts change
-        // every poll, the shape only when the definition changes.
-        var signature = string.Join(";", _fleet.Nodes.Select(n => n.Id))
-            + "|" + string.Join(";", _fleet.Edges.Select(e => $"{e.From}>{e.To}:{e.Kind}:{e.Label}"));
-        if (signature == _layoutSignature) return;
-        try
+        if (_fleet?.Layout is null)
         {
-            var nodes = _fleet.Nodes.Select(n =>
-            {
-                var (w, h) = NodeSize(n.Label);
-                return new { id = n.Id, width = w, height = h };
-            }).ToArray();
-            var edges = _fleet.Edges.Select(e => new { from = e.From, to = e.To, kind = e.Kind ?? "happy" }).ToArray();
-            var result = await JS.InvokeAsync<LayoutResult>("flowLayout.compute", nodes, edges);
-            // Labels ride along from the payload (dagre doesn't know them).
-            foreach (var le in result.Edges)
-            {
-                le.Label = _fleet.Edges.FirstOrDefault(e => e.From == le.From && e.To == le.To)?.Label;
-            }
-            _layout = result;
-            _layoutSignature = signature;
-            _svgWidth = Math.Max(result.Width, 200);
-            _svgHeight = Math.Max(result.Height, 200);
-
-            // Lane divider: midway between the lowest planning node
-            // and the highest implementation node.
-            var planning = _fleet.Nodes.Where(n => n.Lane == "planning").ToList();
-            var impl = _fleet.Nodes.Where(n => n.Lane == "implementation").ToList();
-            if (planning.Count > 0 && impl.Count > 0)
-            {
-                var planningBottom = planning.Max(n => NodePos(n.Id, n.X, n.Y).Y + NodeSize(n.Label).H / 2);
-                var implTop = impl.Min(n => NodePos(n.Id, n.X, n.Y).Y - NodeSize(n.Label).H / 2);
-                _laneDividerY = (planningBottom + implTop) / 2;
-            }
-        }
-        catch (Exception)
-        {
-            // JS unavailable (prerender, circuit churn): fall back to
-            // the definition's baked coordinates, straight edges.
+            // Older backend without the layout payload: definition
+            // coordinates + formula sizes, straight edges.
             _layout = null;
-            _layoutSignature = signature;
             _svgWidth = 740;
             _svgHeight = 480;
-            _laneDividerY = 215;
+            _laneDividerY = null;
+            return;
         }
+        var p = _fleet.Layout;
+        _layout = new LayoutResult
+        {
+            Nodes = p.Nodes.ToDictionary(
+                kv => kv.Key,
+                kv => new PointDto { X = kv.Value.X, Y = kv.Value.Y, W = kv.Value.W, H = kv.Value.H },
+                StringComparer.Ordinal),
+            Edges = p.Edges.Select(e => new LayoutEdgeDto
+            {
+                From = e.From,
+                To = e.To,
+                Kind = e.Kind ?? "happy",
+                Label = e.Label,
+                Points = e.Points.Select(pt => new PointDto { X = pt.X, Y = pt.Y }).ToList(),
+            }).ToList(),
+        };
+        _svgWidth = Math.Max(p.Width, 200);
+        _svgHeight = Math.Max(p.Height, 200);
+        _laneDividerY = p.LaneDividerY;
     }
 
-    private PointDto NodePos(string id, double fallbackX, double fallbackY)
+    private PointDto NodePos(string id, double fallbackX, double fallbackY, string label)
     {
         if (_layout is not null && _layout.Nodes.TryGetValue(id, out var p))
         {
             return p;
         }
-        return new PointDto { X = fallbackX, Y = fallbackY };
+        return new PointDto
+        {
+            X = fallbackX,
+            Y = fallbackY,
+            W = Math.Clamp(label.Length * 7.5 + 36, 110, 220),
+            H = 46,
+        };
     }
 
-    private static (double W, double H) NodeSize(string label)
-        => (Math.Clamp(label.Length * 7.5 + 36, 110, 220), 46);
-
-    // Catmull-Rom -> cubic Bézier: dagre's routed polyline becomes
-    // the smooth arcs the loop edges should read as.
+    // Catmull-Rom -> cubic Bézier: the layout's routed polylines
+    // become the smooth arcs the loop edges should read as.
     private static string SmoothPath(IReadOnlyList<PointDto> pts)
     {
         if (pts.Count == 0) return "";
@@ -496,13 +479,31 @@
 
     private sealed record FleetDto(
         string[] Lanes, List<NodeDto> Nodes, List<EdgeDto> Edges, string? ActiveSprintId,
-        List<IssueSampleDto> AllIssues);
+        List<IssueSampleDto> AllIssues, LayoutPayload? Layout);
+    private sealed class LayoutPayload
+    {
+        public double Width { get; set; }
+        public double Height { get; set; }
+        public double? LaneDividerY { get; set; }
+        public Dictionary<string, LayoutNodePayload> Nodes { get; set; } = new();
+        public List<LayoutEdgePayload> Edges { get; set; } = new();
+    }
+    private sealed class LayoutNodePayload { public double X { get; set; } public double Y { get; set; } public double W { get; set; } public double H { get; set; } }
+    private sealed class LayoutEdgePayload
+    {
+        public string From { get; set; } = "";
+        public string To { get; set; } = "";
+        public string? Kind { get; set; }
+        public string? Label { get; set; }
+        public List<LayoutPointPayload> Points { get; set; } = new();
+    }
+    private sealed class LayoutPointPayload { public double X { get; set; } public double Y { get; set; } }
     private sealed record NodeDto(
         string Id, string Label, string Lane, double X, double Y, int Count, List<IssueSampleDto> Issues);
     private sealed record EdgeDto(string From, string To, string? Kind, string? Label);
     private sealed record IssueSampleDto(string Id, string Title, string Status);
 
-    private sealed class PointDto { public double X { get; set; } public double Y { get; set; } }
+    private sealed class PointDto { public double X { get; set; } public double Y { get; set; } public double W { get; set; } public double H { get; set; } }
     private sealed class LayoutResult
     {
         public double Width { get; set; }
