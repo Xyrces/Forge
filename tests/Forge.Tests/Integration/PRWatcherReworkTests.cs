@@ -43,6 +43,7 @@ public class PRWatcherReworkTests : IDisposable
         public IReadOnlyList<string> FailedChecks = Array.Empty<string>();
         public bool MergeResult = true;
         public int MergeCalls;
+        public List<PullRequestReview> Reviews = new();
         public FakeGitHub() : base("o", "r", null) { }
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult(new PullRequest(number));
@@ -53,7 +54,7 @@ public class PRWatcherReworkTests : IDisposable
         public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default)
             => Task.FromResult(FailedChecks);
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
-            => Task.FromResult((IReadOnlyList<PullRequestReview>)Array.Empty<PullRequestReview>());
+            => Task.FromResult((IReadOnlyList<PullRequestReview>)Reviews);
         public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
         {
             MergeCalls++;
@@ -227,6 +228,54 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal("ReworkQueued", after.GetMetadata("state"));
         Assert.Equal("abc123", after.GetMetadata("reworkForSha"));
         Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
+    public async Task StaleFormalApproval_AtPriorHead_DoesNotMerge()
+    {
+        // The merge rule is an approval AT THE CURRENT HEAD (formal
+        // review or reviewer-agent). The agent verdict was always
+        // SHA-scoped; formal GitHub reviews were not — an operator
+        // approval at head A survived a rework push and could merge
+        // head B unreviewed. Real-path reviews are now filtered by
+        // CommitId == head; a stale approval must not merge.
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        gh.Reviews.Add(NewReview(PullRequestReviewState.Approved, commitId: "old-head"));
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            headShaOverride: _ => "new-head");
+
+        Assert.NotEqual(PRWatcher.WatchPollOutcome.Merged, outcome);
+        Assert.Equal(0, gh.MergeCalls);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task FormalApproval_AtCurrentHead_Merges()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        gh.Reviews.Add(NewReview(PullRequestReviewState.Approved, commitId: "new-head"));
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            headShaOverride: _ => "new-head");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
+        Assert.Equal(1, gh.MergeCalls);
+        Assert.Equal(IssueStatus.Completed, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    private static PullRequestReview NewReview(PullRequestReviewState state, string commitId)
+    {
+        var review = new PullRequestReview();
+        typeof(PullRequestReview).GetProperty(nameof(PullRequestReview.State))!
+            .SetValue(review, new Octokit.StringEnum<PullRequestReviewState>(state));
+        typeof(PullRequestReview).GetProperty(nameof(PullRequestReview.CommitId))!
+            .SetValue(review, commitId);
+        return review;
     }
 
     [Fact]

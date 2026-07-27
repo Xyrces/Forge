@@ -168,10 +168,16 @@ public sealed class PRWatcher
         // without going through Octokit's sealed
         // PullRequestReview ctor. Default = real GitHub call.
         // Formal GitHub reviews count as an OPERATOR verdict
-        // (solo-identity: the operator approves via the GitHub UI).
+        // (solo-identity: the operator approves via the GitHub UI) —
+        // but only against the CURRENT head SHA: a review submitted
+        // before a rework push is stale and must neither merge nor
+        // block the new head (the same SHA rule the reviewer-agent
+        // verdict below already follows). The reviewsOverride test
+        // seam supplies states directly and is treated as current-head.
         var reviewStates = reviewsOverride is not null
             ? reviewsOverride(prNumber)
             : (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
+                .Where(r => string.Equals(r.CommitId, sha, StringComparison.Ordinal))
                 .Select(r => r.State.Value).ToList();
 
         // Reviewer-agent verdict from the watch's own metadata
