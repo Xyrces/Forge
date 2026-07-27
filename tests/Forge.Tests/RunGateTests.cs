@@ -85,6 +85,31 @@ public class RunGateTests : IDisposable
     // ---------- PlanTerritoryGate ----------
 
     [Fact]
+    public async Task TerritoryGate_BareFilenameInProse_NotFlagged()
+    {
+        // Observed live 2026-07-26 (task-196): the Files section had
+        // full paths, but prose in Goal mentioned bare "RunGate.cs"
+        // and the extractor flagged it as nonexistent — 3 revisions
+        // burned. Extraction is scoped to ## Files only.
+        File.WriteAllText(Path.Combine(_workDir, "probe.tmp"), "x"); // worktree root sanity
+        var plan = """
+            ## Goal
+            Add Description to RunGate.cs and each concrete gate (PlanSchemaGate.cs etc).
+            ## Files
+            - `Agents/Gates/RunGate.cs` (new)
+            ## Approach
+            Add the property.
+            ## Test
+            Build.
+            ## Done
+            Builds.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "Agents/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
     public async Task TerritoryGate_NoTerritoryConstraint_Approves()
     {
         var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(FullPlan));
