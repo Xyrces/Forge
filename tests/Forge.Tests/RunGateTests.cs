@@ -274,8 +274,8 @@ public class RunGateTests : IDisposable
     private sealed class ThrowingGate : IRunGate
     {
         public string Name => "throwing";
+        public string Description => "Throwing test gate";
         public GateKind Kind => GateKind.Deterministic;
-        public string Description => "test gate that throws";
         public Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx) => throw new InvalidOperationException("boom");
     }
 

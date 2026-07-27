@@ -10,14 +10,12 @@ public sealed class PlanSchemaGate : IRunGate
 {
     public const string GateName = "plan-schema";
     public string Name => GateName;
+
+    public const string DescriptionText =
+        "Validates that the plan contains the required sections (goal, files, approach, test, done).";
+
     public GateKind Kind => GateKind.Deterministic;
     public string Description => DescriptionText;
-
-    /// <summary>User-facing description of this gate for the catalog.</summary>
-    public const string DescriptionText =
-        "Checks that the plan contains the required sections (goal, files, approach, test, done).";
-
-
 
     /// <summary>Required sections, matched as case-insensitive
     /// keywords at the start of a line (markdown heading or bold

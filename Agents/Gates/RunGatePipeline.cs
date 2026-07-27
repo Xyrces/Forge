@@ -21,16 +21,6 @@ public sealed class RunGatePipeline
 {
     public const string PreImplementationCheckpoint = "preImplementation";
 
-    /// <summary>Catalog of all known gates with their kind and description.
-    /// Used by the catalog endpoint to annotate the resolved list.</summary>
-    public static readonly IReadOnlyDictionary<string, (GateKind Kind, string Description)> GateCatalog =
-        new Dictionary<string, (GateKind, string)>
-        {
-            [PlanSchemaGate.GateName] = (GateKind.Deterministic, PlanSchemaGate.DescriptionText),
-            [PlanTerritoryGate.GateName] = (GateKind.Deterministic, PlanTerritoryGate.DescriptionText),
-            [PlanLlmReviewGate.GateName] = (GateKind.Llm, PlanLlmReviewGate.DescriptionText),
-        };
-
     /// <summary>Built-in default gate order per checkpoint. The
     /// deterministic gates front-run the LLM critic so the expensive
     /// call only sees well-formed, in-territory plans.</summary>
@@ -38,6 +28,18 @@ public sealed class RunGatePipeline
         new Dictionary<string, string[]>
         {
             [PreImplementationCheckpoint] = new[] { PlanSchemaGate.GateName, PlanTerritoryGate.GateName, PlanLlmReviewGate.GateName },
+        };
+
+    /// <summary>Known-gate catalog keyed by name, for the read-only
+    /// catalog endpoint. Each entry carries the kind (Deterministic
+    /// or Llm) and a one-line description sourced from the gate
+    /// class itself.</summary>
+    public static readonly IReadOnlyDictionary<string, (GateKind Kind, string Description)> GateCatalog =
+        new Dictionary<string, (GateKind Kind, string Description)>
+        {
+            [PlanSchemaGate.GateName] = (GateKind.Deterministic, PlanSchemaGate.DescriptionText),
+            [PlanTerritoryGate.GateName] = (GateKind.Deterministic, PlanTerritoryGate.DescriptionText),
+            [PlanLlmReviewGate.GateName] = (GateKind.Llm, PlanLlmReviewGate.DescriptionText),
         };
 
     private readonly GateOptions _options;
@@ -58,12 +60,44 @@ public sealed class RunGatePipeline
     }
 
     /// <summary>Resolve the ordered gate list for a checkpoint:
-    /// DB override -> config -> built-in defaults. Returns
-    /// (names, source) where source is one of "db_override",
-    /// "config", or "builtin_default".</summary>
+    /// DB override -> config -> built-in defaults.</summary>
+    public async Task<IReadOnlyList<string>> ResolveGateNamesAsync(string checkpoint, CancellationToken ct)
+    {
+        if (_memory is not null)
+        {
+            var rows = await _memory.RecallAsync($"gates/run/{checkpoint}", ct);
+            var row = rows.LastOrDefault();
+            if (row is not null)
+            {
+                try
+                {
+                    var names = JsonSerializer.Deserialize<string[]>(row.Body);
+                    if (names is { Length: > 0 }) return names;
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(ex, "RunGatePipeline: malformed DB override gates/run/{Checkpoint} — falling through to config", checkpoint);
+                }
+            }
+        }
+        if (_options.Run.TryGetValue(checkpoint, out var configured) && configured.Length > 0)
+        {
+            return configured;
+        }
+        return Defaults.TryGetValue(checkpoint, out var builtIn) ? builtIn : Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// Resolve the ordered gate list for a checkpoint AND
+    /// identify the resolution source ("db_override", "config",
+    /// or "builtin_default"). Used by the read-only catalog
+    /// endpoint so the operator can see where the gate list
+    /// comes from.
+    /// </summary>
     public async Task<(IReadOnlyList<string> Names, string Source)> ResolveWithSourceAsync(
         string checkpoint, CancellationToken ct)
     {
+        // Check DB override first.
         if (_memory is not null)
         {
             var rows = await _memory.RecallAsync($"gates/run/{checkpoint}", ct);
@@ -81,21 +115,17 @@ public sealed class RunGatePipeline
                 }
             }
         }
+        // Check config.
         if (_options.Run.TryGetValue(checkpoint, out var configured) && configured.Length > 0)
         {
             return (configured, "config");
         }
-        return Defaults.TryGetValue(checkpoint, out var builtIn)
-            ? (builtIn, "builtin_default")
-            : (Array.Empty<string>(), "unknown");
-    }
-
-    /// <summary>Resolve the ordered gate list for a checkpoint:
-    /// DB override -> config -> built-in defaults.</summary>
-    public async Task<IReadOnlyList<string>> ResolveGateNamesAsync(string checkpoint, CancellationToken ct)
-    {
-        var (names, _) = await ResolveWithSourceAsync(checkpoint, ct);
-        return names;
+        // Fall back to built-in defaults.
+        if (Defaults.TryGetValue(checkpoint, out var builtIn))
+        {
+            return (builtIn, "builtin_default");
+        }
+        return (Array.Empty<string>(), "unknown");
     }
 
     /// <summary>Evaluate the checkpoint's gates in order. First

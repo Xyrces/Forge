@@ -9,21 +9,22 @@ using Forge.Core;
 namespace Forge.Dashboard;
 
 /// <summary>
-/// Endpoints for inspecting and overriding the run-quality gate
-/// catalog per checkpoint. GET returns the resolved gate list
-/// (DB override -> config -> built-in defaults) with annotation;
-/// PUT writes an override to the memory store for the checkpoint;
-/// DELETE removes it.
+/// Read-only and write endpoints for the run-quality-gate catalog.
+/// GET returns the resolved ordered gate list with resolution source.
+/// PUT writes a DB override via memory store. DELETE removes the
+/// override, restoring config/built-in default resolution.
 /// </summary>
 public static class RunGateCatalogEndpoints
 {
+    private sealed record PutGateOverrideRequest(string[] Gates);
+
     public static void MapRunGateCatalogEndpoints(
         WebApplication app,
         GateOptions options,
         MemoryStore? memory,
         ILogger logger)
     {
-        // GET /api/gates/{checkpoint} — resolved catalog with source + kind + unknownNames
+        // GET — resolved gate list with source annotation.
         app.MapGet("/api/gates/{checkpoint}", async (string checkpoint, CancellationToken ct) =>
         {
             var pipeline = new RunGatePipeline(
@@ -39,62 +40,79 @@ public static class RunGateCatalogEndpoints
                 return Results.NotFound(new { error = "unknown_checkpoint", checkpoint });
             }
 
-            var gates = names.Select(name =>
-            {
-                string? kind = null;
-                string? description = null;
-                if (RunGatePipeline.GateCatalog.TryGetValue(name, out var entry))
-                {
-                    kind = entry.Kind.ToString();
-                    description = entry.Description;
-                }
-                return new { name, kind, description, source };
-            }).ToList();
-
-            var unknownNames = names.Where(n => !RunGatePipeline.GateCatalog.ContainsKey(n)).ToList();
-
-            return Results.Json(new { checkpoint, source, gates, unknownNames }, DashboardJson.Options);
+            return ToResolvedResponse(checkpoint, names, source);
         });
 
-        // PUT /api/gates/{checkpoint} — write gate override to memory
-        app.MapPut("/api/gates/{checkpoint}", async (string checkpoint, PutGateOverrideRequest body, CancellationToken ct) =>
+        // PUT — write a DB override for this checkpoint.
+        app.MapPut("/api/gates/{checkpoint}", async (string checkpoint, PutGateOverrideRequest request, CancellationToken ct) =>
         {
-            if (body.Gates is null || body.Gates.Length == 0)
-            {
-                return Results.BadRequest(new { error = "gates array must not be empty" });
-            }
-
             if (memory is null)
+                return Results.Problem("Memory store not available", statusCode: 503);
+
+            if (request.Gates is null || request.Gates.Length == 0)
+                return Results.BadRequest(new { error = "gates must not be empty" });
+
+            // Warn about unknown names but don't reject (the pipeline already skips them).
+            var unknown = request.Gates
+                .Where(n => !RunGatePipeline.GateCatalog.ContainsKey(n))
+                .ToList();
+            if (unknown.Count > 0)
             {
-                return Results.Problem(detail: "Memory store not available", statusCode: 503);
+                logger.LogWarning(
+                    "Gate override for {Checkpoint} contains unknown gate names: {Unknown}",
+                    checkpoint, string.Join(", ", unknown));
             }
 
-            var json = JsonSerializer.Serialize(body.Gates);
+            var json = JsonSerializer.Serialize(request.Gates, DashboardJson.Options);
             await memory.RememberAsync($"gates/run/{checkpoint}", json, ct: ct);
-            logger.LogInformation("Gate override written for checkpoint {Checkpoint}: {Gates}", checkpoint, json);
 
-            return Results.Json(new { checkpoint, gates = body.Gates });
+            logger.LogInformation(
+                "Gate override saved for {Checkpoint}: {Names}",
+                checkpoint, string.Join(", ", request.Gates));
+
+            // Return the resolved state after the mutation.
+            var pipeline = new RunGatePipeline(options, memory, _ => null, logger);
+            var (names, source) = await pipeline.ResolveWithSourceAsync(checkpoint, ct);
+            return ToResolvedResponse(checkpoint, names, source);
         });
 
-        // DELETE /api/gates/{checkpoint} — remove gate override from memory
+        // DELETE — remove the DB override, resetting to config/built-in defaults.
         app.MapDelete("/api/gates/{checkpoint}", async (string checkpoint, CancellationToken ct) =>
         {
             if (memory is null)
-            {
-                return Results.Problem(detail: "Memory store not available", statusCode: 503);
-            }
+                return Results.Problem("Memory store not available", statusCode: 503);
 
             var removed = await memory.ForgetAsync($"gates/run/{checkpoint}", ct);
             if (!removed)
-            {
                 return Results.NotFound(new { error = "no_override_found", checkpoint });
-            }
 
-            logger.LogInformation("Gate override removed for checkpoint {Checkpoint}", checkpoint);
-            return Results.NoContent();
+            logger.LogInformation("Gate override removed for {Checkpoint} — reset to defaults", checkpoint);
+
+            // Return the resolved state (will now come from config or defaults).
+            var pipeline = new RunGatePipeline(options, memory, _ => null, logger);
+            var (names, source) = await pipeline.ResolveWithSourceAsync(checkpoint, ct);
+
+            if (names.Count == 0 && source == "unknown")
+                return Results.NotFound(new { error = "unknown_checkpoint", checkpoint });
+
+            return ToResolvedResponse(checkpoint, names, source);
         });
     }
 
-    /// <summary>Request DTO for PUT /api/gates/{checkpoint}.</summary>
-    public sealed record PutGateOverrideRequest(string[] Gates);
+    private static IResult ToResolvedResponse(string checkpoint, IReadOnlyList<string> names, string source)
+    {
+        var gates = names.Select(name =>
+        {
+            string? kind = null;
+            string? description = null;
+            if (RunGatePipeline.GateCatalog.TryGetValue(name, out var entry))
+            {
+                kind = entry.Kind.ToString();
+                description = entry.Description;
+            }
+            return new { name, kind, description, source };
+        }).ToList();
+
+        return Results.Json(new { checkpoint, source, gates }, DashboardJson.Options);
+    }
 }
