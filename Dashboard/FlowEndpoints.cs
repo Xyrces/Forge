@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Forge.Core;
+using Forge.Core.Workflow;
 using Forge.Dashboard.Flow;
 using Forge.Orchestrator.Sprint;
 
@@ -22,12 +23,19 @@ public static class FlowEndpoints
         IIssueStore issues,
         ISpecStore specs,
         ISprintStore sprints,
-        Orchestrator.MemoryExtractionStore? extractions = null)
+        Orchestrator.MemoryExtractionStore? extractions = null,
+        WorkflowResolver? workflow = null)
     {
         app.MapGet("/api/flow", async (CancellationToken ct) =>
         {
-            var counts = FlowGraph.Nodes.ToDictionary(n => n.Id, _ => 0, StringComparer.Ordinal);
-            var samples = FlowGraph.Nodes.ToDictionary(
+            // The graph shape comes from the RESOLVED workflow
+            // definition (published override → built-in default);
+            // classification maps reality onto its step ids.
+            var definition = workflow is not null
+                ? await workflow.ResolveAsync(ct)
+                : WorkflowDefaults.Definition;
+            var counts = definition.Steps.ToDictionary(n => n.Id, _ => 0, StringComparer.Ordinal);
+            var samples = definition.Steps.ToDictionary(
                 n => n.Id, _ => new List<object>(MaxSamplesPerNode), StringComparer.Ordinal);
             void Add(string nodeId, string id, string title, string status)
             {
@@ -62,8 +70,8 @@ public static class FlowEndpoints
 
             return Results.Json(new
             {
-                lanes = new[] { FlowGraph.LanePlanning, FlowGraph.LaneImplementation },
-                nodes = FlowGraph.Nodes.Select(n => new
+                lanes = new[] { WorkflowLanes.Planning, WorkflowLanes.Implementation },
+                nodes = definition.Steps.Select(n => new
                 {
                     id = n.Id,
                     label = n.Label,
@@ -73,7 +81,7 @@ public static class FlowEndpoints
                     count = counts[n.Id],
                     issues = samples[n.Id],
                 }),
-                edges = FlowGraph.Edges.Select(e => new { from = e.From, to = e.To }),
+                edges = definition.Edges.Select(e => new { from = e.From, to = e.To, kind = e.Kind, label = e.Label }),
                 activeSprintId = active?.Id,
                 // Issue-first picker: every traceable work item (newest
                 // activity first), capped for payload size.

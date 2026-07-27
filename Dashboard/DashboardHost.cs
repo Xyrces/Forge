@@ -459,7 +459,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         }
         GateVerdictEndpoints.MapGateVerdictEndpoints(_app, _issues, _logger);
 
-        FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions);
+        FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions,
+            _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null);
         NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory);
         if (_agentRuns is not null)
         {
