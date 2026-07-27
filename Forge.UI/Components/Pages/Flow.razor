@@ -59,13 +59,37 @@
             }
         </div>
 
+        <div class="flow-legend">
+            <span class="flow-legend__item">
+                <svg width="26" height="14"><rect x="1" y="1" width="24" height="12" rx="3" fill="var(--surface)" stroke="var(--outline-variant)" /></svg>
+                stage
+            </span>
+            <span class="flow-legend__item">
+                <svg width="14" height="14"><circle cx="7" cy="7" r="6" fill="var(--primary)" /><text x="7" y="10" text-anchor="middle" font-size="8" fill="var(--on-primary)" font-weight="600">3</text></svg>
+                items at stage
+            </span>
+            <span class="flow-legend__item">
+                <svg width="30" height="8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--outline)" stroke-width="1.4" /></svg>
+                flow
+            </span>
+            <span class="flow-legend__item">
+                <svg width="30" height="8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--warn)" stroke-width="1.4" stroke-dasharray="5 3" /></svg>
+                loop / failure path
+            </span>
+            <span class="flow-legend__item">
+                <svg width="30" height="8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--primary)" stroke-width="2.5" /></svg>
+                traced journey
+            </span>
+        </div>
+
         <div style="display:flex;gap:16px;align-items:flex-start">
             @* Directed layout: dagre (vendored, js/flowLayout.js)
                computes the vertical layered graph — branches fan out
                and loop edges (rework → agent) arc back around the
                spine. Counts refresh every poll; the layout only
                recomputes when the graph SHAPE changes. *@
-            <svg viewBox="0 0 @F(_svgWidth) @F(_svgHeight)" style="flex:1;min-width:0;max-width:900px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:12px">
+            <div class="flow-canvas">
+            <svg viewBox="0 0 @F(_svgWidth) @F(_svgHeight)">
                 <defs>
                     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                         <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--outline)" />
@@ -126,6 +150,7 @@
                     </g>
                 }
             </svg>
+            </div>
 
             <div style="width:380px;flex-shrink:0">
                 @if (_selectedNode is not null)

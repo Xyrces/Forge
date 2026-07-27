@@ -3,6 +3,7 @@
    ------------------------------------------------------------------------- */
 
 :root {
+  color-scheme: dark;
   /* Surfaces — dark theme (default) */
   --bg:               #0A0D17;
   --surface:          #0F1320;
@@ -36,6 +37,7 @@
 
 @media (prefers-color-scheme: light) {
   :root {
+    color-scheme: light;
     --bg:               #F7F8FB;
     --surface:          #FFFFFF;
     --surface-1:        #F0F2F7;
@@ -884,3 +886,9 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .wf-branch { margin-top: 6px; }
 .wf-branch__chip { border-style: dashed; }
 .wf-branch__nested { margin: 6px 0 0 18px; padding-left: 12px; border-left: 2px solid var(--outline-variant); }
+
+/* Flow page: scrollable graph canvas + legend */
+.flow-canvas { flex: 1; min-width: 0; max-width: 900px; max-height: calc(100vh - 210px); overflow: auto; border: 1px solid var(--outline-variant); border-radius: 12px; background: var(--surface); }
+.flow-canvas svg { display: block; width: 100%; height: auto; border: none; border-radius: 0; background: transparent; }
+.flow-legend { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; font-size: 12px; color: var(--on-surface-variant); }
+.flow-legend__item { display: inline-flex; gap: 6px; align-items: center; }

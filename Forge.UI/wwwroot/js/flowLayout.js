@@ -7,7 +7,7 @@ window.flowLayout = {
     // returns { width, height, nodes: { id: {x,y} }, edges: [{ from, to, kind, points: [{x,y}] }] }
     compute: function (nodes, edges) {
         var g = new dagre.graphlib.Graph();
-        g.setGraph({ rankdir: 'TB', nodesep: 36, ranksep: 64, edgesep: 18, marginx: 24, marginy: 24 });
+        g.setGraph({ rankdir: 'TB', nodesep: 30, ranksep: 52, edgesep: 18, marginx: 24, marginy: 24 });
         g.setDefaultEdgeLabel(function () { return {}; });
         nodes.forEach(function (n) { g.setNode(n.id, { width: n.width, height: n.height }); });
         edges.forEach(function (e) { g.setEdge(e.from, e.to); });
