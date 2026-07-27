@@ -128,9 +128,9 @@ public sealed class SprintAssembler
                 // BELONGS there — it is part of the same work (its
                 // followUpOf chain reaches a sprint member) or it
                 // enables/unblocks the ongoing work (a blocks edge to
-                // a member, or an operator P1/blocker flag). Ad-hoc
-                // tasks never form their own sprint; unrelated ones
-                // wait in the backlog for intake promotion.
+                // a member, or an operator P1/blocker flag). Unrelated
+                // groomed ad-hoc work gets its own solo sprint at
+                // assembly instead.
                 await InjectAdHocAsync(active, issues, sprints, ct);
                 return;
             }
@@ -141,6 +141,10 @@ public sealed class SprintAssembler
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
                 null, $"Sprint '{active.Name}' completed"));
         }
+
+        // Epic lifecycle: close epics whose entire tree is terminal
+        // (they otherwise linger as Pending on the board forever).
+        await CloseTerminalEpicsAsync(issues, specs, ct);
 
         // Operator gate: completing a finished sprint is bookkeeping
         // (always allowed); STARTING new work is the gated decision.
@@ -262,6 +266,42 @@ public sealed class SprintAssembler
             return "operator requeue";
         }
         return null;
+    }
+
+    /// <summary>
+    /// Close epics whose entire tree is terminal (EpicCompletion
+    /// rule): spec(s) past grooming, all stories/tasks
+    /// Completed/Closed, no Failed/Blocked descendants, no live
+    /// watch. Epics have no other lifecycle — without this they
+    /// linger as Pending on the board forever (observed 2026-07-27:
+    /// epics 6-11 all Pending despite fully merged work).
+    /// Idempotent; Failed/Blocked descendants keep the epic open for
+    /// the operator (the no-auto-clear rule).
+    /// </summary>
+    private async Task CloseTerminalEpicsAsync(IIssueStore issues, ISpecStore specs, CancellationToken ct)
+    {
+        var all = await issues.ListAsync(new IssueFilter(), ct);
+        var epics = all.Where(i =>
+            i.Type == "epic" && i.Status is IssueStatus.Pending or IssueStatus.InProgress).ToList();
+        if (epics.Count == 0) return;
+        var allSpecs = await specs.ListAsync(projectId: null, status: null, ct);
+
+        foreach (var epic in epics)
+        {
+            var specsForEpic = allSpecs.Where(s =>
+                string.Equals(s.ParentIssueId, epic.Id, StringComparison.Ordinal)).ToList();
+            var decision = Core.EpicCompletion.Evaluate(epic, specsForEpic, all);
+            if (!decision.ShouldClose)
+            {
+                _logger.LogDebug("Epic {Id} stays open: {Reason}", epic.Id, decision.Reason);
+                continue;
+            }
+            await issues.TransitionAsync(epic.Id, IssueStatus.Closed,
+                $"auto-closed: {decision.Reason}", ct: ct);
+            _logger.LogInformation("Epic {Id} auto-closed ({Reason})", epic.Id, decision.Reason);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                epic.Id, "Epic auto-closed — all work terminal"));
+        }
     }
 
     private async Task AssembleNextAsync(string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)

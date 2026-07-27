@@ -74,6 +74,49 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task Epic_AutoCloses_WhenTreeTerminal_StaysOpenOtherwise()
+    {
+        // Epic lifecycle: epics with a fully terminal tree close on
+        // the assembler tick; open work anywhere keeps them open.
+        var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "test", Title: "s", Body: "b", ParentIssueId: epic.Id));
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "st", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "t", ParentId: story.Id));
+
+        // Spec not past grooming yet: epic stays open.
+        await Tick();
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(epic.Id))!.Status);
+
+        // Groom the spec, complete the tree: epic closes.
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, CancellationToken.None);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, CancellationToken.None);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, CancellationToken.None);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Completed, null);
+        await _issues.TransitionAsync(story.Id, IssueStatus.Completed, null);
+        await Tick();
+        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(epic.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Epic_StaysOpen_WhenDescendantFailed()
+    {
+        var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "test", Title: "s", Body: "b", ParentIssueId: epic.Id));
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "st", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "t", ParentId: story.Id));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, CancellationToken.None);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, CancellationToken.None);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, CancellationToken.None);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
+        await _issues.TransitionAsync(story.Id, IssueStatus.Completed, null);
+
+        await Tick();
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(epic.Id))!.Status);
+    }
+
+    [Fact]
     public async Task AssemblesActiveSprint_FromGroomedSpecGroup()
     {
         var (specId, storyIds, taskIds) = await SeedGroomedSpecAsync("Health endpoints", 3,
