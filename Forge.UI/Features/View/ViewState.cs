@@ -55,6 +55,20 @@ public sealed record ViewTask(
         && raw is not null
             ? raw.ToString()
             : null;
+
+    /// <summary>
+    /// The lifecycle state recorded by the state machine
+    /// (Core/TaskStateMachine), when present — Pending, Dispatching,
+    /// AgentRunning, ReworkQueued/Running, StalledRework, PROpen,
+    /// ParkedInfra, MergeReady, Merged, Completed, BlockedOperator,
+    /// Failed, Closed. Null for entities that predate the machine.
+    /// </summary>
+    public string? LifecycleState =>
+        Parameters is not null
+        && Parameters.TryGetValue("state", out var raw)
+        && raw is not null
+            ? raw.ToString()
+            : null;
 }
 
 public sealed record ViewAgent(

@@ -143,6 +143,12 @@ public static class FlowEndpoints
                 title = issue.Title,
                 status = issue.Status.ToString(),
                 currentNode,
+                // The state machine's record on this issue (when the
+                // task has been through the machine).
+                lifecycleState = issue.GetMetadata("state"),
+                lifecycleEvent = issue.GetMetadata("lastEvent"),
+                lifecycleStateEnteredAt = issue.GetMetadata("stateEnteredAt"),
+                lifecycleViolation = issue.GetMetadata("stateViolation"),
                 prNumber = issue.GetMetadata("prNumber"),
                 visits,
             });

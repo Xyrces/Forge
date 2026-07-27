@@ -45,7 +45,8 @@ public sealed class StartupRecovery
         IGitHubRecovery gitHub,
         IDashboardEventBus events,
         ILogger<StartupRecovery> logger,
-        StartupRecoveryOptions? options = null)
+        StartupRecoveryOptions? options = null,
+        Core.TaskStateMachine? lifecycle = null)
     {
         _issues = issues;
         _reports = reports;
@@ -54,6 +55,25 @@ public sealed class StartupRecovery
         _events = events;
         _logger = logger;
         _options = options ?? new StartupRecoveryOptions();
+        _lifecycle = lifecycle;
+    }
+
+    private readonly Core.TaskStateMachine? _lifecycle;
+
+    /// <summary>Report an observed event to the lifecycle machine
+    /// (best-effort — never breaks a recovery pass).</summary>
+    private async Task ReportLifecycleAsync(IssueRecord issue, Core.TaskEvent evt, CancellationToken ct)
+    {
+        if (_lifecycle is null) return;
+        try
+        {
+            var fresh = await _issues.GetAsync(issue.Id, ct) ?? issue;
+            await _lifecycle.ReportAsync(fresh, evt, watch: null, hasActiveDevRun: false, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "lifecycle report {Event} failed for {Id}; continuing", evt, issue.Id);
+        }
     }
 
     public StartupRecoveryOptions Options => _options;
@@ -134,6 +154,7 @@ public sealed class StartupRecovery
                     if (issue.RecoveryAttempts + 1 >= _options.MaxAttempts)
                     {
                         // Hard fail: clean up worktree + transition to Failed.
+                        await ReportLifecycleAsync(issue, Core.TaskEvent.BreakerTripped, issueCts.Token);
                         await TryRemoveWorktreeAsync(issue, issueCts.Token);
                         await _issues.TransitionAsync(issue.Id, IssueStatus.Failed,
                             $"recovered: {decision.Reason}", metadata: new Dictionary<string, object>
@@ -152,6 +173,10 @@ public sealed class StartupRecovery
                         $"retry: {decision.Reason}");
 
                 case RecoveryAction.Replay:
+                    // The crashed run is a died run in lifecycle
+                    // terms (its work may be partially committed);
+                    // the replay's re-dispatch reports Dispatched.
+                    await ReportLifecycleAsync(issue, Core.TaskEvent.RunDied, issueCts.Token);
                     return await ReplayFromCheckpointAsync(issue, decision, issueCts.Token);
 
                 default:

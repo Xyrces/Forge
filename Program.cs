@@ -1285,7 +1285,8 @@ Console.Error.WriteLine(ex.ToString());
             issues, recoveryReports!, primaryBundle.Worktrees,
             new Orchestrator.GitHubRecoveryAdapter(primaryBundle.GitHub),
             eventBus,
-            loggerFactory.CreateLogger<Orchestrator.StartupRecovery>());
+            loggerFactory.CreateLogger<Orchestrator.StartupRecovery>(),
+            lifecycle: lifecycle);
         _startupRecovery = startupRecovery;  // held against GC reaping
 
         // v1 multi-project: build the registry from configuration
