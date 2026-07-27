@@ -30,6 +30,18 @@ public sealed class RunGatePipeline
             [PreImplementationCheckpoint] = new[] { PlanSchemaGate.GateName, PlanTerritoryGate.GateName, PlanLlmReviewGate.GateName },
         };
 
+    /// <summary>Known-gate catalog keyed by name, for the read-only
+    /// catalog endpoint. Each entry carries the kind (Deterministic
+    /// or Llm) and a one-line description sourced from the gate
+    /// class itself.</summary>
+    public static readonly IReadOnlyDictionary<string, (GateKind Kind, string Description)> GateCatalog =
+        new Dictionary<string, (GateKind Kind, string Description)>
+        {
+            [PlanSchemaGate.GateName] = (GateKind.Deterministic, PlanSchemaGate.DescriptionText),
+            [PlanTerritoryGate.GateName] = (GateKind.Deterministic, PlanTerritoryGate.DescriptionText),
+            [PlanLlmReviewGate.GateName] = (GateKind.Llm, PlanLlmReviewGate.DescriptionText),
+        };
+
     private readonly GateOptions _options;
     private readonly MemoryStore? _memory;
     private readonly Func<string, IRunGate?> _gateFactory;
@@ -73,6 +85,47 @@ public sealed class RunGatePipeline
             return configured;
         }
         return Defaults.TryGetValue(checkpoint, out var builtIn) ? builtIn : Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// Resolve the ordered gate list for a checkpoint AND
+    /// identify the resolution source ("db_override", "config",
+    /// or "builtin_default"). Used by the read-only catalog
+    /// endpoint so the operator can see where the gate list
+    /// comes from.
+    /// </summary>
+    public async Task<(IReadOnlyList<string> Names, string Source)> ResolveWithSourceAsync(
+        string checkpoint, CancellationToken ct)
+    {
+        // Check DB override first.
+        if (_memory is not null)
+        {
+            var rows = await _memory.RecallAsync($"gates/run/{checkpoint}", ct);
+            var row = rows.LastOrDefault();
+            if (row is not null)
+            {
+                try
+                {
+                    var names = JsonSerializer.Deserialize<string[]>(row.Body);
+                    if (names is { Length: > 0 }) return (names, "db_override");
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(ex, "RunGatePipeline: malformed DB override gates/run/{Checkpoint} — falling through to config", checkpoint);
+                }
+            }
+        }
+        // Check config.
+        if (_options.Run.TryGetValue(checkpoint, out var configured) && configured.Length > 0)
+        {
+            return (configured, "config");
+        }
+        // Fall back to built-in defaults.
+        if (Defaults.TryGetValue(checkpoint, out var builtIn))
+        {
+            return (builtIn, "builtin_default");
+        }
+        return (Array.Empty<string>(), "unknown");
     }
 
     /// <summary>Evaluate the checkpoint's gates in order. First

@@ -26,6 +26,13 @@ public sealed record RunGateContext(
     string Plan,
     CancellationToken Ct);
 
+/// <summary>Whether a gate is deterministic (zero LLM) or uses an LLM call.</summary>
+public enum GateKind
+{
+    Deterministic,
+    Llm,
+}
+
 /// <summary>
 /// One deterministic-or-LLM quality gate. Gates are ordered per
 /// checkpoint and short-circuit on the first non-Approve verdict.
@@ -36,5 +43,7 @@ public sealed record RunGateContext(
 public interface IRunGate
 {
     string Name { get; }
+    string Description { get; }
+    GateKind Kind { get; }
     Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx);
 }
