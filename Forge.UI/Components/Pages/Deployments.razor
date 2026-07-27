@@ -26,14 +26,14 @@
 
     @if (DeployStore.Value.Error is not null)
     {
-        <div class="page-subtitle" style="color:var(--error)">
+        <div class="banner banner--error">
             Failed to load deployments: @DeployStore.Value.Error
         </div>
     }
 
     @if (DeployStore.Value.ActionError is not null)
     {
-        <div class="page-subtitle" style="color:var(--error)">
+        <div class="banner banner--error">
             @DeployStore.Value.ActionError
             <button class="btn" style="margin-left:8px" @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.ClearActionErrorAction()))">Dismiss</button>
         </div>
@@ -42,7 +42,7 @@
     <div class="overview-section">
         <h3>Request a deployment</h3>
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <select @bind="_selectedProjectId" @bind:after="OnProjectChangedAsync" style="height:32px;">
+            <select class="picker-bar__select" @bind="_selectedProjectId" @bind:after="OnProjectChangedAsync">
                 <option value="">Select a project…</option>
                 @foreach (var p in ProjectsStore.Value.Projects)
                 {
@@ -56,7 +56,7 @@
             }
             else if (DeployStore.Value.CommitsForProjectId == _selectedProjectId && DeployStore.Value.Commits.Count > 0)
             {
-                <select @bind="_selectedCommitSha" style="height:32px; min-width:340px;">
+                <select class="picker-bar__select" @bind="_selectedCommitSha">
                     <option value="">Select a commit…</option>
                     @foreach (var c in DeployStore.Value.Commits)
                     {
@@ -114,16 +114,16 @@
                         <td>
                             @if (d.Status is "Pending" or "BuildPassed")
                             {
-                                <button class="btn btn--primary" style="height:26px; padding:0 8px; font-size:12px;"
+                                <button class="btn btn--small btn--primary"
                                         @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: false))">Approve</button>
-                                <button class="btn btn--danger" style="height:26px; padding:0 8px; font-size:12px;"
+                                <button class="btn btn--small btn--danger"
                                         @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id, d.ProjectId)))">Reject</button>
                             }
                             @if (DeployStore.Value.PendingInFlightWarning is { } warn && warn.DeploymentId == d.Id)
                             {
                                 <div style="margin-top:6px; color:var(--error); font-size:12px; max-width:260px;">
                                     @warn.Message
-                                    <button class="btn btn--danger" style="height:24px; padding:0 8px; font-size:11px; margin-top:4px;"
+                                    <button class="btn btn--small btn--danger" style="margin-top:4px;"
                                             @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: true))">
                                         Force deploy anyway
                                     </button>

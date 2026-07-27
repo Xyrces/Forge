@@ -25,8 +25,9 @@
     else
     {
         @* Issue-first: pick any work item, trace its path. *@
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
-            <input list="flow-issues" class="mono" style="min-width:340px;padding:6px 8px"
+        <div class="picker-bar">
+            <span class="picker-bar__label">Trace</span>
+            <input list="flow-issues" class="mono picker-bar__select"
                    placeholder="Select an issue (type to filter)…"
                    @bind="_traceInput" @bind:event="oninput" />
             <datalist id="flow-issues">

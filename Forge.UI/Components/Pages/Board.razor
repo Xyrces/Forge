@@ -1,5 +1,6 @@
 @page "/board"
 @inject HttpClient Http
+@inject NavigationManager Nav
 @implements IDisposable
 @using System.Net.Http.Json
 
@@ -59,9 +60,9 @@
             <tbody>
                 @foreach (var r in FilteredRows)
                 {
-                    <tr>
+                    <tr style="cursor:pointer" title="Open task detail" @onclick="@(() => Nav.NavigateTo($"/tasks/{r.Id}"))">
                         <td><span class="project-chip">@r.ProjectId</span></td>
-                        <td class="mono">@r.Id</td>
+                        <td class="mono"><a href="/tasks/@r.Id" @onclick:stopPropagation="true">@r.Id</a></td>
                         <td>@r.Title</td>
                         <td class="mono">@(r.Type ?? "—")</td>
                         <td><span class="pill pill--@r.Status.ToLowerInvariant()">@r.Status</span></td>

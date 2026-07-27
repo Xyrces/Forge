@@ -127,13 +127,20 @@
                         <td class="mono meta-text">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
                         <td style="white-space:nowrap">
                             <button class="btn" style="padding:2px 10px; font-size:12px" @onclick="() => BeginEdit(row)">Edit</button>
-                            <button class="btn" style="padding:2px 10px; font-size:12px" @onclick="() => DeleteAsync(row)">Delete</button>
+                            <button class="btn" style="padding:2px 10px; font-size:12px" @onclick="() => _confirmDelete = row">Delete</button>
                         </td>
                     </tr>
                 }
             </tbody>
         </table>
     }
+
+    <ConfirmDialog Visible="_confirmDelete is not null"
+                   Title="Delete skill?"
+                   Body="@($"Permanently delete '{_confirmDelete?.Name}'? Any role assigned it stops loading it immediately.")"
+                   ConfirmLabel="Delete"
+                   OnConfirm="ConfirmDeleteAsync"
+                   OnCancel="() => _confirmDelete = null" />
 </div>
 
 @code {
@@ -213,6 +220,17 @@
     {
         await Http.DeleteAsync($"/api/skills/{row.Id}");
         await LoadAsync();
+    }
+
+    private SkillDto? _confirmDelete;
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (_confirmDelete is not null)
+        {
+            await DeleteAsync(_confirmDelete);
+        }
+        _confirmDelete = null;
     }
 
     private sealed record SkillDto(string Id, string Name, string? Description, string Body,

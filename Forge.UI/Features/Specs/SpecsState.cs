@@ -21,7 +21,10 @@ public sealed record SpecRow(
     string? ParentIssueId,
     string? ParentSpecId,
     DateTime CreatedAt,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    // Server-authoritative action availability (from ToSpecView).
+    bool CanApprove = false,
+    bool CanStartGrooming = false);
 
 public static class SpecsActions
 {

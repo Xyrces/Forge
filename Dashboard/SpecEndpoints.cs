@@ -360,14 +360,16 @@ public static class SpecEndpoints
             var spec = await specs.GetAsync(id, ct);
             if (spec is null) return Results.NotFound();
 
-            var canApprove = spec.Status == SpecStatus.Draft;
-            var canStartGrooming = spec.Status is SpecStatus.Approved or SpecStatus.Designed or SpecStatus.AssetReady;
-            var canShip = spec.Status == SpecStatus.Groomed;
+            // Single source of truth: Core.SpecActions (the UI
+            // consumes the same rules for its buttons).
+            var canApprove = SpecActions.CanApprove(spec.Status);
+            var canStartGrooming = SpecActions.CanStartGrooming(spec.Status);
+            var canShip = SpecActions.CanShip(spec.Status);
             // Designer path: a Draft spec can be sent to the Designer
             // agent (Draft -> ReadyForDesign; the DesignerScheduler
             // picks it up automatically and populates the design
             // board).
-            var canSendToDesign = spec.Status == SpecStatus.Draft;
+            var canSendToDesign = SpecActions.CanSendToDesign(spec.Status);
 
             return Results.Json(new
             {
@@ -421,7 +423,11 @@ public static class SpecEndpoints
         createdAt = s.CreatedAt,
         updatedAt = s.UpdatedAt,
         body = s.Body,
-        author = s.Author
+        author = s.Author,
+        // Server-authoritative action availability (Core.SpecActions)
+        // — the UI must not ship its own copy of these rules.
+        canApprove = SpecActions.CanApprove(s.Status),
+        canStartGrooming = SpecActions.CanStartGrooming(s.Status),
     };
 
     private static object ToVersionView(SpecVersionRecord v) => new

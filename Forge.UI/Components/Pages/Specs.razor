@@ -73,17 +73,16 @@
                         <td class="mono">@(row.ParentIssueId ?? row.ParentSpecId ?? "—")</td>
                         <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
                         <td @onclick:stopPropagation="true">
-                            @* Non-visual fast-path: Draft | ReadyForDesign | NeedsRevision
-                               -> Approved (operator review), then
-                               Approved/Designed/AssetReady -> Groom (decompose
-                               into stories/tasks). Mirrors /api/specs/{id}/actions. *@
-                            @if (row.Status is "Draft" or "ReadyForDesign" or "NeedsRevision")
+                            @* Buttons read the server-authoritative
+                               flags (Core.SpecActions via the list
+                               payload) — the UI ships no rules copy. *@
+                            @if (row.CanApprove)
                             {
                                 <button class="btn btn--small btn--primary" @onclick="@(() => Approve(row.Id))" disabled="@_acting">
                                     Approve
                                 </button>
                             }
-                            @if (row.Status is "Approved" or "Designed" or "AssetReady")
+                            @if (row.CanStartGrooming)
                             {
                                 <button class="btn btn--small btn--primary" @onclick="@(() => Groom(row.Id))" disabled="@_acting">
                                     @(_groomingId == row.Id ? "Grooming…" : "Groom")

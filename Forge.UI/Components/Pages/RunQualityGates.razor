@@ -23,6 +23,14 @@
         </div>
     </div>
 
+    @if (_unknownNames.Count > 0)
+    {
+        <div class="banner banner--warn">
+            Unknown gate name(s) in the resolved list: <strong>@string.Join(", ", _unknownNames)</strong> —
+            the pipeline skips them. Fix the override/config or remove them with Reset to defaults.
+        </div>
+    }
+
     @if (_error is not null)
     {
         <div class="banner banner--error">
@@ -124,6 +132,9 @@
     private string? _source;
     private List<GateView>? _gates;
     private List<GateView> _disabledGates = new();
+    private readonly List<GateView> _catalog = new();
+    private string[] _defaults = Array.Empty<string>();
+    private List<string> _unknownNames = new();
     private HashSet<string> _activeGateNames = new();
     private bool _loading = true;
     private bool _saving;
@@ -131,13 +142,6 @@
 
     // Drag state
     private int? _dragSourceIndex;
-
-    /// <summary>
-    /// The default gate order for preImplementation, used to determine
-    /// where to insert re-enabled gates.
-    /// </summary>
-    private static readonly string[] DefaultGateOrder =
-        { "plan-schema", "plan-territory", "plan-llm-review" };
 
     protected override async Task OnInitializedAsync()
     {
@@ -171,10 +175,33 @@
             _gates = loaded;
             _activeGateNames = activeNames;
 
+            // Catalog + defaults come from the server (single source
+            // of truth — the audit found the hardcoded client copy
+            // had already drifted).
+            _catalog.Clear();
+            if (response.TryGetProperty("catalog", out var cat) && cat.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var g in cat.EnumerateArray())
+                {
+                    _catalog.Add(new GateView(
+                        g.GetProperty("name").GetString() ?? "",
+                        g.TryGetProperty("kind", out var k) ? k.GetString() : null,
+                        g.TryGetProperty("description", out var d) ? d.GetString() : null));
+                }
+            }
+            _defaults = response.TryGetProperty("defaults", out var defs) && defs.ValueKind == JsonValueKind.Array
+                ? defs.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x.Length > 0).ToArray()
+                : Array.Empty<string>();
+
+            // Unknown names in the resolved list (stale config/DB
+            // entries the pipeline skipped) — surface prominently.
+            _unknownNames = response.TryGetProperty("unknownNames", out var un) && un.ValueKind == JsonValueKind.Array
+                ? un.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x.Length > 0).ToList()
+                : new List<string>();
+
             // Build disabled list from the full catalog
-            _disabledGates = _allCatalogGates
+            _disabledGates = _catalog
                 .Where(c => !activeNames.Contains(c.Name))
-                .Select(c => new GateView(c.Name, c.Kind, c.Description))
                 .ToList();
         }
         catch (Exception ex)
@@ -256,14 +283,14 @@
         var names = _gates.Select(g => g.Name).ToList();
 
         // Insert at the default position; if not in defaults, append.
-        var defaultIdx = Array.IndexOf(DefaultGateOrder, name);
+        var defaultIdx = Array.IndexOf(_defaults, name);
         if (defaultIdx >= 0)
         {
             // Find where gates before this default position end
             var insertAt = 0;
             for (int i = 0; i < defaultIdx; i++)
             {
-                var preceding = DefaultGateOrder[i];
+                var preceding = _defaults[i];
                 var foundIdx = names.IndexOf(preceding);
                 if (foundIdx >= 0) insertAt = Math.Max(insertAt, foundIdx + 1);
             }
@@ -288,7 +315,7 @@
     private bool CanDisable() => _gates is not null && _gates.Count > 1;
 
     private bool GateIsInDefaultSet(string name)
-        => DefaultGateOrder.Contains(name);
+        => _defaults.Contains(name);
 
     // Drag and drop
     private void OnDragStart(DragEventArgs e, int index)
@@ -317,17 +344,6 @@
         "Deterministic" => "success",
         "Llm" => "warn",
         _ => "outline"
-    };
-
-    /// <summary>
-    /// Full gate catalog known to the system (from the resolved GET).
-    /// We populate this on first load for the disabled-list computation.
-    /// </summary>
-    private static readonly List<(string Name, string? Kind, string? Description)> _allCatalogGates = new()
-    {
-        ("plan-schema", "Deterministic", "Validates plan structure: required sections (goal, files, approach, test, done) and minimum length."),
-        ("plan-territory", "Deterministic", "Checks plan stays within project territory: only allowed directories and file patterns."),
-        ("plan-llm-review", "Llm", "LLM reviews the plan for completeness, feasibility, and consistency with the task."),
     };
 
     private sealed record GateView(string Name, string? Kind, string? Description);

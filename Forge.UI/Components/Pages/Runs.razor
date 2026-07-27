@@ -22,18 +22,18 @@
     {
         @if (_data.Active.Count > 0)
         {
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px;margin-bottom:18px">
+            <div class="run-active-grid">
                 @foreach (var r in _data.Active)
                 {
-                    <div style="border:1px solid var(--primary);border-radius:10px;padding:12px 14px">
-                        <div style="display:flex;justify-content:space-between;align-items:center">
-                            <span style="display:flex;gap:8px;align-items:center">
-                                <span style="width:8px;height:8px;border-radius:50%;background:var(--primary)"></span>
+                    <div class="run-active-card">
+                        <div class="run-active-card__top">
+                            <span class="run-active-card__role">
+                                <span class="agent-row__dot"></span>
                                 <strong>@r.Role</strong>
                             </span>
-                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Elapsed(r)</span>
+                            <span class="mono run-active-card__elapsed">@Elapsed(r)</span>
                         </div>
-                        <div style="margin-top:6px;font-size:13px">
+                        <div class="run-active-card__body">
                             @if (r.TaskId is not null)
                             {
                                 <a href="/tasks/@r.TaskId" class="mono">@r.TaskId</a>
@@ -42,9 +42,9 @@
                             {
                                 <span class="mono">(no task)</span>
                             }
-                            <span style="color:var(--on-surface-variant)"> · @r.Model</span>
+                            <span class="meta-text"> · @r.Model</span>
                         </div>
-                        <div class="mono" style="font-size:11px;color:var(--on-surface-variant);margin-top:4px">run @r.Id · started @r.StartedAt.ToLocalTime().ToString("HH:mm:ss")</div>
+                        <div class="mono run-active-card__meta">run @r.Id · started @r.StartedAt.ToLocalTime().ToString("HH:mm:ss")</div>
                     </div>
                 }
             </div>
@@ -54,7 +54,7 @@
             <div class="page-subtitle" style="margin-bottom:14px">No agent runs in flight.</div>
         }
 
-        <table class="data-table" style="width:100%">
+        <table class="data-grid">
             <thead>
                 <tr>
                     <th>When</th><th>Role</th><th>Task</th><th>Duration</th>
