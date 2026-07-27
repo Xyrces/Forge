@@ -78,8 +78,7 @@
         @if (selected is not null)
         {
             var members = EnrichMembers(selected);
-            var done = members.Count(m => m.State is "Merged" or "Completed" or "Closed"
-                || (m.State is null && m.Status is "Completed" or "Closed"));
+            var done = members.Count(m => Bucket(m) == "done");
             var pct = members.Count == 0 ? 0 : (int)Math.Round(100.0 * done / members.Count);
 
             <div class="sprint-hero">
@@ -136,7 +135,7 @@
                                 </div>
                                 <div class="kanban__card-title">@card.Title</div>
                                 <div class="kanban__card-meta">
-                                    @if (card.State is not null)
+                                    @if (card.State is not null && card.Status is not ("Completed" or "Closed" or "Failed" or "Blocked"))
                                     {
                                         <span class="pill pill--primary" title="Lifecycle state (state machine)">@card.State</span>
                                     }
@@ -185,21 +184,34 @@
     }
 
     private sealed record Column(string Title, Func<Card, bool> Match);
-    // Kanban columns follow the lifecycle state machine (not raw
-    // IssueStatus): the operator sees WHERE in the loop a task is,
-    // not just its DB row status. Fallback for pre-machine entities:
-    // the IssueStatus bucket.
+    // Kanban columns follow the lifecycle state machine — but the
+    // DB status is authoritative for TERMINAL rows: an operator
+    // close, breaker trip, or plan-gate failure doesn't always
+    // record a machine event, leaving a stale intermediate state
+    // (observed live 2026-07-27: task-210, Closed, sat in the
+    // Running column forever because its record said StalledRework).
+    private static string Bucket(Card c) => c.Status switch
+    {
+        "Completed" or "Closed" => "done",
+        "Failed" => "failed",
+        "Blocked" => "blocked",
+        _ => c.State switch
+        {
+            "Pending" or "ReworkQueued" => "queued",
+            "Dispatching" or "AgentRunning" or "ReworkRunning" or "StalledRework" => "running",
+            "PROpen" or "MergeReady" or "ParkedInfra" => "review",
+            "Failed" or "BlockedOperator" => "failed",
+            "Merged" or "Completed" or "Closed" => "done",
+            _ => c.Status == "InProgress" ? "running" : "queued",
+        },
+    };
     private static readonly Column[] Columns =
     {
-        new("Queued", c => c.State is "Pending" or "ReworkQueued"
-            || (c.State is null && c.Status == "Pending")),
-        new("Running", c => c.State is "Dispatching" or "AgentRunning" or "ReworkRunning" or "StalledRework"
-            || (c.State is null && c.Status == "InProgress")),
-        new("Review", c => c.State is "PROpen" or "MergeReady" or "ParkedInfra"),
-        new("Needs you", c => c.State is "Failed" or "BlockedOperator"
-            || (c.State is null && c.Status is "Failed" or "Blocked")),
-        new("Done", c => c.State is "Merged" or "Completed" or "Closed"
-            || (c.State is null && c.Status is "Completed" or "Closed")),
+        new("Queued", c => Bucket(c) == "queued"),
+        new("Running", c => Bucket(c) == "running"),
+        new("Review", c => Bucket(c) == "review"),
+        new("Needs you", c => Bucket(c) is "failed" or "blocked"),
+        new("Done", c => Bucket(c) == "done"),
     };
 
     private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts);
