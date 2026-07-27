@@ -294,14 +294,17 @@ public sealed class SprintAssembler
                 && !sprinted.Contains(i.Id))
             .ToList();
 
-        // Eligible for ASSEMBLY: spec-chain groups only. Ad-hoc
-        // (parentless) tasks never form their own sprint (operator
-        // rule 2026-07-27: no grab-bag sprints) — they enter the
-        // ACTIVE sprint only by injection (related to or unblocking
-        // the ongoing work), or wait in the backlog for the operator
-        // to promote them through intake as an epic.
+        // Eligible for ASSEMBLY: spec-chain groups, plus groomed
+        // ad-hoc tasks as SOLO sprints (operator rules 2026-07-27):
+        // related/unblocking ad-hoc work INJECTS into the active
+        // sprint instead of waiting; unrelated groomed ad-hoc work
+        // gets its own focused one-task sprint — coherent and
+        // deployable with zero cross-task side effects. What never
+        // returns: bundling multiple unrelated ad-hoc tasks into
+        // one sprint (the grab-bag problem).
         eligible = eligible
-            .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName)
+            .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName
+                || string.Equals(t.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (eligible.Count == 0) return;
 
@@ -361,6 +364,18 @@ public sealed class SprintAssembler
             .First();
         var chosen = groups[chosenKey];
         var (name, goal, _) = described[chosenKey];
+
+        // Ad-hoc assembly is ALWAYS a solo sprint (oldest first) —
+        // never a bundle. Related ad-hoc work would have injected
+        // into the active sprint instead of reaching here.
+        if (chosenKey == AdHocGroupName)
+        {
+            var single = chosen.OrderBy(t => t.CreatedAt).First();
+            chosen = new List<IssueRecord> { single };
+            name = single.Title;
+            goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
+                ?? $"Complete {single.Id}: {single.Title}";
+        }
 
         var start = DateTime.UtcNow;
         var sprint = await sprints.CreateAsync(new NewSprint(

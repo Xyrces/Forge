@@ -196,13 +196,15 @@ public class SprintAssemblerTests : IDisposable
     [Fact]
     public async Task AdHocTask_IsNeverAssembled_EvenAfterSpecSprintDrains()
     {
-        // Operator rule 2026-07-27: no ad-hoc sprints of any size. A
-        // groomed but UNRELATED ad-hoc task never assembles — it
-        // waits in the backlog for injection (related / unblocks /
-        // operator requeue) or operator promotion through intake.
+        // Unrelated groomed ad-hoc tasks assemble SOLO (oldest
+        // first), never bundled. Related work would have injected
+        // into the active sprint instead of reaching assembly.
         await SeedGroomedSpecAsync("Pipeline work", 1);
-        var adhoc = await _issues.CreateAsync(new NewIssue(
-            Type: "task", Title: "unrelated one-off",
+        var older = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "first one-off",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        var newer = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "second one-off",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
 
         await Tick();
@@ -217,8 +219,18 @@ public class SprintAssemblerTests : IDisposable
         }
         await Tick();
 
-        Assert.Null(await _sprints.GetActiveAsync());   // the ad-hoc task did NOT assemble
-        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(adhoc.Id))!.Status);
+        // Oldest ad-hoc task gets its OWN sprint (never bundled).
+        var second = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("first one-off", second.Name);
+        var members = await _sprints.GetIssueIdsAsync(second.Id);
+        Assert.Contains(older.Id, members);
+        Assert.DoesNotContain(newer.Id, members);
+
+        await _issues.TransitionAsync(older.Id, IssueStatus.Completed, null);
+        await Tick();
+        var third = (await _sprints.GetActiveAsync())!;
+        Assert.NotEqual(second.Id, third.Id);
+        Assert.Equal("second one-off", third.Name);
     }
 
     [Fact]
@@ -297,17 +309,18 @@ public class SprintAssemblerTests : IDisposable
     public async Task UngroomedAdHocTask_IsNeverIngested()
     {
         // Operator rule 2026-07-23: no task enters a sprint without
-        // technical grooming — and (2026-07-27) ad-hoc tasks never
-        // assemble at all; even a groomed unrelated one waits for
-        // injection or intake promotion.
+        // technical grooming. Ungroomed ad-hoc: nothing happens.
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "ungroomed one-off"));
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync());
 
+        // Groomed but unrelated: assembles SOLO (own focused sprint).
         await _issues.TransitionAsync(task.Id, IssueStatus.Pending, null,
             metadata: new Dictionary<string, object> { ["groomed"] = "true" });
         await Tick();
-        Assert.Null(await _sprints.GetActiveAsync());   // groomed but unrelated: still no sprint
+        var active = await _sprints.GetActiveAsync();
+        Assert.NotNull(active);
+        Assert.Equal("ungroomed one-off", active!.Name);
     }
 
     [Fact]
