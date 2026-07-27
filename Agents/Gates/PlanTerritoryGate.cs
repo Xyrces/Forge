@@ -65,9 +65,11 @@ public sealed partial class PlanTerritoryGate : IRunGate
     /// does not exist" while its Files section had full paths) —
     /// the Files section is what the schema gate mandates for
     /// exactly this purpose. A trailing "(new)" marks intentional
-    /// creation.</summary>
+    /// creation. Bare filenames that duplicate a full-path entry
+    /// are skipped to avoid false violations.</summary>
     internal static IEnumerable<(string Path, bool IsNew)> ExtractPaths(string plan)
     {
+        var rawPaths = new List<(string Path, bool IsNew)>();
         var inFiles = false;
         foreach (var line in plan.Split('\n'))
         {
@@ -85,10 +87,25 @@ public sealed partial class PlanTerritoryGate : IRunGate
                 p = p.TrimStart('.', '/');
                 if (p.Length == 0 || p.StartsWith("bin/") || p.StartsWith("obj/")) continue;
                 var isNew = line.Contains("(new)", StringComparison.OrdinalIgnoreCase);
-                yield return (p, isNew);
+                rawPaths.Add((p, isNew));
             }
         }
+
+        // Build set of filenames from full-paths for dedup
+        var fullPathFilenames = new HashSet<string>(
+            rawPaths.Where(rp => rp.Path.Contains('/'))
+                    .Select(rp => System.IO.Path.GetFileName(rp.Path)),
+            StringComparer.OrdinalIgnoreCase);
+
+        // Yield, skipping bare filenames that duplicate a full-path entry
+        foreach (var (path, isNew) in rawPaths)
+        {
+            if (!path.Contains('/') && fullPathFilenames.Contains(path))
+                continue;
+            yield return (path, isNew);
+        }
     }
+
 
     [GeneratedRegex(@"[\w./-]+\.(?:cs|razor|css|json|md|csproj|sln|ya?ml|sh|sql)\b")]
     private static partial Regex PathRegex();
