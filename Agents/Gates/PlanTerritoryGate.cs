@@ -19,11 +19,6 @@ public sealed partial class PlanTerritoryGate : IRunGate
     public const string DescriptionText =
         "Verifies every file path in the plan is inside the role's territory and exists in the worktree (or is marked as new).";
 
-    /// <summary>One-line description for the catalog UI.</summary>
-    public const string DescriptionText =
-        "Verifies every file path in the plan is inside the role's territory and exists in the worktree (or is marked (new)).";
-    public string Description => DescriptionText;
-    public GateKind Kind => GateKind.Deterministic;
 
     public Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx)
     {

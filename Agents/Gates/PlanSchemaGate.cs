@@ -17,11 +17,7 @@ public sealed class PlanSchemaGate : IRunGate
     public const string DescriptionText =
         "Checks that the plan contains the required sections (goal, files, approach, test, done).";
 
-    public const string DescriptionText =
-        "Validates that the plan contains the required sections (goal, files, approach, test, done).";
 
-    public GateKind Kind => GateKind.Deterministic;
-    public string Description => DescriptionText;
 
     /// <summary>Required sections, matched as case-insensitive
     /// keywords at the start of a line (markdown heading or bold

@@ -2,13 +2,6 @@ using Microsoft.Extensions.Logging;
 
 namespace Forge.Agents.Gates;
 
-/// <summary>Deterministic or LLM-powered quality gate.</summary>
-public enum GateKind
-{
-    Deterministic,
-    Llm,
-}
-
 /// <summary>Outcome of a single quality-gate evaluation.</summary>
 public enum GateOutcome
 {
@@ -17,8 +10,7 @@ public enum GateOutcome
     Block,
 }
 
-/// <summary>Whether a gate is deterministic (rule-based, zero LLM)
-/// or uses an LLM call.</summary>
+/// <summary>Deterministic or LLM-powered quality gate.</summary>
 public enum GateKind
 {
     Deterministic,
