@@ -198,6 +198,103 @@ public class RunGateTests : IDisposable
         Assert.Equal(GateOutcome.Approve, allowed.Outcome);
     }
 
+    [Fact]
+    public async Task TerritoryGate_BareFilenameInProse_NotViolated()
+    {
+        // Bare filename "RunGate.cs" in prose should not be extracted when ## Files section exists.
+        var plan = @"
+## Goal
+We need to modify RunGate.cs to support the new flow.
+## Files
+- `Agents/Gates/RunGate.cs`
+## Approach
+Add the new method.
+## Test
+Build.
+## Done
+Builds.
+";
+        Directory.CreateDirectory(Path.Combine(_workDir, "Agents/Gates"));
+        File.WriteAllText(Path.Combine(_workDir, "Agents/Gates/RunGate.cs"), "// stub");
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "Agents/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_BareFilenameDuplicateFullPath_NotViolated()
+    {
+        // Files section has both full path and bare filename; bare duplicate should be skipped.
+        var plan = @"
+## Goal
+Add the new flow.
+## Files
+- `Agents/Gates/RunGate.cs`
+- `RunGate.cs`
+## Approach
+Implement it.
+## Test
+Build.
+## Done
+Builds.
+";
+        Directory.CreateDirectory(Path.Combine(_workDir, "Agents/Gates"));
+        File.WriteAllText(Path.Combine(_workDir, "Agents/Gates/RunGate.cs"), "// stub");
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "Agents/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_BareFilenameWithoutFullPath_StillViolated()
+    {
+        // Bare filename "RunGate.cs" with no full-path equivalent should still trigger violation
+        // when the file doesn't exist at root.
+        var plan = @"
+## Goal
+Add the new flow.
+## Files
+- `RunGate.cs`
+## Approach
+Implement it.
+## Test
+Build.
+## Done
+Builds.
+";
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "Agents/" }, allowRoot: false, worktree: _workDir));
+        Assert.Equal(GateOutcome.Revise, v.Outcome);
+        Assert.Contains("RunGate.cs", v.Feedback);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_BareFilenameMatchesFullPath_OnlyDupeIsSkipped()
+    {
+        // Full-path file exists, bare dupe skipped, but bare non-dupe still violates.
+        var plan = @"
+## Goal
+Add the new flow.
+## Files
+- `Agents/Gates/RunGate.cs`
+- `RunGate.cs`
+- `SomeOther.cs`
+## Approach
+Implement it.
+## Test
+Build.
+## Done
+Builds.
+";
+        Directory.CreateDirectory(Path.Combine(_workDir, "Agents/Gates"));
+        File.WriteAllText(Path.Combine(_workDir, "Agents/Gates/RunGate.cs"), "// stub");
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "Agents/" }, allowRoot: false, worktree: _workDir));
+        Assert.Equal(GateOutcome.Revise, v.Outcome);
+        Assert.Contains("SomeOther.cs", v.Feedback);
+        Assert.DoesNotContain("RunGate.cs", v.Feedback);
+    }
+
     // ---------- RunGatePipeline resolution ----------
 
     private RunGatePipeline Pipeline(GateOptions options, MemoryStore? memory = null)
