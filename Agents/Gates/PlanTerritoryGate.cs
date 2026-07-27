@@ -12,6 +12,12 @@ public sealed partial class PlanTerritoryGate : IRunGate
 {
     public const string GateName = "plan-territory";
     public string Name => GateName;
+    public GateKind Kind => GateKind.Deterministic;
+    public string Description => DescriptionText;
+
+    /// <summary>User-facing description of this gate for the catalog.</summary>
+    public const string DescriptionText =
+        "Verifies every file path in the plan is inside the role's territory and exists in the worktree (or is marked as new).";
 
     public Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx)
     {

@@ -63,6 +63,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Agents.RoleModelOverrides? _roleModelOverrides;
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly GitHubOptions? _githubOptions;
+    private readonly GateOptions _gateOptions;
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
@@ -113,6 +114,7 @@ public sealed class DashboardHost : IAsyncDisposable
         AgentRunStore? agentRuns = null,
         Forge.Agents.LlmConfig? llmConfig = null,
         Forge.Agents.RoleModelOverrides? roleModelOverrides = null,
+        GateOptions? gateOptions = null,
         Forge.Core.TaskStateMachine? lifecycle = null)
     {
         _options = options;
@@ -156,6 +158,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _projectCloner = projectCloner;
         _secretStore = secretStore;
         _githubOptions = githubOptions;
+        _gateOptions = gateOptions ?? new GateOptions();
         _logger = logger;
         _agentRuns = agentRuns;
         _llmConfig = llmConfig;
@@ -453,6 +456,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             GateEndpoints.MapGateEndpoints(_app, new StageGates(_memory), _logger);
         }
         GateVerdictEndpoints.MapGateVerdictEndpoints(_app, _issues, _logger);
+        RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(_app, _gateOptions, _memory, _logger);
 
         FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions);
         NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory);

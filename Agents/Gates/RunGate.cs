@@ -10,6 +10,14 @@ public enum GateOutcome
     Block,
 }
 
+/// <summary>Whether a gate is deterministic (rule-based, zero LLM)
+/// or uses an LLM call.</summary>
+public enum GateKind
+{
+    Deterministic,
+    Llm,
+}
+
 public sealed record RunGateVerdict(GateOutcome Outcome, string Feedback)
 {
     public static readonly RunGateVerdict Approved = new(GateOutcome.Approve, "approved");
@@ -36,5 +44,7 @@ public sealed record RunGateContext(
 public interface IRunGate
 {
     string Name { get; }
+    GateKind Kind { get; }
+    string Description { get; }
     Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx);
 }
