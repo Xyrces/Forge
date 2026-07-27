@@ -44,7 +44,7 @@ public sealed partial class PlanTerritoryGate : IRunGate
         {
             return Task.FromResult(new RunGateVerdict(GateOutcome.Revise,
                 "Plan territory/existence violations:\n- " + string.Join("\n- ", problems) +
-                "\n(Paths must be REPO-RELATIVE like `Dashboard/Foo.cs` — never absolute filesystem paths; mark intentional creations with \"(new)\".)");
+                "\n(Paths must be REPO-RELATIVE like `Dashboard/Foo.cs` — never absolute filesystem paths; mark intentional creations with '(new)'.)"));
         }
         return Task.FromResult(RunGateVerdict.Approved);
     }
