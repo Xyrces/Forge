@@ -281,6 +281,28 @@ public sealed class SprintAssembler
     private async Task CloseTerminalEpicsAsync(IIssueStore issues, ISpecStore specs, CancellationToken ct)
     {
         var all = await issues.ListAsync(new IssueFilter(), ct);
+
+        // Story lifecycle first (observed 2026-07-27: stories stay
+        // Pending forever because tasks complete but nothing
+        // transitions the story — which in turn keeps the epic
+        // open). A story closes when every task under it is
+        // Completed/Closed and none is Failed/Blocked (operator
+        // decision). Stories with no tasks yet stay open.
+        var stories = all.Where(i =>
+            i.Type == "story" && i.Status is IssueStatus.Pending or IssueStatus.InProgress).ToList();
+        foreach (var story in stories)
+        {
+            var tasks = all.Where(i => i.Type == "task" && i.ParentIssueId == story.Id).ToList();
+            if (tasks.Count == 0) continue;
+            if (tasks.Any(t => t.Status is IssueStatus.Failed or IssueStatus.Blocked)) continue;
+            if (tasks.Any(t => t.Status is not (IssueStatus.Completed or IssueStatus.Closed))) continue;
+            await issues.TransitionAsync(story.Id, IssueStatus.Closed,
+                "auto-closed: all tasks terminal", ct: ct);
+            _logger.LogInformation("Story {Id} auto-closed (all tasks terminal)", story.Id);
+            // Keep the in-memory view current for the epic pass below.
+            all = all.Select(i => i.Id == story.Id ? i with { Status = IssueStatus.Closed } : i).ToList();
+        }
+
         var epics = all.Where(i =>
             i.Type == "epic" && i.Status is IssueStatus.Pending or IssueStatus.InProgress).ToList();
         if (epics.Count == 0) return;
