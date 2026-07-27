@@ -47,7 +47,8 @@ public sealed class EngineeringDispatchWorkflow
         ILoggerFactory? loggerFactory = null,
         ISprintStore? sprints = null,
         double timeoutMinutes = 15.0,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Core.Workflow.WorkflowResolver? workflow = null)
     {
         // Executor loggers: production passes the real factory so
         // executor diagnostics (checkpoint advances, push/PR steps)
@@ -61,7 +62,7 @@ public sealed class EngineeringDispatchWorkflow
             nullFactory.CreateLogger<RunAgentExecutor>(), projectId, sprints, timeoutMinutes, lifecycle);
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
             memoryExtractor, extractionStore,
-            nullFactory.CreateLogger<CommitPushPrExecutor>());
+            nullFactory.CreateLogger<CommitPushPrExecutor>(), workflow);
         _enqueueWatch = new EnqueueWatchExecutor(issues,
             nullFactory.CreateLogger<EnqueueWatchExecutor>());
         _logger = logger;

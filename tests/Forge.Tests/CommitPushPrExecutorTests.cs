@@ -121,7 +121,7 @@ public class CommitPushPrExecutorTests : IDisposable
             agent, _issues, _worktrees, new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events,
             new NoOpMemoryExtractor(),
             new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-            NullLogger<CommitPushPrExecutor>.Instance, default);
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
 
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal("42", after!.GetMetadata("prNumber"));
@@ -165,7 +165,7 @@ public class CommitPushPrExecutorTests : IDisposable
                 agent, _issues, _worktrees, new StubGitHub(), _events,
                 new NoOpMemoryExtractor(),
                 new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-                NullLogger<CommitPushPrExecutor>.Instance, default).AsTask());
+                NullLogger<CommitPushPrExecutor>.Instance, null, default).AsTask());
 
         Assert.Contains("CreatePullRequestAsync should not be called", ex.Message);
         var after = await _issues.GetAsync(issue.Id);
@@ -192,11 +192,49 @@ public class CommitPushPrExecutorTests : IDisposable
             agent, _issues, _worktrees, new StubGitHub(), _events,
             new NoOpMemoryExtractor(),
             new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-            NullLogger<CommitPushPrExecutor>.Instance, default);
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
 
         Assert.Equal(PrResult.NoDiff, result.Result);
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.Completed, after!.Status);
+    }
+
+    [Fact]
+    public async Task NoDiff_ExplicitMarker_PolicyRework_RequeuesInsteadOfCompleting()
+    {
+        // Workflow policy noDiffOutcome=rework (pass 3): the operator
+        // doesn't accept verified no-op completions — the task
+        // requeues (no-progress breaker still caps the loop).
+        var memory = new Forge.Core.MemoryStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Policies = new Dictionary<string, string>(Forge.Core.Workflow.WorkflowDefaults.Definition.Policies)
+            {
+                [Forge.Core.Workflow.WorkflowPolicies.NoDiffOutcome] = "rework",
+            },
+        };
+        await memory.RememberAsync(Forge.Core.Workflow.WorkflowResolver.LiveKey,
+            Forge.Core.Workflow.WorkflowResolver.Serialize(def));
+        var resolver = new Forge.Core.Workflow.WorkflowResolver(memory);
+
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var agent = new AgentCompleted(worktree, AgentResult.Ok,
+            "Verified: nothing to do. NO_CHANGES_NEEDED", null);
+
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, resolver, default);
+
+        Assert.Equal(PrResult.NoDiff, result.Result);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
     }
 
     [Fact]
@@ -218,7 +256,7 @@ public class CommitPushPrExecutorTests : IDisposable
                 agent, _issues, _worktrees, new StubGitHub(), _events,
                 new NoOpMemoryExtractor(),
                 new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-                NullLogger<CommitPushPrExecutor>.Instance, default);
+                NullLogger<CommitPushPrExecutor>.Instance, null, default);
             Assert.Equal(PrResult.NoDiff, result.Result);
             var after = await _issues.GetAsync(issue.Id);
             if (i < CommitPushPrExecutor.MaxNoProgressAttempts)
@@ -253,7 +291,7 @@ public class CommitPushPrExecutorTests : IDisposable
             agent, _issues, _worktrees, new StubGitHub(), _events,
             new NoOpMemoryExtractor(),
             new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-            NullLogger<CommitPushPrExecutor>.Instance, default);
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
 
         Assert.Equal(PrResult.NoDiff, result.Result);
         var after = await _issues.GetAsync(issue.Id);

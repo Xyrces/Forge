@@ -43,7 +43,8 @@ public static class TaskEndpoints
         ILogger logger,
         Projects.ProjectContextFactory? projectContexts = null,
         ISprintStore? sprints = null,
-        AgentRunStore? runs = null)
+        AgentRunStore? runs = null,
+        Forge.Core.Workflow.WorkflowResolver? workflow = null)
     {
         // Derived lifecycle state (Phase 1 read-model): what the task
         // is doing + what it's waiting on, projected from the task,
@@ -73,7 +74,18 @@ public static class TaskEndpoints
                     string.Equals(r.TaskId, id, StringComparison.Ordinal)
                     && r.Role is "CoreDev" or "ClientDev");
 
-            var info = TaskStateProjector.Derive(task, watch, hasActiveDevRun, DateTime.UtcNow);
+            // Workflow policies (pass 3): strike budget + stall grace
+            // come from the resolved definition when available.
+            var wf = workflow is not null ? await workflow.ResolveAsync(ct) : null;
+            var info = TaskStateProjector.Derive(task, watch, hasActiveDevRun, DateTime.UtcNow,
+                maxStrikes: wf is not null
+                    ? Forge.Core.Workflow.WorkflowPolicyReader.GetInt(
+                        wf, Forge.Core.Workflow.WorkflowPolicies.MaxStrikes, TaskStateProjector.MaxStrikes)
+                    : null,
+                stallGrace: wf is not null
+                    ? TimeSpan.FromMinutes(Forge.Core.Workflow.WorkflowPolicyReader.GetInt(
+                        wf, Forge.Core.Workflow.WorkflowPolicies.StallGraceMinutes, (int)TaskStateProjector.StallGrace.TotalMinutes))
+                    : null);
             return Results.Json(new
             {
                 taskId = id,

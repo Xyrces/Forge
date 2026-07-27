@@ -64,7 +64,8 @@ public class PRWatcherReworkTests : IDisposable
             => Task.FromResult(true);
     }
 
-    private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null) => new(
+    private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null,
+        Forge.Core.Workflow.WorkflowResolver? workflow = null) => new(
         gh,
         worktrees: new AgentTools.GitWorktreeService(
             new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -75,7 +76,23 @@ public class PRWatcherReworkTests : IDisposable
         events: _events,
         logger: NullLogger<PRWatcher>.Instance,
         gates: gates,
-        lifecycle: new Forge.Core.TaskStateMachine(_issues, writeAuthority: false, NullLogger.Instance));
+        lifecycle: new Forge.Core.TaskStateMachine(_issues, writeAuthority: false, NullLogger.Instance),
+        workflow: workflow);
+
+    private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
+    {
+        var memory = new MemoryStore(_dbPath);
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Policies = new Dictionary<string, string>(Forge.Core.Workflow.WorkflowDefaults.Definition.Policies)
+            {
+                [key] = value,
+            },
+        };
+        memory.RememberAsync(Forge.Core.Workflow.WorkflowResolver.LiveKey,
+            Forge.Core.Workflow.WorkflowResolver.Serialize(def)).GetAwaiter().GetResult();
+        return new Forge.Core.Workflow.WorkflowResolver(memory);
+    }
 
     private async Task<(IssueRecord task, IssueRecord watch)> SeedAsync(
         Dictionary<string, object>? taskMeta = null,
@@ -228,6 +245,69 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal("ReworkQueued", after.GetMetadata("state"));
         Assert.Equal("abc123", after.GetMetadata("reworkForSha"));
         Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
+    public async Task Policy_MaxStrikesOne_BreakerTripsImmediately()
+    {
+        // Pass 3: the strike budget is a workflow policy. With
+        // maxStrikes=1 and one strike already recorded, the very next
+        // CI failure trips the breaker instead of requeueing — the
+        // same task under the default budget would requeue (covered
+        // by CiFailed_RequeuesTask_WithContext_WatchStaysLive).
+        var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Success };
+        var (task, watch) = await SeedAsync(
+            taskMeta: new Dictionary<string, object> { ["reworkAttempts"] = "1" });
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWithPolicy("maxStrikes", "1")).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.CiFailed, outcome);
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
+    public async Task Policy_ParkDisabled_PreExistingBaseFailure_StrikesNormally()
+    {
+        // parkOnInfra=false: a CI failure that is ALSO red on the base
+        // branch is treated as a genuine PR failure — strike + rework
+        // round instead of the no-strike park.
+        var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Failure };
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWithPolicy("parkOnInfra", "false")).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal("1", after.GetMetadata("reworkAttempts"));
+        Assert.NotEqual("ParkedInfra", after.GetMetadata("state"));
+    }
+
+    [Fact]
+    public async Task Policy_AutoMergeFalse_GreenApproved_DoesNotMerge()
+    {
+        // autoMerge=false: green + approved at the current head stays
+        // put — the operator merges by hand (external-merge detection
+        // still closes the loop, covered elsewhere).
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var (task, watch) = await SeedAsync();
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWithPolicy("autoMerge", "false")).PollWatchOnceAsync(
+            watch, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => true);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        Assert.Equal(0, gh.MergeCalls);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
     }
 
     [Fact]

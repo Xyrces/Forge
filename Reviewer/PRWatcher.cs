@@ -30,6 +30,7 @@ public sealed class PRWatcher
     private readonly IDashboardEventBus _events;
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly AgentRunStore? _runs;
+    private readonly Forge.Core.Workflow.WorkflowResolver? _workflow;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -42,7 +43,8 @@ public sealed class PRWatcher
         StageGates? gates = null,
         TimeSpan? reworkRoundGrace = null,
         Forge.Core.TaskStateMachine? lifecycle = null,
-        AgentRunStore? runs = null)
+        AgentRunStore? runs = null,
+        Forge.Core.Workflow.WorkflowResolver? workflow = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -55,6 +57,7 @@ public sealed class PRWatcher
         _gates = gates;
         _lifecycle = lifecycle;
         _runs = runs;
+        _workflow = workflow;
     }
 
     /// <summary>
@@ -163,6 +166,24 @@ public sealed class PRWatcher
         // not break the watch loop.
         async Task ReportAsync(Forge.Core.TaskEvent evt)
             => await ReportLifecycleAsync(watchTask, taskId, evt, cancellationToken);
+
+        // Workflow policies (editable workflow, pass 3): resolved per
+        // poll — a publish lands here on the very next sweep, no
+        // restart. Fallbacks are the code constants (pre-definition
+        // behavior); tests pass no resolver and keep ctor values.
+        var wf = _workflow is not null ? await _workflow.ResolveAsync(cancellationToken) : null;
+        var maxStrikes = wf is not null
+            ? Forge.Core.Workflow.WorkflowPolicyReader.GetInt(wf, Forge.Core.Workflow.WorkflowPolicies.MaxStrikes, MaxReworkAttempts)
+            : MaxReworkAttempts;
+        var grace = wf is not null
+            ? TimeSpan.FromMinutes(Forge.Core.Workflow.WorkflowPolicyReader.GetInt(
+                wf, Forge.Core.Workflow.WorkflowPolicies.StallGraceMinutes, (int)_reworkRoundGrace.TotalMinutes))
+            : _reworkRoundGrace;
+        var parkOnInfra = wf is null
+            || Forge.Core.Workflow.WorkflowPolicyReader.GetBool(wf, Forge.Core.Workflow.WorkflowPolicies.ParkOnInfra, true);
+        var autoMerge = wf is null
+            || Forge.Core.Workflow.WorkflowPolicyReader.GetBool(wf, Forge.Core.Workflow.WorkflowPolicies.AutoMerge, true);
+
         var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
         // P4 e2e-harness seam: tests can pre-approve reviews
         // without going through Octokit's sealed
@@ -235,7 +256,7 @@ public sealed class PRWatcher
                 var untouchedFor = DateTime.UtcNow - enteredAt;
                 var roundStalled = guardTask is not null
                     && guardTask.Status == IssueStatus.InProgress
-                    && untouchedFor > _reworkRoundGrace;
+                    && untouchedFor > grace;
                 if (!roundStalled)
                 {
                     return WatchPollOutcome.Pending;
@@ -274,7 +295,17 @@ public sealed class PRWatcher
                     terminalStatus: IssueStatus.Blocked,
                     terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                     terminalOutcome: WatchPollOutcome.Blocked,
-                    cancellationToken);
+                    cancellationToken,
+                    maxStrikes: maxStrikes);
+            }
+
+            // autoMerge=false (workflow policy): same shape as a held
+            // merge gate — the watch stays live, nothing fails, the
+            // operator merges by hand (external merges detected above).
+            if (!autoMerge)
+            {
+                _logger.LogInformation("PR #{PrNumber}: green + approved but autoMerge=false in the workflow definition — leaving for operator merge", prNumber);
+                return WatchPollOutcome.Pending;
             }
 
             // Operator merge gate: hold auto-merge without failing
@@ -312,7 +343,8 @@ public sealed class PRWatcher
                     terminalStatus: IssueStatus.Blocked,
                     terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                     terminalOutcome: WatchPollOutcome.Blocked,
-                    cancellationToken);
+                    cancellationToken,
+                    maxStrikes: maxStrikes);
             }
             _logger.LogWarning("PR #{PrNumber} merge returned false; will retry next poll", prNumber);
             return WatchPollOutcome.Pending;
@@ -342,7 +374,7 @@ public sealed class PRWatcher
                 && string.Equals(parkTask.GetMetadata("state"), nameof(Forge.Core.TaskLifecycleState.ParkedInfra), StringComparison.Ordinal)
                 ? parkTask.GetMetadata("parkedForSha")
                 : null;
-            if (string.Equals(parkedSha, sha, StringComparison.Ordinal))
+            if (parkOnInfra && string.Equals(parkedSha, sha, StringComparison.Ordinal))
             {
                 var baseHead = await _gitHub.GetBranchHeadShaAsync(baseBranch, cancellationToken);
                 var baseCi = await _gitHub.GetCommitStatusAsync(baseHead, cancellationToken);
@@ -362,9 +394,10 @@ public sealed class PRWatcher
                     terminalError: "post-recovery refresh rounds exhausted",
                     terminalOutcome: WatchPollOutcome.CiFailed,
                     cancellationToken,
-                    countAsStrike: false);
+                    countAsStrike: false,
+                    maxStrikes: maxStrikes);
             }
-            if (!string.Equals(parkedSha, sha, StringComparison.Ordinal))
+            if (parkOnInfra && !string.Equals(parkedSha, sha, StringComparison.Ordinal))
             {
                 var baseHead = await _gitHub.GetBranchHeadShaAsync(baseBranch, cancellationToken);
                 var baseCi = await _gitHub.GetCommitStatusAsync(baseHead, cancellationToken);
@@ -398,7 +431,8 @@ public sealed class PRWatcher
                 terminalStatus: IssueStatus.Failed,
                 terminalError: $"CI failed after max rework attempts: {ci}",
                 terminalOutcome: WatchPollOutcome.CiFailed,
-                cancellationToken);
+                cancellationToken,
+                maxStrikes: maxStrikes);
         }
         if (changesRequested)
         {
@@ -411,7 +445,8 @@ public sealed class PRWatcher
                 terminalStatus: IssueStatus.Blocked,
                 terminalError: "changes-requested (circuit breaker tripped after max rework attempts)",
                 terminalOutcome: WatchPollOutcome.Blocked,
-                cancellationToken);
+                cancellationToken,
+                maxStrikes: maxStrikes);
         }
         if (reviewErrored)
         {
@@ -419,7 +454,7 @@ public sealed class PRWatcher
             // errors). Circuit-breaker on review rounds, then the
             // operator must review by hand.
             var rounds = int.TryParse(watchTask.GetMetadata("reviewRound"), out var r) ? r : 1;
-            if (rounds >= MaxReworkAttempts)
+            if (rounds >= maxStrikes)
             {
                 _logger.LogWarning("PR #{PrNumber}: reviewer unavailable after {Rounds} rounds; blocking for operator review", prNumber, rounds);
                 await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "reviewer unavailable — operator review required", ct: cancellationToken);
@@ -452,7 +487,8 @@ public sealed class PRWatcher
                 terminalStatus: IssueStatus.Blocked,
                 terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                 terminalOutcome: WatchPollOutcome.Blocked,
-                cancellationToken);
+                cancellationToken,
+                maxStrikes: maxStrikes);
         }
 
         // 3. Otherwise: CI pending, or review for the current head
@@ -513,7 +549,8 @@ public sealed class PRWatcher
         string terminalError,
         WatchPollOutcome terminalOutcome,
         CancellationToken cancellationToken,
-        bool countAsStrike = true)
+        bool countAsStrike = true,
+        int? maxStrikes = null)
     {
         var task = await _issues.GetAsync(taskId, cancellationToken);
         var attempts = 0;
@@ -523,7 +560,7 @@ public sealed class PRWatcher
             if (raw is not null) int.TryParse(raw, out attempts);
         }
 
-        if (task is null || (countAsStrike && attempts >= MaxReworkAttempts))
+        if (task is null || (countAsStrike && attempts >= (maxStrikes ?? MaxReworkAttempts)))
         {
             _logger.LogWarning("PR watch {WatchId}: circuit breaker tripped for {TaskId} after {N} rework attempts ({Reason})",
                 watchTask.Id, taskId, attempts, reason);

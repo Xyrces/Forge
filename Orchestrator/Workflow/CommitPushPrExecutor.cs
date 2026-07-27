@@ -31,10 +31,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         IDashboardEventBus events,
         IMemoryExtractor memoryExtractor,
         MemoryExtractionStore extractionStore,
-        ILogger<CommitPushPrExecutor> logger)
+        ILogger<CommitPushPrExecutor> logger,
+        Forge.Core.Workflow.WorkflowResolver? workflow = null)
         : base(
             "commit-push-pr",
-            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, ct),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -62,6 +63,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         IMemoryExtractor memoryExtractor,
         MemoryExtractionStore extractionStore,
         ILogger logger,
+        Forge.Core.Workflow.WorkflowResolver? workflow,
         CancellationToken ct)
     {
         if (input.Result == AgentResult.Skipped)
@@ -118,7 +120,18 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             // 40-iteration default cut every run during exploration.)
             var explicitNoOp = (input.Text ?? "")
                 .Contains("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase);
-            if (!explicitNoOp)
+            // Workflow policy noDiffOutcome=rework (pass 3): the
+            // operator doesn't accept verified no-op completions —
+            // even an explicit NO_CHANGES_NEEDED requeues (the
+            // no-progress circuit breaker still caps the loop).
+            var noDiffOutcome = "completed";
+            if (workflow is not null)
+            {
+                var definition = await workflow.ResolveAsync(ct);
+                noDiffOutcome = Forge.Core.Workflow.WorkflowPolicyReader.GetString(
+                    definition, Forge.Core.Workflow.WorkflowPolicies.NoDiffOutcome, "completed");
+            }
+            if (!explicitNoOp || string.Equals(noDiffOutcome, "rework", StringComparison.Ordinal))
             {
                 var attempts = int.TryParse(current?.GetMetadata("noProgressAttempts"), out var n) ? n + 1 : 1;
                 if (attempts >= MaxNoProgressAttempts)
@@ -135,7 +148,9 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 else
                 {
                     await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
-                        $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
+                        explicitNoOp
+                            ? $"NO_CHANGES_NEEDED rejected by workflow policy noDiffOutcome=rework (attempt {attempts})"
+                            : $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
                         new Dictionary<string, object> { ["noProgressAttempts"] = attempts.ToString() }, ct);
                     events.Publish(new DashboardEvent(
                         DateTime.UtcNow, DashboardEventKind.TaskTransition,

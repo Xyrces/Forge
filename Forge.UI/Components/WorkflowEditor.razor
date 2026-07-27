@@ -107,13 +107,41 @@ else if (_working is not null)
 
     <div style="max-width:640px;margin:24px auto 0">
         <h3>Policies</h3>
-        <div class="page-subtitle">Policy editing lands in pass 3 — shown here for context.</div>
-        <div class="chip-row">
-            @foreach (var (k, v) in _working.Policies.OrderBy(kv => kv.Key))
+        <div class="page-subtitle">Draft edits — they take effect at publish, and machinery reads them at its next evaluation. Ranges are enforced at publish.</div>
+        <ul style="list-style:none;padding:0;margin:8px 0 0">
+            @foreach (var meta in PolicyMeta)
             {
-                <span class="pill pill--outline">@k = @v</span>
+                var current = _working.Policies.TryGetValue(meta.Key, out var v) ? v : meta.Default;
+                var isDefault = string.Equals(current, meta.Default, StringComparison.Ordinal);
+                <li style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--outline-variant)">
+                    <span style="min-width:170px" title="@meta.Description">@meta.Label</span>
+                    @if (meta.Kind == PolicyKind.Int)
+                    {
+                        <input type="number" class="mono" style="width:90px" min="@meta.Min" max="@meta.Max"
+                               value="@current"
+                               @onchange="@(e => SetPolicy(meta.Key, e.Value?.ToString()))" />
+                        <span class="page-subtitle">@meta.Min–@meta.Max</span>
+                    }
+                    else
+                    {
+                        <select class="mono" value="@current"
+                                @onchange="@(e => SetPolicy(meta.Key, e.Value?.ToString()))">
+                            @foreach (var choice in meta.Choices ?? Array.Empty<string>())
+                            {
+                                <option value="@choice">@choice</option>
+                            }
+                        </select>
+                    }
+                    <span style="flex:1"></span>
+                    @if (!isDefault)
+                    {
+                        <span class="pill pill--warn" title="Differs from the built-in default (@meta.Default)">changed</span>
+                        <button class="btn btn--small" @onclick="@(() => SetPolicy(meta.Key, meta.Default))" disabled="@_busy"
+                                title="Back to the built-in default (@meta.Default)">Reset</button>
+                    }
+                </li>
             }
-        </div>
+        </ul>
         <div class="page-subtitle" style="margin-top:6px">
             Run-quality gates (plan-schema / plan-territory / plan-llm-review) are edited on the
             <a href="/gates">quality gates page</a>.
@@ -292,6 +320,28 @@ else if (_working is not null)
         step.Gates.Add(gate);
         _dirty = true;
     }
+
+    private void SetPolicy(string key, string? value)
+    {
+        if (value is null) return;
+        _working!.Policies[key] = value;
+        _dirty = true;
+    }
+
+    private enum PolicyKind { Int, Choice }
+
+    private sealed record PolicyMetaEntry(
+        string Key, string Label, string Description, string Default,
+        PolicyKind Kind, int Min = 0, int Max = 0, string[]? Choices = null);
+
+    private static readonly PolicyMetaEntry[] PolicyMeta =
+    {
+        new("maxStrikes", "Max rework strikes", "Rework rounds before the circuit breaker trips and the task goes terminal for the operator.", "3", PolicyKind.Int, 1, 10),
+        new("stallGraceMinutes", "Stall grace (minutes)", "A claimed rework round untouched longer than this is declared stalled and re-fired as a strike.", "35", PolicyKind.Int, 1, 1440),
+        new("parkOnInfra", "Park on infra failure", "When true, a CI failure that is pre-existing on the base branch parks the watch (no strike) until the base recovers.", "true", PolicyKind.Choice, Choices: new[] { "true", "false" }),
+        new("autoMerge", "Auto-merge", "When false, green + approved PRs are left for the operator to merge by hand (external merges are still detected).", "true", PolicyKind.Choice, Choices: new[] { "true", "false" }),
+        new("noDiffOutcome", "No-diff outcome", "completed: an explicit NO_CHANGES_NEEDED verdict completes the task. rework: even a verified no-op requeues (the no-progress breaker still caps the loop).", "completed", PolicyKind.Choice, Choices: new[] { "completed", "rework" }),
+    };
 
     private void DetachGate(StepDto step, string gate)
     {

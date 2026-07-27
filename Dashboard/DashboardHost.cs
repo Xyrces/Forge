@@ -515,7 +515,8 @@ if (_groomerRuns is not null)
                 SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger);
             }
 
-            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns);
+            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
+                _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null);
         }
 
         _app.MapBuildInfoEndpoint();
