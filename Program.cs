@@ -383,6 +383,7 @@ var dashboard = new DashboardHost(
             projectStore: projectStore,
             projectCloner: cloner,
             githubOptions: options.GitHub,
+            gateOptions: options.Gates,
             secretStore: secretStore);
 
         using var shutdownCts = new CancellationTokenSource();
@@ -1343,6 +1344,7 @@ Console.Error.WriteLine(ex.ToString());
             agentRuns: agentRunStore,
             llmConfig: llmConfig,
             roleModelOverrides: roleModelOverrides,
+            gateOptions: options.Gates,
             lifecycle: lifecycle);
 
         // externalStop is the Windows Service host's stoppingToken when
