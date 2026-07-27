@@ -759,3 +759,74 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .dash-panel__title { font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
 .dash-panel__title a { font-size: 12px; font-weight: 400; }
 @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, 1fr); } .dash-panels { grid-template-columns: 1fr; } }
+
+/* =========================================================================
+   Gate list (Run quality gates page)
+   ------------------------------------------------------------------------- */
+
+.gate-list { display: flex; flex-direction: column; gap: 8px; }
+
+.gate-row {
+  display: grid; grid-template-columns: 28px 1fr auto;
+  align-items: center; gap: 8px;
+  padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-md);
+  transition: background .15s, border-color .15s;
+}
+.gate-row:hover { background: var(--surface-1); border-color: var(--outline-variant); }
+.gate-row--disabled { opacity: 0.65; }
+.gate-row--disabled:hover { background: var(--surface); border-color: var(--outline); }
+
+.gate-row__drag {
+  cursor: grab; color: var(--on-surface-variant); font-size: 16px;
+  text-align: center; user-select: none;
+}
+
+.gate-row__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.gate-row__top { display: flex; align-items: center; gap: 8px; }
+.gate-row__name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--on-surface); }
+.gate-row__desc { font-size: 12px; color: var(--on-surface-variant); line-height: 1.5; }
+.gate-row__actions { display: flex; gap: 4px; align-items: center; }
+
+/* Source badge colors */
+.pill--source-db { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
+.pill--source-config { background: rgba(125,223,193,0.12); color: var(--success); border: 1px solid var(--success); }
+.pill--source-default { background: transparent; color: var(--on-surface-variant); border: 1px solid var(--outline); }
+
+/* =========================================================================
+   Gate list (Run quality gates page)
+   ------------------------------------------------------------------------- */
+
+.gate-list { display: flex; flex-direction: column; gap: 8px; }
+
+.gate-row {
+  display: grid; grid-template-columns: 28px 1fr auto;
+  align-items: center; gap: 8px;
+  padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-md);
+  transition: background .15s, border-color .15s;
+}
+.gate-row:hover { background: var(--surface-1); border-color: var(--outline-variant); }
+.gate-row--disabled { opacity: 0.65; }
+.gate-row--disabled:hover { background: var(--surface); border-color: var(--outline); }
+
+.gate-row__drag {
+  cursor: grab; color: var(--on-surface-variant); font-size: 16px;
+  text-align: center; user-select: none;
+}
+
+.gate-row__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.gate-row__top { display: flex; align-items: center; gap: 8px; }
+.gate-row__name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--on-surface); }
+.gate-row__desc { font-size: 12px; color: var(--on-surface-variant); line-height: 1.5; }
+.gate-row__actions { display: flex; gap: 4px; align-items: center; }
+
+/* Source badge colors */
+.pill--source-db { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
+.pill--source-config { background: rgba(125,223,193,0.12); color: var(--success); border: 1px solid var(--success); }
+.pill--source-default { background: transparent; color: var(--on-surface-variant); border: 1px solid var(--outline); }
+
+/* Source badge colors — classes match pill--source-{source-value-with-dashes} */
+.pill--source-db-override { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
+.pill--source-config { background: rgba(125,223,193,0.12); color: var(--success); border: 1px solid var(--success); }
+.pill--source-builtin-default { background: transparent; color: var(--on-surface-variant); border: 1px solid var(--outline); }
