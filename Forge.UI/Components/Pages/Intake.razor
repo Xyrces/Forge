@@ -176,7 +176,7 @@
                         {
                             <div class="intake-memory-row">
                                 <span class="mono">@m.Key</span>
-                                <span class="page-subtitle">@Truncate(m.Value, 120)</span>
+                                <span class="page-subtitle">@Truncate(m.Body, 120)</span>
                             </div>
                         }
                     }
@@ -207,7 +207,7 @@
     public sealed record SessionSpecDto(string Id, string ProjectId, string Title, string Status, int CurrentVersion, string? Body);
     public sealed record GraphDto(string RepoRoot, string RepoSha, DateTime BuiltAt, int FileCount, int ImportCount, int ProjectEdgeCount, List<GraphFileDto> Files);
     public sealed record GraphFileDto(string Path, string Module, string Language);
-    public sealed record MemoryDto(string Key, string Value, DateTime UpdatedAt);
+    public sealed record MemoryDto(string Key, string Body, DateTime UpdatedAt);
 
     private void SelectTab(string tab)
     {

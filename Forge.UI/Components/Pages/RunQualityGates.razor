@@ -193,7 +193,7 @@
         _error = null;
         try
         {
-            var body = new { gateNames };
+            var body = new { gates = gateNames };
             var resp = await Http.PutAsJsonAsync($"/api/gates/{Checkpoint}", body);
             if (!resp.IsSuccessStatusCode)
             {

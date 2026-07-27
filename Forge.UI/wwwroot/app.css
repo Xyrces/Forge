@@ -226,6 +226,14 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
 .pill--draft    { background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); }
 .pill--designed, .pill--assetready, .pill--shipped, .pill--groomed { background: var(--primary); color: var(--on-primary); }
 .pill--approved { background: var(--surface-3); color: var(--on-surface); border: 1px solid var(--outline-variant); }
+/* Status pills that were referenced by pages but never defined —
+   they rendered as invisible/unstyled pills (2026-07-27 audit). */
+.pill--closed    { background: var(--surface-3); color: var(--on-surface-variant); border: 1px solid var(--outline-variant); }
+.pill--blocked   { background: var(--warn); color: var(--on-primary); }
+.pill--active    { background: var(--primary); color: var(--on-primary); }
+.pill--readyfordesign { background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); }
+.pill--needsrevision { background: var(--warn); color: var(--on-primary); }
+.pill--grooming  { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
 
 .heartbeat { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--on-surface-variant); }
 .heartbeat__dot { width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--outline-variant); }

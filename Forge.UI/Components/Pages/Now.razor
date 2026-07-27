@@ -81,6 +81,37 @@
             </div>
         </div>
 
+        @* ── Needs you: the alert inbox, in-line (fetched but never
+             rendered until the 2026-07-27 audit — the bell said
+             "see /now" and this page showed nothing) ── *@
+        @if (_feed.Attention.Count > 0)
+        {
+            <div class="dash-panel" style="margin-bottom:16px">
+                <div class="dash-panel__title">
+                    <span>Needs you (@_feed.Attention.Count)</span>
+                    <a href="/backlog">backlog →</a>
+                </div>
+                @foreach (var a in _feed.Attention.Take(10))
+                {
+                    <a href="@a.Link" class="alert-inbox__row" style="display:flex;text-decoration:none;color:inherit">
+                        <span class="alert-inbox__dot" style="background:@SeverityDot(a.Severity)"></span>
+                        <span class="alert-inbox__text">
+                            <span class="alert-inbox__title">@a.Title</span>
+                            @if (a.Detail is not null)
+                            {
+                                <span class="alert-inbox__detail">@a.Detail</span>
+                            }
+                        </span>
+                        <span class="alert-inbox__chev">›</span>
+                    </a>
+                }
+                @if (_feed.Attention.Count > 10)
+                {
+                    <div class="alert-inbox__empty">+@(_feed.Attention.Count - 10) more</div>
+                }
+            </div>
+        }
+
         @* ── Happening now | Waiting & why ── *@
         <div class="dash-panels">
             <div class="dash-panel">
@@ -177,6 +208,13 @@
     private NowFeedDto? _feed;
     private FlowDto? _flow;
     private System.Threading.Timer? _timer;
+
+    private static string SeverityDot(string severity) => severity switch
+    {
+        "fail" => "#c62828",
+        "warn" => "#ef6c00",
+        _ => "#1565c0",
+    };
 
     protected override void OnInitialized()
     {

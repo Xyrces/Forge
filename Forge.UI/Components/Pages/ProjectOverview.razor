@@ -33,9 +33,9 @@
     {
         <div class="filter-bar">
             <button class="chip chip--active">Overview</button>
-            <a class="chip" href="@($"/projects/{Id}/backlog")">Backlog</a>
-            <a class="chip" href="@($"/projects/{Id}/sprints")">Sprints</a>
-            <a class="chip" href="@($"/projects/{Id}/tasks")">Tasks</a>
+            <button class="chip" @onclick='() => GoTo("/backlog")'>Backlog</button>
+            <button class="chip" @onclick='() => GoTo("/sprints")'>Sprints</button>
+            <button class="chip" @onclick='() => GoTo("/tasks")'>Tasks</button>
             <a class="chip" href="@($"/projects/{Id}/secrets")">Secrets</a>
         </div>
 
@@ -124,6 +124,16 @@
 
 @code {
     [Parameter] public string Id { get; set; } = string.Empty;
+
+    // Tab chips: there are no per-project routes for these boards —
+    // select THIS project in the shell store and go to the global
+    // page (was: hrefs to /projects/{id}/backlog|sprints|tasks that
+    // 404'd — found in the 2026-07-27 UI audit).
+    private void GoTo(string route)
+    {
+        Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.SelectProjectAction(Id));
+        Nav.NavigateTo(route);
+    }
 
     // Mirror of Configuration.DefaultProjectRoles.Default — used only to
     // label rows as "default" vs "override" and to seed the edit grid.

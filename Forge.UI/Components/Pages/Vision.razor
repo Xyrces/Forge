@@ -9,7 +9,7 @@
         @if (_snapshot is not null)
         {
             <div class="page-header__meta">
-                Last revised @(_snapshot.LastModifiedUtc?.ToString("yyyy-MM-dd HH:mm") ?? "—") ·
+                Last revised @(_snapshot.LastModified?.ToString("yyyy-MM-dd HH:mm") ?? "—") ·
                 @_snapshot.Content?.Length.ToString("N0") chars
             </div>
         }
@@ -89,7 +89,7 @@
                     @if (block.Kind == "h1")
                     {
                         <h1 class="vision-h1">@block.Text</h1>
-                        <div class="vision-meta mono">forge/MASTER_DESIGN.md · @_snapshot.Content?.Length.ToString("N0") chars · @(_snapshot.LastModifiedUtc?.ToString("yyyy-MM-dd HH:mm") ?? "—")</div>
+                        <div class="vision-meta mono">forge/MASTER_DESIGN.md · @_snapshot.Content?.Length.ToString("N0") chars · @(_snapshot.LastModified?.ToString("yyyy-MM-dd HH:mm") ?? "—")</div>
                     }
                     else if (block.Kind == "h2")
                     {
@@ -131,7 +131,7 @@
     private string? _draftTaskId;
     private string? _draftError;
 
-    public sealed record SnapshotDto(bool Exists, string Path, string? Content, DateTime? LastModifiedUtc);
+    public sealed record SnapshotDto(bool Exists, string Path, string? Content, DateTime? LastModified);
 
     private sealed record MarkdownBlock(string Kind, string Text);
 
