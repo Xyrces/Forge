@@ -991,7 +991,7 @@ Console.Error.WriteLine(ex.ToString());
         // Optional operator review gates at the major automatic
         // transitions (design / groom / sprint / merge). v1: backed
         // by the primary project's memory store.
-        var stageGates = new Core.StageGates(memoryStore);
+        var stageGates = new Core.StageGates(memoryStore, new Core.Workflow.WorkflowResolver(memoryStore));
 
         // Phase 4: JSONL mirror of the issue store. Background service
         // rewrites the file every 5s so it's safe to tail -f.

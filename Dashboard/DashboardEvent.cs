@@ -49,4 +49,7 @@ public static class DashboardEventKind
     // next sprint is assembled + activated (sprint.started).
     public const string SprintCompleted = "sprint.completed";
     public const string SprintStarted = "sprint.started";
+    // Editable workflow: definition published / restored from the
+    // Flow page Edit mode. Detail carries the human-readable diff.
+    public const string WorkflowPublished = "workflow.published";
 }

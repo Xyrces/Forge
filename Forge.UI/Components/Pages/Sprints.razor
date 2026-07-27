@@ -18,19 +18,20 @@
         </div>
     </div>
 
-    @* Operator stage gates: hold a stage to pause its automatic
-       transition; release to let the pipeline continue. *@
+    @* Operator stage gates: read-only status here — the canonical
+       editing surface is the Flow page Edit mode (one setting, one
+       place; operator rule 2026-07-24). *@
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
         <span class="page-subtitle" style="margin-right:4px">Stage gates:</span>
         @foreach (var stage in _gateStages)
         {
             var held = _gates.TryGetValue(stage, out var s) && s == "hold";
-            <button class="chip @(held ? "chip--active" : "")"
-                    title="@(held ? $"Held — {stage} transitions are paused. Click to release." : $"Open — {stage} runs automatically. Click to hold.")"
-                    @onclick="@(() => ToggleGateAsync(stage))">
+            <span class="chip @(held ? "chip--active" : "")"
+                  title="@(held ? $"Held — {stage} transitions are paused." : $"Open — {stage} runs automatically.")">
                 @stage: @(held ? "held" : "open")
-            </button>
+            </span>
         }
+        <a href="/flow?mode=edit" class="page-subtitle">Edit on the Flow page →</a>
     </div>
 
     @if (ViewStore.Value.Loading)
@@ -174,13 +175,6 @@
             StateHasChanged();
         }
         catch { /* gates endpoint absent on older backends */ }
-    }
-
-    private async Task ToggleGateAsync(string stage)
-    {
-        var held = _gates.TryGetValue(stage, out var s) && s == "hold";
-        var resp = await Http.PostAsync($"/api/gates/{stage}/{(held ? "release" : "hold")}", null);
-        if (resp.IsSuccessStatusCode) await LoadGatesAsync();
     }
 
     private sealed record Column(string Title, Func<Card, bool> Match);

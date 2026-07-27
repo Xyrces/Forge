@@ -1,5 +1,6 @@
 @page "/flow"
 @inject HttpClient Http
+@inject NavigationManager Nav
 @implements IDisposable
 @using System.Net.Http.Json
 
@@ -8,17 +9,26 @@
     <div class="page-header">
         <h1>Pipeline flow</h1>
         <div class="page-header__meta">
-            @if (_fleet is not null)
+            @if (_fleet is not null && !EditMode)
             {
                 <span>@_fleet.Nodes.Sum(n => n.Count) items in flight · refreshed @_lastFetch?.ToString("HH:mm:ss")</span>
             }
         </div>
         <div class="page-header__actions">
-            <button class="btn" @onclick="LoadFleetAsync">Refresh</button>
+            <button class="btn @(EditMode ? "" : "btn--primary")" @onclick="@(() => SetMode(false))">Live</button>
+            <button class="btn @(EditMode ? "btn--primary" : "")" @onclick="@(() => SetMode(true))">Edit</button>
+            @if (!EditMode)
+            {
+                <button class="btn" @onclick="LoadFleetAsync">Refresh</button>
+            }
         </div>
     </div>
 
-    @if (_fleet is null && _loadError is not null)
+    @if (EditMode)
+    {
+        <WorkflowEditor />
+    }
+    else if (_fleet is null && _loadError is not null)
     {
         <div class="banner banner--error">Failed to load the pipeline flow: @_loadError <button class="btn btn--small" @onclick="LoadFleetAsync">Retry</button></div>
     }
@@ -212,6 +222,17 @@
     [Parameter, SupplyParameterFromQuery(Name = "issue")]
     public string? InitialIssue { get; set; }
 
+    [Parameter, SupplyParameterFromQuery(Name = "mode")]
+    public string? Mode { get; set; }
+
+    private bool EditMode => string.Equals(Mode, "edit", StringComparison.OrdinalIgnoreCase);
+
+    private void SetMode(bool edit)
+    {
+        // Pause live polling while editing; resume on the way back.
+        Nav.NavigateTo(edit ? "/flow?mode=edit" : "/flow", forceLoad: false);
+    }
+
     private FleetDto? _fleet;
     private string? _loadError;
     private string? _focusedNode;
@@ -275,6 +296,7 @@
 
     private async Task LoadFleetAsync()
     {
+        if (EditMode) return;   // editor owns the page; don't poll
         try
         {
             _fleet = await Http.GetFromJsonAsync<FleetDto>("/api/flow");

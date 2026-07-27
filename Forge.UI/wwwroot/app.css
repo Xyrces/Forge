@@ -875,3 +875,12 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .run-active-card__elapsed { font-size: 12px; color: var(--on-surface-variant); }
 .run-active-card__body { margin-top: 6px; font-size: 13px; }
 .run-active-card__meta { font-size: 11px; color: var(--on-surface-variant); margin-top: 4px; }
+
+/* Workflow editor (Flow page Edit mode) */
+.wf-step { background: var(--surface); border: 1px solid var(--outline-variant); border-radius: 12px; padding: 12px 14px; }
+.wf-step__header { display: flex; gap: 8px; align-items: center; }
+.wf-step__number { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: var(--on-primary); font-size: 12px; flex-shrink: 0; }
+.wf-connector { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin: 4px auto; border-radius: 50%; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); font-size: 13px; }
+.wf-branch { margin-top: 6px; }
+.wf-branch__chip { border-style: dashed; }
+.wf-branch__nested { margin: 6px 0 0 18px; padding-left: 12px; border-left: 2px solid var(--outline-variant); }
