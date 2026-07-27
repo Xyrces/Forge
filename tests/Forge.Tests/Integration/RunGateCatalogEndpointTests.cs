@@ -162,6 +162,176 @@ public class RunGateCatalogEndpointTests : IDisposable
         Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task Put_OverrideWritesAndGetReturnsDbOverride()
+    {
+        // Arrange: override with a single gate
+        var overrideGates = new[] { "plan-territory" };
+
+        // Act: PUT the override
+        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", overrideGates);
+        Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
+
+        // Verify the PUT response body shows the overridden state
+        var putBody = await putResp.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.NotNull(putBody);
+        Assert.Equal("preImplementation", putBody!.Checkpoint);
+        Assert.Equal("db_override", putBody.Source);
+        Assert.Single(putBody.Gates);
+        Assert.Equal("plan-territory", putBody.Gates[0].Name);
+
+        // Verify a subsequent GET also reflects the override
+        var getResp = await _client.GetAsync("/api/gates/preImplementation");
+        var getBody = await getResp.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Equal("db_override", getBody!.Source);
+        Assert.Single(getBody.Gates);
+        Assert.Equal("plan-territory", getBody.Gates[0].Name);
+    }
+
+    [Fact]
+    public async Task Put_EmptyArrayIsAccepted_AndDoesNotOverride()
+    {
+        // An empty array is stored but the resolver skips it (names is { Length: > 0 } is false),
+        // so the effective gate list falls through to config -> builtin_default.
+        // The request should still succeed (200) without error.
+
+        // Act: PUT with empty array
+        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", Array.Empty<string>());
+        Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
+
+        // The PUT response shows the resolved state after mutation.
+        // Since the empty array resolves as a no-op, source is builtin_default with all 3 gates.
+        var putBody = await putResp.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.NotNull(putBody);
+        Assert.Equal("builtin_default", putBody!.Source);
+        Assert.Equal(3, putBody.Gates.Count);
+
+        // GET also reflects the no-op resolution
+        var getResp = await _client.GetAsync("/api/gates/preImplementation");
+        var getBody = await getResp.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Equal("builtin_default", getBody!.Source);
+        Assert.Equal(3, getBody.Gates.Count);
+    }
+
+    [Fact]
+    public async Task Delete_RevertsToBuiltinDefault()
+    {
+        // Arrange: first write an override
+        var overrideGates = new[] { "plan-schema" };
+        var putResp = await _client.PutAsJsonAsync("/api/gates/preImplementation", overrideGates);
+        Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
+
+        // Verify override is in effect
+        var getAfterPut = await _client.GetAsync("/api/gates/preImplementation");
+        var afterPutBody = await getAfterPut.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Equal("db_override", afterPutBody!.Source);
+
+        // Act: DELETE to remove the override
+        var delResp = await _client.DeleteAsync("/api/gates/preImplementation");
+        Assert.Equal(HttpStatusCode.OK, delResp.StatusCode);
+
+        // Verify the DELETE response body shows reverted state
+        var delBody = await delResp.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.NotNull(delBody);
+        Assert.Equal("builtin_default", delBody!.Source);
+        Assert.Equal(3, delBody.Gates.Count);
+
+        // Verify GET also shows builtin_default again
+        var getAfterDel = await _client.GetAsync("/api/gates/preImplementation");
+        var afterDelBody = await getAfterDel.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Equal("builtin_default", afterDelBody!.Source);
+        Assert.Equal(3, afterDelBody.Gates.Count);
+    }
+
+    [Fact]
+    public async Task Delete_UnknownCheckpoint_ReturnsNotFound()
+    {
+        // Act: DELETE a non-existent checkpoint (no override exists)
+        var resp = await _client.DeleteAsync("/api/gates/bogus-checkpoint");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Put_Returns503_WhenMemoryIsNull()
+    {
+        // Arrange: build a separate app with null memory
+        var port = GetEphemeralPort();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
+        builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(NullLoggerProvider.Instance);
+        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        var app = builder.Build();
+        RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(app, _gateOptions, null, NullLogger<RunGatePipeline>.Instance);
+        app.Start();
+
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+
+        // Act
+        var putResp = await client.PutAsJsonAsync("/api/gates/preImplementation", new[] { "plan-schema" });
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, putResp.StatusCode);
+
+        await app.StopAsync();
+        await app.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Delete_Returns503_WhenMemoryIsNull()
+    {
+        // Arrange: build a separate app with null memory
+        var port = GetEphemeralPort();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = _workDir,
+            ApplicationName = "Forge.Tests",
+        });
+        builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(NullLoggerProvider.Instance);
+        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        var app = builder.Build();
+        RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(app, _gateOptions, null, NullLogger<RunGatePipeline>.Instance);
+        app.Start();
+
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+
+        // Act
+        var delResp = await client.DeleteAsync("/api/gates/preImplementation");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, delResp.StatusCode);
+
+        await app.StopAsync();
+        await app.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Put_ThenDelete_ThenPutAgain_RoundTripWorks()
+    {
+        // PUT override
+        var put1 = await _client.PutAsJsonAsync("/api/gates/preImplementation", new[] { "plan-llm-review" });
+        Assert.Equal(HttpStatusCode.OK, put1.StatusCode);
+        var body1 = await put1.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Equal("db_override", body1!.Source);
+        Assert.Single(body1.Gates);
+        Assert.Equal("plan-llm-review", body1.Gates[0].Name);
+
+        // DELETE override
+        var del = await _client.DeleteAsync("/api/gates/preImplementation");
+        Assert.Equal(HttpStatusCode.OK, del.StatusCode);
+        var bodyDel = await del.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Equal("builtin_default", bodyDel!.Source);
+
+        // PUT again with different gates
+        var put2 = await _client.PutAsJsonAsync("/api/gates/preImplementation", new[] { "plan-schema", "plan-territory" });
+        Assert.Equal(HttpStatusCode.OK, put2.StatusCode);
+        var body2 = await put2.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Equal("db_override", body2!.Source);
+        Assert.Equal(2, body2.Gates.Count);
+        Assert.Equal("plan-schema", body2.Gates[0].Name);
+        Assert.Equal("plan-territory", body2.Gates[1].Name);
+    }
+
     private sealed record CatalogResponse(
         string Checkpoint,
         string Source,
