@@ -7,6 +7,11 @@ namespace Forge.Agents.Gates;
 /// named in the plan must (a) fall inside the role's territory
 /// (prefix set + optional root-file allowance) and (b) exist under
 /// the worktree, unless explicitly marked "(new)". Zero LLM.
+/// Bare filenames (no directory prefix) that duplicate a full-path
+/// match are skipped to avoid false violations.
+/// Extraction is scoped to the ## Files (or ### Files) section only,
+/// so prose references in Goal/Approach/Test/Done do not trigger
+/// false territory or existence violations.
 /// </summary>
 public sealed partial class PlanTerritoryGate : IRunGate
 {
