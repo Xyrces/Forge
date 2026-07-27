@@ -1,0 +1,86 @@
+@inject HttpClient Http
+@implements IDisposable
+@using System.Net.Http.Json
+
+<div class="dash-panel">
+    <div class="dash-panel__title">
+        <span>Run quality verdicts</span>
+        <a href="/tasks">tasks →</a>
+    </div>
+    @if (_verdicts is null)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (_verdicts.Count == 0)
+    {
+        <div class="page-subtitle">No gate verdicts recorded yet.</div>
+    }
+    else
+    {
+        <table class="data-grid" style="width:100%">
+            <thead>
+                <tr>
+                    <th>Task</th>
+                    <th>Gate</th>
+                    <th>Outcome</th>
+                    <th>Feedback</th>
+                    <th>When</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var v in _verdicts)
+                {
+                    <tr>
+                        <td class="mono"><a href="/tasks/@v.TaskId">@v.TaskId</a></td>
+                        <td class="mono">@v.Gate</td>
+                        <td>
+                            <span class="pill @OutcomeCss(v.Outcome)">@v.Outcome</span>
+                        </td>
+                        <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="@v.Feedback">
+                            @v.Feedback
+                        </td>
+                        <td class="mono" style="font-size:12px">@v.Timestamp.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private List<GateVerdictRow>? _verdicts;
+    private System.Threading.Timer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _timer = new System.Threading.Timer(_ => InvokeAsync(LoadAsync), null,
+            TimeSpan.Zero, TimeSpan.FromSeconds(5));
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _verdicts = await Http.GetFromJsonAsync<List<GateVerdictRow>>("/api/gates/verdicts?limit=50");
+            StateHasChanged();
+        }
+        catch { /* keep last good frame */ }
+    }
+
+    private static string OutcomeCss(string outcome) => outcome switch
+    {
+        "Approve" => "pill--success",
+        "Revise" => "pill--warn",
+        "Reject" => "pill--blocked",
+        _ => ""
+    };
+
+    public void Dispose() => _timer?.Dispose();
+
+    private sealed record GateVerdictRow(
+        string TaskId,
+        string Gate,
+        string Outcome,
+        string Feedback,
+        DateTime Timestamp);
+}
