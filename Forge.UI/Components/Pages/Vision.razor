@@ -1,5 +1,6 @@
 @page "/vision"
 @inject HttpClient Http
+@inject NavigationManager Nav
 @implements IDisposable
 
 <PageTitle>Vision</PageTitle>
@@ -93,11 +94,11 @@
                     }
                     else if (block.Kind == "h2")
                     {
-                        <h2 class="vision-h2">@block.Text</h2>
+                        <h2 class="vision-h2" id="@AnchorId(block.Text)">@block.Text</h2>
                     }
                     else if (block.Kind == "h3")
                     {
-                        <h3 class="vision-h3">@block.Text</h3>
+                        <h3 class="vision-h3" id="@AnchorId(block.Text)">@block.Text</h3>
                     }
                     else if (block.Kind == "code")
                     {
@@ -262,8 +263,17 @@
     private void ScrollTo(string heading)
     {
         _activeHeading = heading;
+        // Fragment navigation scrolls the anchor into view (no JS
+        // interop needed); the highlight follows via _activeHeading.
+        Nav.NavigateTo($"/vision#{AnchorId(heading)}", forceLoad: false);
         StateHasChanged();
     }
+
+    private static string AnchorId(string heading) =>
+        "v-" + new string(heading.ToLowerInvariant()
+            .Select(c => char.IsLetterOrDigit(c) ? c : '-')
+            .ToArray())
+            .Replace("--", "-").Trim('-');
 
     public void Dispose() { }
 }

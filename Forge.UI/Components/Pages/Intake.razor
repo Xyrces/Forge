@@ -149,7 +149,7 @@
                                 @foreach (var mod in _graph.Files.GroupBy(f => f.Module).OrderByDescending(g => g.Count()).Take(20))
                                 {
                                     <div class="intake-module">
-                                        <span class="mono">@(string.IsNullOrEmpty(mod.Key) ? "(root)" : mod.Key)</span>
+                                        <span class="mono">@(string.IsNullOrEmpty(mod.Key) || mod.Key == "<root>" ? "(root)" : mod.Key)</span>
                                         <span class="page-subtitle">@mod.Count() files</span>
                                     </div>
                                 }
@@ -301,14 +301,27 @@
 
     protected override async Task OnInitializedAsync()
     {
+        ShellStore.StateChanged += OnShellChanged;
         await ReloadSessions();
+    }
+
+    private string? _loadedProject;
+
+    private void OnShellChanged(object? sender, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+            _ = InvokeAsync(ReloadSessions);
     }
 
     private async Task ReloadSessions()
     {
         try
         {
-            _sessions = await Http.GetFromJsonAsync<List<SessionDto>>("/api/intake/sessions");
+            var projectId = ShellStore.Value.CurrentProjectId;
+            _loadedProject = projectId;
+            _sessions = await Http.GetFromJsonAsync<List<SessionDto>>(
+                string.IsNullOrEmpty(projectId) ? "/api/intake/sessions"
+                    : $"/api/intake/sessions?project={Uri.EscapeDataString(projectId)}");
             if (_sessions is { Count: > 0 } && _activeSessionId is null)
             {
                 await SetActive(_sessions[0].Id);
@@ -409,5 +422,8 @@
 
     private Task RebuildGraph() => LoadGraph(forceRebuild: true);
 
-    public void Dispose() { }
+    public void Dispose()
+    {
+        ShellStore.StateChanged -= OnShellChanged;
+    }
 }

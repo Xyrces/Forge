@@ -78,11 +78,14 @@
                     var selected = _selectedNode == n.Id;
                     var inJourney = _journey?.Visits.Any(v => v.Node == n.Id) == true;
                     var isCurrent = _journey?.CurrentNode == n.Id;
-                    <g style="cursor:pointer" @onclick="@(() => SelectNode(n.Id))">
+                    <g style="cursor:pointer;outline:none" role="button" tabindex="0" aria-label="@($"Flow node {n.Label}")"
+                       @onclick="@(() => SelectNode(n.Id))"
+                       @onkeydown="@(e => { if (e.Key is "Enter" or " ") SelectNode(n.Id); })"
+                       @onfocus="@(() => _focusedNode = n.Id)" @onblur="@(() => _focusedNode = null)">
                         <rect x="@(n.X - 62)" y="@(n.Y - 24)" width="124" height="48" rx="9"
                               fill="@(isCurrent ? "var(--primary-container, var(--surface))" : "var(--surface)")"
-                              stroke="@(isCurrent ? "var(--primary)" : inJourney ? "var(--primary)" : selected ? "var(--primary)" : "var(--outline-variant)")"
-                              stroke-width="@(isCurrent || selected ? 2.5 : inJourney ? 1.8 : 1.2)" />
+                              stroke="@(isCurrent ? "var(--primary)" : inJourney ? "var(--primary)" : selected || _focusedNode == n.Id ? "var(--primary)" : "var(--outline-variant)")"
+                              stroke-width="@(isCurrent || selected || _focusedNode == n.Id ? 2.5 : inJourney ? 1.8 : 1.2)" />
                         @SvgText(n.X, n.Y + 4, "var(--on-surface)", 12, "middle", n.Label)
                         @if (n.Count > 0)
                         {
@@ -211,6 +214,7 @@
 
     private FleetDto? _fleet;
     private string? _loadError;
+    private string? _focusedNode;
     private JourneyDto? _journey;
     private string? _selectedNode;
     private int? _expandedVisit;
