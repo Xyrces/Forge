@@ -310,6 +310,23 @@ public sealed class SprintAssembler
         var chosen = groups[chosenKey];
         var (name, goal, _) = described[chosenKey];
 
+        // Ad-hoc tasks NEVER share a sprint (operator rule
+        // 2026-07-27): bundling unrelated parentless work into one
+        // "Ad-hoc work" sprint mixed deployable states, created
+        // intra-sprint file conflicts, and confused the board. Each
+        // groomed ad-hoc task assembles as its OWN one-task sprint —
+        // a sprint is a coherent, independently deployable unit:
+        // either one spec-chain group or one ad-hoc task. The oldest
+        // ad-hoc task goes first; the next tick assembles the next.
+        if (chosenKey == AdHocGroupName)
+        {
+            var single = chosen.OrderBy(t => t.CreatedAt).First();
+            chosen = new List<IssueRecord> { single };
+            name = single.Title;
+            goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
+                ?? $"Complete {single.Id}: {single.Title}";
+        }
+
         var start = DateTime.UtcNow;
         var sprint = await sprints.CreateAsync(new NewSprint(
             Name: name,

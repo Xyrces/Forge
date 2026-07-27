@@ -218,9 +218,39 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
 
         var active = await _sprints.GetActiveAsync();
-        Assert.Equal(SprintAssembler.AdHocGroupName, active!.Name);
+        Assert.Equal("operator one-off", active!.Name);   // ad-hoc single: sprint named after the task
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(adhoc.Id, members);
+        Assert.Equal(new[] { adhoc.Id }, members.ToList());   // one task, no bundling
+    }
+
+    [Fact]
+    public async Task AdHocTasks_NeverShareASprint_OldestFirst()
+    {
+        // Operator rule 2026-07-27: ad-hoc tasks NEVER bundle —
+        // each groomed ad-hoc task assembles as its own one-task
+        // sprint. Two eligible tasks => two sequential sprints.
+        var older = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "first one-off",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        var newer = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "second one-off",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+
+        await Tick();
+        var first = await _sprints.GetActiveAsync();
+        Assert.Equal("first one-off", first!.Name);
+        var firstMembers = await _sprints.GetIssueIdsAsync(first.Id);
+        Assert.Contains(older.Id, firstMembers);
+        Assert.DoesNotContain(newer.Id, firstMembers);
+
+        await _issues.TransitionAsync(older.Id, IssueStatus.Completed, null);
+        await Tick();
+
+        var second = await _sprints.GetActiveAsync();
+        Assert.NotEqual(first.Id, second!.Id);
+        Assert.Equal("second one-off", second.Name);
+        var secondMembers = await _sprints.GetIssueIdsAsync(second.Id);
+        Assert.Contains(newer.Id, secondMembers);
     }
 
     [Fact]
