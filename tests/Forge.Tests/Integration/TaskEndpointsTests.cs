@@ -82,9 +82,19 @@ public class TaskEndpointsTests : IDisposable
     [Fact]
     public async Task RetryMessage_EnqueuesToBus()
     {
-        var resp = await _client.PostAsJsonAsync("/api/tasks/T-42/retry-message", new { text = "operator override" });
+        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        var task = (await _issues.ListAsync(new IssueFilter(), default)).First();
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/retry-message", new { text = "operator override" });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal(1, _bus.Count("T-42"));
+        Assert.Equal(1, _bus.Count(task.Id));
+    }
+
+    [Fact]
+    public async Task RetryMessage_UnknownTask_Returns404()
+    {
+        // The audit found the endpoint returned success for any id.
+        var resp = await _client.PostAsJsonAsync("/api/tasks/task-nope/retry-message", new { text = "x" });
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
     [Fact]

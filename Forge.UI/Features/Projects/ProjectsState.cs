@@ -29,11 +29,12 @@ public sealed record ProjectsEndpointRow(
     int InProgress,
     int Completed,
     int Failed,
-    IReadOnlyList<ProjectsSlotRow> Slots);
+    IReadOnlyList<ProjectsSlotRow> Slots,
+    IReadOnlyDictionary<string, int>? DefaultRoleCaps = null);
 
 public sealed record ProjectsSlotRow(string ProjectId, string Role, int InFlight, int Max);
 
-public sealed record SecretMetadataDto(string Kind, bool Set, DateTime? CreatedAt, DateTime? UpdatedAt);
+public sealed record SecretMetadataDto(string Kind, bool Set, DateTime? CreatedAt, DateTime? UpdatedAt, bool Known = false);
 public sealed record SetSecretRequestBody(string Kind, string Value);
 
 public sealed record AddProjectRequestBody(string Id, string Name, string RepoUrl, string? DefaultBranch);

@@ -66,7 +66,8 @@ public static class ProjectsEndpoints
             rows.Add(new ProjectDto(
                 p.Id, p.Name, p.RepoUrl, p.DefaultBranch, p.Root, p.Roles,
                 pending, inprogress, completed, failed,
-                slots.Snapshot().Where(m => m.ProjectId == p.Id).ToList()));
+                slots.Snapshot().Where(m => m.ProjectId == p.Id).ToList(),
+                DefaultRoleCaps: new Dictionary<string, int>(Configuration.DefaultProjectRoles.Default, StringComparer.OrdinalIgnoreCase)));
         }
         return Results.Ok(rows);
     }
@@ -229,7 +230,8 @@ public static class ProjectsEndpoints
         int InProgress,
         int Completed,
         int Failed,
-        IReadOnlyList<SlotTable.SlotMeter> Slots);
+        IReadOnlyList<SlotTable.SlotMeter> Slots,
+        IReadOnlyDictionary<string, int>? DefaultRoleCaps = null);
 
     public sealed record AddProjectRequest(
         string Id,

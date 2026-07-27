@@ -70,6 +70,10 @@
                     @onclick="RequestDeploymentAsync">
                 Request deployment
             </button>
+            @if (_requestedSha is not null)
+            {
+                <span class="banner banner--ok" style="margin-left:8px">Deployment requested for @_requestedSha — watch it below.</span>
+            }
         </div>
     </div>
 
@@ -162,8 +166,13 @@
     private void RequestDeploymentAsync()
     {
         if (string.IsNullOrEmpty(_selectedProjectId) || string.IsNullOrEmpty(_selectedCommitSha)) return;
-        Dispatch.Dispatch(new DeploymentsActions.RequestDeploymentAction(_selectedProjectId, _selectedCommitSha, "operator"));
+        var sha = _selectedCommitSha;
+        _requestedSha = sha[..Math.Min(7, sha.Length)];
+        _selectedCommitSha = string.Empty;
+        Dispatch.Dispatch(new DeploymentsActions.RequestDeploymentAction(_selectedProjectId, sha, "operator"));
     }
+
+    private string? _requestedSha;
 
     private void ApproveAsync(string id, string projectId, bool force) =>
         Dispatch.Dispatch(new DeploymentsActions.ApproveDeploymentAction(id, projectId, force));

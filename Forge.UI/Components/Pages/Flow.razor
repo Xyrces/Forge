@@ -18,7 +18,11 @@
         </div>
     </div>
 
-    @if (_fleet is null)
+    @if (_fleet is null && _loadError is not null)
+    {
+        <div class="banner banner--error">Failed to load the pipeline flow: @_loadError <button class="btn btn--small" @onclick="LoadFleetAsync">Retry</button></div>
+    }
+    else if (_fleet is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
@@ -206,6 +210,7 @@
     public string? InitialIssue { get; set; }
 
     private FleetDto? _fleet;
+    private string? _loadError;
     private JourneyDto? _journey;
     private string? _selectedNode;
     private int? _expandedVisit;
@@ -270,9 +275,10 @@
         {
             _fleet = await Http.GetFromJsonAsync<FleetDto>("/api/flow");
             _lastFetch = DateTime.Now;
+            _loadError = null;
             StateHasChanged();
         }
-        catch { /* keep last good frame */ }
+        catch (Exception ex) { _loadError = ex.Message; /* keep last good frame */ }
     }
 
     private void SelectNode(string id)

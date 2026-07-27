@@ -87,10 +87,11 @@
                     }
 
                     <div class="task-card__actions">
-                        <input type="text" placeholder="Retry message…"
+                        <input type="text" placeholder="Retry message…" aria-label="Retry message for @row.Id"
                                value="@GetRetryText(row.Id)"
                                @oninput="@((ChangeEventArgs e) => SetRetryText(row.Id, e.Value?.ToString() ?? ""))" />
-                        <button class="btn" @onclick="@(() => SendRetry(row.Id))">Retry</button>
+                        <button class="btn" disabled="@string.IsNullOrWhiteSpace(GetRetryText(row.Id))"
+                                @onclick="@(() => SendRetry(row.Id))">Retry</button>
                         <button class="btn btn--danger" @onclick="@(() => Recover(row.Id))">Recover</button>
                     </div>
                 </div>

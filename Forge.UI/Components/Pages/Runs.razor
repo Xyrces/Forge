@@ -14,7 +14,11 @@
         </div>
     </div>
 
-    @if (_data is null)
+    @if (_data is null && _loadError is not null)
+    {
+        <div class="banner banner--error">Failed to load agent runs: @_loadError <button class="btn btn--small" @onclick="LoadAsync">Retry</button></div>
+    }
+    else if (_data is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
@@ -62,6 +66,10 @@
                 </tr>
             </thead>
             <tbody>
+                @if (_data.Recent.Count == 0)
+                {
+                    <tr><td colspan="8" class="meta-text">No finished runs yet.</td></tr>
+                }
                 @foreach (var r in _data.Recent)
                 {
                     <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/runs/{r.Id}"))">
@@ -72,7 +80,7 @@
                         <td class="mono">@(r.MessageCount?.ToString() ?? "—")</td>
                         <td class="mono">@(r.ToolCallCount?.ToString() ?? "—")</td>
                         <td>
-                            <span class="pill @(r.Status == "succeeded" ? "pill--completed" : "pill--failed")">@r.Status</span>
+                            <span class="pill @(r.Status == "succeeded" ? "pill--completed" : r.Status == "failed" ? "pill--failed" : "pill--pending")">@r.Status</span>
                             @if (r.Error is not null)
                             {
                                 <span style="font-size:11px;color:var(--on-surface-variant)" title="@r.Error"> ⚠</span>
@@ -88,6 +96,7 @@
 
 @code {
     private RunsDto? _data;
+    private string? _loadError;
     private System.Threading.Timer? _timer;
 
     protected override void OnInitialized()
@@ -101,9 +110,10 @@
         try
         {
             _data = await Http.GetFromJsonAsync<RunsDto>("/api/agent-runs");
+            _loadError = null;
             StateHasChanged();
         }
-        catch { /* keep last good */ }
+        catch (Exception ex) { _loadError = ex.Message; /* keep last good */ }
     }
 
     private static string Elapsed(RunViewDto r)

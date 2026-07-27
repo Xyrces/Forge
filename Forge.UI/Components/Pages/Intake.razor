@@ -80,7 +80,8 @@
                     </div>
                 }
                 <div class="intake-input">
-                    <input class="intake-input__field" @bind="_draft" placeholder="Type your message..." />
+                    <input class="intake-input__field" @bind="_draft" placeholder="Type your message..."
+                           @onkeydown="@(async e => { if (e.Key == "Enter" && !_sending) await SendMessage(); })" />
                     <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">Send</button>
                 </div>
             }

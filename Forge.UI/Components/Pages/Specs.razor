@@ -28,16 +28,20 @@
         }
     </div>
 
-    @if (SpecsStore.Value.Loading)
+    @if (SpecsStore.Value.Loading && SpecsStore.Value.Rows.Count == 0)
     {
         <div class="page-subtitle">Loading…</div>
     }
     else if (SpecsStore.Value.Error is not null)
     {
-        <div class="page-subtitle">Error: @SpecsStore.Value.Error</div>
+        <div class="banner banner--error">Error: @SpecsStore.Value.Error</div>
     }
     else
     {
+        @if (SpecsStore.Value.Loading)
+        {
+            <div class="page-subtitle">Refreshing…</div>
+        }
         @if (_actionError is not null)
         {
             <div class="banner banner--error">
@@ -146,9 +150,9 @@
             }
             _actionError = null;
             LoadForCurrentProject();
-            for (var i = 0; i < 8; i++)
+            for (var i = 0; i < 8 && !_disposeCts.IsCancellationRequested; i++)
             {
-                await Task.Delay(TimeSpan.FromSeconds(15));
+                await Task.Delay(TimeSpan.FromSeconds(15), _disposeCts.Token);
                 LoadForCurrentProject();
             }
         }
@@ -185,7 +189,11 @@
 
     public void Dispose()
     {
+        _disposeCts.Cancel();
+        _disposeCts.Dispose();
         SpecsStore.StateChanged -= OnStateChanged;
         ShellStore.StateChanged -= OnShellChanged;
     }
+
+    private readonly System.Threading.CancellationTokenSource _disposeCts = new();
 }

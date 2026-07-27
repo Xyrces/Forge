@@ -9,7 +9,8 @@
 <div class="page">
     <div class="page-header">
         <h1>
-            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/backlog"))">← Backlog</button>
+            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/sprints"))">← Sprints</button>
+            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/backlog"))">Backlog</button>
             @(Prop(_task, "title") ?? TaskId)
         </h1>
         <div class="page-header__actions">
@@ -22,7 +23,7 @@
     {
         <div class="banner banner--error"><span>@_error</span></div>
     }
-    @if (_task is null)
+    @if (_task is null && _error is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
@@ -125,11 +126,11 @@
                             </td>
                         </tr>
                     }
-                    <tr><td>Created</td><td class="mono">@Prop(_task, "createdAt")</td></tr>
-                    <tr><td>Updated</td><td class="mono">@Prop(_task, "updatedAt")</td></tr>
+                    <tr><td>Created</td><td class="mono">@FmtDate(Prop(_task, "createdAt"))</td></tr>
+                    <tr><td>Updated</td><td class="mono">@FmtDate(Prop(_task, "updatedAt"))</td></tr>
                     @if (Prop(_task, "closedAt") is { } closed)
                     {
-                        <tr><td>Closed</td><td class="mono">@closed</td></tr>
+                        <tr><td>Closed</td><td class="mono">@FmtDate(closed)</td></tr>
                     }
                 </tbody>
             </table>
@@ -207,6 +208,9 @@
 </div>
 
 @code {
+    private static string FmtDate(string? iso) =>
+        DateTime.TryParse(iso, out var d) ? d.ToString("yyyy-MM-dd HH:mm") : iso ?? "—";
+
     [Parameter] public string TaskId { get; set; } = "";
 
     private JsonElement? _task;

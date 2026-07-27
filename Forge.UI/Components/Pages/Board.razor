@@ -37,7 +37,7 @@
 
     @if (_rows is null)
     {
-        <div class="page-subtitle">Loading…</div>
+        <div class="banner banner--error">Failed to load the board: @_loadError <button class="btn btn--small" @onclick="ReloadAsync">Retry</button></div>
     }
     else if (_rows.Count == 0)
     {
@@ -81,6 +81,7 @@
     private List<ProjectsListItem>? _projects;
     private string _filter = "All";
     private string? _projectFilter;
+    private string? _loadError;
 
     private IReadOnlyList<BoardIssueRow> _rows => _board?.Issues ?? (IReadOnlyList<BoardIssueRow>)Array.Empty<BoardIssueRow>();
 
@@ -114,7 +115,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Board reload failed: {ex.Message}");
+            _loadError = ex.Message;
         }
     }
 

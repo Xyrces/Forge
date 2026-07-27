@@ -6,7 +6,12 @@
 
 <PageTitle>Run @RunId</PageTitle>
 <div class="page">
-    @if (_run is null)
+    <a href="/runs" class="meta-text">← All runs</a>
+    @if (_notFound)
+    {
+        <div class="banner banner--error">Run not found: @RunId</div>
+    }
+    else if (_run is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
@@ -147,11 +152,28 @@
     {
         try
         {
-            _run = await Http.GetFromJsonAsync<RunDto>($"/api/agent-runs/{RunId}");
+            var resp = await Http.GetAsync($"/api/agent-runs/{RunId}");
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _notFound = true;
+                _pollCts.Cancel();
+                await InvokeAsync(StateHasChanged);
+                return;
+            }
+            resp.EnsureSuccessStatusCode();
+            _run = await resp.Content.ReadFromJsonAsync<RunDto>();
+            // Terminal runs don't need the 3s poll loop anymore.
+            if (_run?.View.Status is "succeeded" or "failed")
+            {
+                _pollCts.Cancel();
+            }
             await InvokeAsync(StateHasChanged);
         }
-        catch { /* not found or transient */ }
+        catch (OperationCanceledException) { throw; }
+        catch { /* transient */ }
     }
+
+    private bool _notFound;
 
     public void Dispose()
     {

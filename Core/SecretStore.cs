@@ -17,6 +17,9 @@ public static class SecretKinds
     public const string GitHubToken = "github_token";
     public const string KiloGatewayApiKey = "kilo_gateway_api_key";
     public const string MeshyApiKey = "meshy_api_key";
+    /// <summary>Kimi.com (Moonshot) direct API key — the kimi LLM
+    /// provider for quality roles (reviewer/critic/groomer).</summary>
+    public const string KimiApiKey = "kimi_api_key";
 }
 
 public sealed record SecretRecord(
