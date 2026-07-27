@@ -19,6 +19,12 @@ public sealed partial class PlanTerritoryGate : IRunGate
     public const string DescriptionText =
         "Verifies every file path in the plan is inside the role's territory and exists in the worktree (or is marked as new).";
 
+    /// <summary>One-line description for the catalog UI.</summary>
+    public const string DescriptionText =
+        "Verifies every file path in the plan is inside the role's territory and exists in the worktree (or is marked (new)).";
+    public string Description => DescriptionText;
+    public GateKind Kind => GateKind.Deterministic;
+
     public Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx)
     {
         if (ctx.TerritoryPrefixes.Count == 0 && !ctx.TerritoryAllowsRootFiles)
@@ -43,7 +49,8 @@ public sealed partial class PlanTerritoryGate : IRunGate
         if (problems.Count > 0)
         {
             return Task.FromResult(new RunGateVerdict(GateOutcome.Revise,
-                "Plan territory/existence violations:\n- " + string.Join("\n- ", problems)));
+                "Plan territory/existence violations:\n- " + string.Join("\n- ", problems) +
+                "\n(Paths must be REPO-RELATIVE like `Dashboard/Foo.cs` — never absolute filesystem paths; mark intentional creations with '(new)'.)"));
         }
         return Task.FromResult(RunGateVerdict.Approved);
     }
@@ -58,12 +65,25 @@ public sealed partial class PlanTerritoryGate : IRunGate
     }
 
     /// <summary>Extract candidate repo-relative file paths from the
-    /// plan text. Paths are code-formatted tokens with a known source
-    /// extension; a trailing "(new)" marks intentional creation.</summary>
+    /// plan's <c>## Files</c> section ONLY. Prose in Goal/Approach
+    /// sections mentions bare filenames naturally (observed live
+    /// 2026-07-26: task-196 burned all 3 revisions on "RunGate.cs
+    /// does not exist" while its Files section had full paths) —
+    /// the Files section is what the schema gate mandates for
+    /// exactly this purpose. A trailing "(new)" marks intentional
+    /// creation.</summary>
     internal static IEnumerable<(string Path, bool IsNew)> ExtractPaths(string plan)
     {
+        var inFiles = false;
         foreach (var line in plan.Split('\n'))
         {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith('#'))
+            {
+                inFiles = trimmed.TrimStart('#', ' ').StartsWith("files", StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
+            if (!inFiles) continue;
             foreach (Match m in PathRegex().Matches(line))
             {
                 var p = m.Value.Trim('`', '\'', '"', ' ', ',', ';', '(', ')');

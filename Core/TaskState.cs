@@ -58,13 +58,12 @@ public static class TaskStateProjector
         var prNumber = task.GetMetadata("prNumber");
         var reworkReason = task.GetMetadata("reworkReason");
         var strikes = int.TryParse(task.GetMetadata("reworkAttempts"), out var s) ? s : 0;
-        var inFlightSha = watch?.GetMetadata("reworkInFlightSha");
-        // Phase 3: the machine's record on the task is primary for
-        // the park state; the legacy watch flag is the fallback.
+        // The machine's record on the task is authoritative for the
+        // park state (and preferred over derivation below).
         var machineState = task.GetMetadata("state");
         var parked = string.Equals(machineState, nameof(TaskLifecycleState.ParkedInfra), StringComparison.Ordinal)
             ? task.GetMetadata("parkedForSha") ?? "parked"
-            : watch?.GetMetadata("parkedOnMainCiSha");
+            : null;
 
         // Terminal states first.
         switch (task.Status)
@@ -94,12 +93,23 @@ public static class TaskStateProjector
         if (hasActiveDevRun)
         {
             var substate = SubstateOf(task);
-            return new(strikes > 0 || inFlightSha is not null ? TaskLifecycleState.ReworkRunning : TaskLifecycleState.AgentRunning,
+            return new(strikes > 0 ? TaskLifecycleState.ReworkRunning : TaskLifecycleState.AgentRunning,
                 substate, $"dev agent ({substate})", strikes, MaxStrikes);
         }
 
+        // Authority semantics (Phase 3): the machine's recorded state
+        // is the freshest event-sourced truth for everything else.
+        // Flag-derivation below is only the bootstrap for entities
+        // that predate the machine — stale flags (reworkReason
+        // persists after the round pushes) would otherwise pin the
+        // task in ReworkRunning forever (observed live 2026-07-26).
+        if (Enum.TryParse<TaskLifecycleState>(machineState, out var recordedState))
+        {
+            return new(recordedState, null, WaitingOnFor(recordedState), strikes, MaxStrikes);
+        }
+
         // Rework bookkeeping without a live run.
-        if (inFlightSha is not null || (prNumber is not null && reworkReason is not null))
+        if (prNumber is not null && reworkReason is not null)
         {
             if (task.Status == IssueStatus.Pending)
             {
@@ -145,6 +155,25 @@ public static class TaskStateProjector
         return new(TaskLifecycleState.Dispatching, null,
             "workflow (between steps)", strikes, MaxStrikes);
     }
+
+    private static string WaitingOnFor(TaskLifecycleState state) => state switch
+    {
+        TaskLifecycleState.Pending => "dispatch slot (first run)",
+        TaskLifecycleState.Dispatching => "workflow (between steps)",
+        TaskLifecycleState.AgentRunning => "dev agent",
+        TaskLifecycleState.ReworkQueued => "dispatch slot (rework round queued)",
+        TaskLifecycleState.ReworkRunning => "dev agent (rework round)",
+        TaskLifecycleState.StalledRework => "stalled — stall-breaker re-fires as a strike",
+        TaskLifecycleState.PROpen => "CI + reviewer verdict",
+        TaskLifecycleState.ParkedInfra => "base-branch CI recovery (parked — no strikes burning)",
+        TaskLifecycleState.MergeReady => "merge gate",
+        TaskLifecycleState.Merged => "done",
+        TaskLifecycleState.Completed => "done",
+        TaskLifecycleState.BlockedOperator => "operator decision required",
+        TaskLifecycleState.Failed => "operator (failed — inspect, then requeue or close)",
+        TaskLifecycleState.Closed => "closed",
+        _ => "unknown",
+    };
 
     private static string SubstateOf(IssueRecord task)
     {

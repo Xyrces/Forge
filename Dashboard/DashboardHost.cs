@@ -14,6 +14,7 @@ using Forge.Orchestrator;
 using Forge.Orchestrator.Slots;
 using Forge.Projects;
 
+using Forge.Agents.Gates;
 namespace Forge.Dashboard;
 
 public sealed class DashboardHost : IAsyncDisposable

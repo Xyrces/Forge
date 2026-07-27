@@ -25,6 +25,12 @@ public sealed class PlanLlmReviewGate : IRunGate
     public const string DescriptionText =
         "Uses an LLM critic to judge whether the plan is sound, minimal, and process-compliant.";
 
+    public const string DescriptionText =
+        "LLM critic that judges whether the plan solves the task with a sound, minimal, process-compliant approach.";
+
+    public GateKind Kind => GateKind.Llm;
+    public string Description => DescriptionText;
+
     private readonly Func<IChatClient> _clientFactory;
     private readonly ILogger _logger;
 

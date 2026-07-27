@@ -126,6 +126,14 @@
                     <h3 style="margin:0">
                         Journey: <a href="/tasks/@_journey.IssueId" class="mono">@_journey.IssueId</a>
                         <span class="pill pill--@_journey.Status.ToLowerInvariant()" style="margin-left:6px">@_journey.Status</span>
+                        @if (_journey.LifecycleState is not null)
+                        {
+                            <span class="pill pill--primary" style="margin-left:6px" title="Lifecycle state (state machine)@(_journey.LifecycleEvent is not null ? $" — last event: {_journey.LifecycleEvent}" : "")">@_journey.LifecycleState</span>
+                        }
+                        @if (_journey.LifecycleViolation is not null)
+                        {
+                            <span class="pill pill--blocked" style="margin-left:6px" title="Illegal transition recorded by the state machine">violation: @_journey.LifecycleViolation</span>
+                        }
                     </h3>
                     <span class="page-subtitle">@_journey.Title</span>
                 </div>
@@ -309,7 +317,9 @@
     private sealed record EdgeDto(string From, string To);
     private sealed record IssueSampleDto(string Id, string Title, string Status);
     private sealed record JourneyDto(
-        string IssueId, string Title, string Status, string? CurrentNode, int? PrNumber, List<VisitDto> Visits);
+        string IssueId, string Title, string Status, string? CurrentNode, int? PrNumber,
+        string? LifecycleState, string? LifecycleEvent, string? LifecycleViolation,
+        List<VisitDto> Visits);
     private sealed record VisitDto(
         string Node, DateTime At, string? Note, int Count, long DurationMs,
         System.Text.Json.JsonElement Details);

@@ -82,7 +82,12 @@ public sealed class TaskStateMachine
         };
 
         Add(TaskEvent.Dispatched, TaskLifecycleState.Dispatching,
-            TaskLifecycleState.Pending, TaskLifecycleState.ReworkQueued);
+            TaskLifecycleState.Pending, TaskLifecycleState.ReworkQueued,
+            // Re-dispatch after a died/timed-out run (the task
+            // requeues and is claimed again — observed live
+            // 2026-07-26: Dispatching+Dispatched and
+            // StalledRework+Dispatched violations).
+            TaskLifecycleState.Dispatching, TaskLifecycleState.StalledRework);
         Add(TaskEvent.RunCompletedDiff, TaskLifecycleState.PROpen,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
@@ -96,7 +101,11 @@ public sealed class TaskStateMachine
             // A rework round's workflow re-uses the open PR — the
             // dispatch-completed report observes PrOpened while the
             // round record is live (observed live 2026-07-26).
-            TaskLifecycleState.ReworkRunning);
+            TaskLifecycleState.ReworkRunning,
+            // A push after approval: the new head invalidates the
+            // approval — back to PROpen (observed live: task-193,
+            // MergeReady+PrOpened).
+            TaskLifecycleState.MergeReady);
         Add(TaskEvent.ReworkFired, TaskLifecycleState.ReworkQueued,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady, TaskLifecycleState.StalledRework,
             TaskLifecycleState.ParkedInfra, TaskLifecycleState.ReworkQueued);
@@ -143,7 +152,17 @@ public sealed class TaskStateMachine
         IReadOnlyDictionary<string, object>? extraMetadata = null)
     {
         var now = DateTime.UtcNow;
-        var current = TaskStateProjector.Derive(task, watch, hasActiveDevRun, now).State;
+        // Authority semantics (Phase 3): the machine's own recorded
+        // state is the current state when present — flag-derivation
+        // is only the bootstrap for entities that predate the
+        // machine. Deriving from flags here is actively wrong: stale
+        // flags (e.g. reworkReason persists after the round pushes)
+        // make reality and derivation diverge — observed live as
+        // ReworkRunning+ReviewApproved violations (2026-07-26).
+        var recorded = task.GetMetadata("state");
+        var current = Enum.TryParse<TaskLifecycleState>(recorded, out var parsed)
+            ? parsed
+            : TaskStateProjector.Derive(task, watch, hasActiveDevRun, now).State;
         var legal = Table.TryGetValue((evt, current), out var next);
         if (!legal)
         {

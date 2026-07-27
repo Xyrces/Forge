@@ -143,6 +143,12 @@ public static class FlowEndpoints
                 title = issue.Title,
                 status = issue.Status.ToString(),
                 currentNode,
+                // The state machine's record on this issue (when the
+                // task has been through the machine).
+                lifecycleState = issue.GetMetadata("state"),
+                lifecycleEvent = issue.GetMetadata("lastEvent"),
+                lifecycleStateEnteredAt = issue.GetMetadata("stateEnteredAt"),
+                lifecycleViolation = issue.GetMetadata("stateViolation"),
                 prNumber = issue.GetMetadata("prNumber"),
                 visits,
             });
@@ -200,6 +206,14 @@ public static class FlowEndpoints
                 reviewRound = watch?.GetMetadata("reviewRound"),
                 reviewNotes = watch?.GetMetadata("reviewNotes"),
                 reviewedSha = watch?.GetMetadata("reviewSha"),
+            },
+            "parked" => new
+            {
+                // Parked on pre-existing base-branch CI failure:
+                // waiting for the base to recover; no strikes burn.
+                parkedForSha = Meta("parkedForSha"),
+                parkedAt = Meta("stateEnteredAt"),
+                prNumber = Meta("prNumber"),
             },
             "rework" => new
             {

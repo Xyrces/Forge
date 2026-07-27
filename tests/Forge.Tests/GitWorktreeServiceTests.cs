@@ -62,8 +62,10 @@ public class GitWorktreeServiceTests : IDisposable
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
-        return new GitResult(p.ExitCode, p.StandardOutput.ReadToEnd().Trim());
+        return new GitResult(p.ExitCode, stdout.Trim());
     }
 
     private readonly record struct GitResult(int ExitCode, string Stdout);
@@ -215,6 +217,35 @@ public class GitWorktreeServiceTests : IDisposable
         // No sync-base ref planted — should not throw.
         var ex = await Record.ExceptionAsync(() => _service.RemoveAsync(taskId));
         Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_DeletesSyncBaseRef_WithSanitizedTaskId()
+    {
+        // Use a taskId containing characters that Sanitize transforms
+        // (tilde, colon, question mark all become '_'), so the ref path
+        // RemoveAsync computes internally (via its own Sanitize call)
+        // must match the path SyncWorktreeToRefAsync would create.
+        // This guards against a future one-sided Sanitize refactor.
+        var rawTaskId = "t~:sync?cleanup";
+        var sanitizedTaskId = "t__sync_cleanup";
+        var localRef = "refs/forge/sync-base/" + sanitizedTaskId;
+
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync(rawTaskId, "main");
+
+        // Plant the ref at the sanitized path, as SyncWorktreeToRefAsync would.
+        RunGit(_workDir, "update-ref " + localRef + " HEAD");
+
+        // Confirm the ref exists before removal.
+        var beforeVerify = RunGitForResult(_workDir, "show-ref --verify " + localRef);
+        Assert.Equal(0, beforeVerify.ExitCode);
+
+        await _service.RemoveAsync(rawTaskId);
+
+        // Confirm the ref is gone after removal.
+        var afterVerify = RunGitForResult(_workDir, "show-ref --verify " + localRef);
+        Assert.NotEqual(0, afterVerify.ExitCode);
     }
 
     [Fact]

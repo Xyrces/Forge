@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Forge.AgentTools;
 using Xunit;
 
@@ -85,6 +86,15 @@ public class GitRefNamesTests
     {
         var result = GitRefNames.Sanitize("foo@bar");
         Assert.Equal("foo_bar", result);
+    }
+
+    [Fact]
+    public void AtBraceSequence_NoAtBraceInOutput()
+    {
+        // '@' is already in the invalid-chars set and gets replaced,
+        // so '@{' cannot appear in the output (the '@' is gone).
+        var result = GitRefNames.Sanitize("foo@{bar");
+        Assert.DoesNotContain("@{", result);
     }
 
     [Fact]
@@ -210,5 +220,109 @@ public class GitRefNamesTests
         // "a.b..c" -> "a.b__c"
         var result = GitRefNames.Sanitize("a.b..c");
         Assert.Equal("a.b__c", result);
+    }
+
+    [Fact]
+    public void DotLockSuffix_Replaced()
+    {
+        // A component ending in ".lock" is rejected by git-check-ref-format.
+        var result = GitRefNames.Sanitize("task.lock");
+        Assert.Equal("task_lock", result);
+    }
+
+    [Fact]
+    public void DotLockSuffix_MultipleDots_PreservesMiddleDots()
+    {
+        var result = GitRefNames.Sanitize("a.b.lock");
+        // "a.b.lock" -> after second pass "a.b.lock" (no .. / leading/trailing dots),
+        // then third pass replaces trailing ".lock" -> "a.b_lock"
+        Assert.Equal("a.b_lock", result);
+    }
+
+    [Fact]
+    public void DotLockInMiddle_Preserved()
+    {
+        // ".lock" not at the end of the string — not prohibited.
+        var result = GitRefNames.Sanitize("task.lockdown");
+        Assert.Equal("task.lockdown", result);
+    }
+
+    [Fact]
+    public void DotLockSuffix_WithDotDotSequence()
+    {
+        // "..lock" -> after second pass "__lock" (.. replaced),
+        // "__lock" does not end with ".lock" -> unchanged.
+        var result = GitRefNames.Sanitize("..lock");
+        Assert.Equal("__lock", result);
+    }
+
+    [Fact]
+    public void JustLock_NoDotPrefix_PassesThrough()
+    {
+        // "lock" without a dot prefix is fine.
+        var result = GitRefNames.Sanitize("lock");
+        Assert.Equal("lock", result);
+    }
+
+    /// <summary>
+    /// Sweeps every git-check-ref-format edge case listed in the task:
+    /// .lock suffix, @{, .., leading/trailing dot, control chars, space, ~^:?*[\
+    /// and verifies the output could be used as a git branch ref.
+    /// Uses the real <c>git check-ref-format --branch</c> command.
+    /// </summary>
+    [Fact]
+    public void AllGitCheckRefFormatEdgeCases_PassRealGitValidation()
+    {
+        var inputs = new (string Input, string Description)[]
+        {
+            ("task.lock",       ".lock suffix"),
+            ("foo@{bar",        "@{ sequence"),
+            ("..a",             "leading .."),
+            ("a..",             "trailing .."),
+            (".foo",            "leading dot"),
+            ("foo.",            "trailing dot"),
+            (".",               "lone dot"),
+            ("a\0b",            "null char"),
+            ("a\x07b",          "bell char"),
+            ("a\tb",            "tab char"),
+            ("a b",             "space"),
+            ("a~b",             "tilde"),
+            ("a^b",             "caret"),
+            ("a:b",             "colon"),
+            ("a?b",             "question mark"),
+            ("a*b",             "asterisk"),
+            ("a[b",             "open bracket"),
+            ("a\\b",            "backslash"),
+            ("a@b",             "at sign"),
+            ("a!b",             "exclamation"),
+            ("a...b",           "triple dot"),
+            ("foo.lock.bar",    "dot lock in middle"),
+            ("lock",            "just lock (no dot prefix)"),
+            ("a.lock",          "simple .lock"),
+            ("a.b.lock",        "nested .lock"),
+        };
+
+        foreach (var (input, description) in inputs)
+        {
+            var sanitized = GitRefNames.Sanitize(input);
+            var refName = $"refs/heads/agent/{sanitized}";
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = $"check-ref-format --branch {refName}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+
+            using var proc = Process.Start(psi);
+            proc!.WaitForExit(5000);
+
+            Assert.True(proc.ExitCode == 0,
+                $"FAIL: input '{input}' ({description}) sanitized to '{sanitized}' " +
+                $"which git check-ref-format rejected (exit {proc.ExitCode}): " +
+                $"{proc.StandardError.ReadToEnd().Trim()}");
+        }
     }
 }

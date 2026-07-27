@@ -33,13 +33,18 @@ public static class FlowGraph
         new("backlog", "Groomed backlog", LanePlanning, 510, 90),
         new("sprint",  "Sprint",        LanePlanning, 660, 90),
         // Implementation lane (snakes right → left under planning).
-        new("setup",   "Claim + worktree", LaneImplementation, 660, 290),
+        // Maps 1:1 onto the lifecycle state machine (Core/TaskState.cs):
+        // setup=Dispatching, agent=AgentRunning, pr=PROpen,
+        // review=MergeReady, rework=ReworkQueued/Running/Stalled,
+        // parked=ParkedInfra, blocked=Failed/BlockedOperator, done.
+        new("setup",   "Dispatching",   LaneImplementation, 660, 290),
         new("agent",   "Agent run",     LaneImplementation, 510, 290),
-        new("pr",      "PR open",       LaneImplementation, 360, 290),
-        new("review",  "Review + CI",   LaneImplementation, 210, 290),
+        new("pr",      "PR open (CI + review)", LaneImplementation, 360, 290),
+        new("review",  "Approved / merge-ready", LaneImplementation, 210, 290),
         new("done",    "Merged / done", LaneImplementation, 60,  290),
         // Loop + failure sinks below the implementation lane.
         new("rework",  "Rework loop",   LaneImplementation, 360, 420),
+        new("parked",  "Parked (infra wait)", LaneImplementation, 210, 420),
         new("blocked", "Blocked / failed", LaneImplementation, 60, 420),
     };
 
@@ -55,9 +60,12 @@ public static class FlowGraph
         new("agent", "pr"),        // diff → commit/push/PR
         new("agent", "done"),      // verified NO_CHANGES_NEEDED
         new("agent", "blocked"),   // no-progress breaker / unrecoverable
-        new("pr", "review"),       // watcher picks up
-        new("review", "done"),     // CI green + approval → merge
-        new("review", "rework"),   // CI fail / changes requested
+        new("pr", "review"),       // CI green + approval
+        new("pr", "rework"),       // CI fail / changes requested / conflict
+        new("pr", "parked"),       // CI failure pre-existing on base branch
+        new("parked", "rework"),   // base recovered → no-strike refresh round
+        new("review", "done"),     // merge
+        new("review", "rework"),   // base moved after approval (conflict)
         new("rework", "agent"),    // redispatch, same branch/PR
         new("rework", "blocked"),  // rework circuit breaker (3)
     };
@@ -82,9 +90,10 @@ public static class FlowGraph
     };
 
     /// <summary>
-    /// Classify an issue (task) into its current node. Pure function
-    /// of the row + metadata + sprint membership; every branch here
-    /// mirrors a branch in the pipeline itself.
+    /// Classify an issue (task) into its current node. The machine's
+    /// recorded lifecycle state (metadata.state) is authoritative;
+    /// the status/metadata heuristic below is the fallback for
+    /// entities that predate the machine.
     /// </summary>
     /// <param name="issue">The issue row.</param>
     /// <param name="inActiveSprint">Whether the issue is linked to the ACTIVE sprint.</param>
@@ -99,6 +108,24 @@ public static class FlowGraph
             return null;
         }
 
+        var recorded = issue.GetMetadata("state");
+        if (recorded is not null)
+        {
+            return recorded switch
+            {
+                "Pending" => ClassifyPendingPlanning(issue, inActiveSprint, hasSpecChain),
+                "Dispatching" => "setup",
+                "AgentRunning" => "agent",
+                "ReworkQueued" or "ReworkRunning" or "StalledRework" => "rework",
+                "PROpen" => "pr",
+                "MergeReady" => "review",
+                "ParkedInfra" => "parked",
+                "Merged" or "Completed" or "Closed" => "done",
+                "Failed" or "BlockedOperator" => "blocked",
+                _ => null,
+            };
+        }
+
         var prNumber = issue.GetMetadata("prNumber");
 
         switch (issue.Status)
@@ -110,12 +137,7 @@ public static class FlowGraph
             case IssueStatus.Blocked:
                 return "blocked";
             case IssueStatus.Pending:
-                if (prNumber is not null) return "rework";           // queued rework round
-                if (inActiveSprint) return "sprint";
-                if (hasSpecChain) return "backlog";                  // groomed with its spec
-                return string.Equals(issue.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)
-                    ? "backlog"                                       // ad-hoc, groom-approved
-                    : "groom";                                        // ad-hoc, awaiting grooming
+                return ClassifyPendingPlanning(issue, inActiveSprint, hasSpecChain);
             case IssueStatus.InProgress:
                 // InProgress + prNumber + PrOpened = waiting on review/CI.
                 // InProgress + prNumber + earlier checkpoint = rework round running.
@@ -125,6 +147,16 @@ public static class FlowGraph
             default:
                 return null;
         }
+    }
+
+    private static string ClassifyPendingPlanning(IssueRecord issue, bool inActiveSprint, bool hasSpecChain)
+    {
+        if (issue.GetMetadata("prNumber") is not null) return "rework";   // queued rework round
+        if (inActiveSprint) return "sprint";
+        if (hasSpecChain) return "backlog";                               // groomed with its spec
+        return string.Equals(issue.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)
+            ? "backlog"                                                   // ad-hoc, groom-approved
+            : "groom";                                                    // ad-hoc, awaiting grooming
     }
 
     /// <summary>

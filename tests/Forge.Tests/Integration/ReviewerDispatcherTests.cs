@@ -110,13 +110,17 @@ public class ReviewerDispatcherTests : IDisposable
         // Token-saving: a rework round is queued/in-flight for this
         // exact head — the dev agent's push will replace it, and the
         // sha-stamped verdict would be discarded. Don't review a head
-        // that's about to change.
+        // that's about to change. The round record lives on the TASK
+        // via the machine (reworkForSha).
         var gh = new FakeGitHub();
         var runner = new ScriptedRunner("REVIEWER_VERDICT: APPROVE");
         var dispatcher = new ReviewerDispatcher(_issues, gh, runner, NullLogger<ReviewerDispatcher>.Instance);
-        var watch = await SeedWatchAsync();
-        await _issues.TransitionAsync(watch.Id, IssueStatus.Pending, null,
-            new Dictionary<string, object> { ["reworkInFlightSha"] = "abc123" });
+        var task = await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: "task", Title: "t",
+            Metadata: new Dictionary<string, object> { ["reworkForSha"] = "abc123" }));
+        var watch = await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: AgentTaskTypes.PrWatch, Title: "watch",
+            Metadata: new Dictionary<string, object> { ["prNumber"] = 7, ["taskId"] = task.Id }));
 
         var outcome = await dispatcher.ReviewOnceAsync(
             (await _issues.GetAsync(watch.Id))!, headShaOverride: _ => "abc123");
