@@ -336,7 +336,6 @@ if (mode == CliMode.DashboardOnly)
             loggerFactory.CreateLogger<Core.SecretStore>());
 
         var cloner = new Projects.ProjectCloner(dataRoot, null);
-        var bootstrap = new Projects.ProjectBootstrap(dataRoot, cloner, options.GitHub, null);
         var registry = ProjectRegistryLoader.LoadAsync(projectStore, CancellationToken.None)
             .GetAwaiter().GetResult();
 
@@ -354,6 +353,12 @@ if (mode == CliMode.DashboardOnly)
         var dbByProject = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in registry)
         {
+            // Per-project github_token secret overrides the global PAT
+            // for the boot-time clone (same rule as the endpoints).
+            var effectiveGitHub = Projects.GitHubTokenResolver
+                .ResolveAsync(p.Id, options.GitHub, secretStore, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            var bootstrap = new Projects.ProjectBootstrap(dataRoot, cloner, effectiveGitHub, null);
             var result = bootstrap.EnsureProject(p);
             finalised.Add(result.Project);
             dbByProject[result.Project.Id] = result.IssuesDbPath;

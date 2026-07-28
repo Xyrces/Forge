@@ -131,6 +131,9 @@ public sealed class ProjectCloner
         return new ProjectCloneResult(localPath, Created: true, Source: project.RepoUrl);
     }
 
+    /// <summary>The managed working-copy path for a project id.</summary>
+    public string LocalPathFor(string projectId) => ForgesystemPaths.ProjectDir(_dataRoot, projectId);
+
     /// <summary>
     /// Pull the latest from origin/<see cref="ProjectOptions.DefaultBranch"/>.
     /// Returns true on success. Used by the manual <c>POST /api/projects/{id}/sync</c>
@@ -143,11 +146,39 @@ public sealed class ProjectCloner
         var localPath = ForgesystemPaths.ProjectDir(_dataRoot, project.Id);
         if (!Directory.Exists(Path.Combine(localPath, ".git")))
         {
-            _logger?.LogWarning("Project '{Id}': sync requested but no working copy at {Path}", project.Id, localPath);
-            return false;
+            // The registration-time clone may have failed (e.g. a
+            // stale global PAT while the per-project secret is valid);
+            // sync is the documented retry path, so attempt the clone.
+            _logger?.LogInformation(
+                "Project '{Id}': no working copy at {Path}; attempting clone", project.Id, localPath);
+            try
+            {
+                await CloneAsync(project, github, ct);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Project '{Id}': clone-on-sync failed", project.Id);
+                return false;
+            }
         }
 
         var branch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch;
+
+        // A scaffolded repo (registration-time clone failed → local
+        // git-init fallback) has no origin: reconcile against RepoUrl
+        // instead of pulling from a remote that isn't there.
+        var remoteCheck = await RunGitAsync(localPath, "remote", "get-url", "origin");
+        if (remoteCheck.ExitCode != 0)
+        {
+            if (string.IsNullOrWhiteSpace(project.RepoUrl))
+            {
+                _logger?.LogWarning("Project '{Id}': no origin remote and no RepoUrl to reconcile against", project.Id);
+                return false;
+            }
+            return await ReconcileScaffoldAsync(project, localPath, branch, github, ct);
+        }
+
         var result = await RunGitAsync(localPath,
             "pull", "--ff-only", "origin", branch);
         if (result.ExitCode != 0)
@@ -155,6 +186,57 @@ public sealed class ProjectCloner
             _logger?.LogWarning("Project '{Id}': pull failed: {Err}", project.Id, result.Stderr.Trim());
             return false;
         }
+        return true;
+    }
+
+    /// <summary>
+    /// Reattach a scaffolded working copy (the bootstrap's git-init
+    /// fallback) to its remote: add origin, install the credential
+    /// helper (HTTPS + PAT), fetch, and align the branch with
+    /// <c>origin/&lt;branch&gt;</c>. Scaffold commits are disposable by
+    /// definition — agents never commit in the project root.
+    /// </summary>
+    private async Task<bool> ReconcileScaffoldAsync(
+        ProjectOptions project, string localPath, string branch, GitHubOptions? github, CancellationToken ct)
+    {
+        _logger?.LogInformation("Project '{Id}': no origin remote; reconciling scaffold against {Url}",
+            project.Id, ScrubUrl(project.RepoUrl));
+
+        var add = await RunGitAsync(localPath, "remote", "add", "origin", project.RepoUrl);
+        if (add.ExitCode != 0)
+        {
+            _logger?.LogWarning("Project '{Id}': remote add failed: {Err}", project.Id, add.Stderr.Trim());
+            return false;
+        }
+
+        if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token))
+        {
+            var credPath = Path.Combine(localPath, ".forge", "git-credentials");
+            Directory.CreateDirectory(Path.GetDirectoryName(credPath)!);
+            await File.WriteAllTextAsync(credPath, BuildCredentialStoreEntry(project.RepoUrl, github.Token) + "\n", ct);
+            try
+            {
+                if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+                    File.SetUnixFileMode(credPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            catch { /* non-POSIX — best effort */ }
+            await RunGitAsync(localPath, "config", "credential.helper", $"store --file={credPath}");
+        }
+
+        var fetch = await RunGitAsync(localPath, "fetch", "origin", branch);
+        if (fetch.ExitCode != 0)
+        {
+            _logger?.LogWarning("Project '{Id}': fetch failed: {Err}", project.Id, fetch.Stderr.Trim());
+            return false;
+        }
+
+        var align = await RunGitAsync(localPath, "checkout", "-B", branch, $"origin/{branch}");
+        if (align.ExitCode != 0)
+        {
+            _logger?.LogWarning("Project '{Id}': align to origin/{Branch} failed: {Err}", project.Id, branch, align.Stderr.Trim());
+            return false;
+        }
+        _logger?.LogInformation("Project '{Id}': scaffold reconciled with origin/{Branch}", project.Id, branch);
         return true;
     }
 

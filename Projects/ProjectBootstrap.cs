@@ -121,6 +121,21 @@ public sealed class ProjectBootstrap
             }
         }
 
+        if (hasRepoUrl && Directory.Exists(Path.Combine(rootPath, ".git")))
+        {
+            // Scaffolded repo (an earlier clone failed and the git-init
+            // fallback ran): reconcile with the remote so a fixed PAT
+            // self-heals on boot. Only call sync when origin is
+            // actually missing — a healthy clone needs nothing here.
+            if (ProbeGit(rootPath, "remote get-url origin") != 0)
+            {
+                var healed = _cloner.SyncAsync(project, _github, CancellationToken.None)
+                    .GetAwaiter().GetResult();
+                _logger?.LogInformation(
+                    "Project '{Id}': scaffold reconcile {Result}", project.Id, healed ? "succeeded" : "failed (see warnings)");
+            }
+        }
+
         var stateDir = isOperatorManaged
             ? ForgesystemPaths.StateDir(_dataRoot, project.Id)
             : Path.Combine(rootPath, ".forge", "state");
@@ -147,6 +162,23 @@ public sealed class ProjectBootstrap
             StateDirectory: stateDir,
             IssuesDbPath: issuesDb,
             WorktreeParent: worktreeParent);
+    }
+
+    private static int ProbeGit(string cwd, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            Arguments = args,
+            WorkingDirectory = cwd,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        using var p = Process.Start(psi)!;
+        p.WaitForExit(30_000);
+        return p.ExitCode;
     }
 
     private static void RunGit(string cwd, string args)

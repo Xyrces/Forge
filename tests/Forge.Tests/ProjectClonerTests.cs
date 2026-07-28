@@ -100,6 +100,57 @@ public class ProjectClonerTests : IDisposable
         Assert.True(File.Exists(Path.Combine(first.LocalPath, "CHANGELOG.md")));
     }
 
+    [Fact]
+    public async Task SyncAsync_NoWorkingCopy_ClonesInsteadOfFailing()
+    {
+        // Registration-time clone failures (e.g. a stale global PAT)
+        // are retried via sync — the documented operator recovery path.
+        var project = new ProjectOptions
+        {
+            Id = "lateclone",
+            Name = "LateClone",
+            RepoUrl = _remoteDir,
+            DefaultBranch = "main",
+        };
+
+        var ok = await _cloner.SyncAsync(project, github: null);
+        Assert.True(ok);
+        Assert.True(File.Exists(Path.Combine(
+            ForgesystemPaths.ProjectDir(_tempRoot, project.Id), "README.md")));
+    }
+
+    [Fact]
+    public async Task SyncAsync_ScaffoldedRepo_ReconcilesWithRemote()
+    {
+        // Simulate the bootstrap's git-init fallback: a local repo
+        // with a scaffold commit and no origin, shadowing the remote.
+        var project = new ProjectOptions
+        {
+            Id = "scaffolded",
+            Name = "Scaffolded",
+            RepoUrl = _remoteDir,
+            DefaultBranch = "main",
+        };
+        var localPath = ForgesystemPaths.ProjectDir(_tempRoot, project.Id);
+        Directory.CreateDirectory(localPath);
+        RunGit(localPath, "init", "-q -b main");
+        RunGit(localPath, "config", "user.email forge@local");
+        RunGit(localPath, "config", "user.name \"Forge Bootstrap\"");
+        File.WriteAllText(Path.Combine(localPath, ".gitignore"), ".forge/\n");
+        RunGit(localPath, "add", ".gitignore");
+        RunGit(localPath, "commit", "-q -m scaffold");
+
+        var ok = await _cloner.SyncAsync(project, github: null);
+
+        Assert.True(ok);
+        Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
+
+        // Origin reattached: a second sync takes the ff-only pull path.
+        SeedCommit(_remoteDir, "main", "CHANGELOG.md", "v0.2.0\n", "second");
+        Assert.True(await _cloner.SyncAsync(project, github: null));
+        Assert.True(File.Exists(Path.Combine(localPath, "CHANGELOG.md")));
+    }
+
     private static void InitBareRepo(string path)
     {
         // `git init --bare <path>` creates <path>; we must run from

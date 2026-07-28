@@ -134,12 +134,19 @@ Other project-lifecycle endpoints:
 - `POST /api/projects/{id}/sync` — `git pull --ff-only` the default
   branch. Updates `last_synced_at` + `last_sync_error` in SQLite.
 
-Auth model (private repos): PAT is read from `GITHUB_TOKEN` env var
-or `github.token` in appsettings.json; injected into the clone URL
-only, then the stored `origin` is reset to the clean form
-immediately, and a credential-store file (mode 0600) is written
-under `<localPath>/.forge/git-credentials` for future `git push` /
-`pull`.
+Auth model (private repos): the per-project `github_token` secret
+wins wherever a project id is known (`Projects/GitHubTokenResolver.cs`
+— clone/sync/endpoints/bootstrap, and the dispatch bundle for
+push/PR); the global `GITHUB_TOKEN` env var / `github.token` config
+is the fallback. The token is injected into the clone URL only, then
+the stored `origin` is reset to the clean form immediately, and a
+credential-store file (mode 0600) is written under
+`<localPath>/.forge/git-credentials` for future `git push` / `pull`.
+If a registration-time clone fails, the bootstrap scaffolds a local
+git repo (keeps the system usable); `POST /api/projects/{id}/sync`
+(and every service boot) reconciles that scaffold — adds `origin`,
+installs the credential helper, fetches, and aligns the branch to
+`origin/<defaultBranch>` — once a working PAT is available.
 
 **First goal: build Forge with Forge.** Add a `forge` entry
 (id=forge, repoUrl=https://github.com/Xyrces/Forge.git) via the UI

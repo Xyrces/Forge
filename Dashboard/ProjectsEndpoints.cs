@@ -92,6 +92,7 @@ public static class ProjectsEndpoints
         IProjectStore store,
         ProjectCloner cloner,
         Configuration.GitHubOptions github,
+        ISecretStore secrets,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
@@ -113,13 +114,14 @@ public static class ProjectsEndpoints
         ProjectCloneResult? clone = null;
         try
         {
+            var effectiveGitHub = await GitHubTokenResolver.ResolveAsync(record.Id, github, secrets, ct);
             clone = await cloner.CloneAsync(new ProjectOptions
             {
                 Id = record.Id,
                 Name = record.Name,
                 RepoUrl = record.RepoUrl,
                 DefaultBranch = record.DefaultBranch,
-            }, github, ct);
+            }, effectiveGitHub, ct);
             await store.UpdateLocalPathAsync(record.Id, clone.LocalPath, ct);
         }
         catch (Exception ex)
@@ -148,6 +150,7 @@ public static class ProjectsEndpoints
     private static async Task<IResult> SyncProjectAsync(
         string id, IProjectStore store, ProjectCloner cloner,
         Configuration.GitHubOptions github,
+        ISecretStore secrets,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
@@ -155,14 +158,16 @@ public static class ProjectsEndpoints
         var record = await store.GetAsync(id, ct);
         if (record is null) return Results.NotFound(new { error = "project not found", id });
 
+        var effectiveGitHub = await GitHubTokenResolver.ResolveAsync(record.Id, github, secrets, ct);
         var ok = await cloner.SyncAsync(new ProjectOptions
         {
             Id = record.Id,
             Name = record.Name,
             RepoUrl = record.RepoUrl,
             DefaultBranch = record.DefaultBranch,
-        }, github, ct);
+        }, effectiveGitHub, ct);
         await store.UpdateSyncStatusAsync(id, DateTime.UtcNow, ok ? null : "git pull failed (see journalctl)", ct);
+        if (ok) await store.UpdateLocalPathAsync(id, cloner.LocalPathFor(id), ct);
         return ok ? Results.Ok(new { id, syncedAt = DateTime.UtcNow })
                   : Results.Json(new { error = "git pull failed; check journalctl" }, statusCode: 502);
     }
