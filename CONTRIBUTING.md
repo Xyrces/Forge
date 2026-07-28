@@ -79,9 +79,16 @@ Server / Azure SQL (`db.provider=sqlserver`). The provider seam lives in
    Use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` so
    re-runs are no-ops. The full v1→N chain is preserved for existing
    databases.
-3. **SQL Server**: add the FINAL shape to `InitializeSchemaSqlServer()`.
-   Azure databases are fresh-created at the current version — there is
-   no T-SQL migration chain. Tables are guarded by
+3. **SQL Server**: two homes for the change. The FINAL shape goes in
+   `InitializeSchemaSqlServer()` (fresh-create — new databases/schemas
+   are born at it). The path for EXISTING databases is an ordered
+   migration in `Core/Db/Migrations/…` registered in
+   `SqlServerMigrations.All` (absolute versions continuing the SQLite
+   numbering; runner applies `version > MAX(schema_version)` per schema
+   and stamps it). Migrations must be idempotent (existence-guarded —
+   a manually repaired database must converge, not crash) and
+   profile-aware (Core vs Workload get different steps).
+   Tables are guarded by
    `IF NOT EXISTS (SELECT 1 FROM sys.tables ...)`; indexes by
    `IF NOT EXISTS (SELECT 1 FROM sys.indexes ...)`. Constraints to know:
    - No multiple cascade paths (FKs with two parents get `ON DELETE

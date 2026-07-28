@@ -785,7 +785,9 @@ Console.Error.WriteLine(ex.ToString());
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var probe = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
             sw.Stop();
-            var expectedSchema = IssueStore.CurrentSchemaVersion;
+            var expectedSchema = issues.Db.Provider == ForgeDbProvider.SqlServer
+                ? Core.Db.SqlServerMigrations.ExpectedVersion
+                : IssueStore.CurrentSchemaVersion;
             int actualSchema = -1;
             await using (var conn = await issues.Db.OpenAsync())
             {

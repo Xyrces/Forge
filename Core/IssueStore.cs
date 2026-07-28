@@ -1382,16 +1382,37 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             cmd.ExecuteNonQuery();
         }
 
-        using (var stamp = conn.CreateCommand())
+        // Ordered migrations for EXISTING databases (a schema just
+        // fresh-created above is born at the current shape — the
+        // migrations' guards make them no-ops there). Each applied
+        // step is stamped; schema_version keeps full history and
+        // --check reads MAX(version).
+        var applied = 0;
+        using (var ver = conn.CreateCommand())
         {
-            stamp.CommandText = $"""
-                IF NOT EXISTS (SELECT 1 FROM {d.Table("schema_version")} WHERE version = @version)
-                    INSERT INTO {d.Table("schema_version")}(version, applied_at) VALUES (@version, @now);
-                """;
-            stamp.AddParam("@version", CurrentSchemaVersion);
-            stamp.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
-            stamp.ExecuteNonQuery();
+            ver.CommandText = $"SELECT COALESCE(MAX(version), 0) FROM {d.Table("schema_version")}";
+            applied = Convert.ToInt32(ver.ExecuteScalar());
         }
+        foreach (var migration in SqlServerMigrations.All
+            .Where(m => m.Version > applied)
+            .OrderBy(m => m.Version))
+        {
+            migration.Up(conn, d, _db.Profile);
+            StampVersion(conn, d, migration.Version);
+        }
+        StampVersion(conn, d, SqlServerMigrations.ExpectedVersion);
+    }
+
+    private static void StampVersion(DbConnection conn, SqlServerDialect d, int version)
+    {
+        using var stamp = conn.CreateCommand();
+        stamp.CommandText = $"""
+            IF NOT EXISTS (SELECT 1 FROM {d.Table("schema_version")} WHERE version = @version)
+                INSERT INTO {d.Table("schema_version")}(version, applied_at) VALUES (@version, @now);
+            """;
+        stamp.AddParam("@version", version);
+        stamp.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+        stamp.ExecuteNonQuery();
     }
 
     private void ApplyV21AgentRunActivity(SqliteConnection conn)
