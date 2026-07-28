@@ -26,10 +26,31 @@ skill seeding, recovery pass, dashboard endpoints) all passed.
 }
 ```
 
-`db.provider` defaults to `sqlite` (tests, fresh clones). On SQL Server
-every project maps to schema `proj_<id>` in the one database (created
-lazily by the first IssueStore construction); memory.db folds into the
-same per-project schema. Files that stay local regardless: repos/
+`db.provider` defaults to `sqlite` (tests, fresh clones). On SQL
+Server the database is split into two schema profiles, both created
+lazily on first store construction:
+
+| Profile | Schema | Holds |
+|---|---|---|
+| Core | `core` | Registry: `project`, `secret`, `agent`, `skill` (one per database) |
+| Workload | `proj_<id>` | Everything else: `issue`, `issue_event`, `sprint`, `spec`, `memory`, `agent_run`, `codebase_graph_cache`, `design_artifact`, etc. |
+
+There is no `proj_default` anymore — the registry (project + secret
++ agent + skill) lives in `core`, and each workload project's schema
+materializes the first time a store is built against it. The v23 →
+v24 transition is handled by the migration runner (see below), so
+databases cut over before the split keep their existing data.
+
+SQL Server schema changes for EXISTING databases flow through ordered
+migrations in `Core/Db/Migrations/` (registered in
+`SqlServerMigrations.All`; v24 is the profile split itself). The
+runner applies `version > MAX(schema_version)` per schema and stamps
+it; migrations are idempotent and profile-aware (Core vs Workload get
+different steps). Fresh databases skip the chain entirely — they
+are born at the current shape via the final DDL in
+`InitializeSchemaSqlServer()`. See `CONTRIBUTING.md` → "Schema
+migrations" for the rules, index/constraint gotchas, and how to add
+the next migration. Files that stay local regardless: repos/
 worktrees, logs, issues.jsonl (viewer artifact), art output, codebase
 graph cache, DataProtection keyring (`~/.aspnet/DataProtection-Keys/`).
 
@@ -48,8 +69,9 @@ graph cache, DataProtection keyring (`~/.aspnet/DataProtection-Keys/`).
      [--include-open-work] \
      --connection-string "Server=tcp:forge-sql-server.database.windows.net,1433;Initial Catalog=forge;Authentication=Active Directory Default;Encrypt=True;Connect Timeout=30"
    ```
-   Idempotent — safe to re-run. `--reset` drops proj_* schemas first
-   (rehearsal only, never against the production DB after cutover).
+   Idempotent — safe to re-run. `--reset` drops every `proj_*` schema
+   and the `core` registry schema first (rehearsal only, never against
+   the production DB after cutover).
 4. Flip `db.provider`/`db.connectionString` in
    `~/.config/forge/appsettings.json` (shape above; production DB name
    `forge`, not the dev one).
