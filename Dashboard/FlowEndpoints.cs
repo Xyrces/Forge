@@ -18,6 +18,25 @@ public static class FlowEndpoints
 {
     private const int MaxSamplesPerNode = 8;
 
+    private static object LayoutPayload(DirectedFlowLayout.Result layout) => new
+    {
+        width = layout.Width,
+        height = layout.Height,
+        laneDividerY = layout.LaneDividerY,
+        nodes = layout.Nodes.ToDictionary(
+            n => n.Id,
+            n => new { x = n.X, y = n.Y, w = n.W, h = n.H },
+            StringComparer.Ordinal),
+        edges = layout.Edges.Select(e => new
+        {
+            from = e.From,
+            to = e.To,
+            kind = e.Kind,
+            label = e.Label,
+            points = e.Points.Select(p => new { x = p.X, y = p.Y }),
+        }),
+    };
+
     public static void MapFlowEndpoints(
         WebApplication app,
         IIssueStore issues,
@@ -71,6 +90,7 @@ public static class FlowEndpoints
             }
 
             var layout = DirectedFlowLayout.Compute(definition);
+            var layoutH = DirectedFlowLayout.ComputeHorizontal(definition);
             return Results.Json(new
             {
                 lanes = new[] { WorkflowLanes.Planning, WorkflowLanes.Implementation },
@@ -88,24 +108,9 @@ public static class FlowEndpoints
                 // Deterministic directed layout (centered spine,
                 // straight forward edges, framed loops) — the UI
                 // renders this directly, no client-side engine.
-                layout = new
-                {
-                    width = layout.Width,
-                    height = layout.Height,
-                    laneDividerY = layout.LaneDividerY,
-                    nodes = layout.Nodes.ToDictionary(
-                        n => n.Id,
-                        n => new { x = n.X, y = n.Y, w = n.W, h = n.H },
-                        StringComparer.Ordinal),
-                    edges = layout.Edges.Select(e => new
-                    {
-                        from = e.From,
-                        to = e.To,
-                        kind = e.Kind,
-                        label = e.Label,
-                        points = e.Points.Select(p => new { x = p.X, y = p.Y }),
-                    }),
-                },
+                layout = LayoutPayload(layout),
+                // Horizontal compact variant for the dashboard strip.
+                layoutHorizontal = LayoutPayload(layoutH),
                 activeSprintId = active?.Id,
                 // Issue-first picker: every traceable work item (newest
                 // activity first), capped for payload size.

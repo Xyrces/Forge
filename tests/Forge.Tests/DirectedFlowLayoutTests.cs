@@ -103,4 +103,60 @@ public sealed class DirectedFlowLayoutTests
         Assert.True(r.LaneDividerY > byId["sprint"].Y);
         Assert.True(r.LaneDividerY < byId["setup"].Y);
     }
+
+    // ---- Horizontal compact variant (dashboard strip) ----
+
+    [Fact]
+    public void Horizontal_SpineOnCenterRow_OrderedLeftToRight()
+    {
+        var r = DirectedFlowLayout.ComputeHorizontal(WorkflowDefaults.Definition);
+        var byId = r.Nodes.ToDictionary(n => n.Id);
+        Assert.All(SpineIds, id => Assert.Equal(200, byId[id].Y));
+        for (var i = 1; i < SpineIds.Length; i++)
+        {
+            Assert.True(byId[SpineIds[i]].X > byId[SpineIds[i - 1]].X,
+                $"{SpineIds[i]} should rank right of {SpineIds[i - 1]}");
+        }
+    }
+
+    [Fact]
+    public void Horizontal_ConsecutiveSpineEdges_StraightHorizontal()
+    {
+        var r = DirectedFlowLayout.ComputeHorizontal(WorkflowDefaults.Definition);
+        var e = r.Edges.Single(e => e is { From: "agent", To: "pr" });
+        Assert.Equal(2, e.Points.Count);
+        Assert.Equal(e.Points[0].Y, e.Points[1].Y);
+        Assert.Equal(200, e.Points[0].Y);
+    }
+
+    [Fact]
+    public void Horizontal_SinksAboveAndBelow()
+    {
+        var r = DirectedFlowLayout.ComputeHorizontal(WorkflowDefaults.Definition);
+        var byId = r.Nodes.ToDictionary(n => n.Id);
+        Assert.True(byId["parked"].Y > 200 && byId["rework"].Y > 200, "branch sinks below");
+        Assert.True(byId["blocked"].Y < 200, "failure sink above");
+        // Sinks rank just below their lowest source (+0.5), so
+        // parked sits between pr and review horizontally.
+        Assert.True(byId["parked"].X > byId["pr"].X && byId["parked"].X < byId["review"].X);
+    }
+
+    [Fact]
+    public void Horizontal_EverythingInsideTheFrame()
+    {
+        var r = DirectedFlowLayout.ComputeHorizontal(WorkflowDefaults.Definition);
+        foreach (var n in r.Nodes)
+        {
+            Assert.True(n.X - n.W / 2 >= 0 && n.X + n.W / 2 <= r.Width, $"{n.Id} off the left/right");
+            Assert.True(n.Y - n.H / 2 >= 0 && n.Y + n.H / 2 <= r.Height, $"{n.Id} off the top/bottom");
+        }
+        foreach (var e in r.Edges)
+        {
+            foreach (var p in e.Points)
+            {
+                Assert.True(p.X >= 0 && p.X <= r.Width, $"{e.From}->{e.To} x={p.X} outside");
+                Assert.True(p.Y >= 0 && p.Y <= r.Height, $"{e.From}->{e.To} y={p.Y} outside");
+            }
+        }
+    }
 }

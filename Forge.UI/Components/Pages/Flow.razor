@@ -87,7 +87,7 @@
                straight forward edges, sinks in fixed side columns,
                loops on fixed outer margins — framed by construction. *@
             <div class="flow-canvas">
-            <svg viewBox="0 0 @F(_svgWidth) @F(_svgHeight)">
+            <svg viewBox="0 0 @SvgSmoothing.F(_svgWidth) @SvgSmoothing.F(_svgHeight)">
                 <defs>
                     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                         <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--outline)" />
@@ -99,7 +99,7 @@
 
                 @if (_laneDividerY is not null)
                 {
-                    <line x1="8" y1="@F(_laneDividerY.Value)" x2="@F(_svgWidth - 8)" y2="@F(_laneDividerY.Value)"
+                    <line x1="8" y1="@SvgSmoothing.F(_laneDividerY.Value)" x2="@SvgSmoothing.F(_svgWidth - 8)" y2="@SvgSmoothing.F(_laneDividerY.Value)"
                           stroke="var(--outline-variant)" stroke-dasharray="4 4" opacity="0.6" />
                     @SvgText(14, _laneDividerY.Value - 8, "var(--on-surface-variant)", 11, "start", "PLANNING")
                     @SvgText(14, _laneDividerY.Value + 18, "var(--on-surface-variant)", 11, "start", "IMPLEMENTATION")
@@ -110,7 +110,7 @@
                 {
                     var visited = _journey is not null && _journey.Visits.Any(v => v.Node == e.From) && _journey.Visits.Any(v => v.Node == e.To);
                     var isLoop = e.Kind is "loop" or "failure";
-                    <path d="@SmoothPath(e.Points)" fill="none"
+                    <path d="@SvgSmoothing.SmoothPath(e.Points.Select(p => (p.X, p.Y)).ToList())" fill="none"
                           stroke="@(visited ? "var(--primary)" : isLoop ? "var(--warn)" : "var(--outline)")"
                           stroke-width="@(visited ? 2.5 : 1.4)"
                           stroke-dasharray="@(isLoop && !visited ? "6 4" : null)"
@@ -135,14 +135,14 @@
                        @onclick="@(() => SelectNode(n.Id))"
                        @onkeydown="@(e => { if (e.Key is "Enter" or " ") SelectNode(n.Id); })"
                        @onfocus="@(() => _focusedNode = n.Id)" @onblur="@(() => _focusedNode = null)">
-                        <rect x="@F(pos.X - w / 2)" y="@F(pos.Y - h / 2)" width="@F(w)" height="@F(h)" rx="9"
+                        <rect x="@SvgSmoothing.F(pos.X - w / 2)" y="@SvgSmoothing.F(pos.Y - h / 2)" width="@SvgSmoothing.F(w)" height="@SvgSmoothing.F(h)" rx="9"
                               fill="@(isCurrent ? "var(--primary-container, var(--surface))" : "var(--surface)")"
                               stroke="@(isCurrent ? "var(--primary)" : inJourney ? "var(--primary)" : selected || _focusedNode == n.Id ? "var(--primary)" : "var(--outline-variant)")"
                               stroke-width="@(isCurrent || selected || _focusedNode == n.Id ? 2.5 : inJourney ? 1.8 : 1.2)" />
                         @SvgText(pos.X, pos.Y + 4, "var(--on-surface)", 12, "middle", n.Label)
                         @if (n.Count > 0)
                         {
-                            <circle cx="@F(pos.X + w / 2 - 10)" cy="@F(pos.Y - h / 2 + 6)" r="11" fill="var(--primary)" />
+                            <circle cx="@SvgSmoothing.F(pos.X + w / 2 - 10)" cy="@SvgSmoothing.F(pos.Y - h / 2 + 6)" r="11" fill="var(--primary)" />
                             @SvgText(pos.X + w / 2 - 10, pos.Y - h / 2 + 10, "var(--on-primary, #fff)", 11, "middle", n.Count.ToString(), bold: true)
                         }
                     </g>
@@ -409,31 +409,6 @@
         };
     }
 
-    // Catmull-Rom -> cubic Bézier: the layout's routed polylines
-    // become the smooth arcs the loop edges should read as.
-    private static string SmoothPath(IReadOnlyList<PointDto> pts)
-    {
-        if (pts.Count == 0) return "";
-        if (pts.Count < 3)
-        {
-            return $"M {F(pts[0].X)} {F(pts[0].Y)} " +
-                string.Join(" ", pts.Skip(1).Select(p => $"L {F(p.X)} {F(p.Y)}"));
-        }
-        var sb = new StringBuilder($"M {F(pts[0].X)} {F(pts[0].Y)}");
-        for (var i = 0; i < pts.Count - 1; i++)
-        {
-            var p0 = pts[Math.Max(0, i - 1)];
-            var p1 = pts[i];
-            var p2 = pts[i + 1];
-            var p3 = pts[Math.Min(pts.Count - 1, i + 2)];
-            sb.Append($" C {F(p1.X + (p2.X - p0.X) / 6.0)} {F(p1.Y + (p2.Y - p0.Y) / 6.0)}," +
-                      $" {F(p2.X - (p3.X - p1.X) / 6.0)} {F(p2.Y - (p3.Y - p1.Y) / 6.0)}," +
-                      $" {F(p2.X)} {F(p2.Y)}");
-        }
-        return sb.ToString();
-    }
-
-    private static string F(double v) => v.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
 
     private void SelectNode(string id)
     {
@@ -467,13 +442,13 @@
 
     // SVG <text> collides with Razor's <text> tag — emit it raw.
     private static MarkupString SvgText(double x, double y, string fill, int size, string anchor, string content, bool bold = false)
-        => new($"<text x=\"{F(x)}\" y=\"{F(y)}\" fill=\"{fill}\" font-size=\"{size}\" text-anchor=\"{anchor}\"" +
+        => new($"<text x=\"{SvgSmoothing.F(x)}\" y=\"{SvgSmoothing.F(y)}\" fill=\"{fill}\" font-size=\"{size}\" text-anchor=\"{anchor}\"" +
                (bold ? " font-weight=\"600\"" : "") + $">{System.Net.WebUtility.HtmlEncode(content)}</text>");
 
     // Edge labels get a surface-colored halo so they stay readable
     // over the routed paths.
     private static MarkupString SvgEdgeLabel(double x, double y, string content)
-        => new($"<text x=\"{F(x)}\" y=\"{F(y)}\" text-anchor=\"middle\" font-size=\"10\" " +
+        => new($"<text x=\"{SvgSmoothing.F(x)}\" y=\"{SvgSmoothing.F(y)}\" text-anchor=\"middle\" font-size=\"10\" " +
                "fill=\"var(--on-surface-variant)\" stroke=\"var(--surface)\" stroke-width=\"3\" " +
                $"paint-order=\"stroke\" style=\"pointer-events:none\">{System.Net.WebUtility.HtmlEncode(content)}</text>");
 

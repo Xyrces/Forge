@@ -138,6 +138,215 @@ public static class DirectedFlowLayout
         return new Result(CanvasWidth, height, nodes, edges, divider);
     }
 
+    // ---- Horizontal compact variant (dashboard strip) ----
+
+    private const double HLeftMargin = 90;
+    private const double HRankGap = 150;
+    private const double HCenterY = 200;
+    private const double HSinkGap = 130;      // sink rows above/below the spine
+    private const double HOuterBottom = 393;  // back-loop margin under the sink row
+    private const double HTopMargin = 70;     // failure row
+
+    /// <summary>
+    /// Horizontal variant for the dashboard's compact strip: the
+    /// spine runs left → right on the center row with straight
+    /// horizontal forward edges; branch/loop sinks sit BELOW,
+    /// failure sinks ABOVE; back-loops route under the sink row and
+    /// cross-canvas edges around the right end. Same rules, axes
+    /// transposed.
+    /// </summary>
+    public static Result ComputeHorizontal(WorkflowDefinition definition)
+    {
+        var (spineRank, side, rank, byId) = Analyze(definition);
+        var onSpine = spineRank.Keys.ToHashSet(StringComparer.Ordinal);
+
+        double X(double r) => HLeftMargin + r * HRankGap;
+        static double W(string label) => Math.Clamp(label.Length * 7.5 + 36, 110, 220);
+
+        var nodes = new List<LayoutNode>();
+        var pos = new Dictionary<string, LayoutNode>(StringComparer.Ordinal);
+        foreach (var s in byId.Values)
+        {
+            var node = onSpine.Contains(s.Id)
+                ? new LayoutNode(s.Id, X(spineRank[s.Id]), HCenterY, W(s.Label), NodeH)
+                : new LayoutNode(s.Id, X(rank[s.Id]),
+                    side[s.Id] == "left" ? HCenterY - HSinkGap : HCenterY + HSinkGap,
+                    W(s.Label), NodeH);
+            nodes.Add(node);
+            pos[s.Id] = node;
+        }
+
+        var edges = new List<LayoutEdge>();
+        foreach (var e in definition.Edges)
+        {
+            if (!pos.TryGetValue(e.From, out var s) || !pos.TryGetValue(e.To, out var t))
+            {
+                continue;
+            }
+            edges.Add(new LayoutEdge(e.From, e.To, e.Kind, e.Label, RouteHorizontal(s, t)));
+        }
+
+        var width = nodes.Max(n => n.X + n.W / 2) + 100;   // room for the right-end wrap
+        var height = HOuterBottom + 47;
+        var planning = nodes.Where(n => byId[n.Id].Lane == WorkflowLanes.Planning).ToList();
+        var impl = nodes.Where(n => byId[n.Id].Lane == WorkflowLanes.Implementation).ToList();
+        double? divider = planning.Count > 0 && impl.Count > 0
+            ? (planning.Max(n => n.X + n.W / 2) + impl.Min(n => n.X - n.W / 2)) / 2
+            : null;
+        return new Result(width, height, nodes, edges, divider);
+    }
+
+    private static IReadOnlyList<Point> RouteHorizontal(LayoutNode s, LayoutNode t)
+    {
+        var sRight = s.X + s.W / 2;
+        var sLeft = s.X - s.W / 2;
+        var sTop = s.Y - s.H / 2;
+        var sBottom = s.Y + s.H / 2;
+        var tRight = t.X + t.W / 2;
+        var tLeft = t.X - t.W / 2;
+        var tTop = t.Y - t.H / 2;
+        var tBottom = t.Y + t.H / 2;
+
+        // Same row (spine-consecutive, or sink-row chains like
+        // parked → rework): straight horizontal.
+        if (Math.Abs(s.Y - t.Y) < 1)
+        {
+            return t.X > s.X
+                ? new[] { new Point(sRight, s.Y), new Point(tLeft, t.Y) }
+                : new[] { new Point(sLeft, s.Y), new Point(tRight, t.Y) };
+        }
+
+        // Same column (e.g. pr → parked): straight vertical.
+        if (Math.Abs(s.X - t.X) < 1)
+        {
+            return t.Y > s.Y
+                ? new[] { new Point(s.X, sBottom), new Point(t.X, tTop) }
+                : new[] { new Point(s.X, sTop), new Point(t.X, tBottom) };
+        }
+
+        var sOnSpine = Math.Abs(s.Y - HCenterY) < 1;
+        var tOnSpine = Math.Abs(t.Y - HCenterY) < 1;
+
+        // Both on the spine, forward skip (intake→groom, agent→done):
+        // gentle bulge ABOVE, clear of the spine's node boxes.
+        if (sOnSpine && tOnSpine && t.X > s.X)
+        {
+            var midX = (sRight + tLeft) / 2;
+            return new[] { new Point(sRight, s.Y), new Point(midX, s.Y - 70), new Point(tLeft, t.Y) };
+        }
+
+        // Back-loop to the spine (rework → agent): down to the fixed
+        // bottom margin, across, up into the target's bottom.
+        if (tOnSpine && t.X < s.X)
+        {
+            return new[]
+            {
+                new Point(s.X, sBottom),
+                new Point(s.X, HOuterBottom),
+                new Point(t.X, HOuterBottom),
+                new Point(t.X, tBottom),
+            };
+        }
+
+        // Opposite sides of the spine (rework → blocked): wrap
+        // around the right end.
+        if ((s.Y - HCenterY) * (t.Y - HCenterY) < 0 && !tOnSpine && !sOnSpine)
+        {
+            var wrapX = Math.Max(sRight, tRight) + 60;
+            return new[]
+            {
+                new Point(sRight, s.Y),
+                new Point(wrapX, s.Y),
+                new Point(wrapX, t.Y),
+                new Point(tRight, t.Y),
+            };
+        }
+
+        // Forward edge between spine and a sink row.
+        if (t.X >= s.X)
+        {
+            // Failure UP to the top row, or branch DOWN to the bottom
+            // row: elbow — out the source's top/bottom at its column,
+            // across at the target's row, into the target's side.
+            var exitY = t.Y < s.Y ? sTop : sBottom;
+            return new[]
+            {
+                new Point(s.X, exitY),
+                new Point(s.X, t.Y),
+                new Point(tLeft, t.Y),
+            };
+        }
+
+        // Cross-canvas (rework below → blocked above): around the
+        // right end, never through the spine's boxes.
+        var outerX = Math.Max(sRight, tRight) + 60;
+        return new[]
+        {
+            new Point(sRight, s.Y),
+            new Point(outerX, s.Y),
+            new Point(outerX, t.Y),
+            new Point(tRight, t.Y),
+        };
+    }
+
+    // ---- Shared graph analysis (spine, sink sides, sink ranks) ----
+
+    private static (Dictionary<string, double> SpineRank, Dictionary<string, string> Side, Dictionary<string, double> Rank, Dictionary<string, WorkflowStep> ById)
+        Analyze(WorkflowDefinition definition)
+    {
+        var steps = definition.Steps;
+        var byId = steps.ToDictionary(s => s.Id, StringComparer.Ordinal);
+
+        var spine = new List<string>();
+        var onSpine = new HashSet<string>(StringComparer.Ordinal);
+        string? cur = byId.ContainsKey("intake") ? "intake" : steps.FirstOrDefault(s => s.Kind == "stage")?.Id;
+        while (cur is not null && onSpine.Add(cur))
+        {
+            spine.Add(cur);
+            cur = definition.Edges
+                .Where(e => e.From == cur && byId.TryGetValue(e.To, out var t) && t.Kind == "stage" && !onSpine.Contains(e.To))
+                .OrderBy(e => e.Kind == WorkflowEdgeKinds.Happy ? 0 : 1)
+                .Select(e => (string?)e.To)
+                .FirstOrDefault();
+        }
+        foreach (var s in steps.Where(s => s.Kind == "stage" && !onSpine.Contains(s.Id)))
+        {
+            spine.Add(s.Id);
+            onSpine.Add(s.Id);
+        }
+        var spineRank = spine.Select((id, i) => (id, i)).ToDictionary(x => x.id, x => (double)x.i, StringComparer.Ordinal);
+
+        var side = new Dictionary<string, string>(StringComparer.Ordinal);
+        var rank = new Dictionary<string, double>(StringComparer.Ordinal);
+        foreach (var s in steps.Where(s => !onSpine.Contains(s.Id)))
+        {
+            var incoming = definition.Edges.Where(e => e.To == s.Id).ToList();
+            side[s.Id] = incoming.Any(e => e.Kind == WorkflowEdgeKinds.Failure) ? "left" : "right";
+            rank[s.Id] = incoming
+                .Select(e => spineRank.TryGetValue(e.From, out var r) ? r : (double?)null)
+                .Where(r => r is not null)
+                .Select(r => r!.Value)
+                .DefaultIfEmpty(0)
+                .Max() + 0.5;
+        }
+        for (var pass = 0; pass < 3; pass++)
+        {
+            foreach (var s in steps.Where(s => !onSpine.Contains(s.Id)))
+            {
+                foreach (var e in definition.Edges.Where(e => e.To == s.Id))
+                {
+                    var src = spineRank.TryGetValue(e.From, out var sr) ? sr
+                        : rank.TryGetValue(e.From, out var nr) ? nr : (double?)null;
+                    if (src is not null && rank[s.Id] < src.Value + 0.5)
+                    {
+                        rank[s.Id] = src.Value + 0.5;
+                    }
+                }
+            }
+        }
+        return (spineRank, side, rank, byId);
+    }
+
     private static IReadOnlyList<Point> Route(LayoutNode s, LayoutNode t)
     {
         var sBottom = s.Y + s.H / 2;
