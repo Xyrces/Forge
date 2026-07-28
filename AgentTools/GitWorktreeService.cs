@@ -44,6 +44,18 @@ public sealed class GitWorktreeService
 
         if (Directory.Exists(worktreePath))
         {
+            // Reuse path: the worktree may hold a STALE branch from an
+            // earlier task with the same id (worktrees persist). When an
+            // override was requested, force the checkout onto it so the
+            // executor's later push refspec still matches the checkout
+            // (found live: task-29 reused an agent/<id> checkout while
+            // the metadata branch was a custom name).
+            if (branchOverride is not null)
+            {
+                var checkout = await RunGitInAsync(worktreePath, $"checkout -B \"{branchOverride}\"", cancellationToken);
+                if (checkout.ExitCode != 0)
+                    throw new InvalidOperationException($"git checkout -B failed (exit={checkout.ExitCode}): {checkout.Stderr}");
+            }
             _logger.LogInformation("Worktree already exists for {TaskId} at {Path}; reusing", taskId, worktreePath);
             return worktreePath;
         }
