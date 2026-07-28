@@ -70,7 +70,15 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         // budget because plans referenced files that landed on main
         // AFTER their worktrees were created, then died on requeue).
         var reused = Directory.Exists(worktrees.WorktreePathFor(input.Issue.Id));
-        var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct);
+        // One branch value for the whole pipeline: claim metadata,
+        // the worktree checkout, the agent prompt, and the push
+        // refspec must agree (found live 2026-07-28: a task whose
+        // metadata named a custom branch had its worktree created on
+        // agent/<id> instead; the agent committed + pushed there and
+        // the executor's push of the metadata branch failed with
+        // "src refspec does not match any", halting the workflow).
+        var resolvedBranch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
+        var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct, branchOverride: resolvedBranch);
         // P4 Stage A: advance the dispatch checkpoint BEFORE we
         // touch metadata. If we crash between CreateAsync and the
         // TransitionAsync below, the recoverer sees
@@ -82,7 +90,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         var issue = await issues.GetAsync(input.Issue.Id, ct);
         if (issue is not null)
         {
-            var branch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
+            var branch = resolvedBranch;
             var currentMetadata = ParseMetadata(issue.MetadataJson);
             currentMetadata["worktreePath"] = worktreePath;
             currentMetadata["branch"] = branch;

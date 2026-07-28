@@ -31,9 +31,13 @@ public sealed class GitWorktreeService
     public string WorktreePathFor(string taskId)
         => Path.Combine(WorktreeRoot, Sanitize(taskId));
 
-    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default)
+    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null)
     {
-        var branch = $"agent/{Sanitize(taskId)}";
+        // The worktree branch must equal the branch the rest of the
+        // pipeline uses (claim metadata -> prompt -> CommitPushPr push
+        // refspec). When the issue carries an explicit branch in its
+        // metadata, honor it here; otherwise the canonical agent/<id>.
+        var branch = branchOverride ?? $"agent/{Sanitize(taskId)}";
         var worktreePath = WorktreePathFor(taskId);
 
         Directory.CreateDirectory(WorktreeRoot);
