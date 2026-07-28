@@ -5,6 +5,22 @@ using Microsoft.Data.Sqlite;
 namespace Forge.Core.Db;
 
 /// <summary>
+/// Which slice of the schema a factory's database holds. SQL Server is
+/// split by design: <see cref="Core"/> (schema <c>core</c>) holds only
+/// registry/global tables (project, secret, agent, skill) — the future
+/// SaaS account/user/membership tables land here too;
+/// <see cref="Workload"/> (schema <c>proj_&lt;id&gt;</c>) holds the 26
+/// per-project workload tables. A registry anchor never gets agent_run
+/// &amp; co; a workload project never gets a stray copy of the registry.
+/// SQLite ignores the profile (file-per-project carries everything).
+/// </summary>
+public enum ForgeSchemaProfile
+{
+    Core,
+    Workload,
+}
+
+/// <summary>
 /// Opens connections to the state database. One instance per (provider,
 /// project-schema); shared by every store that hangs off the same logical
 /// database (IssueStore + its sibling stores).
@@ -13,6 +29,10 @@ public interface IDbConnectionFactory
 {
     ForgeDbProvider Provider { get; }
     ISqlDialect Dialect { get; }
+
+    /// <summary>Which schema slice this factory owns (SQL Server DDL split;
+    /// informational on SQLite).</summary>
+    ForgeSchemaProfile Profile { get; }
 
     /// <summary>Raw connection string (informational; SQLite tests use it to
     /// open raw verification connections).</summary>
@@ -36,6 +56,7 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
 
     public ForgeDbProvider Provider => ForgeDbProvider.Sqlite;
     public ISqlDialect Dialect => SqliteDialect.Instance;
+    public ForgeSchemaProfile Profile => ForgeSchemaProfile.Workload;
     public string ConnectionString { get; }
     public string Qualifier => "";
 
@@ -67,10 +88,11 @@ public sealed class SqlServerConnectionFactory : IDbConnectionFactory
 {
     private readonly SqlRetryLogicBaseProvider _retry;
 
-    public SqlServerConnectionFactory(string connectionString, string qualifier)
+    public SqlServerConnectionFactory(string connectionString, string qualifier, ForgeSchemaProfile profile = ForgeSchemaProfile.Workload)
     {
         ConnectionString = connectionString;
         Dialect = new SqlServerDialect(qualifier);
+        Profile = profile;
         _retry = SqlConfigurableRetryFactory.CreateExponentialRetryProvider(new SqlRetryLogicOption
         {
             // Generous window: the free-tier serverless dev DB resumes
@@ -86,6 +108,7 @@ public sealed class SqlServerConnectionFactory : IDbConnectionFactory
 
     public ForgeDbProvider Provider => ForgeDbProvider.SqlServer;
     public ISqlDialect Dialect { get; }
+    public ForgeSchemaProfile Profile { get; }
     public string ConnectionString { get; }
     public string Qualifier => ((SqlServerDialect)Dialect).Qualifier;
 
@@ -113,23 +136,44 @@ public static class ForgeDb
     public static IDbConnectionFactory Sqlite(string connectionString)
         => new SqliteConnectionFactory(connectionString);
 
-    public static IDbConnectionFactory SqlServer(string connectionString, string qualifier)
-        => new SqlServerConnectionFactory(connectionString, qualifier);
+    public static IDbConnectionFactory SqlServer(string connectionString, string qualifier, ForgeSchemaProfile profile = ForgeSchemaProfile.Workload)
+        => new SqlServerConnectionFactory(connectionString, qualifier, profile);
 
     /// <summary>Schema name for a registered project's tables.</summary>
     public static string SchemaForProject(string projectId) => $"proj_{projectId}";
+
+    /// <summary>Schema holding registry/global tables (project, secret,
+    /// agent, skill; future SaaS account/user/membership).</summary>
+    public const string RegistrySchema = "core";
+
+    /// <summary>
+    /// The registry/global factory. SQL Server: the <c>core</c> schema with
+    /// the Core profile (registry tables only). SQLite: the default
+    /// project's file (the historical registry anchor location).
+    /// </summary>
+    public static IDbConnectionFactory ForRegistry(
+        bool isSqlServer, string connectionString, string defaultSqlitePath)
+        => isSqlServer
+            ? SqlServer(connectionString, RegistrySchema, ForgeSchemaProfile.Core)
+            : Sqlite(new SqliteConnectionStringBuilder
+            {
+                DataSource = defaultSqlitePath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Cache = SqliteCacheMode.Default,
+                Pooling = true,
+            }.ToString());
 
     /// <summary>
     /// Canonical per-project resolution used by every construction site
     /// (Program.FactoryFor, ProjectDispatchBundleFactory,
     /// ProjectContextFactory): SQL Server → shared database, schema
-    /// proj_&lt;id&gt;; SQLite → per-project file (IssueStore's canonical
-    /// builder settings).
+    /// proj_&lt;id&gt; with the Workload profile; SQLite → per-project
+    /// file (IssueStore's canonical builder settings).
     /// </summary>
     public static IDbConnectionFactory ForProject(
         bool isSqlServer, string connectionString, string projectId, string sqlitePath)
         => isSqlServer
-            ? SqlServer(connectionString, SchemaForProject(projectId))
+            ? SqlServer(connectionString, SchemaForProject(projectId), ForgeSchemaProfile.Workload)
             : Sqlite(new SqliteConnectionStringBuilder
             {
                 DataSource = sqlitePath,
@@ -137,7 +181,4 @@ public static class ForgeDb
                 Cache = SqliteCacheMode.Default,
                 Pooling = true,
             }.ToString());
-
-    /// <summary>Schema holding registry/global tables (project, secret, skill).</summary>
-    public const string RegistrySchema = "dbo";
 }

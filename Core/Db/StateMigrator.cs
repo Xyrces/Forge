@@ -33,9 +33,14 @@ public static class StateMigrator
         var report = new List<string>();
         foreach (var src in sources)
         {
-            var schema = ForgeDb.SchemaForProject(src.ProjectId);
-            var target = ForgeDb.SqlServer(targetConnectionString, schema);
-            // Fresh-creates the schema + all tables (no-op when present).
+            // The registry anchor ('default') migrates into the core
+            // schema (registry tables only); workload projects get
+            // proj_<id> with the workload table set.
+            var isRegistry = string.Equals(src.ProjectId, "default", StringComparison.OrdinalIgnoreCase);
+            var schema = isRegistry ? ForgeDb.RegistrySchema : ForgeDb.SchemaForProject(src.ProjectId);
+            var target = ForgeDb.SqlServer(targetConnectionString, schema,
+                isRegistry ? ForgeSchemaProfile.Core : ForgeSchemaProfile.Workload);
+            // Fresh-creates the schema + profile tables (no-op when present).
             _ = new IssueStore(target);
             report.Add($"project '{src.ProjectId}': target schema [{schema}] ensured");
 
@@ -59,7 +64,9 @@ public static class StateMigrator
     {
         foreach (var pid in projectIds)
         {
-            var schema = ForgeDb.SchemaForProject(pid);
+            var schema = string.Equals(pid, "default", StringComparison.OrdinalIgnoreCase)
+                ? ForgeDb.RegistrySchema
+                : ForgeDb.SchemaForProject(pid);
             var target = ForgeDb.SqlServer(targetConnectionString, schema);
             await using var conn = await target.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();

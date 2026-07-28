@@ -914,6 +914,78 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             ensure.ExecuteNonQuery();
         }
         using var cmd = conn.CreateCommand();
+        // Profile split (SQL Server): the Core schema gets only
+        // registry/global tables (project, secret, agent, skill) — a
+        // registry anchor never carries agent_run & co; a Workload
+        // project schema gets only the 26 workload tables. schema_version
+        // exists in both (per-schema version stamp, read by --check).
+        if (_db.Profile == ForgeSchemaProfile.Core)
+        {
+            cmd.CommandText = $$"""
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'schema_version')
+            CREATE TABLE {{d.Table("schema_version")}} (
+                version    BIGINT NOT NULL PRIMARY KEY,
+                applied_at NVARCHAR(64) NOT NULL
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'agent')
+            CREATE TABLE {{d.Table("agent")}} (
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
+                agent_name   NVARCHAR(128) NOT NULL UNIQUE,
+                display_name NVARCHAR(MAX) NOT NULL,
+                scope        NVARCHAR(MAX) NOT NULL DEFAULT '',
+                description  NVARCHAR(MAX) NULL,
+                enabled      INT           NOT NULL DEFAULT 1,
+                config_json  NVARCHAR(MAX) NOT NULL DEFAULT '{}',
+                created_at   NVARCHAR(64)  NOT NULL,
+                updated_at   NVARCHAR(64)  NOT NULL
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'project')
+            CREATE TABLE {{d.Table("project")}} (
+                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
+                name            NVARCHAR(MAX) NOT NULL,
+                repo_url        NVARCHAR(MAX) NOT NULL,
+                default_branch  NVARCHAR(128) NOT NULL DEFAULT 'main',
+                local_path      NVARCHAR(MAX) NULL,
+                created_at      NVARCHAR(64)  NOT NULL,
+                updated_at      NVARCHAR(64)  NOT NULL,
+                last_synced_at  NVARCHAR(64)  NULL,
+                last_sync_error NVARCHAR(MAX) NULL,
+                roles_json      NVARCHAR(MAX) NOT NULL DEFAULT '{}'
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'secret')
+            CREATE TABLE {{d.Table("secret")}} (
+                id          NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("project")}}(id) ON DELETE CASCADE,
+                kind        NVARCHAR(128) NOT NULL,
+                ciphertext  VARBINARY(MAX) NOT NULL,
+                created_at  NVARCHAR(64)  NOT NULL,
+                updated_at  NVARCHAR(64)  NOT NULL,
+                UNIQUE (project_id, kind)
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'skill')
+            CREATE TABLE {{d.Table("skill")}} (
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
+                name         NVARCHAR(128) NOT NULL,
+                description  NVARCHAR(MAX) NULL,
+                body         NVARCHAR(MAX) NOT NULL,
+                agent_id     NVARCHAR(128) NULL REFERENCES {{d.Table("agent")}}(id) ON DELETE CASCADE,
+                enabled      INT           NOT NULL DEFAULT 1,
+                created_at   NVARCHAR(64)  NOT NULL,
+                updated_at   NVARCHAR(64)  NOT NULL,
+                roles        NVARCHAR(MAX) NULL,
+                UNIQUE (name, agent_id)
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_skill_agent' AND object_id = OBJECT_ID('{{d.Table("skill")}}'))
+                CREATE INDEX ix_skill_agent ON {{d.Table("skill")}}(agent_id);
+            """;
+            cmd.ExecuteNonQuery();
+        }
+        else
+        {
         cmd.CommandText = $$"""
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue')
             CREATE TABLE {{d.Table("issue")}} (
@@ -971,44 +1043,6 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 applied_at NVARCHAR(64) NOT NULL
             );
 
-            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'agent')
-            CREATE TABLE {{d.Table("agent")}} (
-                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
-                agent_name   NVARCHAR(128) NOT NULL UNIQUE,
-                display_name NVARCHAR(MAX) NOT NULL,
-                scope        NVARCHAR(MAX) NOT NULL DEFAULT '',
-                description  NVARCHAR(MAX) NULL,
-                enabled      INT           NOT NULL DEFAULT 1,
-                config_json  NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-                created_at   NVARCHAR(64)  NOT NULL,
-                updated_at   NVARCHAR(64)  NOT NULL
-            );
-
-            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'project')
-            CREATE TABLE {{d.Table("project")}} (
-                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
-                name            NVARCHAR(MAX) NOT NULL,
-                repo_url        NVARCHAR(MAX) NOT NULL,
-                default_branch  NVARCHAR(128) NOT NULL DEFAULT 'main',
-                local_path      NVARCHAR(MAX) NULL,
-                created_at      NVARCHAR(64)  NOT NULL,
-                updated_at      NVARCHAR(64)  NOT NULL,
-                last_synced_at  NVARCHAR(64)  NULL,
-                last_sync_error NVARCHAR(MAX) NULL,
-                roles_json      NVARCHAR(MAX) NOT NULL DEFAULT '{}'
-            );
-
-            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'secret')
-            CREATE TABLE {{d.Table("secret")}} (
-                id          NVARCHAR(128) NOT NULL PRIMARY KEY,
-                project_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("project")}}(id) ON DELETE CASCADE,
-                kind        NVARCHAR(128) NOT NULL,
-                ciphertext  VARBINARY(MAX) NOT NULL,
-                created_at  NVARCHAR(64)  NOT NULL,
-                updated_at  NVARCHAR(64)  NOT NULL,
-                UNIQUE (project_id, kind)
-            );
-
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'agent_run')
             CREATE TABLE {{d.Table("agent_run")}} (
                 id               NVARCHAR(128) NOT NULL PRIMARY KEY,
@@ -1030,22 +1064,6 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 CREATE INDEX idx_agent_run_started ON {{d.Table("agent_run")}}(started_at DESC);
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_agent_run_task' AND object_id = OBJECT_ID('{{d.Table("agent_run")}}'))
                 CREATE INDEX idx_agent_run_task ON {{d.Table("agent_run")}}(task_id);
-
-            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'skill')
-            CREATE TABLE {{d.Table("skill")}} (
-                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
-                name         NVARCHAR(128) NOT NULL,
-                description  NVARCHAR(MAX) NULL,
-                body         NVARCHAR(MAX) NOT NULL,
-                agent_id     NVARCHAR(128) NULL REFERENCES {{d.Table("agent")}}(id) ON DELETE CASCADE,
-                enabled      INT           NOT NULL DEFAULT 1,
-                created_at   NVARCHAR(64)  NOT NULL,
-                updated_at   NVARCHAR(64)  NOT NULL,
-                roles        NVARCHAR(MAX) NULL,
-                UNIQUE (name, agent_id)
-            );
-            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_skill_agent' AND object_id = OBJECT_ID('{{d.Table("skill")}}'))
-                CREATE INDEX ix_skill_agent ON {{d.Table("skill")}}(agent_id);
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'sprint')
             CREATE TABLE {{d.Table("sprint")}} (
@@ -1361,7 +1379,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_deployment_project' AND object_id = OBJECT_ID('{{d.Table("deployment")}}'))
                 CREATE INDEX ix_deployment_project ON {{d.Table("deployment")}}(project_id, requested_at DESC);
             """;
-        cmd.ExecuteNonQuery();
+            cmd.ExecuteNonQuery();
+        }
 
         using (var stamp = conn.CreateCommand())
         {

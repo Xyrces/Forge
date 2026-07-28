@@ -327,7 +327,8 @@ if (mode == CliMode.DashboardOnly)
         // scoped by project_id).
         var primaryDbPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
         Directory.CreateDirectory(Path.GetDirectoryName(primaryDbPath)!);
-        var primaryStore = new Core.IssueStore(FactoryFor(options.Db, "default", primaryDbPath));
+        var primaryStore = new Core.IssueStore(
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDbPath));
         var projectStore = new Core.ProjectStore(primaryStore);
         var secretStore = new Core.SecretStore(
             primaryStore,
@@ -512,8 +513,10 @@ if (mode == CliMode.DashboardOnly)
             ? dbByProject[dashboardOnlyProjects[0].Id]
             : throw new InvalidOperationException("At least one project is required to run the dashboard.");
         var issues = new IssueStore(FactoryFor(options.Db, dashboardOnlyProjects[0].Id, defaultDb));
-        var agents = new AgentStore(issues);
-        var skills = new SkillStore(issues);
+        var registryIssues = new IssueStore(
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, defaultDb));
+        var agents = new AgentStore(registryIssues);
+        var skills = new SkillStore(registryIssues);
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
@@ -1101,8 +1104,10 @@ Console.Error.WriteLine(ex.ToString());
         var stateStore = new StateStore(primaryStateDir);
         var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
         var issues = new IssueStore(primaryFactory);
-        var agents = new AgentStore(issues);
-        var skills = new SkillStore(issues);
+        var registryIssues = new IssueStore(
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDb));
+        var agents = new AgentStore(registryIssues);
+        var skills = new SkillStore(registryIssues);
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var worktrees = new GitWorktreeService(
@@ -1116,8 +1121,8 @@ Console.Error.WriteLine(ex.ToString());
             githubToken: options.GitHub?.Token);
         var gitHub = BuildGitHubService(options.GitHub ?? new Forge.Configuration.GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         var roleRegistry = new RoleAgentRegistry();
-        var agentsStore = new Core.AgentStore(issues);
-        var skillsStore = new Core.SkillStore(issues);
+        var agentsStore = new Core.AgentStore(registryIssues);
+        var skillsStore = new Core.SkillStore(registryIssues);
         var skillSource = new SqliteSkillSource(skillsStore, roleRegistry);
         // Seed the skill catalog (seed-if-absent; operator edits via
         // the dashboard win): pipeline-behavior skills per role +
