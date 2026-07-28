@@ -73,9 +73,14 @@ public sealed class SqlServerConnectionFactory : IDbConnectionFactory
         Dialect = new SqlServerDialect(qualifier);
         _retry = SqlConfigurableRetryFactory.CreateExponentialRetryProvider(new SqlRetryLogicOption
         {
-            NumberOfTries = 6,
-            DeltaTime = TimeSpan.FromSeconds(2),
-            MaxTimeInterval = TimeSpan.FromSeconds(45),
+            // Generous window: the free-tier serverless dev DB resumes
+            // from auto-pause in ~60s and login attempts fail with
+            // 40613 / -2 timeouts until it's online. The Basic
+            // production tier never pauses, so this only ever triggers
+            // against dev or during Azure-side transient faults.
+            NumberOfTries = 10,
+            DeltaTime = TimeSpan.FromSeconds(3),
+            MaxTimeInterval = TimeSpan.FromSeconds(90),
         });
     }
 

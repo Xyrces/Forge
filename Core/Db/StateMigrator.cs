@@ -65,6 +65,11 @@ public static class StateMigrator
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = $"""
                 DECLARE @sql NVARCHAR(MAX) = N'';
+                SELECT @sql += N'ALTER TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N' DROP CONSTRAINT ' + QUOTENAME(fk.name) + N';'
+                FROM sys.foreign_keys fk
+                JOIN sys.tables t ON fk.parent_object_id = t.object_id
+                JOIN sys.schemas s ON t.schema_id = s.schema_id
+                WHERE s.name = @schema;
                 SELECT @sql += N'DROP TABLE ' + QUOTENAME(s.name) + N'.' + QUOTENAME(t.name) + N';'
                 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id
                 WHERE s.name = @schema;

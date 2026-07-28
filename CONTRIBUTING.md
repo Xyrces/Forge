@@ -69,12 +69,41 @@ If a new class needs to read `IOptions<AgentOptions>` AND write to `IssueStore` 
 
 ### Schema migrations
 
-When you change `Core/IssueStore.cs`'s schema:
-1. Bump `CurrentSchemaVersion`.
-2. Add the new tables/columns to the `cmd.CommandText` raw-SQL block in `InitializeSchema()`. Use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` so re-runs are no-ops.
-3. Run the orchestrator once against an existing DB to apply the migration.
-4. Run `--check` to confirm the schema_version row matches the new `CurrentSchemaVersion`.
-5. If you need to read a new column, extend `IssueRecord` (or whatever record) AND every `SELECT` that materializes it.
+Forge is dual-provider: SQLite (default; tests + local dev) and SQL
+Server / Azure SQL (`db.provider=sqlserver`). The provider seam lives in
+`Core/Db/` (factory + dialect). Rules for schema changes:
+
+1. Bump `CurrentSchemaVersion` in `Core/IssueStore.cs`.
+2. **SQLite**: add the migration to the raw-SQL block in
+   `InitializeSchemaSqlite()` (and any guarded post-init `ApplyV*` step).
+   Use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` so
+   re-runs are no-ops. The full v1→N chain is preserved for existing
+   databases.
+3. **SQL Server**: add the FINAL shape to `InitializeSchemaSqlServer()`.
+   Azure databases are fresh-created at the current version — there is
+   no T-SQL migration chain. Tables are guarded by
+   `IF NOT EXISTS (SELECT 1 FROM sys.tables ...)`; indexes by
+   `IF NOT EXISTS (SELECT 1 FROM sys.indexes ...)`. Constraints to know:
+   - No multiple cascade paths (FKs with two parents get `ON DELETE
+     NO ACTION` on the side that never deletes in practice).
+   - Composite index keys must fit 900 bytes (clustered) / 1700 bytes
+     (nonclustered) — id columns are `NVARCHAR(128)`.
+   - `key` is reserved — quote as `[key]` (SQLite accepts brackets too,
+     so use them everywhere in shared queries).
+4. Queries must be provider-neutral: `@` params only, table names via
+   `Dialect.Table()`, row caps via `Dialect.Top/Limit(Param)`. Branch
+   per call-site for upserts (`MERGE ... WITH (HOLDLOCK)` vs
+   `ON CONFLICT`) and identity return (`OUTPUT INSERTED.id` vs
+   `RETURNING` / `last_insert_rowid()`). Use `DbCommandExtensions.AddParam`
+   (not provider-specific `Parameters.AddWithValue`) in ported code.
+5. Integer column types must match reader accessors exactly
+   (`GetInt32` ↔ INT, `GetInt64` ↔ BIGINT) — SQLite is permissive,
+   SqlClient is not.
+6. Run the orchestrator once against an existing SQLite DB to apply the
+   migration, then `--check`. For SQL Server, rehearse with
+   `--migrate-db --target sqlserver --reset` against the dev database.
+7. If you need to read a new column, extend the record AND every
+   `SELECT` that materializes it.
 
 ### Adding a new AIFunction
 

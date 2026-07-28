@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh Azure SQL firewall rule for this machine's egress IP + az token keepalive
+
+[Service]
+Type=oneshot
+ExecStart=%h/Documents/forge/scripts/refresh-sql-firewall.sh

@@ -96,8 +96,9 @@ public sealed class SqlServerDialect : ISqlDialect
     public string TopParam(string param) => $"TOP ({param}) ";
     public string LimitParam(string param) => "";
     public string TextType => "NVARCHAR(MAX)";
-    // 448 keeps indexed key columns under the 900-byte SQL Server limit.
-    public string TextKeyType => "NVARCHAR(448)";
+    // 128 keeps composite index keys under the 900-byte clustered /
+    // 1700-byte nonclustered SQL Server limits (real ids are <=40 chars).
+    public string TextKeyType => "NVARCHAR(128)";
     public string IntType => "BIGINT";
     public string RealType => "FLOAT";
     public string IdentityPk => "BIGINT IDENTITY(1,1) PRIMARY KEY";

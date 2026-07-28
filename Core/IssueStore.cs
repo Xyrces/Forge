@@ -917,19 +917,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         cmd.CommandText = $$"""
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue')
             CREATE TABLE {{d.Table("issue")}} (
-                id                NVARCHAR(448) NOT NULL PRIMARY KEY,
-                short_id          NVARCHAR(448) NOT NULL,
-                type              NVARCHAR(448) NOT NULL,
+                id                NVARCHAR(128) NOT NULL PRIMARY KEY,
+                short_id          NVARCHAR(128) NOT NULL,
+                type              NVARCHAR(128) NOT NULL,
                 title             NVARCHAR(MAX) NOT NULL,
                 description       NVARCHAR(MAX) NULL,
                 status            NVARCHAR(64)  NOT NULL,
                 priority          INT           NOT NULL DEFAULT 2,
-                assignee          NVARCHAR(448) NULL,
+                assignee          NVARCHAR(128) NULL,
                 created_at        NVARCHAR(64)  NOT NULL,
                 updated_at        NVARCHAR(64)  NOT NULL,
                 closed_at         NVARCHAR(64)  NULL,
                 metadata_json     NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-                parent_issue_id   NVARCHAR(448) NULL,
+                parent_issue_id   NVARCHAR(128) NULL,
                 dispatch_checkpoint NVARCHAR(64) NULL,
                 checkpoint_at     NVARCHAR(64)  NULL,
                 recovery_attempts INT           NOT NULL DEFAULT 0
@@ -950,9 +950,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue_event')
             CREATE TABLE {{d.Table("issue_event")}} (
                 id          BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                issue_id    NVARCHAR(448) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
+                issue_id    NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
                 ts          NVARCHAR(64)  NOT NULL,
-                actor       NVARCHAR(448) NULL,
+                actor       NVARCHAR(128) NULL,
                 kind        NVARCHAR(128) NOT NULL,
                 detail      NVARCHAR(MAX) NULL
             );
@@ -961,7 +961,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue_seq')
             CREATE TABLE {{d.Table("issue_seq")}} (
-                type       NVARCHAR(448) NOT NULL PRIMARY KEY,
+                type       NVARCHAR(128) NOT NULL PRIMARY KEY,
                 next_short BIGINT NOT NULL DEFAULT 1
             );
 
@@ -973,8 +973,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'agent')
             CREATE TABLE {{d.Table("agent")}} (
-                id           NVARCHAR(448) NOT NULL PRIMARY KEY,
-                agent_name   NVARCHAR(448) NOT NULL UNIQUE,
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
+                agent_name   NVARCHAR(128) NOT NULL UNIQUE,
                 display_name NVARCHAR(MAX) NOT NULL,
                 scope        NVARCHAR(MAX) NOT NULL DEFAULT '',
                 description  NVARCHAR(MAX) NULL,
@@ -986,10 +986,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'project')
             CREATE TABLE {{d.Table("project")}} (
-                id              NVARCHAR(448) NOT NULL PRIMARY KEY,
+                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
                 name            NVARCHAR(MAX) NOT NULL,
                 repo_url        NVARCHAR(MAX) NOT NULL,
-                default_branch  NVARCHAR(448) NOT NULL DEFAULT 'main',
+                default_branch  NVARCHAR(128) NOT NULL DEFAULT 'main',
                 local_path      NVARCHAR(MAX) NULL,
                 created_at      NVARCHAR(64)  NOT NULL,
                 updated_at      NVARCHAR(64)  NOT NULL,
@@ -1000,9 +1000,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'secret')
             CREATE TABLE {{d.Table("secret")}} (
-                id          NVARCHAR(448) NOT NULL PRIMARY KEY,
-                project_id  NVARCHAR(448) NOT NULL REFERENCES {{d.Table("project")}}(id) ON DELETE CASCADE,
-                kind        NVARCHAR(448) NOT NULL,
+                id          NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("project")}}(id) ON DELETE CASCADE,
+                kind        NVARCHAR(128) NOT NULL,
                 ciphertext  VARBINARY(MAX) NOT NULL,
                 created_at  NVARCHAR(64)  NOT NULL,
                 updated_at  NVARCHAR(64)  NOT NULL,
@@ -1011,10 +1011,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'agent_run')
             CREATE TABLE {{d.Table("agent_run")}} (
-                id               NVARCHAR(448) NOT NULL PRIMARY KEY,
-                task_id          NVARCHAR(448) NULL,
+                id               NVARCHAR(128) NOT NULL PRIMARY KEY,
+                task_id          NVARCHAR(128) NULL,
                 role             NVARCHAR(128) NOT NULL,
-                model            NVARCHAR(448) NULL,
+                model            NVARCHAR(128) NULL,
                 status           NVARCHAR(64)  NOT NULL,
                 started_at       NVARCHAR(64)  NOT NULL,
                 finished_at      NVARCHAR(64)  NULL,
@@ -1033,11 +1033,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'skill')
             CREATE TABLE {{d.Table("skill")}} (
-                id           NVARCHAR(448) NOT NULL PRIMARY KEY,
-                name         NVARCHAR(448) NOT NULL,
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
+                name         NVARCHAR(128) NOT NULL,
                 description  NVARCHAR(MAX) NULL,
                 body         NVARCHAR(MAX) NOT NULL,
-                agent_id     NVARCHAR(448) NULL REFERENCES {{d.Table("agent")}}(id) ON DELETE CASCADE,
+                agent_id     NVARCHAR(128) NULL REFERENCES {{d.Table("agent")}}(id) ON DELETE CASCADE,
                 enabled      INT           NOT NULL DEFAULT 1,
                 created_at   NVARCHAR(64)  NOT NULL,
                 updated_at   NVARCHAR(64)  NOT NULL,
@@ -1049,7 +1049,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'sprint')
             CREATE TABLE {{d.Table("sprint")}} (
-                id           NVARCHAR(448) NOT NULL PRIMARY KEY,
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
                 name         NVARCHAR(MAX) NOT NULL,
                 goal         NVARCHAR(MAX) NOT NULL,
                 start_date   NVARCHAR(64)  NOT NULL,
@@ -1065,8 +1065,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'sprint_issue')
             CREATE TABLE {{d.Table("sprint_issue")}} (
-                sprint_id   NVARCHAR(448) NOT NULL REFERENCES {{d.Table("sprint")}}(id) ON DELETE CASCADE,
-                issue_id    NVARCHAR(448) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
+                sprint_id   NVARCHAR(128) NOT NULL REFERENCES {{d.Table("sprint")}}(id) ON DELETE CASCADE,
+                issue_id    NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE NO ACTION,
                 added_at    NVARCHAR(64)  NOT NULL,
                 PRIMARY KEY (sprint_id, issue_id)
             );
@@ -1075,8 +1075,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'intake_session')
             CREATE TABLE {{d.Table("intake_session")}} (
-                id         NVARCHAR(448) NOT NULL PRIMARY KEY,
-                project_id NVARCHAR(448) NOT NULL,
+                id         NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id NVARCHAR(128) NOT NULL,
                 title      NVARCHAR(MAX) NOT NULL,
                 created_at NVARCHAR(64)  NOT NULL,
                 updated_at NVARCHAR(64)  NOT NULL
@@ -1087,11 +1087,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'intake_message')
             CREATE TABLE {{d.Table("intake_message")}} (
                 id                   BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                session_id           NVARCHAR(448) NOT NULL REFERENCES {{d.Table("intake_session")}}(id) ON DELETE CASCADE,
+                session_id           NVARCHAR(128) NOT NULL REFERENCES {{d.Table("intake_session")}}(id) ON DELETE CASCADE,
                 role                 NVARCHAR(128) NOT NULL,
                 content              NVARCHAR(MAX) NOT NULL,
                 ts                   NVARCHAR(64)  NOT NULL,
-                proposed_epic_id     NVARCHAR(448) NULL,
+                proposed_epic_id     NVARCHAR(128) NULL,
                 proposed_epic_title  NVARCHAR(MAX) NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_intake_message_session' AND object_id = OBJECT_ID('{{d.Table("intake_message")}}'))
@@ -1099,12 +1099,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec')
             CREATE TABLE {{d.Table("spec")}} (
-                id              NVARCHAR(448) NOT NULL PRIMARY KEY,
-                project_id      NVARCHAR(448) NOT NULL,
+                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id      NVARCHAR(128) NOT NULL,
                 title           NVARCHAR(MAX) NOT NULL,
                 status          NVARCHAR(64)  NOT NULL,
-                parent_issue_id NVARCHAR(448) NULL,
-                parent_spec_id  NVARCHAR(448) NULL,
+                parent_issue_id NVARCHAR(128) NULL,
+                parent_spec_id  NVARCHAR(128) NULL,
                 current_version INT           NOT NULL DEFAULT 1,
                 created_at      NVARCHAR(64)  NOT NULL,
                 updated_at      NVARCHAR(64)  NOT NULL,
@@ -1117,10 +1117,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_version')
             CREATE TABLE {{d.Table("spec_version")}} (
-                spec_id     NVARCHAR(448) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                spec_id     NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
                 version     INT           NOT NULL,
                 body        NVARCHAR(MAX) NOT NULL,
-                author      NVARCHAR(448) NULL,
+                author      NVARCHAR(128) NULL,
                 created_at  NVARCHAR(64)  NOT NULL,
                 PRIMARY KEY (spec_id, version)
             );
@@ -1129,7 +1129,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_diagram')
             CREATE TABLE {{d.Table("spec_diagram")}} (
-                spec_id  NVARCHAR(448) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                spec_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
                 ordinal  INT           NOT NULL,
                 kind     NVARCHAR(128) NOT NULL,
                 source   NVARCHAR(MAX) NOT NULL,
@@ -1139,9 +1139,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_touches')
             CREATE TABLE {{d.Table("spec_touches")}} (
-                spec_id     NVARCHAR(448) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
-                module_id   NVARCHAR(448) NOT NULL,
-                source      NVARCHAR(448) NOT NULL,
+                spec_id     NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                module_id   NVARCHAR(128) NOT NULL,
+                source      NVARCHAR(128) NOT NULL,
                 rationale   NVARCHAR(MAX) NULL,
                 created_at  NVARCHAR(64)  NOT NULL,
                 PRIMARY KEY (spec_id, module_id, source)
@@ -1151,11 +1151,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_dep')
             CREATE TABLE {{d.Table("spec_dep")}} (
-                from_spec_id  NVARCHAR(448) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
-                to_spec_id    NVARCHAR(448) NOT NULL,
+                from_spec_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                to_spec_id    NVARCHAR(128) NOT NULL,
                 kind          NVARCHAR(128) NOT NULL,
                 rationale     NVARCHAR(MAX) NULL,
-                source        NVARCHAR(448) NOT NULL,
+                source        NVARCHAR(128) NOT NULL,
                 created_at    NVARCHAR(64)  NOT NULL,
                 PRIMARY KEY (from_spec_id, to_spec_id, kind)
             );
@@ -1164,7 +1164,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'codebase_graph_cache')
             CREATE TABLE {{d.Table("codebase_graph_cache")}} (
-                repo_sha    NVARCHAR(448) NOT NULL PRIMARY KEY,
+                repo_sha    NVARCHAR(128) NOT NULL PRIMARY KEY,
                 built_at    NVARCHAR(64)  NOT NULL,
                 file_count  INT           NOT NULL,
                 edge_count  INT           NOT NULL
@@ -1172,8 +1172,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue_dep')
             CREATE TABLE {{d.Table("issue_dep")}} (
-                blocker_id  NVARCHAR(448) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
-                blocked_id  NVARCHAR(448) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
+                blocker_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
+                blocked_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE NO ACTION,
                 kind        NVARCHAR(64)  NOT NULL DEFAULT 'blocks',
                 created_at  NVARCHAR(64)  NOT NULL,
                 PRIMARY KEY (blocker_id, blocked_id, kind)
@@ -1187,7 +1187,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE TABLE {{d.Table("memory")}} (
                 id          BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                 ts          NVARCHAR(64)  NOT NULL,
-                [key]       NVARCHAR(448) NOT NULL UNIQUE,
+                [key]       NVARCHAR(128) NOT NULL UNIQUE,
                 body        NVARCHAR(MAX) NOT NULL,
                 ttl_days    INT           NULL
             );
@@ -1198,7 +1198,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE TABLE {{d.Table("issue_groomer_run")}} (
                 id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                 ts                  NVARCHAR(64)  NOT NULL,
-                spec_id             NVARCHAR(448) NOT NULL,
+                spec_id             NVARCHAR(128) NOT NULL,
                 trigger_kind        NVARCHAR(64)  NOT NULL,
                 status              NVARCHAR(64)  NOT NULL,
                 stories_produced    INT           NOT NULL DEFAULT 0,
@@ -1213,16 +1213,16 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'design_artifact')
             CREATE TABLE {{d.Table("design_artifact")}} (
-                id                  NVARCHAR(448) NOT NULL PRIMARY KEY,
-                spec_id             NVARCHAR(448) NOT NULL,
+                id                  NVARCHAR(128) NOT NULL PRIMARY KEY,
+                spec_id             NVARCHAR(128) NOT NULL,
                 kind                NVARCHAR(64)  NOT NULL,
                 title               NVARCHAR(MAX) NOT NULL,
                 body                NVARCHAR(MAX) NOT NULL,
                 body_kind           NVARCHAR(64)  NOT NULL,
                 references_json     NVARCHAR(MAX) NULL,
-                parent_artifact_id  NVARCHAR(448) NULL,
+                parent_artifact_id  NVARCHAR(128) NULL,
                 status              NVARCHAR(64)  NOT NULL DEFAULT 'draft',
-                author              NVARCHAR(448) NOT NULL,
+                author              NVARCHAR(128) NOT NULL,
                 created_at          NVARCHAR(64)  NOT NULL,
                 updated_at          NVARCHAR(64)  NOT NULL
             );
@@ -1233,7 +1233,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE TABLE {{d.Table("designer_run")}} (
                 id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                 ts                  NVARCHAR(64)  NOT NULL,
-                spec_id             NVARCHAR(448) NOT NULL,
+                spec_id             NVARCHAR(128) NOT NULL,
                 trigger_kind        NVARCHAR(64)  NOT NULL,
                 status              NVARCHAR(64)  NOT NULL,
                 new_spec_status     NVARCHAR(64)  NULL,
@@ -1249,16 +1249,16 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'art_output')
             CREATE TABLE {{d.Table("art_output")}} (
-                id                  NVARCHAR(448) NOT NULL PRIMARY KEY,
-                spec_id             NVARCHAR(448) NOT NULL,
+                id                  NVARCHAR(128) NOT NULL PRIMARY KEY,
+                spec_id             NVARCHAR(128) NOT NULL,
                 kind                NVARCHAR(64)  NOT NULL,
                 title               NVARCHAR(MAX) NOT NULL,
                 body                NVARCHAR(MAX) NOT NULL,
                 body_kind           NVARCHAR(64)  NOT NULL,
                 references_json     NVARCHAR(MAX) NULL,
-                parent_artifact_id  NVARCHAR(448) NULL,
+                parent_artifact_id  NVARCHAR(128) NULL,
                 status              NVARCHAR(64)  NOT NULL DEFAULT 'draft',
-                author              NVARCHAR(448) NOT NULL,
+                author              NVARCHAR(128) NOT NULL,
                 created_at          NVARCHAR(64)  NOT NULL,
                 updated_at          NVARCHAR(64)  NOT NULL
             );
@@ -1271,7 +1271,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE TABLE {{d.Table("artist_run")}} (
                 id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                 ts                  NVARCHAR(64)  NOT NULL,
-                spec_id             NVARCHAR(448) NOT NULL,
+                spec_id             NVARCHAR(128) NOT NULL,
                 trigger_kind        NVARCHAR(64)  NOT NULL,
                 status              NVARCHAR(64)  NOT NULL,
                 new_spec_status     NVARCHAR(64)  NULL,
@@ -1289,7 +1289,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE TABLE {{d.Table("recovery_report")}} (
                 id              BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                 ts              NVARCHAR(64)  NOT NULL,
-                spec_id         NVARCHAR(448) NULL,
+                spec_id         NVARCHAR(128) NULL,
                 issues_scanned  INT           NOT NULL,
                 issues_replayed INT           NOT NULL,
                 issues_failed   INT           NOT NULL,
@@ -1303,10 +1303,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE TABLE {{d.Table("context_handoff")}} (
                 id              BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                 ts              NVARCHAR(64)  NOT NULL,
-                task_id         NVARCHAR(448) NOT NULL,
+                task_id         NVARCHAR(128) NOT NULL,
                 from_role       NVARCHAR(128) NOT NULL,
                 to_role         NVARCHAR(128) NOT NULL,
-                artifact_id     NVARCHAR(448) NOT NULL,
+                artifact_id     NVARCHAR(128) NOT NULL,
                 artifact_kind   NVARCHAR(64)  NOT NULL,
                 consumed        INT           NOT NULL DEFAULT 0
             );
@@ -1319,7 +1319,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             CREATE TABLE {{d.Table("memory_extraction")}} (
                 id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
                 ts                  NVARCHAR(64)  NOT NULL,
-                task_id             NVARCHAR(448) NOT NULL,
+                task_id             NVARCHAR(128) NOT NULL,
                 source_chars        INT           NOT NULL,
                 extracted_count     INT           NOT NULL,
                 persisted_keys_json NVARCHAR(MAX) NOT NULL,
@@ -1337,24 +1337,24 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 weights_json            NVARCHAR(MAX) NOT NULL,
                 candidates_json         NVARCHAR(MAX) NOT NULL,
                 selected_task_ids_json  NVARCHAR(MAX) NOT NULL,
-                committed_sprint_id     NVARCHAR(448) NULL,
-                committed_by            NVARCHAR(448) NULL
+                committed_sprint_id     NVARCHAR(128) NULL,
+                committed_by            NVARCHAR(128) NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_sprint_proposal_audit_ts' AND object_id = OBJECT_ID('{{d.Table("sprint_proposal_audit")}}'))
                 CREATE INDEX ix_sprint_proposal_audit_ts ON {{d.Table("sprint_proposal_audit")}}(ts DESC);
 
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'deployment')
             CREATE TABLE {{d.Table("deployment")}} (
-                id              NVARCHAR(448) NOT NULL PRIMARY KEY,
-                project_id      NVARCHAR(448) NOT NULL,
+                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id      NVARCHAR(128) NOT NULL,
                 commit_sha      NVARCHAR(128) NOT NULL,
                 commit_summary  NVARCHAR(MAX) NULL,
                 status          NVARCHAR(64)  NOT NULL,
                 requested_at    NVARCHAR(64)  NOT NULL,
-                requested_by    NVARCHAR(448) NULL,
+                requested_by    NVARCHAR(128) NULL,
                 build_log       NVARCHAR(MAX) NULL,
                 approved_at     NVARCHAR(64)  NULL,
-                approved_by     NVARCHAR(448) NULL,
+                approved_by     NVARCHAR(128) NULL,
                 deployed_at     NVARCHAR(64)  NULL,
                 deploy_log      NVARCHAR(MAX) NULL
             );

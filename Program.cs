@@ -100,6 +100,9 @@ if (mode == CliMode.DashboardOnly)
         if (mode == CliMode.MigrateDb)
             return await RunMigrateDbAsync(args, options, loggerFactory);
 
+        if (mode == CliMode.InitAzureSql)
+            return await RunInitAzureSqlAsync(args, options, loggerFactory);
+
         // systemd hosting. When launched by systemd (Type=notify),
         // stdin/stdout are not a console and Console.CancelKeyPress
         // never fires on stop -- systemd instead expects the process
@@ -154,7 +157,7 @@ if (mode == CliMode.DashboardOnly)
         }
     }
 
-    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart, MigrateDb }
+    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart, MigrateDb, InitAzureSql }
 
     private static CliMode ParseMode(string[] args)
     {
@@ -167,6 +170,7 @@ if (mode == CliMode.DashboardOnly)
         if (args.Any(a => a == "--recover")) return CliMode.RecoverDryRun;
         if (args.Any(a => a == "--recover-and-start")) return CliMode.RecoverAndStart;
         if (args.Any(a => a == "--migrate-db")) return CliMode.MigrateDb;
+        if (args.Any(a => a == "--init-azure-sql")) return CliMode.InitAzureSql;
         return CliMode.Run;
     }
 
@@ -425,6 +429,52 @@ if (mode == CliMode.DashboardOnly)
     }
 
     /// <summary>
+    /// <c>--init-azure-sql [--connection-string "..."] [--mi-name forge-mi]</c>:
+    /// one-shot Azure SQL provisioning, run as the Entra admin. Creates the
+    /// contained database user for the user-assigned managed identity
+    /// (db_owner — the app does DDL at startup) so the future ACA/AKS
+    /// cutover is a pure config change. Idempotent.
+    /// </summary>
+    private static async Task<int> RunInitAzureSqlAsync(string[] args, AgentOptions options, ILoggerFactory loggerFactory)
+    {
+        var connectionString = ParseArg(args, "--connection-string") ?? options.Db.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            Console.Error.WriteLine("No target connection string. Pass --connection-string or set db.connectionString in config.");
+            return 1;
+        }
+        var miName = ParseArg(args, "--mi-name") ?? "forge-mi";
+        var factory = Core.Db.ForgeDb.SqlServer(connectionString, "dbo");
+        await using var conn = await factory.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @mi)
+                CREATE USER [{miName}] FROM EXTERNAL PROVIDER;
+            IF NOT EXISTS (SELECT 1 FROM sys.database_role_members rm
+                           JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id
+                           JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id
+                           WHERE r.name = 'db_owner' AND m.name = @mi)
+                ALTER ROLE db_owner ADD MEMBER [{miName}];
+            SELECT name, type_desc FROM sys.database_principals WHERE name = @mi;
+            """;
+        cmd.AddParam("@mi", miName);
+        await using var rd = await cmd.ExecuteReaderAsync();
+        var found = false;
+        while (await rd.ReadAsync())
+        {
+            found = true;
+            Console.WriteLine($"  [ok] contained user: {rd.GetString(0)} ({rd.GetString(1)})");
+        }
+        if (!found)
+        {
+            Console.Error.WriteLine($"  fail: contained user '{miName}' not present after init.");
+            return 1;
+        }
+        Console.WriteLine($"  [ok] '{miName}' is db_owner (idempotent)");
+        return 0;
+    }
+
+    /// <summary>
     /// Appended to --check DB failures on the SQL Server provider:
     /// the dominant failure mode is an expired az CLI session
     /// (Active Directory Default resolves via AzureCliCredential on
@@ -475,7 +525,8 @@ if (mode == CliMode.DashboardOnly)
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
-        var dashboardOnlyFactory = new ProjectContextFactory(projectStore, dataRoot, dbByProject);
+        var dashboardOnlyFactory = new ProjectContextFactory(projectStore, dataRoot, dbByProject,
+            (pid, path) => FactoryFor(options.Db, pid, path));
         var dashboardOnlySlots = new SlotTable();
         var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
         foreach (var pp in dashboardOnlyProjects)
@@ -1420,7 +1471,8 @@ Console.Error.WriteLine(ex.ToString());
         // IssueStore bundles. The per-(project, role) SlotTable was
         // created above (BuildSlotTable) and is shared with the
         // orchestrator's dispatch loop.
-        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject);
+        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
+            (pid, path) => FactoryFor(options.Db, pid, path));
         if (knownProjects.Count > 0)
         {
             logger.LogInformation(

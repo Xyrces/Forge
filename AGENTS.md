@@ -22,7 +22,7 @@ Do **not** edit a role's system prompt thinking you are editing a kilo agent. Th
 
 Lifted from `CONTRIBUTING.md` § "Boundaries":
 
-- `Core/` has no I/O beyond SQLite. No HTTP, no GitHub, no LLM. Stores take their paths via the constructor; they don't read env vars.
+- `Core/` has no I/O beyond the state database (SQLite or Azure SQL, via the `Core/Db` provider seam). No HTTP, no GitHub, no LLM. Stores take a connection factory (or a SQLite path) via the constructor; they don't read env vars or config.
 - `Agents/` depends on `Core/`, `Configuration/`, `Dashboard/`. Publishes `DashboardEvent`. Does not read `appsettings.json` directly.
 - `Orchestrator/` depends on `Agents/` + `Core/`. Glues stores + agent + git + GitHub.
 - `Dashboard/` depends on `Core/` + `Configuration/`. Reads stores; publishes/subscribes events via `IDashboardEventBus`.
@@ -59,7 +59,7 @@ If a class needs to read `IOptions<X>` AND write `IssueStore` AND make HTTP call
 - **No manual out-of-loop fixes (operator rule, 2026-07-25).** When the pipeline can't handle a situation (conflicting PR, watchless PR, stuck watch), do NOT hand-merge, hand-push, or hand-patch around it. Either fix the system so the loop handles it (the operator would tell you to anyway), or surface it and let the operator direct. Manual steps leave dangling state (e.g. PR #32 was hand-created without a watch and sat invisible to review/merge).
 - **Don't bypass `IssueStore` to write the queue.** All task state goes through `IssueStore.CreateAsync` / `ClaimAsync` / `TransitionAsync` / `UpdateMetadata`. Direct SQLite or `StateStore` writes corrupt the JSONL mirror and the recovery audit.
 - **The JSONL mirror is a viewer artifact, not source of truth.** `IssueStore` wins on disagreement. `Core/IssuesJsonlMirror.cs` regenerates every 5s.
-- **Schema changes: bump `CurrentSchemaVersion` in `Core/IssueStore.cs`, use `CREATE TABLE IF NOT EXISTS`, run `--check` after.** `CONTRIBUTING.md` § "Schema migrations" is authoritative.
+- **Schema changes: bump `CurrentSchemaVersion` in `Core/IssueStore.cs`, update BOTH DDL paths (SQLite migration chain in `InitializeSchemaSqlite`, SQL Server fresh-create in `InitializeSchemaSqlServer`), run `--check` after.** `CONTRIBUTING.md` § "Schema migrations" is authoritative.
 - **Don't modify the architecture gate that `Reviewer` enforces.** See `agents/reviewer.md` for the exact rules. Don't weaken them in code or in the role prompt.
 - **Cross-process safety: only one orchestrator per state directory.** SQLite WAL allows concurrent readers but a second writer waits up to the busy-timeout.
 
@@ -74,6 +74,8 @@ If a class needs to read `IOptions<X>` AND write `IssueStore` AND make HTTP call
 - `--recover` — dry-run recovery: see what `StartupRecovery` would do. No side-effects.
 - `--recover-and-start` — replay unfinished side-effects, then start dispatch.
 - `--enqueue-task "<title>" --task-type <type> --task-desc "<desc>" --branch "<branch>"` — enqueue a task.
+- `--migrate-db --target sqlserver [--connection-string "..."] [--include-open-work] [--reset]` — one-shot SQLite → Azure SQL state migration (registry + secrets ciphertext + memory keys; open work only with the flag). Idempotent. Stop the service first. See `docs/azure-sql-cutover.md`.
+- `--init-azure-sql [--connection-string "..."] [--mi-name forge-mi]` — provision the contained DB user for the managed identity (db_owner) as the Entra admin. Idempotent.
 
 Full flag list: `README.md` § "CLI".
 
