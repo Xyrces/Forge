@@ -143,6 +143,22 @@ public sealed class ProjectCloner
     public string LocalPathFor(string projectId) => ForgesystemPaths.ProjectDir(_dataRoot, projectId);
 
     /// <summary>
+    /// Read the default branch from a local clone's origin/HEAD
+    /// symref — the "pull info": what the clone itself recorded from
+    /// the remote. Returns null when the symref isn't set.
+    /// </summary>
+    public async Task<string?> ReadCloneDefaultBranchAsync(string localPath)
+    {
+        var result = await RunGitAsync(localPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD");
+        if (result.ExitCode != 0) return null;
+        const string prefix = "origin/";
+        var name = result.Stdout.Trim();
+        return name.StartsWith(prefix, StringComparison.Ordinal) && name.Length > prefix.Length
+            ? name[prefix.Length..]
+            : null;
+    }
+
+    /// <summary>
     /// Ask the remote for its default branch (the target of its HEAD
     /// symref) via <c>git ls-remote --symref</c>. Returns null when the
     /// remote is unreachable or doesn't advertise a symref — callers
@@ -303,6 +319,9 @@ public sealed class ProjectCloner
             return new ProjectSyncResult(false, branch);
         }
         _logger?.LogInformation("Project '{Id}': scaffold reconciled with origin/{Branch}", project.Id, branch);
+        // Stamp origin/HEAD so the clone's own pull info reflects the
+        // remote default from here on (best effort).
+        await RunGitAsync(localPath, "remote", "set-head", "origin", "--auto");
         return new ProjectSyncResult(true, branch);
     }
 

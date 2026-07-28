@@ -102,17 +102,20 @@ public static class ProjectsEndpoints
             return Results.BadRequest(new { error = "id must match [a-z0-9][a-z0-9_-]* (lowercase, 1-32 chars)" });
 
         var logger = loggerFactory.CreateLogger("Projects.Add");
-        var defaultBranch = body.DefaultBranch;
-        if (string.IsNullOrWhiteSpace(defaultBranch))
+        // Default-branch resolution, in order: (1) git token, (2) the
+        // git repo's advertised HEAD, (3) the clone's own pull info
+        // (post-clone, below), (4) user override — which always wins.
+        var effectiveGitHub = await GitHubTokenResolver.ResolveAsync(body.Id, github, secrets, ct);
+        string? detected = null;
+        if (string.IsNullOrWhiteSpace(body.DefaultBranch))
         {
-            // Not overridden: ask the remote for its real default
-            // branch. Detection failure (unreachable, no symref)
-            // falls back to "main".
-            var effectiveGitHub = await GitHubTokenResolver.ResolveAsync(body.Id, github, secrets, ct);
-            defaultBranch = await cloner.DetectDefaultBranchAsync(
+            detected = await cloner.DetectDefaultBranchAsync(
                 new ProjectOptions { Id = body.Id, Name = body.Name ?? body.Id, RepoUrl = body.RepoUrl },
-                effectiveGitHub, ct) ?? "main";
+                effectiveGitHub, ct);
         }
+        var defaultBranch = !string.IsNullOrWhiteSpace(body.DefaultBranch)
+            ? body.DefaultBranch
+            : detected ?? "main";
         var record = await store.UpsertAsync(new NewProject(
             Id: body.Id,
             Name: string.IsNullOrWhiteSpace(body.Name) ? body.Id : body.Name,
@@ -125,7 +128,6 @@ public static class ProjectsEndpoints
         ProjectCloneResult? clone = null;
         try
         {
-            var effectiveGitHub = await GitHubTokenResolver.ResolveAsync(record.Id, github, secrets, ct);
             clone = await cloner.CloneAsync(new ProjectOptions
             {
                 Id = record.Id,
@@ -134,6 +136,19 @@ public static class ProjectsEndpoints
                 DefaultBranch = record.DefaultBranch,
             }, effectiveGitHub, ct);
             await store.UpdateLocalPathAsync(record.Id, clone.LocalPath, ct);
+
+            // (3) pull info: the clone's origin/HEAD is ground truth.
+            // Correct the stored branch unless the user overrode it.
+            if (string.IsNullOrWhiteSpace(body.DefaultBranch))
+            {
+                var cloneBranch = await cloner.ReadCloneDefaultBranchAsync(clone.LocalPath);
+                if (!string.IsNullOrEmpty(cloneBranch) &&
+                    !string.Equals(cloneBranch, record.DefaultBranch, StringComparison.OrdinalIgnoreCase))
+                {
+                    record = await store.UpsertAsync(
+                        new NewProject(record.Id, record.Name, record.RepoUrl, cloneBranch), ct);
+                }
+            }
         }
         catch (Exception ex)
         {

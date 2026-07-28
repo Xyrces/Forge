@@ -201,6 +201,34 @@ public class ProjectClonerTests : IDisposable
         Assert.True(result.Ok);
         Assert.Equal("trunk", result.Branch);
         Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
+
+        // Pull info stamped: the clone's origin/HEAD now reflects the
+        // remote default.
+        Assert.Equal("trunk", await _cloner.ReadCloneDefaultBranchAsync(localPath));
+    }
+
+    [Fact]
+    public async Task ReadCloneDefaultBranchAsync_ReadsOriginHead()
+    {
+        var trunkRemote = Path.Combine(_tempRoot, "trunk-remote3.git");
+        InitBareRepo(trunkRemote, "trunk");
+        SeedCommit(trunkRemote, "trunk", "README.md", "# Trunk\n", "initial");
+
+        var project = new ProjectOptions
+        {
+            Id = "pullinfo",
+            Name = "PullInfo",
+            RepoUrl = trunkRemote,
+            DefaultBranch = "trunk",
+        };
+        var clone = await _cloner.CloneAsync(project, github: null);
+        Assert.Equal("trunk", await _cloner.ReadCloneDefaultBranchAsync(clone.LocalPath));
+
+        // No origin (scaffold-style repo) → null.
+        var bare = Path.Combine(_tempRoot, "no-origin");
+        Directory.CreateDirectory(bare);
+        RunGit(bare, "init", "-q -b main");
+        Assert.Null(await _cloner.ReadCloneDefaultBranchAsync(bare));
     }
 
     private static void InitBareRepo(string path, string branch = "main")
