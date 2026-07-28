@@ -1,4 +1,5 @@
-using Microsoft.Data.Sqlite;
+using System.Data.Common;
+using Forge.Core.Db;
 
 namespace Forge.Core;
 
@@ -55,6 +56,8 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
     private readonly IssueStore _issues;
     public ProjectStore(IssueStore issues) { _issues = issues; }
 
+    private string T(string name) => _issues.Db.Dialect.Table(name);
+
     public async Task<ProjectRecord> UpsertAsync(NewProject p, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(p.Id))
@@ -62,41 +65,50 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         if (string.IsNullOrWhiteSpace(p.RepoUrl))
             throw new InvalidOperationException($"Project '{p.Id}' has no RepoUrl.");
 
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
 
         // INSERT OR IGNORE first, then UPDATE — preserves original
         // created_at on existing rows; sets it fresh on new rows.
         await using (var ins = conn.CreateCommand())
         {
-            ins.Transaction = (SqliteTransaction)tx;
-            ins.CommandText = @"INSERT OR IGNORE INTO project
-                (id, name, repo_url, default_branch, created_at, updated_at)
-                VALUES ($id, $name, $url, $branch, $now, $now)";
-            ins.Parameters.AddWithValue("$id", p.Id);
-            ins.Parameters.AddWithValue("$name", p.Name);
-            ins.Parameters.AddWithValue("$url", p.RepoUrl);
-            ins.Parameters.AddWithValue("$branch", string.IsNullOrWhiteSpace(p.DefaultBranch) ? "main" : p.DefaultBranch);
-            ins.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            ins.Transaction = tx;
+            ins.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
+                ? $"""
+                    IF NOT EXISTS (SELECT 1 FROM {T("project")} WHERE id = @id)
+                    INSERT INTO {T("project")} (id, name, repo_url, default_branch, created_at, updated_at)
+                    VALUES (@id, @name, @url, @branch, @now, @now);
+                    """
+                : """
+                    INSERT OR IGNORE INTO project
+                    (id, name, repo_url, default_branch, created_at, updated_at)
+                    VALUES (@id, @name, @url, @branch, @now, @now)
+                    """;
+            ins.AddParam("@id", p.Id);
+            ins.AddParam("@name", p.Name);
+            ins.AddParam("@url", p.RepoUrl);
+            ins.AddParam("@branch", string.IsNullOrWhiteSpace(p.DefaultBranch) ? "main" : p.DefaultBranch);
+            ins.AddParam("@now", IssueStore.DateFormatTime(now));
             await ins.ExecuteNonQueryAsync(ct);
         }
 
         await using (var upd = conn.CreateCommand())
         {
-            upd.Transaction = (SqliteTransaction)tx;
-            upd.CommandText = @"UPDATE project SET
-                name = $name,
-                repo_url = $url,
-                default_branch = $branch,
-                updated_at = $now
-                WHERE id = $id";
-            upd.Parameters.AddWithValue("$id", p.Id);
-            upd.Parameters.AddWithValue("$name", p.Name);
-            upd.Parameters.AddWithValue("$url", p.RepoUrl);
-            upd.Parameters.AddWithValue("$branch", string.IsNullOrWhiteSpace(p.DefaultBranch) ? "main" : p.DefaultBranch);
-            upd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            upd.Transaction = tx;
+            upd.CommandText = $"""
+                UPDATE {T("project")} SET
+                name = @name,
+                repo_url = @url,
+                default_branch = @branch,
+                updated_at = @now
+                WHERE id = @id
+                """;
+            upd.AddParam("@id", p.Id);
+            upd.AddParam("@name", p.Name);
+            upd.AddParam("@url", p.RepoUrl);
+            upd.AddParam("@branch", string.IsNullOrWhiteSpace(p.DefaultBranch) ? "main" : p.DefaultBranch);
+            upd.AddParam("@now", IssueStore.DateFormatTime(now));
             await upd.ExecuteNonQueryAsync(ct);
         }
 
@@ -109,23 +121,25 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
 
     public async Task<ProjectRecord?> GetAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error, roles_json
-            FROM project WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"""
+            SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error, roles_json
+            FROM {T("project")} WHERE id = @id
+            """;
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
 
     public async Task<IReadOnlyList<ProjectRecord>> ListAsync(CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error, roles_json
-            FROM project ORDER BY id";
+        cmd.CommandText = $"""
+            SELECT id, name, repo_url, default_branch, local_path, created_at, updated_at, last_synced_at, last_sync_error, roles_json
+            FROM {T("project")} ORDER BY id
+            """;
         var list = new List<ProjectRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(Read(rd));
@@ -134,40 +148,39 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
 
     public async Task<bool> DeleteAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM project WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"DELETE FROM {T("project")} WHERE id = @id";
+        cmd.AddParam("@id", id);
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 
     public async Task UpdateLocalPathAsync(string id, string localPath, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"UPDATE project SET local_path = $path, updated_at = $now WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$path", localPath);
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        cmd.CommandText = $"""UPDATE {T("project")} SET local_path = @path, updated_at = @now WHERE id = @id""";
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@path", localPath);
+        cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task UpdateSyncStatusAsync(string id, DateTime syncedAt, string? error, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"UPDATE project SET
-            last_synced_at = $when,
-            last_sync_error = $err,
-            updated_at = $now
-            WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$when", IssueStore.DateFormatTime(syncedAt));
-        cmd.Parameters.AddWithValue("$err", (object?)error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        cmd.CommandText = $"""
+            UPDATE {T("project")} SET
+            last_synced_at = @when,
+            last_sync_error = @err,
+            updated_at = @now
+            WHERE id = @id
+            """;
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@when", IssueStore.DateFormatTime(syncedAt));
+        cmd.AddParam("@err", (object?)error ?? DBNull.Value);
+        cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -175,17 +188,16 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(roles);
         var json = System.Text.Json.JsonSerializer.Serialize(roles);
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"UPDATE project SET roles_json = $roles, updated_at = $now WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$roles", json);
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        cmd.CommandText = $"""UPDATE {T("project")} SET roles_json = @roles, updated_at = @now WHERE id = @id""";
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@roles", json);
+        cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 
-    private static ProjectRecord Read(SqliteDataReader rd) => new(
+    private static ProjectRecord Read(DbDataReader rd) => new(
         Id: rd.GetString(0),
         Name: rd.GetString(1),
         RepoUrl: rd.GetString(2),
