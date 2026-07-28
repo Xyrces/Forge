@@ -73,16 +73,18 @@ public sealed class SqlServerDialect : ISqlDialect
 {
     private readonly string _qualifier;
 
-    /// <param name="qualifier">Schema name (dbo, proj_&lt;id&gt;). Must already be
-    /// validated to a safe identifier ([a-z0-9_]) by the caller — project ids
-    /// are lowercase slugs, so <c>proj_{id}</c> is safe by construction.</param>
+    /// <param name="qualifier">Schema name (proj_&lt;id&gt;). Project ids are
+    /// lowercase slugs ([a-z0-9][a-z0-9_-]*), so hyphens are allowed here —
+    /// the bracket quoting in <see cref="Table"/> makes them safe. Anything
+    /// outside [a-zA-Z0-9_-] is rejected (no 1:1 project mapping, possible
+    /// injection).</param>
     public SqlServerDialect(string qualifier)
     {
         if (string.IsNullOrWhiteSpace(qualifier))
             throw new ArgumentException("Schema qualifier is required for SQL Server.", nameof(qualifier));
         foreach (var c in qualifier)
         {
-            if (!char.IsAsciiLetterOrDigit(c) && c != '_')
+            if (!char.IsAsciiLetterOrDigit(c) && c != '_' && c != '-')
                 throw new ArgumentException($"Schema qualifier '{qualifier}' contains unsafe character '{c}'.", nameof(qualifier));
         }
         _qualifier = qualifier;
