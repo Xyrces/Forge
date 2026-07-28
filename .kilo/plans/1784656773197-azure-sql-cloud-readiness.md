@@ -1,5 +1,21 @@
 # Azure SQL Cloud Readiness — SQLite → Azure SQL provider seam + cutover
 
+## Status (2026-07-27, commits f5edd6f..ca2aee5, CI green)
+- [x] Phase A — resources: Basic `forge` DB, `forge-mi` + contained db_owner in
+  both DBs (`--init-azure-sql`), Entra-only auth ENABLED, firewall rule live.
+- [x] Phase B — provider seam + all stores ported; config-driven `db.provider`;
+  Program.cs wiring; `--check` db section; ProjectContextFactory dbResolver.
+- [x] Phase C — `--migrate-db` + rehearsal on the free serverless DB PASSED
+  (schema create, registry+secrets+134 keys, `--check`, full-service run,
+  dashboard endpoints from Azure SQL). Auto-pause resume: retry configured
+  (10 tries/90s), first live exercise happens on next dev-DB wake.
+- [x] Phase D — firewall refresh script + timer installed, ExecStartPre wired,
+  docs (azure-sql-cutover.md, linux-deployment, AGENTS.md, CONTRIBUTING).
+- [ ] **Operator cutover** (not done — needs operator presence): drain 9
+  non-terminal issues or `--include-open-work`, stop service, migrate to the
+  Basic `forge` DB, flip `db.provider=sqlserver`, 48h soak, then archive
+  SQLite files. Runbook: `docs/azure-sql-cutover.md`.
+
 ## Goal
 Forge's state database becomes portable: SQLite stays for tests/dev, Azure SQL becomes the
 24/7 primary store on this machine via Entra-only auth, ready for a later ACA/AKS cutover
