@@ -11,10 +11,15 @@
   (10 tries/90s), first live exercise happens on next dev-DB wake.
 - [x] Phase D — firewall refresh script + timer installed, ExecStartPre wired,
   docs (azure-sql-cutover.md, linux-deployment, AGENTS.md, CONTRIBUTING).
-- [ ] **Operator cutover** (not done — needs operator presence): drain 9
-  non-terminal issues or `--include-open-work`, stop service, migrate to the
-  Basic `forge` DB, flip `db.provider=sqlserver`, 48h soak, then archive
-  SQLite files. Runbook: `docs/azure-sql-cutover.md`.
+- [x] **Cutover EXECUTED 2026-07-28** (`--include-open-work`: 31 non-terminal
+  issues + spec + 134 memory keys migrated to the Basic `forge` DB; service
+  flipped to `db.provider=sqlserver`). Full engineering loop proven E2E on
+  Azure SQL the same morning: task-28 flowed enqueue → ad-hoc groom → solo
+  sprint → dispatch → plan gate → agent run (heartbeats in proj_forge.agent_run)
+  → push → PR #64 → reviewer approve → CI green → auto-merge → sprint
+  Completed. Two live-found bugs fixed in-loop: dispatch bundle provider
+  bypass (b5f6a7c) and worktree branch/metadata mismatch (0204714).
+  Remaining: 48h soak, then archive the SQLite files (rollback until then).
 
 ## Goal
 Forge's state database becomes portable: SQLite stays for tests/dev, Azure SQL becomes the
