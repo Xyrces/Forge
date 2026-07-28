@@ -97,6 +97,9 @@ if (mode == CliMode.DashboardOnly)
         if (mode == CliMode.RecoverAndStart)
             return await RunRecoverAsync(options, loggerFactory, logger, dryRun: false);
 
+        if (mode == CliMode.MigrateDb)
+            return await RunMigrateDbAsync(args, options, loggerFactory);
+
         // systemd hosting. When launched by systemd (Type=notify),
         // stdin/stdout are not a console and Console.CancelKeyPress
         // never fires on stop -- systemd instead expects the process
@@ -151,7 +154,7 @@ if (mode == CliMode.DashboardOnly)
         }
     }
 
-    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart }
+    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart, MigrateDb }
 
     private static CliMode ParseMode(string[] args)
     {
@@ -163,6 +166,7 @@ if (mode == CliMode.DashboardOnly)
         if (args.Any(a => a == "--check")) return CliMode.Check;
         if (args.Any(a => a == "--recover")) return CliMode.RecoverDryRun;
         if (args.Any(a => a == "--recover-and-start")) return CliMode.RecoverAndStart;
+        if (args.Any(a => a == "--migrate-db")) return CliMode.MigrateDb;
         return CliMode.Run;
     }
 
@@ -355,6 +359,69 @@ if (mode == CliMode.DashboardOnly)
         }
 
         return (finalised, dbByProject, dataRoot, projectStore, cloner, secretStore);
+    }
+
+    /// <summary>
+    /// <c>--migrate-db --target sqlserver [--connection-string "..."]
+    /// [--include-open-work] [--reset]</c>: one-shot SQLite -> Azure SQL
+    /// state migration (registry + secrets ciphertext + memory keys;
+    /// open work only with the flag). Idempotent; prints a per-table
+    /// verification report. The service must be stopped first — the
+    /// migration reads the SQLite files read-only but the operator
+    /// model is "cut over while nothing writes".
+    /// </summary>
+    private static async Task<int> RunMigrateDbAsync(string[] args, AgentOptions options, ILoggerFactory loggerFactory)
+    {
+        var target = ParseArg(args, "--target") ?? "sqlserver";
+        if (!string.Equals(target, "sqlserver", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine($"--target '{target}' is not supported (only 'sqlserver').");
+            return 1;
+        }
+        var connectionString = ParseArg(args, "--connection-string") ?? options.Db.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            Console.Error.WriteLine("No target connection string. Pass --connection-string or set db.connectionString in config.");
+            return 1;
+        }
+        var includeOpenWork = args.Any(a => a == "--include-open-work");
+        var reset = args.Any(a => a == "--reset");
+
+        var (projects, dbByProject, dataRoot, _, _, _) = BuildProjectBootstrap(options, loggerFactory);
+        var sources = projects
+            .Select(p => new Core.Db.StateMigrator.ProjectSource(
+                p.Id,
+                dbByProject[p.Id],
+                Path.Combine(Path.GetDirectoryName(dbByProject[p.Id])!, "memory.db")))
+            .ToList();
+        // The registry anchor ('default') may not be a registered
+        // project — always include it so project/secret rows migrate.
+        if (sources.All(sx => !string.Equals(sx.ProjectId, "default", StringComparison.OrdinalIgnoreCase)))
+        {
+            var defaultPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
+            if (File.Exists(defaultPath))
+            {
+                sources.Insert(0, new Core.Db.StateMigrator.ProjectSource(
+                    "default", defaultPath,
+                    Path.Combine(Path.GetDirectoryName(defaultPath)!, "memory.db")));
+            }
+        }
+
+        if (reset)
+        {
+            Console.WriteLine($"Resetting {sources.Count} project schema(s) on the target...");
+            await Core.Db.StateMigrator.ResetAsync(
+                connectionString, sources.Select(sx => sx.ProjectId).ToList());
+            Console.WriteLine("Reset complete.");
+        }
+
+        Console.WriteLine($"Migrating {sources.Count} project source(s) -> Azure SQL (includeOpenWork={includeOpenWork})");
+        var report = await Core.Db.StateMigrator.MigrateAsync(
+            sources, connectionString,
+            new Core.Db.StateMigrator.MigrateOptions(IncludeOpenWork: includeOpenWork));
+        foreach (var line in report) Console.WriteLine($"  {line}");
+        Console.WriteLine("Migration complete. Verify with --check after flipping db.provider=sqlserver.");
+        return 0;
     }
 
     /// <summary>
