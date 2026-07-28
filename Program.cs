@@ -502,15 +502,7 @@ if (mode == CliMode.DashboardOnly)
     /// IssueStore construction against a schema creates it and all tables.
     /// </summary>
     private static Core.Db.IDbConnectionFactory FactoryFor(DbOptions db, string projectId, string sqlitePath)
-        => db.IsSqlServer
-            ? Core.Db.ForgeDb.SqlServer(db.ConnectionString, Core.Db.ForgeDb.SchemaForProject(projectId))
-            : Core.Db.ForgeDb.Sqlite(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-            {
-                DataSource = sqlitePath,
-                Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadWriteCreate,
-                Cache = Microsoft.Data.Sqlite.SqliteCacheMode.Default,
-                Pooling = true,
-            }.ToString());
+        => Core.Db.ForgeDb.ForProject(db.IsSqlServer, db.ConnectionString, projectId, sqlitePath);
 
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)

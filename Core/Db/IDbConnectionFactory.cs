@@ -119,6 +119,25 @@ public static class ForgeDb
     /// <summary>Schema name for a registered project's tables.</summary>
     public static string SchemaForProject(string projectId) => $"proj_{projectId}";
 
+    /// <summary>
+    /// Canonical per-project resolution used by every construction site
+    /// (Program.FactoryFor, ProjectDispatchBundleFactory,
+    /// ProjectContextFactory): SQL Server → shared database, schema
+    /// proj_&lt;id&gt;; SQLite → per-project file (IssueStore's canonical
+    /// builder settings).
+    /// </summary>
+    public static IDbConnectionFactory ForProject(
+        bool isSqlServer, string connectionString, string projectId, string sqlitePath)
+        => isSqlServer
+            ? SqlServer(connectionString, SchemaForProject(projectId))
+            : Sqlite(new SqliteConnectionStringBuilder
+            {
+                DataSource = sqlitePath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Cache = SqliteCacheMode.Default,
+                Pooling = true,
+            }.ToString());
+
     /// <summary>Schema holding registry/global tables (project, secret, skill).</summary>
     public const string RegistrySchema = "dbo";
 }
