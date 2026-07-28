@@ -1,3 +1,5 @@
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Text.Json;
@@ -14,38 +16,56 @@ namespace Forge.Core;
 /// </summary>
 public sealed class IssueGroomerRunStore
 {
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
 
     public IssueGroomerRunStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
     {
         _dbPath = dbPath;
-        Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+    }
+
+    public IssueGroomerRunStore(IDbConnectionFactory db)
+    {
+        _db = db;
+        _dbPath = "";
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
             Pooling = true,
         }.ToString();
     }
 
+    private string T(string name) => _db.Dialect.Table(name);
+
     public string DbPath => _dbPath;
 
     public async Task<IssueGroomerRun> StartAsync(string specId, GroomerTriggerKind trigger, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO issue_groomer_run(ts, spec_id, trigger_kind, status)
-            VALUES($ts, $spec, $trigger, 'started')
-            RETURNING id
-            """;
-        cmd.Parameters.AddWithValue("$ts", now.ToString(IssueStore.DateFormat));
-        cmd.Parameters.AddWithValue("$spec", specId);
-        cmd.Parameters.AddWithValue("$trigger", trigger.ToString().ToLowerInvariant());
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                INSERT INTO {T("issue_groomer_run")}(ts, spec_id, trigger_kind, status)
+                OUTPUT INSERTED.id
+                VALUES(@ts, @spec, @trigger, 'started');
+                """
+            : """
+                INSERT INTO issue_groomer_run(ts, spec_id, trigger_kind, status)
+                VALUES(@ts, @spec, @trigger, 'started')
+                RETURNING id
+                """;
+        cmd.AddParam("@ts", now.ToString(IssueStore.DateFormat));
+        cmd.AddParam("@spec", specId);
+        cmd.AddParam("@trigger", trigger.ToString().ToLowerInvariant());
         var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
         return new IssueGroomerRun(
             Id: id,
@@ -68,24 +88,23 @@ public sealed class IssueGroomerRunStore
         TimeSpan duration,
         CancellationToken ct)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE issue_groomer_run
-            SET status = $status,
-                stories_produced = $stories,
-                tasks_produced = $tasks,
-                error = $error,
-                duration_ms = $ms
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("issue_groomer_run")}
+            SET status = @status,
+                stories_produced = @stories,
+                tasks_produced = @tasks,
+                error = @error,
+                duration_ms = @ms
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$status", StatusToDb(status));
-        cmd.Parameters.AddWithValue("$stories", storiesProduced);
-        cmd.Parameters.AddWithValue("$tasks", tasksProduced);
-        cmd.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$ms", (long)duration.TotalMilliseconds);
-        cmd.Parameters.AddWithValue("$id", runId);
+        cmd.AddParam("@status", StatusToDb(status));
+        cmd.AddParam("@stories", storiesProduced);
+        cmd.AddParam("@tasks", tasksProduced);
+        cmd.AddParam("@error", (object?)error ?? DBNull.Value);
+        cmd.AddParam("@ms", (long)duration.TotalMilliseconds);
+        cmd.AddParam("@id", runId);
         await cmd.ExecuteNonQueryAsync(ct);
         return new IssueGroomerRun(
             Id: runId,
@@ -101,32 +120,32 @@ public sealed class IssueGroomerRunStore
 
     public async Task<IReadOnlyList<IssueGroomerRun>> ListAsync(string? specId = null, int limit = 100, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
+        var d = _db.Dialect;
         if (specId is null)
         {
-            cmd.CommandText = """
-                SELECT id, ts, spec_id, trigger_kind, status,
+            cmd.CommandText = $"""
+                SELECT {d.TopParam("@limit")}id, ts, spec_id, trigger_kind, status,
                        stories_produced, tasks_produced, error, duration_ms
-                FROM issue_groomer_run
+                FROM {T("issue_groomer_run")}
                 ORDER BY ts DESC
-                LIMIT $limit
+                {d.LimitParam("@limit")}
                 """;
         }
         else
         {
-            cmd.CommandText = """
-                SELECT id, ts, spec_id, trigger_kind, status,
+            cmd.CommandText = $"""
+                SELECT {d.TopParam("@limit")}id, ts, spec_id, trigger_kind, status,
                        stories_produced, tasks_produced, error, duration_ms
-                FROM issue_groomer_run
-                WHERE spec_id = $spec
+                FROM {T("issue_groomer_run")}
+                WHERE spec_id = @spec
                 ORDER BY ts DESC
-                LIMIT $limit
+                {d.LimitParam("@limit")}
                 """;
-            cmd.Parameters.AddWithValue("$spec", specId);
+            cmd.AddParam("@spec", specId);
         }
-        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.AddParam("@limit", limit);
         var list = new List<IssueGroomerRun>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))

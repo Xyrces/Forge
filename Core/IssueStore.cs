@@ -1021,7 +1021,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 duration_ms      BIGINT        NULL,
                 message_count    INT           NULL,
                 tool_call_count  INT           NULL,
-                text_chars       BIGINT        NULL,
+                text_chars       INT           NULL,
                 error            NVARCHAR(MAX) NULL,
                 transcript_json  NVARCHAR(MAX) NULL,
                 last_activity_at NVARCHAR(64)  NULL
@@ -1204,7 +1204,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 stories_produced    INT           NOT NULL DEFAULT 0,
                 tasks_produced      INT           NOT NULL DEFAULT 0,
                 error               NVARCHAR(MAX) NULL,
-                duration_ms         BIGINT        NOT NULL DEFAULT 0
+                duration_ms         INT           NOT NULL DEFAULT 0
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_groomer_run_spec' AND object_id = OBJECT_ID('{{d.Table("issue_groomer_run")}}'))
                 CREATE INDEX ix_issue_groomer_run_spec ON {{d.Table("issue_groomer_run")}}(spec_id, ts);
@@ -1240,7 +1240,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 design_artifact_ids NVARCHAR(MAX) NULL,
                 hygiene_report      NVARCHAR(MAX) NULL,
                 error               NVARCHAR(MAX) NULL,
-                duration_ms         BIGINT        NOT NULL DEFAULT 0
+                duration_ms         INT           NOT NULL DEFAULT 0
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_designer_run_spec' AND object_id = OBJECT_ID('{{d.Table("designer_run")}}'))
                 CREATE INDEX ix_designer_run_spec ON {{d.Table("designer_run")}}(spec_id, ts);
@@ -1278,7 +1278,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 art_output_ids      NVARCHAR(MAX) NULL,
                 meshy_tasks         NVARCHAR(MAX) NULL,
                 error               NVARCHAR(MAX) NULL,
-                duration_ms         BIGINT        NOT NULL DEFAULT 0
+                duration_ms         INT           NOT NULL DEFAULT 0
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_artist_run_spec' AND object_id = OBJECT_ID('{{d.Table("artist_run")}}'))
                 CREATE INDEX ix_artist_run_spec ON {{d.Table("artist_run")}}(spec_id, ts);
@@ -1294,7 +1294,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 issues_replayed INT           NOT NULL,
                 issues_failed   INT           NOT NULL,
                 actions_json    NVARCHAR(MAX) NOT NULL,
-                duration_ms     BIGINT        NOT NULL DEFAULT 0
+                duration_ms     INT           NOT NULL DEFAULT 0
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_recovery_report_ts' AND object_id = OBJECT_ID('{{d.Table("recovery_report")}}'))
                 CREATE INDEX ix_recovery_report_ts ON {{d.Table("recovery_report")}}(ts);

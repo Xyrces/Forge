@@ -1,3 +1,5 @@
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 
 namespace Forge.Core;
@@ -34,27 +36,30 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
     private readonly IssueStore _issues;
     public SprintStore(IssueStore issues) { _issues = issues; }
 
+    private string T(string name) => _issues.Db.Dialect.Table(name);
+
     public async Task<SprintRecord> CreateAsync(NewSprint spec, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         var id = $"sprint-{Guid.NewGuid().ToString("N")[..10]}";
         var now = DateTime.UtcNow;
         if (spec.Status == SprintStatus.Active)
             await DeactivateOthersAsync(conn, tx, id, ct);
         await using (var cmd = conn.CreateCommand())
         {
-            cmd.Transaction = (SqliteTransaction)tx;
-            cmd.CommandText = @"INSERT INTO sprint (id, name, goal, start_date, end_date, status, created_at, updated_at)
-                VALUES ($id, $name, $goal, $start, $end, $status, $now, $now)";
-            cmd.Parameters.AddWithValue("$id", id);
-            cmd.Parameters.AddWithValue("$name", spec.Name);
-            cmd.Parameters.AddWithValue("$goal", spec.Goal);
-            cmd.Parameters.AddWithValue("$start", IssueStore.DateFormatTime(spec.StartDate));
-            cmd.Parameters.AddWithValue("$end", IssueStore.DateFormatTime(spec.EndDate));
-            cmd.Parameters.AddWithValue("$status", spec.Status.ToString());
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            cmd.Transaction = tx;
+            cmd.CommandText = $"""
+                INSERT INTO {T("sprint")} (id, name, goal, start_date, end_date, status, created_at, updated_at)
+                VALUES (@id, @name, @goal, @start, @end, @status, @now, @now)
+                """;
+            cmd.AddParam("@id", id);
+            cmd.AddParam("@name", spec.Name);
+            cmd.AddParam("@goal", spec.Goal);
+            cmd.AddParam("@start", IssueStore.DateFormatTime(spec.StartDate));
+            cmd.AddParam("@end", IssueStore.DateFormatTime(spec.EndDate));
+            cmd.AddParam("@status", spec.Status.ToString());
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -63,12 +68,11 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
 
     public async Task<IReadOnlyList<SprintRecord>> ListAsync(bool activeOnly, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = activeOnly
-            ? "SELECT id, name, goal, start_date, end_date, status, created_at, updated_at FROM sprint WHERE status='Active' ORDER BY start_date DESC"
-            : "SELECT id, name, goal, start_date, end_date, status, created_at, updated_at FROM sprint ORDER BY start_date DESC";
+            ? $"SELECT id, name, goal, start_date, end_date, status, created_at, updated_at FROM {T("sprint")} WHERE status='Active' ORDER BY start_date DESC"
+            : $"SELECT id, name, goal, start_date, end_date, status, created_at, updated_at FROM {T("sprint")} ORDER BY start_date DESC";
         var list = new List<SprintRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(Read(rd));
@@ -77,21 +81,20 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
 
     public async Task<SprintRecord?> GetAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, name, goal, start_date, end_date, status, created_at, updated_at FROM sprint WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"SELECT id, name, goal, start_date, end_date, status, created_at, updated_at FROM {T("sprint")} WHERE id = @id";
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
 
     public async Task<SprintRecord?> GetActiveAsync(CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, name, goal, start_date, end_date, status, created_at, updated_at FROM sprint WHERE status='Active' LIMIT 1";
+        var d = _issues.Db.Dialect;
+        cmd.CommandText = $"SELECT {d.Top(1)}id, name, goal, start_date, end_date, status, created_at, updated_at FROM {T("sprint")} WHERE status='Active'{d.Limit(1)}";
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
@@ -108,16 +111,15 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             Status = fields.TryGetValue("status", out var st) ? Enum.Parse<SprintStatus>(st?.ToString() ?? "Active") : existing.Status,
         };
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         if (merged.Status == SprintStatus.Active)
         {
-            await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+            await using var tx = await conn.BeginTransactionAsync(ct);
             await DeactivateOthersAsync(conn, tx, id, ct);
             await using var cmd = conn.CreateCommand();
-            cmd.Transaction = (SqliteTransaction)tx;
+            cmd.Transaction = tx;
             ApplySprintUpdateCommand(cmd, merged, now);
-            cmd.Parameters.AddWithValue("$id", id);
+            cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
             await tx.CommitAsync(ct);
         }
@@ -125,7 +127,7 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         {
             await using var cmd = conn.CreateCommand();
             ApplySprintUpdateCommand(cmd, merged, now);
-            cmd.Parameters.AddWithValue("$id", id);
+            cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
         }
         return merged with { UpdatedAt = now };
@@ -133,26 +135,24 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
 
     public async Task DeleteAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM sprint WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"DELETE FROM {T("sprint")} WHERE id = @id";
+        cmd.AddParam("@id", id);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<SprintRecord> SetActiveAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         await DeactivateOthersAsync(conn, tx, id, ct);
         await using (var cmd = conn.CreateCommand())
         {
-            cmd.Transaction = (SqliteTransaction)tx;
-            cmd.CommandText = "UPDATE sprint SET status='Active', updated_at=$now WHERE id=$id";
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
-            cmd.Parameters.AddWithValue("$id", id);
+            cmd.Transaction = tx;
+            cmd.CommandText = $"""UPDATE {T("sprint")} SET status='Active', updated_at=@now WHERE id=@id""";
+            cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -161,63 +161,67 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
 
     public async Task AddIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"INSERT OR IGNORE INTO sprint_issue (sprint_id, issue_id, added_at)
-            VALUES ($sid, $iid, $now)";
-        cmd.Parameters.AddWithValue("$sid", sprintId);
-        cmd.Parameters.AddWithValue("$iid", issueId);
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        cmd.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                IF NOT EXISTS (SELECT 1 FROM {T("sprint_issue")} WHERE sprint_id = @sid AND issue_id = @iid)
+                INSERT INTO {T("sprint_issue")} (sprint_id, issue_id, added_at) VALUES (@sid, @iid, @now);
+                """
+            : """
+                INSERT OR IGNORE INTO sprint_issue (sprint_id, issue_id, added_at)
+                VALUES (@sid, @iid, @now)
+                """;
+        cmd.AddParam("@sid", sprintId);
+        cmd.AddParam("@iid", issueId);
+        cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task RemoveIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM sprint_issue WHERE sprint_id = $sid AND issue_id = $iid";
-        cmd.Parameters.AddWithValue("$sid", sprintId);
-        cmd.Parameters.AddWithValue("$iid", issueId);
+        cmd.CommandText = $"DELETE FROM {T("sprint_issue")} WHERE sprint_id = @sid AND issue_id = @iid";
+        cmd.AddParam("@sid", sprintId);
+        cmd.AddParam("@iid", issueId);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<IReadOnlyList<string>> GetIssueIdsAsync(string sprintId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT issue_id FROM sprint_issue WHERE sprint_id = $sid ORDER BY added_at";
-        cmd.Parameters.AddWithValue("$sid", sprintId);
+        cmd.CommandText = $"SELECT issue_id FROM {T("sprint_issue")} WHERE sprint_id = @sid ORDER BY added_at";
+        cmd.AddParam("@sid", sprintId);
         var ids = new List<string>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) ids.Add(rd.GetString(0));
         return ids;
     }
 
-    private static async Task DeactivateOthersAsync(SqliteConnection conn, SqliteTransaction tx, string keepId, CancellationToken ct)
+    private async Task DeactivateOthersAsync(DbConnection conn, DbTransaction tx, string keepId, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = "UPDATE sprint SET status='Archived', updated_at=$now WHERE status='Active' AND id != $keep";
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
-        cmd.Parameters.AddWithValue("$keep", keepId);
+        cmd.CommandText = $"""UPDATE {T("sprint")} SET status='Archived', updated_at=@now WHERE status='Active' AND id != @keep""";
+        cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        cmd.AddParam("@keep", keepId);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static void ApplySprintUpdateCommand(SqliteCommand cmd, SprintRecord s, DateTime now)
+    private void ApplySprintUpdateCommand(DbCommand cmd, SprintRecord s, DateTime now)
     {
-        cmd.CommandText = @"UPDATE sprint SET name=$name, goal=$goal, start_date=$start, end_date=$end, status=$status, updated_at=$now WHERE id=$id";
-        cmd.Parameters.AddWithValue("$name", s.Name);
-        cmd.Parameters.AddWithValue("$goal", s.Goal);
-        cmd.Parameters.AddWithValue("$start", IssueStore.DateFormatTime(s.StartDate));
-        cmd.Parameters.AddWithValue("$end", IssueStore.DateFormatTime(s.EndDate));
-        cmd.Parameters.AddWithValue("$status", s.Status.ToString());
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+        cmd.CommandText = $"""UPDATE {T("sprint")} SET name=@name, goal=@goal, start_date=@start, end_date=@end, status=@status, updated_at=@now WHERE id=@id""";
+        cmd.AddParam("@name", s.Name);
+        cmd.AddParam("@goal", s.Goal);
+        cmd.AddParam("@start", IssueStore.DateFormatTime(s.StartDate));
+        cmd.AddParam("@end", IssueStore.DateFormatTime(s.EndDate));
+        cmd.AddParam("@status", s.Status.ToString());
+        cmd.AddParam("@now", IssueStore.DateFormatTime(now));
     }
 
-    private static SprintRecord Read(SqliteDataReader rd) => new(
+    private static SprintRecord Read(DbDataReader rd) => new(
         Id: rd.GetString(0),
         Name: rd.GetString(1),
         Goal: rd.GetString(2),

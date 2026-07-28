@@ -1,4 +1,5 @@
-using Microsoft.Data.Sqlite;
+using System.Data.Common;
+using Forge.Core.Db;
 
 namespace Forge.Core;
 
@@ -59,15 +60,18 @@ public sealed class SpecExtractionReader : ISpecExtractionReader
     private readonly IssueStore _issues;
     public SpecExtractionReader(IssueStore issues) { _issues = issues; }
 
+    private string T(string name) => _issues.Db.Dialect.Table(name);
+
     public async Task<IReadOnlyList<SpecDiagramRow>> GetDiagramsAsync(string specId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         var list = new List<SpecDiagramRow>();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT spec_id, ordinal, kind, source, title
-                            FROM spec_diagram WHERE spec_id = $id ORDER BY ordinal";
-        cmd.Parameters.AddWithValue("$id", specId);
+        cmd.CommandText = $"""
+            SELECT spec_id, ordinal, kind, source, title
+            FROM {T("spec_diagram")} WHERE spec_id = @id ORDER BY ordinal
+            """;
+        cmd.AddParam("@id", specId);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
         {
@@ -83,13 +87,14 @@ public sealed class SpecExtractionReader : ISpecExtractionReader
 
     public async Task<IReadOnlyList<SpecTouchRow>> GetTouchesAsync(string specId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         var list = new List<SpecTouchRow>();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT spec_id, module_id, source, rationale, created_at
-                            FROM spec_touches WHERE spec_id = $id ORDER BY module_id";
-        cmd.Parameters.AddWithValue("$id", specId);
+        cmd.CommandText = $"""
+            SELECT spec_id, module_id, source, rationale, created_at
+            FROM {T("spec_touches")} WHERE spec_id = @id ORDER BY module_id
+            """;
+        cmd.AddParam("@id", specId);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
         {
@@ -105,13 +110,14 @@ public sealed class SpecExtractionReader : ISpecExtractionReader
 
     public async Task<IReadOnlyList<SpecDepRow>> GetDepsAsync(string specId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         var list = new List<SpecDepRow>();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT from_spec_id, to_spec_id, kind, rationale, source, created_at
-                            FROM spec_dep WHERE from_spec_id = $id ORDER BY to_spec_id, kind";
-        cmd.Parameters.AddWithValue("$id", specId);
+        cmd.CommandText = $"""
+            SELECT from_spec_id, to_spec_id, kind, rationale, source, created_at
+            FROM {T("spec_dep")} WHERE from_spec_id = @id ORDER BY to_spec_id, kind
+            """;
+        cmd.AddParam("@id", specId);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
         {
@@ -128,18 +134,19 @@ public sealed class SpecExtractionReader : ISpecExtractionReader
 
     public async Task<IReadOnlyList<SpecRecord>> ListByParentIssueIdAsync(string parentIssueId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         var list = new List<SpecRecord>();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
+        cmd.CommandText = $"""
+            SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
                 s.current_version, s.created_at, s.updated_at,
                 v.body, v.author
-                FROM spec s
-                JOIN spec_version v ON v.spec_id = s.id AND v.version = s.current_version
-                WHERE s.parent_issue_id = $pid
-                ORDER BY s.created_at";
-        cmd.Parameters.AddWithValue("$pid", parentIssueId);
+            FROM {T("spec")} s
+            JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
+            WHERE s.parent_issue_id = @pid
+            ORDER BY s.created_at
+            """;
+        cmd.AddParam("@pid", parentIssueId);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
         {

@@ -1,5 +1,7 @@
 ﻿using System.Globalization;
 using System.Text.Json;
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 
 namespace Forge.Core;
@@ -22,21 +24,34 @@ namespace Forge.Core;
 /// </summary>
 public sealed class DesignerRunStore
 {
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
 
     public DesignerRunStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
     {
         _dbPath = dbPath;
-        Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+    }
+
+    public DesignerRunStore(IDbConnectionFactory db)
+    {
+        _db = db;
+        _dbPath = "";
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
             Pooling = true,
         }.ToString();
     }
+
+    private string T(string name) => _db.Dialect.Table(name);
 
     public string DbPath => _dbPath;
 
@@ -44,17 +59,22 @@ public sealed class DesignerRunStore
         string specId, DesignerTriggerKind trigger, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO designer_run(ts, spec_id, trigger_kind, status)
-            VALUES($ts, $spec, $trigger, 'started')
-            RETURNING id
-            """;
-        cmd.Parameters.AddWithValue("$ts", now.ToString(IssueStore.DateFormat));
-        cmd.Parameters.AddWithValue("$spec", specId);
-        cmd.Parameters.AddWithValue("$trigger", trigger.ToString().ToLowerInvariant());
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                INSERT INTO {T("designer_run")}(ts, spec_id, trigger_kind, status)
+                OUTPUT INSERTED.id
+                VALUES(@ts, @spec, @trigger, 'started');
+                """
+            : """
+                INSERT INTO designer_run(ts, spec_id, trigger_kind, status)
+                VALUES(@ts, @spec, @trigger, 'started')
+                RETURNING id
+                """;
+        cmd.AddParam("@ts", now.ToString(IssueStore.DateFormat));
+        cmd.AddParam("@spec", specId);
+        cmd.AddParam("@trigger", trigger.ToString().ToLowerInvariant());
         var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
         return new DesignerRun(
             Id: id, Ts: now, SpecId: specId, Trigger: trigger,
@@ -73,27 +93,26 @@ public sealed class DesignerRunStore
         TimeSpan duration,
         CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE designer_run
-            SET status = $status,
-                new_spec_status = $new_status,
-                design_artifact_ids = $artifact_ids,
-                hygiene_report = $hygiene,
-                error = $error,
-                duration_ms = $ms
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("designer_run")}
+            SET status = @status,
+                new_spec_status = @new_status,
+                design_artifact_ids = @artifact_ids,
+                hygiene_report = @hygiene,
+                error = @error,
+                duration_ms = @ms
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$status", StatusToDb(status));
-        cmd.Parameters.AddWithValue("$new_status", (object?)newSpecStatus?.ToString() ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$artifact_ids",
+        cmd.AddParam("@status", StatusToDb(status));
+        cmd.AddParam("@new_status", (object?)newSpecStatus?.ToString() ?? DBNull.Value);
+        cmd.AddParam("@artifact_ids",
             (object?)(designArtifactIds is null ? null : JsonSerializer.Serialize(designArtifactIds)) ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$hygiene", (object?)hygieneReportJson ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$ms", (long)duration.TotalMilliseconds);
-        cmd.Parameters.AddWithValue("$id", runId);
+        cmd.AddParam("@hygiene", (object?)hygieneReportJson ?? DBNull.Value);
+        cmd.AddParam("@error", (object?)error ?? DBNull.Value);
+        cmd.AddParam("@ms", (long)duration.TotalMilliseconds);
+        cmd.AddParam("@id", runId);
         await cmd.ExecuteNonQueryAsync(ct);
         return new DesignerRun(
             Id: runId, Ts: DateTime.MinValue, SpecId: "", Trigger: DesignerTriggerKind.Manual,
@@ -105,32 +124,32 @@ public sealed class DesignerRunStore
     public async Task<IReadOnlyList<DesignerRun>> ListAsync(
         string? specId = null, int limit = 100, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
+        var d = _db.Dialect;
         if (specId is null)
         {
-            cmd.CommandText = """
-                SELECT id, ts, spec_id, trigger_kind, status, new_spec_status,
+            cmd.CommandText = $"""
+                SELECT {d.TopParam("@limit")}id, ts, spec_id, trigger_kind, status, new_spec_status,
                        design_artifact_ids, hygiene_report, error, duration_ms
-                FROM designer_run
+                FROM {T("designer_run")}
                 ORDER BY ts DESC
-                LIMIT $limit
+                {d.LimitParam("@limit")}
                 """;
         }
         else
         {
-            cmd.CommandText = """
-                SELECT id, ts, spec_id, trigger_kind, status, new_spec_status,
+            cmd.CommandText = $"""
+                SELECT {d.TopParam("@limit")}id, ts, spec_id, trigger_kind, status, new_spec_status,
                        design_artifact_ids, hygiene_report, error, duration_ms
-                FROM designer_run
-                WHERE spec_id = $spec
+                FROM {T("designer_run")}
+                WHERE spec_id = @spec
                 ORDER BY ts DESC
-                LIMIT $limit
+                {d.LimitParam("@limit")}
                 """;
-            cmd.Parameters.AddWithValue("$spec", specId);
+            cmd.AddParam("@spec", specId);
         }
-        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.AddParam("@limit", limit);
         var list = new List<DesignerRun>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
