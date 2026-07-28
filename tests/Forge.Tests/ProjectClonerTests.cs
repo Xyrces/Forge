@@ -208,6 +208,25 @@ public class ProjectClonerTests : IDisposable
     }
 
     [Fact]
+    public async Task ListRemoteBranchesAsync_ListsHeads()
+    {
+        var project = new ProjectOptions
+        {
+            Id = "brancher",
+            Name = "Brancher",
+            RepoUrl = _remoteDir,
+            DefaultBranch = "main",
+        };
+        SeedCommit(_remoteDir, "feature", "FEATURE.md", "x\n", "feature");
+
+        var branches = await _cloner.ListRemoteBranchesAsync(project, github: null);
+
+        Assert.Contains("main", branches);
+        Assert.Contains("feature", branches);
+        Assert.Equal(branches.OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList(), branches.ToList());
+    }
+
+    [Fact]
     public async Task ReadCloneDefaultBranchAsync_ReadsOriginHead()
     {
         var trunkRemote = Path.Combine(_tempRoot, "trunk-remote3.git");
@@ -253,6 +272,8 @@ public class ProjectClonerTests : IDisposable
             RunGit(work, "clone", $"-q \"{bareRepo}\" \"{work}\"");
             RunGit(work, "config", "user.email forge@test.local");
             RunGit(work, "config", "user.name Forge Test");
+            // Seed onto the requested branch (create or reset it).
+            RunGit(work, "checkout", $"-B {branch}");
             // If the bare repo was empty, HEAD doesn't exist yet —
             // create an initial empty commit so subsequent branches
             // can be created from a known ref.

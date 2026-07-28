@@ -14,6 +14,36 @@ namespace Forge.Projects;
 /// </summary>
 public static class GitHubTokenResolver
 {
+    /// <summary>
+    /// Resolve the raw token with explicit-first precedence: an
+    /// explicitly supplied token (e.g. entered in the UI) wins, then
+    /// the per-project <c>github_token</c> secret, then the global
+    /// config. Returns null when no source yields a token.
+    /// </summary>
+    public static async Task<string?> ResolveTokenAsync(
+        string? explicitToken,
+        string? projectId,
+        GitHubOptions? global,
+        ISecretStore? secrets,
+        CancellationToken ct = default)
+    {
+        if (!string.IsNullOrEmpty(explicitToken)) return explicitToken;
+        if (secrets is not null && !string.IsNullOrEmpty(projectId))
+        {
+            string? perProject = null;
+            try
+            {
+                perProject = await secrets.GetPlaintextAsync(projectId, SecretKinds.GitHubToken, ct);
+            }
+            catch
+            {
+                // decrypt or store failure → fall back to the global token
+            }
+            if (!string.IsNullOrEmpty(perProject)) return perProject;
+        }
+        return string.IsNullOrEmpty(global?.Token) ? null : global!.Token;
+    }
+
     public static async Task<GitHubOptions?> ResolveAsync(
         string projectId,
         GitHubOptions? global,

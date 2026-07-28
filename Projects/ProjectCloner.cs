@@ -159,6 +159,41 @@ public sealed class ProjectCloner
     }
 
     /// <summary>
+    /// List the remote's branches via <c>git ls-remote --heads</c>.
+    /// Returns an empty list when the remote is unreachable.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListRemoteBranchesAsync(
+        ProjectOptions project, GitHubOptions? github, CancellationToken ct = default)
+    {
+        if (project is null) throw new ArgumentNullException(nameof(project));
+        if (string.IsNullOrWhiteSpace(project.RepoUrl)) return Array.Empty<string>();
+
+        var (effectiveUrl, _) = BuildAuthenticatedUrl(project.RepoUrl, github?.Token);
+        Directory.CreateDirectory(_dataRoot);
+        var result = await RunGitAsync(_dataRoot, "ls-remote", "--heads", effectiveUrl);
+        if (result.ExitCode != 0)
+        {
+            _logger?.LogInformation("Project '{Id}': branch listing failed: {Err}",
+                project.Id, result.Stderr.Trim());
+            return Array.Empty<string>();
+        }
+
+        // Line shape: "<sha>\trefs/heads/<branch>"
+        const string marker = "refs/heads/";
+        var branches = new List<string>();
+        foreach (var raw in result.Stdout.Split('\n'))
+        {
+            var line = raw.TrimEnd();
+            var idx = line.IndexOf(marker, StringComparison.Ordinal);
+            if (idx < 0) continue;
+            var name = line[(idx + marker.Length)..];
+            if (!string.IsNullOrWhiteSpace(name)) branches.Add(name);
+        }
+        branches.Sort(StringComparer.OrdinalIgnoreCase);
+        return branches;
+    }
+
+    /// <summary>
     /// Ask the remote for its default branch (the target of its HEAD
     /// symref) via <c>git ls-remote --symref</c>. Returns null when the
     /// remote is unreachable or doesn't advertise a symref — callers

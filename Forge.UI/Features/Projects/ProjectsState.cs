@@ -37,12 +37,16 @@ public sealed record ProjectsSlotRow(string ProjectId, string Role, int InFlight
 public sealed record SecretMetadataDto(string Kind, bool Set, DateTime? CreatedAt, DateTime? UpdatedAt, bool Known = false);
 public sealed record SetSecretRequestBody(string Kind, string Value);
 
-public sealed record AddProjectRequestBody(string Id, string Name, string RepoUrl, string? DefaultBranch);
+public sealed record AddProjectRequestBody(string Id, string Name, string RepoUrl, string? DefaultBranch, string? GitToken = null);
 public sealed record AddProjectResponseBody(ProjectRecord Project, object? ClonedInfo, string? Warning);
 public sealed record ProjectRecord(
     string Id, string Name, string RepoUrl, string DefaultBranch,
     string? LocalPath, DateTime CreatedAt, DateTime UpdatedAt,
     DateTime? LastSyncedAt, string? LastSyncError);
+
+public sealed record RepoLookupRow(string Name, string FullName, string Url, bool Private, string? DefaultBranch);
+public sealed record RepoLookupResponse(IReadOnlyList<RepoLookupRow> Repos);
+public sealed record BranchLookupResponse(IReadOnlyList<string> Branches, string? DefaultBranch);
 
 public static class ProjectsActions
 {
@@ -51,7 +55,7 @@ public static class ProjectsActions
     public sealed record ProjectsLoadFailedAction(string Error);
 
     public sealed record AddProjectAction(
-        string Id, string Name, string RepoUrl, string? DefaultBranch);
+        string Id, string Name, string RepoUrl, string? DefaultBranch, string? GitToken);
     public sealed record AddProjectSubmittingAction();
     public sealed record AddProjectSucceededAction(string Id);
     public sealed record AddProjectFailedAction(string Error);
@@ -66,6 +70,9 @@ public static class ProjectsActions
 
 public sealed class ProjectsClient
 {
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOptions =
+        new(System.Text.Json.JsonSerializerDefaults.Web);
+
     private readonly HttpClient _http;
     public ProjectsClient(HttpClient http) { _http = http; }
 
@@ -99,5 +106,37 @@ public sealed class ProjectsClient
             throw new InvalidOperationException(
                 $"PUT /api/projects/{id}/roles returned {(int)resp.StatusCode}: {raw}");
         }
+    }
+
+    public async Task<RepoLookupResponse> LookupReposAsync(string? token, string? id, CancellationToken ct)
+    {
+        var resp = await _http.PostAsJsonAsync("/api/projects/lookup/repos", new { token, id }, ct);
+        var raw = await resp.Content.ReadAsStringAsync(ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new InvalidOperationException($"repo lookup failed: {ExtractError(raw)}");
+        return System.Text.Json.JsonSerializer.Deserialize<RepoLookupResponse>(raw, JsonOptions)
+            ?? new RepoLookupResponse(Array.Empty<RepoLookupRow>());
+    }
+
+    public async Task<BranchLookupResponse> LookupBranchesAsync(string? token, string? id, string repoUrl, CancellationToken ct)
+    {
+        var resp = await _http.PostAsJsonAsync("/api/projects/lookup/branches", new { token, id, repoUrl }, ct);
+        var raw = await resp.Content.ReadAsStringAsync(ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new InvalidOperationException($"branch lookup failed: {ExtractError(raw)}");
+        return System.Text.Json.JsonSerializer.Deserialize<BranchLookupResponse>(raw, JsonOptions)
+            ?? new BranchLookupResponse(Array.Empty<string>(), null);
+    }
+
+    private static string ExtractError(string raw)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(raw);
+            if (doc.RootElement.TryGetProperty("error", out var err))
+                return err.GetString() ?? raw;
+        }
+        catch { /* not JSON — return raw */ }
+        return raw;
     }
 }

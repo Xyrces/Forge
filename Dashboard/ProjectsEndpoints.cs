@@ -102,6 +102,25 @@ public static class ProjectsEndpoints
             return Results.BadRequest(new { error = "id must match [a-z0-9][a-z0-9_-]* (lowercase, 1-32 chars)" });
 
         var logger = loggerFactory.CreateLogger("Projects.Add");
+
+        // Register the row first (secret has an FK to it). The branch
+        // may be a placeholder here — detection below re-upserts.
+        var record = await store.UpsertAsync(new NewProject(
+            Id: body.Id,
+            Name: string.IsNullOrWhiteSpace(body.Name) ? body.Id : body.Name,
+            RepoUrl: body.RepoUrl,
+            DefaultBranch: string.IsNullOrWhiteSpace(body.DefaultBranch) ? "main" : body.DefaultBranch), ct);
+
+        // A token entered in the Add Project form becomes the
+        // project's github_token secret — stored before detection and
+        // the inline clone so both already resolve it.
+        if (!string.IsNullOrEmpty(body.GitToken))
+        {
+            await secrets.UpsertAsync(new NewSecret(
+                body.Id, SecretKinds.GitHubToken,
+                System.Text.Encoding.UTF8.GetBytes(body.GitToken)), ct);
+        }
+
         // Default-branch resolution, in order: (1) git token, (2) the
         // git repo's advertised HEAD, (3) the clone's own pull info
         // (post-clone, below), (4) user override — which always wins.
@@ -112,15 +131,13 @@ public static class ProjectsEndpoints
             detected = await cloner.DetectDefaultBranchAsync(
                 new ProjectOptions { Id = body.Id, Name = body.Name ?? body.Id, RepoUrl = body.RepoUrl },
                 effectiveGitHub, ct);
+            if (!string.IsNullOrEmpty(detected) &&
+                !string.Equals(detected, record.DefaultBranch, StringComparison.OrdinalIgnoreCase))
+            {
+                record = await store.UpsertAsync(
+                    new NewProject(record.Id, record.Name, record.RepoUrl, detected), ct);
+            }
         }
-        var defaultBranch = !string.IsNullOrWhiteSpace(body.DefaultBranch)
-            ? body.DefaultBranch
-            : detected ?? "main";
-        var record = await store.UpsertAsync(new NewProject(
-            Id: body.Id,
-            Name: string.IsNullOrWhiteSpace(body.Name) ? body.Id : body.Name,
-            RepoUrl: body.RepoUrl,
-            DefaultBranch: defaultBranch), ct);
 
         // Attempt the clone inline. Failure doesn't roll back the
         // registry row — the operator can retry via sync, or the
@@ -279,7 +296,8 @@ public static class ProjectsEndpoints
         string Id,
         string Name,
         string RepoUrl,
-        string? DefaultBranch);
+        string? DefaultBranch,
+        string? GitToken = null);
 
     public sealed record PatchSlotRequest(int Max);
 

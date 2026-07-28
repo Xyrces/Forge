@@ -79,6 +79,42 @@ public class GitHubTokenResolverTests
         Assert.Same(global, resolved);
     }
 
+    [Fact]
+    public async Task ResolveToken_ExplicitWinsOverSecretAndGlobal()
+    {
+        var secrets = new FakeSecretStore();
+        secrets.Set("forge", SecretKinds.GitHubToken, "secret-pat");
+        var global = new GitHubOptions { Token = "global-pat" };
+
+        var token = await GitHubTokenResolver.ResolveTokenAsync("explicit-pat", "forge", global, secrets);
+        Assert.Equal("explicit-pat", token);
+    }
+
+    [Fact]
+    public async Task ResolveToken_SecretWinsOverGlobal()
+    {
+        var secrets = new FakeSecretStore();
+        secrets.Set("forge", SecretKinds.GitHubToken, "secret-pat");
+        var global = new GitHubOptions { Token = "global-pat" };
+
+        var token = await GitHubTokenResolver.ResolveTokenAsync(null, "forge", global, secrets);
+        Assert.Equal("secret-pat", token);
+    }
+
+    [Fact]
+    public async Task ResolveToken_GlobalFallback_AndNullWhenNothing()
+    {
+        var secrets = new FakeSecretStore();
+        var global = new GitHubOptions { Token = "global-pat" };
+
+        Assert.Equal("global-pat",
+            await GitHubTokenResolver.ResolveTokenAsync(null, "forge", global, secrets));
+        Assert.Null(
+            await GitHubTokenResolver.ResolveTokenAsync(null, "forge", global: null, secrets));
+        Assert.Null(
+            await GitHubTokenResolver.ResolveTokenAsync(null, projectId: null, global: null, secrets));
+    }
+
     private sealed class FakeSecretStore : ISecretStore
     {
         private readonly Dictionary<(string ProjectId, string Kind), string> _values = new();

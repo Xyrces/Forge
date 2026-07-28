@@ -397,6 +397,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         if (_projectFactory is not null && _slots is not null)
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
+            ProjectLookupEndpoints.MapProjectLookupEndpoints(_app);
             SecretsEndpoints.MapSecretsEndpoints(_app);
             DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
         }

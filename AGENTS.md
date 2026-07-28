@@ -119,16 +119,23 @@ loop. The `appsettings.json` `projects[]` array
 is **deprecated** — it is no longer the source of truth. Add
 projects via:
 
-- **Dashboard**: `Projects` page → **Add Project** button.
-  Fields: `id` (lowercase slug, becomes the dispatch key),
-  `name` (display label), `repoUrl` (HTTPS or SSH), `defaultBranch`
-  (optional override — when omitted the remote's HEAD symref is
-  detected via `git ls-remote --symref`; "main" is only the
-  last-resort fallback when detection fails).
-- **API**: `POST /api/projects/` with the same JSON shape. The
-  endpoint calls `ProjectCloner.CloneAsync` inline (best-effort
-  — clone failures don't roll back the registration; the operator
-  fixes the PAT/repo and retries via `POST /api/projects/{id}/sync`).
+- **Dashboard**: `Projects` page → **Add Project** button. Guided
+  flow: enter a git token → **Fetch repositories** (lists what the
+  token can see via `POST /api/projects/lookup/repos`) → pick a repo
+  (auto-fills URL/name/id and detects the default branch via
+  `POST /api/projects/lookup/branches`) → override the branch if
+  needed → Register. The entered token is stored encrypted as the
+  project's `github_token` secret. Manual URL entry still works.
+  Default-branch resolution order: (1) git token, (2) the remote's
+  HEAD symref, (3) the clone's `origin/HEAD` pull info, (4) user
+  override — which always wins.
+- **API**: `POST /api/projects/` with the same JSON shape (`id`,
+  `name`, `repoUrl`, optional `defaultBranch` override, optional
+  `gitToken` — stored as the project's `github_token` secret before
+  cloning). The endpoint calls `ProjectCloner.CloneAsync` inline
+  (best-effort — clone failures don't roll back the registration;
+  the operator fixes the PAT/repo and retries via
+  `POST /api/projects/{id}/sync`).
 
 Other project-lifecycle endpoints:
 
