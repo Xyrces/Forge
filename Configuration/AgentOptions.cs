@@ -41,6 +41,12 @@ public sealed record AgentOptions
     /// </summary>
     public ForgesystemOptions Forgesystem { get; set; } = new();
     /// <summary>
+    /// State-database backend. <c>db.provider</c> = sqlite (default)
+    /// or sqlserver; <c>db.connectionString</c> carries the SQL Server
+    /// target (Entra auth, no secrets). See <see cref="DbOptions"/>.
+    /// </summary>
+    public DbOptions Db { get; set; } = new();
+    /// <summary>
     /// P4 Stage B — runtime selection. "InProcess" (default)
     /// uses Microsoft.Agents.AI.Workflows InProcessExecution;
     /// "Durable" uses Microsoft.Agents.AI.DurableTask +

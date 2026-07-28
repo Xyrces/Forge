@@ -7,6 +7,7 @@ using Forge.AgentTools;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Core.Db;
 using Forge.Dashboard;
 using Forge.Orchestrator.Slots;
 using Forge.Projects;
@@ -187,7 +188,7 @@ if (mode == CliMode.DashboardOnly)
                 return 1;
             }
             var primary = projects[0];
-            await using var issues = new IssueStore(dbByProject[primary.Id]);
+            await using var issues = new IssueStore(FactoryFor(options.Db, primary.Id, dbByProject[primary.Id]));
             var all = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
             Console.WriteLine($"Project   : {primary.Id} ({primary.Root})");
             Console.WriteLine($"Pending:    {all.Count(i => i.Status == IssueStatus.Pending)}");
@@ -220,7 +221,7 @@ if (mode == CliMode.DashboardOnly)
             return 1;
         }
         var primary = projects[0];
-        var issues = new IssueStore(dbByProject[primary.Id]);
+        var issues = new IssueStore(FactoryFor(options.Db, primary.Id, dbByProject[primary.Id]));
 
 
         // Stable, caller-supplied id: prefer explicit --task-id, else slugify the title.
@@ -318,7 +319,7 @@ if (mode == CliMode.DashboardOnly)
         // scoped by project_id).
         var primaryDbPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
         Directory.CreateDirectory(Path.GetDirectoryName(primaryDbPath)!);
-        var primaryStore = new Core.IssueStore(primaryDbPath);
+        var primaryStore = new Core.IssueStore(FactoryFor(options.Db, "default", primaryDbPath));
         var projectStore = new Core.ProjectStore(primaryStore);
         var secretStore = new Core.SecretStore(
             primaryStore,
@@ -356,6 +357,44 @@ if (mode == CliMode.DashboardOnly)
         return (finalised, dbByProject, dataRoot, projectStore, cloner, secretStore);
     }
 
+    /// <summary>
+    /// Appended to --check DB failures on the SQL Server provider:
+    /// the dominant failure mode is an expired az CLI session
+    /// (Active Directory Default resolves via AzureCliCredential on
+    /// this machine), so name the remediation explicitly.
+    /// </summary>
+    private static string DbAuthHint(Exception ex, AgentOptions options)
+    {
+        if (!options.Db.IsSqlServer) return "";
+        var msg = ex.ToString();
+        if (msg.Contains("az login", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("AzureCliCredential", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("DefaultAzureCredential", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("AADSTS", StringComparison.OrdinalIgnoreCase))
+        {
+            return " [hint: Entra token acquisition failed — run `az login` (this machine) or check the managed-identity assignment (Azure)]";
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// Resolve the connection factory for one project's logical state
+    /// database. SQLite: per-project .db file at <paramref name="sqlitePath"/>
+    /// (settings match IssueStore's canonical builder). SQL Server: the
+    /// shared database, schema-per-project (proj_&lt;id&gt;) — the first
+    /// IssueStore construction against a schema creates it and all tables.
+    /// </summary>
+    private static Core.Db.IDbConnectionFactory FactoryFor(DbOptions db, string projectId, string sqlitePath)
+        => db.IsSqlServer
+            ? Core.Db.ForgeDb.SqlServer(db.ConnectionString, Core.Db.ForgeDb.SchemaForProject(projectId))
+            : Core.Db.ForgeDb.Sqlite(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            {
+                DataSource = sqlitePath,
+                Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadWriteCreate,
+                Cache = Microsoft.Data.Sqlite.SqliteCacheMode.Default,
+                Pooling = true,
+            }.ToString());
+
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
@@ -363,7 +402,7 @@ if (mode == CliMode.DashboardOnly)
         var defaultDb = dashboardOnlyProjects.Count > 0
             ? dbByProject[dashboardOnlyProjects[0].Id]
             : throw new InvalidOperationException("At least one project is required to run the dashboard.");
-        var issues = new IssueStore(defaultDb);
+        var issues = new IssueStore(FactoryFor(options.Db, dashboardOnlyProjects[0].Id, defaultDb));
         var agents = new AgentStore(issues);
         var skills = new SkillStore(issues);
         var sprints = new SprintStore(issues);
@@ -511,8 +550,9 @@ Console.Error.WriteLine(ex.ToString());
             var primary = projects[0];
             var primaryDb = dbByProject[primary.Id];
             var stateDir = Path.GetDirectoryName(primaryDb)!;
-            await using var issues = new IssueStore(primaryDb);
-            var recoveryReports = new RecoveryReportStore(primaryDb);
+            var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
+            await using var issues = new IssueStore(primaryFactory);
+            var recoveryReports = new RecoveryReportStore(primaryFactory);
             var worktrees = new GitWorktreeService(
                 new WorkspaceOptions
                 {
@@ -623,75 +663,74 @@ Console.Error.WriteLine(ex.ToString());
             Console.WriteLine($"  [ok] project '{primary.Id}' is a git repo at {primary.Root}");
         }
 
-        // 2. IssueStore opens + schema version is current
+        // 2. State DB opens + schema version is current (both
+        //    providers; SQL Server also validates the Entra token
+        //    path and reports round-trip latency).
         try
         {
-            await using var issues = new IssueStore(Path.Combine(stateDir, "issues.db"));
-            // Trigger InitializeSchema by listing (cheap read).
+            await using var issues = new IssueStore(FactoryFor(options.Db, primary.Id, Path.Combine(stateDir, "issues.db")));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var probe = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
+            sw.Stop();
             var expectedSchema = IssueStore.CurrentSchemaVersion;
-            // Read the actual schema_version from the DB.
             int actualSchema = -1;
-            await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(issues.ConnectionString))
+            await using (var conn = await issues.Db.OpenAsync())
             {
-                await conn.OpenAsync();
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM schema_version;";
+                cmd.CommandText = $"SELECT COALESCE(MAX(version), 0) FROM {issues.Db.Dialect.Table("schema_version")};";
                 var result = await cmd.ExecuteScalarAsync();
                 actualSchema = Convert.ToInt32(result);
             }
+            var dbLabel = issues.Db.Provider == ForgeDbProvider.SqlServer
+                ? $"sqlserver ({issues.Db.Qualifier}, {sw.ElapsedMilliseconds}ms)"
+                : "sqlite";
             if (actualSchema == expectedSchema)
             {
-                Console.WriteLine($"  [ok] issues.db schema v{actualSchema} (current)");
+                Console.WriteLine($"  [ok] db provider={dbLabel} schema v{actualSchema} (current)");
             }
             else
             {
-                failures.Add($"issues.db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+                failures.Add($"db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
             }
             _ = probe;
         }
         catch (Exception ex)
         {
-            failures.Add($"issues.db: {ex.GetType().Name}: {ex.Message}");
+            failures.Add($"db: {ex.GetType().Name}: {ex.Message}{DbAuthHint(ex, options)}");
         }
 
-        // 3. MemoryStore opens + schema version is current
+        // 3. Memory table reachable (same schema on SQL Server;
+        //    separate memory.db file on SQLite).
         try
         {
             var memPath = Path.Combine(stateDir, "memory.db");
-            if (!File.Exists(memPath))
+            if (!options.Db.IsSqlServer && !File.Exists(memPath))
             {
                 Console.WriteLine("  [skip] memory.db does not exist yet (will be created on first start)");
             }
             else
             {
-                // Reuse IssueStore to bootstrap the schema, then check.
-                _ = new IssueStore(memPath);
-                await using var mem = new MemoryStore(memPath);
-                var memProbe = await mem.RecallAsync();
-                int actualSchema = -1;
-                await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(mem.ConnectionString))
+                MemoryStore mem;
+                if (options.Db.IsSqlServer)
                 {
-                    await conn.OpenAsync();
-                    await using var cmd = conn.CreateCommand();
-                    cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM schema_version;";
-                    var result = await cmd.ExecuteScalarAsync();
-                    actualSchema = Convert.ToInt32(result);
-                }
-                var expectedSchema = IssueStore.CurrentSchemaVersion;
-                if (actualSchema == expectedSchema)
-                {
-                    Console.WriteLine($"  [ok] memory.db schema v{actualSchema} (current)");
+                    mem = new MemoryStore(FactoryFor(options.Db, primary.Id, memPath));
                 }
                 else
                 {
-                    failures.Add($"memory.db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+                    // Reuse IssueStore to bootstrap the schema, then check.
+                    _ = new IssueStore(memPath);
+                    mem = new MemoryStore(memPath);
+                }
+                await using (mem)
+                {
+                    var memProbe = await mem.RecallAsync();
+                    Console.WriteLine($"  [ok] memory store reachable ({memProbe.Count} keys)");
                 }
             }
         }
         catch (Exception ex)
         {
-            failures.Add($"memory.db: {ex.GetType().Name}: {ex.Message}");
+            failures.Add($"memory store: {ex.GetType().Name}: {ex.Message}{DbAuthHint(ex, options)}");
         }
 
         // 4. LLM provider + key configured. The kilo gateway key is
@@ -950,7 +989,8 @@ Console.Error.WriteLine(ex.ToString());
         var primaryDb = orchDbByProject[primary.Id];
         var primaryStateDir = Path.GetDirectoryName(primaryDb)!;
         var stateStore = new StateStore(primaryStateDir);
-        var issues = new IssueStore(primaryDb);
+        var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
+        var issues = new IssueStore(primaryFactory);
         var agents = new AgentStore(issues);
         var skills = new SkillStore(issues);
         var sprints = new SprintStore(issues);
@@ -977,17 +1017,28 @@ Console.Error.WriteLine(ex.ToString());
             Path.Combine(primary.Root, ".kilo", "skills"),
             loggerFactory.CreateLogger("Forge.SkillSeeder"),
             CancellationToken.None);
-        // The memory table lives in IssueStore's schema (v7). Construct an
-        // IssueStore against the memory DB once at startup so the schema
-        // (and any future migrations) run before MemoryStore touches it.
-        // MemoryStore itself does not own migrations.
+        // The memory table lives in IssueStore's schema (v7). On SQLite
+        // it lives in a separate memory.db file, so construct an
+        // IssueStore against it once at startup to run the schema (and
+        // any future migrations) before MemoryStore touches it.
+        // MemoryStore itself does not own migrations. On SQL Server the
+        // memory table lives in the same per-project schema — no
+        // separate bootstrap needed.
         var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
-        var memoryBootstrap = new Core.IssueStore(memoryDbPath);
-        var memoryStore = new MemoryStore(memoryDbPath);
+        MemoryStore memoryStore;
+        if (options.Db.IsSqlServer)
+        {
+            memoryStore = new MemoryStore(primaryFactory);
+        }
+        else
+        {
+            _ = new Core.IssueStore(memoryDbPath);
+            memoryStore = new MemoryStore(memoryDbPath);
+        }
         // Agent run registry + transcripts (schema v20 table on the
         // primary project's issues.db): who ran what, when, and the
         // full conversation for the run-detail view.
-        var agentRunStore = new Core.AgentRunStore(primaryDb);
+        var agentRunStore = new Core.AgentRunStore(primaryFactory);
         // Optional operator review gates at the major automatic
         // transitions (design / groom / sprint / merge). v1: backed
         // by the primary project's memory store.
@@ -1003,7 +1054,7 @@ Console.Error.WriteLine(ex.ToString());
             // (the v8 migration is applied at IssueStore's ctor).
             // The groomer_runs table has a foreign key on issue.id,
             // so the runs must live in the same DB as the issue rows.
-            var groomerRunsDb = primaryDb;
+            var groomerRunsDb = primaryFactory;
             var groomerRuns = new Core.IssueGroomerRunStore(groomerRunsDb);
             // P2.a: design_artifact + designer_run share the issues.db
             // (the v9 migration created both tables). The IssueStore
