@@ -132,7 +132,7 @@ public sealed class ProjectBootstrap
                 var healed = _cloner.SyncAsync(project, _github, CancellationToken.None)
                     .GetAwaiter().GetResult();
                 _logger?.LogInformation(
-                    "Project '{Id}': scaffold reconcile {Result}", project.Id, healed ? "succeeded" : "failed (see warnings)");
+                    "Project '{Id}': scaffold reconcile {Result}", project.Id, healed.Ok ? "succeeded" : "failed (see warnings)");
             }
         }
 

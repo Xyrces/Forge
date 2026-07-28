@@ -95,7 +95,7 @@ public class ProjectClonerTests : IDisposable
         // Push a new commit to the remote.
         SeedCommit(_remoteDir, "main", "CHANGELOG.md", "v0.2.0\n", "second");
 
-        var ok = await _cloner.SyncAsync(project, github: null);
+        var ok = (await _cloner.SyncAsync(project, github: null)).Ok;
         Assert.True(ok);
         Assert.True(File.Exists(Path.Combine(first.LocalPath, "CHANGELOG.md")));
     }
@@ -113,7 +113,7 @@ public class ProjectClonerTests : IDisposable
             DefaultBranch = "main",
         };
 
-        var ok = await _cloner.SyncAsync(project, github: null);
+        var ok = (await _cloner.SyncAsync(project, github: null)).Ok;
         Assert.True(ok);
         Assert.True(File.Exists(Path.Combine(
             ForgesystemPaths.ProjectDir(_tempRoot, project.Id), "README.md")));
@@ -140,23 +140,75 @@ public class ProjectClonerTests : IDisposable
         RunGit(localPath, "add", ".gitignore");
         RunGit(localPath, "commit", "-q -m scaffold");
 
-        var ok = await _cloner.SyncAsync(project, github: null);
+        var ok = (await _cloner.SyncAsync(project, github: null)).Ok;
 
         Assert.True(ok);
         Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
 
         // Origin reattached: a second sync takes the ff-only pull path.
         SeedCommit(_remoteDir, "main", "CHANGELOG.md", "v0.2.0\n", "second");
-        Assert.True(await _cloner.SyncAsync(project, github: null));
+        Assert.True((await _cloner.SyncAsync(project, github: null)).Ok);
         Assert.True(File.Exists(Path.Combine(localPath, "CHANGELOG.md")));
     }
 
-    private static void InitBareRepo(string path)
+    [Fact]
+    public async Task DetectDefaultBranchAsync_ReturnsRemoteHead()
+    {
+        var trunkRemote = Path.Combine(_tempRoot, "trunk-remote.git");
+        InitBareRepo(trunkRemote, "trunk");
+        SeedCommit(trunkRemote, "trunk", "README.md", "# Trunk\n", "initial");
+
+        var project = new ProjectOptions
+        {
+            Id = "detector",
+            Name = "Detector",
+            RepoUrl = trunkRemote,
+            DefaultBranch = "main",
+        };
+
+        var detected = await _cloner.DetectDefaultBranchAsync(project, github: null);
+        Assert.Equal("trunk", detected);
+    }
+
+    [Fact]
+    public async Task SyncAsync_ScaffoldedRepo_UsesDetectedBranchWhenStoredMissing()
+    {
+        // Registry says "main" (the old guess) but the remote's
+        // default is "trunk": reconcile should detect + align to
+        // trunk and report it in the result.
+        var trunkRemote = Path.Combine(_tempRoot, "trunk-remote2.git");
+        InitBareRepo(trunkRemote, "trunk");
+        SeedCommit(trunkRemote, "trunk", "README.md", "# Trunk\n", "initial");
+
+        var project = new ProjectOptions
+        {
+            Id = "scaffold-trunk",
+            Name = "ScaffoldTrunk",
+            RepoUrl = trunkRemote,
+            DefaultBranch = "main",
+        };
+        var localPath = ForgesystemPaths.ProjectDir(_tempRoot, project.Id);
+        Directory.CreateDirectory(localPath);
+        RunGit(localPath, "init", "-q -b main");
+        RunGit(localPath, "config", "user.email forge@local");
+        RunGit(localPath, "config", "user.name \"Forge Bootstrap\"");
+        File.WriteAllText(Path.Combine(localPath, ".gitignore"), ".forge/\n");
+        RunGit(localPath, "add", ".gitignore");
+        RunGit(localPath, "commit", "-q -m scaffold");
+
+        var result = await _cloner.SyncAsync(project, github: null);
+
+        Assert.True(result.Ok);
+        Assert.Equal("trunk", result.Branch);
+        Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
+    }
+
+    private static void InitBareRepo(string path, string branch = "main")
     {
         // `git init --bare <path>` creates <path>; we must run from
         // <path>'s parent, not from <path> itself (which doesn't exist yet).
         var parent = Path.GetDirectoryName(path)!;
-        RunGit(parent, "init", $"--bare --initial-branch=main -q \"{path}\"");
+        RunGit(parent, "init", $"--bare --initial-branch={branch} -q \"{path}\"");
     }
 
     private static void SeedCommit(string bareRepo, string branch, string filename, string content, string message)

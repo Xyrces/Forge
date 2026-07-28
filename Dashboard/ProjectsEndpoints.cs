@@ -102,11 +102,22 @@ public static class ProjectsEndpoints
             return Results.BadRequest(new { error = "id must match [a-z0-9][a-z0-9_-]* (lowercase, 1-32 chars)" });
 
         var logger = loggerFactory.CreateLogger("Projects.Add");
+        var defaultBranch = body.DefaultBranch;
+        if (string.IsNullOrWhiteSpace(defaultBranch))
+        {
+            // Not overridden: ask the remote for its real default
+            // branch. Detection failure (unreachable, no symref)
+            // falls back to "main".
+            var effectiveGitHub = await GitHubTokenResolver.ResolveAsync(body.Id, github, secrets, ct);
+            defaultBranch = await cloner.DetectDefaultBranchAsync(
+                new ProjectOptions { Id = body.Id, Name = body.Name ?? body.Id, RepoUrl = body.RepoUrl },
+                effectiveGitHub, ct) ?? "main";
+        }
         var record = await store.UpsertAsync(new NewProject(
             Id: body.Id,
             Name: string.IsNullOrWhiteSpace(body.Name) ? body.Id : body.Name,
             RepoUrl: body.RepoUrl,
-            DefaultBranch: string.IsNullOrWhiteSpace(body.DefaultBranch) ? "main" : body.DefaultBranch), ct);
+            DefaultBranch: defaultBranch), ct);
 
         // Attempt the clone inline. Failure doesn't roll back the
         // registry row — the operator can retry via sync, or the
@@ -159,15 +170,26 @@ public static class ProjectsEndpoints
         if (record is null) return Results.NotFound(new { error = "project not found", id });
 
         var effectiveGitHub = await GitHubTokenResolver.ResolveAsync(record.Id, github, secrets, ct);
-        var ok = await cloner.SyncAsync(new ProjectOptions
+        var sync = await cloner.SyncAsync(new ProjectOptions
         {
             Id = record.Id,
             Name = record.Name,
             RepoUrl = record.RepoUrl,
             DefaultBranch = record.DefaultBranch,
         }, effectiveGitHub, ct);
+        var ok = sync.Ok;
         await store.UpdateSyncStatusAsync(id, DateTime.UtcNow, ok ? null : "git pull failed (see journalctl)", ct);
-        if (ok) await store.UpdateLocalPathAsync(id, cloner.LocalPathFor(id), ct);
+        if (ok)
+        {
+            await store.UpdateLocalPathAsync(id, cloner.LocalPathFor(id), ct);
+            // Reconciliation may have discovered the remote's real
+            // default branch — persist it so later clones/syncs/
+            // dispatches use it too.
+            if (!string.Equals(sync.Branch, record.DefaultBranch, StringComparison.OrdinalIgnoreCase))
+            {
+                await store.UpsertAsync(new NewProject(record.Id, record.Name, record.RepoUrl, sync.Branch), ct);
+            }
+        }
         return ok ? Results.Ok(new { id, syncedAt = DateTime.UtcNow })
                   : Results.Json(new { error = "git pull failed; check journalctl" }, statusCode: 502);
     }

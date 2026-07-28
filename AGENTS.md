@@ -121,7 +121,10 @@ projects via:
 
 - **Dashboard**: `Projects` page → **Add Project** button.
   Fields: `id` (lowercase slug, becomes the dispatch key),
-  `name` (display label), `repoUrl` (HTTPS or SSH), `defaultBranch`.
+  `name` (display label), `repoUrl` (HTTPS or SSH), `defaultBranch`
+  (optional override — when omitted the remote's HEAD symref is
+  detected via `git ls-remote --symref`; "main" is only the
+  last-resort fallback when detection fails).
 - **API**: `POST /api/projects/` with the same JSON shape. The
   endpoint calls `ProjectCloner.CloneAsync` inline (best-effort
   — clone failures don't roll back the registration; the operator

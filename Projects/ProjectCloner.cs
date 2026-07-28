@@ -16,6 +16,14 @@ public sealed record ProjectCloneResult(
     string? Source);
 
 /// <summary>
+/// Outcome of a <see cref="ProjectCloner.SyncAsync"/> call.
+/// <see cref="Branch"/> is the branch actually synced — the
+/// reconcile path may discover the remote's real default branch
+/// when the stored one doesn't exist there.
+/// </summary>
+public sealed record ProjectSyncResult(bool Ok, string Branch);
+
+/// <summary>
 /// Clones (or refreshes) a project's git working copy into a Forge-managed
 /// directory under <c>{dataRoot}/projects/{id}/</c>. Auth model:
 ///
@@ -135,14 +143,55 @@ public sealed class ProjectCloner
     public string LocalPathFor(string projectId) => ForgesystemPaths.ProjectDir(_dataRoot, projectId);
 
     /// <summary>
-    /// Pull the latest from origin/<see cref="ProjectOptions.DefaultBranch"/>.
-    /// Returns true on success. Used by the manual <c>POST /api/projects/{id}/sync</c>
-    /// endpoint and as a sanity check at startup (so the dashboard
-    /// surfaces "remote is ahead by N commits" via the UI).
+    /// Ask the remote for its default branch (the target of its HEAD
+    /// symref) via <c>git ls-remote --symref</c>. Returns null when the
+    /// remote is unreachable or doesn't advertise a symref — callers
+    /// then keep their configured/fallback branch.
     /// </summary>
-    public async Task<bool> SyncAsync(ProjectOptions project, GitHubOptions? github, CancellationToken ct = default)
+    public async Task<string?> DetectDefaultBranchAsync(
+        ProjectOptions project, GitHubOptions? github, CancellationToken ct = default)
     {
         if (project is null) throw new ArgumentNullException(nameof(project));
+        if (string.IsNullOrWhiteSpace(project.RepoUrl)) return null;
+
+        var (effectiveUrl, _) = BuildAuthenticatedUrl(project.RepoUrl, github?.Token);
+        Directory.CreateDirectory(_dataRoot);
+        var result = await RunGitAsync(_dataRoot, "ls-remote", "--symref", effectiveUrl, "HEAD");
+        if (result.ExitCode != 0)
+        {
+            _logger?.LogInformation("Project '{Id}': default-branch detection failed: {Err}",
+                project.Id, result.Stderr.Trim());
+            return null;
+        }
+
+        // First line shape: "ref: refs/heads/<branch>\tHEAD"
+        foreach (var raw in result.Stdout.Split('\n'))
+        {
+            var line = raw.TrimEnd();
+            if (!line.StartsWith("ref: refs/heads/", StringComparison.Ordinal) ||
+                !line.EndsWith("HEAD", StringComparison.Ordinal))
+                continue;
+            var name = line["ref: refs/heads/".Length..];
+            var cut = name.IndexOfAny(new[] { '\t', ' ' });
+            if (cut > 0) name = name[..cut];
+            if (!string.IsNullOrWhiteSpace(name)) return name.Trim();
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Pull the latest from origin/<see cref="ProjectOptions.DefaultBranch"/>.
+    /// The result carries the branch actually synced — reconciliation
+    /// may discover the remote's real default branch when the stored
+    /// one doesn't exist there. Used by the manual
+    /// <c>POST /api/projects/{id}/sync</c> endpoint and as a sanity
+    /// check at startup (so the dashboard surfaces "remote is ahead
+    /// by N commits" via the UI).
+    /// </summary>
+    public async Task<ProjectSyncResult> SyncAsync(ProjectOptions project, GitHubOptions? github, CancellationToken ct = default)
+    {
+        if (project is null) throw new ArgumentNullException(nameof(project));
+        var branch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch;
         var localPath = ForgesystemPaths.ProjectDir(_dataRoot, project.Id);
         if (!Directory.Exists(Path.Combine(localPath, ".git")))
         {
@@ -154,16 +203,14 @@ public sealed class ProjectCloner
             try
             {
                 await CloneAsync(project, github, ct);
-                return true;
+                return new ProjectSyncResult(true, branch);
             }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "Project '{Id}': clone-on-sync failed", project.Id);
-                return false;
+                return new ProjectSyncResult(false, branch);
             }
         }
-
-        var branch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch;
 
         // A scaffolded repo (registration-time clone failed → local
         // git-init fallback) has no origin: reconcile against RepoUrl
@@ -174,7 +221,7 @@ public sealed class ProjectCloner
             if (string.IsNullOrWhiteSpace(project.RepoUrl))
             {
                 _logger?.LogWarning("Project '{Id}': no origin remote and no RepoUrl to reconcile against", project.Id);
-                return false;
+                return new ProjectSyncResult(false, branch);
             }
             return await ReconcileScaffoldAsync(project, localPath, branch, github, ct);
         }
@@ -184,19 +231,22 @@ public sealed class ProjectCloner
         if (result.ExitCode != 0)
         {
             _logger?.LogWarning("Project '{Id}': pull failed: {Err}", project.Id, result.Stderr.Trim());
-            return false;
+            return new ProjectSyncResult(false, branch);
         }
-        return true;
+        return new ProjectSyncResult(true, branch);
     }
 
     /// <summary>
     /// Reattach a scaffolded working copy (the bootstrap's git-init
     /// fallback) to its remote: add origin, install the credential
     /// helper (HTTPS + PAT), fetch, and align the branch with
-    /// <c>origin/&lt;branch&gt;</c>. Scaffold commits are disposable by
-    /// definition — agents never commit in the project root.
+    /// <c>origin/&lt;branch&gt;</c>. When the stored branch doesn't
+    /// exist on the remote, the remote's advertised default branch
+    /// wins (the stored value was a guess, not an override).
+    /// Scaffold commits are disposable by definition — agents never
+    /// commit in the project root.
     /// </summary>
-    private async Task<bool> ReconcileScaffoldAsync(
+    private async Task<ProjectSyncResult> ReconcileScaffoldAsync(
         ProjectOptions project, string localPath, string branch, GitHubOptions? github, CancellationToken ct)
     {
         _logger?.LogInformation("Project '{Id}': no origin remote; reconciling scaffold against {Url}",
@@ -206,7 +256,7 @@ public sealed class ProjectCloner
         if (add.ExitCode != 0)
         {
             _logger?.LogWarning("Project '{Id}': remote add failed: {Err}", project.Id, add.Stderr.Trim());
-            return false;
+            return new ProjectSyncResult(false, branch);
         }
 
         if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token))
@@ -226,18 +276,34 @@ public sealed class ProjectCloner
         var fetch = await RunGitAsync(localPath, "fetch", "origin", branch);
         if (fetch.ExitCode != 0)
         {
-            _logger?.LogWarning("Project '{Id}': fetch failed: {Err}", project.Id, fetch.Stderr.Trim());
-            return false;
+            // The stored branch may predate detection support (a "main"
+            // guess) — ask the remote for its real default and retry.
+            var detected = await DetectDefaultBranchAsync(project, github, ct);
+            if (detected is null || string.Equals(detected, branch, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger?.LogWarning("Project '{Id}': fetch failed: {Err}", project.Id, fetch.Stderr.Trim());
+                return new ProjectSyncResult(false, branch);
+            }
+            _logger?.LogInformation(
+                "Project '{Id}': stored branch '{Stored}' not on remote; using detected default '{Detected}'",
+                project.Id, branch, detected);
+            branch = detected;
+            fetch = await RunGitAsync(localPath, "fetch", "origin", branch);
+            if (fetch.ExitCode != 0)
+            {
+                _logger?.LogWarning("Project '{Id}': fetch failed: {Err}", project.Id, fetch.Stderr.Trim());
+                return new ProjectSyncResult(false, branch);
+            }
         }
 
         var align = await RunGitAsync(localPath, "checkout", "-B", branch, $"origin/{branch}");
         if (align.ExitCode != 0)
         {
             _logger?.LogWarning("Project '{Id}': align to origin/{Branch} failed: {Err}", project.Id, branch, align.Stderr.Trim());
-            return false;
+            return new ProjectSyncResult(false, branch);
         }
         _logger?.LogInformation("Project '{Id}': scaffold reconciled with origin/{Branch}", project.Id, branch);
-        return true;
+        return new ProjectSyncResult(true, branch);
     }
 
     private static (string effectiveUrl, bool isHttps) BuildAuthenticatedUrl(string repoUrl, string? token)
