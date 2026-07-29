@@ -67,7 +67,8 @@ public static class ProjectsEndpoints
                 p.Id, p.Name, p.RepoUrl, p.DefaultBranch, p.Root, p.Roles,
                 pending, inprogress, completed, failed,
                 slots.Snapshot().Where(m => m.ProjectId == p.Id).ToList(),
-                DefaultRoleCaps: new Dictionary<string, int>(Configuration.DefaultProjectRoles.Default, StringComparer.OrdinalIgnoreCase)));
+                DefaultRoleCaps: new Dictionary<string, int>(Configuration.DefaultProjectRoles.Default, StringComparer.OrdinalIgnoreCase),
+                Territories: p.Territories));
         }
         return Results.Ok(rows);
     }
@@ -84,7 +85,8 @@ public static class ProjectsEndpoints
         return Results.Ok(new ProjectDto(
             ctx.Options.Id, ctx.Options.Name, ctx.Options.RepoUrl, ctx.Options.DefaultBranch, ctx.Options.Root, ctx.Options.Roles,
             pending, inprogress, completed, failed,
-            slots.Snapshot().Where(m => m.ProjectId == id).ToList()));
+            slots.Snapshot().Where(m => m.ProjectId == id).ToList(),
+            Territories: ctx.Options.Territories));
     }
 
     private static async Task<IResult> AddProjectAsync(
@@ -248,35 +250,65 @@ public static class ProjectsEndpoints
         SlotTable slots,
         CancellationToken ct)
     {
-        if (body?.Roles is null)
-            return Results.BadRequest(new { error = "roles object required, e.g. { \"roles\": { \"coredev\": 2 } }" });
+        if (body?.Roles is null && body?.Territory is null)
+            return Results.BadRequest(new { error = "roles and/or territory object required, e.g. { \"roles\": { \"coredev\": 2 }, \"territory\": { \"coredev\": { \"prefixes\": [\"Src/\"], \"rootFiles\": true } } }" });
 
-        // Validate: role keys are non-empty short tokens; caps 1..32.
-        foreach (var (role, max) in body.Roles)
+        if (body.Roles is not null)
         {
-            if (string.IsNullOrWhiteSpace(role) || role.Length > 32)
-                return Results.BadRequest(new { error = $"invalid role key '{role}'" });
-            if (max < 1 || max > 32)
-                return Results.BadRequest(new { error = $"role '{role}': max must be 1..32 (got {max})" });
+            // Validate: role keys are non-empty short tokens; caps 1..32.
+            foreach (var (role, max) in body.Roles)
+            {
+                if (string.IsNullOrWhiteSpace(role) || role.Length > 32)
+                    return Results.BadRequest(new { error = $"invalid role key '{role}'" });
+                if (max < 1 || max > 32)
+                    return Results.BadRequest(new { error = $"role '{role}': max must be 1..32 (got {max})" });
+            }
+
+            var roles = new Dictionary<string, int>(body.Roles, StringComparer.OrdinalIgnoreCase);
+            var updated = await store.UpdateRolesAsync(id, roles, ct);
+            if (!updated) return Results.NotFound(new { error = "project not found", id });
+
+            // Apply live: re-seed every known role (defaults ∪ overrides)
+            // so removing an override also resets the slot to its default.
+            var allRoles = new HashSet<string>(Configuration.DefaultProjectRoles.Default.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (var r in roles.Keys) allRoles.Add(r);
+            foreach (var r in allRoles)
+            {
+                slots.Configure(id, r, Configuration.DefaultProjectRoles.MaxFor(roles, r));
+            }
         }
 
-        var roles = new Dictionary<string, int>(body.Roles, StringComparer.OrdinalIgnoreCase);
-        var updated = await store.UpdateRolesAsync(id, roles, ct);
-        if (!updated) return Results.NotFound(new { error = "project not found", id });
-
-        // Apply live: re-seed every known role (defaults ∪ overrides)
-        // so removing an override also resets the slot to its default.
-        var allRoles = new HashSet<string>(Configuration.DefaultProjectRoles.Default.Keys, StringComparer.OrdinalIgnoreCase);
-        foreach (var r in roles.Keys) allRoles.Add(r);
-        foreach (var r in allRoles)
+        if (body.Territory is not null)
         {
-            slots.Configure(id, r, Configuration.DefaultProjectRoles.MaxFor(roles, r));
+            // Validate: role keys short tokens; prefixes repo-relative,
+            // no absolute paths / traversal.
+            foreach (var (role, t) in body.Territory)
+            {
+                if (string.IsNullOrWhiteSpace(role) || role.Length > 32)
+                    return Results.BadRequest(new { error = $"invalid territory role key '{role}'" });
+                foreach (var p in t.Prefixes)
+                {
+                    if (string.IsNullOrWhiteSpace(p) || p.StartsWith('/') || p.Contains(".."))
+                        return Results.BadRequest(new { error = $"role '{role}': invalid territory prefix '{p}'" });
+                }
+            }
+            var territories = body.Territory.ToDictionary(
+                kv => kv.Key,
+                kv => new Core.RoleTerritory(kv.Value.Prefixes, kv.Value.RootFiles),
+                StringComparer.OrdinalIgnoreCase);
+            var updated = await store.UpdateTerritoriesAsync(id, territories, ct);
+            if (!updated) return Results.NotFound(new { error = "project not found", id });
         }
 
-        return Results.Ok(new { projectId = id, roles });
+        var project = await store.GetAsync(id, ct);
+        return Results.Ok(new { projectId = id, roles = project?.Roles, territory = project?.Territories });
     }
 
-    public sealed record PutRolesRequest(Dictionary<string, int> Roles);
+    public sealed record PutRolesRequest(
+        Dictionary<string, int>? Roles,
+        Dictionary<string, PutTerritoryEntry>? Territory = null);
+
+    public sealed record PutTerritoryEntry(List<string> Prefixes, bool RootFiles = false);
 
     public sealed record ProjectDto(
         string Id,
@@ -290,7 +322,8 @@ public static class ProjectsEndpoints
         int Completed,
         int Failed,
         IReadOnlyList<SlotTable.SlotMeter> Slots,
-        IReadOnlyDictionary<string, int>? DefaultRoleCaps = null);
+        IReadOnlyDictionary<string, int>? DefaultRoleCaps = null,
+        IReadOnlyDictionary<string, Core.RoleTerritory>? Territories = null);
 
     public sealed record AddProjectRequest(
         string Id,

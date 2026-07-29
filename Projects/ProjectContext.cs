@@ -157,6 +157,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
                     DefaultBranch = r.DefaultBranch,
                     Root = root,
                     Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
+                    Territories = new Dictionary<string, Core.RoleTerritory>(r.Territories, StringComparer.OrdinalIgnoreCase),
                 });
             }
             return list;

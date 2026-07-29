@@ -36,6 +36,11 @@ public sealed record ProjectOptions
     public string? SkillPlaybookUrl { get; set; }
     public Dictionary<string, int> Roles { get; set; } = new();
 
+    // Per-project role-territory overrides (role -> prefixes + root-file
+    // allowance), persisted in project.roles_json under "$territory".
+    // Empty = the built-in RoleAgentRegistry territory applies.
+    public Dictionary<string, Core.RoleTerritory> Territories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     // P8: optional deployment pipeline config. Null/omitted means the
     // project has no configured deployment action -- it can still be
     // enqueued for build-verification, but "approve" has nothing to

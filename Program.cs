@@ -1119,6 +1119,10 @@ Console.Error.WriteLine(ex.ToString());
             projectFactory.KnownProjects
                 .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
                 ?.Root;
+        IReadOnlyDictionary<string, Core.RoleTerritory>? ProjectTerritoryLookup(string projectId) =>
+            projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
+                ?.Territories;
         var primaryDb = orchDbByProject[primary.Id];
         var primaryStateDir = Path.GetDirectoryName(primaryDb)!;
         var stateStore = new StateStore(primaryStateDir);
@@ -1292,6 +1296,7 @@ Console.Error.WriteLine(ex.ToString());
             skills: skillSource,
             rolePromptsRoot: rolePromptsRoot,
             projectRootLookup: ProjectRootLookup,
+            projectTerritoryLookup: ProjectTerritoryLookup,
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,

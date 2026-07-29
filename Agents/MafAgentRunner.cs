@@ -31,6 +31,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly ILogger<MafAgentRunner> _logger;
     private readonly string _rolePromptsRoot;
     private readonly Func<string, string?>? _projectRootLookup;
+    private readonly Func<string, IReadOnlyDictionary<string, Core.RoleTerritory>?>? _projectTerritoryLookup;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _promptRootsByProject = new(StringComparer.OrdinalIgnoreCase);
     private readonly ISkillSource? _skills;
     private readonly MemoryStore? _memory;
@@ -66,6 +67,10 @@ public sealed class MafAgentRunner : IAgentRunner
         // the project ships its own role prompts. Null/unknown project
         // or no agents dir → the construction-time fallback root.
         Func<string, string?>? projectRootLookup = null,
+        // Per-project plan-gate territory: maps a project id to its
+        // roles_json $territory overrides. Null / no entry for the role
+        // → the registry's built-in territory applies.
+        Func<string, IReadOnlyDictionary<string, Core.RoleTerritory>?>? projectTerritoryLookup = null,
         MemoryStore? memory = null,
         ContextHandoffStore? handoffs = null,
         // P5.1 stores — passed as factories so the runner can
@@ -88,6 +93,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _skills = skills;
         _rolePromptsRoot = rolePromptsRoot;
         _projectRootLookup = projectRootLookup;
+        _projectTerritoryLookup = projectTerritoryLookup;
         _memory = memory;
         _handoffs = handoffs;
         _designArtifactsFactory = designArtifacts;
@@ -159,11 +165,16 @@ public async Task<AgentRunResult> RunAsync(
                 };
                 var gatePipeline = new Gates.RunGatePipeline(
                     _gateOptions, _memory, name => BuildRunGate(name), _logger);
+                var projectTerritories = projectId is not null && _projectTerritoryLookup is not null
+                    ? _projectTerritoryLookup(projectId)
+                    : null;
+                var (territoryPrefixes, territoryRootFiles) =
+                    RoleAgentRegistry.ResolveTerritory(roleDef, projectTerritories);
                 var gateContext = new Gates.RunGateContext(
                     TaskId: ResolveContextString(context, "issueId") ?? "unknown",
                     RoleName: roleDef.AgentName,
-                    TerritoryPrefixes: roleDef.TerritoryPrefixes ?? Array.Empty<string>(),
-                    TerritoryAllowsRootFiles: roleDef.TerritoryAllowsRootFiles,
+                    TerritoryPrefixes: territoryPrefixes,
+                    TerritoryAllowsRootFiles: territoryRootFiles,
                     WorktreePath: bashWorkingDir,
                     TaskText: prompt.Length > 4000 ? prompt[..4000] : prompt,
                     Plan: "",

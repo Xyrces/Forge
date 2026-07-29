@@ -328,4 +328,156 @@ public class ProjectStoreRolesTests : IDisposable
         Assert.Equal("Forge Renamed", p!.Name);
         Assert.Equal(3, p.Roles["coredev"]);
     }
+
+    [Fact]
+    public async Task UpdateTerritories_RoundTrips_AndPreservesCaps()
+    {
+        await SeedAsync();
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 3 });
+
+        var territory = new Dictionary<string, RoleTerritory>
+        {
+            ["coredev"] = new(new[] { "PortHorizon.Core/", "PortHorizon.Tests/", "docs/" }, AllowsRootFiles: true),
+            ["clientdev"] = new(new[] { "PortHorizon.Client/" }, AllowsRootFiles: false),
+        };
+        Assert.True(await _store.UpdateTerritoriesAsync("forge", territory));
+
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.Equal(2, p!.Territories.Count);
+        Assert.Equal(new[] { "PortHorizon.Core/", "PortHorizon.Tests/", "docs/" }, p.Territories["coredev"].Prefixes);
+        Assert.True(p.Territories["coredev"].AllowsRootFiles);
+        Assert.False(p.Territories["clientdev"].AllowsRootFiles);
+        // Caps survive the territory write.
+        Assert.Equal(3, p.Roles["coredev"]);
+    }
+
+    [Fact]
+    public async Task UpdateRoles_PreservesTerritories()
+    {
+        await SeedAsync();
+        await _store.UpdateTerritoriesAsync("forge", new Dictionary<string, RoleTerritory>
+        {
+            ["coredev"] = new(new[] { "Src/" }, AllowsRootFiles: false),
+        });
+
+        // A caps save (the dashboard's existing PUT) must not drop
+        // the territory block stored under the same roles_json column.
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 4 });
+
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.Equal(4, p!.Roles["coredev"]);
+        Assert.Single(p.Territories);
+        Assert.Equal(new[] { "Src/" }, p.Territories["coredev"].Prefixes);
+    }
+
+    [Fact]
+    public async Task UpdateTerritories_UnknownProject_ReturnsFalse()
+    {
+        var updated = await _store.UpdateTerritoriesAsync("ghost", new Dictionary<string, RoleTerritory>
+        {
+            ["coredev"] = new(new[] { "Src/" }, AllowsRootFiles: false),
+        });
+        Assert.False(updated);
+    }
+
+    [Fact]
+    public async Task LegacyFlatRolesJson_ParsesWithNoTerritories()
+    {
+        // Rows written before territory existed are a flat role->max
+        // dict; they must still parse (caps intact, territories empty).
+        await SeedAsync();
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 2, ["reviewer"] = 1 });
+
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.Equal(2, p!.Roles.Count);
+        Assert.Empty(p.Territories);
+    }
+}
+
+public class RoleTerritoryResolutionTests
+{
+    private static readonly Agents.RoleAgentRegistry Registry = new();
+
+    [Fact]
+    public void ProjectOverride_WinsOverRegistryDefault()
+    {
+        var roleDef = Registry.ForType(AgentType.CoreDev);
+        var territories = new Dictionary<string, RoleTerritory>
+        {
+            ["coredev"] = new(new[] { "PortHorizon.Core/", "PortHorizon.Tests/" }, AllowsRootFiles: true),
+        };
+
+        var (prefixes, rootFiles) = Agents.RoleAgentRegistry.ResolveTerritory(roleDef, territories);
+
+        Assert.Equal(new[] { "PortHorizon.Core/", "PortHorizon.Tests/" }, prefixes);
+        Assert.True(rootFiles);
+    }
+
+    [Fact]
+    public void NoProjectEntry_FallsBackToRegistryDefault()
+    {
+        var roleDef = Registry.ForType(AgentType.CoreDev);
+        var territories = new Dictionary<string, RoleTerritory>
+        {
+            ["clientdev"] = new(new[] { "Elsewhere/" }, AllowsRootFiles: false),
+        };
+
+        var (prefixes, rootFiles) = Agents.RoleAgentRegistry.ResolveTerritory(roleDef, territories);
+
+        Assert.Equal(roleDef.TerritoryPrefixes, prefixes);
+        Assert.Equal(roleDef.TerritoryAllowsRootFiles, rootFiles);
+    }
+
+    [Fact]
+    public void NullProjectTerritories_FallsBackToRegistryDefault()
+    {
+        var roleDef = Registry.ForType(AgentType.ClientDev);
+
+        var (prefixes, rootFiles) = Agents.RoleAgentRegistry.ResolveTerritory(roleDef, null);
+
+        Assert.Equal(roleDef.TerritoryPrefixes, prefixes);
+        Assert.Equal(roleDef.TerritoryAllowsRootFiles, rootFiles);
+    }
+
+    [Fact]
+    public async Task PorthorizonTestPath_PassesTerritoryGate_WithProjectOverride()
+    {
+        // Regression for the live 2026-07-29 task-7 failure: a plan
+        // naming PortHorizon.Tests/... was rejected as "outside
+        // coredev's territory" because the gate only knew Forge's
+        // repo shape. With the project's override the same plan passes.
+        var roleDef = Registry.ForType(AgentType.CoreDev);
+        var territories = new Dictionary<string, RoleTerritory>
+        {
+            ["coredev"] = new(new[] { "PortHorizon.Core/", "PortHorizon.Tests/", "PortHorizon.Benchmarks/", "docs/", ".github/" }, AllowsRootFiles: true),
+        };
+        var (prefixes, rootFiles) = Agents.RoleAgentRegistry.ResolveTerritory(roleDef, territories);
+        var worktree = Path.Combine(Path.GetTempPath(), $"ph-terr-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(worktree, "PortHorizon.Tests", "Systems"));
+        File.WriteAllText(Path.Combine(worktree, "PortHorizon.Tests", "Systems", "MaterialReservationSystemTests.cs"), "// test");
+        try
+        {
+            var gate = new Agents.Gates.PlanTerritoryGate();
+            var ctx = new Agents.Gates.RunGateContext(
+                TaskId: "task-7",
+                RoleName: roleDef.AgentName,
+                TerritoryPrefixes: prefixes,
+                TerritoryAllowsRootFiles: rootFiles,
+                WorktreePath: worktree,
+                TaskText: "deflake the test",
+                Plan: "## Goal\nDeflake.\n\n## Files\n- PortHorizon.Tests/Systems/MaterialReservationSystemTests.cs\n",
+                Ct: CancellationToken.None);
+
+            var verdict = await gate.EvaluateAsync(ctx);
+
+            Assert.Equal(Agents.Gates.GateOutcome.Approve, verdict.Outcome);
+        }
+        finally
+        {
+            try { Directory.Delete(worktree, recursive: true); } catch { }
+        }
+    }
 }
