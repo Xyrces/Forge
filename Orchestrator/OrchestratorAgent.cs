@@ -319,7 +319,7 @@ public sealed class OrchestratorAgent : IAgent
     /// unbounded parallel poll loops. Each watch first gets its
     /// reviewer pass (ReviewerDispatcher records the verdict in the
     /// watch metadata), then the merge/rework decision
-    /// (PRWatcher.PollWatchOnceAsync). A 429 aborts the sweep early
+    /// (PRWatcher.PollWatchedTaskAsync). A 429 aborts the sweep early
     /// and arms the cooldown. Watch issues stay Pending between
     /// sweeps (by design: the watch IS a long-lived subscription).
     /// </summary>

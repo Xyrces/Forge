@@ -242,7 +242,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             gitHub, worktrees, issueStore,
             pollInterval: TimeSpan.FromSeconds(30),
             // Stale window for the sequential watch sweep. Anchored to
-            // the watch's CreatedAt (see PRWatcher.PollWatchOnceAsync),
+            // prOpenedAt metadata (see PRWatcher.PollWatchedTaskAsync),
             // so it must cover the operator-merge latency: the solo-
             // identity model means a human merges by hand, possibly
             // hours after the PR opens. 30 minutes (the old poll-loop

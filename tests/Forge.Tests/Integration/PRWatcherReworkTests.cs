@@ -8,7 +8,7 @@ using Xunit;
 namespace Forge.Tests.Integration;
 
 /// <summary>
-/// The review/rework loop: PRWatcher.PollWatchOnceAsync consults CI
+/// The review/rework loop: PRWatcher.PollWatchedTaskAsync consults CI
 /// (GitHub) + the reviewer agent's verdict (watch metadata) and, on
 /// failure, requeues the task for a bounded rework round instead of
 /// going terminal. Circuit breaker at MaxReworkAttempts.
