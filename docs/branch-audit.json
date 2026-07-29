@@ -1,0 +1,319 @@
+{
+  "GeneratedAt": "2026-07-29T12:44:30.5465864Z",
+  "DefaultBranch": "main",
+  "Count": 39,
+  "Rows": [
+    {
+      "Branch": "main",
+      "Category": "other",
+      "TipSha": "207c254cb644253f1804023d786d6d8769599db8",
+      "LastCommitDate": "2026-07-28T20:25:50-04:00",
+      "MergedIntoMain": true,
+      "Protected": true
+    },
+    {
+      "Branch": "agent/task-30",
+      "Category": "agent",
+      "TipSha": "207c254cb644253f1804023d786d6d8769599db8",
+      "LastCommitDate": "2026-07-28T20:25:50-04:00",
+      "MergedIntoMain": true,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-31",
+      "Category": "agent",
+      "TipSha": "207c254cb644253f1804023d786d6d8769599db8",
+      "LastCommitDate": "2026-07-28T20:25:50-04:00",
+      "MergedIntoMain": true,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-205",
+      "Category": "agent",
+      "TipSha": "4646f279a49525c7465e18c67cdc16d15e946bb6",
+      "LastCommitDate": "2026-07-27T01:52:00-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-210",
+      "Category": "agent",
+      "TipSha": "456257c631c1e2c8477d2c3dad1d5233a566c96a",
+      "LastCommitDate": "2026-07-27T01:44:24-04:00",
+      "MergedIntoMain": true,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-202",
+      "Category": "agent",
+      "TipSha": "5564c84f80c92bc2a63c145ecb645d8c5357d983",
+      "LastCommitDate": "2026-07-26T22:18:43-04:00",
+      "MergedIntoMain": true,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-188",
+      "Category": "agent",
+      "TipSha": "644ae67ccbc2a928b2aa701cbc0a345de9c6391c",
+      "LastCommitDate": "2026-07-26T14:30:16-04:00",
+      "MergedIntoMain": true,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-164",
+      "Category": "agent",
+      "TipSha": "620057ea06e2e127581ff47b30160d3c50ac2789",
+      "LastCommitDate": "2026-07-26T08:54:08-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-162",
+      "Category": "agent",
+      "TipSha": "1ca3317e2201f83bf9919d7941da1e9684d2dd21",
+      "LastCommitDate": "2026-07-26T08:43:03-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-161",
+      "Category": "agent",
+      "TipSha": "c0355668c84c26e63c63278c622adc966e7140c6",
+      "LastCommitDate": "2026-07-25T19:22:51-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-149",
+      "Category": "agent",
+      "TipSha": "4e234ffdbb9f9cf4b18eddb0725ba9c22ecb5e64",
+      "LastCommitDate": "2026-07-22T20:37:21-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-148",
+      "Category": "agent",
+      "TipSha": "9ca0dd9f67b39783af4c0e58ef0edee5fb937eb2",
+      "LastCommitDate": "2026-07-22T20:31:53-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-90",
+      "Category": "agent",
+      "TipSha": "4c009fdfab45e4dccbe661847e56025446bc215c",
+      "LastCommitDate": "2026-07-22T20:19:35-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-88",
+      "Category": "agent",
+      "TipSha": "d56df57c6a1dc6df128a1b69461fce9374ac43ad",
+      "LastCommitDate": "2026-07-22T19:13:53-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-85",
+      "Category": "agent",
+      "TipSha": "703f288eb6ab516f13082fe98ff39d503dd1bc1f",
+      "LastCommitDate": "2026-07-22T19:05:26-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-84",
+      "Category": "agent",
+      "TipSha": "ddc9e8a85174a10915e08e2c0114d673c80075cf",
+      "LastCommitDate": "2026-07-22T19:02:54-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-79",
+      "Category": "agent",
+      "TipSha": "96b29d6b57b873046babd8ceb5b0590e99861521",
+      "LastCommitDate": "2026-07-22T18:54:42-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-78",
+      "Category": "agent",
+      "TipSha": "d8618d6fa67b420b77c40d3c0cc7f6616b8a6261",
+      "LastCommitDate": "2026-07-22T18:50:11-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-72",
+      "Category": "agent",
+      "TipSha": "b4aef142ae99b0317e0495386a151a051482fbfa",
+      "LastCommitDate": "2026-07-22T18:31:14-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-70",
+      "Category": "agent",
+      "TipSha": "a49b7899d2071ccef6ce927cbb047dbdf85266a2",
+      "LastCommitDate": "2026-07-22T18:18:01-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-66",
+      "Category": "agent",
+      "TipSha": "51008cb175a223108a23b9b44d780c9d9edecdb0",
+      "LastCommitDate": "2026-07-22T18:10:26-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-65",
+      "Category": "agent",
+      "TipSha": "2936021f3e799213826559f1339b5e67129e53b3",
+      "LastCommitDate": "2026-07-22T18:08:26-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-64",
+      "Category": "agent",
+      "TipSha": "3a2548736729da4229770aeabed55990a5e21bc9",
+      "LastCommitDate": "2026-07-22T18:04:46-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-60",
+      "Category": "agent",
+      "TipSha": "9796ba36d6b88f6bb0676ed9d043d927bad19a89",
+      "LastCommitDate": "2026-07-22T17:49:08-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-58",
+      "Category": "agent",
+      "TipSha": "b31d3f5eeba42faeecff3f425df52f67a28d9fff",
+      "LastCommitDate": "2026-07-22T17:41:17-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-55",
+      "Category": "agent",
+      "TipSha": "e96518d5195cf99a6ad16c15e8ab812edcb26e5c",
+      "LastCommitDate": "2026-07-22T17:35:04-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-50",
+      "Category": "agent",
+      "TipSha": "033e14b34aa2fd7c6c4e617192620477bc26ed1d",
+      "LastCommitDate": "2026-07-22T17:22:28-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-49",
+      "Category": "agent",
+      "TipSha": "ba0c026a1f7b3ea26d478dbbe1fd04c66b62abb2",
+      "LastCommitDate": "2026-07-22T17:20:25-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-46",
+      "Category": "agent",
+      "TipSha": "227a0c394fd2ccd720a58af176a314dd46054f1c",
+      "LastCommitDate": "2026-07-22T17:13:31-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-45",
+      "Category": "agent",
+      "TipSha": "c44202c6e5698865c81aaf9d1eb89506a5e20cf4",
+      "LastCommitDate": "2026-07-22T17:10:07-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-40",
+      "Category": "agent",
+      "TipSha": "a2835fc8b06837c174e4697ee17de96aad150a93",
+      "LastCommitDate": "2026-07-22T16:47:04-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-12",
+      "Category": "agent",
+      "TipSha": "58146820da0c87217d11b207f9c014eaf48e467b",
+      "LastCommitDate": "2026-07-22T16:04:07-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-11",
+      "Category": "agent",
+      "TipSha": "ca016bb7b00ee5a84d695caa86cdeb19915ab02a",
+      "LastCommitDate": "2026-07-22T15:59:50-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-6",
+      "Category": "agent",
+      "TipSha": "3139e1b9328785cc1b86137b16a447e81b98c9d9",
+      "LastCommitDate": "2026-07-22T13:38:02-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-14",
+      "Category": "agent",
+      "TipSha": "731e7c4e97e1c10b80dac0d3ce083998d19421a2",
+      "LastCommitDate": "2026-07-20T14:11:53-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-9",
+      "Category": "agent",
+      "TipSha": "6c6066add7cc4107fd9c46142bcce5a89093adb5",
+      "LastCommitDate": "2026-07-20T10:23:09-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/task-2",
+      "Category": "agent",
+      "TipSha": "82ff959199dfbaa5cce3956514254083209d40cc",
+      "LastCommitDate": "2026-07-18T08:16:55-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    },
+    {
+      "Branch": "agent/story-1",
+      "Category": "agent",
+      "TipSha": "c1f722d629ea376678113291a4e1219e6e36bcc9",
+      "LastCommitDate": "2026-07-07T18:31:49-04:00",
+      "MergedIntoMain": true,
+      "Protected": false
+    },
+    {
+      "Branch": "test/push-agent-12",
+      "Category": "other",
+      "TipSha": "fff9df494b7449d4068636b02eb8313b06b52140",
+      "LastCommitDate": "2026-07-20T13:19:32-04:00",
+      "MergedIntoMain": false,
+      "Protected": false
+    }
+  ]
+}
