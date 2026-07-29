@@ -391,6 +391,11 @@ public sealed class SprintAssembler
             }
         }
 
+        // Cross-project guard: a spec group belongs to the project
+        // that OWNS the spec (see DropCrossProjectGroupsAsync).
+        await DropCrossProjectGroupsAsync(groups, groupOrder, projectId, specs, _logger, ct);
+        if (groupOrder.Count == 0) return;
+
         // Resolve each group's display name / goal / age for ordering.
         // Spec groups: name = spec title, goal = parent epic's
         // description (the epic is the spec's parent_issue_id) or the
@@ -494,5 +499,42 @@ public sealed class SprintAssembler
             hops++;
         }
         return AdHocGroupName;
+    }
+
+    /// <summary>
+    /// Cross-project guard: a spec group belongs to the project that
+    /// OWNS the spec. Tasks physically present in this project's
+    /// store but chained to another project's spec are a routing bug
+    /// (observed live 2026-07-29: porthorizon stories groomed into
+    /// the forge store were assembled and dispatched against the
+    /// Forge repo — bogus PRs #66/#67). Never assemble them here;
+    /// log loudly so the operator sees the violation. Returns the
+    /// number of groups dropped.
+    /// </summary>
+    internal static async Task<int> DropCrossProjectGroupsAsync(
+        Dictionary<string, List<IssueRecord>> groups,
+        List<string> groupOrder,
+        string projectId,
+        ISpecStore specs,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        var dropped = 0;
+        foreach (var key in groupOrder.ToList())
+        {
+            if (key == AdHocGroupName) continue;
+            var groupSpec = await specs.GetAsync(key, ct);
+            if (groupSpec is not null
+                && !string.Equals(groupSpec.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogError(
+                    "SprintAssembler: {Count} task(s) in project {Project}'s store chain to spec {SpecId} owned by project {SpecProject} — skipping (routing violation)",
+                    groups[key].Count, projectId, key, groupSpec.ProjectId);
+                groups.Remove(key);
+                groupOrder.Remove(key);
+                dropped++;
+            }
+        }
+        return dropped;
     }
 }

@@ -291,11 +291,15 @@ public static class SpecEndpoints
                 // piles up duplicates (observed 2026-07-22: ~27 repeat
                 // grooms of one spec → 83 stories / 147 tasks / 28 PRs).
                 // Intentional re-decomposition passes ?force=true.
+                // The stories live in the SPEC'S PROJECT's store (the
+                // groomer routes by spec.ProjectId), so the guard must
+                // look there — not in the primary store.
                 if (spec.Status == SpecStatus.Groomed
                     && issues is not null
                     && !string.Equals(force, "true", StringComparison.OrdinalIgnoreCase))
                 {
-                    var existing = await issues.ListAsync(
+                    var storyStore = projectContexts?.Find(spec.ProjectId)?.Issues ?? issues;
+                    var existing = await storyStore.ListAsync(
                         new Forge.Core.IssueFilter { Type = "story" }, ct);
                     if (existing.Any(s => string.Equals(s.ParentIssueId, spec.Id, StringComparison.Ordinal)))
                     {
@@ -312,7 +316,7 @@ public static class SpecEndpoints
                 // and watch the event stream. The manual run is
                 // recorded in issue_groomer_run (P3.5) so the
                 // dashboard's Groomer timeline can show it.
-                var agent = groomerFactory.Create();
+                var agent = groomerFactory.Create(projectId: spec.ProjectId);
                 var runs = groomerRuns;
                 _ = Task.Run(async () =>
                 {

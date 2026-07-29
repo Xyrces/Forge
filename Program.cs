@@ -1411,8 +1411,12 @@ Console.Error.WriteLine(ex.ToString());
             new IntakeAgent(
                 projectId,
                 intakeStore,
-                issues,
-                sprints,
+                // Epics (and every other issue the intake agent
+                // creates) belong to the SESSION'S project store —
+                // the primary store would put them in the wrong
+                // sprint lane (routing incident 2026-07-29).
+                projectFactory.Find(projectId)?.Issues ?? issues,
+                projectFactory.Find(projectId)?.Sprints ?? sprints,
                 chatClientFactory,
                 llmConfig,
                 roleRegistry,
@@ -1440,7 +1444,8 @@ Console.Error.WriteLine(ex.ToString());
         var groomerFactory = new Agents.GroomerAgentFactory(
             issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
             memory: memoryStore, projectRoot: primary.Root,
-            projectRootLookup: ProjectRootLookup);
+            projectRootLookup: ProjectRootLookup,
+            issueStoreLookup: id => projectFactory.Find(id)?.Issues);
         // P2.a: Designer pipeline. The hygiene checker is shared
         // between the manual endpoint, the scheduled run, and the
         // agent's first step. The factory builds fresh DesignerAgent
@@ -1614,7 +1619,8 @@ try
                 specStore, groomerFactory, groomerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
                 interval: TimeSpan.FromMinutes(5),
-                issues: issues, sprints: sprints, gates: stageGates);
+                issues: issues, sprints: sprints, gates: stageGates,
+                projectContexts: projectFactory);
             _ = scheduledGroomer.RunAsync(shutdownCts.Token);
             _scheduledGroomer = scheduledGroomer;
 
