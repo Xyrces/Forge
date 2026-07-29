@@ -212,7 +212,50 @@ public class MafAgentRunnerSkillsTests
     {
         private readonly Exception _ex;
         public ThrowingSkillSource(Exception ex) { _ex = ex; }
-        public Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, CancellationToken ct = default)
+        public Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, string? projectId = null, CancellationToken ct = default)
             => throw _ex;
+    }
+
+    [Fact]
+    public async Task RunAsync_ProjectWithOwnAgentsDir_LoadsProjectRolePrompt()
+    {
+        // Per-project role prompts: a project whose clone ships
+        // <root>/agents/coredev.md gets ITS instructions, not the
+        // built-in fallback root's.
+        var projRoot = Path.Combine(Path.GetTempPath(), $"ph-proj-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projRoot, "agents"));
+        await File.WriteAllTextAsync(Path.Combine(projRoot, "agents", "coredev.md"),
+            "---\ndescription: You are the PORTHORIZON coredev. Zero-alloc hot paths.\n---\n");
+        var fallbackRoot = Path.Combine(Path.GetTempPath(), $"ph-fallback-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fallbackRoot);
+        await File.WriteAllTextAsync(Path.Combine(fallbackRoot, "coredev.md"),
+            "---\ndescription: You are the FALLBACK coredev.\n---\n");
+
+        var scripted = new ScriptedChatClient(
+            new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok")),
+            new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok")),
+            new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok")));
+        var factory = new ScriptingFactory(scripted);
+        var runner = new MafAgentRunner(
+            chatClientFactory: factory,
+            config: new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
+            roles: new RoleAgentRegistry(),
+            logger: NullLogger<MafAgentRunner>.Instance,
+            skills: null,
+            rolePromptsRoot: fallbackRoot,
+            projectRootLookup: id => id == "porthorizon" ? projRoot : null);
+
+        await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null,
+            context: new Dictionary<string, object> { ["projectId"] = "porthorizon" }, ct: default);
+        Assert.Contains("PORTHORIZON coredev", factory.LastInstructions!, StringComparison.Ordinal);
+
+        // A project without an agents/ dir (and runs with no project)
+        // fall back to the built-in root.
+        await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null,
+            context: new Dictionary<string, object> { ["projectId"] = "forge" }, ct: default);
+        Assert.Contains("FALLBACK coredev", factory.LastInstructions!, StringComparison.Ordinal);
+
+        await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
+        Assert.Contains("FALLBACK coredev", factory.LastInstructions!, StringComparison.Ordinal);
     }
 }

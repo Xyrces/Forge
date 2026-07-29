@@ -35,6 +35,7 @@ public static class SqlServerMigrations
     public static IReadOnlyList<ISqlServerMigration> All { get; } = new ISqlServerMigration[]
     {
         new M024ProfileSplit(),
+        new M025SkillProjectScope(),
     };
 
     public static int ExpectedVersion =>

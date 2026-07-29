@@ -4,51 +4,73 @@ using Microsoft.Extensions.Logging;
 namespace Forge.Agents;
 
 /// <summary>
-/// Seeds the skill catalog on startup with seed-if-absent semantics:
-/// a skill row is created ONLY when no row with that NAME exists —
-/// operator edits (body, description, AND the role set) made via the
-/// dashboard are never overwritten.
+/// Seeds the skill catalog on startup. Two sources with DIFFERENT
+/// ownership semantics (operator rule 2026-07-28):
 ///
-/// Two sources:
 /// <list type="number">
 /// <item>Pipeline-behavior skills (canonical text embedded here) —
-/// the orchestration's behavioral contract, assigned to a SET of
-/// roles (skills are many-to-many: one row per skill, a role list
-/// on it; an empty set means global).</item>
-/// <item>The project's <c>.kilo/skills/&lt;name&gt;/SKILL.md</c>
-/// files — imported as global skills (dogfooding knowledge that
-/// ships with the repo).</item>
+/// the orchestration's behavioral contract, owned by Forge
+/// (<see cref="SkillSources.Forge"/>), global (no project). Seeded
+/// if-absent: operator edits via the dashboard are never
+/// overwritten.</item>
+/// <item>Each registered project's <c>.kilo/skills/&lt;name&gt;/SKILL.md</c>
+/// — imported as <see cref="SkillSources.Repo"/> rows scoped to that
+/// project. The REPO is the source of truth: every startup upserts
+/// the file contents over the row (SKILL.md edits propagate), rows
+/// whose SKILL.md disappeared are deleted, and the dashboard refuses
+/// edits/deletes on repo rows (<see cref="RepoOwnedSkillException"/>).</item>
 /// </list>
 /// </summary>
 public static class SkillSeeder
 {
+    /// <summary>One registered project's skill-import source: the
+    /// project id the imported rows are scoped to + the absolute path
+    /// of its .kilo/skills directory (null/absent dir = no import).</summary>
+    public sealed record ProjectSkillSource(string ProjectId, string? KiloSkillsDir);
+
     public static async Task<int> SeedAsync(
-        ISkillStore skills, string? kiloSkillsDir, ILogger logger, CancellationToken ct = default)
+        ISkillStore skills, IReadOnlyList<ProjectSkillSource> projects, ILogger logger, CancellationToken ct = default)
     {
         var existing = (await skills.ListByRoleAsync(role: null, globalOnly: false, ct))
-            .Select(s => s.Name)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .Select(s => (Name: s.Name.ToLowerInvariant(), s.ProjectId))
+            .ToHashSet();
 
         var seeded = 0;
         foreach (var (name, description, body, roles) in BehaviorSkills)
         {
-            if (existing.Contains(name)) continue;
+            if (existing.Contains((name, null))) continue;
             await skills.CreateAsync(new NewSkill(
-                Name: name, Body: body, Description: description, Roles: roles), ct);
+                Name: name, Body: body, Description: description, Roles: roles,
+                Source: SkillSources.Forge), ct);
             seeded++;
         }
 
-        if (kiloSkillsDir is not null && Directory.Exists(kiloSkillsDir))
+        foreach (var project in projects)
         {
-            foreach (var dir in Directory.EnumerateDirectories(kiloSkillsDir))
+            if (string.IsNullOrWhiteSpace(project.KiloSkillsDir) || !Directory.Exists(project.KiloSkillsDir))
+                continue;
+            var imported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dir in Directory.EnumerateDirectories(project.KiloSkillsDir))
             {
                 var file = Path.Combine(dir, "SKILL.md");
                 if (!File.Exists(file)) continue;
                 var (name, description, body) = ParseSkillMd(await File.ReadAllTextAsync(file, ct));
-                if (name is null || existing.Contains(name)) continue;
-                await skills.CreateAsync(new NewSkill(Name: name, Body: body, Description: description), ct);
-                seeded++;
+                if (name is null) continue;
+                imported.Add(name);
+                // Upsert ALWAYS (not seed-if-absent): the repo is the
+                // source of truth, so a SKILL.md edit must overwrite the
+                // stored row on the next startup.
+                await skills.CreateAsync(new NewSkill(
+                    Name: name, Body: body, Description: description,
+                    ProjectId: project.ProjectId, Source: SkillSources.Repo), ct);
+                if (!existing.Contains((name.ToLowerInvariant(), project.ProjectId))) seeded++;
             }
+            // Reconciliation: a SKILL.md removed from the repo removes
+            // the skill. Only repo-sourced rows for THIS project are
+            // eligible; UI-owned rows are never touched.
+            var deleted = await skills.DeleteRepoSkillsNotInAsync(project.ProjectId, imported.ToList(), ct);
+            if (deleted > 0)
+                logger.LogInformation("Skill catalog: removed {Count} repo skills no longer in {ProjectId}'s .kilo/skills", deleted, project.ProjectId);
         }
 
         if (seeded > 0)

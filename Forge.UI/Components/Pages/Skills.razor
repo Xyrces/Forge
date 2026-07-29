@@ -45,6 +45,19 @@
                         </td>
                     </tr>
                     <tr>
+                        <td class="meta-text">Project</td>
+                        <td>
+                            @if (_editing.Id is null)
+                            {
+                                <input type="text" class="mono" style="width:240px" @bind="_editing.ProjectId" placeholder="blank = all projects" />
+                            }
+                            else
+                            {
+                                <span class="mono meta-text">@(_editing.ProjectId ?? "all projects")</span>
+                            }
+                        </td>
+                    </tr>
+                    <tr>
                         <td class="meta-text">Description</td>
                         <td><input type="text" style="width:100%" @bind="_editing.Description" placeholder="What this skill is for (one line)" /></td>
                     </tr>
@@ -87,6 +100,7 @@
                 <tr>
                     <th>Name</th>
                     <th>Applies to</th>
+                    <th>Scope</th>
                     <th>Description</th>
                     <th>Enabled</th>
                     <th>Updated</th>
@@ -113,6 +127,22 @@
                                 }
                             </div>
                         </td>
+                        <td>
+                            <div class="chip-row">
+                                @if (row.ProjectId is null)
+                                {
+                                    <span class="pill">all projects</span>
+                                }
+                                else
+                                {
+                                    <span class="pill pill--primary">@row.ProjectId</span>
+                                }
+                                @if (row.Source == "repo")
+                                {
+                                    <span class="pill" title="Imported from the project's .kilo/skills — edit the SKILL.md in the repo; the orchestrator re-imports on startup">repo</span>
+                                }
+                            </div>
+                        </td>
                         <td class="meta-text">@(row.Description ?? "—")</td>
                         <td>
                             @if (row.Enabled)
@@ -126,8 +156,15 @@
                         </td>
                         <td class="mono meta-text">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
                         <td style="white-space:nowrap">
-                            <button class="btn btn--small" @onclick="() => BeginEdit(row)">Edit</button>
-                            <button class="btn btn--small" @onclick="() => _confirmDelete = row">Delete</button>
+                            @if (row.Source == "repo")
+                            {
+                                <span class="meta-text" title="Repo-owned: edit the SKILL.md in the project's .kilo/skills and restart the orchestrator">read-only</span>
+                            }
+                            else
+                            {
+                                <button class="btn btn--small" @onclick="() => BeginEdit(row)">Edit</button>
+                                <button class="btn btn--small" @onclick="() => _confirmDelete = row">Delete</button>
+                            }
                         </td>
                     </tr>
                 }
@@ -182,6 +219,7 @@
             Body = row.Body,
             Roles = (row.Roles ?? []).ToList(),
             Enabled = row.Enabled,
+            ProjectId = row.ProjectId,
         };
         _editError = null;
     }
@@ -203,6 +241,7 @@
             body = _editing.Body,
             roles = _editing.Roles.Count == 0 ? null : _editing.Roles.ToArray(),
             enabled = _editing.Enabled,
+            projectId = string.IsNullOrWhiteSpace(_editing.ProjectId) ? null : _editing.ProjectId.Trim(),
         };
         HttpResponseMessage resp = _editing.Id is null
             ? await Http.PostAsJsonAsync("/api/skills", payload)
@@ -234,7 +273,7 @@
     }
 
     private sealed record SkillDto(string Id, string Name, string? Description, string Body,
-        string? AgentId, string[]? Roles, bool Enabled, DateTime CreatedAt, DateTime UpdatedAt);
+        string? AgentId, string[]? Roles, bool Enabled, string? ProjectId, string? Source, DateTime CreatedAt, DateTime UpdatedAt);
 
     private sealed class EditModel
     {
@@ -244,5 +283,6 @@
         public string Body { get; set; } = "";
         public List<string> Roles { get; set; } = new();
         public bool Enabled { get; set; } = true;
+        public string? ProjectId { get; set; }
     }
 }

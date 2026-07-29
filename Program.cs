@@ -1106,6 +1106,19 @@ Console.Error.WriteLine(ex.ToString());
             return 1;
         }
         var primary = knownProjects[0];
+
+        // Project registry factory: lazily builds per-project IssueStore
+        // bundles AND serves as the project-id → clone-root lookup for
+        // per-project role prompts / skills / groomer grounding.
+        // Constructed early so the agent runner + factories below can
+        // take the lookup. Live mode: KnownProjects re-reads the store,
+        // so runtime project adds resolve without a restart.
+        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
+            (pid, path) => FactoryFor(options.Db, pid, path));
+        string? ProjectRootLookup(string projectId) =>
+            projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
+                ?.Root;
         var primaryDb = orchDbByProject[primary.Id];
         var primaryStateDir = Path.GetDirectoryName(primaryDb)!;
         var stateStore = new StateStore(primaryStateDir);
@@ -1131,12 +1144,17 @@ Console.Error.WriteLine(ex.ToString());
         var agentsStore = new Core.AgentStore(registryIssues);
         var skillsStore = new Core.SkillStore(registryIssues);
         var skillSource = new SqliteSkillSource(skillsStore, roleRegistry);
-        // Seed the skill catalog (seed-if-absent; operator edits via
-        // the dashboard win): pipeline-behavior skills per role +
-        // the repo's .kilo/skills imported as global skills.
+        // Seed the skill catalog: pipeline-behavior skills per role
+        // (Forge-owned, seed-if-absent — operator edits win) + EVERY
+        // registered project's .kilo/skills imported as repo-owned,
+        // project-scoped rows (repo is the source of truth — SKILL.md
+        // edits propagate on startup; removed files remove rows).
         await Agents.SkillSeeder.SeedAsync(
             skillsStore,
-            Path.Combine(primary.Root, ".kilo", "skills"),
+            knownProjects
+                .Select(p => new Agents.SkillSeeder.ProjectSkillSource(
+                    p.Id, Path.Combine(p.Root, ".kilo", "skills")))
+                .ToList(),
             loggerFactory.CreateLogger("Forge.SkillSeeder"),
             CancellationToken.None);
         // The memory table lives in IssueStore's schema (v7). On SQLite
@@ -1273,6 +1291,7 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
             rolePromptsRoot: rolePromptsRoot,
+            projectRootLookup: ProjectRootLookup,
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,
@@ -1420,7 +1439,8 @@ Console.Error.WriteLine(ex.ToString());
         _productRefinementQueue = productRefinementQueue;
         var groomerFactory = new Agents.GroomerAgentFactory(
             issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
-            memory: memoryStore, projectRoot: primary.Root);
+            memory: memoryStore, projectRoot: primary.Root,
+            projectRootLookup: ProjectRootLookup);
         // P2.a: Designer pipeline. The hygiene checker is shared
         // between the manual endpoint, the scheduled run, and the
         // agent's first step. The factory builds fresh DesignerAgent
@@ -1474,9 +1494,9 @@ Console.Error.WriteLine(ex.ToString());
         // workspace.root is set) and lazily construct per-project
         // IssueStore bundles. The per-(project, role) SlotTable was
         // created above (BuildSlotTable) and is shared with the
-        // orchestrator's dispatch loop.
-        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
-            (pid, path) => FactoryFor(options.Db, pid, path));
+        // orchestrator's dispatch loop. (Constructed earlier, right
+        // after the registry bootstrap — the agent runner and the
+        // planning-lane factories take it as the project-root lookup.)
         if (knownProjects.Count > 0)
         {
             logger.LogInformation(

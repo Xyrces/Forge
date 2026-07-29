@@ -182,7 +182,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 23;
+    public const int CurrentSchemaVersion = 24;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -881,6 +881,13 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // be given to any set of roles; an empty set means global).
         ApplyV23SkillRoles(conn);
 
+        // v24 (post-init): skill.project_id + skill.source — per-project
+        // skills. project_id NULL = global (every project's runs see it);
+        // source 'forge' = UI-owned (dashboard edits win), 'repo' =
+        // imported from a project's .kilo/skills (repo is the source of
+        // truth; the dashboard is read-only for these).
+        ApplyV24SkillProjectScope(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -896,9 +903,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
     /// <summary>
     /// SQL Server schema: fresh-create at <see cref="CurrentSchemaVersion"/>
-    /// in one shot. The SQLite v1→v23 migration chain is NOT ported — Azure
+    /// in one shot. The SQLite v1→v24 migration chain is NOT ported — Azure
     /// databases start at the final shape (roles_json, last_activity_at,
-    /// skill.roles, agent.agent_name all present from birth). Tables are
+    /// skill.roles + skill.project_id/source, agent.agent_name all present
+    /// from birth). Tables are
     /// created inside the factory's per-project schema qualifier.
     /// Integer column types match reader accessors exactly:
     /// GetInt32-read columns are INT, identity/GetInt64 columns BIGINT.
@@ -977,7 +985,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 created_at   NVARCHAR(64)  NOT NULL,
                 updated_at   NVARCHAR(64)  NOT NULL,
                 roles        NVARCHAR(MAX) NULL,
-                UNIQUE (name, agent_id)
+                project_id   NVARCHAR(128) NULL,
+                source       NVARCHAR(16)  NOT NULL DEFAULT 'forge',
+                UNIQUE (name, project_id)
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_skill_agent' AND object_id = OBJECT_ID('{{d.Table("skill")}}'))
                 CREATE INDEX ix_skill_agent ON {{d.Table("skill")}}(agent_id);
@@ -1471,6 +1481,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         using var drop = conn.CreateCommand();
         drop.CommandText = "ALTER TABLE skill DROP COLUMN role";
         drop.ExecuteNonQuery();
+    }
+
+    private void ApplyV24SkillProjectScope(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('skill') WHERE name = 'project_id' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = """
+            ALTER TABLE skill ADD COLUMN project_id TEXT;
+            ALTER TABLE skill ADD COLUMN source TEXT NOT NULL DEFAULT 'forge';
+            """;
+        alter.ExecuteNonQuery();
     }
 
     private void ApplyV19ProjectRoles(SqliteConnection conn)

@@ -156,9 +156,11 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         });
 
         // ---- Skills ----
-        app.MapGet("/api/skills", async (string? role, string? global, CancellationToken ct) =>
+        app.MapGet("/api/skills", async (string? role, string? global, string? projectId, CancellationToken ct) =>
         {
             var list = await skills.ListByRoleAsync(role, global == "true", ct);
+            if (!string.IsNullOrWhiteSpace(projectId))
+                list = list.Where(s => s.ProjectId is null || string.Equals(s.ProjectId, projectId, StringComparison.OrdinalIgnoreCase)).ToList();
             return Results.Json(list.Select(ToSkillView).ToArray(), DashboardJson.Options);
         });
 
@@ -166,7 +168,9 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         {
             var spec = await JsonSerializer.DeserializeAsync<NewSkill>(ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (spec is null || string.IsNullOrWhiteSpace(spec.Name)) return Results.BadRequest();
-            var created = await skills.CreateAsync(spec, ctx.RequestAborted);
+            // UI-created skills are always Forge-owned — the repo
+            // source is reserved for the startup importer.
+            var created = await skills.CreateAsync(spec with { Source = Core.SkillSources.Forge }, ctx.RequestAborted);
             return Results.Json(ToSkillView(created), DashboardJson.Options, statusCode: 201);
         });
 
@@ -175,14 +179,28 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (patch is null) return Results.BadRequest();
-            var updated = await skills.UpdateAsync(id, patch, ctx.RequestAborted);
-            return Results.Json(ToSkillView(updated), DashboardJson.Options);
+            try
+            {
+                var updated = await skills.UpdateAsync(id, patch, ctx.RequestAborted);
+                return Results.Json(ToSkillView(updated), DashboardJson.Options);
+            }
+            catch (Core.RepoOwnedSkillException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
         });
 
         app.MapDelete("/api/skills/{id}", async (string id, CancellationToken ct) =>
         {
-            await skills.DeleteAsync(id, ct);
-            return Results.NoContent();
+            try
+            {
+                await skills.DeleteAsync(id, ct);
+                return Results.NoContent();
+            }
+            catch (Core.RepoOwnedSkillException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
         });
 
         // ---- Sprints ----
@@ -326,6 +344,8 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         agentId = s.AgentId,
         roles = s.Roles,
         enabled = s.Enabled,
+        projectId = s.ProjectId,
+        source = s.Source,
         createdAt = s.CreatedAt,
         updatedAt = s.UpdatedAt
     };

@@ -30,6 +30,8 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly RoleAgentRegistry _roles;
     private readonly ILogger<MafAgentRunner> _logger;
     private readonly string _rolePromptsRoot;
+    private readonly Func<string, string?>? _projectRootLookup;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _promptRootsByProject = new(StringComparer.OrdinalIgnoreCase);
     private readonly ISkillSource? _skills;
     private readonly MemoryStore? _memory;
     private readonly ContextHandoffStore? _handoffs;
@@ -59,6 +61,11 @@ public sealed class MafAgentRunner : IAgentRunner
         ILogger<MafAgentRunner> logger,
         ISkillSource? skills = null,
         string rolePromptsRoot = "agents",
+        // Per-project role-prompt resolution (schema v24 era): maps a
+        // project id to its clone root so runs load <root>/agents when
+        // the project ships its own role prompts. Null/unknown project
+        // or no agents dir → the construction-time fallback root.
+        Func<string, string?>? projectRootLookup = null,
         MemoryStore? memory = null,
         ContextHandoffStore? handoffs = null,
         // P5.1 stores — passed as factories so the runner can
@@ -80,6 +87,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _logger = logger;
         _skills = skills;
         _rolePromptsRoot = rolePromptsRoot;
+        _projectRootLookup = projectRootLookup;
         _memory = memory;
         _handoffs = handoffs;
         _designArtifactsFactory = designArtifacts;
@@ -104,10 +112,12 @@ public async Task<AgentRunResult> RunAsync(
         CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
-        var roleInstructions = LoadRoleInstructions(roleDef.AgentName);
+        var projectId = ResolveContextString(context, "projectId");
+        if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
+        var roleInstructions = LoadRoleInstructions(roleDef.AgentName, projectId);
         var skillInstructions = _skills is null
             ? string.Empty
-            : await BuildSkillInstructionsAsync(role, ct);
+            : await BuildSkillInstructionsAsync(role, projectId, ct);
         var memoryInstructions = _memory is null
             ? string.Empty
             : await BuildMemoryInstructionsAsync(context, ct);
@@ -615,19 +625,19 @@ public async Task<AgentRunResult> RunAsync(
         return env.Count == 0 ? null : env;
     }
 
-    private async Task<string> BuildSkillInstructionsAsync(AgentType role, CancellationToken ct)
+    private async Task<string> BuildSkillInstructionsAsync(AgentType role, string? projectId, CancellationToken ct)
     {
         IReadOnlyList<SkillContent> skills;
         try
         {
-            skills = await _skills!.LoadForRoleAsync(role, ct);
+            skills = await _skills!.LoadForRoleAsync(role, projectId, ct);
         }
         catch (Exception ex)
         {
             // Skill loading must never break a dispatch. The role prompt
             // (without skills) still reaches the agent, and the error is
             // surfaced via the dashboard event log.
-            _logger.LogWarning(ex, "Failed to load skills for role {Role}; continuing without skills", role);
+            _logger.LogWarning(ex, "Failed to load skills for role {Role} project {ProjectId}; continuing without skills", role, projectId ?? "<none>");
             return string.Empty;
         }
         if (skills.Count == 0) return string.Empty;
@@ -739,9 +749,31 @@ public async Task<AgentRunResult> RunAsync(
         return string.Join("\n\n", sections);
     }
 
-    private string LoadRoleInstructions(string agentName)
+    /// <summary>Per-project role-prompt root: the project's own
+    /// <c>&lt;root&gt;/agents</c> dir when it ships one, else the
+    /// construction-time fallback (built-in defaults). Resolved once
+    /// per project and cached; a project that gains an agents/ dir
+    /// picks it up on restart.</summary>
+    private string ResolvePromptRoot(string? projectId)
     {
-        var path = Path.Combine(_rolePromptsRoot, agentName + ".md");
+        if (projectId is null || _projectRootLookup is null) return _rolePromptsRoot;
+        return _promptRootsByProject.GetOrAdd(projectId, ResolvePromptRootUncached);
+    }
+
+    // Internal for tests: the per-project resolution without the cache.
+    internal string ResolvePromptRootUncached(string projectId)
+    {
+        string? root = null;
+        try { root = _projectRootLookup!(projectId); }
+        catch (Exception ex) { _logger.LogWarning(ex, "project root lookup failed for {ProjectId}; using fallback prompt root", projectId); }
+        if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(Path.Combine(root, "agents")))
+            return Path.Combine(root, "agents");
+        return _rolePromptsRoot;
+    }
+
+    private string LoadRoleInstructions(string agentName, string? projectId = null)
+    {
+        var path = Path.Combine(ResolvePromptRoot(projectId), agentName + ".md");
         if (!File.Exists(path))
         {
             _logger.LogWarning("role prompt file not found at {Path}; using fallback instructions", path);
