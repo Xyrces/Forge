@@ -95,6 +95,55 @@ public sealed class ReviewerDispatcher
         // the head SHA directly.
         var headSha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
 
+        // Defend against a stale PR ref: when the orchestrator
+        // enqueued the watch, the PR object (pr.Head.Sha) and the
+        // live origin/<branch> ref agreed. A subsequent force-push can
+        // move the live ref ahead of the PR object the watch sweep
+        // just fetched (observed live on agent/task-6: the reviewer
+        // was re-fired against a cached PR head and flagged `nul` as
+        // still committed, even though the branch tip had already
+        // deleted the file). Cross-check the live branch head via
+        // GetBranchHeadShaAsync; if it differs, prefer the live value.
+        // Without this, the per-SHA dedupe below returns null for the
+        // OLD head and the watcher happily applies a verdict that was
+        // written for a commit the PR no longer contains.
+        //
+        // A second, narrower reason: a `REQUEST_CHANGES` verdict
+        // carries the reviewer's REVIEWER_NOTES forward into the
+        // rework prompt verbatim. If those notes describe a file that
+        // the new head no longer has, the rework agent wastes a round
+        // chasing a ghost. The live-head reconciliation below forces
+        // a fresh review against the commit the branch actually
+        // points at now.
+        if (headShaOverride is null)
+        {
+            var liveBranch = watchTask.GetMetadata("branch");
+            if (!string.IsNullOrWhiteSpace(liveBranch))
+            {
+                try
+                {
+                    var liveHeadSha = await _gitHub.GetBranchHeadShaAsync(liveBranch, cancellationToken);
+                    if (!string.IsNullOrEmpty(liveHeadSha)
+                        && !string.Equals(liveHeadSha, headSha, StringComparison.Ordinal))
+                    {
+                        _logger.LogWarning(
+                            "PR #{Pr}: PR ref is stale (pr.Head.Sha={PrSha}, origin/{Branch}={LiveSha}); re-reviewing against live head",
+                            prNumber, headSha, liveBranch, liveHeadSha);
+                        headSha = liveHeadSha;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Never block review on a ref-resolution failure:
+                    // fall back to the PR-reported SHA and let the
+                    // existing per-SHA dedupe decide.
+                    _logger.LogDebug(ex,
+                        "PR #{Pr}: could not resolve live origin/{Branch} head SHA; falling back to pr.Head.Sha={PrSha}",
+                        prNumber, liveBranch, headSha);
+                }
+            }
+        }
+
         // Per-SHA dedupe: the watch sweep calls this every pass; only
         // a head move (rework push) triggers a fresh round. An Error
         // verdict does NOT dedupe — the sweep retries the review (the
