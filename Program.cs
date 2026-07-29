@@ -1456,7 +1456,8 @@ Console.Error.WriteLine(ex.ToString());
         // agent's first step. The factory builds fresh DesignerAgent
         // instances per run.
         var designHygiene = new Orchestrator.DesignHygieneChecker(
-            specStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root);
+            specStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root,
+            projectRootLookup: ProjectRootLookup);
         var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
             specStore, designArtifacts, designerRuns, memoryStore, designHygiene,
             chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,

@@ -48,17 +48,42 @@ public sealed class DesignHygieneChecker
     private readonly ICodebaseGraphCacheStore _graphCache;
     private readonly ICodebaseGraphBuilder _graphBuilder;
     private readonly string _workspaceRoot;
+    private readonly Func<string, string?>? _projectRootLookup;
 
     public DesignHygieneChecker(
         ISpecStore specs,
         ICodebaseGraphCacheStore graphCache,
         ICodebaseGraphBuilder graphBuilder,
-        string workspaceRoot)
+        string workspaceRoot,
+        Func<string, string?>? projectRootLookup = null)
     {
         _specs = specs;
         _graphCache = graphCache;
         _graphBuilder = graphBuilder;
         _workspaceRoot = workspaceRoot;
+        _projectRootLookup = projectRootLookup;
+    }
+
+    /// <summary>The codebase graph is per repo: a spec's touches are
+    /// checked against the graph of the PROJECT that owns the spec,
+    /// not the primary workspace (multi-project fix — a porthorizon
+    /// spec's PortHorizon.Core.* touches all read as "undefined
+    /// module" against Forge's graph).</summary>
+    private string RootFor(SpecRecord spec)
+    {
+        if (!string.IsNullOrWhiteSpace(spec.ProjectId) && _projectRootLookup is not null)
+        {
+            try
+            {
+                var root = _projectRootLookup(spec.ProjectId);
+                if (!string.IsNullOrWhiteSpace(root)) return root;
+            }
+            catch (Exception)
+            {
+                // lookup failure → primary root (single-project behavior)
+            }
+        }
+        return _workspaceRoot;
     }
 
     public async Task<HygieneReport> CheckAsync(SpecRecord spec, CancellationToken ct = default)
@@ -113,7 +138,7 @@ public sealed class DesignHygieneChecker
         //    module id that's not in the codebase graph.
         if (extracted.Touches.Count > 0)
         {
-            var graph = await LoadGraphAsync(ct);
+            var graph = await LoadGraphAsync(RootFor(spec), ct);
             if (graph is not null)
             {
                 var known = graph.Files.Select(f => f.Module).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -278,9 +303,9 @@ public sealed class DesignHygieneChecker
         }
     }
 
-    private async Task<CodebaseGraph?> LoadGraphAsync(CancellationToken ct)
+    private async Task<CodebaseGraph?> LoadGraphAsync(string repoRoot, CancellationToken ct)
     {
-        var cached = await _graphCache.GetAsync(_workspaceRoot, ct);
+        var cached = await _graphCache.GetAsync(repoRoot, ct);
         if (cached is not null && File.Exists(cached.DiskPath))
         {
             try
@@ -293,7 +318,7 @@ public sealed class DesignHygieneChecker
                 // fall through to rebuild
             }
         }
-        return await _graphBuilder.BuildAsync(_workspaceRoot, cached, cacheDirectory: null, ct: ct);
+        return await _graphBuilder.BuildAsync(repoRoot, cached, cacheDirectory: null, ct: ct);
     }
 
     private static string? FindSection(string? body, string title)

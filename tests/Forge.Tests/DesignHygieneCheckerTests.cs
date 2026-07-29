@@ -386,4 +386,38 @@ public class DesignHygieneCheckerTests : IDisposable
         Assert.Single(findings);
         Assert.Contains("made-up-kind", findings[0].Message);
     }
+
+    [Fact]
+    public async Task TouchesCheckedAgainstSpecProjectRoot_NotPrimaryRoot()
+    {
+        // Regression for the live 2026-07-29 epic-2 design failure: a
+        // porthorizon spec touching PortHorizon.Core.* modules was
+        // hygiene-failed because the graph was built from the PRIMARY
+        // (forge) workspace. The checker must resolve the graph root
+        // per spec project.
+        var primaryRoot = Path.Combine(Path.GetTempPath(), $"ph-hygiene-primary-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(primaryRoot);
+        InitRepo(primaryRoot);   // git repo, but no PortHorizon.Core project
+        try
+        {
+            File.Delete(Path.Combine(primaryRoot, "PortHorizon.Core", "PortHorizon.Core.csproj"));
+            File.Delete(Path.Combine(primaryRoot, "PortHorizon.Core", "Program.cs"));
+            Directory.Delete(Path.Combine(primaryRoot, "PortHorizon.Core"));
+
+            var checker = new DesignHygieneChecker(
+                _specs, _graphCache, _graphBuilder, primaryRoot,
+                projectRootLookup: id => id == "porthorizon" ? _workDir : null);
+            var spec = await _specs.CreateAsync(new NewSpec("porthorizon", "Test", HealthyBody));
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
+            spec = (await _specs.GetAsync(spec.Id))!;
+
+            var report = await checker.CheckAsync(spec);
+
+            Assert.DoesNotContain(report.Findings, f => f.Rule == "touches_undefined_module");
+        }
+        finally
+        {
+            try { Directory.Delete(primaryRoot, recursive: true); } catch { }
+        }
+    }
 }
