@@ -297,6 +297,50 @@ public class StartupRecoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_MultiProject_SweepsExtraProjectStores()
+    {
+        // Multi-project fix (2026-07-29): the pass used to scan only
+        // the primary store, stranding a second project's InProgress
+        // tasks across a restart. Seed an orphaned worktree_acquired
+        // issue in a SECOND project (own store + own git repo) and
+        // assert the sweep requeues it.
+        var dir2 = Path.Combine(Path.GetTempPath(), $"ph-recovery2-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir2);
+        InitRepo(dir2);
+        var db2 = Path.Combine(dir2, "issues.db");
+        _ = new IssueStore(db2);
+        await using var issues2 = new IssueStore(db2);
+        var worktrees2 = new GitWorktreeService(
+            new WorkspaceOptions { Root = dir2, WorktreeRoot = ".wt", DefaultBranch = "main" },
+            NullLogger<GitWorktreeService>.Instance);
+        try
+        {
+            var issue = await issues2.CreateAsync(new NewIssue(Type: "task", Title: "stranded"));
+            Assert.NotNull(await issues2.ClaimAsync(issue.Id, "forge"));
+            await worktrees2.CreateAsync(issue.Id, "main");
+            var wtPath = worktrees2.WorktreePathFor(issue.Id);
+            await issues2.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null,
+                metadata: new Dictionary<string, object>
+                {
+                    ["worktreePath"] = wtPath,
+                    ["branch"] = $"agent/{issue.Id}",
+                });
+            await issues2.SetCheckpointAsync(issue.Id, DispatchCheckpoint.WorktreeAcquired);
+
+            var ctx2 = new StartupRecovery.ProjectRecoveryContext(
+                "proj2", issues2, worktrees2, new StubGitHub(), "main");
+            await _recovery.RunAsync(extraProjects: new[] { ctx2 });
+
+            var after = await issues2.GetAsync(issue.Id);
+            Assert.Equal(IssueStatus.Pending, after!.Status);
+        }
+        finally
+        {
+            try { Directory.Delete(dir2, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task RunAsync_Sweep_SixFixtureStates()
     {
         // Build 6 issues in different states:

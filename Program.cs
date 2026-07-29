@@ -1591,7 +1591,24 @@ try
             // dispatch loop starts) so any in-flight issues from
             // a previous crash are replayed before the new
             // dispatch cycle begins.
-            await startupRecovery.RunAsync(ct: shutdownCts.Token);
+            // Multi-project: one recovery context per NON-primary
+            // project (the primary is the recovery service's own
+            // construction context). Without this a restart strands a
+            // second project's InProgress tasks forever (observed live
+            // 2026-07-29: porthorizon task-5/6 claimed pre-restart,
+            // recovery scanned only the primary store — scanned=0).
+            var recoveryContexts = knownProjects
+                .Where(p => !string.Equals(p.Id, primary.Id, StringComparison.OrdinalIgnoreCase))
+                .Select(p =>
+                {
+                    var b = dispatchBundleFactory.Build(p);
+                    return new Orchestrator.StartupRecovery.ProjectRecoveryContext(
+                        p.Id, b.IssueStore, b.Worktrees,
+                        new Orchestrator.GitHubRecoveryAdapter(b.GitHub),
+                        p.DefaultBranch);
+                })
+                .ToList();
+            await startupRecovery.RunAsync(extraProjects: recoveryContexts, ct: shutdownCts.Token);
 
             // P4 Stage B — bring the workflow dispatcher host up.
             // For InProcess this is a no-op. For Durable this
