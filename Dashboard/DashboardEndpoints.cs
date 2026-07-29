@@ -43,16 +43,21 @@ public static class DashboardEndpoints
             return Results.Json(ToIssueView(created), DashboardJson.Options, statusCode: 201);
         });
 
-app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
+app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string? projectId) =>
         {
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (patch is null) return Results.BadRequest(new { error = "empty body" });
-            var existing = await issues.GetAsync(id, ctx.RequestAborted);
+            // Multi-project: operator task mutations route to the
+            // owning project's store (the default is the primary).
+            var store = !string.IsNullOrWhiteSpace(projectId)
+                ? projectContexts?.Find(projectId)?.Issues ?? issues
+                : issues;
+            var existing = await store.GetAsync(id, ctx.RequestAborted);
             if (existing is null) return Results.NotFound();
             if (patch.TryGetValue("status", out var st) && Enum.TryParse<IssueStatus>(st?.ToString() ?? "", out var toStatus))
             {
-                var updated = await issues.TransitionAsync(id, toStatus,
+                var updated = await store.TransitionAsync(id, toStatus,
                     patch.TryGetValue("error", out var e) ? e?.ToString() : null,
                     ct: ctx.RequestAborted);
                 return Results.Json(ToIssueView(updated), DashboardJson.Options);
