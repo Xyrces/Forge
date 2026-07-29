@@ -87,13 +87,21 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         var hasChanges = commit.HasChanges;
         if (!hasChanges)
         {
-            var ahead = await worktrees.GetDiffStatsAsync(worktreePath, input.Worktree.BaseBranch, ct);
-            if (!string.IsNullOrWhiteSpace(ahead.Summary))
+            // The source of truth for "the branch carries new work"
+            // is the unique-commit count against ORIGIN's base — the
+            // worktree's local base ref can be stale and diff as a
+            // false-positive "self-commit" (porthorizon task-7,
+            // 2026-07-29: HEAD exactly on fresh origin/main diffed as
+            // 9 files vs stale local main; the no-op push then died
+            // on GitHub's no-commits 422, swallowed mid-pipeline).
+            var aheadCount = await worktrees.GetAheadCountAsync(worktreePath, input.Worktree.BaseBranch, ct);
+            if (aheadCount > 0)
             {
+                var ahead = await worktrees.GetDiffStatsAsync(worktreePath, input.Worktree.BaseBranch, ct);
                 hasChanges = true;
                 logger.LogInformation(
-                    "CommitPushPr({Id}): nothing to commit but branch is ahead of {Base} — agent self-committed ({Summary}); proceeding to push/PR",
-                    issue.Id, input.Worktree.BaseBranch, ahead.Summary);
+                    "CommitPushPr({Id}): nothing to commit but branch is {Count} commit(s) ahead of {Base} — agent self-committed ({Summary}); proceeding to push/PR",
+                    issue.Id, aheadCount, input.Worktree.BaseBranch, ahead.Summary);
             }
         }
         if (!hasChanges)
