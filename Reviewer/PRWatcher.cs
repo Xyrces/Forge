@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Octokit;
 using Forge.AgentTools;
 using Forge.Core;
@@ -92,47 +92,51 @@ public sealed class PRWatcher
     /// stale window is anchored to the watch issue's CreatedAt, so it
     /// stays stable no matter which sweep picks the watch up.
     /// </summary>
-    public async Task<WatchPollOutcome> PollWatchOnceAsync(
-        IssueRecord watchTask,
+    public async Task<WatchPollOutcome> PollWatchedTaskAsync(
+        IssueRecord task,
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
         Func<PullRequest, string>? headShaOverride = null,
         Func<PullRequest, bool?>? mergeableOverride = null)
     {
-        var prText = watchTask.GetMetadata("prNumber");
+        var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
         {
-            _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
-            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
+            // Tasks enter the sweep BECAUSE they carry a prNumber —
+            // reaching this means the row is corrupt. Log and skip;
+            // never transition a dev task over a machinery problem.
+            _logger.LogError("Watched task {Id} missing prNumber", task.Id);
             return WatchPollOutcome.Error;
         }
 
-        var taskId = watchTask.GetMetadata("taskId") ?? watchTask.Id;
-        var branch = watchTask.GetMetadata("branch") ?? watchTask.Title;
-        var worktreePath = watchTask.GetMetadata("worktreePath");
+        var taskId = task.Id;
+        var branch = task.GetMetadata("branch") ?? $"agent/{task.Id}";
+        var worktreePath = task.GetMetadata("worktreePath");
 
-        // Orphan guard: a watch whose task is already terminal
-        // (operator closeout, breaker, or external resolution) must
-        // not drive the task — a CI-failure fire would transition a
-        // CLOSED task back to Pending (resurrection). Close the
-        // watch and skip. Observed live 2026-07-26: pr-watch-44
-        // kept polling after task-161 + PR #34 were closed.
-        var watchedTask = await _issues.GetAsync(taskId, cancellationToken);
-        if (watchedTask is null || watchedTask.Status is IssueStatus.Closed or IssueStatus.Completed)
+        // Orphan guard (was the watch-closeout guard): a task that
+        // went terminal between selection and poll (operator close,
+        // external resolution) must not be driven — a CI-failure
+        // fire would resurrect a CLOSED task to Pending. Re-read:
+        // the caller's record can be stale by minutes.
+        var freshTask = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+        if (freshTask.Status is IssueStatus.Closed or IssueStatus.Completed)
         {
             _logger.LogInformation(
-                "PR watch {WatchId}: watched task {TaskId} is {Status} — closing watch",
-                watchTask.Id, taskId, watchedTask?.Status.ToString() ?? "missing");
-            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Closed,
-                $"watched task {taskId} is terminal", ct: cancellationToken);
+                "Watched task {TaskId} is {Status} — nothing to watch",
+                task.Id, freshTask.Status);
             return WatchPollOutcome.Merged;
         }
 
-        if (DateTime.UtcNow - watchTask.CreatedAt > _staleAfter)
+        // Stale window anchored to the PR-open time (prOpenedAt
+        // metadata, written by CommitPushPrExecutor / recovery;
+        // legacy rows fall back to task creation).
+        var prOpenedRaw = task.GetMetadata("prOpenedAt");
+        var anchor = DateTimeOffset.TryParse(prOpenedRaw, out var openedAt)
+            ? openedAt.UtcDateTime : task.CreatedAt;
+        if (DateTime.UtcNow - anchor > _staleAfter)
         {
             _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
             await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
-            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             return WatchPollOutcome.Stale;
         }
@@ -149,7 +153,6 @@ public sealed class PRWatcher
             await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
             await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
-            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally; task completed"));
@@ -166,7 +169,7 @@ public sealed class PRWatcher
         // never fire-and-forget. Best-effort: machine failures must
         // not break the watch loop.
         async Task ReportAsync(Forge.Core.TaskEvent evt)
-            => await ReportLifecycleAsync(watchTask, taskId, evt, cancellationToken);
+            => await ReportLifecycleAsync(task, evt, cancellationToken);
 
         // Workflow policies (editable workflow, pass 3): resolved per
         // poll — a publish lands here on the very next sweep, no
@@ -212,8 +215,8 @@ public sealed class PRWatcher
         // (ReviewerDispatcher records reviewSha/reviewVerdict/
         // reviewNotes). Only counts against the CURRENT head SHA —
         // a stale verdict from a prior head is ignored.
-        var agentVerdict = watchTask.GetMetadata("reviewVerdict");
-        var agentVerdictSha = watchTask.GetMetadata("reviewSha");
+        var agentVerdict = task.GetMetadata("reviewVerdict");
+        var agentVerdictSha = task.GetMetadata("reviewSha");
         var agentVerdictCurrent = reviewEnabled
             && !string.IsNullOrEmpty(agentVerdict)
             && string.Equals(agentVerdictSha, sha, StringComparison.Ordinal);
@@ -271,8 +274,8 @@ public sealed class PRWatcher
                 }
                 await ReportAsync(Forge.Core.TaskEvent.StallDetected);
                 _logger.LogWarning(
-                    "PR watch {WatchId}: rework round for {TaskId} stalled — no push and no task update for {Minutes:F0}m (head still {Sha}); re-firing as another strike",
-                    watchTask.Id, taskId, untouchedFor.TotalMinutes, sha);
+                    "PR watch (task {TaskId}): rework round stalled — no push and no task update for {Minutes:F0}m (head still {Sha}); re-firing as another strike",
+                    taskId, untouchedFor.TotalMinutes, sha);
             }
         }
 
@@ -297,7 +300,7 @@ public sealed class PRWatcher
             {
                 await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
-                    watchTask, taskId, worktreePath, sha,
+                    task, worktreePath, sha,
                     reason: "PR conflicts with the base branch",
                     context: ConflictContext,
                     terminalStatus: IssueStatus.Blocked,
@@ -330,7 +333,6 @@ public sealed class PRWatcher
                 await ReportAsync(Forge.Core.TaskEvent.Merged);
                 await _gitHub.DeleteBranchAsync(branch, cancellationToken);
                 await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
-                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Completed, null, ct: cancellationToken);
                 await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
                 _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                     taskId, $"PR #{prNumber} merged and branch deleted"));
@@ -345,7 +347,7 @@ public sealed class PRWatcher
             {
                 await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
-                    watchTask, taskId, worktreePath, sha,
+                    task, worktreePath, sha,
                     reason: "PR conflicts with the base branch",
                     context: ConflictContext,
                     terminalStatus: IssueStatus.Blocked,
@@ -395,7 +397,7 @@ public sealed class PRWatcher
                 // state on the machine record.
                 await ReportAsync(Forge.Core.TaskEvent.BaseRecovered);
                 return await ReworkOrTripAsync(
-                    watchTask, taskId, worktreePath, sha,
+                    task, worktreePath, sha,
                     reason: "base-branch CI recovered — retrigger PR CI",
                     context: $"The failing CI on this PR was pre-existing breakage on the base branch ({baseBranch}), not caused by your diff — the base is green again now. Bring your branch up to date so CI retriggers: git fetch origin && git merge origin/{baseBranch}, run the full test suite, and push to the SAME branch. Do not restructure your earlier work.",
                     terminalStatus: IssueStatus.Failed,
@@ -417,7 +419,7 @@ public sealed class PRWatcher
                     // The machine records the park on the task
                     // (state=ParkedInfra + parkedForSha) — no watch
                     // flag write anymore.
-                    await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.ParkedOnInfra, cancellationToken,
+                    await ReportLifecycleAsync(task, Forge.Core.TaskEvent.ParkedOnInfra, cancellationToken,
                         extraMetadata: new Dictionary<string, object> { ["parkedForSha"] = sha });
                     _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
                         taskId, $"Watch parked: CI failure is pre-existing on {baseBranch}; merge pipeline paused until base recovers"));
@@ -436,7 +438,6 @@ public sealed class PRWatcher
                     prNumber);
                 await _issues.TransitionAsync(taskId, IssueStatus.Blocked,
                     $"CI failed ({ci}); workflow branch 'on CI failure' = block", ct: cancellationToken);
-                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "ci-failed-block", ct: cancellationToken);
                 _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrFailed,
                     taskId, $"CI failed ({ci}) — workflow branch set to block"));
                 return WatchPollOutcome.Blocked;
@@ -446,7 +447,7 @@ public sealed class PRWatcher
                 ? " Failing checks:\n" + string.Join("\n", failing.Select(f => $"- {f}"))
                 : "";
             return await ReworkOrTripAsync(
-                watchTask, taskId, worktreePath, sha,
+                task, worktreePath, sha,
                 reason: $"CI failed for {sha[..Math.Min(7, sha.Length)]}: {ci}",
                 context: $"CI checks failed ({ci}). Fix the build/tests on the same branch.{detail}",
                 terminalStatus: IssueStatus.Failed,
@@ -458,9 +459,9 @@ public sealed class PRWatcher
         if (changesRequested)
         {
             await ReportAsync(Forge.Core.TaskEvent.ReviewChangesRequested);
-            var notes = watchTask.GetMetadata("reviewNotes");
+            var notes = task.GetMetadata("reviewNotes");
             return await ReworkOrTripAsync(
-                watchTask, taskId, worktreePath, sha,
+                task, worktreePath, sha,
                 reason: "reviewer requested changes",
                 context: $"The reviewer requested changes:\n{notes}",
                 terminalStatus: IssueStatus.Blocked,
@@ -474,12 +475,11 @@ public sealed class PRWatcher
             // Reviewer agent itself is failing (LLM outage, parse
             // errors). Circuit-breaker on review rounds, then the
             // operator must review by hand.
-            var rounds = int.TryParse(watchTask.GetMetadata("reviewRound"), out var r) ? r : 1;
+            var rounds = int.TryParse(task.GetMetadata("reviewRound"), out var r) ? r : 1;
             if (rounds >= maxStrikes)
             {
                 _logger.LogWarning("PR #{PrNumber}: reviewer unavailable after {Rounds} rounds; blocking for operator review", prNumber, rounds);
                 await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "reviewer unavailable — operator review required", ct: cancellationToken);
-                await _issues.TransitionAsync(watchTask.Id, IssueStatus.Blocked, "reviewer-error", ct: cancellationToken);
                 return WatchPollOutcome.Blocked;
             }
             return WatchPollOutcome.Pending;
@@ -502,7 +502,7 @@ public sealed class PRWatcher
         {
             await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
             return await ReworkOrTripAsync(
-                watchTask, taskId, worktreePath, sha,
+                task, worktreePath, sha,
                 reason: "PR conflicts with the base branch",
                 context: ConflictContext,
                 terminalStatus: IssueStatus.Blocked,
@@ -534,21 +534,18 @@ public sealed class PRWatcher
     /// event to the lifecycle machine. Best-effort — never breaks the
     /// watch loop.</summary>
     private async Task ReportLifecycleAsync(
-        IssueRecord watchTask, string taskId, Forge.Core.TaskEvent evt, CancellationToken cancellationToken,
+        IssueRecord task, Forge.Core.TaskEvent evt, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, object>? extraMetadata = null)
     {
         if (_lifecycle is null) return;
         try
         {
-            var task = await _issues.GetAsync(taskId, cancellationToken);
-            if (task is not null)
-            {
-                await _lifecycle.ReportAsync(_issues, task, evt, watchTask, hasActiveDevRun: false, cancellationToken, extraMetadata);
-            }
+            var fresh = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+            await _lifecycle.ReportAsync(_issues, fresh, evt, watch: null, hasActiveDevRun: false, cancellationToken, extraMetadata);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "lifecycle report {Event} failed for {TaskId}; continuing", evt, taskId);
+            _logger.LogWarning(ex, "lifecycle report {Event} failed for {TaskId}; continuing", evt, task.Id);
         }
     }
 
@@ -560,8 +557,7 @@ public sealed class PRWatcher
     /// terminal transition instead.
     /// </summary>
     private async Task<WatchPollOutcome> ReworkOrTripAsync(
-        IssueRecord watchTask,
-        string taskId,
+        IssueRecord task,
         string? worktreePath,
         string headSha,
         string reason,
@@ -573,21 +569,29 @@ public sealed class PRWatcher
         bool countAsStrike = true,
         int? maxStrikes = null)
     {
-        var task = await _issues.GetAsync(taskId, cancellationToken);
+        var taskId = task.Id;
+        // Re-read: the caller's record predates the lifecycle reports
+        // fired on the way here (BaseRecovered et al.), and the
+        // metadata merge below must not clobber the machine's fresh
+        // state writes with stale seeded values.
+        var current = await _issues.GetAsync(taskId, cancellationToken) ?? task;
         var attempts = 0;
-        if (task is not null)
         {
-            var raw = task.GetMetadata("reworkAttempts");
+            var raw = current.GetMetadata("reworkAttempts");
             if (raw is not null) int.TryParse(raw, out attempts);
         }
 
-        if (task is null || (countAsStrike && attempts >= (maxStrikes ?? MaxReworkAttempts)))
+        if (countAsStrike && attempts >= (maxStrikes ?? MaxReworkAttempts))
         {
-            _logger.LogWarning("PR watch {WatchId}: circuit breaker tripped for {TaskId} after {N} rework attempts ({Reason})",
-                watchTask.Id, taskId, attempts, reason);
-            await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.BreakerTripped, cancellationToken);
+            // The circuit breaker is a TASK outcome: the loop gave up
+            // after N rounds and the operator must intervene. Only the
+            // task goes terminal — there is no watch row to fail
+            // alongside it (operator rule 2026-07-29: a failed watch
+            // read as "the review failed"; the breaker is not that).
+            _logger.LogWarning("PR watch (task {TaskId}): circuit breaker tripped after {N} rework attempts ({Reason})",
+                taskId, attempts, reason);
+            await ReportLifecycleAsync(task, Forge.Core.TaskEvent.BreakerTripped, cancellationToken);
             await _issues.TransitionAsync(taskId, terminalStatus, terminalError, ct: cancellationToken);
-            await _issues.TransitionAsync(watchTask.Id, terminalStatus, terminalError, ct: cancellationToken);
             if (terminalStatus == IssueStatus.Failed)
             {
                 await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
@@ -604,11 +608,11 @@ public sealed class PRWatcher
         // round: it must not consume breaker budget.
         if (countAsStrike) attempts++;
         _logger.LogInformation(
-            "PR watch {WatchId}: rework round {N}/{Max} for {TaskId} — {Reason}",
-            watchTask.Id, attempts, MaxReworkAttempts, taskId, reason);
-        await ReportLifecycleAsync(watchTask, taskId, Forge.Core.TaskEvent.ReworkFired, cancellationToken,
+            "PR watch (task {TaskId}): rework round {N}/{Max} — {Reason}",
+            taskId, attempts, MaxReworkAttempts, reason);
+        await ReportLifecycleAsync(task, Forge.Core.TaskEvent.ReworkFired, cancellationToken,
             extraMetadata: new Dictionary<string, object> { ["reworkForSha"] = headSha });
-        var metadata = ParseMetadataDict(task.MetadataJson);
+        var metadata = ParseMetadataDict(current.MetadataJson);
         metadata["reworkAttempts"] = attempts.ToString();
         metadata["reworkReason"] = reason;
         metadata["reworkContext"] = context.Length > 3000 ? context[..3000] : context;
@@ -649,24 +653,23 @@ public sealed class PRWatcher
         return metadata;
     }
 
-    public async Task<int> ProcessWatchTaskAsync(
-        IssueRecord watchTask,
+    public async Task<int> ProcessWatchedTaskAsync(
+        IssueRecord task,
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
         Func<PullRequest, string>? headShaOverride = null)
     {
-        var prText = watchTask.GetMetadata("prNumber");
+        var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out _))
         {
-            _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
-            await _issues.TransitionAsync(watchTask.Id, IssueStatus.Failed, "missing prNumber", ct: cancellationToken);
+            _logger.LogError("Watched task {Id} missing prNumber", task.Id);
             return 1;
         }
 
         while (!cancellationToken.IsCancellationRequested)
         {
-            var outcome = await PollWatchOnceAsync(
-                watchTask, cancellationToken, reviewsOverride, headShaOverride);
+            var outcome = await PollWatchedTaskAsync(
+                task, cancellationToken, reviewsOverride, headShaOverride);
             switch (outcome)
             {
                 case WatchPollOutcome.Merged:

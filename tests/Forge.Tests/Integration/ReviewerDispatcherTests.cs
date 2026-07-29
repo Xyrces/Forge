@@ -117,13 +117,14 @@ public class ReviewerDispatcherTests : IDisposable
         var dispatcher = new ReviewerDispatcher(_issues, gh, runner, NullLogger<ReviewerDispatcher>.Instance);
         var task = await _issues.CreateAsync(new Forge.Core.NewIssue(
             Type: "task", Title: "t",
-            Metadata: new Dictionary<string, object> { ["reworkForSha"] = "abc123" }));
-        var watch = await _issues.CreateAsync(new Forge.Core.NewIssue(
-            Type: AgentTaskTypes.PrWatch, Title: "watch",
-            Metadata: new Dictionary<string, object> { ["prNumber"] = 7, ["taskId"] = task.Id }));
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 7,
+                ["reworkForSha"] = "abc123",
+            }));
 
         var outcome = await dispatcher.ReviewOnceAsync(
-            (await _issues.GetAsync(watch.Id))!, headShaOverride: _ => "abc123");
+            (await _issues.GetAsync(task.Id))!, headShaOverride: _ => "abc123");
 
         Assert.Null(outcome);
         Assert.Equal(0, runner.Calls);

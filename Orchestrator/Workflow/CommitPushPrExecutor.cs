@@ -247,6 +247,9 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         {
             m["prNumber"] = pr.Number;
             m["branchSha"] = headSha;
+            // Stale-window anchor for the state-driven watch sweep.
+            // Rework rounds reuse the PR — keep the ORIGINAL open time.
+            if (!m.ContainsKey("prOpenedAt")) m["prOpenedAt"] = DateTime.UtcNow.ToString("O");
             // Success clears any stale run-failure record (requeues
             // never remove it; metadata is upsert-merge only, so
             // JSON null is the delete idiom).

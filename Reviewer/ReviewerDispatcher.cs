@@ -70,13 +70,13 @@ public sealed class ReviewerDispatcher
     /// Error outcome so the watcher's circuit breaker can count them.
     /// </summary>
     public async Task<ReviewOutcome?> ReviewOnceAsync(
-        IssueRecord watchTask, CancellationToken cancellationToken = default,
+        IssueRecord task, CancellationToken cancellationToken = default,
         Func<PullRequest, string>? headShaOverride = null)
     {
-        var prText = watchTask.GetMetadata("prNumber");
+        var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
         {
-            _logger.LogError("Watch issue {Id} missing prNumber", watchTask.Id);
+            _logger.LogError("Watched task {Id} missing prNumber", task.Id);
             return new ReviewOutcome(ReviewerVerdict.Error, "", "", "missing prNumber");
         }
 
@@ -99,8 +99,8 @@ public sealed class ReviewerDispatcher
         // a head move (rework push) triggers a fresh round. An Error
         // verdict does NOT dedupe — the sweep retries the review (the
         // watcher's circuit breaker bounds the retries).
-        var reviewedSha = watchTask.GetMetadata("reviewSha");
-        var recordedVerdict = watchTask.GetMetadata("reviewVerdict");
+        var reviewedSha = task.GetMetadata("reviewSha");
+        var recordedVerdict = task.GetMetadata("reviewVerdict");
         if (string.Equals(reviewedSha, headSha, StringComparison.Ordinal)
             && !string.IsNullOrEmpty(recordedVerdict)
             && recordedVerdict != nameof(ReviewerVerdict.Error))
@@ -113,14 +113,8 @@ public sealed class ReviewerDispatcher
         // wastes a full review on a head that's about to be replaced
         // — the verdict is sha-stamped, so it would be discarded the
         // moment the rework push lands. Wait for the new head. The
-        // round record lives on the TASK via the machine.
-        string? reworkSha = null;
-        var taskIdForSha = watchTask.GetMetadata("taskId");
-        if (taskIdForSha is not null)
-        {
-            var t = await _issues.GetAsync(taskIdForSha, cancellationToken);
-            reworkSha = t?.GetMetadata("reworkForSha");
-        }
+        // round record lives on the task via the machine.
+        var reworkSha = task.GetMetadata("reworkForSha");
         if (string.Equals(reworkSha, headSha, StringComparison.Ordinal))
         {
             return null;
@@ -138,9 +132,9 @@ public sealed class ReviewerDispatcher
         }
 
         var round = 1;
-        if (int.TryParse(watchTask.GetMetadata("reviewRound"), out var prior)) round = prior + 1;
+        if (int.TryParse(task.GetMetadata("reviewRound"), out var prior)) round = prior + 1;
 
-        var prompt = BuildReviewerPrompt(pr, diff, watchTask);
+        var prompt = BuildReviewerPrompt(pr, diff, task);
         ReviewerVerdict verdict;
         string body;
         string? error = null;
@@ -151,7 +145,7 @@ public sealed class ReviewerDispatcher
             // groomable follow-up tasks (parented via metadata).
             var reviewContext = new Dictionary<string, object>
             {
-                ["issueId"] = watchTask.GetMetadata("taskId") ?? watchTask.Id,
+                ["issueId"] = task.Id,
             };
             // Bounded call: the reviewer runs inside the watch sweep,
             // which shares the orchestrator's main loop — an
@@ -213,9 +207,9 @@ public sealed class ReviewerDispatcher
             }
         }
 
-        // Record the verdict in the watch metadata — the PRWatcher's
+        // Record the verdict in the task metadata — the PRWatcher's
         // merge/rework decision reads this.
-        await UpdateWatchMetadataAsync(watchTask, m =>
+        await UpdateWatchMetadataAsync(task, m =>
         {
             m["reviewSha"] = headSha;
             m["reviewVerdict"] = verdict.ToString();
@@ -236,17 +230,12 @@ public sealed class ReviewerDispatcher
         {
             try
             {
-                var taskId = watchTask.GetMetadata("taskId") ?? watchTask.Id;
-                var task = await _issues.GetAsync(taskId, cancellationToken);
-                var freshWatch = await _issues.GetAsync(watchTask.Id, cancellationToken) ?? watchTask;
-                if (task is not null)
-                {
-                    await _lifecycle.ReportAsync(_issues, task,
-                        verdict == ReviewerVerdict.Approve
-                            ? Forge.Core.TaskEvent.ReviewApproved
-                            : Forge.Core.TaskEvent.ReviewChangesRequested,
-                        freshWatch, hasActiveDevRun: false, cancellationToken);
-                }
+                var fresh = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+                await _lifecycle.ReportAsync(_issues, fresh,
+                    verdict == ReviewerVerdict.Approve
+                        ? Forge.Core.TaskEvent.ReviewApproved
+                        : Forge.Core.TaskEvent.ReviewChangesRequested,
+                    watch: null, hasActiveDevRun: false, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -260,20 +249,20 @@ public sealed class ReviewerDispatcher
     /// Back-compat wrapper for the HTTP endpoint: review once and
     /// return a process-style exit code.
     /// </summary>
-    public async Task<int> ProcessWatchTaskAsync(
-        IssueRecord watchTask,
+    public async Task<int> ProcessWatchedTaskAsync(
+        IssueRecord task,
         CancellationToken cancellationToken = default)
     {
-        var outcome = await ReviewOnceAsync(watchTask, cancellationToken);
+        var outcome = await ReviewOnceAsync(task, cancellationToken);
         return outcome is null || outcome.Error is null ? 0 : 1;
     }
 
     private async Task UpdateWatchMetadataAsync(
-        IssueRecord watchTask,
+        IssueRecord task,
         Func<Dictionary<string, object>, Dictionary<string, object>> mutate,
         CancellationToken ct)
     {
-        var cur = await _issues.GetAsync(watchTask.Id, ct);
+        var cur = await _issues.GetAsync(task.Id, ct);
         if (cur is null) return;
         var current = new Dictionary<string, object>();
         if (!string.IsNullOrWhiteSpace(cur.MetadataJson))
@@ -298,9 +287,9 @@ public sealed class ReviewerDispatcher
         await _issues.TransitionAsync(cur.Id, cur.Status, error: null, metadata: next, ct: ct);
     }
 
-    private static string BuildReviewerPrompt(PullRequest pr, string diff, IssueRecord watchTask)
+    private static string BuildReviewerPrompt(PullRequest pr, string diff, IssueRecord task)
     {
-        var taskTitle = watchTask.GetMetadata("taskTitle") ?? watchTask.Title;
+        var taskTitle = task.GetMetadata("taskTitle") ?? task.Title;
         return $"You are the Reviewer role for Forge, evaluating a pull request against its task.\n\n" +
                $"Task: {taskTitle}\n" +
                $"PR: {pr.Title} (#{pr.Number})\n" +
