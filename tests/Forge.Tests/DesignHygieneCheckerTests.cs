@@ -388,6 +388,19 @@ public class DesignHygieneCheckerTests : IDisposable
     }
 
     [Fact]
+    public async Task NamespaceTouch_InsideKnownModule_Passes()
+    {
+        // Graph modules are csproj-granular ('PortHorizon.Core'); a
+        // touches entry naming a namespace inside it is more specific,
+        // not undefined (live 2026-07-29: epic-2's spec touched
+        // 'PortHorizon.Core.Construction' and was hygiene-failed).
+        var body = HealthyBody.Replace("- PortHorizon.Core", "- PortHorizon.Core.Construction");
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.DoesNotContain(report.Findings, f => f.Rule == "touches_undefined_module");
+    }
+
+    [Fact]
     public async Task TouchesCheckedAgainstSpecProjectRoot_NotPrimaryRoot()
     {
         // Regression for the live 2026-07-29 epic-2 design failure: a

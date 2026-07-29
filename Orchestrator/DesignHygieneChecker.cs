@@ -145,7 +145,12 @@ public sealed class DesignHygieneChecker
                 foreach (var t in extracted.Touches)
                 {
                     if (string.IsNullOrWhiteSpace(t.ModuleId)) continue;
-                    if (!known.Contains(t.ModuleId))
+                    // Graph modules are csproj-granular; a touches entry
+                    // naming a namespace INSIDE a known module (e.g.
+                    // 'PortHorizon.Core.Construction' under module
+                    // 'PortHorizon.Core') is more specific, not undefined.
+                    if (!known.Contains(t.ModuleId)
+                        && !known.Any(m => t.ModuleId.StartsWith(m + ".", StringComparison.OrdinalIgnoreCase)))
                     {
                         findings.Add(new HygieneFinding(
                             "touches_undefined_module", HygieneSeverity.Error,
