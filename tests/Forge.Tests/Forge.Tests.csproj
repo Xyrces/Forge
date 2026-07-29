@@ -27,4 +27,8 @@
     <ProjectReference Include="..\..\Forge.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\tools\branch-audit\branch-audit.csproj" />
+  </ItemGroup>
+
 </Project>
