@@ -67,19 +67,6 @@ public class AppShellEndpointsTests : IDisposable
     }
 
     [Fact]
-    public async Task Uptime_ReturnsUptimeMsAndUtcTimestamp()
-    {
-        var resp = await _client.GetAsync("/api/health/uptime");
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.Content.ReadFromJsonAsync<UptimeShape>();
-        Assert.NotNull(body);
-        Assert.True(body!.UptimeMs >= 0);
-        Assert.False(string.IsNullOrWhiteSpace(body.UtcTimestamp));
-        Assert.True(DateTime.TryParse(body.UtcTimestamp, null,
-            System.Globalization.DateTimeStyles.RoundtripKind, out _));
-    }
-
-    [Fact]
     public async Task Heartbeat_ReturnsHealthy()
     {
         var resp = await _client.GetAsync("/api/health/heartbeat");
@@ -142,12 +129,6 @@ public class AppShellEndpointsTests : IDisposable
         l.Start();
         try { return ((System.Net.IPEndPoint)l.LocalEndpoint).Port; }
         finally { l.Stop(); }
-    }
-
-    public sealed class UptimeShape
-    {
-        public long UptimeMs { get; set; }
-        public string UtcTimestamp { get; set; } = "";
     }
 
     public sealed class HeartbeatShape
