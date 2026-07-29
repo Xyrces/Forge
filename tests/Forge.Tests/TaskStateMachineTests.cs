@@ -176,7 +176,7 @@ public class TaskStateMachineTests : IDisposable
         // second project's tasks failed with "Issue not found" and
         // their state never advanced. The store is now per-call.
         var otherPath = Path.Combine(_workDir, $"other-{Guid.NewGuid():N}.db");
-        using var other = new IssueStore(otherPath);
+        await using var other = new IssueStore(otherPath);
         try
         {
             var foreign = await other.CreateAsync(new NewIssue("task", "foreign task", ""), CancellationToken.None);
