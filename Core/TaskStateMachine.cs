@@ -103,7 +103,12 @@ public sealed class TaskStateMachine
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
         Add(TaskEvent.RunCompletedNoDiff, TaskLifecycleState.Completed,
-            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Completed);
+            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Completed,
+            // A fast no-diff run can complete before the RunStarted
+            // report lands (sibling events RunCompletedDiff and
+            // RunDied already allow Dispatching — observed live
+            // 2026-07-29: porthorizon task-11 stateViolation).
+            TaskLifecycleState.Dispatching);
         Add(TaskEvent.RunDied, TaskLifecycleState.StalledRework,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
