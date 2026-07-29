@@ -543,7 +543,7 @@ public sealed class PRWatcher
             var task = await _issues.GetAsync(taskId, cancellationToken);
             if (task is not null)
             {
-                await _lifecycle.ReportAsync(task, evt, watchTask, hasActiveDevRun: false, cancellationToken, extraMetadata);
+                await _lifecycle.ReportAsync(_issues, task, evt, watchTask, hasActiveDevRun: false, cancellationToken, extraMetadata);
             }
         }
         catch (Exception ex)

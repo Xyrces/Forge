@@ -68,7 +68,7 @@ public sealed class StartupRecovery
         try
         {
             var fresh = await _issues.GetAsync(issue.Id, ct) ?? issue;
-            await _lifecycle.ReportAsync(fresh, evt, watch: null, hasActiveDevRun: false, ct);
+            await _lifecycle.ReportAsync(_issues, fresh, evt, watch: null, hasActiveDevRun: false, ct);
         }
         catch (Exception ex)
         {

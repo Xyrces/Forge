@@ -1304,7 +1304,7 @@ Console.Error.WriteLine(ex.ToString());
             gates: options.Gates);
         var eventBus = new InMemoryDashboardEventBus();
         var lifecycle = new Core.TaskStateMachine(
-            issues, options.State.WriteAuthority,
+            options.State.WriteAuthority,
             loggerFactory.CreateLogger<Core.TaskStateMachine>());
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,

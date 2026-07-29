@@ -48,16 +48,19 @@ public enum TaskEvent
 /// </summary>
 public sealed class TaskStateMachine
 {
-    private readonly IIssueStore _issues;
     private readonly bool _writeAuthority;
     private readonly ILogger _logger;
 
+    /// <summary>The machine is store-AGNOSTIC (multi-project fix
+    /// 2026-07-29): every report passes the store that owns the task.
+    /// The previous construction-time store silently wrote lifecycle
+    /// state to the primary project's store, so a second project's
+    /// tasks failed every report with "Issue not found" and their
+    /// state never advanced.</summary>
     public TaskStateMachine(
-        IIssueStore issues,
         bool writeAuthority,
         ILogger logger)
     {
-        _issues = issues;
         _writeAuthority = writeAuthority;
         _logger = logger;
     }
@@ -150,8 +153,11 @@ public sealed class TaskStateMachine
     /// validate the transition, record state metadata. The legacy
     /// flag writes stay at the call sites until Phase 3 — the
     /// machine SHADOWS them for now. Returns the new state.
+    /// <paramref name="issues"/> is the store that OWNS the task
+    /// (the task's project store) — the machine writes nowhere else.
     /// </summary>
     public async Task<TaskLifecycleState> ReportAsync(
+        IIssueStore issues,
         IssueRecord task,
         TaskEvent evt,
         IssueRecord? watch,
@@ -200,7 +206,7 @@ public sealed class TaskStateMachine
         {
             foreach (var kv in extraMetadata) metadata[kv.Key] = kv.Value;
         }
-        await _issues.TransitionAsync(task.Id, task.Status, error: null, metadata: metadata, ct: ct);
+        await issues.TransitionAsync(task.Id, task.Status, error: null, metadata: metadata, ct: ct);
         return next;
     }
 }

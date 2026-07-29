@@ -187,7 +187,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 try
                 {
                     var fresh = await issues.GetAsync(issue.Id, ct) ?? issue;
-                    await lifecycle.ReportAsync(fresh, Core.TaskEvent.RunStarted, watch: null, hasActiveDevRun: true, ct);
+                    await lifecycle.ReportAsync(issues, fresh, Core.TaskEvent.RunStarted, watch: null, hasActiveDevRun: true, ct);
                 }
                 catch (Exception ex)
                 {

@@ -525,7 +525,7 @@ public sealed class OrchestratorAgent : IAgent
             // the watch is not loaded here (null is fine — watch-side
             // states are driven by PRWatcher's own reports).
             var fresh = await bundle.IssueStore.GetAsync(task.Id, ct) ?? task;
-            await _lifecycle.ReportAsync(fresh, evt, watch: null, hasActiveDevRun: false, ct);
+            await _lifecycle.ReportAsync(bundle.IssueStore, fresh, evt, watch: null, hasActiveDevRun: false, ct);
         }
         catch (Exception ex)
         {

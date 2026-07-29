@@ -41,7 +41,7 @@ public class TaskStateMachineTests : IDisposable
     }
 
     private TaskStateMachine Machine(bool authority = false)
-        => new(_issues, authority, NullLogger.Instance);
+        => new(authority, NullLogger.Instance);
 
     [Theory]
     // Happy paths from the 2026-07-25/26 incident trail.
@@ -87,7 +87,7 @@ public class TaskStateMachineTests : IDisposable
     public async Task Report_LegalTransition_RecordsStateMetadata()
     {
         var task = await SeedTaskAsync(IssueStatus.Pending);
-        var next = await Machine().ReportAsync(task, TaskEvent.Dispatched, null, false, CancellationToken.None);
+        var next = await Machine().ReportAsync(_issues, task, TaskEvent.Dispatched, null, false, CancellationToken.None);
 
         Assert.Equal(TaskLifecycleState.Dispatching, next);
         var after = (await _issues.GetAsync(task.Id))!;
@@ -103,7 +103,7 @@ public class TaskStateMachineTests : IDisposable
         // A Pending task reporting Merged (impossible in reality) —
         // shadow mode: allowed, flagged, state unchanged.
         var task = await SeedTaskAsync(IssueStatus.Pending);
-        var next = await Machine(authority: false).ReportAsync(task, TaskEvent.Merged, null, false, CancellationToken.None);
+        var next = await Machine(authority: false).ReportAsync(_issues, task, TaskEvent.Merged, null, false, CancellationToken.None);
 
         Assert.Equal(TaskLifecycleState.Pending, next);   // no move
         var after = (await _issues.GetAsync(task.Id))!;
@@ -114,7 +114,7 @@ public class TaskStateMachineTests : IDisposable
     public async Task Report_IllegalTransition_AuthorityMode_FlagsWithoutThrowing()
     {
         var task = await SeedTaskAsync(IssueStatus.Pending);
-        var next = await Machine(authority: true).ReportAsync(task, TaskEvent.Merged, null, false, CancellationToken.None);
+        var next = await Machine(authority: true).ReportAsync(_issues, task, TaskEvent.Merged, null, false, CancellationToken.None);
         Assert.Equal(TaskLifecycleState.Pending, next);
         Assert.Equal("Pending+Merged", (await _issues.GetAsync(task.Id))!.GetMetadata("stateViolation"));
     }
@@ -134,7 +134,7 @@ public class TaskStateMachineTests : IDisposable
             ["reworkAttempts"] = "1",
             ["state"] = "PROpen",                     // machine record (post-push)
         });
-        var next = await Machine().ReportAsync(task, TaskEvent.ReviewApproved, null, false, CancellationToken.None);
+        var next = await Machine().ReportAsync(_issues, task, TaskEvent.ReviewApproved, null, false, CancellationToken.None);
 
         Assert.Equal(TaskLifecycleState.MergeReady, next);
         Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("stateViolation"));
@@ -150,22 +150,50 @@ public class TaskStateMachineTests : IDisposable
         var m = Machine();
 
         Assert.Equal(TaskLifecycleState.Dispatching,
-            await m.ReportAsync(await Reload(task), TaskEvent.Dispatched, null, false, CancellationToken.None));
+            await m.ReportAsync(_issues, await Reload(task), TaskEvent.Dispatched, null, false, CancellationToken.None));
         await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object> { ["prNumber"] = "99" });
         Assert.Equal(TaskLifecycleState.PROpen,
-            await m.ReportAsync(await Reload(task), TaskEvent.PrOpened, null, false, CancellationToken.None));
+            await m.ReportAsync(_issues, await Reload(task), TaskEvent.PrOpened, null, false, CancellationToken.None));
         Assert.Equal(TaskLifecycleState.ReworkQueued,
-            await m.ReportAsync(await Reload(task), TaskEvent.CiRedOnPr, null, false, CancellationToken.None));
+            await m.ReportAsync(_issues, await Reload(task), TaskEvent.CiRedOnPr, null, false, CancellationToken.None));
         // The rework round: claimed (Dispatched), pushes (PrOpened —
         // production observes it via the dispatch-completed report).
         Assert.Equal(TaskLifecycleState.Dispatching,
-            await m.ReportAsync(await Reload(task), TaskEvent.Dispatched, null, false, CancellationToken.None));
+            await m.ReportAsync(_issues, await Reload(task), TaskEvent.Dispatched, null, false, CancellationToken.None));
         Assert.Equal(TaskLifecycleState.PROpen,
-            await m.ReportAsync(await Reload(task), TaskEvent.PrOpened, null, false, CancellationToken.None));
+            await m.ReportAsync(_issues, await Reload(task), TaskEvent.PrOpened, null, false, CancellationToken.None));
         Assert.Equal(TaskLifecycleState.MergeReady,
-            await m.ReportAsync(await Reload(task), TaskEvent.CiGreen, null, false, CancellationToken.None));
+            await m.ReportAsync(_issues, await Reload(task), TaskEvent.CiGreen, null, false, CancellationToken.None));
         Assert.Equal(TaskLifecycleState.Merged,
-            await m.ReportAsync(await Reload(task), TaskEvent.Merged, null, false, CancellationToken.None));
+            await m.ReportAsync(_issues, await Reload(task), TaskEvent.Merged, null, false, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Report_WritesToThePassedStore_NotTheMachineHome()
+    {
+        // Multi-project regression (2026-07-29): the machine used to
+        // hold a construction-time store, so lifecycle reports for a
+        // second project's tasks failed with "Issue not found" and
+        // their state never advanced. The store is now per-call.
+        var otherPath = Path.Combine(_workDir, $"other-{Guid.NewGuid():N}.db");
+        using var other = new IssueStore(otherPath);
+        try
+        {
+            var foreign = await other.CreateAsync(new NewIssue("task", "foreign task", ""), CancellationToken.None);
+            var m = Machine();
+            var next = await m.ReportAsync(other, foreign, TaskEvent.Dispatched, null, false, CancellationToken.None);
+            Assert.Equal(TaskLifecycleState.Dispatching, next);
+            var reloaded = await other.GetAsync(foreign.Id);
+            Assert.Equal("Dispatching", reloaded!.GetMetadata("state"));
+            // The home store knows nothing about the foreign task.
+            Assert.Null(await _issues.GetAsync(foreign.Id));
+        }
+        finally
+        {
+            try { File.Delete(otherPath); } catch { }
+            try { File.Delete(otherPath + "-wal"); } catch { }
+            try { File.Delete(otherPath + "-shm"); } catch { }
+        }
     }
 
     private async Task<IssueRecord> Reload(IssueRecord t) => (await _issues.GetAsync(t.Id))!;

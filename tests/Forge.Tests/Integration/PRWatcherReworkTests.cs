@@ -76,7 +76,7 @@ public class PRWatcherReworkTests : IDisposable
         events: _events,
         logger: NullLogger<PRWatcher>.Instance,
         gates: gates,
-        lifecycle: new Forge.Core.TaskStateMachine(_issues, writeAuthority: false, NullLogger.Instance),
+        lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
         workflow: workflow);
 
     private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
@@ -656,7 +656,7 @@ public class PRWatcherReworkTests : IDisposable
             staleAfter: TimeSpan.FromHours(1),
             events: _events,
             logger: NullLogger<PRWatcher>.Instance,
-            lifecycle: new Forge.Core.TaskStateMachine(_issues, writeAuthority: false, NullLogger.Instance),
+            lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
             runs: runs,
             reworkRoundGrace: TimeSpan.Zero);   // would "stall" instantly without the run check
 

@@ -241,7 +241,7 @@ public sealed class ReviewerDispatcher
                 var freshWatch = await _issues.GetAsync(watchTask.Id, cancellationToken) ?? watchTask;
                 if (task is not null)
                 {
-                    await _lifecycle.ReportAsync(task,
+                    await _lifecycle.ReportAsync(_issues, task,
                         verdict == ReviewerVerdict.Approve
                             ? Forge.Core.TaskEvent.ReviewApproved
                             : Forge.Core.TaskEvent.ReviewChangesRequested,
