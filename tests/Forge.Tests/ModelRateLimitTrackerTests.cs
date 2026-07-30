@@ -91,4 +91,20 @@ public class LlmAuthFailureClassificationTests
         var ex = new InvalidOperationException("request failed: 401 Unauthorized");
         Assert.False(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
     }
+
+    [Fact]
+    public void ClientResult402_Classifies()
+    {
+        var ex = new InvalidOperationException("run failed",
+            new System.ClientModel.ClientResultException("HTTP 402 (: ) Add credits to continue", null));
+        Assert.True(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+
+    [Fact]
+    public void Http402_InStringForm_Classifies()
+    {
+        var ex = new InvalidOperationException(
+            "ClientResultException: HTTP 402 (: )  Add credits to continue");
+        Assert.True(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
 }

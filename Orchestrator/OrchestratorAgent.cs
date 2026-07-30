@@ -357,8 +357,17 @@ public sealed class OrchestratorAgent : IAgent
     {
         for (var e = ex; e is not null; e = e.InnerException)
         {
-            if (e is System.ClientModel.ClientResultException cre && cre.Status is 401 or 403) return true;
+            // 401/403 auth, 402 payment/credits — all provider account
+            // state, all need the operator (observed live 2026-07-30:
+            // kilo-gateway 402 "Add credits to continue" burned 18
+            // sprint tasks overnight).
+            if (e is System.ClientModel.ClientResultException cre && cre.Status is 401 or 402 or 403) return true;
             if (e.Message.Contains("PAID_MODEL_AUTH_REQUIRED", StringComparison.Ordinal)) return true;
+            // The recorded lastError flattens the exception to a
+            // string ("ClientResultException: HTTP 402 (: ) Add
+            // credits...") — the typed check can't see it there.
+            if (e.Message.Contains("HTTP 402", StringComparison.Ordinal)
+                || e.Message.Contains("Add credits", StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
     }
