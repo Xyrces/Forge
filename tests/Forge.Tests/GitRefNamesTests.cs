@@ -314,6 +314,11 @@ public class GitRefNamesTests
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
+                // Guard against an inherited CWD that has already been deleted
+                // by TempRoot cleanup or other test teardown. Git fails with
+                // "Unable to read current working directory" when spawned into
+                // a removed directory, so run this command from a stable location.
+                WorkingDirectory = AppContext.BaseDirectory,
             };
 
             using var proc = Process.Start(psi);
