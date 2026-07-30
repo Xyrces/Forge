@@ -98,20 +98,28 @@ public sealed class TaskStateMachine
             // stall guard's clock measures from run-start, not from
             // the rework fire (observed live 2026-07-27: retried
             // stalls looked frozen at Dispatching for the whole run).
-            TaskLifecycleState.Dispatching, TaskLifecycleState.AgentRunning);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.AgentRunning,
+            // Claim-race tolerance: the requeue transition makes the
+            // task claimable before the ReworkFired machine write is
+            // visible, so the run's events can arrive while the record
+            // still says ReworkQueued (observed live 2026-07-29:
+            // task-12's record stranded after a Dispatched violation).
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.RunCompletedDiff, TaskLifecycleState.PROpen,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
-            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.RunCompletedNoDiff, TaskLifecycleState.Completed,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Completed,
             // A fast no-diff run can complete before the RunStarted
             // report lands (sibling events RunCompletedDiff and
             // RunDied already allow Dispatching — observed live
             // 2026-07-29: porthorizon task-11 stateViolation).
-            TaskLifecycleState.Dispatching);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.RunDied, TaskLifecycleState.StalledRework,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
-            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.PrOpened, TaskLifecycleState.PROpen,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
             // A rework round's workflow re-uses the open PR — the
@@ -121,7 +129,8 @@ public sealed class TaskStateMachine
             // A push after approval: the new head invalidates the
             // approval — back to PROpen (observed live: task-193,
             // MergeReady+PrOpened).
-            TaskLifecycleState.MergeReady);
+            TaskLifecycleState.MergeReady,
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.ReworkFired, TaskLifecycleState.ReworkQueued,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady, TaskLifecycleState.StalledRework,
             TaskLifecycleState.ParkedInfra, TaskLifecycleState.ReworkQueued);
