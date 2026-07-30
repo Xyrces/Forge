@@ -28,7 +28,7 @@ public class RunAgentExecutorTests : IDisposable
 
     public RunAgentExecutorTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-rae-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("rae");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
@@ -81,7 +81,7 @@ public class RunAgentExecutorTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-rae-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("rae-md"));
     }
 
     private sealed class TestScriptingFactory : IChatClientFactory
@@ -150,7 +150,7 @@ public class RunAgentExecutorTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-rae-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("rae-md"));
 
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var claimed = await ClaimExecutor.HandleAsync(
@@ -236,7 +236,7 @@ public class RunAgentExecutorTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-rae-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("rae-md"));
         var result = await RunAgentExecutor.HandleAsync(
             worktree, _issues, runner, _roleRegistry, _ => null, _events,
             new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),

@@ -3,7 +3,7 @@ using Forge.AgentTools;
 using Forge.Core;
 using Xunit;
 
-namespace PortHorizon.Agents.Tests;
+namespace Forge.Tests;
 
 /// <summary>
 /// P5.1 — Native SharedContext equivalent. Tests for
@@ -21,7 +21,7 @@ public class ArtifactReadToolTests : IDisposable
 
     public ArtifactReadToolTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-artread-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("artread");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _designArtifacts = new DesignArtifactStore(Path.Combine(_workDir, "issues.db"));

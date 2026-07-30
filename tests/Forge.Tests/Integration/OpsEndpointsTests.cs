@@ -27,7 +27,7 @@ public class OpsEndpointsTests : IDisposable
 
     public OpsEndpointsTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-ops-ep-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("ops-ep");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

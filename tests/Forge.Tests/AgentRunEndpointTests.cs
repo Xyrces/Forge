@@ -28,7 +28,7 @@ public class AgentRunEndpointTests : IDisposable
 
     public AgentRunEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-runs-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("runs-api");
         _ = new IssueStore(_dbPath);
         _runs = new AgentRunStore(_dbPath);
         _memory = new MemoryStore(_dbPath);

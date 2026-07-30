@@ -15,7 +15,7 @@ public class ProviderApiKeyResolverTests : IDisposable
 
     public ProviderApiKeyResolverTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-keyres-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("keyres");
         _issues = new IssueStore(_dbPath);
         _projects = new ProjectStore(_issues);
         _secrets = new SecretStore(_issues, DataProtectionProvider.Create("forge.secrets.test"),

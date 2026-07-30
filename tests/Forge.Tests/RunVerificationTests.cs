@@ -11,7 +11,7 @@ public class RunVerificationTests : IDisposable
 
     public RunVerificationTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-verify-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("verify");
         Directory.CreateDirectory(_workDir);
     }
 

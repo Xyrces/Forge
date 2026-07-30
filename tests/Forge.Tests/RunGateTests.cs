@@ -19,7 +19,7 @@ public class RunGateTests : IDisposable
 
     public RunGateTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-gates-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("gates");
         Directory.CreateDirectory(_workDir);
     }
 

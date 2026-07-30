@@ -18,7 +18,7 @@ public class SkillSeederTests : IDisposable
 
     public SkillSeederTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-seed-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("seed");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _skills = new SkillStore(_issues);

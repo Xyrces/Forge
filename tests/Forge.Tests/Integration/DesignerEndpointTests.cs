@@ -50,7 +50,7 @@ public class DesignerEndpointTests : IDisposable
     public DesignerEndpointTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-dendpoints-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("dendpoints");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");

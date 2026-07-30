@@ -13,7 +13,7 @@ public class IssueDepTests : IDisposable
 
     public IssueDepTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-dep-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("dep");
         _store = new IssueStore(_dbPath);
     }
 

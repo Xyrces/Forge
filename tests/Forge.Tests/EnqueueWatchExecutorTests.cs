@@ -16,7 +16,7 @@ public class EnqueueWatchExecutorTests : IDisposable
 
     public EnqueueWatchExecutorTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-watch-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("watch");
         _issues = new IssueStore(_dbPath);
     }
 

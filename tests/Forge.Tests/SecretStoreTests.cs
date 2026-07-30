@@ -21,7 +21,7 @@ public class SecretStoreTests : IDisposable
 
     public SecretStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-secret-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("secret");
         _issues = new IssueStore(_dbPath);
         _projects = new ProjectStore(_issues);
         // Ephemeral provider: the keys live only in process memory
