@@ -21,10 +21,8 @@ public sealed record DeploymentOptions
     // Command line invoked by DeploymentBuildRunner, split on the
     // first space into (FileName, Arguments). Defaults cover the
     // common .NET case; override for other stacks (npm, make, etc).
-    // The explicit solution file prevents MSB1011 when the repo root also
-    // contains a project file (e.g. Forge.Core.csproj at the root).
-    public string BuildCommand { get; set; } = "dotnet build -c Release Forge.sln";
-    public string TestCommand { get; set; } = "dotnet test -c Release Forge.sln";
+    public string BuildCommand { get; set; } = "dotnet build -c Release";
+    public string TestCommand { get; set; } = "dotnet test -c Release";
 
     // --- DeploymentKind.Script ---
     // Path to a script (any interpreter registered on PATH/shebang),
