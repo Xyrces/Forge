@@ -382,7 +382,7 @@ public class RunGateTests : IDisposable
     [InlineData("git log --oneline -5", false)]
     [InlineData("git diff HEAD", false)]
     [InlineData("git fetch origin", false)]
-    [InlineData("dotnet build Forge.Core.csproj", false)]
+    [InlineData("dotnet build Forge.Core/Forge.Core.csproj", false)]
     [InlineData("dotnet test tests/Forge.Tests", false)]
     [InlineData("grep -rn foo Core/", false)]
     [InlineData("cat file.cs", false)]

@@ -9,6 +9,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\Forge.Core.csproj" />
+    <ProjectReference Include="..\..\Forge.Core\Forge.Core.csproj" />
   </ItemGroup>
 </Project>
