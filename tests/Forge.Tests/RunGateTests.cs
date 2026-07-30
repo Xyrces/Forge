@@ -110,6 +110,32 @@ public class RunGateTests : IDisposable
     }
 
     [Fact]
+    public async Task TerritoryGate_GlobMentionInFilesSection_NotFlagged()
+    {
+        // Observed live 2026-07-29 (porthorizon task-13): the Files
+        // section referenced `Data/Ships/*.ship.json` (data the test
+        // asserts about, not a file to edit). The regex matched the
+        // ".ship.json" tail after the '*', producing a phantom
+        // "ship.json" path — 3 revisions burned, run rejected.
+        var plan = """
+            ## Goal
+            Verify ship data reaches the registry.
+            ## Files
+            - `PortHorizon.Tests/ECS/ShipDefinitionRegistryBootstrapTests.cs` (new)
+            - `Data/Ships/*.ship.json` (reference — already covered by the Data/**/*.json glob)
+            ## Approach
+            Assert the registry is non-empty after DataBootstrapper.Initialize.
+            ## Test
+            dotnet test --filter ShipDefinitionRegistryBootstrap
+            ## Done
+            Test green.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "PortHorizon.Tests/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
     public async Task TerritoryGate_NoTerritoryConstraint_Approves()
     {
         var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(FullPlan));

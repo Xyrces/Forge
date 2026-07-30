@@ -82,6 +82,12 @@ public sealed partial class PlanTerritoryGate : IRunGate
             if (!inFiles) continue;
             foreach (Match m in PathRegex().Matches(line))
             {
+                // Glob mentions (`Data/Ships/*.ship.json`, `**/*.json`)
+                // are prose about data, not file entries — the match
+                // starting right after a '*' would extract a phantom
+                // bare filename ("ship.json") the model can't fix
+                // (observed live 2026-07-29: task-13 rejected 3x).
+                if (m.Index > 0 && line[m.Index - 1] == '*') continue;
                 var p = m.Value.Trim('`', '\'', '"', ' ', ',', ';', '(', ')');
                 if (p.StartsWith("http", StringComparison.OrdinalIgnoreCase)) continue;
                 p = p.TrimStart('.', '/');
