@@ -1720,6 +1720,12 @@ try
         catch (Exception ex)
         {
             logger.LogCritical(ex, "Orchestrator crashed");
+            try { await dashboard.StopAsync(); } catch { }
+            // Die for real: a logged crash that leaves the process
+            // alive is a zombie systemd never restarts (observed live
+            // 2026-07-30 — host shut down at 03:08, process lingered
+            // for hours, dashboard dead, systemd blind).
+            Environment.Exit(1);
             return 1;
         }
         finally

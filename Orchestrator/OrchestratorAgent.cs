@@ -30,6 +30,11 @@ public sealed class OrchestratorAgent : IAgent
     // time so the loop doesn't hammer the API every dispatch cycle.
     private DateTime _githubRateLimitedUntil = DateTime.MinValue;
     private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
+
+    /// <summary>Backoff after a failed dispatch cycle (transient infra
+    /// outage). Long enough to let DNS/SQL recover, short enough that
+    /// the queue resumes promptly.</summary>
+    private const int CycleFailureBackoffSeconds = 30;
     // Watch sweep cadence. Previously every dispatch cycle spawned a
     // parallel Task.Run per Pending watch, and ProcessWatchTaskAsync
     // looped internally every 30s with 3 API calls per iteration —
@@ -104,7 +109,30 @@ public sealed class OrchestratorAgent : IAgent
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await DispatchCycleAsync(cancellationToken);
+                try
+                {
+                    await DispatchCycleAsync(cancellationToken);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // Transient infra failures (SQL outage, DNS flake,
+                    // gateway blips OUTSIDE an agent run) must not kill
+                    // the loop — log, back off, continue (observed live
+                    // 2026-07-30: a 3am Azure SQL outage crashed the
+                    // orchestrator and took the dashboard down with it
+                    // for hours; systemd saw a live process and never
+                    // restarted).
+                    _logger.LogError(ex,
+                        "Dispatch cycle failed; backing off {BackoffSeconds}s and continuing",
+                        CycleFailureBackoffSeconds);
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(CycleFailureBackoffSeconds), cancellationToken);
+                    }
+                    catch (OperationCanceledException) { break; }
+                    continue;
+                }
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(_spawnerOptions.PollIntervalSeconds), cancellationToken);
