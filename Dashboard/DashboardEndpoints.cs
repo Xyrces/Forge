@@ -209,14 +209,19 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
         });
 
         // ---- Sprints ----
-        app.MapGet("/api/sprints", async (string? active, CancellationToken ct) =>
+        app.MapGet("/api/sprints", async (string? active, string? projectId, CancellationToken ct) =>
         {
+            // Multi-project: sprint reads route to the owning project's
+            // store (default is the primary), same as issue reads.
+            var store = !string.IsNullOrWhiteSpace(projectId)
+                ? projectContexts?.Find(projectId)?.Sprints ?? sprints
+                : sprints;
             if (active == "true")
             {
-                var s = await sprints.GetActiveAsync(ct);
+                var s = await store.GetActiveAsync(ct);
                 return Results.Json(s is null ? Array.Empty<object>() : new[] { ToSprintView(s) }, DashboardJson.Options);
             }
-            var list = await sprints.ListAsync(activeOnly: false, ct);
+            var list = await store.ListAsync(activeOnly: false, ct);
             return Results.Json(list.Select(ToSprintView).ToArray(), DashboardJson.Options);
         });
 

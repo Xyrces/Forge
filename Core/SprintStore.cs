@@ -44,6 +44,14 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         await using var tx = await conn.BeginTransactionAsync(ct);
         var id = $"sprint-{Guid.NewGuid().ToString("N")[..10]}";
         var now = DateTime.UtcNow;
+        // Sequential sprint number (per store/project): names read
+        // "Sprint N: <short goal>" so the board is scannable — bare
+        // hash ids gave no ordering or goal signal.
+        var number = await NextNumberAsync(conn, tx, ct);
+        var baseName = spec.Name.Length > 60 ? spec.Name[..60].TrimEnd() : spec.Name;
+        var name = System.Text.RegularExpressions.Regex.IsMatch(spec.Name, @"^Sprint \d+:", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            ? spec.Name
+            : $"Sprint {number}: {baseName}";
         if (spec.Status == SprintStatus.Active)
             await DeactivateOthersAsync(conn, tx, id, ct);
         await using (var cmd = conn.CreateCommand())
@@ -54,7 +62,7 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
                 VALUES (@id, @name, @goal, @start, @end, @status, @now, @now)
                 """;
             cmd.AddParam("@id", id);
-            cmd.AddParam("@name", spec.Name);
+            cmd.AddParam("@name", name);
             cmd.AddParam("@goal", spec.Goal);
             cmd.AddParam("@start", IssueStore.DateFormatTime(spec.StartDate));
             cmd.AddParam("@end", IssueStore.DateFormatTime(spec.EndDate));
@@ -63,7 +71,16 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
-        return new SprintRecord(id, spec.Name, spec.Goal, spec.StartDate, spec.EndDate, spec.Status, now, now);
+        return new SprintRecord(id, name, spec.Goal, spec.StartDate, spec.EndDate, spec.Status, now, now);
+    }
+
+    private async Task<int> NextNumberAsync(System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"SELECT COUNT(*) FROM {T("sprint")}";
+        var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
+        return count + 1;
     }
 
     public async Task<IReadOnlyList<SprintRecord>> ListAsync(bool activeOnly, CancellationToken ct = default)

@@ -415,8 +415,16 @@ public sealed class SprintAssembler
                 && !string.IsNullOrWhiteSpace(epic.Description)
                     ? epic.Description!
                     : null;
-            return (spec?.Title ?? key,
-                epicDesc ?? $"Complete all groomed tasks for {spec?.Title ?? key}.",
+            // Fallback chain when the spec read misses (transient
+            // version-bump race): the parent STORY's title is still a
+            // meaningful short goal — a raw spec id never is.
+            var storyTitle = groups.TryGetValue(key, out var members) && members.Count > 0
+                && members[0].ParentIssueId is not null
+                && byId.TryGetValue(members[0].ParentIssueId!, out var story)
+                    ? story.Title
+                    : null;
+            return (spec?.Title ?? storyTitle ?? key,
+                epicDesc ?? $"Complete all groomed tasks for {spec?.Title ?? storyTitle ?? key}.",
                 spec?.CreatedAt ?? DateTime.MaxValue);
         }
 

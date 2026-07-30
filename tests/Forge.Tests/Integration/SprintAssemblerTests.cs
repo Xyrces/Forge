@@ -162,7 +162,7 @@ public class SprintAssemblerTests : IDisposable
 
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
-        Assert.Equal("Health endpoints", active.Name);
+        Assert.Equal("Sprint 1: Health endpoints", active.Name);
         Assert.Equal("Ship the health/meta endpoint set.", active.Goal);
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
@@ -269,7 +269,7 @@ public class SprintAssemblerTests : IDisposable
         Assert.Equal(SprintStatus.Completed, all.Single(s => s.Id == first.Id).Status);
         var active = await _sprints.GetActiveAsync();
         Assert.NotEqual(first.Id, active!.Id);
-        Assert.Equal("Sprint B", active.Name);
+        Assert.Equal("Sprint 2: Sprint B", active.Name);
     }
 
     [Fact]
@@ -288,7 +288,7 @@ public class SprintAssemblerTests : IDisposable
 
         await Tick();
         var first = (await _sprints.GetActiveAsync())!;
-        Assert.Equal("Pipeline work", first.Name);
+        Assert.Equal("Sprint 1: Pipeline work", first.Name);
 
         foreach (var id in await _sprints.GetIssueIdsAsync(first.Id))
         {
@@ -300,7 +300,7 @@ public class SprintAssemblerTests : IDisposable
 
         // Oldest ad-hoc task gets its OWN sprint (never bundled).
         var second = (await _sprints.GetActiveAsync())!;
-        Assert.Equal("first one-off", second.Name);
+        Assert.Equal("Sprint 2: first one-off", second.Name);
         var members = await _sprints.GetIssueIdsAsync(second.Id);
         Assert.Contains(older.Id, members);
         Assert.DoesNotContain(newer.Id, members);
@@ -309,7 +309,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
         var third = (await _sprints.GetActiveAsync())!;
         Assert.NotEqual(second.Id, third.Id);
-        Assert.Equal("second one-off", third.Name);
+        Assert.Equal("Sprint 3: second one-off", third.Name);
     }
 
     [Fact]
@@ -399,7 +399,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
-        Assert.Equal("ungroomed one-off", active!.Name);
+        Assert.Equal("Sprint 1: ungroomed one-off", active!.Name);
     }
 
     [Fact]
