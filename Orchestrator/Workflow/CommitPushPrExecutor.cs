@@ -32,10 +32,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         IMemoryExtractor memoryExtractor,
         MemoryExtractionStore extractionStore,
         ILogger<CommitPushPrExecutor> logger,
-        Forge.Core.Workflow.WorkflowResolver? workflow = null)
+        Forge.Core.Workflow.WorkflowResolver? workflow = null,
+        IReadOnlyList<string>? verifyCommands = null)
         : base(
             "commit-push-pr",
-            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -64,7 +65,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         MemoryExtractionStore extractionStore,
         ILogger logger,
         Forge.Core.Workflow.WorkflowResolver? workflow,
-        CancellationToken ct)
+        IReadOnlyList<string>? verifyCommands = null,
+        CancellationToken ct = default)
     {
         if (input.Result == AgentResult.Skipped)
         {
@@ -186,6 +188,58 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                     ["response"] = Truncate(input.Text ?? "", 400),
                 }));
             return new PrOpened(input, PrResult.NoDiff, 0, null);
+        }
+
+        // Pre-push verification gate: run the project's build/test
+        // commands in the worktree BEFORE pushing. A failure here
+        // bounces the task back to the agent with the output — no PR
+        // churn, no watch round; GitHub CI stays the safety net.
+        // verifyCommands: null = auto-detect (dotnet), empty = disabled.
+        var commands = verifyCommands ?? DetectDefaultVerifyCommands(worktreePath);
+        if (commands.Count > 0)
+        {
+            logger.LogInformation("CommitPushPr({Id}): running {Count} verification command(s) before push", issue.Id, commands.Count);
+            var verification = await RunVerification.RunAsync(worktreePath, commands, logger, ct);
+            if (!verification.Ok)
+            {
+                var attempts = int.TryParse(
+                    (await issues.GetAsync(issue.Id, ct))?.GetMetadata("noProgressAttempts"), out var vn) ? vn + 1 : 1;
+                var detail = string.Join("\n\n", verification.Failures);
+                if (attempts >= MaxNoProgressAttempts)
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Failed,
+                        $"pre-push verification failed in {attempts} attempts",
+                        new Dictionary<string, object>
+                        {
+                            ["noProgressAttempts"] = attempts.ToString(),
+                            ["lastError"] = $"pre-push verification failed:\n{detail}",
+                            ["lastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                        }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Failed (verification failed in {attempts} attempts)",
+                        new Dictionary<string, object?> { ["response"] = Truncate(detail, 400) }));
+                    logger.LogError("Issue {Id}: pre-push verification failed after {Attempts} attempts — Failed for operator review", issue.Id, attempts);
+                }
+                else
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        $"pre-push verification failed (attempt {attempts}): {verification.Failures[0][..Math.Min(200, verification.Failures[0].Length)]}",
+                        new Dictionary<string, object>
+                        {
+                            ["noProgressAttempts"] = attempts.ToString(),
+                            ["lastError"] = $"pre-push verification failed:\n{detail}",
+                            ["lastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                        }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Requeued (verification failed, attempt {attempts})",
+                        new Dictionary<string, object?> { ["response"] = Truncate(detail, 400) }));
+                    logger.LogWarning("Issue {Id}: pre-push verification failed — requeued with output (attempt {Attempts})", issue.Id, attempts);
+                }
+                return new PrOpened(input, PrResult.NoDiff, 0, null);
+            }
+            logger.LogInformation("CommitPushPr({Id}): verification passed", issue.Id);
         }
 
         // P4 Stage A: advance through the dispatch checkpoints so
@@ -320,6 +374,18 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         => $"Task: {issue.Id}\n\nSHA: {headSha}\n\n## Model response\n\n{modelText ?? string.Empty}";
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
+
+    /// <summary>Default verification when the project doesn't configure
+    /// $verify: dotnet build + test for dotnet repos, nothing otherwise.</summary>
+    internal static IReadOnlyList<string> DetectDefaultVerifyCommands(string worktreePath)
+    {
+        var isDotnet = Directory.EnumerateFiles(worktreePath, "*.sln").Any()
+            || Directory.EnumerateFiles(worktreePath, "*.slnx").Any()
+            || Directory.EnumerateFiles(worktreePath, "*.csproj").Any();
+        return isDotnet
+            ? new[] { "dotnet build -c Release --nologo", "dotnet test -c Release --nologo" }
+            : Array.Empty<string>();
+    }
 
     private static async Task UpdateMetadataAsync(
         IIssueStore issues, string id,

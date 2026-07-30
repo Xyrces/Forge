@@ -41,6 +41,12 @@ public sealed record ProjectOptions
     // Empty = the built-in RoleAgentRegistry territory applies.
     public Dictionary<string, Core.RoleTerritory> Territories { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    // Pre-push verification commands (the "$verify" roles_json key):
+    // shell commands run in the worktree before a dev run's branch is
+    // pushed. Null = auto-detect (dotnet build+test for dotnet repos);
+    // empty = verification disabled.
+    public List<string>? VerifyCommands { get; set; }
+
     // P8: optional deployment pipeline config. Null/omitted means the
     // project has no configured deployment action -- it can still be
     // enqueued for build-verification, but "approve" has nothing to

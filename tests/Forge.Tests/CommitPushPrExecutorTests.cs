@@ -300,6 +300,88 @@ public class CommitPushPrExecutorTests : IDisposable
         // UpdatedAt is the merge's, not a fresh no-diff write).
     }
 
+    [Fact]
+    public async Task VerificationFailure_RequeuesWithOutput_NoPush()
+    {
+        // The pre-push gate: a failing build/test bounces the task
+        // back to the agent with the output — no push, no PR, no
+        // watch round. GitHub CI stays the safety net.
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null,
+            verifyCommands: new[] { "echo BUILD-BROKE-MARKER; exit 1" });
+
+        Assert.Equal(PrResult.NoDiff, result.Result);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+        Assert.Contains("BUILD-BROKE-MARKER", after.GetMetadata("lastError"));
+        // No push: the push checkpoint was never reached.
+        Assert.True(after.DispatchCheckpoint < DispatchCheckpoint.PushDone,
+            $"expected no push, checkpoint is {after.DispatchCheckpoint}");
+    }
+
+    [Fact]
+    public async Task VerificationPass_ProceedsToPush()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null,
+            verifyCommands: new[] { "true" });
+
+        Assert.Equal(42, result.PrNumber);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(DispatchCheckpoint.PrOpened, after!.DispatchCheckpoint);
+    }
+
+    [Fact]
+    public void DefaultVerification_DotnetRepo_BuildsAndTests()
+    {
+        File.WriteAllText(Path.Combine(_workDir, "X.csproj"), "<Project />");
+        var commands = CommitPushPrExecutor.DetectDefaultVerifyCommands(_workDir);
+        Assert.Equal(2, commands.Count);
+        Assert.Contains("build", commands[0]);
+        Assert.Contains("test", commands[1]);
+    }
+
+    [Fact]
+    public void DefaultVerification_NonDotnetRepo_NoCommands()
+    {
+        var empty = Path.Combine(_workDir, "empty");
+        Directory.CreateDirectory(empty);
+        Assert.Empty(CommitPushPrExecutor.DetectDefaultVerifyCommands(empty));
+    }
+
     // WithDiff test omitted: GitHubService.CreatePullRequestAsync returns
     // a read-only Octokit.PullRequest that's hard to stub without a real
     // connection. The with-diff path is covered by the live demo

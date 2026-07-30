@@ -250,8 +250,8 @@ public static class ProjectsEndpoints
         SlotTable slots,
         CancellationToken ct)
     {
-        if (body?.Roles is null && body?.Territory is null)
-            return Results.BadRequest(new { error = "roles and/or territory object required, e.g. { \"roles\": { \"coredev\": 2 }, \"territory\": { \"coredev\": { \"prefixes\": [\"Src/\"], \"rootFiles\": true } } }" });
+        if (body?.Roles is null && body?.Territory is null && body?.Verify is null)
+            return Results.BadRequest(new { error = "roles and/or territory and/or verify required, e.g. { \"roles\": { \"coredev\": 2 }, \"verify\": [\"dotnet build -c Release\", \"dotnet test -c Release\"] }" });
 
         if (body.Roles is not null)
         {
@@ -300,13 +300,24 @@ public static class ProjectsEndpoints
             if (!updated) return Results.NotFound(new { error = "project not found", id });
         }
 
+        if (body.Verify is not null)
+        {
+            // Pre-push verification commands: non-empty, bounded length,
+            // no absolute paths outside the worktree assumptions.
+            if (body.Verify.Count > 16 || body.Verify.Any(c => string.IsNullOrWhiteSpace(c) || c.Length > 400))
+                return Results.BadRequest(new { error = "verify: up to 16 non-empty commands (<=400 chars each)" });
+            var updated = await store.UpdateVerifyCommandsAsync(id, body.Verify, ct);
+            if (!updated) return Results.NotFound(new { error = "project not found", id });
+        }
+
         var project = await store.GetAsync(id, ct);
-        return Results.Ok(new { projectId = id, roles = project?.Roles, territory = project?.Territories });
+        return Results.Ok(new { projectId = id, roles = project?.Roles, territory = project?.Territories, verify = project?.VerifyCommands });
     }
 
     public sealed record PutRolesRequest(
         Dictionary<string, int>? Roles,
-        Dictionary<string, PutTerritoryEntry>? Territory = null);
+        Dictionary<string, PutTerritoryEntry>? Territory = null,
+        List<string>? Verify = null);
 
     public sealed record PutTerritoryEntry(List<string> Prefixes, bool RootFiles = false);
 

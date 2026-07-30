@@ -158,6 +158,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
                     Root = root,
                     Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
                     Territories = new Dictionary<string, Core.RoleTerritory>(r.Territories, StringComparer.OrdinalIgnoreCase),
+                    VerifyCommands = r.VerifyCommands?.ToList(),
                 });
             }
             return list;

@@ -1368,7 +1368,8 @@ Console.Error.WriteLine(ex.ToString());
                 projectId: primary.Id,
                 timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
                 lifecycle: lifecycle,
-                workflow: new Core.Workflow.WorkflowResolver(memoryStore))
+                workflow: new Core.Workflow.WorkflowResolver(memoryStore),
+                verifyCommands: primary.VerifyCommands)
                 .Build();
             var services = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -1404,7 +1405,8 @@ Console.Error.WriteLine(ex.ToString());
                         loggerFactory: loggerFactory,
                         sprints: bundle.Sprints,
                         timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
-                        workflow: new Core.Workflow.WorkflowResolver(memoryStore));
+                        workflow: new Core.Workflow.WorkflowResolver(memoryStore),
+                        verifyCommands: bundle.Project.VerifyCommands);
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());

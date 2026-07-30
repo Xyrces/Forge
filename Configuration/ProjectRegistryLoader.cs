@@ -60,5 +60,6 @@ public static class ProjectRegistryLoader
         // orchestrator seeds SlotTable from these at startup.
         Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
         Territories = new Dictionary<string, Core.RoleTerritory>(r.Territories, StringComparer.OrdinalIgnoreCase),
+        VerifyCommands = r.VerifyCommands?.ToList(),
     };
 }

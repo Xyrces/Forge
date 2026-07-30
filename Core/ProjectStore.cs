@@ -21,7 +21,8 @@ public sealed record ProjectRecord(
     DateTime? LastSyncedAt,
     string? LastSyncError,
     IReadOnlyDictionary<string, int>? Roles = null,
-    IReadOnlyDictionary<string, RoleTerritory>? Territories = null)
+    IReadOnlyDictionary<string, RoleTerritory>? Territories = null,
+    IReadOnlyList<string>? VerifyCommands = null)
 {
     /// <summary>Per-project role-cap overrides (role -&gt; max). Empty = use defaults.</summary>
     public IReadOnlyDictionary<string, int> Roles { get; init; } =
@@ -30,6 +31,11 @@ public sealed record ProjectRecord(
     /// <summary>Per-project role-territory overrides. Empty = built-in registry territory.</summary>
     public IReadOnlyDictionary<string, RoleTerritory> Territories { get; init; } =
         Territories ?? new Dictionary<string, RoleTerritory>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Pre-push verification commands (build/test gates),
+    /// from the <c>$verify</c> roles_json key. Null = auto-detect;
+    /// empty = verification disabled.</summary>
+    public IReadOnlyList<string>? VerifyCommands { get; init; } = VerifyCommands;
 }
 
 public sealed record NewProject(
@@ -63,6 +69,13 @@ public interface IProjectStore
     /// take effect without a restart.
     /// </summary>
     Task<bool> UpdateTerritoriesAsync(string id, IReadOnlyDictionary<string, RoleTerritory> territories, CancellationToken ct = default);
+
+    /// <summary>
+    /// Replace the pre-push verification command list (the <c>$verify</c>
+    /// roles_json key). Caps and territory are preserved. Empty list =
+    /// verification disabled for the project.
+    /// </summary>
+    Task<bool> UpdateVerifyCommandsAsync(string id, IReadOnlyList<string> commands, CancellationToken ct = default);
 }
 
 public sealed class ProjectStore : IProjectStore, IAsyncDisposable
@@ -203,7 +216,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(roles);
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
-        var json = SerializeRolesJson(roles, existing.Territories);
+        var json = SerializeRolesJson(roles, existing.Territories, existing.Verify);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
@@ -213,20 +226,30 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
         if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, territories);
+        var json = SerializeRolesJson(existing.Roles, territories, existing.Verify);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
-    private async Task<(bool Exists, IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories)> ReadRolesJsonAsync(
+    public async Task<bool> UpdateVerifyCommandsAsync(string id, IReadOnlyList<string> commands, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(commands);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        var existing = await ReadRolesJsonAsync(conn, id, ct);
+        if (!existing.Exists) return false;
+        var json = SerializeRolesJson(existing.Roles, existing.Territories, commands);
+        return await WriteRolesJsonAsync(conn, id, json, ct);
+    }
+
+    private async Task<(bool Exists, IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories, IReadOnlyList<string>? Verify)> ReadRolesJsonAsync(
         System.Data.Common.DbConnection conn, string id, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""SELECT roles_json FROM {T("project")} WHERE id = @id""";
         cmd.AddParam("@id", id);
         var raw = await cmd.ExecuteScalarAsync(ct);
-        if (raw is null || raw is DBNull) return (false, new Dictionary<string, int>(), new Dictionary<string, RoleTerritory>());
+        if (raw is null || raw is DBNull) return (false, new Dictionary<string, int>(), new Dictionary<string, RoleTerritory>(), null);
         var (roles, territories) = ParseRolesJson(raw as string);
-        return (true, roles, territories);
+        return (true, roles, territories, ParseVerify(raw as string));
     }
 
     private async Task<bool> WriteRolesJsonAsync(System.Data.Common.DbConnection conn, string id, string json, CancellationToken ct)
@@ -250,11 +273,32 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         LastSyncedAt: rd.IsDBNull(7) ? null : IssueStore.ParseTime(rd.GetString(7)),
         LastSyncError: rd.IsDBNull(8) ? null : rd.GetString(8),
         Roles: ParseRoles(rd.IsDBNull(9) ? null : rd.GetString(9)),
-        Territories: ParseTerritories(rd.IsDBNull(9) ? null : rd.GetString(9)));
+        Territories: ParseTerritories(rd.IsDBNull(9) ? null : rd.GetString(9)),
+        VerifyCommands: ParseVerify(rd.IsDBNull(9) ? null : rd.GetString(9)));
 
     /// <summary>Reserved roles_json key holding the territory block; keys
     /// starting with '$' are metadata, never role caps.</summary>
     internal const string TerritoryKey = "$territory";
+
+    /// <summary>Reserved roles_json key holding the pre-push
+    /// verification command list.</summary>
+    internal const string VerifyKey = "$verify";
+
+    private static IReadOnlyList<string>? ParseVerify(string? json)
+    {
+        var obj = ParseObject(json);
+        if (obj is null
+            || !obj.TryGetPropertyValue(VerifyKey, out var block)
+            || block is not System.Text.Json.Nodes.JsonArray arr)
+            return null;
+        var commands = new List<string>();
+        foreach (var item in arr)
+        {
+            var cmd = item?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(cmd)) commands.Add(cmd);
+        }
+        return commands;
+    }
 
     private static (IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories) ParseRolesJson(string? json)
         => (ParseRoles(json), ParseTerritories(json));
@@ -318,7 +362,8 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
 
     private static string SerializeRolesJson(
         IReadOnlyDictionary<string, int> roles,
-        IReadOnlyDictionary<string, RoleTerritory> territories)
+        IReadOnlyDictionary<string, RoleTerritory> territories,
+        IReadOnlyList<string>? verifyCommands = null)
     {
         var obj = new System.Text.Json.Nodes.JsonObject();
         foreach (var kv in roles)
@@ -339,6 +384,11 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
                 };
             }
             obj[TerritoryKey] = block;
+        }
+        if (verifyCommands is not null)
+        {
+            obj[VerifyKey] = new System.Text.Json.Nodes.JsonArray(
+                verifyCommands.Select(c => (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonValue.Create(c)!).ToArray());
         }
         return obj.ToJsonString();
     }
