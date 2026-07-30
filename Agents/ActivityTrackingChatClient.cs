@@ -19,6 +19,7 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
 {
     private readonly string _runId;
     private readonly AgentRunStore _runs;
+    private readonly Func<string?>? _phaseProvider;
     private int _roundTrips;
     private int _toolCalls;
     private int _textChars;
@@ -29,11 +30,13 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
     private readonly List<ChatMessage> _liveTranscript = new();
     private int _seenHistory;
 
-    public ActivityTrackingChatClient(IChatClient inner, string runId, AgentRunStore runs)
+    public ActivityTrackingChatClient(IChatClient inner, string runId, AgentRunStore runs,
+        Func<string?>? phaseProvider = null)
         : base(inner)
     {
         _runId = runId;
         _runs = runs;
+        _phaseProvider = phaseProvider;
     }
 
     public override async Task<ChatResponse> GetResponseAsync(
@@ -62,7 +65,8 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
         {
             await _runs.UpdateProgressAsync(_runId, roundTrips, toolCalls, textChars,
                 transcriptJson: MafAgentRunner.BuildTranscriptJson(_liveTranscript),
-                ct: CancellationToken.None);
+                ct: CancellationToken.None,
+                phase: _phaseProvider?.Invoke());
         }
         catch { /* best-effort — never break a run */ }
 

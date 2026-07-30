@@ -1,9 +1,10 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Forge.AgentTools;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Core.Workflow;
 using Forge.Dashboard;
 using Forge.Reviewer;
 
@@ -29,6 +30,11 @@ public sealed class OrchestratorAgent : IAgent
     // time so the loop doesn't hammer the API every dispatch cycle.
     private DateTime _githubRateLimitedUntil = DateTime.MinValue;
     private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
+
+    /// <summary>Backoff after a failed dispatch cycle (transient infra
+    /// outage). Long enough to let DNS/SQL recover, short enough that
+    /// the queue resumes promptly.</summary>
+    private const int CycleFailureBackoffSeconds = 30;
     // Watch sweep cadence. Previously every dispatch cycle spawned a
     // parallel Task.Run per Pending watch, and ProcessWatchTaskAsync
     // looped internally every 30s with 3 API calls per iteration —
@@ -46,6 +52,7 @@ public sealed class OrchestratorAgent : IAgent
     // dispatches FOR THAT MODEL ONLY.
     private readonly ModelRateLimitTracker _modelCooldowns;
     private readonly Core.TaskStateMachine? _lifecycle;
+    private readonly Core.Workflow.WorkflowResolver? _workflow;
     private Agents.LlmConfig? _llmConfig;
     private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
     // In-flight dev dispatches. The cycle fire-and-forgets runs via
@@ -76,7 +83,8 @@ public sealed class OrchestratorAgent : IAgent
         ILoggerFactory? loggerFactory = null,
         Slots.SlotTable? slots = null,
         ModelRateLimitTracker? modelCooldowns = null,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Core.Workflow.WorkflowResolver? workflow = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -90,6 +98,7 @@ public sealed class OrchestratorAgent : IAgent
         _slots = slots ?? new Slots.SlotTable();
         _modelCooldowns = modelCooldowns ?? new ModelRateLimitTracker();
         _lifecycle = lifecycle;
+        _workflow = workflow;
         _maxRetryCount = 1;
     }
 
@@ -100,7 +109,30 @@ public sealed class OrchestratorAgent : IAgent
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await DispatchCycleAsync(cancellationToken);
+                try
+                {
+                    await DispatchCycleAsync(cancellationToken);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // Transient infra failures (SQL outage, DNS flake,
+                    // gateway blips OUTSIDE an agent run) must not kill
+                    // the loop — log, back off, continue (observed live
+                    // 2026-07-30: a 3am Azure SQL outage crashed the
+                    // orchestrator and took the dashboard down with it
+                    // for hours; systemd saw a live process and never
+                    // restarted).
+                    _logger.LogError(ex,
+                        "Dispatch cycle failed; backing off {BackoffSeconds}s and continuing",
+                        CycleFailureBackoffSeconds);
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(CycleFailureBackoffSeconds), cancellationToken);
+                    }
+                    catch (OperationCanceledException) { break; }
+                    continue;
+                }
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(_spawnerOptions.PollIntervalSeconds), cancellationToken);
@@ -144,21 +176,38 @@ public sealed class OrchestratorAgent : IAgent
                 // stories + a watch starved 4 feature tasks).
                 var allReady = await bundle.IssueStore.ReadyAsync(0, sprintId: null, cancellationToken);
 
-                // Watches are lifecycle subscriptions, not sprint
-                // work: they sweep from the FULL queue regardless of
-                // sprint state (a sprint-scoped fetch would starve
-                // them — watches are never linked to sprints).
-                var watchTasks = allReady.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
-                if (watchTasks.Count > 0 && DateTime.UtcNow < _githubRateLimitedUntil)
+                // Watched tasks sweep by STATE, not by a watch row
+                // (watch issues were retired 2026-07-29 — the task
+                // carries prNumber + the lifecycle states, so a
+                // separate subscription row was pure duplication).
+                // Any live task with a PR number is watched, regardless
+                // of sprint state. Legacy pr-watch rows still in the
+                // queue are closed here (their tasks are picked up by
+                // the same sweep — the metadata lives on the task).
+                var watchedTasks = (await bundle.IssueStore.ListAsync(new IssueFilter(), cancellationToken))
+                    .Where(t => !AgentTaskTypes.IsContainer(t.Type)
+                        && t.Type != AgentTaskTypes.PrWatch
+                        && t.Status is IssueStatus.Pending or IssueStatus.InProgress
+                        && t.GetMetadata("prNumber") is not null)
+                    .ToList();
+                var legacyWatches = allReady.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
+                foreach (var legacy in legacyWatches)
                 {
-                    _logger.LogDebug("Dispatch cycle: skipping {N} watch issues — GitHub rate-limit cooldown until {Until:HH:mm:ss}",
-                        watchTasks.Count, _githubRateLimitedUntil);
-                    watchTasks = new List<IssueRecord>();
+                    await bundle.IssueStore.TransitionAsync(legacy.Id, IssueStatus.Closed,
+                        "superseded: PR watching is driven by the watched task's own state (prNumber metadata) — no watch row needed",
+                        ct: cancellationToken);
+                    _logger.LogInformation("Closed legacy watch {Id} (superseded by state-driven watching)", legacy.Id);
                 }
-                if (watchTasks.Count > 0 && DateTime.UtcNow >= _nextWatchSweepUtc)
+                if (watchedTasks.Count > 0 && DateTime.UtcNow < _githubRateLimitedUntil)
+                {
+                    _logger.LogDebug("Dispatch cycle: skipping {N} watched tasks — GitHub rate-limit cooldown until {Until:HH:mm:ss}",
+                        watchedTasks.Count, _githubRateLimitedUntil);
+                    watchedTasks = new List<IssueRecord>();
+                }
+                if (watchedTasks.Count > 0 && DateTime.UtcNow >= _nextWatchSweepUtc)
                 {
                     _nextWatchSweepUtc = DateTime.UtcNow + WatchSweepInterval;
-                    await RunWatchSweepAsync(watchTasks, bundle, cancellationToken);
+                    await RunWatchSweepAsync(watchedTasks, bundle, cancellationToken);
                 }
 
                 // Sprint flow gate: ALL engineering work happens inside
@@ -292,43 +341,84 @@ public sealed class OrchestratorAgent : IAgent
         return false;
     }
 
+    // Provider auth failure cooldown: much longer than the 429 one —
+    // a lapsed key needs the operator, and each probe re-extends it.
+    private static readonly TimeSpan LlmAuthFailureCooldown = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Provider-side auth failure (lapsed/revoked key, plan sign-in
+    /// required). NOT the task's fault: the run never really started,
+    /// so the failure must not consume the task's retry budget — the
+    /// task requeues strike-free and dispatch on that model cools
+    /// down (observed live 2026-07-29: a kilo-gateway 401 storm
+    /// burned 16 porthorizon tasks to Failed in ~10 minutes).
+    /// </summary>
+    internal static bool IsLlmAuthFailure(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            // 401/403 auth, 402 payment/credits — all provider account
+            // state, all need the operator (observed live 2026-07-30:
+            // kilo-gateway 402 "Add credits to continue" burned 18
+            // sprint tasks overnight).
+            if (e is System.ClientModel.ClientResultException cre && cre.Status is 401 or 402 or 403) return true;
+            if (e.Message.Contains("PAID_MODEL_AUTH_REQUIRED", StringComparison.Ordinal)) return true;
+            // The recorded lastError flattens the exception to a
+            // string ("ClientResultException: HTTP 402 (: ) Add
+            // credits...") — the typed check can't see it there.
+            if (e.Message.Contains("HTTP 402", StringComparison.Ordinal)
+                || e.Message.Contains("Add credits", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
     /// <summary>
     /// One sequential poll over every Pending watch issue — a single
     /// GitHub burst per <see cref="WatchSweepInterval"/> instead of
     /// unbounded parallel poll loops. Each watch first gets its
     /// reviewer pass (ReviewerDispatcher records the verdict in the
     /// watch metadata), then the merge/rework decision
-    /// (PRWatcher.PollWatchOnceAsync). A 429 aborts the sweep early
+    /// (PRWatcher.PollWatchedTaskAsync). A 429 aborts the sweep early
     /// and arms the cooldown. Watch issues stay Pending between
     /// sweeps (by design: the watch IS a long-lived subscription).
     /// </summary>
-    private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchedTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Watch sweep: polling {N} watch issue(s) (project={Project})",
-            watchTasks.Count, bundle.Project.Id);
-        foreach (var watch in watchTasks)
+        _logger.LogInformation("Watch sweep: polling {N} watched task(s) (project={Project})",
+            watchedTasks.Count, bundle.Project.Id);
+        foreach (var watched in watchedTasks)
         {
             if (cancellationToken.IsCancellationRequested) return;
             try
             {
-                // Review first (verdict metadata), then decide. The
-                // reviewer is constructed per sweep — it shares the
-                // bundle's stores + the shared agent runner.
-                var reviewer = new Forge.Reviewer.ReviewerDispatcher(
-                    bundle.IssueStore, bundle.GitHub, _runner,
-                    _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
-                        ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
-                    lifecycle: _lifecycle);
-                var fresh = watch;
-                var outcome = await reviewer.ReviewOnceAsync(watch, cancellationToken);
-                if (outcome is not null)
+                // Review first (verdict metadata on the task), then
+                // decide. The reviewer is constructed per sweep — it
+                // shares the bundle's stores + the shared agent runner.
+                // Review step disabled in the workflow definition
+                // (pass 4): no reviewer-agent runs — merges require a
+                // formal review at the current head.
+                var fresh = watched;
+                var reviewEnabled = _workflow is null
+                    || (await _workflow.ResolveAsync(cancellationToken)).IsStepEnabled("review");
+                if (reviewEnabled)
                 {
-                    // The review updated the watch's metadata; re-read
-                    // so the poll sees the fresh verdict.
-                    fresh = await bundle.IssueStore.GetAsync(watch.Id, cancellationToken) ?? watch;
+                    var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+                        bundle.IssueStore, bundle.GitHub, _runner,
+                        _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
+                            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
+                        lifecycle: _lifecycle,
+                        events: _events,
+                        projectId: bundle.Project.Id);
+                    var outcome = await reviewer.ReviewOnceAsync(watched, cancellationToken);
+                    if (outcome is not null)
+                    {
+                        // The review updated the task's metadata;
+                        // re-read so the poll sees the fresh verdict.
+                        fresh = await bundle.IssueStore.GetAsync(watched.Id, cancellationToken) ?? watched;
+                    }
                 }
-                var poll = await bundle.PrWatcher.PollWatchOnceAsync(fresh, cancellationToken);
-                _logger.LogDebug("Watch {Id}: {Outcome}", watch.Id, poll);
+                var poll = await bundle.PrWatcher.PollWatchedTaskAsync(fresh, cancellationToken);
+                _logger.LogDebug("Watch (task {Id}): {Outcome}", watched.Id, poll);
             }
             catch (Octokit.RateLimitExceededException)
             {
@@ -339,7 +429,7 @@ public sealed class OrchestratorAgent : IAgent
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Watch issue {Id} crashed (project={Project})", watch.Id, bundle.Project.Id);
+                _logger.LogError(ex, "Watched task {Id} crashed (project={Project})", watched.Id, bundle.Project.Id);
             }
             // Courtesy delay: GitHub's secondary rate limit dislikes
             // rapid-fire request bursts even well under the quota.
@@ -386,6 +476,15 @@ public sealed class OrchestratorAgent : IAgent
             }
             catch (Exception ex)
             {
+                if (IsLlmAuthFailure(ex))
+                {
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-auth", bundle, cancellationToken);
+                    return new Result(false, "llm-auth-failure");
+                }
                 if (IsLlmRateLimited(ex))
                 {
                     var mk = ResolveModelKey(preClaimed.Type);
@@ -444,6 +543,15 @@ public sealed class OrchestratorAgent : IAgent
                 // leaving a completed sprint with a todo task).
                 var reachedPr = after?.DispatchCheckpoint >= DispatchCheckpoint.PrOpened;
                 var alreadyTerminal = after?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed;
+                if (IsLlmAuthFailure(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
+                {
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-auth", bundle, cancellationToken);
+                    return new Result(false, "llm-auth-failure");
+                }
                 if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
                     var mk = ResolveModelKey(preClaimed.Type);
@@ -513,7 +621,7 @@ public sealed class OrchestratorAgent : IAgent
             // the watch is not loaded here (null is fine — watch-side
             // states are driven by PRWatcher's own reports).
             var fresh = await bundle.IssueStore.GetAsync(task.Id, ct) ?? task;
-            await _lifecycle.ReportAsync(fresh, evt, watch: null, hasActiveDevRun: false, ct);
+            await _lifecycle.ReportAsync(bundle.IssueStore, fresh, evt, watch: null, hasActiveDevRun: false, ct);
         }
         catch (Exception ex)
         {
@@ -598,22 +706,6 @@ public sealed class OrchestratorAgent : IAgent
                 catch (Exception wx) { _logger.LogWarning(wx, "Worktree removal failed"); }
             }
         }
-    }
-
-    private async Task EnqueueWatchIssueAsync(string devIssueId, int prNumber, string branch, string worktreePath, ProjectDispatchBundle bundle, CancellationToken ct)
-    {
-        var watch = await bundle.IssueStore.CreateAsync(new NewIssue(
-            Type: AgentTaskTypes.PrWatch,
-            Title: $"Watch PR #{prNumber} for {devIssueId}",
-            Description: $"Wait for PR #{prNumber} to be reviewed.",
-            Metadata: new Dictionary<string, object>
-            {
-                ["prNumber"] = prNumber,
-                ["branch"] = branch,
-                ["worktreePath"] = worktreePath,
-                ["taskId"] = devIssueId,
-            }), ct);
-        _logger.LogInformation("Enqueued watch issue {Id} for PR #{PrNumber}", watch.Id, prNumber);
     }
 
     private async Task RecordModelResponseMetadataAsync(string id, string? response, string? error, ProjectDispatchBundle bundle, CancellationToken ct = default)

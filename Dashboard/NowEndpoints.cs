@@ -18,7 +18,8 @@ public static class NowEndpoints
         IIssueStore issues,
         ISpecStore specs,
         ISprintStore sprints,
-        MemoryStore? memory)
+        MemoryStore? memory,
+        AgentRunStore? runs = null)
     {
         app.MapGet("/api/now", async (CancellationToken ct) =>
         {
@@ -36,7 +37,22 @@ public static class NowEndpoints
                 : await new StageGates(memory).SnapshotAsync(ct);
 
             var attention = NowFeed.BuildAttention(all, gates, now);
-            var live = NowFeed.BuildLive(all, now);
+            // Live-run phase labels (v25): the run registry's phase
+            // column feeds the live cards so a verifying/reviewing
+            // run doesn't read as idle.
+            IReadOnlyDictionary<string, string?>? phases = null;
+            if (runs is not null)
+            {
+                try
+                {
+                    phases = (await runs.ListActiveAsync(ct))
+                        .Where(r => r.TaskId is not null)
+                        .GroupBy(r => r.TaskId!, StringComparer.Ordinal)
+                        .ToDictionary(g => g.Key, g => g.First().Phase, StringComparer.Ordinal);
+                }
+                catch { phases = null; /* phase labels are additive */ }
+            }
+            var live = NowFeed.BuildLive(all, now, phases);
 
             // Waiting reasons for open Pending tasks (newest first,
             // capped). The last transition detail disambiguates
@@ -78,6 +94,7 @@ public static class NowEndpoints
                 live = live.Select(l => new
                 {
                     issueId = l.IssueId, title = l.Title, stage = l.Stage, elapsedMs = l.ElapsedMs,
+                    phase = l.Phase,
                 }),
                 waiting = waiting.Select(w => new
                 {

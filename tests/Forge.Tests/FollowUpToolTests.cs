@@ -19,7 +19,7 @@ public class FollowUpToolTests : IDisposable
 
     public FollowUpToolTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-fup-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("fup");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
     }

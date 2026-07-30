@@ -81,6 +81,37 @@
             </div>
         </div>
 
+        @* ── Needs you: the alert inbox, in-line (fetched but never
+             rendered until the 2026-07-27 audit — the bell said
+             "see /now" and this page showed nothing) ── *@
+        @if (_feed.Attention.Count > 0)
+        {
+            <div class="dash-panel" style="margin-bottom:16px">
+                <div class="dash-panel__title">
+                    <span>Needs you (@_feed.Attention.Count)</span>
+                    <a href="/backlog">backlog →</a>
+                </div>
+                @foreach (var a in _feed.Attention.Take(10))
+                {
+                    <a href="@a.Link" class="alert-inbox__row" style="display:flex;text-decoration:none;color:inherit">
+                        <span class="alert-inbox__dot" style="background:@SeverityDot(a.Severity)"></span>
+                        <span class="alert-inbox__text">
+                            <span class="alert-inbox__title">@a.Title</span>
+                            @if (a.Detail is not null)
+                            {
+                                <span class="alert-inbox__detail">@a.Detail</span>
+                            }
+                        </span>
+                        <span class="alert-inbox__chev">›</span>
+                    </a>
+                }
+                @if (_feed.Attention.Count > 10)
+                {
+                    <div class="alert-inbox__empty">+@(_feed.Attention.Count - 10) more</div>
+                }
+            </div>
+        }
+
         @* ── Happening now | Waiting & why ── *@
         <div class="dash-panels">
             <div class="dash-panel">
@@ -99,7 +130,7 @@
                             <span style="width:8px;height:8px;border-radius:50%;background:var(--primary);flex-shrink:0"></span>
                             <span class="mono" style="min-width:84px">@l.IssueId</span>
                             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px">@l.Title</span>
-                            <span style="color:var(--on-surface-variant);font-size:13px">@l.Stage</span>
+                            <span style="color:var(--on-surface-variant);font-size:13px">@l.Stage@(l.Phase is { Length: > 0 } lp ? $" · {lp}" : "")</span>
                             <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(l.ElapsedMs)</span>
                         </div>
                     </a>
@@ -140,31 +171,56 @@
                     <span>Pipeline flow</span>
                     <a href="/flow">open flow →</a>
                 </div>
-                <svg viewBox="0 0 740 480" style="width:100%;max-height:380px">
-                    <defs>
-                        <marker id="darrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--outline-variant)" />
-                        </marker>
-                    </defs>
-                    @foreach (var e in _flow.Edges)
-                    {
-                        var a = _flow.Nodes.First(n => n.Id == e.From);
-                        var b = _flow.Nodes.First(n => n.Id == e.To);
-                        <line x1="@a.X" y1="@a.Y" x2="@b.X" y2="@b.Y" stroke="var(--outline-variant)" stroke-width="1" marker-end="url(#darrow)" opacity="0.55" />
-                    }
-                    @foreach (var n in _flow.Nodes)
-                    {
-                        <rect x="@(n.X - 62)" y="@(n.Y - 24)" width="124" height="48" rx="9"
-                              fill="var(--surface)" stroke="@(n.Count > 0 ? "var(--primary)" : "var(--outline-variant)")"
-                              stroke-width="@(n.Count > 0 ? 1.8 : 1)" />
-                        @SvgText(n.X, n.Y + 4, "var(--on-surface)", 12, "middle", n.Label)
-                        @if (n.Count > 0)
+                @* Horizontal compact variant of the directed layout
+                   (spine left → right, sinks above/below) — computed
+                   server-side alongside the vertical one. *@
+                @if (_flow.LayoutHorizontal is not null)
+                {
+                    var lh = _flow.LayoutHorizontal;
+                    <svg viewBox="0 0 @SvgSmoothing.F(lh.Width) @SvgSmoothing.F(lh.Height)" style="width:100%;max-height:340px">
+                        <defs>
+                            <marker id="darrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                                <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--outline-variant)" />
+                            </marker>
+                        </defs>
+                        @if (lh.LaneDividerY is not null)
                         {
-                            <circle cx="@(n.X + 52)" cy="@(n.Y - 18)" r="11" fill="var(--primary)" />
-                            @SvgText(n.X + 52, n.Y - 14, "var(--on-primary, #fff)", 11, "middle", n.Count.ToString(), bold: true)
+                            <line x1="@SvgSmoothing.F(lh.LaneDividerY.Value)" y1="10" x2="@SvgSmoothing.F(lh.LaneDividerY.Value)" y2="@SvgSmoothing.F(lh.Height - 10)"
+                                  stroke="var(--outline-variant)" stroke-dasharray="4 4" opacity="0.6" />
                         }
-                    }
-                </svg>
+                        @foreach (var e in lh.Edges)
+                        {
+                            var isLoop = e.Kind is "loop" or "failure";
+                            <path d="@SvgSmoothing.SmoothPath(e.Points.Select(p => (p.X, p.Y)).ToList())" fill="none"
+                                  stroke="@(isLoop ? "var(--warn)" : "var(--outline)")"
+                                  stroke-width="1.2" stroke-dasharray="@(isLoop ? "5 3" : null)"
+                                  marker-end="url(#darrow)" opacity="0.7" />
+                        }
+                        @foreach (var n in _flow.Nodes)
+                        {
+                            if (!lh.Nodes.TryGetValue(n.Id, out var p)) continue;
+                            var gateHeld = n.Gates.Count > 0 && n.Gates.Any(g => _flow.GateStates?.GetValueOrDefault(g) == true);
+                            <rect x="@SvgSmoothing.F(p.X - p.W / 2)" y="@SvgSmoothing.F(p.Y - p.H / 2)" width="@SvgSmoothing.F(p.W)" height="@SvgSmoothing.F(p.H)" rx="9"
+                                  fill="var(--surface)" stroke="@(gateHeld ? "var(--warn)" : n.Count > 0 ? "var(--primary)" : "var(--outline-variant)")"
+                                  stroke-width="@(gateHeld || n.Count > 0 ? 1.8 : 1)" />
+                            @SvgText((int)p.X, (int)(p.Y + 4), "var(--on-surface)", 12, "middle", n.Label)
+                            @if (n.Gates.Count > 0)
+                            {
+                                var gx = p.X - p.W / 2 + 6;
+                                var gy = p.Y - p.H / 2 + 9;
+                                var chipFill = gateHeld ? "var(--warn)" : "var(--on-surface-variant)";
+                                var chipText = gateHeld ? "◆ HELD" : "◆ " + string.Join(" · ", n.Gates);
+                                var chipTitle = $"stage gate: {string.Join(", ", n.Gates)}{(gateHeld ? " (HELD)" : " (open)")}";
+                                @((MarkupString)$"<text x=\"{SvgSmoothing.F(gx)}\" y=\"{SvgSmoothing.F(gy)}\" font-size=\"8\" fill=\"{chipFill}\" text-anchor=\"start\" font-weight=\"600\"><title>{System.Net.WebUtility.HtmlEncode(chipTitle)}</title>{System.Net.WebUtility.HtmlEncode(chipText)}</text>")
+                            }
+                            @if (n.Count > 0)
+                            {
+                                <circle cx="@SvgSmoothing.F(p.X + p.W / 2 - 10)" cy="@SvgSmoothing.F(p.Y - p.H / 2 + 6)" r="11" fill="var(--primary)" />
+                                @SvgText((int)(p.X + p.W / 2 - 10), (int)(p.Y - p.H / 2 + 10), "var(--on-primary, #fff)", 11, "middle", n.Count.ToString(), bold: true)
+                            }
+                        }
+                    </svg>
+                }
             </div>
         }
         @* ── Run quality gate verdicts ── *@
@@ -177,6 +233,13 @@
     private NowFeedDto? _feed;
     private FlowDto? _flow;
     private System.Threading.Timer? _timer;
+
+    private static string SeverityDot(string severity) => severity switch
+    {
+        "fail" => "#c62828",
+        "warn" => "#ef6c00",
+        _ => "#1565c0",
+    };
 
     protected override void OnInitialized()
     {
@@ -241,12 +304,35 @@
         List<WaitingDto> Waiting,
         PulseDto Pulse);
     private sealed record AttentionDto(string Severity, string Kind, string Title, string? Detail, string? IssueId, string Link);
-    private sealed record LiveDto(string IssueId, string Title, string Stage, long ElapsedMs);
+    private sealed record LiveDto(string IssueId, string Title, string Stage, long ElapsedMs, string? Phase);
     private sealed record WaitingDto(string IssueId, string Title, string Reason, long WaitingMs);
     private sealed record PulseDto(Dictionary<string, string> Gates, SprintDto? Sprint, DateTime? LastActivityAt);
     private sealed record SprintDto(string Id, string Name, int Done, int Total);
 
-    private sealed record FlowDto(List<FlowNodeDto> Nodes, List<FlowEdgeDto> Edges);
-    private sealed record FlowNodeDto(string Id, string Label, string Lane, int X, int Y, int Count);
+    private sealed record FlowDto(
+        List<FlowNodeDto> Nodes,
+        List<FlowEdgeDto> Edges,
+        FlowLayoutDto? LayoutHorizontal,
+        Dictionary<string, bool>? GateStates);
+    private sealed record FlowNodeDto(
+        string Id, string Label, string Lane, int X, int Y, int Count,
+        IReadOnlyList<string> Gates);
     private sealed record FlowEdgeDto(string From, string To);
+    private sealed class FlowLayoutDto
+    {
+        public double Width { get; set; }
+        public double Height { get; set; }
+        public double? LaneDividerY { get; set; }
+        public Dictionary<string, FlowLayoutNodeDto> Nodes { get; set; } = new();
+        public List<FlowLayoutEdgeDto> Edges { get; set; } = new();
+    }
+    private sealed class FlowLayoutNodeDto { public double X { get; set; } public double Y { get; set; } public double W { get; set; } public double H { get; set; } }
+    private sealed class FlowLayoutEdgeDto
+    {
+        public string From { get; set; } = "";
+        public string To { get; set; } = "";
+        public string? Kind { get; set; }
+        public List<FlowLayoutPointDto> Points { get; set; } = new();
+    }
+    private sealed class FlowLayoutPointDto { public double X { get; set; } public double Y { get; set; } }
 }

@@ -14,7 +14,7 @@ public class GitWorktreeServiceTests : IDisposable
 
     public GitWorktreeServiceTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-gw-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("gw");
         _bareDir = _workDir + "-bare.git";
         Directory.CreateDirectory(_workDir);
         _service = new GitWorktreeService(
@@ -84,6 +84,64 @@ public class GitWorktreeServiceTests : IDisposable
         RunGit(dir, $"clone --bare {dir} {_bareDir}");
         RunGit(dir, $"remote add origin {_bareDir}");
         RunGit(dir, "fetch origin");
+    }
+
+    [Fact]
+    public async Task DiffAndAheadCount_StaleLocalMain_DoNotFalsePositive()
+    {
+        // Regression (porthorizon task-7, 2026-07-29): the worktree's
+        // LOCAL main ref is stale, but origin/main moved forward and
+        // HEAD sits exactly on fresh origin/main. A diff against the
+        // local ref shows the upstream commits as if they were the
+        // agent's own ("self-committed" false positive). The honest
+        // answer is: zero files, zero ahead.
+        var worktreePath = _service.WorktreePathFor("t-stale");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-stale", "main");
+
+        // Move origin/main forward from ANOTHER clone (local main
+        // in the worktree stays put).
+        var other = Path.Combine(_workDir, "other-clone");
+        RunGit(_workDir, $"clone -q {_bareDir} {other}");
+        RunGit(other, "config user.email test@example.com");
+        RunGit(other, "config user.name Test");
+        File.WriteAllText(Path.Combine(other, "upstream.txt"), "upstream work");
+        RunGit(other, "add -A");
+        RunGit(other, "commit -q -m upstream");
+        RunGit(other, "push -q origin main");
+
+        // The worktree fetches (picks up origin/main) and its task
+        // branch is synced onto fresh origin/main — local main never
+        // moves.
+        RunGit(worktreePath, "fetch -q origin");
+        RunGit(worktreePath, "reset -q --hard origin/main");
+        // Sanity: local main really is behind.
+        var behind = RunGitForResult(worktreePath, "rev-list --count main..origin/main");
+        Assert.Equal("1", behind.Stdout);
+
+        var diff = await _service.GetDiffStatsAsync(worktreePath, "main", CancellationToken.None);
+        Assert.Equal(string.Empty, diff.Summary);
+        Assert.Equal(0, await _service.GetAheadCountAsync(worktreePath, "main", CancellationToken.None));
+
+        // And real work still registers.
+        File.WriteAllText(Path.Combine(worktreePath, "mine.txt"), "mine");
+        RunGit(worktreePath, "add -A");
+        RunGit(worktreePath, "commit -q -m mine");
+        Assert.Equal(1, await _service.GetAheadCountAsync(worktreePath, "main", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Push_DetachedHead_Throws()
+    {
+        // The push pushes the BRANCH REF; a detached HEAD means the
+        // agent's commits are not on the task branch — fail loud
+        // instead of silently pushing the wrong commits.
+        var worktreePath = _service.WorktreePathFor("t-detach");
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        await _service.CreateAsync("t-detach", "main");
+        RunGit(worktreePath, "checkout -q --detach HEAD");
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _service.PushAsync(worktreePath, "agent/t-detach", CancellationToken.None));
     }
 
     [Fact]

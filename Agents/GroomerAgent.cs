@@ -42,6 +42,7 @@ public sealed class GroomerAgent
     private readonly ILogger<GroomerAgent> _logger;
     private readonly MemoryStore? _memory;
     private readonly string? _projectRoot;
+    private readonly Func<string, string?>? _projectRootLookup;
     private readonly string _runId;
 
     public GroomerAgent(
@@ -53,7 +54,8 @@ public sealed class GroomerAgent
         ILogger<GroomerAgent> logger,
         string? runId = null,
         MemoryStore? memory = null,
-        string? projectRoot = null)
+        string? projectRoot = null,
+        Func<string, string?>? projectRootLookup = null)
     {
         _issues = issues;
         _specs = specs;
@@ -63,6 +65,7 @@ public sealed class GroomerAgent
         _logger = logger;
         _memory = memory;
         _projectRoot = projectRoot;
+        _projectRootLookup = projectRootLookup;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
     }
 
@@ -423,7 +426,17 @@ public sealed class GroomerAgent
         var sb = new StringBuilder();
 
         sb.AppendLine("## Project vision");
-        var vision = _memory is null ? null : (await _memory.RecallAsync("vision/master", ct)).FirstOrDefault()?.Body;
+        // Per-project vision wins (vision/<projectId>); the legacy
+        // global vision/master is the fallback so single-project
+        // deployments need no re-keying.
+        string? vision = null;
+        if (_memory is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(projectId))
+                vision = (await _memory.RecallAsync($"vision/{projectId}", ct)).FirstOrDefault()?.Body;
+            if (string.IsNullOrWhiteSpace(vision))
+                vision = (await _memory.RecallAsync("vision/master", ct)).FirstOrDefault()?.Body;
+        }
         sb.AppendLine(string.IsNullOrWhiteSpace(vision)
             ? "(no vision document — the operator has not written one; judge against the spec/task text alone)"
             : vision.Length > 4000 ? vision[..4000] + "\n...[truncated]..." : vision);
@@ -452,14 +465,26 @@ public sealed class GroomerAgent
 
         sb.AppendLine();
         sb.AppendLine("## Repo shape (top levels of the current codebase)");
-        sb.AppendLine(BuildRepoShape());
+        sb.AppendLine(BuildRepoShape(projectId));
 
         return sb.ToString();
     }
 
-    private string BuildRepoShape()
+    private string BuildRepoShape(string? projectId = null)
     {
-        if (string.IsNullOrWhiteSpace(_projectRoot) || !Directory.Exists(_projectRoot))
+        var root = _projectRoot;
+        if (!string.IsNullOrWhiteSpace(projectId) && _projectRootLookup is not null)
+        {
+            try
+            {
+                root = _projectRootLookup(projectId) ?? root;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "project root lookup failed for {ProjectId}; using default root", projectId);
+            }
+        }
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
         {
             return "(unavailable)";
         }
@@ -468,7 +493,7 @@ public sealed class GroomerAgent
         var lines = new List<string>();
         try
         {
-            foreach (var dir in Directory.GetDirectories(_projectRoot).OrderBy(d => d))
+            foreach (var dir in Directory.GetDirectories(root).OrderBy(d => d))
             {
                 var name = Path.GetFileName(dir);
                 if (skip.Contains(name)) continue;
@@ -481,7 +506,7 @@ public sealed class GroomerAgent
                     lines.Add($"  {subName}/");
                 }
             }
-            foreach (var file in Directory.GetFiles(_projectRoot).OrderBy(f => f).Take(20))
+            foreach (var file in Directory.GetFiles(root).OrderBy(f => f).Take(20))
             {
                 lines.Add(Path.GetFileName(file));
             }

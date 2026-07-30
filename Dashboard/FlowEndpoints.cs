@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Forge.Core;
+using Forge.Core.Workflow;
 using Forge.Dashboard.Flow;
 using Forge.Orchestrator.Sprint;
 
@@ -17,17 +18,61 @@ public static class FlowEndpoints
 {
     private const int MaxSamplesPerNode = 8;
 
+    /// <summary>
+    /// Intrinsic (code-owned) gate mechanics per default-definition
+    /// step id — the plan gate, the pre-push verification gate, and
+    /// the CI+approval merge requirement are enforced in code (plan
+    /// gate hard gates, CommitPushPrExecutor's verify loop, the
+    /// PRWatcher's merge guard), NOT wired in the workflow
+    /// definition, so the definition can't carry them. Keyed by step
+    /// id: a custom workflow that renames the step simply renders no
+    /// note (graceful).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> GateNotes =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["agent"] = "plan gate: schema · territory · LLM critic → verify build+test before push",
+            ["pr"] = "gate: CI green + approval at head",
+        };
+
+    private static object LayoutPayload(DirectedFlowLayout.Result layout) => new
+    {
+        width = layout.Width,
+        height = layout.Height,
+        laneDividerY = layout.LaneDividerY,
+        nodes = layout.Nodes.ToDictionary(
+            n => n.Id,
+            n => new { x = n.X, y = n.Y, w = n.W, h = n.H },
+            StringComparer.Ordinal),
+        edges = layout.Edges.Select(e => new
+        {
+            from = e.From,
+            to = e.To,
+            kind = e.Kind,
+            label = e.Label,
+            points = e.Points.Select(p => new { x = p.X, y = p.Y }),
+        }),
+    };
+
     public static void MapFlowEndpoints(
         WebApplication app,
         IIssueStore issues,
         ISpecStore specs,
         ISprintStore sprints,
-        Orchestrator.MemoryExtractionStore? extractions = null)
+        Orchestrator.MemoryExtractionStore? extractions = null,
+        WorkflowResolver? workflow = null,
+        MemoryStore? memory = null)
     {
         app.MapGet("/api/flow", async (CancellationToken ct) =>
         {
-            var counts = FlowGraph.Nodes.ToDictionary(n => n.Id, _ => 0, StringComparer.Ordinal);
-            var samples = FlowGraph.Nodes.ToDictionary(
+            // The graph shape comes from the RESOLVED workflow
+            // definition (published override → built-in default);
+            // classification maps reality onto its step ids.
+            var definition = workflow is not null
+                ? await workflow.ResolveAsync(ct)
+                : WorkflowDefaults.Definition;
+            var counts = definition.Steps.ToDictionary(n => n.Id, _ => 0, StringComparer.Ordinal);
+            var samples = definition.Steps.ToDictionary(
                 n => n.Id, _ => new List<object>(MaxSamplesPerNode), StringComparer.Ordinal);
             void Add(string nodeId, string id, string title, string status)
             {
@@ -38,10 +83,12 @@ public static class FlowEndpoints
                 }
             }
 
-            // Planning lane: specs still in planning.
+            // Planning lane: specs still planning. Classification
+            // honors disabled steps (pass 4).
+            var designEnabled = definition.IsStepEnabled("design");
             foreach (var spec in await specs.ListAsync(projectId: null, status: null, ct))
             {
-                var node = FlowGraph.ClassifySpec(spec.Status);
+                var node = FlowGraph.ClassifySpec(spec.Status, designEnabled);
                 if (node is not null) Add(node, spec.Id, spec.Title, spec.Status.ToString());
             }
 
@@ -60,10 +107,23 @@ public static class FlowEndpoints
                 if (node is not null) Add(node, issue.Id, issue.Title, issue.Status.ToString());
             }
 
+            var layout = DirectedFlowLayout.Compute(definition, GateNotes);
+            var layoutH = DirectedFlowLayout.ComputeHorizontal(definition);
+
+            IReadOnlyDictionary<string, bool>? gateStates = null;
+            if (memory is not null)
+            {
+                try
+                {
+                    gateStates = await new StageGates(memory, workflow).SnapshotAsync(ct);
+                }
+                catch { /* gate states are additive; don't fail the flow view */ }
+            }
+
             return Results.Json(new
             {
-                lanes = new[] { FlowGraph.LanePlanning, FlowGraph.LaneImplementation },
-                nodes = FlowGraph.Nodes.Select(n => new
+                lanes = new[] { WorkflowLanes.Planning, WorkflowLanes.Implementation },
+                nodes = definition.Steps.Select(n => new
                 {
                     id = n.Id,
                     label = n.Label,
@@ -72,8 +132,16 @@ public static class FlowEndpoints
                     y = n.Y,
                     count = counts[n.Id],
                     issues = samples[n.Id],
+                    gates = n.Gates,
+                    gateNote = GateNotes.TryGetValue(n.Id, out var note) ? note : null,
                 }),
-                edges = FlowGraph.Edges.Select(e => new { from = e.From, to = e.To }),
+                edges = definition.Edges.Select(e => new { from = e.From, to = e.To, kind = e.Kind, label = e.Label }),
+                // Deterministic directed layout (centered spine,
+                // straight forward edges, framed loops) — the UI
+                // renders this directly, no client-side engine.
+                layout = LayoutPayload(layout),
+                // Horizontal compact variant for the dashboard strip.
+                layoutHorizontal = LayoutPayload(layoutH),
                 activeSprintId = active?.Id,
                 // Issue-first picker: every traceable work item (newest
                 // activity first), capped for payload size.
@@ -82,6 +150,7 @@ public static class FlowEndpoints
                     .OrderByDescending(i => i.UpdatedAt)
                     .Take(300)
                     .Select(i => new { id = i.Id, title = i.Title, status = i.Status.ToString() }),
+                gateStates = gateStates?.ToDictionary(kv => kv.Key, kv => kv.Value),
             });
         });
 

@@ -50,7 +50,7 @@ public class SqliteSkillSourceTests : IDisposable
 
     public SqliteSkillSourceTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-skills-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("skills");
         _issues = new IssueStore(_dbPath);
         _skills = new SkillStore(_issues);
         _roles = new RoleAgentRegistry();
@@ -145,5 +145,40 @@ public class SqliteSkillSourceTests : IDisposable
         Assert.Equal("build-style", skills[0].Name);
         // Role-specific copy wins.
         Assert.Equal("ROLE VERSION", skills[0].Body);
+    }
+
+    [Fact]
+    public async Task LoadForRole_ProjectSkills_OnlyVisibleToThatProject()
+    {
+        await _skills.CreateAsync(new NewSkill(Name: "shared", Body: "S"));
+        await _skills.CreateAsync(new NewSkill(Name: "ph-rules", Body: "P", ProjectId: "porthorizon", Source: SkillSources.Repo));
+
+        var phRun = await _source.LoadForRoleAsync(AgentType.CoreDev, "porthorizon");
+        Assert.Equal(2, phRun.Count);
+        Assert.Contains(phRun, s => s.Name == "ph-rules");
+
+        var forgeRun = await _source.LoadForRoleAsync(AgentType.CoreDev, "forge");
+        Assert.Single(forgeRun);
+        Assert.Equal("shared", forgeRun[0].Name);
+
+        var noProject = await _source.LoadForRoleAsync(AgentType.CoreDev);
+        Assert.Single(noProject);
+        Assert.Equal("shared", noProject[0].Name);
+    }
+
+    [Fact]
+    public async Task LoadForRole_ProjectCopyOfGlobalName_ProjectWins()
+    {
+        await _skills.CreateAsync(new NewSkill(Name: "tone", Body: "GLOBAL"));
+        await _skills.CreateAsync(new NewSkill(Name: "tone", Body: "PROJECT", ProjectId: "porthorizon", Source: SkillSources.Repo));
+
+        var phRun = await _source.LoadForRoleAsync(AgentType.CoreDev, "porthorizon");
+        Assert.Single(phRun);
+        Assert.Equal("PROJECT", phRun[0].Body);
+
+        // Other projects still get the global copy.
+        var otherRun = await _source.LoadForRoleAsync(AgentType.CoreDev, "forge");
+        Assert.Single(otherRun);
+        Assert.Equal("GLOBAL", otherRun[0].Body);
     }
 }

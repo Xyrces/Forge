@@ -31,7 +31,7 @@ public class CommitPushPrExecutorTests : IDisposable
 
     public CommitPushPrExecutorTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-cppr-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("cppr");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
@@ -121,7 +121,7 @@ public class CommitPushPrExecutorTests : IDisposable
             agent, _issues, _worktrees, new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events,
             new NoOpMemoryExtractor(),
             new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-            NullLogger<CommitPushPrExecutor>.Instance, default);
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
 
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal("42", after!.GetMetadata("prNumber"));
@@ -165,7 +165,7 @@ public class CommitPushPrExecutorTests : IDisposable
                 agent, _issues, _worktrees, new StubGitHub(), _events,
                 new NoOpMemoryExtractor(),
                 new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-                NullLogger<CommitPushPrExecutor>.Instance, default).AsTask());
+                NullLogger<CommitPushPrExecutor>.Instance, null, default).AsTask());
 
         Assert.Contains("CreatePullRequestAsync should not be called", ex.Message);
         var after = await _issues.GetAsync(issue.Id);
@@ -192,11 +192,49 @@ public class CommitPushPrExecutorTests : IDisposable
             agent, _issues, _worktrees, new StubGitHub(), _events,
             new NoOpMemoryExtractor(),
             new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-            NullLogger<CommitPushPrExecutor>.Instance, default);
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
 
         Assert.Equal(PrResult.NoDiff, result.Result);
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.Completed, after!.Status);
+    }
+
+    [Fact]
+    public async Task NoDiff_ExplicitMarker_PolicyRework_RequeuesInsteadOfCompleting()
+    {
+        // Workflow policy noDiffOutcome=rework (pass 3): the operator
+        // doesn't accept verified no-op completions — the task
+        // requeues (no-progress breaker still caps the loop).
+        var memory = new Forge.Core.MemoryStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Policies = new Dictionary<string, string>(Forge.Core.Workflow.WorkflowDefaults.Definition.Policies)
+            {
+                [Forge.Core.Workflow.WorkflowPolicies.NoDiffOutcome] = "rework",
+            },
+        };
+        await memory.RememberAsync(Forge.Core.Workflow.WorkflowResolver.LiveKey,
+            Forge.Core.Workflow.WorkflowResolver.Serialize(def));
+        var resolver = new Forge.Core.Workflow.WorkflowResolver(memory);
+
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var agent = new AgentCompleted(worktree, AgentResult.Ok,
+            "Verified: nothing to do. NO_CHANGES_NEEDED", null);
+
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, resolver, default);
+
+        Assert.Equal(PrResult.NoDiff, result.Result);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
     }
 
     [Fact]
@@ -218,7 +256,7 @@ public class CommitPushPrExecutorTests : IDisposable
                 agent, _issues, _worktrees, new StubGitHub(), _events,
                 new NoOpMemoryExtractor(),
                 new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-                NullLogger<CommitPushPrExecutor>.Instance, default);
+                NullLogger<CommitPushPrExecutor>.Instance, null, default);
             Assert.Equal(PrResult.NoDiff, result.Result);
             var after = await _issues.GetAsync(issue.Id);
             if (i < CommitPushPrExecutor.MaxNoProgressAttempts)
@@ -253,13 +291,95 @@ public class CommitPushPrExecutorTests : IDisposable
             agent, _issues, _worktrees, new StubGitHub(), _events,
             new NoOpMemoryExtractor(),
             new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
-            NullLogger<CommitPushPrExecutor>.Instance, default);
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
 
         Assert.Equal(PrResult.NoDiff, result.Result);
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.Completed, after!.Status);
         // And crucially: no NEW transition stomped it (the row's
         // UpdatedAt is the merge's, not a fresh no-diff write).
+    }
+
+    [Fact]
+    public async Task VerificationFailure_RequeuesWithOutput_NoPush()
+    {
+        // The pre-push gate: a failing build/test bounces the task
+        // back to the agent with the output — no push, no PR, no
+        // watch round. GitHub CI stays the safety net.
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null,
+            verifyCommands: new[] { "echo BUILD-BROKE-MARKER; exit 1" });
+
+        Assert.Equal(PrResult.NoDiff, result.Result);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+        Assert.Contains("BUILD-BROKE-MARKER", after.GetMetadata("lastError"));
+        // No push: the push checkpoint was never reached.
+        Assert.True(after.DispatchCheckpoint < DispatchCheckpoint.PushDone,
+            $"expected no push, checkpoint is {after.DispatchCheckpoint}");
+    }
+
+    [Fact]
+    public async Task VerificationPass_ProceedsToPush()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null,
+            verifyCommands: new[] { "true" });
+
+        Assert.Equal(42, result.PrNumber);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(DispatchCheckpoint.PrOpened, after!.DispatchCheckpoint);
+    }
+
+    [Fact]
+    public void DefaultVerification_DotnetRepo_BuildsAndTests()
+    {
+        File.WriteAllText(Path.Combine(_workDir, "X.csproj"), "<Project />");
+        var commands = AgentTools.RunVerification.DefaultCommands(_workDir);
+        Assert.Equal(2, commands.Count);
+        Assert.Contains("build", commands[0]);
+        Assert.Contains("test", commands[1]);
+    }
+
+    [Fact]
+    public void DefaultVerification_NonDotnetRepo_NoCommands()
+    {
+        var empty = Path.Combine(_workDir, "empty");
+        Directory.CreateDirectory(empty);
+        Assert.Empty(AgentTools.RunVerification.DefaultCommands(empty));
     }
 
     // WithDiff test omitted: GitHubService.CreatePullRequestAsync returns

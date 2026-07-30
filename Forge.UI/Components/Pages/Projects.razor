@@ -1,6 +1,7 @@
 @page "/projects"
 @inject IState<Forge.Dashboard.Features.Projects.ProjectsState> ProjectsStore
 @inject Fluxor.IDispatcher Dispatch
+@inject Forge.Dashboard.Features.Projects.ProjectsClient ProjectsClient
 @implements IDisposable
 @using Forge.Dashboard.Features.Projects
 
@@ -48,9 +49,10 @@
             <div class="card add-project-card">
                 <h2>Add Project</h2>
                 <p class="add-project-hint">
-                    Forge clones the repo into <code>&lt;dataRoot&gt;/projects/&lt;id&gt;/</code> on submit.
-                    Private repos need a GitHub PAT configured server-side
-                    (<code>GITHUB_TOKEN</code> env var or <code>github.token</code> in appsettings.json).
+                    Enter a git token, fetch the repos it can see, pick one — Forge detects the
+                    default branch (override it if you like) and clones on submit. The token is
+                    stored encrypted as the project's <code>github_token</code> secret; leave it
+                    blank to use an existing token.
                 </p>
 
                 @if (ProjectsStore.Value.AddError is not null)
@@ -69,6 +71,32 @@
                 }
 
                 <form class="form-grid" @onsubmit="SubmitAsync" @onsubmit:preventDefault="true">
+                    <label class="form-grid__full">
+                        <span>Git token <small>(stored encrypted; never shown again)</small></span>
+                        <input type="password" placeholder="github_pat_… (blank = use existing token)" @bind="_gitToken" autocomplete="off" maxlength="256" />
+                    </label>
+                    <div class="form-grid__full">
+                        <button type="button" class="btn" @onclick="FetchReposAsync" disabled="@_fetchingRepos">
+                            @(_fetchingRepos ? "Fetching repositories…" : "Fetch repositories")
+                        </button>
+                        @if (_repoFetchError is not null)
+                        {
+                            <span class="banner banner--warn">@_repoFetchError</span>
+                        }
+                    </div>
+                    @if (_repos is not null && _repos.Count > 0)
+                    {
+                        <label class="form-grid__full">
+                            <span>Repository <small>(@_repos.Count visible to this token)</small></span>
+                            <select @onchange="OnRepoSelected">
+                                <option value="">— pick a repository —</option>
+                                @foreach (var r in _repos)
+                                {
+                                    <option value="@r.Url">@r.FullName@(r.Private ? " (private)" : "")</option>
+                                }
+                            </select>
+                        </label>
+                    }
                     <label>
                         <span>ID <small>(lowercase, [a-z0-9_-]{1..32}, becomes the dispatch key)</small></span>
                         <input type="text" placeholder="forge" @bind="_model.Id" required pattern="[a-z0-9][a-z0-9_-]*" maxlength="32" autocomplete="off" />
@@ -78,12 +106,18 @@
                         <input type="text" placeholder="Forge" @bind="_model.Name" required maxlength="64" autocomplete="off" />
                     </label>
                     <label class="form-grid__full">
-                        <span>Repository URL <small>(HTTPS with PAT or SSH)</small></span>
+                        <span>Repository URL <small>(auto-filled by the picker, or enter manually)</small></span>
                         <input type="url" placeholder="https://github.com/Xyrces/Forge.git" @bind="_model.RepoUrl" required autocomplete="off" />
                     </label>
                     <label>
-                        <span>Default branch</span>
-                        <input type="text" placeholder="main" @bind="_model.DefaultBranch" autocomplete="off" maxlength="64" />
+                        <span>Default branch <small>(detected; override if needed)</small></span>
+                        <input type="text" placeholder="main" list="add-project-branches" @bind="_model.DefaultBranch" autocomplete="off" maxlength="64" />
+                        <datalist id="add-project-branches">
+                            @foreach (var b in _branches)
+                            {
+                                <option value="@b"></option>
+                            }
+                        </datalist>
                     </label>
                     <div class="form-grid__actions">
                         <button type="submit" class="btn btn--primary" disabled="@ProjectsStore.Value.Submitting">
@@ -149,6 +183,11 @@
 @code {
     private bool _formOpen;
     private AddProjectForm _model = new();
+    private string _gitToken = string.Empty;
+    private bool _fetchingRepos;
+    private string? _repoFetchError;
+    private IReadOnlyList<RepoLookupRow>? _repos;
+    private IReadOnlyList<string> _branches = Array.Empty<string>();
 
     protected override void OnInitialized()
     {
@@ -167,7 +206,65 @@
         if (!_formOpen)
         {
             _model = new();
+            _gitToken = string.Empty;
+            _repos = null;
+            _repoFetchError = null;
+            _branches = Array.Empty<string>();
             Dispatch.Dispatch(new ProjectsActions.AddProjectDismissErrorAction());
+        }
+    }
+
+    private async Task FetchReposAsync()
+    {
+        _fetchingRepos = true;
+        _repoFetchError = null;
+        try
+        {
+            var resp = await ProjectsClient.LookupReposAsync(
+                string.IsNullOrWhiteSpace(_gitToken) ? null : _gitToken.Trim(),
+                id: null, CancellationToken.None);
+            _repos = resp.Repos;
+            if (_repos.Count == 0) _repoFetchError = "The token can see no repositories.";
+        }
+        catch (Exception ex)
+        {
+            _repos = null;
+            _repoFetchError = ex.Message;
+        }
+        finally
+        {
+            _fetchingRepos = false;
+        }
+    }
+
+    private async Task OnRepoSelected(ChangeEventArgs e)
+    {
+        var url = e.Value?.ToString();
+        var repo = _repos?.FirstOrDefault(r => r.Url == url);
+        if (repo is null) return;
+        _model.RepoUrl = repo.Url;
+        if (string.IsNullOrWhiteSpace(_model.Name)) _model.Name = repo.Name;
+        if (string.IsNullOrWhiteSpace(_model.Id))
+        {
+            _model.Id = repo.Name.ToLowerInvariant();
+        }
+        await FetchBranchesAsync(repo.Url, repo.DefaultBranch);
+    }
+
+    private async Task FetchBranchesAsync(string repoUrl, string? detected)
+    {
+        try
+        {
+            var resp = await ProjectsClient.LookupBranchesAsync(
+                string.IsNullOrWhiteSpace(_gitToken) ? null : _gitToken.Trim(),
+                id: null, repoUrl, CancellationToken.None);
+            _branches = resp.Branches;
+            _model.DefaultBranch = resp.DefaultBranch ?? detected ?? _model.DefaultBranch;
+        }
+        catch
+        {
+            _branches = Array.Empty<string>();
+            if (!string.IsNullOrEmpty(detected)) _model.DefaultBranch = detected;
         }
     }
 
@@ -183,7 +280,9 @@
             _model.Id.Trim(),
             _model.Name.Trim(),
             _model.RepoUrl.Trim(),
-            string.IsNullOrWhiteSpace(_model.DefaultBranch) ? null : _model.DefaultBranch.Trim()));
+            string.IsNullOrWhiteSpace(_model.DefaultBranch) ? null : _model.DefaultBranch.Trim(),
+            string.IsNullOrWhiteSpace(_gitToken) ? null : _gitToken.Trim()));
+        _gitToken = string.Empty;
         await Task.CompletedTask;
     }
 

@@ -25,12 +25,17 @@
             @foreach (var row in ArtStore.Value.Rows)
             {
                 <div class="art-card">
-                    <div class="art-card__thumb"></div>
+                    <div class="art-card__thumb">
+                        @if (!string.IsNullOrWhiteSpace(row.FileUrl))
+                        {
+                            <img src="@row.FileUrl" alt="@row.Title" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block" />
+                        }
+                    </div>
                     <div class="art-card__overlay">
                         <span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span>
                     </div>
                     <div class="art-card__title">@row.Title</div>
-                    <div class="art-card__meta mono">@row.Kind · @row.BodyKind</div>
+                    <div class="art-card__meta mono"><a href="/specs/@row.SpecId">@row.SpecId</a> · @row.Kind · @row.BodyKind</div>
                 </div>
             }
             @if (ArtStore.Value.Rows.Count == 0)

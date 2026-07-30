@@ -1,4 +1,6 @@
-﻿using Microsoft.Data.Sqlite;
+﻿using System.Data.Common;
+using Forge.Core.Db;
+using Microsoft.Data.Sqlite;
 using Forge.Specs;
 
 namespace Forge.Core;
@@ -194,6 +196,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         _designArtifacts = designArtifacts;
     }
 
+    private string T(string name) => _issues.Db.Dialect.Table(name);
+
     public async Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(spec.ProjectId))
@@ -204,36 +208,39 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var now = DateTime.UtcNow;
         var id = $"spec-{Guid.NewGuid():N}";
 
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = @"INSERT INTO spec
+            cmd.CommandText = $"""
+                INSERT INTO {T("spec")}
                 (id, project_id, title, status, parent_issue_id, parent_spec_id, current_version, created_at, updated_at)
-                VALUES ($id, $proj, $title, $status, $pIssue, $pSpec, 1, $now, $now)";
-            cmd.Parameters.AddWithValue("$id", id);
-            cmd.Parameters.AddWithValue("$proj", spec.ProjectId);
-            cmd.Parameters.AddWithValue("$title", spec.Title);
-            cmd.Parameters.AddWithValue("$status", SpecStatus.Draft.ToString());
-            cmd.Parameters.AddWithValue("$pIssue", (object?)spec.ParentIssueId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$pSpec", (object?)spec.ParentSpecId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+                VALUES (@id, @proj, @title, @status, @pIssue, @pSpec, 1, @now, @now)
+                """;
+            cmd.AddParam("@id", id);
+            cmd.AddParam("@proj", spec.ProjectId);
+            cmd.AddParam("@title", spec.Title);
+            cmd.AddParam("@status", SpecStatus.Draft.ToString());
+            cmd.AddParam("@pIssue", (object?)spec.ParentIssueId ?? DBNull.Value);
+            cmd.AddParam("@pSpec", (object?)spec.ParentSpecId ?? DBNull.Value);
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = @"INSERT INTO spec_version
+            cmd.CommandText = $"""
+                INSERT INTO {T("spec_version")}
                 (spec_id, version, body, author, created_at)
-                VALUES ($sid, 1, $body, $author, $now)";
-            cmd.Parameters.AddWithValue("$sid", id);
-            cmd.Parameters.AddWithValue("$body", spec.Body);
-            cmd.Parameters.AddWithValue("$author", (object?)spec.Author ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+                VALUES (@sid, 1, @body, @author, @now)
+                """;
+            cmd.AddParam("@sid", id);
+            cmd.AddParam("@body", spec.Body);
+            cmd.AddParam("@author", (object?)spec.Author ?? DBNull.Value);
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -258,19 +265,20 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
     public async Task<SpecRecord?> GetAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
 
         SpecRecord? spec = null;
         await using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = @"SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
+            cmd.CommandText = $"""
+                SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
                 s.current_version, s.created_at, s.updated_at,
                 v.body, v.author
-                FROM spec s
-                JOIN spec_version v ON v.spec_id = s.id AND v.version = s.current_version
-                WHERE s.id = $id";
-            cmd.Parameters.AddWithValue("$id", id);
+                FROM {T("spec")} s
+                JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
+                WHERE s.id = @id
+                """;
+            cmd.AddParam("@id", id);
             await using var rd = await cmd.ExecuteReaderAsync(ct);
             if (!await rd.ReadAsync(ct)) return null;
             spec = new SpecRecord(
@@ -292,23 +300,24 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
     public async Task<IReadOnlyList<SpecRecord>> ListAsync(
         string? projectId, SpecStatus? status, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
 
         var list = new List<SpecRecord>();
         await using var cmd = conn.CreateCommand();
-        var sql = @"SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
+        var sql = $"""
+            SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
             s.current_version, s.created_at, s.updated_at,
             v.body, v.author
-            FROM spec s
-            JOIN spec_version v ON v.spec_id = s.id AND v.version = s.current_version
-            WHERE 1=1";
-        if (projectId is not null) sql += " AND s.project_id = $proj";
-        if (status is not null) sql += " AND s.status = $status";
+            FROM {T("spec")} s
+            JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
+            WHERE 1=1
+            """;
+        if (projectId is not null) sql += " AND s.project_id = @proj";
+        if (status is not null) sql += " AND s.status = @status";
         sql += " ORDER BY s.updated_at DESC";
         cmd.CommandText = sql;
-        if (projectId is not null) cmd.Parameters.AddWithValue("$proj", projectId);
-        if (status is not null) cmd.Parameters.AddWithValue("$status", status.Value.ToString());
+        if (projectId is not null) cmd.AddParam("@proj", projectId);
+        if (status is not null) cmd.AddParam("@status", status.Value.ToString());
 
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
@@ -337,16 +346,15 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             throw new ArgumentException("body is required", nameof(update));
 
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
         int nextVersion;
         await using (var cur = conn.CreateCommand())
         {
             cur.Transaction = tx;
-            cur.CommandText = "SELECT current_version FROM spec WHERE id = $id";
-            cur.Parameters.AddWithValue("$id", id);
+            cur.CommandText = $"SELECT current_version FROM {T("spec")} WHERE id = @id";
+            cur.AddParam("@id", id);
             var hit = await cur.ExecuteScalarAsync(ct);
             if (hit is null) throw new InvalidOperationException($"Spec {id} not found");
             nextVersion = Convert.ToInt32(hit) + 1;
@@ -387,23 +395,25 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = @"INSERT INTO spec_version (spec_id, version, body, author, created_at)
-                VALUES ($sid, $v, $body, $author, $now)";
-            cmd.Parameters.AddWithValue("$sid", id);
-            cmd.Parameters.AddWithValue("$v", nextVersion);
-            cmd.Parameters.AddWithValue("$body", storedBody);
-            cmd.Parameters.AddWithValue("$author", (object?)update.Author ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            cmd.CommandText = $"""
+                INSERT INTO {T("spec_version")} (spec_id, version, body, author, created_at)
+                VALUES (@sid, @v, @body, @author, @now)
+                """;
+            cmd.AddParam("@sid", id);
+            cmd.AddParam("@v", nextVersion);
+            cmd.AddParam("@body", storedBody);
+            cmd.AddParam("@author", (object?)update.Author ?? DBNull.Value);
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = "UPDATE spec SET current_version = $v, updated_at = $now WHERE id = $id";
-            cmd.Parameters.AddWithValue("$v", nextVersion);
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
-            cmd.Parameters.AddWithValue("$id", id);
+            cmd.CommandText = $"""UPDATE {T("spec")} SET current_version = @v, updated_at = @now WHERE id = @id""";
+            cmd.AddParam("@v", nextVersion);
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
+            cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -421,13 +431,12 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var current = await GetAsync(id, ct)
             ?? throw new InvalidOperationException($"Spec {id} not found");
         SpecStatusTransitions.EnsureAllowed(current.Status, status);
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "UPDATE spec SET status = $status, updated_at = $now WHERE id = $id";
-        cmd.Parameters.AddWithValue("$status", status.ToString());
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"""UPDATE {T("spec")} SET status = @status, updated_at = @now WHERE id = @id""";
+        cmd.AddParam("@status", status.ToString());
+        cmd.AddParam("@now", IssueStore.DateFormatTime(now));
+        cmd.AddParam("@id", id);
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         if (rows == 0) throw new InvalidOperationException($"Spec {id} not found");
         return (await GetAsync(id, ct))!;
@@ -435,13 +444,14 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
     public async Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         var list = new List<SpecVersionRecord>();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT spec_id, version, body, author, created_at
-                            FROM spec_version WHERE spec_id = $id ORDER BY version DESC";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"""
+            SELECT spec_id, version, body, author, created_at
+            FROM {T("spec_version")} WHERE spec_id = @id ORDER BY version DESC
+            """;
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
         {
@@ -457,11 +467,10 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
     public async Task DeleteAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM spec WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"DELETE FROM {T("spec")} WHERE id = @id";
+        cmd.AddParam("@id", id);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -474,8 +483,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
     /// body may mention a future spec by name.
     /// </summary>
     private async Task PersistExtractionAsync(
-        SqliteConnection conn,
-        SqliteTransaction tx,
+        DbConnection conn,
+        DbTransaction tx,
         string specId,
         string body,
         CancellationToken ct)
@@ -486,22 +495,24 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         await using (var del = conn.CreateCommand())
         {
             del.Transaction = tx;
-            del.CommandText = "DELETE FROM spec_diagram WHERE spec_id = $id";
-            del.Parameters.AddWithValue("$id", specId);
+            del.CommandText = $"DELETE FROM {T("spec_diagram")} WHERE spec_id = @id";
+            del.AddParam("@id", specId);
             await del.ExecuteNonQueryAsync(ct);
         }
         foreach (var d in extracted.Diagrams)
         {
             await using var ins = conn.CreateCommand();
             ins.Transaction = tx;
-            ins.CommandText = @"INSERT INTO spec_diagram
+            ins.CommandText = $"""
+                INSERT INTO {T("spec_diagram")}
                 (spec_id, ordinal, kind, source, title)
-                VALUES ($sid, $ord, $kind, $src, $title)";
-            ins.Parameters.AddWithValue("$sid", specId);
-            ins.Parameters.AddWithValue("$ord", d.Ordinal);
-            ins.Parameters.AddWithValue("$kind", d.Kind);
-            ins.Parameters.AddWithValue("$src", d.Source);
-            ins.Parameters.AddWithValue("$title", (object?)d.Title ?? DBNull.Value);
+                VALUES (@sid, @ord, @kind, @src, @title)
+                """;
+            ins.AddParam("@sid", specId);
+            ins.AddParam("@ord", d.Ordinal);
+            ins.AddParam("@kind", d.Kind);
+            ins.AddParam("@src", d.Source);
+            ins.AddParam("@title", (object?)d.Title ?? DBNull.Value);
             await ins.ExecuteNonQueryAsync(ct);
         }
 
@@ -509,21 +520,23 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         await using (var del = conn.CreateCommand())
         {
             del.Transaction = tx;
-            del.CommandText = "DELETE FROM spec_touches WHERE spec_id = $id";
-            del.Parameters.AddWithValue("$id", specId);
+            del.CommandText = $"DELETE FROM {T("spec_touches")} WHERE spec_id = @id";
+            del.AddParam("@id", specId);
             await del.ExecuteNonQueryAsync(ct);
         }
         foreach (var t in extracted.Touches)
         {
             await using var ins = conn.CreateCommand();
             ins.Transaction = tx;
-            ins.CommandText = @"INSERT INTO spec_touches
+            ins.CommandText = $"""
+                INSERT INTO {T("spec_touches")}
                 (spec_id, module_id, source, rationale, created_at)
-                VALUES ($sid, $mod, 'auto', $rat, $now)";
-            ins.Parameters.AddWithValue("$sid", specId);
-            ins.Parameters.AddWithValue("$mod", t.ModuleId);
-            ins.Parameters.AddWithValue("$rat", (object?)t.Rationale ?? DBNull.Value);
-            ins.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+                VALUES (@sid, @mod, 'auto', @rat, @now)
+                """;
+            ins.AddParam("@sid", specId);
+            ins.AddParam("@mod", t.ModuleId);
+            ins.AddParam("@rat", (object?)t.Rationale ?? DBNull.Value);
+            ins.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
             await ins.ExecuteNonQueryAsync(ct);
         }
 
@@ -534,22 +547,24 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         await using (var del = conn.CreateCommand())
         {
             del.Transaction = tx;
-            del.CommandText = "DELETE FROM spec_dep WHERE from_spec_id = $id";
-            del.Parameters.AddWithValue("$id", specId);
+            del.CommandText = $"DELETE FROM {T("spec_dep")} WHERE from_spec_id = @id";
+            del.AddParam("@id", specId);
             await del.ExecuteNonQueryAsync(ct);
         }
         foreach (var d in extracted.Deps)
         {
             await using var ins = conn.CreateCommand();
             ins.Transaction = tx;
-            ins.CommandText = @"INSERT INTO spec_dep
+            ins.CommandText = $"""
+                INSERT INTO {T("spec_dep")}
                 (from_spec_id, to_spec_id, kind, rationale, source, created_at)
-                VALUES ($from, $to, $kind, $rat, 'auto', $now)";
-            ins.Parameters.AddWithValue("$from", specId);
-            ins.Parameters.AddWithValue("$to", d.TargetSpecId);
-            ins.Parameters.AddWithValue("$kind", d.Kind);
-            ins.Parameters.AddWithValue("$rat", (object?)d.Rationale ?? DBNull.Value);
-            ins.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+                VALUES (@from, @to, @kind, @rat, 'auto', @now)
+                """;
+            ins.AddParam("@from", specId);
+            ins.AddParam("@to", d.TargetSpecId);
+            ins.AddParam("@kind", d.Kind);
+            ins.AddParam("@rat", (object?)d.Rationale ?? DBNull.Value);
+            ins.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
             await ins.ExecuteNonQueryAsync(ct);
         }
 
@@ -557,9 +572,9 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         await using (var upd = conn.CreateCommand())
         {
             upd.Transaction = tx;
-            upd.CommandText = "UPDATE spec SET extracted_at = $now WHERE id = $id";
-            upd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
-            upd.Parameters.AddWithValue("$id", specId);
+            upd.CommandText = $"""UPDATE {T("spec")} SET extracted_at = @now WHERE id = @id""";
+            upd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            upd.AddParam("@id", specId);
             await upd.ExecuteNonQueryAsync(ct);
         }
     }

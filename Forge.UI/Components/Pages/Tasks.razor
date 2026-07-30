@@ -43,7 +43,7 @@
             {
                 <div class="task-card">
                     <div class="task-card__header">
-                        <span class="mono">@row.Id</span>
+                        <a href="/tasks/@row.Id" class="mono">@row.Id</a>
                         <span class="task-card__title">@row.Title</span>
                         <span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span>
                     </div>
@@ -87,10 +87,11 @@
                     }
 
                     <div class="task-card__actions">
-                        <input type="text" placeholder="Retry message…"
+                        <input type="text" placeholder="Retry message…" aria-label="Retry message for @row.Id"
                                value="@GetRetryText(row.Id)"
                                @oninput="@((ChangeEventArgs e) => SetRetryText(row.Id, e.Value?.ToString() ?? ""))" />
-                        <button class="btn" @onclick="@(() => SendRetry(row.Id))">Retry</button>
+                        <button class="btn" disabled="@string.IsNullOrWhiteSpace(GetRetryText(row.Id))"
+                                @onclick="@(() => SendRetry(row.Id))">Retry</button>
                         <button class="btn btn--danger" @onclick="@(() => Recover(row.Id))">Recover</button>
                     </div>
                 </div>

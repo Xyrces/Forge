@@ -29,6 +29,12 @@ public static class ProviderModelCatalog
         return models;
     }
 
+    /// <summary>Last fetch failure per provider (for diagnostics); null when the last fetch succeeded.</summary>
+    public static string? LastError(string providerName)
+        => Errors.TryGetValue(providerName, out var e) ? e : null;
+
+    private static readonly ConcurrentDictionary<string, string> Errors = new(StringComparer.OrdinalIgnoreCase);
+
     internal static async Task<string[]> FetchModelsAsync(ProviderConfig provider, HttpClient http, CancellationToken ct)
     {
         try
@@ -37,11 +43,21 @@ public static class ProviderModelCatalog
             if (!string.IsNullOrEmpty(provider.ApiKey))
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", provider.ApiKey);
             using var resp = await http.SendAsync(req, ct);
-            if (!resp.IsSuccessStatusCode) return Array.Empty<string>();
-            return ParseModelIds(await resp.Content.ReadAsStringAsync(ct));
+            if (!resp.IsSuccessStatusCode)
+            {
+                Errors[provider.Name] = $"HTTP {(int)resp.StatusCode} from {provider.BaseUrl}/models";
+                return Array.Empty<string>();
+            }
+            var models = ParseModelIds(await resp.Content.ReadAsStringAsync(ct));
+            if (models.Length == 0)
+                Errors[provider.Name] = "no model ids in response (unexpected JSON shape)";
+            else
+                Errors.TryRemove(provider.Name, out _);
+            return models;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Errors[provider.Name] = $"{ex.GetType().Name}: {ex.Message}";
             return Array.Empty<string>();
         }
     }

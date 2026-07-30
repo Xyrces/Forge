@@ -14,7 +14,12 @@ public sealed record ProviderConfig(
     string BaseUrl,
     string? ApiKey,
     string? OrgId,
-    string DefaultModel);
+    string DefaultModel,
+    // Wire protocol: null/"openai" = chat completions (the default);
+    // "anthropic" = Anthropic Messages API (e.g. Kimi-for-Coding,
+    // whose chat lives at {base}/messages with x-api-key auth — the
+    // OpenAI-shaped /models listing works but chat 401s).
+    string? Api = null);
 
 /// <summary>
 /// Per-role model assignment. Resolved by looking up
@@ -106,7 +111,8 @@ public static class LlmConfigAdapter
             BaseUrl: p.BaseUrl,
             ApiKey: string.IsNullOrEmpty(p.ApiKey) ? null : p.ApiKey,
             OrgId: string.IsNullOrEmpty(p.OrgId) ? null : p.OrgId,
-            DefaultModel: p.DefaultModel)).ToList();
+            DefaultModel: p.DefaultModel,
+            Api: string.IsNullOrEmpty(p.Api) ? null : p.Api)).ToList();
         var roles = new Dictionary<AgentType, RoleModel>(capacity: options.Roles.Count);
         foreach (var (key, value) in options.Roles)
         {

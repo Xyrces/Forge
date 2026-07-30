@@ -25,7 +25,12 @@ public static class MemoryEndpoints
             try
             {
                 var list = await memory.RecallAsync(prefix, ct);
-                return Results.Json(list.Select(ToMemoryView).ToArray(), DashboardJson.Options);
+                // session/ keys are machine state (persisted MAF
+                // sessions for pause/resume) — 100KB JSON blobs that
+                // would flood the operator-facing memory view.
+                return Results.Json(list
+                    .Where(m => !m.Key.StartsWith("session/", StringComparison.Ordinal))
+                    .Select(ToMemoryView).ToArray(), DashboardJson.Options);
             }
             catch (Exception ex)
             {

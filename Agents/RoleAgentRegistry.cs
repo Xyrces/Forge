@@ -54,6 +54,23 @@ public sealed class RoleAgentRegistry
     public const string ArtistAgentName = "artist";
 
     /// <summary>
+    /// Resolve the effective plan-gate territory for a role on a given
+    /// project: the project's roles_json <c>$territory</c> override wins
+    /// wholesale when present; otherwise the built-in registry territory
+    /// (Forge-repo-shaped) applies. A role with no registry territory
+    /// and no override has no constraint (the gate approves).
+    /// </summary>
+    public static (IReadOnlyList<string> Prefixes, bool AllowsRootFiles) ResolveTerritory(
+        RoleAgent roleDef,
+        IReadOnlyDictionary<string, Core.RoleTerritory>? projectTerritories)
+    {
+        if (projectTerritories is not null
+            && projectTerritories.TryGetValue(roleDef.AgentName, out var t))
+            return (t.Prefixes, t.AllowsRootFiles);
+        return (roleDef.TerritoryPrefixes ?? Array.Empty<string>(), roleDef.TerritoryAllowsRootFiles);
+    }
+
+    /// <summary>
     /// Get a role by its agent name. Returns null when no role
     /// matches. Use this for the Designer (which is keyed by name
     /// not by AgentType).

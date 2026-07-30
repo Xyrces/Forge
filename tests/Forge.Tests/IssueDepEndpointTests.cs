@@ -29,7 +29,7 @@ public class IssueDepEndpointTests : IDisposable
 
     public IssueDepEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-dep-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("dep-api");
         _issues = new IssueStore(_dbPath);
         var agents = new AgentStore(_issues);
         var skills = new SkillStore(_issues);

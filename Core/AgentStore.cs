@@ -1,5 +1,6 @@
+using System.Data.Common;
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
+using Forge.Core.Db;
 
 namespace Forge.Core;
 
@@ -29,27 +30,30 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
     private readonly IssueStore _issues;
     public AgentStore(IssueStore issues) { _issues = issues; }
 
+    private string T(string name) => _issues.Db.Dialect.Table(name);
+
     public async Task<AgentRecord> CreateAsync(NewAgent spec, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         var id = $"agent-{Guid.NewGuid().ToString("N")[..10]}";
         var now = DateTime.UtcNow;
         var configJson = JsonSerializer.Serialize(spec.Config ?? new Dictionary<string, object>());
         await using (var cmd = conn.CreateCommand())
         {
-            cmd.Transaction = (SqliteTransaction)tx;
-            cmd.CommandText = @"INSERT INTO agent (id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
-                VALUES ($id, $agent, $display, $scope, $desc, $enabled, $config, $now, $now)";
-            cmd.Parameters.AddWithValue("$id", id);
-            cmd.Parameters.AddWithValue("$agent", spec.AgentName);
-            cmd.Parameters.AddWithValue("$display", spec.DisplayName);
-            cmd.Parameters.AddWithValue("$scope", spec.Scope ?? "");
-            cmd.Parameters.AddWithValue("$desc", (object?)spec.Description ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$enabled", spec.Enabled ? 1 : 0);
-            cmd.Parameters.AddWithValue("$config", configJson);
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            cmd.Transaction = tx;
+            cmd.CommandText = $"""
+                INSERT INTO {T("agent")} (id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
+                VALUES (@id, @agent, @display, @scope, @desc, @enabled, @config, @now, @now)
+                """;
+            cmd.AddParam("@id", id);
+            cmd.AddParam("@agent", spec.AgentName);
+            cmd.AddParam("@display", spec.DisplayName);
+            cmd.AddParam("@scope", spec.Scope ?? "");
+            cmd.AddParam("@desc", (object?)spec.Description ?? DBNull.Value);
+            cmd.AddParam("@enabled", spec.Enabled ? 1 : 0);
+            cmd.AddParam("@config", configJson);
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -58,10 +62,9 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
 
     public async Task<IReadOnlyList<AgentRecord>> ListAsync(CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent ORDER BY display_name";
+        cmd.CommandText = $"SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM {T("agent")} ORDER BY display_name";
         var list = new List<AgentRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(Read(rd));
@@ -70,22 +73,20 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
 
     public async Task<AgentRecord?> GetAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM {T("agent")} WHERE id = @id";
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
 
     public async Task<AgentRecord?> GetByNameAsync(string agentName, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM agent WHERE agent_name = $agent";
-        cmd.Parameters.AddWithValue("$agent", agentName);
+        cmd.CommandText = $"SELECT id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at FROM {T("agent")} WHERE agent_name = @agent";
+        cmd.AddParam("@agent", agentName);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
@@ -105,60 +106,67 @@ public sealed class AgentStore : IAgentStore, IAsyncDisposable
                 : existing.ConfigJson,
         };
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"UPDATE agent SET agent_name=$agent, display_name=$display, scope=$scope, description=$desc, enabled=$enabled, config_json=$config, updated_at=$now WHERE id=$id";
-        cmd.Parameters.AddWithValue("$agent", merged.AgentName);
-        cmd.Parameters.AddWithValue("$display", merged.DisplayName);
-        cmd.Parameters.AddWithValue("$scope", merged.Scope);
-        cmd.Parameters.AddWithValue("$desc", (object?)merged.Description ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$enabled", merged.Enabled ? 1 : 0);
-        cmd.Parameters.AddWithValue("$config", merged.ConfigJson);
-        cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"""UPDATE {T("agent")} SET agent_name=@agent, display_name=@display, scope=@scope, description=@desc, enabled=@enabled, config_json=@config, updated_at=@now WHERE id=@id""";
+        cmd.AddParam("@agent", merged.AgentName);
+        cmd.AddParam("@display", merged.DisplayName);
+        cmd.AddParam("@scope", merged.Scope);
+        cmd.AddParam("@desc", (object?)merged.Description ?? DBNull.Value);
+        cmd.AddParam("@enabled", merged.Enabled ? 1 : 0);
+        cmd.AddParam("@config", merged.ConfigJson);
+        cmd.AddParam("@now", IssueStore.DateFormatTime(now));
+        cmd.AddParam("@id", id);
         await cmd.ExecuteNonQueryAsync(ct);
         return merged with { UpdatedAt = now };
     }
 
     public async Task DeleteAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM agent WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = $"DELETE FROM {T("agent")} WHERE id = @id";
+        cmd.AddParam("@id", id);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task BulkUpsertFromAgentFilesAsync(IEnumerable<(string AgentName, string DisplayName, string Scope, string? Description)> entries, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         foreach (var entry in entries)
         {
             await using var cmd = conn.CreateCommand();
-            cmd.Transaction = (SqliteTransaction)tx;
-            cmd.CommandText = @"INSERT INTO agent (id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
-                VALUES ($id, $agent, $display, $scope, $desc, 1, '{}', $now, $now)
-                ON CONFLICT(agent_name) DO UPDATE SET
-                    display_name = excluded.display_name,
-                    scope        = excluded.scope,
-                    description  = excluded.description,
-                    updated_at   = excluded.updated_at";
-            cmd.Parameters.AddWithValue("$id", $"agent-{Guid.NewGuid().ToString("N")[..10]}");
-            cmd.Parameters.AddWithValue("$agent", entry.AgentName);
-            cmd.Parameters.AddWithValue("$display", entry.DisplayName);
-            cmd.Parameters.AddWithValue("$scope", entry.Scope);
-            cmd.Parameters.AddWithValue("$desc", (object?)entry.Description ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            cmd.Transaction = tx;
+            cmd.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
+                ? $$"""
+                    MERGE {{T("agent")}} WITH (HOLDLOCK) AS t
+                    USING (SELECT @agent AS agent_name) AS s ON t.agent_name = s.agent_name
+                    WHEN MATCHED THEN UPDATE SET display_name = @display, scope = @scope, description = @desc, updated_at = @now
+                    WHEN NOT MATCHED THEN INSERT (id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
+                        VALUES (@id, @agent, @display, @scope, @desc, 1, '{}', @now, @now);
+                    """
+                : """
+                    INSERT INTO agent (id, agent_name, display_name, scope, description, enabled, config_json, created_at, updated_at)
+                    VALUES (@id, @agent, @display, @scope, @desc, 1, '{}', @now, @now)
+                    ON CONFLICT(agent_name) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        scope        = excluded.scope,
+                        description  = excluded.description,
+                        updated_at   = excluded.updated_at
+                    """;
+            cmd.AddParam("@id", $"agent-{Guid.NewGuid().ToString("N")[..10]}");
+            cmd.AddParam("@agent", entry.AgentName);
+            cmd.AddParam("@display", entry.DisplayName);
+            cmd.AddParam("@scope", entry.Scope);
+            cmd.AddParam("@desc", (object?)entry.Description ?? DBNull.Value);
+            cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
     }
 
-    private static AgentRecord Read(SqliteDataReader rd) => new(
+    private static AgentRecord Read(DbDataReader rd) => new(
         Id: rd.GetString(0),
         AgentName: rd.GetString(1),
         DisplayName: rd.GetString(2),

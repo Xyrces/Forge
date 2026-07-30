@@ -48,7 +48,7 @@ public class KillRestartVerificationTests : IDisposable
     public KillRestartVerificationTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-killrestart-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("killrestart");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");

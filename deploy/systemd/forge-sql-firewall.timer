@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodic Azure SQL firewall refresh (dynamic egress IP)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

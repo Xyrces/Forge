@@ -47,3 +47,64 @@ public class ModelRateLimitTrackerTests
         Assert.True(snap.ContainsKey("kilo-gateway|minimax/minimax-m3"));
     }
 }
+
+public class LlmAuthFailureClassificationTests
+{
+    [Fact]
+    public void ClientResult401_Classifies()
+    {
+        var ex = new InvalidOperationException("run failed",
+            new System.ClientModel.ClientResultException("HTTP 401 (: PAID_MODEL_AUTH_REQUIRED)", null));
+        Assert.True(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+
+    [Fact]
+    public void PaidMarker_InStringForm_Classifies()
+    {
+        // The lastError path wraps the recorded error string in a
+        // plain InvalidOperationException — the marker must match.
+        var ex = new InvalidOperationException(
+            "ClientResultException: HTTP 401 (: PAID_MODEL_AUTH_REQUIRED)  You need to sign in to use this model.");
+        Assert.True(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+
+    [Fact]
+    public void Generic500_DoesNotClassify()
+    {
+        var ex = new System.ClientModel.ClientResultException("HTTP 500", null);
+        Assert.False(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+
+    [Fact]
+    public void RateLimit429_DoesNotClassify_AsAuth()
+    {
+        var ex = new System.ClientModel.ClientResultException("HTTP 429 Too Many Requests", null);
+        Assert.False(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+
+    [Fact]
+    public void Bare401String_WithoutMarker_DoesNotClassify()
+    {
+        // A GitHub-ish 401 in string form must not park the task as
+        // an LLM auth outage — only the LLM client's typed exception
+        // or the gateway marker counts.
+        var ex = new InvalidOperationException("request failed: 401 Unauthorized");
+        Assert.False(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+
+    [Fact]
+    public void ClientResult402_Classifies()
+    {
+        var ex = new InvalidOperationException("run failed",
+            new System.ClientModel.ClientResultException("HTTP 402 (: ) Add credits to continue", null));
+        Assert.True(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+
+    [Fact]
+    public void Http402_InStringForm_Classifies()
+    {
+        var ex = new InvalidOperationException(
+            "ClientResultException: HTTP 402 (: )  Add credits to continue");
+        Assert.True(Forge.Orchestrator.OrchestratorAgent.IsLlmAuthFailure(ex));
+    }
+}

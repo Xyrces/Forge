@@ -1,3 +1,5 @@
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 using Forge.Core;
 
@@ -19,12 +21,22 @@ public sealed class MemoryExtractionStore : IAsyncDisposable
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
 
     public MemoryExtractionStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
+    {
+    }
+
+    public MemoryExtractionStore(IDbConnectionFactory db)
+    {
+        _db = db;
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+        return new SqliteConnectionStringBuilder
         {
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
@@ -33,25 +45,26 @@ public sealed class MemoryExtractionStore : IAsyncDisposable
         }.ToString();
     }
 
+    private string T(string name) => _db.Dialect.Table(name);
+
     public async Task RecordAsync(ExtractionResult result, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO memory_extraction(
+        cmd.CommandText = $"""
+            INSERT INTO {T("memory_extraction")}(
                 ts, task_id, source_chars, extracted_count,
                 persisted_keys_json, error)
-            VALUES($ts, $task, $src, $count, $keys, $err)
+            VALUES(@ts, @task, @src, @count, @keys, @err)
             """;
-        cmd.Parameters.AddWithValue("$ts", now.ToString(DateFormat));
-        cmd.Parameters.AddWithValue("$task", result.IssueId);
-        cmd.Parameters.AddWithValue("$src", result.SourceChars);
-        cmd.Parameters.AddWithValue("$count", result.ExtractedCount);
-        cmd.Parameters.AddWithValue("$keys",
+        cmd.AddParam("@ts", now.ToString(DateFormat));
+        cmd.AddParam("@task", result.IssueId);
+        cmd.AddParam("@src", result.SourceChars);
+        cmd.AddParam("@count", result.ExtractedCount);
+        cmd.AddParam("@keys",
             System.Text.Json.JsonSerializer.Serialize(result.PersistedKeys));
-        cmd.Parameters.AddWithValue("$err", (object?)result.Error ?? DBNull.Value);
+        cmd.AddParam("@err", (object?)result.Error ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -61,17 +74,16 @@ public sealed class MemoryExtractionStore : IAsyncDisposable
     public async Task<IReadOnlyList<MemoryExtractionRecord>> ListForTaskAsync(
         string taskId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT id, ts, task_id, source_chars, extracted_count,
                    persisted_keys_json, error
-            FROM memory_extraction
-            WHERE task_id = $task
+            FROM {T("memory_extraction")}
+            WHERE task_id = @task
             ORDER BY ts ASC, id ASC
             """;
-        cmd.Parameters.AddWithValue("$task", taskId);
+        cmd.AddParam("@task", taskId);
         var list = new List<MemoryExtractionRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
@@ -99,17 +111,17 @@ public sealed class MemoryExtractionStore : IAsyncDisposable
     public async Task<IReadOnlyList<MemoryExtractionRecord>> ListAsync(
         int limit = 100, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, ts, task_id, source_chars, extracted_count,
+        var d = _db.Dialect;
+        cmd.CommandText = $"""
+            SELECT {d.TopParam("@limit")}id, ts, task_id, source_chars, extracted_count,
                    persisted_keys_json, error
-            FROM memory_extraction
+            FROM {T("memory_extraction")}
             ORDER BY ts DESC, id DESC
-            LIMIT $limit
+            {d.LimitParam("@limit")}
             """;
-        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.AddParam("@limit", limit);
         var list = new List<MemoryExtractionRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
