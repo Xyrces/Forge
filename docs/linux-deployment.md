@@ -54,7 +54,7 @@ orchestrator + its state dir.
 2. **Publish a release**:
 
    ```bash
-   dotnet publish Core/Forge.Core.csproj -c Release -o /tmp/forge-$(git rev-parse --short HEAD)
+   dotnet publish Forge.Core/Forge.Core.csproj -c Release -o /tmp/forge-$(git rev-parse --short HEAD)
    ```
 
 3. **Drop an appsettings.json**:
@@ -169,6 +169,28 @@ loopback only. To expose the dashboard:
   configure the Kestrel HTTPS endpoint in `appsettings.json`. You
   need a cert (`dotnet dev-certs https` for dev; Let's Encrypt or
   an internal CA for prod).
+
+## Azure SQL state backend (optional)
+
+With `db.provider=sqlserver` the per-project SQLite files are replaced
+by one Azure SQL database (schema `proj_<id>` per project). See
+`docs/azure-sql-cutover.md` for the full runbook (resources, cutover
+steps, failure modes). Deployment-specific notes:
+
+- Auth is Entra-only; the connection string uses
+  `Authentication=Active Directory Default` — on a self-hosted machine
+  this resolves via the Azure CLI login of the service user; in Azure
+  it resolves via managed identity (`forge-mi`, already provisioned as
+  db_owner).
+- `scripts/refresh-sql-firewall.sh` keeps the server's
+  `forge-dev-machine` firewall rule aligned with a dynamic egress IP
+  and refreshes the az token. Wire it as an ExecStartPre (commented
+  example in `deploy/systemd/forge.service`) and install
+  `deploy/systemd/forge-sql-firewall.{service,timer}` for the 15-min
+  refresh.
+- Backup becomes Azure-side (automatic backups + PITR on the Basic
+  tier). The SQLite guidance below applies only to the default
+  `sqlite` provider.
 
 ## Backup
 

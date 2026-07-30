@@ -8,11 +8,12 @@
 /// (c) feed the dashboard.
 ///
 /// <para>
-/// <see cref="SessionId"/> is the MAF <c>AgentSession</c> blob in
-/// <c>JsonElement</c> form. Round-trip it via
-/// <c>AgentSession.SerializeSessionAsync</c> / <c>DeserializeSessionAsync</c>
-/// to resume the conversation after a restart. The pre-MAF ACP runner
-/// returned null here (it had no session equivalent).
+/// <see cref="SessionId"/> is a REFERENCE to the run's persisted
+/// session — the memory-store key the session JSON lives under
+/// (<c>session/&lt;project&gt;/&lt;task&gt;/&lt;role&gt;</c>), not the
+/// blob itself. The runner resumes that session automatically on the
+/// next run of the same task+role (pause/resume rework loop); callers
+/// pass <c>sessionId: null</c> and the runner resolves the rest.
 /// </para>
 /// </summary>
 public sealed record AgentRunResult(

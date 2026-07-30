@@ -63,7 +63,7 @@ public static class ReviewerEndpoints
         var fakeWatch = new IssueRecord(
             Id: $"pr-watch-body-{body.PrNumber}",
             ShortId: $"pr-watch-body-{body.PrNumber}",
-            Type: AgentTaskTypes.PrWatch,
+            Type: "task",
             Title: $"[http] review for pr #{body.PrNumber}",
             Description: null,
             Status: IssueStatus.Pending,
@@ -80,7 +80,7 @@ public static class ReviewerEndpoints
                 ["taskId"] = $"task-review-{body.PrNumber}",
             }));
 
-        return await dispatcher.ProcessWatchTaskAsync(fakeWatch, ct);
+        return await dispatcher.ProcessWatchedTaskAsync(fakeWatch, ct);
     }
 }
 

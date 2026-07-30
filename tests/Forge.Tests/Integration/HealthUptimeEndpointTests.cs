@@ -20,7 +20,7 @@ public class HealthUptimeEndpointTests : IDisposable
 
     public HealthUptimeEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-uptime-ep-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("uptime-ep");
         Directory.CreateDirectory(_workDir);
         var port = GetEphemeralPort();
         _baseAddress = new Uri($"http://127.0.0.1:{port}/");

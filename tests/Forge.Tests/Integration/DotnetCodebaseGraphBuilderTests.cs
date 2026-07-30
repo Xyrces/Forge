@@ -18,7 +18,7 @@ public class DotnetCodebaseGraphBuilderTests : IDisposable
 
     public DotnetCodebaseGraphBuilderTests()
     {
-        _repoRoot = Path.Combine(Path.GetTempPath(), $"ph-graph-{Guid.NewGuid():N}");
+        _repoRoot = TempRoot.Instance.NewDirectory("graph");
         Directory.CreateDirectory(_repoRoot);
     }
 

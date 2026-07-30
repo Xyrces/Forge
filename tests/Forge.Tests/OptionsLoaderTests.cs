@@ -15,7 +15,7 @@ public class OptionsLoaderTests : IDisposable
 
     public OptionsLoaderTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-options-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("options");
         Directory.CreateDirectory(_workDir);
         _configPath = Path.Combine(_workDir, "appsettings.json");
     }

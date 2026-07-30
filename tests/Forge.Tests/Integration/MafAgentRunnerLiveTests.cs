@@ -39,9 +39,9 @@ public class MafAgentRunnerLiveTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("live-md"));
 
-        var worktree = Path.Combine(Path.GetTempPath(), $"ph-live-wt-{Guid.NewGuid():N}");
+        var worktree = TempRoot.Instance.NewDirectory("live-wt");
         Directory.CreateDirectory(worktree);
         File.WriteAllText(Path.Combine(worktree, "PROBE.txt"), "live-marker-12345");
 
@@ -95,12 +95,12 @@ public class MafAgentRunnerLiveTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("live-md"));
 
         // Use the actual prompt shape from RunAgentExecutor.BuildPrompt.
         // Working directory points at a temp dir with a sample .cs file
         // so the LLM has a real surface to act on.
-        var worktree = Path.Combine(Path.GetTempPath(), $"ph-real-{Guid.NewGuid():N}");
+        var worktree = TempRoot.Instance.NewDirectory("real");
         Directory.CreateDirectory(worktree);
         File.WriteAllText(Path.Combine(worktree, "Program.cs"),
             "// existing program\nclass Program { static void Main() {}\n}\n");
@@ -170,10 +170,10 @@ public class MafAgentRunnerLiveTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-live-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("live-md"));
 
         // Create a small repo-like workspace for the agent.
-        var worktree = Path.Combine(Path.GetTempPath(), $"ph-multi-{Guid.NewGuid():N}");
+        var worktree = TempRoot.Instance.NewDirectory("multi");
         Directory.CreateDirectory(worktree);
         File.WriteAllText(Path.Combine(worktree, "lib.cs"),
             "namespace MyLib { public class Helper { public static int Add(int a, int b) => a + b; } }\n");

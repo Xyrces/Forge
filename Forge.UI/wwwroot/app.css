@@ -3,6 +3,7 @@
    ------------------------------------------------------------------------- */
 
 :root {
+  color-scheme: dark;
   /* Surfaces — dark theme (default) */
   --bg:               #0A0D17;
   --surface:          #0F1320;
@@ -36,6 +37,7 @@
 
 @media (prefers-color-scheme: light) {
   :root {
+    color-scheme: light;
     --bg:               #F7F8FB;
     --surface:          #FFFFFF;
     --surface-1:        #F0F2F7;
@@ -215,6 +217,9 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
   letter-spacing: 0.04em; text-transform: uppercase;
 }
 .pill--primary  { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
+/* Informational tone: "reviewing…", "review pending", "resumed" —
+   activity in flight that is neither success nor failure. */
+.pill--info     { background: var(--primary-soft); color: var(--on-surface); border: 1px solid var(--outline); }
 .pill--outline  { background: transparent; border: 1px solid var(--outline); color: var(--on-surface-variant); }
 .pill--success  { background: var(--success); color: var(--on-primary); }
 .pill--error    { background: var(--error); color: var(--on-primary); }
@@ -226,6 +231,14 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
 .pill--draft    { background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); }
 .pill--designed, .pill--assetready, .pill--shipped, .pill--groomed { background: var(--primary); color: var(--on-primary); }
 .pill--approved { background: var(--surface-3); color: var(--on-surface); border: 1px solid var(--outline-variant); }
+/* Status pills that were referenced by pages but never defined —
+   they rendered as invisible/unstyled pills (2026-07-27 audit). */
+.pill--closed    { background: var(--surface-3); color: var(--on-surface-variant); border: 1px solid var(--outline-variant); }
+.pill--blocked   { background: var(--warn); color: var(--on-primary); }
+.pill--active    { background: var(--primary); color: var(--on-primary); }
+.pill--readyfordesign { background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); }
+.pill--needsrevision { background: var(--warn); color: var(--on-primary); }
+.pill--grooming  { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
 
 .heartbeat { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--on-surface-variant); }
 .heartbeat__dot { width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--outline-variant); }
@@ -365,12 +378,24 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
    ------------------------------------------------------------------------- */
 
 .banner {
+
   display: flex; align-items: center; gap: 12px;
   padding: 10px 12px; border-radius: var(--radius-md);
   font-size: 12px; line-height: 1.5;
 }
 .banner--ok { background: rgba(125, 223, 193, 0.10); border: 1px solid var(--success); color: var(--on-surface); }
 .banner--warn { background: rgba(242, 181, 90, 0.10); border: 1px solid var(--warn); color: var(--on-surface); }
+
+/* ConfirmDialog: shared destructive-action confirmation. */
+.confirm-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.confirm-dialog { max-width: 420px; padding: 16px 18px; }
+.confirm-dialog__danger {
+  background: var(--error); color: var(--on-primary); border-color: var(--error);
+}
+.confirm-dialog__danger:hover { filter: brightness(1.1); }
 .banner--error { background: rgba(255, 107, 122, 0.10); border: 1px solid var(--error); color: var(--on-surface); }
 .banner > span { flex: 1; }
 .banner--warn:has(.cert-help) { flex-direction: column; align-items: stretch; }
@@ -830,3 +855,43 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .pill--source-db-override { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
 .pill--source-config { background: rgba(125,223,193,0.12); color: var(--success); border: 1px solid var(--success); }
 .pill--source-builtin-default { background: transparent; color: var(--on-surface-variant); border: 1px solid var(--outline); }
+
+/* RunDetail transcript messages (de-inlined 2026-07-27 audit). */
+.run-msg { border: 1px solid var(--outline-variant); border-radius: 8px; }
+.run-msg__summary { cursor: pointer; padding: 8px 12px; }
+.run-msg__summary--muted { cursor: pointer; padding: 8px 12px; color: var(--on-surface-variant); }
+.run-msg__pre { margin: 0; padding: 12px; white-space: pre-wrap; font-size: 13px; border-top: 1px solid var(--outline-variant); }
+.run-msg__pre--muted { margin: 0; padding: 12px; white-space: pre-wrap; font-size: 12px; color: var(--on-surface-variant); border-top: 1px solid var(--outline-variant); }
+.run-msg--thinking { border-left: 3px solid var(--outline-variant); }
+.run-msg--assistant { border-left: 3px solid var(--primary); padding: 10px 14px; }
+.run-msg__code { background: var(--surface-1, rgba(255,255,255,.05)); padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 12.5px; }
+.run-msg__text { white-space: pre-wrap; font-size: 14px; margin-top: 6px; }
+.run-msg__tools { border-top: 1px solid var(--outline-variant); }
+.run-msg__tool { padding: 10px 12px; border-bottom: 1px solid var(--outline-variant); }
+.run-msg__tool-name { font-size: 12px; color: var(--primary); }
+.run-msg__tool-args { margin: 6px 0 0; font-size: 12px; white-space: pre-wrap; color: var(--on-surface-variant); }
+.run-msg__tool-result { margin: 6px 0 0; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; background: var(--surface-1, rgba(255,255,255,.04)); padding: 8px; border-radius: 6px; }
+
+/* Runs page: active-run cards (de-inlined 2026-07-27 audit). */
+.run-active-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.run-active-card { border: 1px solid var(--primary); border-radius: 10px; padding: 12px 14px; }
+.run-active-card__top { display: flex; justify-content: space-between; align-items: center; }
+.run-active-card__role { display: flex; gap: 8px; align-items: center; }
+.run-active-card__elapsed { font-size: 12px; color: var(--on-surface-variant); }
+.run-active-card__body { margin-top: 6px; font-size: 13px; }
+.run-active-card__meta { font-size: 11px; color: var(--on-surface-variant); margin-top: 4px; }
+
+/* Workflow editor (Flow page Edit mode) */
+.wf-step { background: var(--surface); border: 1px solid var(--outline-variant); border-radius: 12px; padding: 12px 14px; }
+.wf-step__header { display: flex; gap: 8px; align-items: center; }
+.wf-step__number { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: var(--on-primary); font-size: 12px; flex-shrink: 0; }
+.wf-connector { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin: 4px auto; border-radius: 50%; border: 1px solid var(--outline-variant); color: var(--on-surface-variant); font-size: 13px; }
+.wf-branch { margin-top: 6px; }
+.wf-branch__chip { border-style: dashed; }
+.wf-branch__nested { margin: 6px 0 0 18px; padding-left: 12px; border-left: 2px solid var(--outline-variant); }
+
+/* Flow page: scrollable graph canvas + legend */
+.flow-canvas { flex: 1; min-width: 0; max-width: 900px; max-height: calc(100vh - 210px); overflow: auto; border: 1px solid var(--outline-variant); border-radius: 12px; background: var(--surface); }
+.flow-canvas svg { display: block; width: 100%; height: auto; border: none; border-radius: 0; background: transparent; }
+.flow-legend { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; font-size: 12px; color: var(--on-surface-variant); }
+.flow-legend__item { display: inline-flex; gap: 6px; align-items: center; }

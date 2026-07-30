@@ -19,8 +19,8 @@ public class IssuesJsonlMirrorTests : IDisposable
 
     public IssuesJsonlMirrorTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-jsonl-{Guid.NewGuid():N}.db");
-        _jsonlPath = Path.Combine(Path.GetTempPath(), $"ph-jsonl-{Guid.NewGuid():N}.jsonl");
+        _dbPath = TempRoot.Instance.NewDbPath("jsonl");
+        _jsonlPath = Path.Combine(TempRoot.Instance.NewDirectory("jsonl"), "issues.jsonl");
         _store = new IssueStore(_dbPath);
     }
 

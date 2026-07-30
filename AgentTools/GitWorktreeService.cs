@@ -31,15 +31,31 @@ public sealed class GitWorktreeService
     public string WorktreePathFor(string taskId)
         => Path.Combine(WorktreeRoot, Sanitize(taskId));
 
-    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default)
+    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null)
     {
-        var branch = $"agent/{Sanitize(taskId)}";
+        // The worktree branch must equal the branch the rest of the
+        // pipeline uses (claim metadata -> prompt -> CommitPushPr push
+        // refspec). When the issue carries an explicit branch in its
+        // metadata, honor it here; otherwise the canonical agent/<id>.
+        var branch = branchOverride ?? $"agent/{Sanitize(taskId)}";
         var worktreePath = WorktreePathFor(taskId);
 
         Directory.CreateDirectory(WorktreeRoot);
 
         if (Directory.Exists(worktreePath))
         {
+            // Reuse path: the worktree may hold a STALE branch from an
+            // earlier task with the same id (worktrees persist). When an
+            // override was requested, force the checkout onto it so the
+            // executor's later push refspec still matches the checkout
+            // (found live: task-29 reused an agent/<id> checkout while
+            // the metadata branch was a custom name).
+            if (branchOverride is not null)
+            {
+                var checkout = await RunGitInAsync(worktreePath, $"checkout -B \"{branchOverride}\"", cancellationToken);
+                if (checkout.ExitCode != 0)
+                    throw new InvalidOperationException($"git checkout -B failed (exit={checkout.ExitCode}): {checkout.Stderr}");
+            }
             _logger.LogInformation("Worktree already exists for {TaskId} at {Path}; reusing", taskId, worktreePath);
             return worktreePath;
         }
@@ -190,10 +206,37 @@ public sealed class GitWorktreeService
 
     public async Task<DiffStats> GetDiffStatsAsync(string worktreePath, string baseBranch, CancellationToken cancellationToken = default)
     {
-        var result = await RunGitInAsync(worktreePath, $"diff --stat \"{baseBranch}...HEAD\"", cancellationToken);
+        var baseRef = await ResolveRemoteBaseRefAsync(worktreePath, baseBranch, cancellationToken);
+        var result = await RunGitInAsync(worktreePath, $"diff --stat \"{baseRef}...HEAD\"", cancellationToken);
         var lines = result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         var summary = lines.Length == 0 ? string.Empty : lines[^1];
         return new DiffStats(result.Stdout, summary);
+    }
+
+    /// <summary>Unique commits on HEAD not reachable from the base
+    /// branch (origin-preferred). This — never a diff against a
+    /// possibly-stale LOCAL main ref — is the source of truth for
+    /// "does this branch carry new work". (Observed live 2026-07-29
+    /// on porthorizon task-7: the worktree's local main was stale,
+    /// so a HEAD sitting exactly on fresh origin/main diffed as
+    /// "9 files, agent self-committed" — a false positive that
+    /// pushed a no-op branch and died on GitHub's no-commits 422.)</summary>
+    public async Task<int> GetAheadCountAsync(string worktreePath, string baseBranch, CancellationToken cancellationToken = default)
+    {
+        var baseRef = await ResolveRemoteBaseRefAsync(worktreePath, baseBranch, cancellationToken);
+        var result = await RunGitInAsync(worktreePath, $"rev-list --count \"{baseRef}..HEAD\"", cancellationToken);
+        return int.TryParse(result.Stdout.Trim(), out var n) ? n : 0;
+    }
+
+    /// <summary>The local <c>main</c> ref in a worktree can be
+    /// arbitrarily stale (created with the worktree, never moved).
+    /// <c>origin/&lt;base&gt;</c> is refreshed by every sync/fetch
+    /// and is the honest upstream. Fall back to the local ref only
+    /// when the remote-tracking ref doesn't exist.</summary>
+    private async Task<string> ResolveRemoteBaseRefAsync(string worktreePath, string baseBranch, CancellationToken cancellationToken)
+    {
+        var probe = await RunGitInAsync(worktreePath, $"rev-parse --verify --quiet \"origin/{baseBranch}\"", cancellationToken);
+        return probe.ExitCode == 0 ? $"origin/{baseBranch}" : baseBranch;
     }
 
     public async Task<CommitResult> CommitAllAsync(string worktreePath, string message, CancellationToken cancellationToken = default)
@@ -258,6 +301,20 @@ public sealed class GitWorktreeService
             throw new InvalidOperationException(
                 $"Refusing to push protected branch '{branch}'. " +
                 "Agents must push their agent/<taskId> branch only.");
+        }
+        // Guard: HEAD must be ON the branch being pushed. `git push
+        // origin <branch>` pushes the BRANCH REF — when an agent
+        // committed on a detached HEAD (or checked out another ref)
+        // the push silently succeeds with the wrong commits and the
+        // agent's work is orphaned (observed live 2026-07-29 on
+        // porthorizon task-7: the push was a no-op at main's tip and
+        // PR-open died on GitHub's no-commits 422).
+        var headRef = (await RunGitInAsync(worktreePath, "rev-parse --abbrev-ref HEAD", cancellationToken)).Stdout.Trim();
+        if (!headRef.Equals(branch, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to push '{branch}': worktree HEAD is on '{headRef}' — the agent's commits are not on the task branch. " +
+                "The run must commit on its agent/<taskId> branch.");
         }
         var result = await RunGitInAsync(worktreePath, $"push -u origin \"{branch}\"", cancellationToken);
         if (result.ExitCode != 0)

@@ -14,7 +14,7 @@ public class BashToolTests : IDisposable
 
     public BashToolTests()
     {
-        _cwd = Path.Combine(Path.GetTempPath(), $"ph-bash-{Guid.NewGuid():N}");
+        _cwd = TempRoot.Instance.NewDirectory("bash");
         Directory.CreateDirectory(_cwd);
     }
 

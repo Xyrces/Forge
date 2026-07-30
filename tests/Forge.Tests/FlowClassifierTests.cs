@@ -5,9 +5,9 @@ using Xunit;
 namespace Forge.Tests;
 
 /// <summary>
-/// FlowGraph.ClassifyIssue: the pure mapping from (status,
-/// checkpoint, metadata, sprint membership, spec chain) to the
-/// flow node — every branch mirrors a pipeline branch. Plus the
+/// FlowGraph.ClassifySpec / ClassifyIssue: the pure mapping from
+/// (status, checkpoint, metadata, sprint membership, spec chain) to
+/// the flow node — every branch mirrors a pipeline branch. Plus the
 /// journey builder's event-timeline derivation.
 /// </summary>
 public class FlowClassifierTests
@@ -31,6 +31,17 @@ public class FlowClassifierTests
                 }.Where(kv => kv.Value is not null).ToDictionary(kv => kv.Key, kv => kv.Value))
                 : "{}",
             ParentIssueId: parent, DispatchCheckpoint: ckpt);
+
+    [Fact]
+    public void ClassifySpec_DesignDisabled_ReadyForDesignGoesToIntake()
+    {
+        // Pass 4: design step disabled — a ReadyForDesign spec has
+        // nowhere to go and classifies back to intake (operator fast
+        // path). Default: the design node.
+        Assert.Equal("design", FlowGraph.ClassifySpec(SpecStatus.ReadyForDesign));
+        Assert.Equal("intake", FlowGraph.ClassifySpec(SpecStatus.ReadyForDesign, designEnabled: false));
+        Assert.Equal("groom", FlowGraph.ClassifySpec(SpecStatus.Designed, designEnabled: false));
+    }
 
     // Machine-record classification (authoritative): the recorded
     // lifecycle state drives the node, not status/checkpoint.

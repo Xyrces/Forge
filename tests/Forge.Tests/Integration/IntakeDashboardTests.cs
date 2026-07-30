@@ -35,7 +35,7 @@ public class IntakeDashboardTests : IDisposable
 
     public IntakeDashboardTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-intake-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("intake-api");
         _issues = new IssueStore(_dbPath);
         _sprints = new SprintStore(_issues);
         _intake = new IntakeStore(_issues);

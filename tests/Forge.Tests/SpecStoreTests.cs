@@ -11,7 +11,7 @@ public class SpecStoreTests : IDisposable
 
     public SpecStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-spec-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("spec");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
     }

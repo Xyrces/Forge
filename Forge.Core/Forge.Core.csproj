@@ -9,17 +9,17 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>NU1904;NU1903</NoWarn>
     <RootNamespace>Forge</RootNamespace>
-    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
+  <!--
+    The project file lives in Forge.Core/ but the backend source files
+    remain at the repository root. Include all root .cs files except the
+    test, e2e-harness, and Blazor UI projects that have their own csproj.
+  -->
   <ItemGroup>
-    <!--
-      The project file lives in Core/ so the solution directory can be
-      unambiguous, but all backend source still lives under the repo root.
-      Pull in every .cs file under the root except the test, tool, UI, and
-      build output directories.
-    -->
-    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\bin\**\*.cs;..\obj\**\*.cs" />
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\obj\**\*.cs;..\Forge.Core\bin\**\*.cs" />
+    <None Remove="..\tests\**;..\tools\**;..\Forge.UI\**" />
+    <EmbeddedResource Remove="..\tests\**" />
   </ItemGroup>
 
   <!--
@@ -47,14 +47,14 @@
          project without its own agents/ dir still gets real role
          instructions (see Agents/RolePromptRoot.cs). -->
     <Content Include="..\agents\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="agents\%(Filename)%(Extension)" />
-    <!-- Example configuration files kept next to the solution. -->
-    <Content Include="..\appsettings*.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Agents.AI" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.DurableTask" Version="1.1.0-preview.260410.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.0.2" />
     <PackageReference Include="Microsoft.DurableTask.Client.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.DurableTask.Worker.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />

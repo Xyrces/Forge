@@ -1,6 +1,6 @@
 # UI troubleshooting — when the Blazor dashboard looks wrong
 
-The dashboard is Blazor Server (interactive render mode) over a `Microsoft.NET.Sdk.Web`-library sibling (`Forge.UI.csproj`) that references the host (`Core/Forge.Core.csproj`). Wrong path traversal or a stale manifest can leave the UI in three common failure modes:
+The dashboard is Blazor Server (interactive render mode) over a `Microsoft.NET.Sdk.Web`-library sibling (`Forge.UI.csproj`) that references the host (`Forge.Core/Forge.Core.csproj`). Wrong path traversal or a stale manifest can leave the UI in three common failure modes:
 
 ## Symptom: full-page reload is needed to see new data
 

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 
 namespace Forge.Core;
@@ -11,21 +13,34 @@ namespace Forge.Core;
 /// </summary>
 public sealed class RecoveryReportStore
 {
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
 
     public RecoveryReportStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
     {
         _dbPath = dbPath;
-        Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+    }
+
+    public RecoveryReportStore(IDbConnectionFactory db)
+    {
+        _db = db;
+        _dbPath = "";
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
             Pooling = true,
         }.ToString();
     }
+
+    private string T(string name) => _db.Dialect.Table(name);
 
     public string DbPath => _dbPath;
 
@@ -35,16 +50,21 @@ public sealed class RecoveryReportStore
         // through the connection so the recoverer's caller can hold
         // the report id while doing the sweep.
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO recovery_report(ts, spec_id, issues_scanned, issues_replayed, issues_failed, actions_json, duration_ms)
-            VALUES($ts, $spec, 0, 0, 0, '[]', 0)
-            RETURNING id
-            """;
-        cmd.Parameters.AddWithValue("$ts", now.ToString(IssueStore.DateFormat));
-        cmd.Parameters.AddWithValue("$spec", (object?)specId ?? DBNull.Value);
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                INSERT INTO {T("recovery_report")}(ts, spec_id, issues_scanned, issues_replayed, issues_failed, actions_json, duration_ms)
+                OUTPUT INSERTED.id
+                VALUES(@ts, @spec, 0, 0, 0, '[]', 0);
+                """
+            : """
+                INSERT INTO recovery_report(ts, spec_id, issues_scanned, issues_replayed, issues_failed, actions_json, duration_ms)
+                VALUES(@ts, @spec, 0, 0, 0, '[]', 0)
+                RETURNING id
+                """;
+        cmd.AddParam("@ts", now.ToString(IssueStore.DateFormat));
+        cmd.AddParam("@spec", (object?)specId ?? DBNull.Value);
         var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
         return new RecoveryReportRecord(id, now, specId, 0, 0, 0, "[]", 0);
     }
@@ -59,24 +79,23 @@ public sealed class RecoveryReportStore
         CancellationToken ct = default)
     {
         var actionsJson = System.Text.Json.JsonSerializer.Serialize(actions);
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE recovery_report
-            SET issues_scanned = $scanned,
-                issues_replayed = $replayed,
-                issues_failed = $failed,
-                actions_json = $actions,
-                duration_ms = $ms
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("recovery_report")}
+            SET issues_scanned = @scanned,
+                issues_replayed = @replayed,
+                issues_failed = @failed,
+                actions_json = @actions,
+                duration_ms = @ms
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", reportId);
-        cmd.Parameters.AddWithValue("$scanned", issuesScanned);
-        cmd.Parameters.AddWithValue("$replayed", issuesReplayed);
-        cmd.Parameters.AddWithValue("$failed", issuesFailed);
-        cmd.Parameters.AddWithValue("$actions", actionsJson);
-        cmd.Parameters.AddWithValue("$ms", (long)duration.TotalMilliseconds);
+        cmd.AddParam("@id", reportId);
+        cmd.AddParam("@scanned", issuesScanned);
+        cmd.AddParam("@replayed", issuesReplayed);
+        cmd.AddParam("@failed", issuesFailed);
+        cmd.AddParam("@actions", actionsJson);
+        cmd.AddParam("@ms", (long)duration.TotalMilliseconds);
         await cmd.ExecuteNonQueryAsync(ct);
         return new RecoveryReportRecord(
             reportId, DateTime.MinValue, null,
@@ -86,16 +105,16 @@ public sealed class RecoveryReportStore
 
     public async Task<IReadOnlyList<RecoveryReportRecord>> ListAsync(int limit = 50, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, ts, spec_id, issues_scanned, issues_replayed, issues_failed, actions_json, duration_ms
-            FROM recovery_report
+        var d = _db.Dialect;
+        cmd.CommandText = $"""
+            SELECT {d.TopParam("@limit")}id, ts, spec_id, issues_scanned, issues_replayed, issues_failed, actions_json, duration_ms
+            FROM {T("recovery_report")}
             ORDER BY ts DESC
-            LIMIT $limit
+            {d.LimitParam("@limit")}
             """;
-        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.AddParam("@limit", limit);
         var list = new List<RecoveryReportRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
@@ -115,14 +134,13 @@ public sealed class RecoveryReportStore
 
     public async Task<RecoveryReportRecord?> GetAsync(long id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT id, ts, spec_id, issues_scanned, issues_replayed, issues_failed, actions_json, duration_ms
-            FROM recovery_report WHERE id = $id
+            FROM {T("recovery_report")} WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct)
             ? new RecoveryReportRecord(

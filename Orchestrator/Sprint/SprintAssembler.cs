@@ -123,15 +123,15 @@ public sealed class SprintAssembler
         {
             if (!await IsCompleteAsync(active, issues, sprints, ct))
             {
-                // Blocker absorption: a groomed, operator-urgent
-                // (P1) ad-hoc task joins the ACTIVE sprint
-                // immediately instead of waiting for the current
-                // sprint to drain. Motivation (observed live
-                // 2026-07-25): an infra fix that unblocks the merge
-                // gate (task-166) had to wait for six tasks to burn
-                // all their doomed rework rounds first — hours and
-                // tokens wasted on a queue ordering technicality.
-                await AbsorbBlockersAsync(active, issues, sprints, ct);
+                // Ad-hoc injection (operator rule 2026-07-27): a
+                // groomed ad-hoc task joins the ACTIVE sprint when it
+                // BELONGS there — it is part of the same work (its
+                // followUpOf chain reaches a sprint member) or it
+                // enables/unblocks the ongoing work (a blocks edge to
+                // a member, or an operator P1/blocker flag). Unrelated
+                // groomed ad-hoc work gets its own solo sprint at
+                // assembly instead.
+                await InjectAdHocAsync(active, issues, sprints, ct);
                 return;
             }
             await sprints.UpdateAsync(active.Id,
@@ -141,6 +141,10 @@ public sealed class SprintAssembler
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
                 null, $"Sprint '{active.Name}' completed"));
         }
+
+        // Epic lifecycle: close epics whose entire tree is terminal
+        // (they otherwise linger as Pending on the board forever).
+        await CloseTerminalEpicsAsync(issues, specs, ct);
 
         // Operator gate: completing a finished sprint is bookkeeping
         // (always allowed); STARTING new work is the gated decision.
@@ -178,36 +182,147 @@ public sealed class SprintAssembler
     }
 
     /// <summary>
-    /// Link groomed blocker tasks into the ACTIVE sprint. A blocker
-    /// is an ad-hoc (parentless) task that is groomed AND marked
-    /// urgent: priority 1 (operator-set, e.g. at enqueue) or
-    /// metadata blocker=true (groomer-set). Spec-chain tasks are
-    /// excluded — they flow through normal sprint assembly with
-    /// their group. Absorption never completes, replaces, or
-    /// reorders the sprint; it only adds work that by definition
-    /// outranks everything in flight.
+    /// Inject groomed ad-hoc tasks that BELONG to the active sprint
+    /// (operator rule 2026-07-27). A sprint is a coherent deployable
+    /// unit — ad-hoc work may join it, but only when it is part of
+    /// the same work or it enables/unblocks it. Three triggers,
+    /// all requiring groomed=true:
+    /// <list type="number">
+    /// <item><b>Same work</b>: the task's followUpOf chain reaches a
+    /// member of the active sprint (a follow-up filed from the
+    /// sprint's own work).</item>
+    /// <item><b>Unblocks</b>: a <c>blocks</c> dependency edge has the
+    /// task blocking an active sprint member (the member cannot
+    /// proceed until it lands — e.g. the merge-gate harness fix).</item>
+    /// <item><b>Operator-urgent</b>: priority 1 or metadata
+    /// blocker=true (the operator's explicit inject signal).</item>
+    /// </list>
+    /// Injection never completes, replaces, or reorders the sprint.
     /// </summary>
-    private async Task AbsorbBlockersAsync(
+    private async Task InjectAdHocAsync(
         SprintRecord active, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
     {
         var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
+        var all = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
+        var blockersOfMembers = await issues.ListBlockersOfAsync(memberIds, ct);
+
         foreach (var task in pending)
         {
             if (AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
-            if (task.ParentIssueId is not null) continue;   // spec-chain work waits for assembly
+            if (task.ParentIssueId is not null) continue;   // spec-chain work flows through assembly
             if (memberIds.Contains(task.Id)) continue;
             if (!string.Equals(task.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)) continue;
-            var isBlocker = task.Priority == 1
-                || string.Equals(task.GetMetadata("blocker"), "true", StringComparison.OrdinalIgnoreCase);
-            if (!isBlocker) continue;
+
+            var reason = InjectionReason(task, memberIds, all, blockersOfMembers);
+            if (reason is null) continue;
 
             await sprints.AddIssueAsync(active.Id, task.Id, ct);
             _logger.LogInformation(
-                "Sprint {SprintId}: absorbed blocker task {TaskId} ({Title}) into the active sprint",
-                active.Id, task.Id, task.Title);
+                "Sprint {SprintId}: injected ad-hoc task {TaskId} ({Title}) — {Reason}",
+                active.Id, task.Id, task.Title, reason);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                task.Id, $"Blocker task absorbed into active sprint '{active.Name}'"));
+                task.Id, $"Injected into active sprint '{active.Name}' — {reason}"));
+        }
+    }
+
+    private static string? InjectionReason(
+        IssueRecord task,
+        HashSet<string> memberIds,
+        Dictionary<string, IssueRecord> all,
+        HashSet<string> blockersOfMembers)
+    {
+        // Same work: walk the followUpOf chain; a hit on any sprint
+        // member means this task is a continuation of the sprint's
+        // own work.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var cur = task.GetMetadata("followUpOf");
+        while (cur is not null && seen.Add(cur))
+        {
+            if (memberIds.Contains(cur))
+            {
+                return $"same work (follow-up of {cur})";
+            }
+            cur = all.TryGetValue(cur, out var parent) ? parent.GetMetadata("followUpOf") : null;
+        }
+        // Unblocks: a blocks edge has this task blocking a sprint
+        // member — the member cannot proceed until it lands.
+        if (blockersOfMembers.Contains(task.Id))
+        {
+            return "unblocks ongoing work";
+        }
+        // Operator-urgent.
+        if (task.Priority == 1
+            || string.Equals(task.GetMetadata("blocker"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            return "operator-flagged blocker";
+        }
+        // Operator requeue: an ad-hoc task the operator explicitly
+        // requeued from Failed/Blocked carries operator intent to
+        // run — inject it (otherwise ad-hoc work never assembles and
+        // the sanctioned requeue path would strand it forever).
+        if (task.GetMetadata("requeuedFromFailedAt") is not null)
+        {
+            return "operator requeue";
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Close epics whose entire tree is terminal (EpicCompletion
+    /// rule): spec(s) past grooming, all stories/tasks
+    /// Completed/Closed, no Failed/Blocked descendants, no live
+    /// watch. Epics have no other lifecycle — without this they
+    /// linger as Pending on the board forever (observed 2026-07-27:
+    /// epics 6-11 all Pending despite fully merged work).
+    /// Idempotent; Failed/Blocked descendants keep the epic open for
+    /// the operator (the no-auto-clear rule).
+    /// </summary>
+    private async Task CloseTerminalEpicsAsync(IIssueStore issues, ISpecStore specs, CancellationToken ct)
+    {
+        var all = await issues.ListAsync(new IssueFilter(), ct);
+
+        // Story lifecycle first (observed 2026-07-27: stories stay
+        // Pending forever because tasks complete but nothing
+        // transitions the story — which in turn keeps the epic
+        // open). A story closes when every task under it is
+        // Completed/Closed and none is Failed/Blocked (operator
+        // decision). Stories with no tasks yet stay open.
+        var stories = all.Where(i =>
+            i.Type == "story" && i.Status is IssueStatus.Pending or IssueStatus.InProgress).ToList();
+        foreach (var story in stories)
+        {
+            var tasks = all.Where(i => i.Type == "task" && i.ParentIssueId == story.Id).ToList();
+            if (tasks.Count == 0) continue;
+            if (tasks.Any(t => t.Status is IssueStatus.Failed or IssueStatus.Blocked)) continue;
+            if (tasks.Any(t => t.Status is not (IssueStatus.Completed or IssueStatus.Closed))) continue;
+            await issues.TransitionAsync(story.Id, IssueStatus.Closed,
+                "auto-closed: all tasks terminal", ct: ct);
+            _logger.LogInformation("Story {Id} auto-closed (all tasks terminal)", story.Id);
+            // Keep the in-memory view current for the epic pass below.
+            all = all.Select(i => i.Id == story.Id ? i with { Status = IssueStatus.Closed } : i).ToList();
+        }
+
+        var epics = all.Where(i =>
+            i.Type == "epic" && i.Status is IssueStatus.Pending or IssueStatus.InProgress).ToList();
+        if (epics.Count == 0) return;
+        var allSpecs = await specs.ListAsync(projectId: null, status: null, ct);
+
+        foreach (var epic in epics)
+        {
+            var specsForEpic = allSpecs.Where(s =>
+                string.Equals(s.ParentIssueId, epic.Id, StringComparison.Ordinal)).ToList();
+            var decision = Core.EpicCompletion.Evaluate(epic, specsForEpic, all);
+            if (!decision.ShouldClose)
+            {
+                _logger.LogDebug("Epic {Id} stays open: {Reason}", epic.Id, decision.Reason);
+                continue;
+            }
+            await issues.TransitionAsync(epic.Id, IssueStatus.Closed,
+                $"auto-closed: {decision.Reason}", ct: ct);
+            _logger.LogInformation("Epic {Id} auto-closed ({Reason})", epic.Id, decision.Reason);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                epic.Id, "Epic auto-closed — all work terminal"));
         }
     }
 
@@ -241,12 +356,14 @@ public sealed class SprintAssembler
                 && !sprinted.Contains(i.Id))
             .ToList();
 
-        // Grooming gate: a task whose parent chain never reaches a
-        // groomed spec (ad-hoc) is eligible only after technical
-        // grooming approves it (metadata groomed=true, set by the
-        // ScheduledGroomer task pass). Spec-chain tasks were groomed
-        // with their spec. Operator-enqueued and agent-filed
-        // follow-ups wait for grooming like everything else.
+        // Eligible for ASSEMBLY: spec-chain groups, plus groomed
+        // ad-hoc tasks as SOLO sprints (operator rules 2026-07-27):
+        // related/unblocking ad-hoc work INJECTS into the active
+        // sprint instead of waiting; unrelated groomed ad-hoc work
+        // gets its own focused one-task sprint — coherent and
+        // deployable with zero cross-task side effects. What never
+        // returns: bundling multiple unrelated ad-hoc tasks into
+        // one sprint (the grab-bag problem).
         eligible = eligible
             .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName
                 || string.Equals(t.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
@@ -274,6 +391,11 @@ public sealed class SprintAssembler
             }
         }
 
+        // Cross-project guard: a spec group belongs to the project
+        // that OWNS the spec (see DropCrossProjectGroupsAsync).
+        await DropCrossProjectGroupsAsync(groups, groupOrder, projectId, specs, _logger, ct);
+        if (groupOrder.Count == 0) return;
+
         // Resolve each group's display name / goal / age for ordering.
         // Spec groups: name = spec title, goal = parent epic's
         // description (the epic is the spec's parent_issue_id) or the
@@ -293,8 +415,16 @@ public sealed class SprintAssembler
                 && !string.IsNullOrWhiteSpace(epic.Description)
                     ? epic.Description!
                     : null;
-            return (spec?.Title ?? key,
-                epicDesc ?? $"Complete all groomed tasks for {spec?.Title ?? key}.",
+            // Fallback chain when the spec read misses (transient
+            // version-bump race): the parent STORY's title is still a
+            // meaningful short goal — a raw spec id never is.
+            var storyTitle = groups.TryGetValue(key, out var members) && members.Count > 0
+                && members[0].ParentIssueId is not null
+                && byId.TryGetValue(members[0].ParentIssueId!, out var story)
+                    ? story.Title
+                    : null;
+            return (spec?.Title ?? storyTitle ?? key,
+                epicDesc ?? $"Complete all groomed tasks for {spec?.Title ?? storyTitle ?? key}.",
                 spec?.CreatedAt ?? DateTime.MaxValue);
         }
 
@@ -309,6 +439,18 @@ public sealed class SprintAssembler
             .First();
         var chosen = groups[chosenKey];
         var (name, goal, _) = described[chosenKey];
+
+        // Ad-hoc assembly is ALWAYS a solo sprint (oldest first) —
+        // never a bundle. Related ad-hoc work would have injected
+        // into the active sprint instead of reaching here.
+        if (chosenKey == AdHocGroupName)
+        {
+            var single = chosen.OrderBy(t => t.CreatedAt).First();
+            chosen = new List<IssueRecord> { single };
+            name = single.Title;
+            goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
+                ?? $"Complete {single.Id}: {single.Title}";
+        }
 
         var start = DateTime.UtcNow;
         var sprint = await sprints.CreateAsync(new NewSprint(
@@ -365,5 +507,42 @@ public sealed class SprintAssembler
             hops++;
         }
         return AdHocGroupName;
+    }
+
+    /// <summary>
+    /// Cross-project guard: a spec group belongs to the project that
+    /// OWNS the spec. Tasks physically present in this project's
+    /// store but chained to another project's spec are a routing bug
+    /// (observed live 2026-07-29: porthorizon stories groomed into
+    /// the forge store were assembled and dispatched against the
+    /// Forge repo — bogus PRs #66/#67). Never assemble them here;
+    /// log loudly so the operator sees the violation. Returns the
+    /// number of groups dropped.
+    /// </summary>
+    internal static async Task<int> DropCrossProjectGroupsAsync(
+        Dictionary<string, List<IssueRecord>> groups,
+        List<string> groupOrder,
+        string projectId,
+        ISpecStore specs,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        var dropped = 0;
+        foreach (var key in groupOrder.ToList())
+        {
+            if (key == AdHocGroupName) continue;
+            var groupSpec = await specs.GetAsync(key, ct);
+            if (groupSpec is not null
+                && !string.Equals(groupSpec.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogError(
+                    "SprintAssembler: {Count} task(s) in project {Project}'s store chain to spec {SpecId} owned by project {SpecProject} — skipping (routing violation)",
+                    groups[key].Count, projectId, key, groupSpec.ProjectId);
+                groups.Remove(key);
+                groupOrder.Remove(key);
+                dropped++;
+            }
+        }
+        return dropped;
     }
 }

@@ -24,7 +24,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\Core\Forge.Core.csproj" />
+    <ProjectReference Include="..\..\Forge.Core\Forge.Core.csproj" />
   </ItemGroup>
 
 </Project>

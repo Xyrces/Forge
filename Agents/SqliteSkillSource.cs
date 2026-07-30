@@ -22,28 +22,25 @@ public sealed class SqliteSkillSource : ISkillSource
         _roles = roles;
     }
 
-    public async Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, CancellationToken ct = default)
+    public async Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, string? projectId = null, CancellationToken ct = default)
     {
         var roleName = _roles.ForType(role).AgentName;
 
-        var globals = await _skills.ListByRoleAsync(role: null, globalOnly: true, ct);
-        var roleSkills = await _skills.ListByRoleAsync(role: roleName, globalOnly: false, ct);
-
-        // Merge + filter enabled. Global first, then role-specific, both
-        // sorted by name. Duplicates (same name in global + role) are
-        // resolved in favor of the role-specific copy.
-        var byName = new Dictionary<string, SkillContent>(StringComparer.OrdinalIgnoreCase);
-        foreach (var s in globals)
+        // One scoped query: role match (empty set or contains the role)
+        // intersect project match (global or this project). Merge by
+        // name with a deterministic rank: a project-scoped copy beats a
+        // global one (projects refine global skills), and a role-scoped
+        // copy beats a role-global one (role rows refine shared rows).
+        var rows = await _skills.ListForRunAsync(roleName, projectId, ct);
+        var byName = new Dictionary<string, (SkillContent Content, int Rank)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in rows)
         {
             if (!s.Enabled) continue;
-            byName[s.Name] = new SkillContent(s.Name, s.Description, s.Body);
+            var rank = (s.ProjectId is not null ? 2 : 0) + (!s.IsGlobal ? 1 : 0);
+            if (!byName.TryGetValue(s.Name, out var cur) || rank > cur.Rank)
+                byName[s.Name] = (new SkillContent(s.Name, s.Description, s.Body), rank);
         }
-        foreach (var s in roleSkills)
-        {
-            if (!s.Enabled) continue;
-            byName[s.Name] = new SkillContent(s.Name, s.Description, s.Body);
-        }
-        return byName.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        return byName.Values.Select(v => v.Content).OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 }
 
@@ -60,7 +57,7 @@ public sealed class InMemorySkillSource : ISkillSource
         _byRole = byRole;
     }
 
-    public Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, CancellationToken ct = default)
+    public Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(AgentType role, string? projectId = null, CancellationToken ct = default)
         => Task.FromResult(_byRole.TryGetValue(role, out var list)
             ? list
             : (IReadOnlyList<SkillContent>)Array.Empty<SkillContent>());

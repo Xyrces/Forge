@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 
 namespace Forge.Core;
@@ -16,21 +18,34 @@ namespace Forge.Core;
 /// </summary>
 public sealed class ArtOutputStore
 {
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
 
     public ArtOutputStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
     {
         _dbPath = dbPath;
-        Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+    }
+
+    public ArtOutputStore(IDbConnectionFactory db)
+    {
+        _db = db;
+        _dbPath = "";
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
             Pooling = true,
         }.ToString();
     }
+
+    private string T(string name) => _db.Dialect.Table(name);
 
     public string DbPath => _dbPath;
 
@@ -45,28 +60,27 @@ public sealed class ArtOutputStore
 
         var id = $"art-{Guid.NewGuid():N}";
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO art_output(
+        cmd.CommandText = $"""
+            INSERT INTO {T("art_output")}(
                 id, spec_id, kind, title, body, body_kind,
                 references_json, parent_artifact_id, status, author, created_at, updated_at)
             VALUES(
-                $id, $spec, $kind, $title, $body, $body_kind,
-                $refs, $parent, $status, $author, $ts, $ts)
+                @id, @spec, @kind, @title, @body, @body_kind,
+                @refs, @parent, @status, @author, @ts, @ts)
             """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$spec", req.SpecId);
-        cmd.Parameters.AddWithValue("$kind", req.Kind.ToDbValue());
-        cmd.Parameters.AddWithValue("$title", req.Title);
-        cmd.Parameters.AddWithValue("$body", req.Body);
-        cmd.Parameters.AddWithValue("$body_kind", req.BodyKind);
-        cmd.Parameters.AddWithValue("$refs", (object?)req.ReferencesJson ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$parent", (object?)req.ParentArtifactId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$status", req.Status.ToString().ToLowerInvariant());
-        cmd.Parameters.AddWithValue("$author", req.Author);
-        cmd.Parameters.AddWithValue("$ts", now.ToString(IssueStore.DateFormat));
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@spec", req.SpecId);
+        cmd.AddParam("@kind", req.Kind.ToDbValue());
+        cmd.AddParam("@title", req.Title);
+        cmd.AddParam("@body", req.Body);
+        cmd.AddParam("@body_kind", req.BodyKind);
+        cmd.AddParam("@refs", (object?)req.ReferencesJson ?? DBNull.Value);
+        cmd.AddParam("@parent", (object?)req.ParentArtifactId ?? DBNull.Value);
+        cmd.AddParam("@status", req.Status.ToString().ToLowerInvariant());
+        cmd.AddParam("@author", req.Author);
+        cmd.AddParam("@ts", now.ToString(IssueStore.DateFormat));
         await cmd.ExecuteNonQueryAsync(ct);
         return new ArtOutput(
             Id: id, SpecId: req.SpecId, Kind: req.Kind, Title: req.Title,
@@ -77,15 +91,14 @@ public sealed class ArtOutputStore
 
     public async Task<ArtOutput?> GetAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT id, spec_id, kind, title, body, body_kind,
                    references_json, parent_artifact_id, status, author, created_at, updated_at
-            FROM art_output WHERE id = $id
+            FROM {T("art_output")} WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? ReadRow(rd) : null;
     }
@@ -93,31 +106,30 @@ public sealed class ArtOutputStore
     public async Task<IReadOnlyList<ArtOutput>> ListBySpecAsync(
         string specId, ArtOutputStatus? status = null, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         if (status is null)
         {
-            cmd.CommandText = """
+            cmd.CommandText = $"""
                 SELECT id, spec_id, kind, title, body, body_kind,
                        references_json, parent_artifact_id, status, author, created_at, updated_at
-                FROM art_output
-                WHERE spec_id = $spec
+                FROM {T("art_output")}
+                WHERE spec_id = @spec
                 ORDER BY created_at ASC
                 """;
         }
         else
         {
-            cmd.CommandText = """
+            cmd.CommandText = $"""
                 SELECT id, spec_id, kind, title, body, body_kind,
                        references_json, parent_artifact_id, status, author, created_at, updated_at
-                FROM art_output
-                WHERE spec_id = $spec AND status = $status
+                FROM {T("art_output")}
+                WHERE spec_id = @spec AND status = @status
                 ORDER BY created_at ASC
                 """;
-            cmd.Parameters.AddWithValue("$status", status.Value.ToString().ToLowerInvariant());
+            cmd.AddParam("@status", status.Value.ToString().ToLowerInvariant());
         }
-        cmd.Parameters.AddWithValue("$spec", specId);
+        cmd.AddParam("@spec", specId);
         var list = new List<ArtOutput>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(ReadRow(rd));
@@ -127,35 +139,34 @@ public sealed class ArtOutputStore
     public async Task<IReadOnlyList<ArtOutput>> ListByProjectAsync(
         string projectId, ArtOutputStatus? status = null, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         if (status is null)
         {
-            cmd.CommandText = """
+            cmd.CommandText = $"""
                 SELECT ao.id, ao.spec_id, ao.kind, ao.title, ao.body, ao.body_kind,
                        ao.references_json, ao.parent_artifact_id, ao.status, ao.author,
                        ao.created_at, ao.updated_at
-                FROM art_output ao
-                JOIN spec s ON s.id = ao.spec_id
-                WHERE s.project_id = $project
+                FROM {T("art_output")} ao
+                JOIN {T("spec")} s ON s.id = ao.spec_id
+                WHERE s.project_id = @project
                 ORDER BY ao.created_at ASC
                 """;
         }
         else
         {
-            cmd.CommandText = """
+            cmd.CommandText = $"""
                 SELECT ao.id, ao.spec_id, ao.kind, ao.title, ao.body, ao.body_kind,
                        ao.references_json, ao.parent_artifact_id, ao.status, ao.author,
                        ao.created_at, ao.updated_at
-                FROM art_output ao
-                JOIN spec s ON s.id = ao.spec_id
-                WHERE s.project_id = $project AND ao.status = $status
+                FROM {T("art_output")} ao
+                JOIN {T("spec")} s ON s.id = ao.spec_id
+                WHERE s.project_id = @project AND ao.status = @status
                 ORDER BY ao.created_at ASC
                 """;
-            cmd.Parameters.AddWithValue("$status", status.Value.ToString().ToLowerInvariant());
+            cmd.AddParam("@status", status.Value.ToString().ToLowerInvariant());
         }
-        cmd.Parameters.AddWithValue("$project", projectId);
+        cmd.AddParam("@project", projectId);
         var list = new List<ArtOutput>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(ReadRow(rd));
@@ -164,15 +175,14 @@ public sealed class ArtOutputStore
 
     public async Task<int> DeleteBySpecAsync(string specId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM art_output WHERE spec_id = $spec";
-        cmd.Parameters.AddWithValue("$spec", specId);
+        cmd.CommandText = $"DELETE FROM {T("art_output")} WHERE spec_id = @spec";
+        cmd.AddParam("@spec", specId);
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static ArtOutput ReadRow(SqliteDataReader rd)
+    private static ArtOutput ReadRow(DbDataReader rd)
     {
         var kindStr = rd.GetString(2);
         ArtOutputKindExtensions.TryParseDb(kindStr, out var kind);

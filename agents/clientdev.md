@@ -53,7 +53,7 @@ Before ANY mutating command (file writes, `>` redirection, `git commit/push/merg
 
 1. Read the page/component and its Fluxor feature before editing.
 2. Make the minimal change.
-3. `dotnet build Core/Forge.Core.csproj --nologo` — must exit 0, no warnings (the UI compiles as part of Forge.Core).
+3. `dotnet build Forge.Core/Forge.Core.csproj --nologo` — must exit 0, no warnings (the UI compiles as part of Forge.Core).
 4. `git add -A && git commit -m "ClientDev(task=<id>): <summary>"`.
 5. `git push -u origin <branch>`.
 6. **Do NOT open a PR.**
