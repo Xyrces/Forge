@@ -21,8 +21,8 @@ public sealed record DeploymentOptions
     // Command line invoked by DeploymentBuildRunner, split on the
     // first space into (FileName, Arguments). Defaults cover the
     // common .NET case; override for other stacks (npm, make, etc).
-    public string BuildCommand { get; set; } = "dotnet build Forge.sln -c Release";
-    public string TestCommand { get; set; } = "dotnet test Forge.sln -c Release";
+    public string BuildCommand { get; set; } = "dotnet build -c Release";
+    public string TestCommand { get; set; } = "dotnet test -c Release";
 
     // --- DeploymentKind.Script ---
     // Path to a script (any interpreter registered on PATH/shebang),
