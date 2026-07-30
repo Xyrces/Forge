@@ -17,6 +17,10 @@ public static class DashboardEventKind
     public const string PrMerged = "pr.merged";
     public const string PrChangesRequested = "pr.changes-requested";
     public const string PrFailed = "pr.failed";
+    // Reviewer-agent lifecycle: published when a review run starts
+    // (event-driven PR-open trigger AND the sweep's review path) so
+    // the Events stream shows activity between PR-open and verdict.
+    public const string ReviewStarted = "pr.review.started";
     public const string Log = "log";
     // P2.a: Designer agent lifecycle events. Namespaced under
     // 'designer.' so the dashboard's SSE filter can scope to them.

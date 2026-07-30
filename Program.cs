@@ -1409,7 +1409,42 @@ Console.Error.WriteLine(ex.ToString());
                         sprints: bundle.Sprints,
                         timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
                         workflow: new Core.Workflow.WorkflowResolver(memoryStore),
-                        verifyCommands: bundle.Project.VerifyCommands);
+                        verifyCommands: bundle.Project.VerifyCommands,
+                        // Event-driven review trigger (pause/resume
+                        // architecture): the reviewer starts on the
+                        // pushed head while CI runs — verdict and CI
+                        // arrive together. Fire-and-forget (the dev's
+                        // role slot must release at push); the watch
+                        // sweep stays the backstop.
+                        onPrOpened: (task, ct) =>
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    var resolver = new Core.Workflow.WorkflowResolver(memoryStore);
+                                    if (!Core.Workflow.WorkflowExtensions.IsStepEnabled(
+                                            await resolver.ResolveAsync(CancellationToken.None), "review")) return;
+                                    var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+                                        bundle.IssueStore, bundle.GitHub, agentRunner,
+                                        loggerFactory.CreateLogger<Forge.Reviewer.ReviewerDispatcher>(),
+                                        lifecycle: lifecycle,
+                                        events: eventBus,
+                                        projectId: bundle.Project.Id);
+                                    var outcome = await reviewer.ReviewOnceAsync(task, CancellationToken.None);
+                                    if (outcome is not null && outcome.Error is null)
+                                    {
+                                        logger.LogInformation("PR-open review trigger: verdict {Verdict} for task {Id} (PR head {Sha})",
+                                            outcome.Verdict, task.Id, outcome.HeadSha);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogWarning(ex, "PR-open review trigger failed for task {Id}; the watch sweep is the backstop", task.Id);
+                                }
+                            });
+                            return Task.CompletedTask;
+                        });
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());

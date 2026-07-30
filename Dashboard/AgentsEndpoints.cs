@@ -95,6 +95,8 @@ public static class AgentsEndpoints
                         lastActivityAt = activeRun.LastActivityAt,
                         messageCount = activeRun.MessageCount,
                         toolCallCount = activeRun.ToolCallCount,
+                        phase = activeRun.Phase,
+                        resumedSession = activeRun.ResumedSession,
                     },
                     lastRun = lastRun is null ? null : new
                     {

@@ -36,6 +36,8 @@ public sealed class ReviewerDispatcher
     private readonly GitHubService _gitHub;
     private readonly IAgentRunner _agentRunner;
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
+    private readonly IDashboardEventBus? _events;
+    private readonly string? _projectId;
 
     /// <summary>Hard cap on one reviewer LLM call. Reviewer prompts
     /// are small (one diff); 3 minutes is generous. See the call
@@ -48,13 +50,17 @@ public sealed class ReviewerDispatcher
         GitHubService gitHub,
         IAgentRunner agentRunner,
         ILogger<ReviewerDispatcher> logger,
-        Forge.Core.TaskStateMachine? lifecycle = null)
+        Forge.Core.TaskStateMachine? lifecycle = null,
+        IDashboardEventBus? events = null,
+        string? projectId = null)
     {
         _issues = issues;
         _gitHub = gitHub;
         _agentRunner = agentRunner;
         _logger = logger;
         _lifecycle = lifecycle;
+        _events = events;
+        _projectId = projectId;
     }
 
     public sealed record ReviewOutcome(
@@ -120,21 +126,72 @@ public sealed class ReviewerDispatcher
             return null;
         }
 
-        string diff;
+        // Re-review resume: a prior verdict at an EARLIER head means
+        // this round scopes to the incremental diff (what the rework
+        // push changed) plus the prior findings to verify — not the
+        // whole PR. The warm session (resumed by the runner under the
+        // task's session key) carries the previous review's context;
+        // the incremental framing bounds anchoring/rubber-stamping.
+        var previousReviewSha = !string.IsNullOrEmpty(reviewedSha)
+            && !string.Equals(reviewedSha, headSha, StringComparison.Ordinal)
+            && !string.IsNullOrEmpty(recordedVerdict)
+            && recordedVerdict != nameof(ReviewerVerdict.Error)
+            ? reviewedSha
+            : null;
+
+        // "Reviewing…" lifecycle for the dashboard: stamp
+        // reviewStartedAt + publish the event when a review actually
+        // starts (both the event-driven PR-open trigger and the sweep
+        // path flow through here); cleared when the verdict lands.
         try
         {
-            diff = await _gitHub.GetPullRequestDiffAsync(prNumber, cancellationToken);
+            await UpdateWatchMetadataAsync(task, m =>
+            {
+                m["reviewStartedAt"] = DateTime.UtcNow.ToString("O");
+                return m;
+            }, cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not fetch diff for PR #{Pr}; reviewing with empty diff", prNumber);
-            diff = "";
+            _logger.LogDebug(ex, "reviewStartedAt stamp failed for PR #{Pr}; continuing", prNumber);
+        }
+        _events?.Publish(new DashboardEvent(
+            DateTime.UtcNow, DashboardEventKind.ReviewStarted, task.Id,
+            $"PR #{prNumber} review started (sha {headSha[..Math.Min(7, headSha.Length)]})",
+            new Dictionary<string, object?>
+            {
+                ["prNumber"] = prNumber,
+                ["sha"] = headSha,
+                ["incrementalSince"] = previousReviewSha,
+            }));
+
+        string diff;
+        var incremental = false;
+        if (previousReviewSha is not null)
+        {
+            try
+            {
+                diff = await _gitHub.GetCompareDiffAsync(previousReviewSha, headSha, cancellationToken);
+                incremental = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PR #{Pr}: incremental diff {Base}..{Head} failed; falling back to the full PR diff",
+                    prNumber, previousReviewSha, headSha);
+                diff = await FetchPrDiffAsync(prNumber, cancellationToken);
+            }
+        }
+        else
+        {
+            diff = await FetchPrDiffAsync(prNumber, cancellationToken);
         }
 
         var round = 1;
         if (int.TryParse(task.GetMetadata("reviewRound"), out var prior)) round = prior + 1;
 
-        var prompt = BuildReviewerPrompt(pr, diff, task);
+        var prompt = incremental
+            ? BuildReReviewPrompt(pr, diff, task, previousReviewSha!, recordedVerdict!, task.GetMetadata("reviewNotes"))
+            : BuildReviewerPrompt(pr, diff, task);
         ReviewerVerdict verdict;
         string body;
         string? error = null;
@@ -143,10 +200,16 @@ public sealed class ReviewerDispatcher
             // Context carries the watched task id so the Reviewer's
             // file_followup tool can defer non-blocking findings as
             // groomable follow-up tasks (parented via metadata).
+            // projectId scopes the resumed reviewer session to this
+            // project (session key: session/<project>/<task>/<role>).
             var reviewContext = new Dictionary<string, object>
             {
                 ["issueId"] = task.Id,
             };
+            if (!string.IsNullOrWhiteSpace(_projectId))
+            {
+                reviewContext["projectId"] = _projectId;
+            }
             // Bounded call: the reviewer runs inside the watch sweep,
             // which shares the orchestrator's main loop — an
             // unbounded LLM hang (SDK retries × 5-min network
@@ -208,13 +271,16 @@ public sealed class ReviewerDispatcher
         }
 
         // Record the verdict in the task metadata — the PRWatcher's
-        // merge/rework decision reads this.
+        // merge/rework decision reads this. The verdict landing
+        // clears the "reviewing…" marker (metadata is upsert-merge
+        // only — JSON null is the delete idiom).
         await UpdateWatchMetadataAsync(task, m =>
         {
             m["reviewSha"] = headSha;
             m["reviewVerdict"] = verdict.ToString();
             m["reviewNotes"] = body.Length > 2000 ? body[..2000] : body;
             m["reviewRound"] = round;
+            m["reviewStartedAt"] = null!;
             if (error is not null) m["reviewError"] = error;
             else m.Remove("reviewError");
             return m;
@@ -300,6 +366,55 @@ public sealed class ReviewerDispatcher
                "conventions, and don't introduce dead code, unrelated rewrites, or artifacts that " +
                "don't belong in version control. Respond with your assessment, then the verdict " +
                "marker on its own line at the END of your reply:\n\n" +
+               "REVIEWER_VERDICT: APPROVE | REQUEST_CHANGES\n\n" +
+               "If REQUEST_CHANGES, precede it with a REVIEWER_NOTES: section listing the concrete " +
+               "issues the engineer must fix (file + what to change). Be specific — these notes go " +
+               "straight back to the engineer agent as rework instructions.";
+    }
+
+    private async Task<string> FetchPrDiffAsync(int prNumber, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _gitHub.GetPullRequestDiffAsync(prNumber, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not fetch diff for PR #{Pr}; reviewing with empty diff", prNumber);
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// Re-review prompt for a head that moved since the last verdict:
+    /// the reviewer resumes its warm session, verifies each prior
+    /// finding against the INCREMENTAL diff, and flags only NEW
+    /// blocking issues introduced by the new commits. The framing
+    /// bounds warm-session anchoring: the model is told exactly what
+    /// to re-check and what not to re-litigate.
+    /// </summary>
+    private static string BuildReReviewPrompt(
+        PullRequest pr, string incrementalDiff, IssueRecord task,
+        string previousReviewSha, string previousVerdict, string? previousNotes)
+    {
+        var taskTitle = task.GetMetadata("taskTitle") ?? task.Title;
+        var diff = incrementalDiff.Length > 12000
+            ? incrementalDiff[..12000] + "\n...[truncated]..."
+            : incrementalDiff;
+        return $"You are the Reviewer role for Forge, RE-REVIEWING a pull request after a rework push.\n\n" +
+               $"Task: {taskTitle}\n" +
+               $"PR: {pr.Title} (#{pr.Number})\n\n" +
+               $"You previously reviewed this PR at commit {previousReviewSha[..Math.Min(7, previousReviewSha.Length)]} " +
+               $"and returned {previousVerdict} with these notes:\n" +
+               $"{(string.IsNullOrWhiteSpace(previousNotes) ? "(no notes recorded)" : previousNotes)}\n\n" +
+               $"The engineer has pushed new commits. The diff below covers ONLY the changes since your " +
+               $"last reviewed head ({previousReviewSha[..Math.Min(7, previousReviewSha.Length)]}..HEAD):\n" +
+               $"```diff\n{diff}\n```\n\n" +
+               "Your job for this round:\n" +
+               "1. Verify each of your prior findings is addressed by the new commits.\n" +
+               "2. Flag only NEW blocking issues introduced by these commits — do NOT re-litigate " +
+               "code you already approved unless the new commits broke it.\n\n" +
+               "Respond with your assessment, then the verdict marker on its own line at the END of your reply:\n\n" +
                "REVIEWER_VERDICT: APPROVE | REQUEST_CHANGES\n\n" +
                "If REQUEST_CHANGES, precede it with a REVIEWER_NOTES: section listing the concrete " +
                "issues the engineer must fix (file + what to change). Be specific — these notes go " +

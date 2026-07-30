@@ -217,6 +217,9 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
   letter-spacing: 0.04em; text-transform: uppercase;
 }
 .pill--primary  { background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary); }
+/* Informational tone: "reviewing…", "review pending", "resumed" —
+   activity in flight that is neither success nor failure. */
+.pill--info     { background: var(--primary-soft); color: var(--on-surface); border: 1px solid var(--outline); }
 .pill--outline  { background: transparent; border: 1px solid var(--outline); color: var(--on-surface-variant); }
 .pill--success  { background: var(--success); color: var(--on-primary); }
 .pill--error    { background: var(--error); color: var(--on-primary); }

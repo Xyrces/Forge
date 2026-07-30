@@ -22,6 +22,14 @@
             <h1>@v.Role <span style="font-weight:400;color:var(--on-surface-variant)">run</span></h1>
             <div class="page-header__meta">
                 <span class="pill @(v.Status == "succeeded" ? "pill--completed" : v.Status == "running" ? "pill--inprogress" : "pill--failed")">@v.Status</span>
+                @if (v.ResumedSession == true)
+                {
+                    <span class="pill pill--info">resumed session</span>
+                }
+                @if (!string.IsNullOrEmpty(v.Phase))
+                {
+                    <span class="pill pill--primary">@v.Phase</span>
+                }
                 @v.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
                 · @(v.DurationMs is null ? "…" : Fmt(v.DurationMs.Value))
                 · @v.MessageCount msgs · @v.ToolCallCount tool calls
@@ -192,7 +200,8 @@
         string Id, string? TaskId, string Role, string? Model, string Status,
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
-        string? Error, bool HasTranscript, DateTime? LastActivityAt);
+        string? Error, bool HasTranscript, DateTime? LastActivityAt,
+        string? Phase, bool? ResumedSession);
 
     private sealed record ChatMsg(string Kind, string Text, List<ToolCall> Calls);
     private sealed record ToolCall(string Name, string Args, string? Result);

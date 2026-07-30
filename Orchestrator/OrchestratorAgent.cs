@@ -406,7 +406,9 @@ public sealed class OrchestratorAgent : IAgent
                         bundle.IssueStore, bundle.GitHub, _runner,
                         _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
                             ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
-                        lifecycle: _lifecycle);
+                        lifecycle: _lifecycle,
+                        events: _events,
+                        projectId: bundle.Project.Id);
                     var outcome = await reviewer.ReviewOnceAsync(watched, cancellationToken);
                     if (outcome is not null)
                     {

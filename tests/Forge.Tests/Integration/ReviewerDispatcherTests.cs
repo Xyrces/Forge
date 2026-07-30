@@ -36,11 +36,17 @@ public class ReviewerDispatcherTests : IDisposable
     private sealed class FakeGitHub : GitHubService
     {
         public int CommentCalls;
+        public (string Base, string Head)? CompareCall;
         public FakeGitHub() : base("o", "r", null) { }
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult(new PullRequest(number));
         public override Task<string> GetPullRequestDiffAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult("diff --git a/F.cs b/F.cs\n+added");
+        public override Task<string> GetCompareDiffAsync(string baseSha, string headSha, CancellationToken cancellationToken = default)
+        {
+            CompareCall = (baseSha, headSha);
+            return Task.FromResult("INCREMENTAL-DIFF");
+        }
         public override Task<long> CreateIssueCommentAsync(long issueNumber, string body, CancellationToken cancellationToken = default)
         {
             CommentCalls++;
@@ -161,5 +167,67 @@ public class ReviewerDispatcherTests : IDisposable
 
         Assert.NotNull(retry); // retried (circuit breaker lives in PRWatcher)
         Assert.Equal(2, runner.Calls);
+    }
+
+    [Fact]
+    public async Task ReReview_UsesIncrementalDiffAndPriorFindings()
+    {
+        // Pause/resume review: a head move after a verdict re-reviews
+        // with the INCREMENTAL diff (old..new) plus the prior
+        // findings to verify — not the full PR diff.
+        var gh = new FakeGitHub();
+        var runner = new CapturingRunner("Addressed.\nREVIEWER_VERDICT: APPROVE");
+        var dispatcher = new ReviewerDispatcher(_issues, gh, runner, NullLogger<ReviewerDispatcher>.Instance);
+        var task = await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: "task", Title: "t",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 7,
+                ["reviewSha"] = "old111aaa",
+                ["reviewVerdict"] = "RequestChanges",
+                ["reviewNotes"] = "fix F.cs null check",
+                ["reviewRound"] = "1",
+            }));
+
+        var outcome = await dispatcher.ReviewOnceAsync(
+            (await _issues.GetAsync(task.Id))!, headShaOverride: _ => "new222bbb");
+
+        Assert.NotNull(outcome);
+        Assert.Equal(("old111aaa", "new222bbb"), gh.CompareCall);
+        Assert.Contains("INCREMENTAL-DIFF", runner.Prompt);
+        Assert.DoesNotContain("diff --git a/F.cs", runner.Prompt);   // not the full diff
+        Assert.Contains("fix F.cs null check", runner.Prompt);       // prior findings to verify
+        Assert.Contains("RE-REVIEWING", runner.Prompt);
+        // The verdict landing cleared the "reviewing…" marker.
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(after.GetMetadata("reviewStartedAt"));
+        Assert.Equal("new222bbb", after.GetMetadata("reviewSha"));
+        Assert.Equal("2", after.GetMetadata("reviewRound"));
+    }
+
+    [Fact]
+    public async Task FirstReview_UsesFullDiff_NoIncrementalCall()
+    {
+        var gh = new FakeGitHub();
+        var runner = new CapturingRunner("REVIEWER_VERDICT: APPROVE");
+        var dispatcher = new ReviewerDispatcher(_issues, gh, runner, NullLogger<ReviewerDispatcher>.Instance);
+        var watch = await SeedWatchAsync();
+
+        await dispatcher.ReviewOnceAsync(watch, headShaOverride: _ => "abc123");
+
+        Assert.Null(gh.CompareCall);
+        Assert.Contains("diff --git a/F.cs", runner.Prompt);
+    }
+
+    private sealed class CapturingRunner : IAgentRunner
+    {
+        private readonly string _response;
+        public string Prompt { get; private set; } = "";
+        public CapturingRunner(string response) { _response = response; }
+        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context = null, CancellationToken ct = default)
+        {
+            Prompt = prompt;
+            return Task.FromResult(new AgentRunResult(_response, null, 0, 0, TimeSpan.Zero));
+        }
     }
 }

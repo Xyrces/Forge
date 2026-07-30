@@ -47,7 +47,15 @@
                                 <span class="mono">(no task)</span>
                             }
                             <span class="meta-text"> · @r.Model</span>
+                            @if (r.ResumedSession == true)
+                            {
+                                <span class="pill pill--info">resumed</span>
+                            }
                         </div>
+                        @if (!string.IsNullOrEmpty(r.Phase))
+                        {
+                            <div class="meta-text">@r.Phase</div>
+                        }
                         <div class="mono run-active-card__meta">run @r.Id · started @r.StartedAt.ToLocalTime().ToString("HH:mm:ss")</div>
                     </div>
                 }
@@ -62,19 +70,25 @@
             <thead>
                 <tr>
                     <th>When</th><th>Role</th><th>Task</th><th>Duration</th>
-                    <th>Msgs</th><th>Tools</th><th>Status</th><th></th>
+                    <th>Msgs</th><th>Tools</th><th>Status</th><th>Phase</th><th></th>
                 </tr>
             </thead>
             <tbody>
                 @if (_data.Recent.Count == 0)
                 {
-                    <tr><td colspan="8" class="meta-text">No finished runs yet.</td></tr>
+                    <tr><td colspan="9" class="meta-text">No finished runs yet.</td></tr>
                 }
                 @foreach (var r in _data.Recent)
                 {
                     <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/runs/{r.Id}"))">
                         <td class="mono">@r.StartedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
-                        <td>@r.Role</td>
+                        <td>
+                            @r.Role
+                            @if (r.ResumedSession == true)
+                            {
+                                <span class="pill pill--info">resumed</span>
+                            }
+                        </td>
                         <td class="mono">@(r.TaskId ?? "—")</td>
                         <td class="mono">@(r.DurationMs is null ? "—" : Fmt(r.DurationMs.Value))</td>
                         <td class="mono">@(r.MessageCount?.ToString() ?? "—")</td>
@@ -86,6 +100,7 @@
                                 <span style="font-size:11px;color:var(--on-surface-variant)" title="@r.Error"> ⚠</span>
                             }
                         </td>
+                        <td class="meta-text">@(r.Phase ?? "—")</td>
                         <td>@(r.HasTranscript ? "transcript →" : "")</td>
                     </tr>
                 }
@@ -134,5 +149,5 @@
         string Id, string? TaskId, string Role, string? Model, string Status,
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
-        string? Error, bool HasTranscript);
+        string? Error, bool HasTranscript, string? Phase, bool? ResumedSession);
 }

@@ -49,7 +49,8 @@ public sealed class EngineeringDispatchWorkflow
         double timeoutMinutes = 15.0,
         Core.TaskStateMachine? lifecycle = null,
         Core.Workflow.WorkflowResolver? workflow = null,
-        IReadOnlyList<string>? verifyCommands = null)
+        IReadOnlyList<string>? verifyCommands = null,
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
     {
         // Executor loggers: production passes the real factory so
         // executor diagnostics (checkpoint advances, push/PR steps)
@@ -63,7 +64,7 @@ public sealed class EngineeringDispatchWorkflow
             nullFactory.CreateLogger<RunAgentExecutor>(), projectId, sprints, timeoutMinutes, lifecycle);
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
             memoryExtractor, extractionStore,
-            nullFactory.CreateLogger<CommitPushPrExecutor>(), workflow, verifyCommands);
+            nullFactory.CreateLogger<CommitPushPrExecutor>(), workflow, verifyCommands, onPrOpened);
         _enqueueWatch = new EnqueueWatchExecutor(issues,
             nullFactory.CreateLogger<EnqueueWatchExecutor>());
         _logger = logger;

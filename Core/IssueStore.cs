@@ -182,7 +182,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 24;
+    public const int CurrentSchemaVersion = 25;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -353,6 +353,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             -- 30 days / newest 50 per task — transcripts are the
             -- high-volume data and the 35GB budget is protected by
             -- pruning, not by truncating content.
+            -- v25: phase (plan gate / implementing / verifying n/3 /
+            -- reviewing — the dashboard's "what is the run doing
+            -- right now" label) + resumed_session (the run resumed a
+            -- persisted MAF session instead of starting cold).
             CREATE TABLE IF NOT EXISTS agent_run (
                 id               TEXT PRIMARY KEY,
                 task_id          TEXT,
@@ -367,7 +371,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 text_chars       INTEGER,
                 error            TEXT,
                 transcript_json  TEXT,
-                last_activity_at TEXT
+                last_activity_at TEXT,
+                phase            TEXT,
+                resumed_session  INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_agent_run_started ON agent_run(started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run(task_id);
@@ -888,6 +894,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // truth; the dashboard is read-only for these).
         ApplyV24SkillProjectScope(conn);
 
+        // v25 (post-init): agent_run.phase + agent_run.resumed_session —
+        // the run's live phase label (plan gate / implementing /
+        // verifying n/3 / reviewing) and the warm-session marker for
+        // pause/resume runs.
+        ApplyV25AgentRunPhase(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -1068,7 +1080,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 text_chars       INT           NULL,
                 error            NVARCHAR(MAX) NULL,
                 transcript_json  NVARCHAR(MAX) NULL,
-                last_activity_at NVARCHAR(64)  NULL
+                last_activity_at NVARCHAR(64)  NULL,
+                phase            NVARCHAR(64)  NULL,
+                resumed_session  INT           NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_agent_run_started' AND object_id = OBJECT_ID('{{d.Table("agent_run")}}'))
                 CREATE INDEX idx_agent_run_started ON {{d.Table("agent_run")}}(started_at DESC);
@@ -1503,6 +1517,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         if (probe.ExecuteScalar() is not null) return;
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE project ADD COLUMN roles_json TEXT NOT NULL DEFAULT '{}'";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV25AgentRunPhase(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'phase' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = """
+            ALTER TABLE agent_run ADD COLUMN phase TEXT;
+            ALTER TABLE agent_run ADD COLUMN resumed_session INTEGER;
+            """;
         alter.ExecuteNonQuery();
     }
 

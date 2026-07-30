@@ -130,7 +130,7 @@
                             <span style="width:8px;height:8px;border-radius:50%;background:var(--primary);flex-shrink:0"></span>
                             <span class="mono" style="min-width:84px">@l.IssueId</span>
                             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px">@l.Title</span>
-                            <span style="color:var(--on-surface-variant);font-size:13px">@l.Stage</span>
+                            <span style="color:var(--on-surface-variant);font-size:13px">@l.Stage@(l.Phase is { Length: > 0 } lp ? $" · {lp}" : "")</span>
                             <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Fmt(l.ElapsedMs)</span>
                         </div>
                     </a>
@@ -294,7 +294,7 @@
         List<WaitingDto> Waiting,
         PulseDto Pulse);
     private sealed record AttentionDto(string Severity, string Kind, string Title, string? Detail, string? IssueId, string Link);
-    private sealed record LiveDto(string IssueId, string Title, string Stage, long ElapsedMs);
+    private sealed record LiveDto(string IssueId, string Title, string Stage, long ElapsedMs, string? Phase);
     private sealed record WaitingDto(string IssueId, string Title, string Reason, long WaitingMs);
     private sealed record PulseDto(Dictionary<string, string> Gates, SprintDto? Sprint, DateTime? LastActivityAt);
     private sealed record SprintDto(string Id, string Name, int Done, int Total);

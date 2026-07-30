@@ -103,6 +103,18 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 $"Your previous attempt produced a PR that did NOT pass review/CI. " +
                 $"Fix the following on the SAME branch (do not restructure unrelated work):\n\n{reworkContext}";
         }
+        // Resume honesty: a rework round resumes the dev's PERSISTED
+        // session — the agent remembers file contents from the last
+        // run, but the worktree was synced to a new head since. Tell
+        // it explicitly so stale memory doesn't produce bad edits.
+        var reworkForSha = issue.GetMetadata("reworkForSha");
+        if (!string.IsNullOrWhiteSpace(reworkForSha))
+        {
+            prompt += $"\n\n## Resumed session\n" +
+                $"You are resuming your previous session on this task. Your branch has been " +
+                $"synced to PR head {reworkForSha[..Math.Min(7, reworkForSha.Length)]} since you last saw it — " +
+                $"re-read any file before editing it; your memory of its contents may be stale.";
+        }
         // Plan-gate fast path: mechanical rework rounds (conflict
         // sync, infra retrigger) have their exact steps prescribed by
         // the watcher — evaluating a plan against an LLM critic

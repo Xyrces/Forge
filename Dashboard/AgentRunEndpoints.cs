@@ -60,5 +60,7 @@ public static class AgentRunEndpoints
         error = r.Error,
         hasTranscript = r.TranscriptJson is not null,
         lastActivityAt = r.LastActivityAt,
+        phase = r.Phase,
+        resumedSession = r.ResumedSession,
     };
 }

@@ -55,9 +55,15 @@ public sealed class AgentRunStore : IDisposable
         int? TextChars,
         string? Error,
         string? TranscriptJson,
-        DateTime? LastActivityAt);
+        DateTime? LastActivityAt,
+        // v25: live phase label (plan gate / implementing /
+        // verifying n/3 / reviewing) + the warm-session marker
+        // (the run resumed a persisted MAF session).
+        string? Phase,
+        bool? ResumedSession);
 
-    public async Task StartAsync(string id, string? taskId, string role, string? model, CancellationToken ct = default)
+    public async Task StartAsync(string id, string? taskId, string role, string? model, CancellationToken ct = default,
+        bool resumedSession = false)
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -68,20 +74,22 @@ public sealed class AgentRunStore : IDisposable
                 WHEN MATCHED THEN UPDATE SET task_id = @task, role = @role, model = @model,
                     status = 'running', started_at = @started, finished_at = NULL, duration_ms = NULL,
                     message_count = NULL, tool_call_count = NULL, text_chars = NULL,
-                    error = NULL, transcript_json = NULL, last_activity_at = NULL
-                WHEN NOT MATCHED THEN INSERT (id, task_id, role, model, status, started_at)
-                    VALUES (@id, @task, @role, @model, 'running', @started);
+                    error = NULL, transcript_json = NULL, last_activity_at = NULL,
+                    phase = NULL, resumed_session = @resumed
+                WHEN NOT MATCHED THEN INSERT (id, task_id, role, model, status, started_at, resumed_session)
+                    VALUES (@id, @task, @role, @model, 'running', @started, @resumed);
                 """
             : """
                 INSERT OR REPLACE INTO agent_run
-                    (id, task_id, role, model, status, started_at)
-                VALUES (@id, @task, @role, @model, 'running', @started)
+                    (id, task_id, role, model, status, started_at, resumed_session)
+                VALUES (@id, @task, @role, @model, 'running', @started, @resumed)
                 """;
         cmd.AddParam("@id", id);
         cmd.AddParam("@task", (object?)taskId ?? DBNull.Value);
         cmd.AddParam("@role", role);
         cmd.AddParam("@model", (object?)model ?? DBNull.Value);
         cmd.AddParam("@started", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@resumed", resumedSession ? 1 : 0);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -93,9 +101,11 @@ public sealed class AgentRunStore : IDisposable
     /// is provided the accumulated live transcript is persisted too —
     /// the run-detail page streams the conversation AS IT HAPPENS.
     /// Cheap single-row UPDATE; the activity tracker calls it after
-    /// every model round-trip.
+    /// every model round-trip. <paramref name="phase"/> is the run's
+    /// live phase label (plan gate / implementing / verifying n/3 /
+    /// reviewing); null keeps the previously written value.
     /// </summary>
-    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, string? transcriptJson = null, CancellationToken ct = default)
+    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, string? transcriptJson = null, CancellationToken ct = default, string? phase = null)
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -103,7 +113,8 @@ public sealed class AgentRunStore : IDisposable
             UPDATE {T("agent_run")} SET
                 message_count = @msgs, tool_call_count = @tools,
                 text_chars = @chars, last_activity_at = @activity,
-                transcript_json = COALESCE(@transcript, transcript_json)
+                transcript_json = COALESCE(@transcript, transcript_json),
+                phase = COALESCE(@phase, phase)
             WHERE id = @id
             """;
         cmd.AddParam("@id", id);
@@ -112,6 +123,7 @@ public sealed class AgentRunStore : IDisposable
         cmd.AddParam("@chars", textChars);
         cmd.AddParam("@activity", DateTime.UtcNow.ToString(DateFormat));
         cmd.AddParam("@transcript", (object?)transcriptJson ?? DBNull.Value);
+        cmd.AddParam("@phase", (object?)phase ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -192,7 +204,7 @@ public sealed class AgentRunStore : IDisposable
         cmd.CommandText = $"""
             SELECT {(limit is { } n ? d.Top(n) : "")}id, task_id, role, model, status, started_at, finished_at,
                    duration_ms, message_count, tool_call_count, text_chars, error, transcript_json,
-                   last_activity_at
+                   last_activity_at, phase, resumed_session
             FROM {T("agent_run")} {whereSql}{(limit is { } m ? d.Limit(m) : "")}
             """;
         var list = new List<AgentRunRecord>();
@@ -213,7 +225,9 @@ public sealed class AgentRunStore : IDisposable
                 TextChars: rd.IsDBNull(10) ? null : rd.GetInt32(10),
                 Error: rd.IsDBNull(11) ? null : rd.GetString(11),
                 TranscriptJson: rd.IsDBNull(12) ? null : rd.GetString(12),
-                LastActivityAt: rd.IsDBNull(13) ? null : DateTime.ParseExact(rd.GetString(13), DateFormat, System.Globalization.CultureInfo.InvariantCulture)));
+                LastActivityAt: rd.IsDBNull(13) ? null : DateTime.ParseExact(rd.GetString(13), DateFormat, System.Globalization.CultureInfo.InvariantCulture),
+                Phase: rd.IsDBNull(14) ? null : rd.GetString(14),
+                ResumedSession: rd.IsDBNull(15) ? null : rd.GetInt32(15) != 0));
         }
         return list;
     }

@@ -179,8 +179,10 @@ public static class FlowGraph
                     {
                         Push(prNumber is not null ? "rework" : "sprint", at,
                             detail.Contains("llm-429", StringComparison.Ordinal) ? "LLM 429 requeue"
+                            : detail.Contains("llm-auth", StringComparison.Ordinal) ? "LLM auth requeue (provider credentials)"
                             : detail.Contains("no diff", StringComparison.Ordinal) ? "no-progress requeue"
-                            : prNumber is not null ? "rework queued" : "requeued");
+                            : detail.Contains("pre-push verification failed", StringComparison.OrdinalIgnoreCase) ? "pre-push verification failed"
+                            : prNumber is not null ? ReworkNote(issue) : "requeued");
                         inRun = false;
                     }
                     else if (detail.Contains("->InProgress", StringComparison.Ordinal))
@@ -219,5 +221,21 @@ public static class FlowGraph
             Push(currentNode, issue.UpdatedAt, "current");
         }
         return visits;
+    }
+
+    /// <summary>Journey note for a rework requeue: names the round
+    /// and the cause from the task's metadata (the transition detail
+    /// itself carries no error for rework rounds), and flags the
+    /// warm-session resume when a persisted session exists.</summary>
+    private static string ReworkNote(IssueRecord issue)
+    {
+        var reason = issue.GetMetadata("reworkReason") ?? "";
+        var round = int.TryParse(issue.GetMetadata("reviewRound"), out var rr) ? rr : 0;
+        var note = reason.Contains("reviewer requested changes", StringComparison.OrdinalIgnoreCase)
+            ? $"review requested changes{(round > 0 ? $" (round {round})" : "")}"
+            : reason.Length > 0 ? reason : "rework queued";
+        return !string.IsNullOrEmpty(issue.GetMetadata("agentSessionId"))
+            ? note + " — resumes warm session"
+            : note;
     }
 }

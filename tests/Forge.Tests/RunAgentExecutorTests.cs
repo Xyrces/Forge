@@ -211,6 +211,63 @@ public class RunAgentExecutorTests : IDisposable
         Assert.Null(after.GetMetadata("agentTimeout"));
     }
 
+    [Fact]
+    public async Task RunAgent_ReworkResume_PromptNotesSyncedHead()
+    {
+        // Pause/resume honesty: a rework round resumes the dev's
+        // persisted session, so the prompt must tell the agent the
+        // worktree moved under it (re-read files before editing).
+        var issue = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "x",
+            Metadata: new Dictionary<string, object>
+            {
+                ["reworkForSha"] = "abc1234567890",
+                ["reworkContext"] = "CI failed: build error",
+            }));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+
+        var capturing = new CapturingChatClient();
+        var runner = new MafAgentRunner(
+            chatClientFactory: new TestScriptingFactory(capturing),
+            config: new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
+            roles: new RoleAgentRegistry(),
+            logger: NullLogger<MafAgentRunner>.Instance,
+            skills: null,
+            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-rae-md-{Guid.NewGuid():N}"));
+        var result = await RunAgentExecutor.HandleAsync(
+            worktree, _issues, runner, _roleRegistry, _ => null, _events,
+            new DesignArtifactStore(Path.Combine(_workDir, "issues.db")),
+            new ArtOutputStore(Path.Combine(_workDir, "issues.db")),
+            NullLogger<RunAgentExecutor>.Instance, projectId: null, sprints: null, default);
+
+        Assert.Equal(AgentResult.Ok, result.Result);
+        var userText = string.Join("\n", capturing.Messages.Select(m => m.Text));
+        Assert.Contains("Resumed session", userText);
+        Assert.Contains("re-read any file", userText);
+        Assert.Contains("abc1234", userText);   // short sha of the synced head
+    }
+
+    /// <summary>Records the incoming messages of the first call and
+    /// answers with fixed text.</summary>
+    private sealed class CapturingChatClient : IChatClient
+    {
+        public IReadOnlyList<ChatMessage> Messages { get; private set; } = Array.Empty<ChatMessage>();
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Messages = messages.ToList();
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")));
+        }
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new NotImplementedException();
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
     /// <summary>
     /// Test-only IChatClient that never returns from GetResponseAsync
     /// until the CancellationToken is cancelled. Used to simulate a

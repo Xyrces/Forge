@@ -38,7 +38,9 @@ public class DispatchCheckpointTests : IDisposable
 // v18 = per-project encrypted secret store.
 // v19 = project.roles_json — DB-persisted per-project role caps.
 // v24 = skill.project_id + skill.source — per-project, repo-owned skills.
-        Assert.Equal(24, IssueStore.CurrentSchemaVersion);
+// v25 = agent_run.phase + agent_run.resumed_session — pause/resume
+// run observability (SQL Server chain: M026).
+        Assert.Equal(25, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

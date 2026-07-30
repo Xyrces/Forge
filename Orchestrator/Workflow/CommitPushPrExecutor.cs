@@ -33,10 +33,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         MemoryExtractionStore extractionStore,
         ILogger<CommitPushPrExecutor> logger,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
-        IReadOnlyList<string>? verifyCommands = null)
+        IReadOnlyList<string>? verifyCommands = null,
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
         : base(
             "commit-push-pr",
-            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -66,7 +67,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         ILogger logger,
         Forge.Core.Workflow.WorkflowResolver? workflow,
         IReadOnlyList<string>? verifyCommands = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
     {
         if (input.Result == AgentResult.Skipped)
         {
@@ -322,6 +324,25 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 ["sha"] = headSha,
             }));
         logger.LogInformation("Opened PR #{PrNumber} for {Id}", pr.Number, issue.Id);
+
+        // Event-driven review trigger (pause/resume architecture):
+        // the reviewer starts on the pushed head NOW — while CI runs
+        // — instead of waiting up to a sweep interval. The callback
+        // is expected to be non-blocking (it schedules the review and
+        // returns); the 15-min sweep stays the backstop. Failures
+        // here must never break the dispatch.
+        if (onPrOpened is not null)
+        {
+            try
+            {
+                var freshForReview = await issues.GetAsync(issue.Id, ct) ?? issue;
+                await onPrOpened(freshForReview, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "CommitPushPr({Id}): PR-opened review trigger failed; the sweep is the backstop", issue.Id);
+            }
+        }
 
         // P5.5: extract durable project memory from the model's
         // response. Advisory only; failure must not fail the
