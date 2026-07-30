@@ -313,6 +313,28 @@ public sealed class OrchestratorAgent : IAgent
         return false;
     }
 
+    // Provider auth failure cooldown: much longer than the 429 one —
+    // a lapsed key needs the operator, and each probe re-extends it.
+    private static readonly TimeSpan LlmAuthFailureCooldown = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Provider-side auth failure (lapsed/revoked key, plan sign-in
+    /// required). NOT the task's fault: the run never really started,
+    /// so the failure must not consume the task's retry budget — the
+    /// task requeues strike-free and dispatch on that model cools
+    /// down (observed live 2026-07-29: a kilo-gateway 401 storm
+    /// burned 16 porthorizon tasks to Failed in ~10 minutes).
+    /// </summary>
+    internal static bool IsLlmAuthFailure(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is System.ClientModel.ClientResultException cre && cre.Status is 401 or 403) return true;
+            if (e.Message.Contains("PAID_MODEL_AUTH_REQUIRED", StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
+
     /// <summary>
     /// One sequential poll over every Pending watch issue — a single
     /// GitHub burst per <see cref="WatchSweepInterval"/> instead of
@@ -415,6 +437,15 @@ public sealed class OrchestratorAgent : IAgent
             }
             catch (Exception ex)
             {
+                if (IsLlmAuthFailure(ex))
+                {
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-auth", bundle, cancellationToken);
+                    return new Result(false, "llm-auth-failure");
+                }
                 if (IsLlmRateLimited(ex))
                 {
                     var mk = ResolveModelKey(preClaimed.Type);
@@ -473,6 +504,15 @@ public sealed class OrchestratorAgent : IAgent
                 // leaving a completed sprint with a todo task).
                 var reachedPr = after?.DispatchCheckpoint >= DispatchCheckpoint.PrOpened;
                 var alreadyTerminal = after?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed;
+                if (IsLlmAuthFailure(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
+                {
+                    var mk = ResolveModelKey(preClaimed.Type);
+                    _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
+                        preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
+                    await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-auth", bundle, cancellationToken);
+                    return new Result(false, "llm-auth-failure");
+                }
                 if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
                     var mk = ResolveModelKey(preClaimed.Type);
