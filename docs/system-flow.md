@@ -126,6 +126,13 @@ The DB is the source of truth. The JSONL is a viewer artifact — a file the ope
 
 The full pipeline for turning a user prompt into a merged PR is six stages. Each stage is an orchestrator-owned background service or agent; the orchestrator's `DispatchCycleAsync` picks up Ready issues, calls the next stage in line, and the next stage's scheduler picks up the result on its next tick.
 
+**Gates** (operator-tunable or hard-enforced):
+
+- **Stage gates** (`StageGates`): optional hold/release at `design`, `groom`, `sprint`, and `merge`. A held gate pauses that automatic transition until the operator releases it (Sprints page gate strip or `/api/gates`).
+- **Run-level plan gate** (`Agents/Gates/`): every engineering run must pass `plan-schema`, `plan-territory`, and `plan-llm-review` before the bash tool accepts mutations.
+- **Pre-push verification gate**: `CommitPushPrExecutor` runs build+test in the worktree before commit/push/PR (up to three rounds).
+- **Merge gate**: `PRWatcher` merges only when CI check runs are green AND the current head has an approval (formal GitHub review or reviewer-agent verdict).
+
 ```
    user prompt                  product refines            design artifacts
        │                              │                            │
@@ -146,7 +153,20 @@ The full pipeline for turning a user prompt into a merged PR is six stages. Each
    GroomerAgent ──► Spec(Groomed) ──► Spec(Shipped on merge)
        │
        ▼
-   EngineeringDispatchWorkflow (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch) ──► PR opened ──► PRWatcher ──► merged
+   EngineeringDispatchWorkflow:
+       Claim → Worktree → RunAgent ──► CommitPushPr ──► PR opened ──► PRWatcher ──► merged
+                              │             │                │
+                              │             │                ▼
+                              │             │      [CI green + approval at head]
+                              │             ▼
+                              │    [verify build+test (×3)]
+                              ▼
+            [plan gate: schema · territory · LLM critic]
+
+   [design]  [groom]  [sprint]           [merge]
+      │        │        │                 │
+      ▼        ▼        ▼                 ▼
+   (operator stage gates on the workflow's automatic transitions)
 ```
 
 Each `Spec` row carries its current status; the next stage's scheduler filters by status to find candidates. Manual triggers (`POST /api/specs/{id}/design`, `POST /api/specs/{id}/design-art`, `POST /api/specs/{id}/groom`) bypass the scheduler and run the agent immediately in a background task.

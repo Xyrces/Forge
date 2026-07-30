@@ -15,7 +15,7 @@ public class MemoryStoreTests : IDisposable
 
     public MemoryStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-mem-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("mem");
         // Initialize the schema via IssueStore so the memory table
         // exists (IssueStore.InitializeSchema creates it as part of
         // its v7 block; we then point MemoryStore at the same file).

@@ -38,10 +38,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         ILogger<RunAgentExecutor> logger,
         string? projectId = null,
         ISprintStore? sprints = null,
-        double timeoutMinutes = 15.0)
+        double timeoutMinutes = 15.0,
+        Core.TaskStateMachine? lifecycle = null)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes),
+            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -71,7 +72,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         string? projectId,
         ISprintStore? sprints,
         CancellationToken ct,
-        double timeoutMinutes = 15.0)
+        double timeoutMinutes = 15.0,
+        Core.TaskStateMachine? lifecycle = null)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
         {
@@ -100,6 +102,18 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             prompt += $"\n\n## Rework required (round {round})\n" +
                 $"Your previous attempt produced a PR that did NOT pass review/CI. " +
                 $"Fix the following on the SAME branch (do not restructure unrelated work):\n\n{reworkContext}";
+        }
+        // Resume honesty: a rework round resumes the dev's PERSISTED
+        // session — the agent remembers file contents from the last
+        // run, but the worktree was synced to a new head since. Tell
+        // it explicitly so stale memory doesn't produce bad edits.
+        var reworkForSha = issue.GetMetadata("reworkForSha");
+        if (!string.IsNullOrWhiteSpace(reworkForSha))
+        {
+            prompt += $"\n\n## Resumed session\n" +
+                $"You are resuming your previous session on this task. Your branch has been " +
+                $"synced to PR head {reworkForSha[..Math.Min(7, reworkForSha.Length)]} since you last saw it — " +
+                $"re-read any file before editing it; your memory of its contents may be stale.";
         }
         // Plan-gate fast path: mechanical rework rounds (conflict
         // sync, infra retrigger) have their exact steps prescribed by
@@ -172,6 +186,24 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     // Sprint context is advisory; a lookup failure must
                     // never break a dispatch.
                     logger.LogWarning(ex, "RunAgent({Id}): sprint context lookup failed; continuing without it", issue.Id);
+                }
+            }
+            // RunStarted: the model run is about to begin. Advances
+            // the recorded lifecycle state (Dispatching ->
+            // AgentRunning) and refreshes stateEnteredAt so the
+            // stall guard's clock measures from run-start, not from
+            // the rework fire (observed live 2026-07-27: retried
+            // stalls looked frozen at Dispatching for the whole run).
+            if (lifecycle is not null)
+            {
+                try
+                {
+                    var fresh = await issues.GetAsync(issue.Id, ct) ?? issue;
+                    await lifecycle.ReportAsync(issues, fresh, Core.TaskEvent.RunStarted, watch: null, hasActiveDevRun: true, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "lifecycle RunStarted report failed for {Id}; continuing", issue.Id);
                 }
             }
             result = await runner.RunAsync(

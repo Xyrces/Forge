@@ -27,17 +27,39 @@ public sealed class StageGates
     private const string OpenValue = "open";
 
     private readonly MemoryStore _memory;
+    private readonly Workflow.WorkflowResolver? _workflow;
 
-    public StageGates(MemoryStore memory) => _memory = memory;
+    public StageGates(MemoryStore memory, Workflow.WorkflowResolver? workflow = null)
+    {
+        _memory = memory;
+        _workflow = workflow;
+    }
 
     public static bool IsKnown(string stage) => All.Contains(stage, StringComparer.OrdinalIgnoreCase);
 
     private static string Key(string stage) => $"gate/{stage}";
 
     public async Task<bool> IsHeldAsync(string stage, CancellationToken ct = default)
-        => string.Equals(
+    {
+        // Workflow wiring (editable workflow, pass 2): a gate that is
+        // not attached to any step in the resolved definition is
+        // DISABLED — holds on it have no effect. The built-in default
+        // attaches every gate at its current step, so default
+        // behavior is unchanged.
+        if (_workflow is not null)
+        {
+            var definition = await _workflow.ResolveAsync(ct);
+            var attached = definition.Steps.Any(s => s.Enabled
+                && s.Gates.Contains(stage, StringComparer.OrdinalIgnoreCase));
+            if (!attached)
+            {
+                return false;
+            }
+        }
+        return string.Equals(
             (await _memory.RecallAsync(Key(stage), ct)).FirstOrDefault()?.Body,
             HoldValue, StringComparison.Ordinal);
+    }
 
     public async Task HoldAsync(string stage, CancellationToken ct = default)
         => await _memory.RememberAsync(Key(stage), HoldValue, ttlDays: null, ct);

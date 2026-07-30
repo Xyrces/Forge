@@ -14,7 +14,7 @@ public class ProjectClonerTests : IDisposable
 
     public ProjectClonerTests()
     {
-        _tempRoot = Path.Combine(Path.GetTempPath(), $"ph-clone-{Guid.NewGuid():N}");
+        _tempRoot = TempRoot.Instance.NewDirectory("clone");
         _remoteDir = Path.Combine(_tempRoot, "remote.git");
         Directory.CreateDirectory(_tempRoot);
         InitBareRepo(_remoteDir);
@@ -95,17 +95,167 @@ public class ProjectClonerTests : IDisposable
         // Push a new commit to the remote.
         SeedCommit(_remoteDir, "main", "CHANGELOG.md", "v0.2.0\n", "second");
 
-        var ok = await _cloner.SyncAsync(project, github: null);
+        var ok = (await _cloner.SyncAsync(project, github: null)).Ok;
         Assert.True(ok);
         Assert.True(File.Exists(Path.Combine(first.LocalPath, "CHANGELOG.md")));
     }
 
-    private static void InitBareRepo(string path)
+    [Fact]
+    public async Task SyncAsync_NoWorkingCopy_ClonesInsteadOfFailing()
+    {
+        // Registration-time clone failures (e.g. a stale global PAT)
+        // are retried via sync — the documented operator recovery path.
+        var project = new ProjectOptions
+        {
+            Id = "lateclone",
+            Name = "LateClone",
+            RepoUrl = _remoteDir,
+            DefaultBranch = "main",
+        };
+
+        var ok = (await _cloner.SyncAsync(project, github: null)).Ok;
+        Assert.True(ok);
+        Assert.True(File.Exists(Path.Combine(
+            ForgesystemPaths.ProjectDir(_tempRoot, project.Id), "README.md")));
+    }
+
+    [Fact]
+    public async Task SyncAsync_ScaffoldedRepo_ReconcilesWithRemote()
+    {
+        // Simulate the bootstrap's git-init fallback: a local repo
+        // with a scaffold commit and no origin, shadowing the remote.
+        var project = new ProjectOptions
+        {
+            Id = "scaffolded",
+            Name = "Scaffolded",
+            RepoUrl = _remoteDir,
+            DefaultBranch = "main",
+        };
+        var localPath = ForgesystemPaths.ProjectDir(_tempRoot, project.Id);
+        Directory.CreateDirectory(localPath);
+        RunGit(localPath, "init", "-q -b main");
+        RunGit(localPath, "config", "user.email forge@local");
+        RunGit(localPath, "config", "user.name \"Forge Bootstrap\"");
+        File.WriteAllText(Path.Combine(localPath, ".gitignore"), ".forge/\n");
+        RunGit(localPath, "add", ".gitignore");
+        RunGit(localPath, "commit", "-q -m scaffold");
+
+        var ok = (await _cloner.SyncAsync(project, github: null)).Ok;
+
+        Assert.True(ok);
+        Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
+
+        // Origin reattached: a second sync takes the ff-only pull path.
+        SeedCommit(_remoteDir, "main", "CHANGELOG.md", "v0.2.0\n", "second");
+        Assert.True((await _cloner.SyncAsync(project, github: null)).Ok);
+        Assert.True(File.Exists(Path.Combine(localPath, "CHANGELOG.md")));
+    }
+
+    [Fact]
+    public async Task DetectDefaultBranchAsync_ReturnsRemoteHead()
+    {
+        var trunkRemote = Path.Combine(_tempRoot, "trunk-remote.git");
+        InitBareRepo(trunkRemote, "trunk");
+        SeedCommit(trunkRemote, "trunk", "README.md", "# Trunk\n", "initial");
+
+        var project = new ProjectOptions
+        {
+            Id = "detector",
+            Name = "Detector",
+            RepoUrl = trunkRemote,
+            DefaultBranch = "main",
+        };
+
+        var detected = await _cloner.DetectDefaultBranchAsync(project, github: null);
+        Assert.Equal("trunk", detected);
+    }
+
+    [Fact]
+    public async Task SyncAsync_ScaffoldedRepo_UsesDetectedBranchWhenStoredMissing()
+    {
+        // Registry says "main" (the old guess) but the remote's
+        // default is "trunk": reconcile should detect + align to
+        // trunk and report it in the result.
+        var trunkRemote = Path.Combine(_tempRoot, "trunk-remote2.git");
+        InitBareRepo(trunkRemote, "trunk");
+        SeedCommit(trunkRemote, "trunk", "README.md", "# Trunk\n", "initial");
+
+        var project = new ProjectOptions
+        {
+            Id = "scaffold-trunk",
+            Name = "ScaffoldTrunk",
+            RepoUrl = trunkRemote,
+            DefaultBranch = "main",
+        };
+        var localPath = ForgesystemPaths.ProjectDir(_tempRoot, project.Id);
+        Directory.CreateDirectory(localPath);
+        RunGit(localPath, "init", "-q -b main");
+        RunGit(localPath, "config", "user.email forge@local");
+        RunGit(localPath, "config", "user.name \"Forge Bootstrap\"");
+        File.WriteAllText(Path.Combine(localPath, ".gitignore"), ".forge/\n");
+        RunGit(localPath, "add", ".gitignore");
+        RunGit(localPath, "commit", "-q -m scaffold");
+
+        var result = await _cloner.SyncAsync(project, github: null);
+
+        Assert.True(result.Ok);
+        Assert.Equal("trunk", result.Branch);
+        Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
+
+        // Pull info stamped: the clone's origin/HEAD now reflects the
+        // remote default.
+        Assert.Equal("trunk", await _cloner.ReadCloneDefaultBranchAsync(localPath));
+    }
+
+    [Fact]
+    public async Task ListRemoteBranchesAsync_ListsHeads()
+    {
+        var project = new ProjectOptions
+        {
+            Id = "brancher",
+            Name = "Brancher",
+            RepoUrl = _remoteDir,
+            DefaultBranch = "main",
+        };
+        SeedCommit(_remoteDir, "feature", "FEATURE.md", "x\n", "feature");
+
+        var branches = await _cloner.ListRemoteBranchesAsync(project, github: null);
+
+        Assert.Contains("main", branches);
+        Assert.Contains("feature", branches);
+        Assert.Equal(branches.OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList(), branches.ToList());
+    }
+
+    [Fact]
+    public async Task ReadCloneDefaultBranchAsync_ReadsOriginHead()
+    {
+        var trunkRemote = Path.Combine(_tempRoot, "trunk-remote3.git");
+        InitBareRepo(trunkRemote, "trunk");
+        SeedCommit(trunkRemote, "trunk", "README.md", "# Trunk\n", "initial");
+
+        var project = new ProjectOptions
+        {
+            Id = "pullinfo",
+            Name = "PullInfo",
+            RepoUrl = trunkRemote,
+            DefaultBranch = "trunk",
+        };
+        var clone = await _cloner.CloneAsync(project, github: null);
+        Assert.Equal("trunk", await _cloner.ReadCloneDefaultBranchAsync(clone.LocalPath));
+
+        // No origin (scaffold-style repo) → null.
+        var bare = Path.Combine(_tempRoot, "no-origin");
+        Directory.CreateDirectory(bare);
+        RunGit(bare, "init", "-q -b main");
+        Assert.Null(await _cloner.ReadCloneDefaultBranchAsync(bare));
+    }
+
+    private static void InitBareRepo(string path, string branch = "main")
     {
         // `git init --bare <path>` creates <path>; we must run from
         // <path>'s parent, not from <path> itself (which doesn't exist yet).
         var parent = Path.GetDirectoryName(path)!;
-        RunGit(parent, "init", $"--bare --initial-branch=main -q \"{path}\"");
+        RunGit(parent, "init", $"--bare --initial-branch={branch} -q \"{path}\"");
     }
 
     private static void SeedCommit(string bareRepo, string branch, string filename, string content, string message)
@@ -114,7 +264,7 @@ public class ProjectClonerTests : IDisposable
         // we get the existing history on subsequent seeds) then add
         // a new commit and push. This pattern works for the first
         // commit too — clone an empty repo, write a file, commit.
-        var work = Path.Combine(Path.GetTempPath(), $"ph-seed-{Guid.NewGuid():N}");
+        var work = TempRoot.Instance.NewDirectory("seed");
         Directory.CreateDirectory(work);
         try
         {
@@ -122,6 +272,8 @@ public class ProjectClonerTests : IDisposable
             RunGit(work, "clone", $"-q \"{bareRepo}\" \"{work}\"");
             RunGit(work, "config", "user.email forge@test.local");
             RunGit(work, "config", "user.name Forge Test");
+            // Seed onto the requested branch (create or reset it).
+            RunGit(work, "checkout", $"-B {branch}");
             // If the bare repo was empty, HEAD doesn't exist yet —
             // create an initial empty commit so subsequent branches
             // can be created from a known ref.

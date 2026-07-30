@@ -43,7 +43,8 @@ public static class TaskEndpoints
         ILogger logger,
         Projects.ProjectContextFactory? projectContexts = null,
         ISprintStore? sprints = null,
-        AgentRunStore? runs = null)
+        AgentRunStore? runs = null,
+        Forge.Core.Workflow.WorkflowResolver? workflow = null)
     {
         // Derived lifecycle state (Phase 1 read-model): what the task
         // is doing + what it's waiting on, projected from the task,
@@ -73,7 +74,18 @@ public static class TaskEndpoints
                     string.Equals(r.TaskId, id, StringComparison.Ordinal)
                     && r.Role is "CoreDev" or "ClientDev");
 
-            var info = TaskStateProjector.Derive(task, watch, hasActiveDevRun, DateTime.UtcNow);
+            // Workflow policies (pass 3): strike budget + stall grace
+            // come from the resolved definition when available.
+            var wf = workflow is not null ? await workflow.ResolveAsync(ct) : null;
+            var info = TaskStateProjector.Derive(task, watch, hasActiveDevRun, DateTime.UtcNow,
+                maxStrikes: wf is not null
+                    ? Forge.Core.Workflow.WorkflowPolicyReader.GetInt(
+                        wf, Forge.Core.Workflow.WorkflowPolicies.MaxStrikes, TaskStateProjector.MaxStrikes)
+                    : null,
+                stallGrace: wf is not null
+                    ? TimeSpan.FromMinutes(Forge.Core.Workflow.WorkflowPolicyReader.GetInt(
+                        wf, Forge.Core.Workflow.WorkflowPolicies.StallGraceMinutes, (int)TaskStateProjector.StallGrace.TotalMinutes))
+                    : null);
             return Results.Json(new
             {
                 taskId = id,
@@ -192,6 +204,11 @@ public static class TaskEndpoints
                 var text = textEl.GetString() ?? "";
                 if (string.IsNullOrWhiteSpace(text))
                     return Results.BadRequest(new { error = "text cannot be empty" });
+
+                // The audit found this returned success for any id —
+                // a typo'd task id must not silently succeed.
+                if (await issues.GetAsync(id, ctx.RequestAborted) is null)
+                    return Results.NotFound(new { error = "task not found", id });
 
                 messageBus.Enqueue(id, text);
                 return Results.Json(new { accepted = true, taskId = id });
@@ -326,6 +343,8 @@ public static class TaskEndpoints
             if (recovery is null) return Results.Problem(detail: "StartupRecovery not configured", statusCode: 503);
             try
             {
+                if (await issues.GetAsync(id, ct) is null)
+                    return Results.NotFound(new { error = "task not found", id });
                 var reportId = await recovery.RunAsync(specId: null, ct: ct);
                 return Results.Json(new { taskId = id, reportId });
             }

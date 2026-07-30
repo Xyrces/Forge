@@ -1,5 +1,6 @@
 @page "/board"
 @inject HttpClient Http
+@inject NavigationManager Nav
 @implements IDisposable
 @using System.Net.Http.Json
 
@@ -36,7 +37,7 @@
 
     @if (_rows is null)
     {
-        <div class="page-subtitle">Loading…</div>
+        <div class="banner banner--error">Failed to load the board: @_loadError <button class="btn btn--small" @onclick="ReloadAsync">Retry</button></div>
     }
     else if (_rows.Count == 0)
     {
@@ -59,9 +60,9 @@
             <tbody>
                 @foreach (var r in FilteredRows)
                 {
-                    <tr>
+                    <tr style="cursor:pointer" title="Open task detail" @onclick="@(() => Nav.NavigateTo($"/tasks/{r.Id}"))">
                         <td><span class="project-chip">@r.ProjectId</span></td>
-                        <td class="mono">@r.Id</td>
+                        <td class="mono"><a href="/tasks/@r.Id" @onclick:stopPropagation="true">@r.Id</a></td>
                         <td>@r.Title</td>
                         <td class="mono">@(r.Type ?? "—")</td>
                         <td><span class="pill pill--@r.Status.ToLowerInvariant()">@r.Status</span></td>
@@ -80,6 +81,7 @@
     private List<ProjectsListItem>? _projects;
     private string _filter = "All";
     private string? _projectFilter;
+    private string? _loadError;
 
     private IReadOnlyList<BoardIssueRow> _rows => _board?.Issues ?? (IReadOnlyList<BoardIssueRow>)Array.Empty<BoardIssueRow>();
 
@@ -113,7 +115,7 @@
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Board reload failed: {ex.Message}");
+            _loadError = ex.Message;
         }
     }
 

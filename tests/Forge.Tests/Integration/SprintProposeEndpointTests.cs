@@ -29,7 +29,7 @@ public class SprintProposeEndpointTests : IDisposable
 
     public SprintProposeEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-sprint-propose-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("sprint-propose");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

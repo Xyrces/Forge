@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 using Forge.Core;
 
@@ -14,12 +16,22 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
 
     public SprintProposalAuditStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
+    {
+    }
+
+    public SprintProposalAuditStore(IDbConnectionFactory db)
+    {
+        _db = db;
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+        return new SqliteConnectionStringBuilder
         {
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
@@ -27,6 +39,8 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
             Pooling = true,
         }.ToString();
     }
+
+    private string T(string name) => _db.Dialect.Table(name);
 
     public async Task<long> RecordAsync(
         string? theme,
@@ -36,21 +50,29 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
         IReadOnlyList<string> selectedTaskIds,
         CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO sprint_proposal_audit(
-                ts, theme, goal, weights_json, candidates_json,
-                selected_task_ids_json)
-            VALUES($ts, $theme, $goal, $weights, $cands, $sel)
-            """;
-        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString(DateFormat));
-        cmd.Parameters.AddWithValue("$theme", (object?)theme ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$goal", (object?)goal ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$weights",
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                INSERT INTO {T("sprint_proposal_audit")}(
+                    ts, theme, goal, weights_json, candidates_json,
+                    selected_task_ids_json)
+                OUTPUT INSERTED.id
+                VALUES(@ts, @theme, @goal, @weights, @cands, @sel);
+                """
+            : """
+                INSERT INTO sprint_proposal_audit(
+                    ts, theme, goal, weights_json, candidates_json,
+                    selected_task_ids_json)
+                VALUES(@ts, @theme, @goal, @weights, @cands, @sel);
+                SELECT last_insert_rowid();
+                """;
+        cmd.AddParam("@ts", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@theme", (object?)theme ?? DBNull.Value);
+        cmd.AddParam("@goal", (object?)goal ?? DBNull.Value);
+        cmd.AddParam("@weights",
             JsonSerializer.Serialize(weights));
-        cmd.Parameters.AddWithValue("$cands",
+        cmd.AddParam("@cands",
             JsonSerializer.Serialize(candidates.Select(c => new
             {
                 taskId = c.TaskId,
@@ -58,45 +80,40 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
                 score = c.Score,
                 breakdown = c.Breakdown,
             })));
-        cmd.Parameters.AddWithValue("$sel",
+        cmd.AddParam("@sel",
             JsonSerializer.Serialize(selectedTaskIds));
-        await cmd.ExecuteNonQueryAsync(ct);
-
-        await using var idCmd = conn.CreateCommand();
-        idCmd.CommandText = "SELECT last_insert_rowid()";
-        var id = (long)(await idCmd.ExecuteScalarAsync(ct))!;
+        var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
         return id;
     }
 
     public async Task MarkCommittedAsync(long id, string sprintId, string committedBy, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE sprint_proposal_audit
-            SET committed_sprint_id = $sid, committed_by = $who
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("sprint_proposal_audit")}
+            SET committed_sprint_id = @sid, committed_by = @who
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$sid", sprintId);
-        cmd.Parameters.AddWithValue("$who", committedBy);
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.AddParam("@sid", sprintId);
+        cmd.AddParam("@who", committedBy);
+        cmd.AddParam("@id", id);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<IReadOnlyList<SprintProposalAuditRecord>> ListAsync(int limit = 50, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, ts, theme, goal, weights_json, candidates_json,
+        var d = _db.Dialect;
+        cmd.CommandText = $"""
+            SELECT {d.TopParam("@limit")}id, ts, theme, goal, weights_json, candidates_json,
                    selected_task_ids_json, committed_sprint_id, committed_by
-            FROM sprint_proposal_audit
+            FROM {T("sprint_proposal_audit")}
             ORDER BY ts DESC, id DESC
-            LIMIT $limit
+            {d.LimitParam("@limit")}
             """;
-        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.AddParam("@limit", limit);
         var list = new List<SprintProposalAuditRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
@@ -108,21 +125,20 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
 
     public async Task<SprintProposalAuditRecord?> GetAsync(long id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT id, ts, theme, goal, weights_json, candidates_json,
                    selected_task_ids_json, committed_sprint_id, committed_by
-            FROM sprint_proposal_audit
-            WHERE id = $id
+            FROM {T("sprint_proposal_audit")}
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
 
-    private static SprintProposalAuditRecord Read(SqliteDataReader rd) => new(
+    private static SprintProposalAuditRecord Read(DbDataReader rd) => new(
         Id: rd.GetInt64(0),
         Timestamp: DateTime.ParseExact(rd.GetString(1), DateFormat,
             System.Globalization.CultureInfo.InvariantCulture),

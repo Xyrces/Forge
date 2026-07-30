@@ -32,7 +32,8 @@ public static class SecretsEndpoints
         string Kind,
         bool Set,
         DateTime? CreatedAt,
-        DateTime? UpdatedAt);
+        DateTime? UpdatedAt,
+        bool Known = false);
 
     public sealed record SetSecretRequest(string Kind, string Value);
 
@@ -47,18 +48,19 @@ public static class SecretsEndpoints
         // Whitelist of known kinds so the UI's upper panel always
         // shows the same supported fields (even when unset). Custom
         // kinds the operator stored via POST follow, sorted, so the
-        // lower panel can render everything that exists.
-        var knownKinds = new[] { SecretKinds.GitHubToken, SecretKinds.KiloGatewayApiKey, SecretKinds.MeshyApiKey };
+        // lower panel can render everything that exists. The DTO
+        // carries Known so the UI ships no mirror of this list.
+        var knownKinds = new[] { SecretKinds.GitHubToken, SecretKinds.KiloGatewayApiKey, SecretKinds.MeshyApiKey, SecretKinds.KimiApiKey };
         var dtos = knownKinds.Select(kind => byKind.TryGetValue(kind, out var row)
-            ? new SecretMetadataDto(kind, Set: true, row.CreatedAt, row.UpdatedAt)
-            : new SecretMetadataDto(kind, Set: false, null, null))
+            ? new SecretMetadataDto(kind, Set: true, row.CreatedAt, row.UpdatedAt, Known: true)
+            : new SecretMetadataDto(kind, Set: false, null, null, Known: true))
             .Concat(byKind.Keys
                 .Where(k => !knownKinds.Contains(k, StringComparer.OrdinalIgnoreCase))
                 .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
                 .Select(k =>
                 {
                     var row = byKind[k];
-                    return new SecretMetadataDto(row.Kind, Set: true, row.CreatedAt, row.UpdatedAt);
+                    return new SecretMetadataDto(row.Kind, Set: true, row.CreatedAt, row.UpdatedAt, Known: false);
                 }));
         return Results.Ok(dtos);
     }

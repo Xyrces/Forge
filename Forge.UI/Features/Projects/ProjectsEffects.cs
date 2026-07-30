@@ -60,7 +60,7 @@ public class AddProjectEffect : Effect<ProjectsActions.AddProjectAction>
         dispatcher.Dispatch(new ProjectsActions.AddProjectSubmittingAction());
         try
         {
-            var body = new AddProjectRequestBody(action.Id, action.Name, action.RepoUrl, action.DefaultBranch);
+            var body = new AddProjectRequestBody(action.Id, action.Name, action.RepoUrl, action.DefaultBranch, action.GitToken);
             var resp = await _client.AddAsync(body, CancellationToken.None);
             if (!string.IsNullOrEmpty(resp.Warning))
             {

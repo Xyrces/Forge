@@ -56,6 +56,8 @@
     <PackageReference Include="Microsoft.Agents.AI" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.DurableTask" Version="1.1.0-preview.260410.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.0.2" />
     <PackageReference Include="Microsoft.DurableTask.Client.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.DurableTask.Worker.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />

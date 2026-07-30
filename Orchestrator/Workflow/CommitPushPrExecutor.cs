@@ -1,4 +1,4 @@
-﻿using Microsoft.Agents.AI.Workflows;
+using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.Logging;
 using Octokit;
 using Forge.AgentTools;
@@ -31,10 +31,13 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         IDashboardEventBus events,
         IMemoryExtractor memoryExtractor,
         MemoryExtractionStore extractionStore,
-        ILogger<CommitPushPrExecutor> logger)
+        ILogger<CommitPushPrExecutor> logger,
+        Forge.Core.Workflow.WorkflowResolver? workflow = null,
+        IReadOnlyList<string>? verifyCommands = null,
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
         : base(
             "commit-push-pr",
-            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, ct),
+            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -62,7 +65,10 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         IMemoryExtractor memoryExtractor,
         MemoryExtractionStore extractionStore,
         ILogger logger,
-        CancellationToken ct)
+        Forge.Core.Workflow.WorkflowResolver? workflow,
+        IReadOnlyList<string>? verifyCommands = null,
+        CancellationToken ct = default,
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
     {
         if (input.Result == AgentResult.Skipped)
         {
@@ -85,13 +91,21 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         var hasChanges = commit.HasChanges;
         if (!hasChanges)
         {
-            var ahead = await worktrees.GetDiffStatsAsync(worktreePath, input.Worktree.BaseBranch, ct);
-            if (!string.IsNullOrWhiteSpace(ahead.Summary))
+            // The source of truth for "the branch carries new work"
+            // is the unique-commit count against ORIGIN's base — the
+            // worktree's local base ref can be stale and diff as a
+            // false-positive "self-commit" (porthorizon task-7,
+            // 2026-07-29: HEAD exactly on fresh origin/main diffed as
+            // 9 files vs stale local main; the no-op push then died
+            // on GitHub's no-commits 422, swallowed mid-pipeline).
+            var aheadCount = await worktrees.GetAheadCountAsync(worktreePath, input.Worktree.BaseBranch, ct);
+            if (aheadCount > 0)
             {
+                var ahead = await worktrees.GetDiffStatsAsync(worktreePath, input.Worktree.BaseBranch, ct);
                 hasChanges = true;
                 logger.LogInformation(
-                    "CommitPushPr({Id}): nothing to commit but branch is ahead of {Base} — agent self-committed ({Summary}); proceeding to push/PR",
-                    issue.Id, input.Worktree.BaseBranch, ahead.Summary);
+                    "CommitPushPr({Id}): nothing to commit but branch is {Count} commit(s) ahead of {Base} — agent self-committed ({Summary}); proceeding to push/PR",
+                    issue.Id, aheadCount, input.Worktree.BaseBranch, ahead.Summary);
             }
         }
         if (!hasChanges)
@@ -118,7 +132,18 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             // 40-iteration default cut every run during exploration.)
             var explicitNoOp = (input.Text ?? "")
                 .Contains("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase);
-            if (!explicitNoOp)
+            // Workflow policy noDiffOutcome=rework (pass 3): the
+            // operator doesn't accept verified no-op completions —
+            // even an explicit NO_CHANGES_NEEDED requeues (the
+            // no-progress circuit breaker still caps the loop).
+            var noDiffOutcome = "completed";
+            if (workflow is not null)
+            {
+                var definition = await workflow.ResolveAsync(ct);
+                noDiffOutcome = Forge.Core.Workflow.WorkflowPolicyReader.GetString(
+                    definition, Forge.Core.Workflow.WorkflowPolicies.NoDiffOutcome, "completed");
+            }
+            if (!explicitNoOp || string.Equals(noDiffOutcome, "rework", StringComparison.Ordinal))
             {
                 var attempts = int.TryParse(current?.GetMetadata("noProgressAttempts"), out var n) ? n + 1 : 1;
                 if (attempts >= MaxNoProgressAttempts)
@@ -135,7 +160,9 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 else
                 {
                     await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
-                        $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
+                        explicitNoOp
+                            ? $"NO_CHANGES_NEEDED rejected by workflow policy noDiffOutcome=rework (attempt {attempts})"
+                            : $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
                         new Dictionary<string, object> { ["noProgressAttempts"] = attempts.ToString() }, ct);
                     events.Publish(new DashboardEvent(
                         DateTime.UtcNow, DashboardEventKind.TaskTransition,
@@ -163,6 +190,58 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                     ["response"] = Truncate(input.Text ?? "", 400),
                 }));
             return new PrOpened(input, PrResult.NoDiff, 0, null);
+        }
+
+        // Pre-push verification gate: run the project's build/test
+        // commands in the worktree BEFORE pushing. A failure here
+        // bounces the task back to the agent with the output — no PR
+        // churn, no watch round; GitHub CI stays the safety net.
+        // verifyCommands: null = auto-detect (dotnet), empty = disabled.
+        var commands = verifyCommands ?? AgentTools.RunVerification.DefaultCommands(worktreePath);
+        if (commands.Count > 0)
+        {
+            logger.LogInformation("CommitPushPr({Id}): running {Count} verification command(s) before push", issue.Id, commands.Count);
+            var verification = await AgentTools.RunVerification.RunAsync(worktreePath, commands, logger, ct);
+            if (!verification.Ok)
+            {
+                var attempts = int.TryParse(
+                    (await issues.GetAsync(issue.Id, ct))?.GetMetadata("noProgressAttempts"), out var vn) ? vn + 1 : 1;
+                var detail = string.Join("\n\n", verification.Failures);
+                if (attempts >= MaxNoProgressAttempts)
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Failed,
+                        $"pre-push verification failed in {attempts} attempts",
+                        new Dictionary<string, object>
+                        {
+                            ["noProgressAttempts"] = attempts.ToString(),
+                            ["lastError"] = $"pre-push verification failed:\n{detail}",
+                            ["lastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                        }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Failed (verification failed in {attempts} attempts)",
+                        new Dictionary<string, object?> { ["response"] = Truncate(detail, 400) }));
+                    logger.LogError("Issue {Id}: pre-push verification failed after {Attempts} attempts — Failed for operator review", issue.Id, attempts);
+                }
+                else
+                {
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        $"pre-push verification failed (attempt {attempts}): {verification.Failures[0][..Math.Min(200, verification.Failures[0].Length)]}",
+                        new Dictionary<string, object>
+                        {
+                            ["noProgressAttempts"] = attempts.ToString(),
+                            ["lastError"] = $"pre-push verification failed:\n{detail}",
+                            ["lastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                        }, ct);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Requeued (verification failed, attempt {attempts})",
+                        new Dictionary<string, object?> { ["response"] = Truncate(detail, 400) }));
+                    logger.LogWarning("Issue {Id}: pre-push verification failed — requeued with output (attempt {Attempts})", issue.Id, attempts);
+                }
+                return new PrOpened(input, PrResult.NoDiff, 0, null);
+            }
+            logger.LogInformation("CommitPushPr({Id}): verification passed", issue.Id);
         }
 
         // P4 Stage A: advance through the dispatch checkpoints so
@@ -224,6 +303,9 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         {
             m["prNumber"] = pr.Number;
             m["branchSha"] = headSha;
+            // Stale-window anchor for the state-driven watch sweep.
+            // Rework rounds reuse the PR — keep the ORIGINAL open time.
+            if (!m.ContainsKey("prOpenedAt")) m["prOpenedAt"] = DateTime.UtcNow.ToString("O");
             // Success clears any stale run-failure record (requeues
             // never remove it; metadata is upsert-merge only, so
             // JSON null is the delete idiom).
@@ -242,6 +324,25 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 ["sha"] = headSha,
             }));
         logger.LogInformation("Opened PR #{PrNumber} for {Id}", pr.Number, issue.Id);
+
+        // Event-driven review trigger (pause/resume architecture):
+        // the reviewer starts on the pushed head NOW — while CI runs
+        // — instead of waiting up to a sweep interval. The callback
+        // is expected to be non-blocking (it schedules the review and
+        // returns); the 15-min sweep stays the backstop. Failures
+        // here must never break the dispatch.
+        if (onPrOpened is not null)
+        {
+            try
+            {
+                var freshForReview = await issues.GetAsync(issue.Id, ct) ?? issue;
+                await onPrOpened(freshForReview, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "CommitPushPr({Id}): PR-opened review trigger failed; the sweep is the backstop", issue.Id);
+            }
+        }
 
         // P5.5: extract durable project memory from the model's
         // response. Advisory only; failure must not fail the

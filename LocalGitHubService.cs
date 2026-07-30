@@ -164,6 +164,12 @@ public sealed class LocalGitHubService : GitHubService
     public override Task<string> GetPullRequestDiffAsync(
         int prNumber, CancellationToken cancellationToken = default)
         => Task.FromResult(string.Empty);
+
+    /// <summary>Incremental diff; the harness doesn't drive the
+    /// reviewer loop, so empty like the PR diff above.</summary>
+    public override Task<string> GetCompareDiffAsync(
+        string baseSha, string headSha, CancellationToken cancellationToken = default)
+        => Task.FromResult(string.Empty);
 }
 
 /// <summary>

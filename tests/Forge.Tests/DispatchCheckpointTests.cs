@@ -16,7 +16,7 @@ public class DispatchCheckpointTests : IDisposable
 
     public DispatchCheckpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-checkpoint-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("checkpoint");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _reports = new RecoveryReportStore(Path.Combine(_workDir, "issues.db"));
@@ -37,7 +37,10 @@ public class DispatchCheckpointTests : IDisposable
 // v17 = project registry table for runtime project add/remove.
 // v18 = per-project encrypted secret store.
 // v19 = project.roles_json — DB-persisted per-project role caps.
-        Assert.Equal(23, IssueStore.CurrentSchemaVersion);
+// v24 = skill.project_id + skill.source — per-project, repo-owned skills.
+// v25 = agent_run.phase + agent_run.resumed_session — pause/resume
+// run observability (SQL Server chain: M026).
+        Assert.Equal(25, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

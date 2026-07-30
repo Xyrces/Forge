@@ -1,0 +1,40 @@
+@* Shared destructive-action confirmation (2026-07-27 audit:
+   Skills and Secrets deletes were one-click with no undo).
+   Usage:
+   <ConfirmDialog Visible="_confirm is not null"
+                  Title="Delete skill?"
+                  Body="@($"Permanently delete '{_confirm?.Name}'? Roles loading it stop seeing it immediately.")"
+                  ConfirmLabel="Delete"
+                  OnConfirm="ConfirmDeleteAsync"
+                  OnCancel="() => _confirm = null" /> *@
+
+@if (Visible)
+{
+    <div class="confirm-backdrop" @onclick="OnCancel">
+        <div class="card confirm-dialog" role="alertdialog" aria-modal="true" @onclick:stopPropagation="true">
+            <div style="font-weight:600;margin-bottom:8px">@Title</div>
+            <div class="page-subtitle" style="margin-bottom:14px">@Body</div>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button class="btn btn--small" @onclick="OnCancel">Cancel</button>
+                <button class="btn btn--small confirm-dialog__danger" @onclick="InvokeConfirm" disabled="@_busy">@ConfirmLabel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public string Title { get; set; } = "Are you sure?";
+    [Parameter] public string? Body { get; set; }
+    [Parameter] public string ConfirmLabel { get; set; } = "Confirm";
+    [Parameter] public EventCallback OnConfirm { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private bool _busy;
+    private async Task InvokeConfirm()
+    {
+        _busy = true;
+        try { await OnConfirm.InvokeAsync(); }
+        finally { _busy = false; }
+    }
+}

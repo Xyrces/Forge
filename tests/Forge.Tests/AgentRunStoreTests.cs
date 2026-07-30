@@ -16,7 +16,7 @@ public class AgentRunStoreTests : IDisposable
 
     public AgentRunStoreTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-runs-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("runs");
         Directory.CreateDirectory(_workDir);
         _schema = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _runs = new AgentRunStore(Path.Combine(_workDir, "issues.db"));
@@ -106,5 +106,35 @@ public class AgentRunStoreTests : IDisposable
         // Same-second timestamps make order-by unstable; assert set
         // membership instead: 50 distinct runs of the 55.
         Assert.Equal(50, kept.Select(r => r.Id).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task ResumedSession_RoundTrips_FromStart()
+    {
+        await _runs.StartAsync("run-cold", "task-1", "CoreDev", "m");
+        await _runs.StartAsync("run-warm", "task-1", "CoreDev", "m", resumedSession: true);
+
+        var active = await _runs.ListActiveAsync();
+        Assert.Equal(2, active.Count);
+        Assert.Equal(false, active.Single(r => r.Id == "run-cold").ResumedSession);
+        Assert.Equal(true, active.Single(r => r.Id == "run-warm").ResumedSession);
+    }
+
+    [Fact]
+    public async Task Phase_HeartbeatWritesAndCoalesces()
+    {
+        await _runs.StartAsync("run-ph", "task-1", "CoreDev", "m");
+        Assert.Null((await _runs.ListActiveAsync()).Single().Phase);
+
+        await _runs.UpdateProgressAsync("run-ph", 1, 0, 10, phase: "plan gate");
+        Assert.Equal("plan gate", (await _runs.ListActiveAsync()).Single().Phase);
+
+        await _runs.UpdateProgressAsync("run-ph", 5, 2, 900, phase: "verifying 1/3");
+        Assert.Equal("verifying 1/3", (await _runs.ListActiveAsync()).Single().Phase);
+
+        // A heartbeat without a phase keeps the last written value
+        // (COALESCE) — the label survives phase-less progress writes.
+        await _runs.UpdateProgressAsync("run-ph", 6, 2, 950);
+        Assert.Equal("verifying 1/3", (await _runs.ListActiveAsync()).Single().Phase);
     }
 }

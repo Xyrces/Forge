@@ -45,7 +45,7 @@ public class RecoveryEndpointTests : IDisposable
     public RecoveryEndpointTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-recovery-ep-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("recovery-ep");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");

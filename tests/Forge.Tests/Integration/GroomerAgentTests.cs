@@ -22,7 +22,7 @@ public class GroomerAgentTests : IDisposable
 
     public GroomerAgentTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-groomer-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("groomer");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
     }
@@ -196,4 +196,155 @@ public class DeterministicScorerTests
     private static IssueRecord MakeTask(string id, int priority, string title, DateTime createdAt)
         => new(id, id, "task", title, null, IssueStatus.Pending, priority, null,
             createdAt, createdAt, null, "{}");
+}
+/// <summary>
+/// Multi-project routing (live incident 2026-07-29): a groomer run
+/// for a spec owned by project B must write its stories/tasks into
+/// project B's issue store — never the default (primary) store,
+/// whose sprint lane would dispatch them against the wrong repo.
+/// </summary>
+public class GroomerRoutingTests : IDisposable
+{
+    private readonly string _dir;
+    private readonly IssueStore _defaultStore;
+    private readonly IssueStore _projectStore;
+    private readonly SpecStore _specs;
+
+    public GroomerRoutingTests()
+    {
+        _dir = TempRoot.Instance.NewDirectory("groomroute");
+        Directory.CreateDirectory(_dir);
+        _defaultStore = new IssueStore(Path.Combine(_dir, "default.db"));
+        _projectStore = new IssueStore(Path.Combine(_dir, "proj.db"));
+        // The spec store is shared (primary-backed) in production —
+        // specs carry project_id, issues are per-project.
+        _specs = new SpecStore(_defaultStore);
+    }
+
+    public void Dispose()
+    {
+        try { _defaultStore.Dispose(); } catch { }
+        try { _projectStore.Dispose(); } catch { }
+        try { Directory.Delete(_dir, recursive: true); } catch { }
+    }
+
+    [Fact]
+    public async Task GroomAsync_SpecOwnedByOtherProject_StoriesLandInThatProjectsStore()
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "porthorizon", Title: "Hygiene",
+            Body: "## Acceptance criteria\n- [ ] cleanup\n"));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+
+        var fcs = new[]
+        {
+            new FunctionCallContent("c1", "create_story",
+                new Dictionary<string, object?> { ["title"] = "Story routed" }),
+            new FunctionCallContent("c2", "set_spec_status",
+                new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        };
+        var scripted = new MultiToolCallingChatClient(fcs, "Done.");
+        var chatFactory = new ScriptingChatClientFactory(scripted);
+        var config = new LlmConfig(new ProviderConfig("test", "", null, null, "test-model"));
+        var factory = new GroomerAgentFactory(
+            _defaultStore, _specs, new InMemoryDashboardEventBus(),
+            chatFactory, config, NullLoggerFactory.Instance,
+            issueStoreLookup: id => id == "porthorizon" ? _projectStore : null);
+
+        var agent = factory.Create(projectId: spec.ProjectId);
+        var result = await agent.GroomAsync(spec.Id, default);
+
+        Assert.NotNull(result);
+        Assert.Single(result!.StoryIds);
+
+        // The story exists ONLY in the porthorizon store.
+        var inProject = await _projectStore.ListAsync(new IssueFilter { Type = "story" }, default);
+        Assert.Single(inProject);
+        Assert.Equal(spec.Id, inProject[0].ParentIssueId);
+        var inDefault = await _defaultStore.ListAsync(new IssueFilter { Type = "story" }, default);
+        Assert.Empty(inDefault);
+    }
+
+    [Fact]
+    public async Task GroomAsync_UnknownProject_FallsBackToDefaultStore()
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "ghost", Title: "T", Body: "## Acceptance criteria\n- [ ] x\n"));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+
+        var fcs = new[]
+        {
+            new FunctionCallContent("c1", "create_story",
+                new Dictionary<string, object?> { ["title"] = "S" }),
+            new FunctionCallContent("c2", "set_spec_status",
+                new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        };
+        var scripted = new MultiToolCallingChatClient(fcs, "Done.");
+        var chatFactory = new ScriptingChatClientFactory(scripted);
+        var config = new LlmConfig(new ProviderConfig("test", "", null, null, "test-model"));
+        var factory = new GroomerAgentFactory(
+            _defaultStore, _specs, new InMemoryDashboardEventBus(),
+            chatFactory, config, NullLoggerFactory.Instance,
+            issueStoreLookup: _ => null);
+
+        var agent = factory.Create(projectId: spec.ProjectId);
+        var result = await agent.GroomAsync(spec.Id, default);
+
+        Assert.NotNull(result);
+        var inDefault = await _defaultStore.ListAsync(new IssueFilter { Type = "story" }, default);
+        Assert.Single(inDefault);
+    }
+}
+
+/// <summary>
+/// SprintAssembler.DropCrossProjectGroupsAsync: tasks chained to a
+/// spec owned by ANOTHER project must never assemble in this
+/// project's sprint lane.
+/// </summary>
+public class SprintAssemblerGuardTests : IDisposable
+{
+    private readonly string _dbPath;
+    private readonly IssueStore _issues;
+    private readonly SpecStore _specs;
+
+    public SprintAssemblerGuardTests()
+    {
+        _dbPath = TempRoot.Instance.NewDbPath("guard");
+        _issues = new IssueStore(_dbPath);
+        _specs = new SpecStore(_issues);
+    }
+
+    public void Dispose()
+    {
+        try { _issues.Dispose(); } catch { }
+        try { File.Delete(_dbPath); } catch { }
+    }
+
+    private static IssueRecord MakeTask(string id, string? parentId)
+        => new(id, id, "task", $"T-{id}", null, IssueStatus.Pending, 2, parentId,
+            DateTime.UtcNow, DateTime.UtcNow, null, "{}");
+
+    [Fact]
+    public async Task Guard_DropsGroupsOwnedByOtherProjects_KeepsOwnAndAdHoc()
+    {
+        var foreignSpec = await _specs.CreateAsync(new NewSpec(ProjectId: "porthorizon", Title: "F", Body: "b"));
+        var ownSpec = await _specs.CreateAsync(new NewSpec(ProjectId: "forge", Title: "O", Body: "b"));
+
+        var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal)
+        {
+            [foreignSpec.Id] = new() { MakeTask("task-f1", "story-f") },
+            [ownSpec.Id] = new() { MakeTask("task-o1", "story-o") },
+            [Forge.Orchestrator.Sprint.SprintAssembler.AdHocGroupName] = new() { MakeTask("task-a1", null) },
+        };
+        var order = groups.Keys.ToList();
+
+        var dropped = await Forge.Orchestrator.Sprint.SprintAssembler.DropCrossProjectGroupsAsync(
+            groups, order, projectId: "forge", _specs,
+            NullLogger<Forge.Orchestrator.Sprint.SprintAssembler>.Instance, default);
+
+        Assert.Equal(1, dropped);
+        Assert.DoesNotContain(foreignSpec.Id, order);
+        Assert.Contains(ownSpec.Id, order);
+        Assert.Contains(Forge.Orchestrator.Sprint.SprintAssembler.AdHocGroupName, order);
+    }
 }

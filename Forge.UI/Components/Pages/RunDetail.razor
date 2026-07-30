@@ -6,7 +6,12 @@
 
 <PageTitle>Run @RunId</PageTitle>
 <div class="page">
-    @if (_run is null)
+    <a href="/runs" class="meta-text">← All runs</a>
+    @if (_notFound)
+    {
+        <div class="banner banner--error">Run not found: @RunId</div>
+    }
+    else if (_run is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
@@ -17,6 +22,14 @@
             <h1>@v.Role <span style="font-weight:400;color:var(--on-surface-variant)">run</span></h1>
             <div class="page-header__meta">
                 <span class="pill @(v.Status == "succeeded" ? "pill--completed" : v.Status == "running" ? "pill--inprogress" : "pill--failed")">@v.Status</span>
+                @if (v.ResumedSession == true)
+                {
+                    <span class="pill pill--info">resumed session</span>
+                }
+                @if (!string.IsNullOrEmpty(v.Phase))
+                {
+                    <span class="pill pill--primary">@v.Phase</span>
+                }
                 @v.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
                 · @(v.DurationMs is null ? "…" : Fmt(v.DurationMs.Value))
                 · @v.MessageCount msgs · @v.ToolCallCount tool calls
@@ -39,7 +52,7 @@
         </div>
         @if (v.Error is not null)
         {
-            <div style="padding:10px 14px;border:1px solid var(--outline-variant);border-left:4px solid #c62828;border-radius:8px;margin-bottom:12px">
+            <div class="banner banner--error" style="margin-bottom:12px">
                 <strong>Error:</strong> @v.Error
             </div>
         }
@@ -60,53 +73,53 @@
                     @switch (msg.Kind)
                     {
                         case "user":
-                            <details style="border:1px solid var(--outline-variant);border-radius:8px">
-                                <summary style="cursor:pointer;padding:8px 12px">
-                                    <span class="pill" style="background:var(--surface-2,rgba(255,255,255,.08))">user</span>
-                                    <span style="color:var(--on-surface-variant);font-size:12px;margin-left:8px">task prompt (@msg.Text.Length chars — expand to read)</span>
+                            <details class="run-msg">
+                                <summary class="run-msg__summary">
+                                    <span class="pill">user</span>
+                                    <span class="meta-text" style="margin-left:8px">task prompt (@msg.Text.Length chars — expand to read)</span>
                                 </summary>
-                                <pre style="margin:0;padding:12px;white-space:pre-wrap;font-size:13px;border-top:1px solid var(--outline-variant)">@msg.Text</pre>
+                                <pre class="run-msg__pre">@msg.Text</pre>
                             </details>
                             break;
                         case "thinking":
-                            <details style="border:1px solid var(--outline-variant);border-left:3px solid var(--outline-variant);border-radius:8px">
-                                <summary style="cursor:pointer;padding:8px 12px;color:var(--on-surface-variant)">
+                            <details class="run-msg run-msg--thinking">
+                                <summary class="run-msg__summary--muted">
                                     <span class="pill" style="font-size:11px">thinking</span>
-                                    <span style="font-size:12px;margin-left:8px">model reasoning (@msg.Text.Length chars)</span>
+                                    <span class="meta-text" style="margin-left:8px">model reasoning (@msg.Text.Length chars)</span>
                                 </summary>
-                                <pre style="margin:0;padding:12px;white-space:pre-wrap;font-size:12px;color:var(--on-surface-variant);border-top:1px solid var(--outline-variant)">@msg.Text</pre>
+                                <pre class="run-msg__pre--muted">@msg.Text</pre>
                             </details>
                             break;
                         case "assistant":
-                            <div style="border:1px solid var(--outline-variant);border-left:3px solid var(--primary);border-radius:8px;padding:10px 14px">
+                            <div class="run-msg run-msg--assistant">
                                 <span class="pill pill--primary" style="font-size:11px">assistant</span>
                                 @foreach (var block in MarkdownBlocks(msg.Text))
                                 {
                                     if (block.IsCode)
                                     {
-                                        <pre style="background:rgba(255,255,255,.05);padding:10px;border-radius:6px;overflow-x:auto;font-size:12.5px">@block.Text</pre>
+                                        <pre class="run-msg__code">@block.Text</pre>
                                     }
                                     else
                                     {
-                                        <div style="white-space:pre-wrap;font-size:14px;margin-top:6px">@block.Text</div>
+                                        <div class="run-msg__text">@block.Text</div>
                                     }
                                 }
                             </div>
                             break;
                         case "tools":
-                            <details style="border:1px solid var(--outline-variant);border-radius:8px">
-                                <summary style="cursor:pointer;padding:8px 12px;color:var(--on-surface-variant)">
+                            <details class="run-msg">
+                                <summary class="run-msg__summary--muted">
                                     🔧 @msg.Calls.Count tool call@(msg.Calls.Count == 1 ? "" : "s"): @string.Join(", ", msg.Calls.Select(c => c.Name).Distinct())
                                 </summary>
-                                <div style="border-top:1px solid var(--outline-variant)">
+                                <div class="run-msg__tools">
                                     @foreach (var call in msg.Calls)
                                     {
-                                        <div style="padding:10px 12px;border-bottom:1px solid var(--outline-variant)">
-                                            <div class="mono" style="font-size:12px;color:var(--primary)">@call.Name</div>
-                                            <pre style="margin:6px 0 0;font-size:12px;white-space:pre-wrap;color:var(--on-surface-variant)">@call.Args</pre>
+                                        <div class="run-msg__tool">
+                                            <div class="mono run-msg__tool-name">@call.Name</div>
+                                            <pre class="run-msg__tool-args">@call.Args</pre>
                                             @if (call.Result is not null)
                                             {
-                                                <pre style="margin:6px 0 0;font-size:12px;white-space:pre-wrap;max-height:300px;overflow-y:auto;background:rgba(255,255,255,.04);padding:8px;border-radius:6px">@call.Result</pre>
+                                                <pre class="run-msg__tool-result">@call.Result</pre>
                                             }
                                         </div>
                                     }
@@ -114,7 +127,6 @@
                             </details>
                             break;
                     }
-                    idx.ToString();
                 }
             </div>
         }
@@ -148,11 +160,28 @@
     {
         try
         {
-            _run = await Http.GetFromJsonAsync<RunDto>($"/api/agent-runs/{RunId}");
+            var resp = await Http.GetAsync($"/api/agent-runs/{RunId}");
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _notFound = true;
+                _pollCts.Cancel();
+                await InvokeAsync(StateHasChanged);
+                return;
+            }
+            resp.EnsureSuccessStatusCode();
+            _run = await resp.Content.ReadFromJsonAsync<RunDto>();
+            // Terminal runs don't need the 3s poll loop anymore.
+            if (_run?.View.Status is "succeeded" or "failed")
+            {
+                _pollCts.Cancel();
+            }
             await InvokeAsync(StateHasChanged);
         }
-        catch { /* not found or transient */ }
+        catch (OperationCanceledException) { throw; }
+        catch { /* transient */ }
     }
+
+    private bool _notFound;
 
     public void Dispose()
     {
@@ -171,7 +200,8 @@
         string Id, string? TaskId, string Role, string? Model, string Status,
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
-        string? Error, bool HasTranscript, DateTime? LastActivityAt);
+        string? Error, bool HasTranscript, DateTime? LastActivityAt,
+        string? Phase, bool? ResumedSession);
 
     private sealed record ChatMsg(string Kind, string Text, List<ToolCall> Calls);
     private sealed record ToolCall(string Name, string Args, string? Result);

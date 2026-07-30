@@ -19,7 +19,7 @@ public class ActivityTrackingChatClientTests : IDisposable
 
     public ActivityTrackingChatClientTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-activity-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("activity");
         Directory.CreateDirectory(_workDir);
         _schema = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _runs = new AgentRunStore(Path.Combine(_workDir, "issues.db"));

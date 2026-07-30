@@ -33,7 +33,7 @@ var options = Options.Create(new MeshyOptions
             PollIntervalSeconds = 10,
             MaxWaitSeconds = 420,
         });
-        var tmpRoot = Path.Combine(Path.GetTempPath(), $"ph-meshy-live-{Guid.NewGuid():N}");
+        var tmpRoot = TempRoot.Instance.NewDirectory("meshy-live");
         var client = new MeshyClient(
             new HttpClientHandler(),
             options,

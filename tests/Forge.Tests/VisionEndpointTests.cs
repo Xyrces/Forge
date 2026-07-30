@@ -27,7 +27,7 @@ public class VisionEndpointTests : IDisposable
 
     public VisionEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-vision-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("vision");
         Directory.CreateDirectory(_workDir);
         var docsDir = Path.Combine(_workDir, "docs");
         Directory.CreateDirectory(docsDir);

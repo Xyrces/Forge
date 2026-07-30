@@ -25,6 +25,14 @@ NotifyAccess=main
 # executor handles the symlink swap.
 ExecStart=/usr/bin/dotnet /opt/forge/current/Forge.Core.dll --config /etc/forge/appsettings.json
 
+# When db.provider=sqlserver with Entra-only auth: keep the Azure SQL
+# firewall aligned with this host's egress IP and the az/Azure.Identity
+# token path warm. Uncomment (and install forge-sql-firewall.timer).
+# Note the timer keeps the rule fresh while running; this ExecStartPre
+# covers boot. In Azure (ACA/AKS) managed identity replaces this — no
+# firewall script needed (private endpoint or AllowAllWindowsAzureIps).
+# ExecStartPre=-/opt/forge/scripts/refresh-sql-firewall.sh
+
 # StateDirectory=auto creates /var/lib/forge owned by User=forge at
 # first start; StateDirectory=forge -> /var/lib/forge. The agent
 # processes' worktrees and the JSONL mirror live here. Override with

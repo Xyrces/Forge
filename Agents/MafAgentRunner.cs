@@ -30,6 +30,13 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly RoleAgentRegistry _roles;
     private readonly ILogger<MafAgentRunner> _logger;
     private readonly string _rolePromptsRoot;
+    private readonly Func<string, string?>? _projectRootLookup;
+    private readonly Func<string, IReadOnlyDictionary<string, Core.RoleTerritory>?>? _projectTerritoryLookup;
+    private readonly Func<string, IReadOnlyList<string>?>? _verifyCommandsLookup;
+
+    /// <summary>Seam for tests: replaces the real verification runner.</summary>
+    internal Func<string, IReadOnlyList<string>, ILogger, CancellationToken, Task<AgentTools.RunVerification.Result>>? VerifyRunner { get; set; }
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _promptRootsByProject = new(StringComparer.OrdinalIgnoreCase);
     private readonly ISkillSource? _skills;
     private readonly MemoryStore? _memory;
     private readonly ContextHandoffStore? _handoffs;
@@ -59,6 +66,22 @@ public sealed class MafAgentRunner : IAgentRunner
         ILogger<MafAgentRunner> logger,
         ISkillSource? skills = null,
         string rolePromptsRoot = "agents",
+        // Per-project role-prompt resolution (schema v24 era): maps a
+        // project id to its clone root so runs load <root>/agents when
+        // the project ships its own role prompts. Null/unknown project
+        // or no agents dir → the construction-time fallback root.
+        Func<string, string?>? projectRootLookup = null,
+        // Per-project plan-gate territory: maps a project id to its
+        // roles_json $territory overrides. Null / no entry for the role
+        // → the registry's built-in territory applies.
+        Func<string, IReadOnlyDictionary<string, Core.RoleTerritory>?>? projectTerritoryLookup = null,
+        // Per-project pre-push verification commands (roles_json
+        // $verify). When set, engineering runs verify their work
+        // IN-SESSION before completing — failures feed back to the
+        // agent like a plan-gate revision, not a dispatch-level
+        // requeue (user direction 2026-07-30: lenient on corrections,
+        // don't restart the session).
+        Func<string, IReadOnlyList<string>?>? verifyCommandsLookup = null,
         MemoryStore? memory = null,
         ContextHandoffStore? handoffs = null,
         // P5.1 stores — passed as factories so the runner can
@@ -80,6 +103,9 @@ public sealed class MafAgentRunner : IAgentRunner
         _logger = logger;
         _skills = skills;
         _rolePromptsRoot = rolePromptsRoot;
+        _projectRootLookup = projectRootLookup;
+        _projectTerritoryLookup = projectTerritoryLookup;
+        _verifyCommandsLookup = verifyCommandsLookup;
         _memory = memory;
         _handoffs = handoffs;
         _designArtifactsFactory = designArtifacts;
@@ -104,10 +130,12 @@ public async Task<AgentRunResult> RunAsync(
         CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
-        var roleInstructions = LoadRoleInstructions(roleDef.AgentName);
+        var projectId = ResolveContextString(context, "projectId");
+        if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
+        var roleInstructions = LoadRoleInstructions(roleDef.AgentName, projectId);
         var skillInstructions = _skills is null
             ? string.Empty
-            : await BuildSkillInstructionsAsync(role, ct);
+            : await BuildSkillInstructionsAsync(role, projectId, ct);
         var memoryInstructions = _memory is null
             ? string.Empty
             : await BuildMemoryInstructionsAsync(context, ct);
@@ -149,11 +177,16 @@ public async Task<AgentRunResult> RunAsync(
                 };
                 var gatePipeline = new Gates.RunGatePipeline(
                     _gateOptions, _memory, name => BuildRunGate(name), _logger);
+                var projectTerritories = projectId is not null && _projectTerritoryLookup is not null
+                    ? _projectTerritoryLookup(projectId)
+                    : null;
+                var (territoryPrefixes, territoryRootFiles) =
+                    RoleAgentRegistry.ResolveTerritory(roleDef, projectTerritories);
                 var gateContext = new Gates.RunGateContext(
                     TaskId: ResolveContextString(context, "issueId") ?? "unknown",
                     RoleName: roleDef.AgentName,
-                    TerritoryPrefixes: roleDef.TerritoryPrefixes ?? Array.Empty<string>(),
-                    TerritoryAllowsRootFiles: roleDef.TerritoryAllowsRootFiles,
+                    TerritoryPrefixes: territoryPrefixes,
+                    TerritoryAllowsRootFiles: territoryRootFiles,
                     WorktreePath: bashWorkingDir,
                     TaskText: prompt.Length > 4000 ? prompt[..4000] : prompt,
                     Plan: "",
@@ -209,6 +242,24 @@ public async Task<AgentRunResult> RunAsync(
         var runTaskId = ResolveContextString(context, "issueId");
         var startedAt = DateTime.UtcNow;
 
+        // Pause/resume phase tracking: the activity tracker reads
+        // this closure per model round-trip so the dashboard shows
+        // what the run is doing right now (a 3-minute verify round
+        // no longer reads as stalled). verifyRound is bumped by the
+        // in-session verification loop below.
+        var verifyRound = 0;
+        string? ComputePhase()
+        {
+            if (role == AgentType.Reviewer) return "reviewing";
+            if (gateState is not null)
+            {
+                if (!gateState.PlanApproved) return "plan gate";
+                if (verifyRound > 0) return $"verifying {verifyRound}/3";
+                return "implementing";
+            }
+            return null;
+        }
+
         var chatClient = _chatClientFactory.Create(_config, role);
         // Per-round-trip activity heartbeat. Wraps the RAW provider
         // client so MAF's internal model→tool→model loop (inside one
@@ -216,7 +267,7 @@ public async Task<AgentRunResult> RunAsync(
         // outer client would only fire once per RunAsync call.
         var trackedClient = _runs is null
             ? chatClient
-            : new ActivityTrackingChatClient(chatClient, runId, _runs);
+            : new ActivityTrackingChatClient(chatClient, runId, _runs, ComputePhase);
         // Wrap with function invocation so MAF actually executes the
         // tools the model calls (instead of just leaving them in the
         // response). Cap raised from the 40 default: complex tasks
@@ -238,7 +289,23 @@ public async Task<AgentRunResult> RunAsync(
             tools: tools);
 
         var message = new ChatMessage(ChatRole.User, fullPrompt);
+        // Pause/resume: an explicit sessionId wins; otherwise the
+        // runner resumes the persisted session for this
+        // (project, task, role) when one exists — rework rounds AND
+        // plain retries come back warm instead of cold. Junk in the
+        // store degrades to a fresh session (logged).
+        var sessionKey = SessionKey(projectId, runTaskId, role);
+        var resumedSession = false;
         var session = await DeserializeSessionAsync(agent, sessionId, ct);
+        if (session is null && sessionId is null && sessionKey is not null)
+        {
+            var storedJson = await RecallSessionAsync(sessionKey, ct);
+            if (storedJson is not null)
+            {
+                session = await DeserializeSessionAsync(agent, storedJson, ct);
+                resumedSession = session is not null;
+            }
+        }
         // Always run with a session so leaked-markup continuations below
         // keep the full conversation history.
         session ??= await agent.CreateSessionAsync(ct);
@@ -254,7 +321,8 @@ public async Task<AgentRunResult> RunAsync(
             try
             {
                 var (_, runModel, _) = _config.ResolveEffective(role, _modelOverrides);
-                await _runs.StartAsync(runId, runTaskId, role.ToString(), runModel, ct);
+                await _runs.StartAsync(runId, runTaskId, role.ToString(), runModel, ct,
+                    resumedSession: resumedSession);
             }
             catch (Exception ex)
             {
@@ -269,6 +337,11 @@ public async Task<AgentRunResult> RunAsync(
         // transcript — an agent that dies on turn 8 of 10 leaves 8
         // turns of auditable work, not nothing.
         var transcriptMessages = new List<ChatMessage> { message };
+        // Set when the session is persisted on the success path; the
+        // finally below persists the PARTIAL session on failure too —
+        // a run that dies on turn 8 of 10 still leaves a resumable
+        // conversation for the retry.
+        var sessionPersisted = false;
 
         try
         {
@@ -317,10 +390,61 @@ public async Task<AgentRunResult> RunAsync(
             }
             await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
 
+            // In-session pre-push verification: engineering runs verify
+            // their work BEFORE completing — failures feed back to the
+            // agent like a plan-gate revision (same session, lenient
+            // budget), not a dispatch-level requeue with a fresh
+            // worktree sync + plan gate. The CommitPushPr gate remains
+            // as the backstop for whatever survives.
+            var worktreePath = ResolveWorktreePath(context);
+            var verifyCommands = ResolveVerifyCommands(projectId, worktreePath);
+            if (gateState?.PlanApproved == true
+                && worktreePath is not null
+                && verifyCommands is { Count: > 0 })
+            {
+                const int maxVerifyRounds = 3;
+                for (var round = 1; round <= maxVerifyRounds; round++)
+                {
+                    verifyRound = round;
+                    var verify = VerifyRunner is not null
+                        ? await VerifyRunner(worktreePath, verifyCommands, _logger, ct)
+                        : await AgentTools.RunVerification.RunAsync(worktreePath, verifyCommands, _logger, ct);
+                    if (verify.Ok)
+                    {
+                        _logger.LogInformation("Role {Role}: in-session verification passed (round {Round})", role, round);
+                        break;
+                    }
+                    if (round == maxVerifyRounds)
+                    {
+                        // Out of rounds: return normally — the
+                        // CommitPushPr gate re-verifies and bounces the
+                        // task with the output (strike-counted).
+                        _logger.LogWarning("Role {Role}: in-session verification still failing after {Rounds} rounds — the executor gate will handle it", role, maxVerifyRounds);
+                        break;
+                    }
+                    _logger.LogInformation("Role {Role}: verification failed; feeding output back into the session (round {Round}/{Max})",
+                        role, round, maxVerifyRounds);
+                    var feedback = new ChatMessage(ChatRole.User,
+                        "Pre-push verification failed (round " + round + "/" + maxVerifyRounds + "). " +
+                        "Fix the failures below and iterate — verification runs again when you finish. " +
+                        "Do not weaken tests to make them pass; fix the cause.\n\n" +
+                        string.Join("\n\n", verify.Failures));
+                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
+                    transcriptMessages.Add(feedback);
+                    transcriptMessages.AddRange(response.Messages);
+                    await HeartbeatAsync(runId, transcriptMessages);
+                }
+            }
+
             var text = string.Concat(response.Messages
                 .Where(m => m.Role == ChatRole.Assistant)
                 .Select(m => m.Text));
-            var newSessionId = await SerializeSessionAsync(response, agent, session, ct);
+            // Pause/resume: persist the session so the next run of
+            // this (project, task, role) resumes warm. The returned
+            // reference is the storage KEY, not the blob — issue
+            // metadata and logs must not carry the full transcript.
+            var newSessionId = await SerializeAndPersistSessionAsync(agent, session, sessionKey, ct);
+            sessionPersisted = newSessionId is not null;
 
             // DIAGNOSTIC: append to a side-channel log so we can
             // diagnose the silent-agent bug even when the host swallows
@@ -402,6 +526,21 @@ public async Task<AgentRunResult> RunAsync(
         }
         finally
         {
+            // Pause/resume: persist the session on failure too
+            // (partial sessions resume fine — the retry continues
+            // where this run died instead of re-exploring from
+            // scratch). Best-effort; never masks the real exception.
+            if (!sessionPersisted)
+            {
+                try
+                {
+                    await SerializeAndPersistSessionAsync(agent, session, sessionKey, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "session persist on failure path failed; continuing");
+                }
+            }
             // MAF ChatClientAgent does not implement IDisposable; chatClient is the
             // resource, and our stubbed IChatClient (Microsoft.Extensions.AI) is
             // IDisposable. Best-effort dispose; real providers handle their own
@@ -417,6 +556,20 @@ public async Task<AgentRunResult> RunAsync(
         if (context is null) return null;
         if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
         return raw.ToString();
+    }
+
+    /// <summary>Verify commands for a run: the project's $verify
+    /// override; null means auto-detect against the worktree (dotnet
+    /// build+test for dotnet repos); empty means disabled.</summary>
+    private IReadOnlyList<string>? ResolveVerifyCommands(string? projectId, string? worktreePath)
+    {
+        var configured = projectId is not null && _verifyCommandsLookup is not null
+            ? _verifyCommandsLookup(projectId)
+            : null;
+        if (configured is not null) return configured;
+        return worktreePath is not null
+            ? AgentTools.RunVerification.DefaultCommands(worktreePath)
+            : null;
     }
 
     /// <summary>Gate factory for the run-gate pipeline. Unknown names
@@ -615,19 +768,19 @@ public async Task<AgentRunResult> RunAsync(
         return env.Count == 0 ? null : env;
     }
 
-    private async Task<string> BuildSkillInstructionsAsync(AgentType role, CancellationToken ct)
+    private async Task<string> BuildSkillInstructionsAsync(AgentType role, string? projectId, CancellationToken ct)
     {
         IReadOnlyList<SkillContent> skills;
         try
         {
-            skills = await _skills!.LoadForRoleAsync(role, ct);
+            skills = await _skills!.LoadForRoleAsync(role, projectId, ct);
         }
         catch (Exception ex)
         {
             // Skill loading must never break a dispatch. The role prompt
             // (without skills) still reaches the agent, and the error is
             // surfaced via the dashboard event log.
-            _logger.LogWarning(ex, "Failed to load skills for role {Role}; continuing without skills", role);
+            _logger.LogWarning(ex, "Failed to load skills for role {Role} project {ProjectId}; continuing without skills", role, projectId ?? "<none>");
             return string.Empty;
         }
         if (skills.Count == 0) return string.Empty;
@@ -729,19 +882,44 @@ public async Task<AgentRunResult> RunAsync(
             _logger.LogWarning(ex, "Failed to recall project memory; continuing without it");
             return string.Join("\n\n", sections);
         }
-        // Sprint keys already have their own section above; keep the
-        // global block free of duplicates.
+        // Sprint keys already have their own section above; session
+        // keys are machine state (persisted MAF sessions for
+        // pause/resume), not prompt material. Keep the global block
+        // free of both.
         var globalOnly = memories
-            .Where(m => !m.Key.StartsWith("sprint/", StringComparison.Ordinal))
+            .Where(m => !m.Key.StartsWith("sprint/", StringComparison.Ordinal)
+                && !m.Key.StartsWith("session/", StringComparison.Ordinal))
             .ToList();
         var globalRendered = MemoryStore.RenderForPrompt(globalOnly);
         if (!string.IsNullOrEmpty(globalRendered)) sections.Add(globalRendered);
         return string.Join("\n\n", sections);
     }
 
-    private string LoadRoleInstructions(string agentName)
+    /// <summary>Per-project role-prompt root: the project's own
+    /// <c>&lt;root&gt;/agents</c> dir when it ships one, else the
+    /// construction-time fallback (built-in defaults). Resolved once
+    /// per project and cached; a project that gains an agents/ dir
+    /// picks it up on restart.</summary>
+    private string ResolvePromptRoot(string? projectId)
     {
-        var path = Path.Combine(_rolePromptsRoot, agentName + ".md");
+        if (projectId is null || _projectRootLookup is null) return _rolePromptsRoot;
+        return _promptRootsByProject.GetOrAdd(projectId, ResolvePromptRootUncached);
+    }
+
+    // Internal for tests: the per-project resolution without the cache.
+    internal string ResolvePromptRootUncached(string projectId)
+    {
+        string? root = null;
+        try { root = _projectRootLookup!(projectId); }
+        catch (Exception ex) { _logger.LogWarning(ex, "project root lookup failed for {ProjectId}; using fallback prompt root", projectId); }
+        if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(Path.Combine(root, "agents")))
+            return Path.Combine(root, "agents");
+        return _rolePromptsRoot;
+    }
+
+    private string LoadRoleInstructions(string agentName, string? projectId = null)
+    {
+        var path = Path.Combine(ResolvePromptRoot(projectId), agentName + ".md");
         if (!File.Exists(path))
         {
             _logger.LogWarning("role prompt file not found at {Path}; using fallback instructions", path);
@@ -810,18 +988,60 @@ public async Task<AgentRunResult> RunAsync(
         text.Contains("<tool_call>", StringComparison.Ordinal) ||
         text.Contains("<invoke name=", StringComparison.Ordinal);
 
-    private async Task<string?> SerializeSessionAsync(
-        AgentResponse response, ChatClientAgent agent, AgentSession? session, CancellationToken ct)
+    /// <summary>
+    /// The memory-store key a run's persisted MAF session lives under:
+    /// <c>session/&lt;projectId|_&gt;/&lt;taskId&gt;/&lt;role&gt;</c>.
+    /// Null when there's no task id — untasked runs (groomer,
+    /// designer, intake) don't persist sessions.
+    /// </summary>
+    internal static string? SessionKey(string? projectId, string? taskId, AgentType role)
+        => string.IsNullOrWhiteSpace(taskId)
+            ? null
+            : $"session/{(string.IsNullOrWhiteSpace(projectId) ? "_" : projectId)}/{taskId}/{role}";
+
+    /// <summary>
+    /// Serialize the run's MAF session and persist it under the
+    /// (project, task, role) session key so the NEXT run of the same
+    /// task+role resumes warm (the pause/resume rework loop). Returns
+    /// the storage key as the run's session reference — never the
+    /// blob: issue metadata and logs must not carry 100KB of
+    /// transcript. Best-effort: failures degrade to a null
+    /// reference, never throw.
+    /// </summary>
+    private async Task<string?> SerializeAndPersistSessionAsync(
+        ChatClientAgent agent, AgentSession session, string? sessionKey, CancellationToken ct)
     {
-        // SerializeSessionAsync is on the protected base; the public API is
-        // SerializeSessionAsync(AgentSession, ...). We can't call the protected
-        // override directly, so we use the agent's own public surface if
-        // exposed. Phase 0 doesn't yet need round-tripping; return null and let
-        // the dashboard show "(no session)".
-        // TODO P1: expose this via a derived ChatClientAgent subclass or via
-        // AgentSession.Serialize/Deserialize directly.
-        await Task.CompletedTask;
-        return null;
+        try
+        {
+            if (sessionKey is null || _memory is null) return null;
+            var json = await agent.SerializeSessionAsync(session, cancellationToken: ct);
+            await _memory.RememberAsync(sessionKey, json.GetRawText(), ttlDays: null, CancellationToken.None);
+            return sessionKey;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "session persist failed for {Key}; continuing", sessionKey ?? "<none>");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Recall the persisted session JSON for a session key. Missing
+    /// key / store failure → null (the caller starts fresh).
+    /// </summary>
+    private async Task<string?> RecallSessionAsync(string key, CancellationToken ct)
+    {
+        if (_memory is null) return null;
+        try
+        {
+            var hits = await _memory.RecallAsync(key, ct);
+            return hits.LastOrDefault()?.Body;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "session recall failed for {Key}; starting fresh", key);
+            return null;
+        }
     }
 }
 

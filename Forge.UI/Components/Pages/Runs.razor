@@ -14,7 +14,11 @@
         </div>
     </div>
 
-    @if (_data is null)
+    @if (_data is null && _loadError is not null)
+    {
+        <div class="banner banner--error">Failed to load agent runs: @_loadError <button class="btn btn--small" @onclick="LoadAsync">Retry</button></div>
+    }
+    else if (_data is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
@@ -22,18 +26,18 @@
     {
         @if (_data.Active.Count > 0)
         {
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px;margin-bottom:18px">
+            <div class="run-active-grid">
                 @foreach (var r in _data.Active)
                 {
-                    <div style="border:1px solid var(--primary);border-radius:10px;padding:12px 14px">
-                        <div style="display:flex;justify-content:space-between;align-items:center">
-                            <span style="display:flex;gap:8px;align-items:center">
-                                <span style="width:8px;height:8px;border-radius:50%;background:var(--primary)"></span>
+                    <div class="run-active-card">
+                        <div class="run-active-card__top">
+                            <span class="run-active-card__role">
+                                <span class="agent-row__dot"></span>
                                 <strong>@r.Role</strong>
                             </span>
-                            <span class="mono" style="font-size:12px;color:var(--on-surface-variant)">@Elapsed(r)</span>
+                            <span class="mono run-active-card__elapsed">@Elapsed(r)</span>
                         </div>
-                        <div style="margin-top:6px;font-size:13px">
+                        <div class="run-active-card__body">
                             @if (r.TaskId is not null)
                             {
                                 <a href="/tasks/@r.TaskId" class="mono">@r.TaskId</a>
@@ -42,9 +46,17 @@
                             {
                                 <span class="mono">(no task)</span>
                             }
-                            <span style="color:var(--on-surface-variant)"> · @r.Model</span>
+                            <span class="meta-text"> · @r.Model</span>
+                            @if (r.ResumedSession == true)
+                            {
+                                <span class="pill pill--info">resumed</span>
+                            }
                         </div>
-                        <div class="mono" style="font-size:11px;color:var(--on-surface-variant);margin-top:4px">run @r.Id · started @r.StartedAt.ToLocalTime().ToString("HH:mm:ss")</div>
+                        @if (!string.IsNullOrEmpty(r.Phase))
+                        {
+                            <div class="meta-text">@r.Phase</div>
+                        }
+                        <div class="mono run-active-card__meta">run @r.Id · started @r.StartedAt.ToLocalTime().ToString("HH:mm:ss")</div>
                     </div>
                 }
             </div>
@@ -54,30 +66,41 @@
             <div class="page-subtitle" style="margin-bottom:14px">No agent runs in flight.</div>
         }
 
-        <table class="data-table" style="width:100%">
+        <table class="data-grid">
             <thead>
                 <tr>
                     <th>When</th><th>Role</th><th>Task</th><th>Duration</th>
-                    <th>Msgs</th><th>Tools</th><th>Status</th><th></th>
+                    <th>Msgs</th><th>Tools</th><th>Status</th><th>Phase</th><th></th>
                 </tr>
             </thead>
             <tbody>
+                @if (_data.Recent.Count == 0)
+                {
+                    <tr><td colspan="9" class="meta-text">No finished runs yet.</td></tr>
+                }
                 @foreach (var r in _data.Recent)
                 {
                     <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/runs/{r.Id}"))">
                         <td class="mono">@r.StartedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
-                        <td>@r.Role</td>
+                        <td>
+                            @r.Role
+                            @if (r.ResumedSession == true)
+                            {
+                                <span class="pill pill--info">resumed</span>
+                            }
+                        </td>
                         <td class="mono">@(r.TaskId ?? "—")</td>
                         <td class="mono">@(r.DurationMs is null ? "—" : Fmt(r.DurationMs.Value))</td>
                         <td class="mono">@(r.MessageCount?.ToString() ?? "—")</td>
                         <td class="mono">@(r.ToolCallCount?.ToString() ?? "—")</td>
                         <td>
-                            <span class="pill @(r.Status == "succeeded" ? "pill--completed" : "pill--failed")">@r.Status</span>
+                            <span class="pill @(r.Status == "succeeded" ? "pill--completed" : r.Status == "failed" ? "pill--failed" : "pill--pending")">@r.Status</span>
                             @if (r.Error is not null)
                             {
                                 <span style="font-size:11px;color:var(--on-surface-variant)" title="@r.Error"> ⚠</span>
                             }
                         </td>
+                        <td class="meta-text">@(r.Phase ?? "—")</td>
                         <td>@(r.HasTranscript ? "transcript →" : "")</td>
                     </tr>
                 }
@@ -88,6 +111,7 @@
 
 @code {
     private RunsDto? _data;
+    private string? _loadError;
     private System.Threading.Timer? _timer;
 
     protected override void OnInitialized()
@@ -101,9 +125,10 @@
         try
         {
             _data = await Http.GetFromJsonAsync<RunsDto>("/api/agent-runs");
+            _loadError = null;
             StateHasChanged();
         }
-        catch { /* keep last good */ }
+        catch (Exception ex) { _loadError = ex.Message; /* keep last good */ }
     }
 
     private static string Elapsed(RunViewDto r)
@@ -124,5 +149,5 @@
         string Id, string? TaskId, string Role, string? Model, string Status,
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
-        string? Error, bool HasTranscript);
+        string? Error, bool HasTranscript, string? Phase, bool? ResumedSession);
 }

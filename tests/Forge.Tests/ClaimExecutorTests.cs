@@ -17,7 +17,7 @@ public class ClaimExecutorTests : IDisposable
 
     public ClaimExecutorTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-claim-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("claim");
         _issues = new IssueStore(_dbPath);
     }
 

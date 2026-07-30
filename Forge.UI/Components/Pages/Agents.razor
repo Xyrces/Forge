@@ -1,5 +1,6 @@
 @page "/agents"
 @inject HttpClient Http
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @implements IDisposable
 @using System.Net.Http.Json
 
@@ -33,7 +34,7 @@
                                   Kind="@role.AgentType"
                                   Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
                                   Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
-                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount))"
+                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount, role.CurrentRun.Phase, role.CurrentRun.ResumedSession))"
                                   LastRun="@(role.LastRun is null ? null : new AgentRoleRow.LastRunInfo(role.LastRun.Id, role.LastRun.TaskId, role.LastRun.Status, role.LastRun.FinishedAt, role.LastRun.DurationMs, role.LastRun.Error))"
                                   Territory="@role.Territory"
                                   Tools="@role.Tools"
@@ -86,8 +87,17 @@
 
     protected override async Task OnInitializedAsync()
     {
+        ShellStore.StateChanged += OnShellChanged;
         await LoadAsync();
         _ = PollLoopAsync();
+    }
+
+    private string? _loadedProject;
+
+    private void OnShellChanged(object? sender, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+            _ = InvokeAsync(LoadAsync);
     }
 
     private async Task PollLoopAsync()
@@ -105,7 +115,9 @@
     {
         try
         {
-            _data = await Http.GetFromJsonAsync<RolesResponse>("/api/agents/roles?projectId=forge");
+            var projectId = ShellStore.Value.CurrentProjectId ?? "forge";
+            _loadedProject = projectId;
+            _data = await Http.GetFromJsonAsync<RolesResponse>($"/api/agents/roles?projectId={Uri.EscapeDataString(projectId)}");
             _error = null;
             await InvokeAsync(StateHasChanged);
         }
@@ -137,6 +149,7 @@
 
     public void Dispose()
     {
+        ShellStore.StateChanged -= OnShellChanged;
         _pollCts.Cancel();
         _pollCts.Dispose();
     }
@@ -153,7 +166,8 @@
     private sealed record SlotDto(int InFlight, int Max);
     private sealed record PromptDto(string Source, string? Path, string? Content);
     private sealed record CurrentRunDto(string Id, string? TaskId, DateTime StartedAt,
-        DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount);
+        DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount,
+        string? Phase, bool? ResumedSession);
     private sealed record LastRunDto(string Id, string? TaskId, string Status,
         DateTime? FinishedAt, long? DurationMs, string? Error);
 }

@@ -6,3 +6,12 @@ obj/
 *.suo
 .DS_Store
 appsettings.json
+
+# Agent workflow artifacts — NEVER commit these
+comment.json
+status.json
+pr_body.md
+review_comment.md
+spec_payload.json
+spec_por1115.json
+verify.txt

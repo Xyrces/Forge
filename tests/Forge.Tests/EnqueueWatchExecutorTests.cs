@@ -16,7 +16,7 @@ public class EnqueueWatchExecutorTests : IDisposable
 
     public EnqueueWatchExecutorTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-watch-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("watch");
         _issues = new IssueStore(_dbPath);
     }
 
@@ -29,23 +29,23 @@ public class EnqueueWatchExecutorTests : IDisposable
     }
 
     [Fact]
-    public async Task PrResult_Ok_EnqueuesWatchIssueWithPrMetadata()
+    public async Task PrResult_Ok_CreatesNoWatchRow_StateDrivenWatching()
     {
+        // State-driven watching (2026-07-29): the stage is a graph
+        // placeholder — the task carries prNumber and the sweep
+        // discovers it directly. No pr-watch row is ever created.
         var devIssue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "dev"));
         var claimed = new ClaimedIssue(devIssue, ClaimResult.Ok, "/tmp/wt", "agent/dev-task");
         var worktree = new WorktreeReady(claimed, WorktreeResult.Ok, "/tmp/wt", "main");
         var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the thing", null);
         var pr = new PrOpened(agent, PrResult.Ok, 4242, "abc1234");
 
-        var watch = await EnqueueWatchExecutor.HandleAsync(
+        var result = await EnqueueWatchExecutor.HandleAsync(
             pr, _issues, NullLogger<EnqueueWatchExecutor>.Instance, default);
 
-        Assert.NotNull(watch.WatchIssueId);
-        var watchIssue = await _issues.GetAsync(watch.WatchIssueId!);
-        Assert.NotNull(watchIssue);
-        Assert.Equal(AgentTaskTypes.PrWatch, watchIssue!.Type);
-        Assert.Equal("4242", watchIssue.GetMetadata("prNumber"));
-        Assert.Equal("agent/dev-task", watchIssue.GetMetadata("branch"));
+        Assert.Null(result.WatchIssueId);
+        var watches = await _issues.ListAsync(new IssueFilter { Type = AgentTaskTypes.PrWatch });
+        Assert.Empty(watches);
     }
 
     [Fact]

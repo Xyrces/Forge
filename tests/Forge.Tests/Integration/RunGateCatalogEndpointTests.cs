@@ -28,7 +28,7 @@ public class RunGateCatalogEndpointTests : IDisposable
 
     public RunGateCatalogEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-gate-cat-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("gate-cat");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         // Bootstrap the schema so memory table exists
@@ -94,6 +94,7 @@ public class RunGateCatalogEndpointTests : IDisposable
 
         Assert.Equal("plan-llm-review", body.Gates[2].Name);
         Assert.Equal("Llm", body.Gates[2].Kind);
+        Assert.Empty(body.UnknownNames);
     }
 
     [Fact]
@@ -161,6 +162,36 @@ public class RunGateCatalogEndpointTests : IDisposable
         var resp = await _client.PostAsync("/api/gates/preImplementation", null);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
     }
+    [Fact]
+    public async Task Get_ReturnsUnknownNames_ForUnrecognizedGate()
+    {
+        var port = GetEphemeralPort();
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            ContentRootPath = Path.GetTempPath(),
+            ApplicationName = "Forge.Tests",
+        });
+        builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(NullLoggerProvider.Instance);
+        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+
+        var configOptions = new GateOptions();
+        configOptions.Run["preImplementation"] = new[] { "plan-schema", "bogus-gate" };
+        var app = builder.Build();
+        RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(app, configOptions, null!, NullLogger<RunGatePipeline>.Instance);
+        app.Start();
+
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+        var resp = await client.GetAsync("/api/gates/preImplementation");
+        var body = await resp.Content.ReadFromJsonAsync<CatalogResponse>();
+        Assert.Contains("bogus-gate", body!.UnknownNames);
+        Assert.DoesNotContain("plan-schema", body.UnknownNames);
+
+        await app.StopAsync();
+        await app.DisposeAsync();
+    }
+
+
 
     [Fact]
     public async Task Put_OverrideWritesAndGetReturnsDbOverride()
@@ -318,7 +349,8 @@ public class RunGateCatalogEndpointTests : IDisposable
     private sealed record CatalogResponse(
         string Checkpoint,
         string Source,
-        List<GateInfo> Gates);
+        List<GateInfo> Gates,
+        IReadOnlyList<string> UnknownNames);
 
     private sealed record GateInfo(
         string Name,

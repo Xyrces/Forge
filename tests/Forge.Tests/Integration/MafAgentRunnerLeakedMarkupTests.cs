@@ -67,7 +67,7 @@ public class MafAgentRunnerLeakedMarkupTests
         roles: new RoleAgentRegistry(),
         logger: NullLogger<MafAgentRunner>.Instance,
         skills: null,
-        rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-leak-md-{Guid.NewGuid():N}"));
+        rolePromptsRoot: TempRoot.Instance.NewDirectory("leak-md"));
 
     [Fact]
     public async Task RunAsync_LeakedMarkup_NudgesModelAndReturnsCleanResponse()

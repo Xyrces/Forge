@@ -43,6 +43,20 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     public string? HeadroomProxyBaseUrl { get; set; }
 
     /// <summary>
+    /// The provider the Headroom proxy fronts. The rewrite in
+    /// <see cref="Create"/> applies ONLY to this provider — the
+    /// proxy speaks OpenAI chat-completions to one upstream, so
+    /// rewriting any other provider misroutes it (kimi's requests
+    /// 401/404'd through the kilo-gateway proxy live).
+    /// </summary>
+    public string HeadroomProviderName { get; set; } = "kilo-gateway";
+
+    /// <summary>True when the Headroom baseUrl rewrite applies to this
+    /// provider: only the provider the proxy actually fronts.</summary>
+    internal static bool ShouldRewriteForHeadroom(string providerName, string headroomProviderName) =>
+        string.Equals(providerName, headroomProviderName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Optional <see cref="CostTracker"/> singleton. When set,
     /// the factory wraps every <see cref="IChatClient"/> it
     /// returns in a per-session <see cref="DelegatingChatClient"/>
@@ -69,6 +83,15 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// </summary>
     public Core.ModelRateLimitTracker? RateLimits { get; set; }
 
+    /// <summary>
+    /// Live provider-key snapshot (refreshed on a loop by Program.cs).
+    /// When set, Create swaps in the freshest key for the resolved
+    /// provider — a Secrets-page rotation takes effect on the next run
+    /// without a restart. The client cache's key-hash then builds a
+    /// fresh client; the stale one is never used again.
+    /// </summary>
+    public ProviderApiKeyResolver? KeyResolver { get; set; }
+
     /// <summary>Max simultaneous round-trips per provider (the
     /// "several concurrent agents" cap). Default 2; 0 disables the
     /// permit (cooldown tracking still applies).</summary>
@@ -79,6 +102,10 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     public IChatClient Create(LlmConfig config, AgentType role)
     {
         var (provider, model, _) = config.ResolveEffective(role, Overrides);
+        // Live key first: a rotated secret must also rescue a config
+        // whose placeholder was never boot-resolved.
+        if (KeyResolver?.Get(provider.Name) is { Length: > 0 } freshKey)
+            provider = provider with { ApiKey = freshKey };
         if (string.IsNullOrEmpty(provider.ApiKey))
         {
             throw new InvalidOperationException(
@@ -86,7 +113,8 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
                 "Set the apiKey field in appsettings.json (providers[].apiKey). " +
                 "For tests, the LLM_API_KEY env var override is read by OpenAICompatibleChatClientFactory.TryFromEnv.");
         }
-        if (!string.IsNullOrEmpty(HeadroomProxyBaseUrl))
+        if (!string.IsNullOrEmpty(HeadroomProxyBaseUrl)
+            && ShouldRewriteForHeadroom(provider.Name, HeadroomProviderName))
         {
             // Rewrite the baseUrl so the OpenAI client talks to
             // Headroom. The Headroom proxy is started with the
@@ -174,6 +202,13 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
 
     private static IChatClient Build(ProviderConfig provider, string model)
     {
+        if (string.Equals(provider.Api, "anthropic", StringComparison.OrdinalIgnoreCase))
+        {
+            // Anthropic Messages protocol (Kimi-for-Coding): chat at
+            // {base}/messages, x-api-key auth.
+            return new AnthropicMessagesChatClient(provider.BaseUrl, provider.ApiKey ?? string.Empty, model);
+        }
+
         var options = new OpenAIClientOptions
         {
             Endpoint = new Uri(provider.BaseUrl),
