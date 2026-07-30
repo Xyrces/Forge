@@ -11,16 +11,6 @@
     <RootNamespace>Forge</RootNamespace>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Compile Remove="tests/**/*.cs" />
-    <Compile Remove="tools/**/*.cs" />
-    <Compile Remove="Forge.UI\**\*.cs" />
-    <None Remove="tests/**" />
-    <None Remove="tools/**" />
-    <None Remove="Forge.UI\**" />
-    <EmbeddedResource Remove="tests/**" />
-  </ItemGroup>
-
   <!--
     The Blazor WASM UI (Forge.UI) lives in a sibling project with
     StaticWebAssetsEnabled=true. The static web assets (app.css,
@@ -41,7 +31,7 @@
     next to Forge.Core.dll.
   -->
   <ItemGroup>
-    <Content Include="Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Content Include="..\Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
     <!-- Built-in MAF role prompts: copied next to the app so any
          project without its own agents/ dir still gets real role
          instructions (see Agents/RolePromptRoot.cs). -->
@@ -62,7 +52,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="Forge.UI\Forge.UI.csproj" />
+    <ProjectReference Include="..\Forge.UI\Forge.UI.csproj" />
   </ItemGroup>
 
   <ItemGroup>
