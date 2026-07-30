@@ -119,12 +119,15 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
     public async Task<SprintRecord> UpdateAsync(string id, IReadOnlyDictionary<string, object?> fields, CancellationToken ct = default)
     {
         var existing = await GetAsync(id, ct) ?? throw new InvalidOperationException($"Sprint {id} not found");
+        // Field values arrive as JsonElement from the dashboard's
+        // Dictionary<string,object?> deserialize — unwrap via ToString.
+        static string? Str(object? v) => v is string s ? s : v?.ToString();
         var merged = existing with
         {
-            Name = fields.TryGetValue("name", out var nm) && nm is string s1 ? s1 : existing.Name,
-            Goal = fields.TryGetValue("goal", out var gl) && gl is string s2 ? s2 : existing.Goal,
-            StartDate = fields.TryGetValue("startDate", out var sd) ? Convert.ToDateTime(sd) : existing.StartDate,
-            EndDate = fields.TryGetValue("endDate", out var ed) ? Convert.ToDateTime(ed) : existing.EndDate,
+            Name = fields.TryGetValue("name", out var nm) && Str(nm) is { Length: > 0 } s1 ? s1 : existing.Name,
+            Goal = fields.TryGetValue("goal", out var gl) && Str(gl) is { Length: > 0 } s2 ? s2 : existing.Goal,
+            StartDate = fields.TryGetValue("startDate", out var sd) ? Convert.ToDateTime(Str(sd)) : existing.StartDate,
+            EndDate = fields.TryGetValue("endDate", out var ed) ? Convert.ToDateTime(Str(ed)) : existing.EndDate,
             Status = fields.TryGetValue("status", out var st) ? Enum.Parse<SprintStatus>(st?.ToString() ?? "Active") : existing.Status,
         };
         var now = DateTime.UtcNow;

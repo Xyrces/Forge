@@ -75,4 +75,47 @@ public class SprintStoreTests : IDisposable
         var allReady = await _issues.ReadyAsync(10, sprintId: null);
         Assert.Equal(2, allReady.Count);
     }
+
+    [Fact]
+    public async Task Create_AssignsSequentialNumbers_WithShortGoal()
+    {
+        var now = DateTime.UtcNow;
+        var first = await _sprints.CreateAsync(new NewSprint("Bootstrap, wiring & visibility", "g", now, now.AddDays(7), SprintStatus.Active));
+        var second = await _sprints.CreateAsync(new NewSprint("Construction loop", "g", now, now.AddDays(7), SprintStatus.Active));
+        var alreadyNumbered = await _sprints.CreateAsync(new NewSprint("Sprint 9: custom", "g", now, now.AddDays(7), SprintStatus.Active));
+
+        Assert.Equal("Sprint 1: Bootstrap, wiring & visibility", first.Name);
+        Assert.Equal("Sprint 2: Construction loop", second.Name);
+        Assert.Equal("Sprint 9: custom", alreadyNumbered.Name);
+    }
+
+    [Fact]
+    public async Task Create_TruncatesLongNames()
+    {
+        var now = DateTime.UtcNow;
+        var longName = new string('x', 90);
+        var s = await _sprints.CreateAsync(new NewSprint(longName, "g", now, now.AddDays(7), SprintStatus.Active));
+        Assert.True(s.Name.Length <= 70, $"expected <= 70 chars, got {s.Name.Length}");
+        Assert.StartsWith("Sprint 1: ", s.Name);
+    }
+
+    [Fact]
+    public async Task Update_UnwrapsJsonElementStringFields()
+    {
+        var now = DateTime.UtcNow;
+        var s = await _sprints.CreateAsync(new NewSprint("old", "old goal", now, now.AddDays(7), SprintStatus.Active));
+        // The dashboard PATCH deserializes into Dictionary<string,object?>
+        // whose values are JsonElement, not string — name/goal updates
+        // must still land (previously a silent no-op).
+        var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(
+            "{\"name\":\"Sprint 5: new name\",\"goal\":\"new goal\"}");
+        var fields = new Dictionary<string, object?>
+        {
+            ["name"] = json.GetProperty("name"),
+            ["goal"] = json.GetProperty("goal"),
+        };
+        var updated = await _sprints.UpdateAsync(s.Id, fields);
+        Assert.Equal("Sprint 5: new name", updated.Name);
+        Assert.Equal("new goal", updated.Goal);
+    }
 }
