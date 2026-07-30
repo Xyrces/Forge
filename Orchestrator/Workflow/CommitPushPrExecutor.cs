@@ -1,4 +1,4 @@
-﻿using Microsoft.Agents.AI.Workflows;
+using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.Logging;
 using Octokit;
 using Forge.AgentTools;
@@ -195,11 +195,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         // bounces the task back to the agent with the output — no PR
         // churn, no watch round; GitHub CI stays the safety net.
         // verifyCommands: null = auto-detect (dotnet), empty = disabled.
-        var commands = verifyCommands ?? DetectDefaultVerifyCommands(worktreePath);
+        var commands = verifyCommands ?? AgentTools.RunVerification.DefaultCommands(worktreePath);
         if (commands.Count > 0)
         {
             logger.LogInformation("CommitPushPr({Id}): running {Count} verification command(s) before push", issue.Id, commands.Count);
-            var verification = await RunVerification.RunAsync(worktreePath, commands, logger, ct);
+            var verification = await AgentTools.RunVerification.RunAsync(worktreePath, commands, logger, ct);
             if (!verification.Ok)
             {
                 var attempts = int.TryParse(
@@ -374,18 +374,6 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         => $"Task: {issue.Id}\n\nSHA: {headSha}\n\n## Model response\n\n{modelText ?? string.Empty}";
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
-
-    /// <summary>Default verification when the project doesn't configure
-    /// $verify: dotnet build + test for dotnet repos, nothing otherwise.</summary>
-    internal static IReadOnlyList<string> DetectDefaultVerifyCommands(string worktreePath)
-    {
-        var isDotnet = Directory.EnumerateFiles(worktreePath, "*.sln").Any()
-            || Directory.EnumerateFiles(worktreePath, "*.slnx").Any()
-            || Directory.EnumerateFiles(worktreePath, "*.csproj").Any();
-        return isDotnet
-            ? new[] { "dotnet build -c Release --nologo", "dotnet test -c Release --nologo" }
-            : Array.Empty<string>();
-    }
 
     private static async Task UpdateMetadataAsync(
         IIssueStore issues, string id,

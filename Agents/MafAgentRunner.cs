@@ -32,6 +32,10 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly string _rolePromptsRoot;
     private readonly Func<string, string?>? _projectRootLookup;
     private readonly Func<string, IReadOnlyDictionary<string, Core.RoleTerritory>?>? _projectTerritoryLookup;
+    private readonly Func<string, IReadOnlyList<string>?>? _verifyCommandsLookup;
+
+    /// <summary>Seam for tests: replaces the real verification runner.</summary>
+    internal Func<string, IReadOnlyList<string>, ILogger, CancellationToken, Task<AgentTools.RunVerification.Result>>? VerifyRunner { get; set; }
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _promptRootsByProject = new(StringComparer.OrdinalIgnoreCase);
     private readonly ISkillSource? _skills;
     private readonly MemoryStore? _memory;
@@ -71,6 +75,13 @@ public sealed class MafAgentRunner : IAgentRunner
         // roles_json $territory overrides. Null / no entry for the role
         // → the registry's built-in territory applies.
         Func<string, IReadOnlyDictionary<string, Core.RoleTerritory>?>? projectTerritoryLookup = null,
+        // Per-project pre-push verification commands (roles_json
+        // $verify). When set, engineering runs verify their work
+        // IN-SESSION before completing — failures feed back to the
+        // agent like a plan-gate revision, not a dispatch-level
+        // requeue (user direction 2026-07-30: lenient on corrections,
+        // don't restart the session).
+        Func<string, IReadOnlyList<string>?>? verifyCommandsLookup = null,
         MemoryStore? memory = null,
         ContextHandoffStore? handoffs = null,
         // P5.1 stores — passed as factories so the runner can
@@ -94,6 +105,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _rolePromptsRoot = rolePromptsRoot;
         _projectRootLookup = projectRootLookup;
         _projectTerritoryLookup = projectTerritoryLookup;
+        _verifyCommandsLookup = verifyCommandsLookup;
         _memory = memory;
         _handoffs = handoffs;
         _designArtifactsFactory = designArtifacts;
@@ -338,6 +350,51 @@ public async Task<AgentRunResult> RunAsync(
             }
             await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
 
+            // In-session pre-push verification: engineering runs verify
+            // their work BEFORE completing — failures feed back to the
+            // agent like a plan-gate revision (same session, lenient
+            // budget), not a dispatch-level requeue with a fresh
+            // worktree sync + plan gate. The CommitPushPr gate remains
+            // as the backstop for whatever survives.
+            var worktreePath = ResolveWorktreePath(context);
+            var verifyCommands = ResolveVerifyCommands(projectId, worktreePath);
+            if (gateState?.PlanApproved == true
+                && worktreePath is not null
+                && verifyCommands is { Count: > 0 })
+            {
+                const int maxVerifyRounds = 3;
+                for (var round = 1; round <= maxVerifyRounds; round++)
+                {
+                    var verify = VerifyRunner is not null
+                        ? await VerifyRunner(worktreePath, verifyCommands, _logger, ct)
+                        : await AgentTools.RunVerification.RunAsync(worktreePath, verifyCommands, _logger, ct);
+                    if (verify.Ok)
+                    {
+                        _logger.LogInformation("Role {Role}: in-session verification passed (round {Round})", role, round);
+                        break;
+                    }
+                    if (round == maxVerifyRounds)
+                    {
+                        // Out of rounds: return normally — the
+                        // CommitPushPr gate re-verifies and bounces the
+                        // task with the output (strike-counted).
+                        _logger.LogWarning("Role {Role}: in-session verification still failing after {Rounds} rounds — the executor gate will handle it", role, maxVerifyRounds);
+                        break;
+                    }
+                    _logger.LogInformation("Role {Role}: verification failed; feeding output back into the session (round {Round}/{Max})",
+                        role, round, maxVerifyRounds);
+                    var feedback = new ChatMessage(ChatRole.User,
+                        "Pre-push verification failed (round " + round + "/" + maxVerifyRounds + "). " +
+                        "Fix the failures below and iterate — verification runs again when you finish. " +
+                        "Do not weaken tests to make them pass; fix the cause.\n\n" +
+                        string.Join("\n\n", verify.Failures));
+                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
+                    transcriptMessages.Add(feedback);
+                    transcriptMessages.AddRange(response.Messages);
+                    await HeartbeatAsync(runId, transcriptMessages);
+                }
+            }
+
             var text = string.Concat(response.Messages
                 .Where(m => m.Role == ChatRole.Assistant)
                 .Select(m => m.Text));
@@ -438,6 +495,20 @@ public async Task<AgentRunResult> RunAsync(
         if (context is null) return null;
         if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
         return raw.ToString();
+    }
+
+    /// <summary>Verify commands for a run: the project's $verify
+    /// override; null means auto-detect against the worktree (dotnet
+    /// build+test for dotnet repos); empty means disabled.</summary>
+    private IReadOnlyList<string>? ResolveVerifyCommands(string? projectId, string? worktreePath)
+    {
+        var configured = projectId is not null && _verifyCommandsLookup is not null
+            ? _verifyCommandsLookup(projectId)
+            : null;
+        if (configured is not null) return configured;
+        return worktreePath is not null
+            ? AgentTools.RunVerification.DefaultCommands(worktreePath)
+            : null;
     }
 
     /// <summary>Gate factory for the run-gate pipeline. Unknown names

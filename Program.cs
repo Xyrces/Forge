@@ -1320,6 +1320,9 @@ Console.Error.WriteLine(ex.ToString());
             rolePromptsRoot: rolePromptsRoot,
             projectRootLookup: ProjectRootLookup,
             projectTerritoryLookup: ProjectTerritoryLookup,
+            verifyCommandsLookup: id => projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))
+                ?.VerifyCommands,
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,

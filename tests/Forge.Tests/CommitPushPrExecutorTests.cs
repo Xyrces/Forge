@@ -368,7 +368,7 @@ public class CommitPushPrExecutorTests : IDisposable
     public void DefaultVerification_DotnetRepo_BuildsAndTests()
     {
         File.WriteAllText(Path.Combine(_workDir, "X.csproj"), "<Project />");
-        var commands = CommitPushPrExecutor.DetectDefaultVerifyCommands(_workDir);
+        var commands = AgentTools.RunVerification.DefaultCommands(_workDir);
         Assert.Equal(2, commands.Count);
         Assert.Contains("build", commands[0]);
         Assert.Contains("test", commands[1]);
@@ -379,7 +379,7 @@ public class CommitPushPrExecutorTests : IDisposable
     {
         var empty = Path.Combine(_workDir, "empty");
         Directory.CreateDirectory(empty);
-        Assert.Empty(CommitPushPrExecutor.DetectDefaultVerifyCommands(empty));
+        Assert.Empty(AgentTools.RunVerification.DefaultCommands(empty));
     }
 
     // WithDiff test omitted: GitHubService.CreatePullRequestAsync returns

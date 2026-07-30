@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Microsoft.Extensions.Logging;
 
-namespace Forge.Orchestrator.Workflow;
+namespace Forge.AgentTools;
 
 /// <summary>
 /// Pre-push verification: runs the project's verification commands
@@ -103,4 +103,16 @@ public static class RunVerification
 
     private static string Tail(string text, int max) =>
         text.Length <= max ? text.Trim() : "…" + text[^max..].Trim();
+
+    /// <summary>Default verification when the project doesn't configure
+    /// $verify: dotnet build + test for dotnet repos, nothing otherwise.</summary>
+    public static IReadOnlyList<string> DefaultCommands(string workDir)
+    {
+        var isDotnet = Directory.EnumerateFiles(workDir, "*.sln").Any()
+            || Directory.EnumerateFiles(workDir, "*.slnx").Any()
+            || Directory.EnumerateFiles(workDir, "*.csproj").Any();
+        return isDotnet
+            ? new[] { "dotnet build -c Release --nologo", "dotnet test -c Release --nologo" }
+            : Array.Empty<string>();
+    }
 }
