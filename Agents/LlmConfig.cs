@@ -111,7 +111,8 @@ public static class LlmConfigAdapter
             BaseUrl: p.BaseUrl,
             ApiKey: string.IsNullOrEmpty(p.ApiKey) ? null : p.ApiKey,
             OrgId: string.IsNullOrEmpty(p.OrgId) ? null : p.OrgId,
-            DefaultModel: p.DefaultModel)).ToList();
+            DefaultModel: p.DefaultModel,
+            Api: string.IsNullOrEmpty(p.Api) ? null : p.Api)).ToList();
         var roles = new Dictionary<AgentType, RoleModel>(capacity: options.Roles.Count);
         foreach (var (key, value) in options.Roles)
         {

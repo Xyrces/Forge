@@ -279,6 +279,10 @@ public sealed record LlmProviderOptions
     public string ApiKey { get; set; } = string.Empty;
     public string OrgId { get; set; } = string.Empty;
     public string DefaultModel { get; set; } = string.Empty;
+
+    // Wire protocol: "openai" (default) | "anthropic" (Anthropic
+    // Messages API, e.g. Kimi-for-Coding).
+    public string Api { get; set; } = string.Empty;
 }
 
 public sealed record LlmRoleModelOptions
