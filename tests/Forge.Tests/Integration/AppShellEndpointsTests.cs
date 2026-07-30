@@ -78,6 +78,46 @@ public class AppShellEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Uptime_ReturnsMonotonicMillisAndIsoTimestamp()
+    {
+        var before = Environment.TickCount64;
+        var resp = await _client.GetAsync("/api/health/uptime");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<UptimeShape>();
+        Assert.NotNull(body);
+        Assert.True(body!.UptimeMs >= before, $"uptimeMs {body.UptimeMs} should be >= {before}");
+        Assert.True(body.UptimeMs <= Environment.TickCount64 + 1000);
+        var parsed = DateTime.Parse(body.UtcTimestamp, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, parsed.Kind);
+        Assert.True(parsed > DateTime.UtcNow.AddMinutes(-1));
+    }
+
+    [Fact]
+    public async Task Uptime_PostReturnsMethodNotAllowed()
+    {
+        var resp = await _client.PostAsync("/api/health/uptime", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task BuildInfo_ReturnsNonEmptyVersionAndFramework()
+    {
+        var resp = await _client.GetAsync("/api/meta/buildinfo");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<BuildInfoShape>();
+        Assert.NotNull(body);
+        Assert.False(string.IsNullOrWhiteSpace(body!.InformationalVersion));
+        Assert.False(string.IsNullOrWhiteSpace(body.Framework));
+    }
+
+    [Fact]
+    public async Task BuildInfo_IsReadOnly_NoPostHandler()
+    {
+        var resp = await _client.PostAsync("/api/meta/buildinfo", new StringContent(""));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task ActiveSprint_None_ReturnsNull()
     {
         var resp = await _client.GetAsync("/api/sprints/active");
@@ -136,6 +176,18 @@ public class AppShellEndpointsTests : IDisposable
         public string Status { get; set; } = "";
         public DateTime At { get; set; }
         public string? Version { get; set; }
+    }
+
+    public sealed class UptimeShape
+    {
+        public long UptimeMs { get; set; }
+        public string UtcTimestamp { get; set; } = "";
+    }
+
+    public sealed class BuildInfoShape
+    {
+        public string InformationalVersion { get; set; } = "";
+        public string Framework { get; set; } = "";
     }
 
     public sealed class ActiveSprintShape

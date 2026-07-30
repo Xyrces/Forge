@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -9,6 +11,10 @@ namespace Forge.Dashboard;
 public static class AppShellEndpoints
 {
     public sealed record HeartbeatDto(string Status, DateTime At, string? Version);
+
+    public sealed record UptimeDto(long UptimeMs, string UtcTimestamp);
+
+    public sealed record BuildInfoDto(string InformationalVersion, string Framework);
 
     public sealed record SearchHitDto(string Kind, string Id, string Title, string Snippet);
 
@@ -34,6 +40,27 @@ public static class AppShellEndpoints
         {
             var version = typeof(AppShellEndpoints).Assembly.GetName().Version?.ToString();
             return Results.Json(new HeartbeatDto("healthy", DateTime.UtcNow, version));
+        });
+
+        app.MapGet("/api/health/uptime", () => Results.Json(new UptimeDto(
+            UptimeMs: Environment.TickCount64,
+            UtcTimestamp: DateTime.UtcNow.ToString("o")), DashboardJson.Options));
+
+        // Build metadata: informationalVersion from the assembly's
+        // AssemblyInformationalVersionAttribute (falls back to the
+        // assembly version), plus the runtime framework string from
+        // RuntimeInformation.FrameworkDescription. Read-only; no
+        // side effects. Serialized via DashboardJson so the property
+        // names stay camelCase to match the rest of the API surface.
+        app.MapGet("/api/meta/buildinfo", () =>
+        {
+            var assembly = typeof(AppShellEndpoints).Assembly;
+            var informationalVersion =
+                assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                ?? assembly.GetName().Version?.ToString()
+                ?? "unknown";
+            var framework = RuntimeInformation.FrameworkDescription ?? "Unknown";
+            return Results.Json(new BuildInfoDto(informationalVersion, framework), DashboardJson.Options);
         });
 
         app.MapGet("/api/sprints/active", async (string? projectId, CancellationToken ct) =>
