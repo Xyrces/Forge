@@ -91,7 +91,12 @@ public sealed class TaskStateMachine
             // requeues and is claimed again — observed live
             // 2026-07-26: Dispatching+Dispatched and
             // StalledRework+Dispatched violations).
-            TaskLifecycleState.Dispatching, TaskLifecycleState.StalledRework);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.StalledRework,
+            // Claim-race tolerance: a CI/review requeue makes the task
+            // claimable while the record still says PROpen (observed
+            // live 2026-07-30: task-9 violation during the rework
+            // storm). Same class as the ReworkQueued entries.
+            TaskLifecycleState.PROpen);
         Add(TaskEvent.RunStarted, TaskLifecycleState.AgentRunning,
             // The model run actually begins — advances the recorded
             // state and (critically) refreshes stateEnteredAt, so the
