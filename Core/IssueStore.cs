@@ -1525,12 +1525,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         using var probe = conn.CreateCommand();
         probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'phase' LIMIT 1";
         if (probe.ExecuteScalar() is not null) return;
-        using var alter = conn.CreateCommand();
-        alter.CommandText = """
-            ALTER TABLE agent_run ADD COLUMN phase TEXT;
-            ALTER TABLE agent_run ADD COLUMN resumed_session INTEGER;
-            """;
-        alter.ExecuteNonQuery();
+
+        // Separate commands: SQLite executes one statement per
+        // DbCommand (multi-statement batches are driver-dependent).
+        using (var alter = conn.CreateCommand())
+        {
+            alter.CommandText = "ALTER TABLE agent_run ADD COLUMN phase TEXT";
+            alter.ExecuteNonQuery();
+        }
+        using (var alter = conn.CreateCommand())
+        {
+            alter.CommandText = "ALTER TABLE agent_run ADD COLUMN resumed_session INTEGER";
+            alter.ExecuteNonQuery();
+        }
     }
 
     private void ApplyLegacyKiloRenames(SqliteConnection conn)
