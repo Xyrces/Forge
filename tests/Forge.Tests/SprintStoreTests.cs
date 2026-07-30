@@ -11,7 +11,7 @@ public class SprintStoreTests : IDisposable
 
     public SprintStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-sprint-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("sprint");
         _issues = new IssueStore(_dbPath);
         _sprints = new SprintStore(_issues);
     }

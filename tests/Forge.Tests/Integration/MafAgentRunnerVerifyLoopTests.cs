@@ -20,7 +20,7 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
 
     public MafAgentRunnerVerifyLoopTests()
     {
-        _worktree = Path.Combine(Path.GetTempPath(), $"ph-verify-loop-{Guid.NewGuid():N}");
+        _worktree = TempRoot.Instance.NewDirectory("verify-loop");
         Directory.CreateDirectory(_worktree);
     }
 
@@ -88,7 +88,7 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-vl-md-{Guid.NewGuid():N}"),
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("vl-md"),
             verifyCommandsLookup: _ => new[] { "dotnet test" });
 
         var verifyCalls = 0;
@@ -129,7 +129,7 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-vp-md-{Guid.NewGuid():N}"),
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("vp-md"),
             verifyCommandsLookup: _ => new[] { "dotnet test" });
 
         var verifyCalls = 0;
@@ -168,7 +168,7 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-vs-md-{Guid.NewGuid():N}"),
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("vs-md"),
             verifyCommandsLookup: _ => new[] { "dotnet test" });
 
         var verifyCalls = 0;

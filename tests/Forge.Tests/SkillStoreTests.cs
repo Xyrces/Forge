@@ -12,7 +12,7 @@ public class SkillStoreTests : IDisposable
 
     public SkillStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-skills-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("skills");
         _issues = new IssueStore(_dbPath);
         _agents = new AgentStore(_issues);
         _skills = new SkillStore(_issues);

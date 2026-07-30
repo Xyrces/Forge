@@ -41,7 +41,7 @@ public class DesignerSchedulerTests : IDisposable
     public DesignerSchedulerTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-dscheduler-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("dscheduler");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");

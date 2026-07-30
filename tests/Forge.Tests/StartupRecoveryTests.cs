@@ -35,7 +35,7 @@ public class StartupRecoveryTests : IDisposable
     public StartupRecoveryTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-recovery-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("recovery");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
@@ -304,7 +304,7 @@ public class StartupRecoveryTests : IDisposable
         // tasks across a restart. Seed an orphaned worktree_acquired
         // issue in a SECOND project (own store + own git repo) and
         // assert the sweep requeues it.
-        var dir2 = Path.Combine(Path.GetTempPath(), $"ph-recovery2-{Guid.NewGuid():N}");
+        var dir2 = TempRoot.Instance.NewDirectory("recovery2");
         Directory.CreateDirectory(dir2);
         InitRepo(dir2);
         var db2 = Path.Combine(dir2, "issues.db");

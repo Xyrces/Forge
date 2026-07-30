@@ -31,7 +31,7 @@ public class CommitPushPrExecutorTests : IDisposable
 
     public CommitPushPrExecutorTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-cppr-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("cppr");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));

@@ -14,7 +14,7 @@ public class ProjectClonerTests : IDisposable
 
     public ProjectClonerTests()
     {
-        _tempRoot = Path.Combine(Path.GetTempPath(), $"ph-clone-{Guid.NewGuid():N}");
+        _tempRoot = TempRoot.Instance.NewDirectory("clone");
         _remoteDir = Path.Combine(_tempRoot, "remote.git");
         Directory.CreateDirectory(_tempRoot);
         InitBareRepo(_remoteDir);
@@ -264,7 +264,7 @@ public class ProjectClonerTests : IDisposable
         // we get the existing history on subsequent seeds) then add
         // a new commit and push. This pattern works for the first
         // commit too — clone an empty repo, write a file, commit.
-        var work = Path.Combine(Path.GetTempPath(), $"ph-seed-{Guid.NewGuid():N}");
+        var work = TempRoot.Instance.NewDirectory("seed");
         Directory.CreateDirectory(work);
         try
         {

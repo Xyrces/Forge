@@ -32,7 +32,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("no-md"));
 
         var result = await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -63,7 +63,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: skills,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("no-md"));
 
         await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -97,7 +97,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: skills,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("no-md"));
 
         await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -122,7 +122,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: failing,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("no-md"));
 
         var result = await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);
 
@@ -153,7 +153,7 @@ public class MafAgentRunnerSkillsTests
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: skills,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("no-md"));
 
         await runner.RunAsync(AgentType.CoreDev, "x", sessionId: null, ct: default);
         var coreInstructions = factory.LastInstructions!;
@@ -222,11 +222,11 @@ public class MafAgentRunnerSkillsTests
         // Per-project role prompts: a project whose clone ships
         // <root>/agents/coredev.md gets ITS instructions, not the
         // built-in fallback root's.
-        var projRoot = Path.Combine(Path.GetTempPath(), $"ph-proj-{Guid.NewGuid():N}");
+        var projRoot = TempRoot.Instance.NewDirectory("proj");
         Directory.CreateDirectory(Path.Combine(projRoot, "agents"));
         await File.WriteAllTextAsync(Path.Combine(projRoot, "agents", "coredev.md"),
             "---\ndescription: You are the PORTHORIZON coredev. Zero-alloc hot paths.\n---\n");
-        var fallbackRoot = Path.Combine(Path.GetTempPath(), $"ph-fallback-{Guid.NewGuid():N}");
+        var fallbackRoot = TempRoot.Instance.NewDirectory("fallback");
         Directory.CreateDirectory(fallbackRoot);
         await File.WriteAllTextAsync(Path.Combine(fallbackRoot, "coredev.md"),
             "---\ndescription: You are the FALLBACK coredev.\n---\n");

@@ -22,7 +22,7 @@ public class ForgesystemPathsTests
     [Fact]
     public void ResolveDataRoot_Override_FullPath()
     {
-        var root = Path.Combine(Path.GetTempPath(), "forge-test-" + Guid.NewGuid().ToString("N")[..8]);
+        var root = TempRoot.Instance.NewDirectory("test");
         try
         {
             var resolved = ForgesystemPaths.ResolveDataRoot(root);
@@ -60,7 +60,7 @@ public class ProjectBootstrapTests : IDisposable
 
     public ProjectBootstrapTests()
     {
-        _tempRoot = Path.Combine(Path.GetTempPath(), "forge-bootstrap-" + Guid.NewGuid().ToString("N")[..8]);
+        _tempRoot = TempRoot.Instance.NewDirectory("bootstrap");
         Directory.CreateDirectory(_tempRoot);
         var cloner = new ProjectCloner(_tempRoot, NullLogger<ProjectCloner>.Instance);
         _bootstrap = new ProjectBootstrap(_tempRoot, cloner, null, NullLogger<ProjectBootstrap>.Instance);

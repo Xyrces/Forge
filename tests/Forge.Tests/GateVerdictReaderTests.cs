@@ -11,7 +11,7 @@ public class GateVerdictReaderTests : IDisposable
 
     public GateVerdictReaderTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-gvr-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("gvr");
         _store = new IssueStore(_dbPath);
         _reader = new GateVerdictReader(_store);
     }

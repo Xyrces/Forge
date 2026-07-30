@@ -32,11 +32,11 @@ public class CodebaseGraphEndpointTests : IDisposable
 
     public CodebaseGraphEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-graph-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("graph-api");
         _issues = new IssueStore(_dbPath);
         _cache = new CodebaseGraphCacheStore(_issues);
 
-        _repoRoot = Path.Combine(Path.GetTempPath(), $"ph-graph-rep-{Guid.NewGuid():N}");
+        _repoRoot = TempRoot.Instance.NewDirectory("graph-rep");
         Directory.CreateDirectory(_repoRoot);
 
         _host = BuildHost();
