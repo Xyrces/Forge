@@ -314,6 +314,7 @@ public class GitRefNamesTests
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
+                WorkingDirectory = AppContext.BaseDirectory,
             };
 
             using var proc = Process.Start(psi);
