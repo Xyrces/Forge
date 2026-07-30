@@ -27,11 +27,9 @@ public sealed class AnthropicMessagesChatClient : IChatClient
 
     private readonly HttpClient _http;
     private readonly string _model;
-    private readonly bool _ownsHttp;
 
     public AnthropicMessagesChatClient(string baseUrl, string apiKey, string model, HttpClient? http = null)
     {
-        _ownsHttp = http is null;
         _http = http ?? new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
         _http.BaseAddress ??= new Uri(baseUrl.TrimEnd('/') + "/");
         if (!string.IsNullOrEmpty(apiKey) && !_http.DefaultRequestHeaders.Contains("x-api-key"))
@@ -81,7 +79,12 @@ public sealed class AnthropicMessagesChatClient : IChatClient
 
     public void Dispose()
     {
-        if (_ownsHttp) _http.Dispose();
+        // No-op by design: the factory caches one client per
+        // (provider, model) for the process lifetime, while some
+        // callers (IntakeAgent) dispose their chat client after every
+        // run. Disposing the shared HttpClient here would poison the
+        // cache entry ("Cannot access a disposed object" on the next
+        // run). The HttpClient dies with the process.
     }
 
     private JsonObject BuildRequest(IEnumerable<ChatMessage> messages, ChatOptions? options)
