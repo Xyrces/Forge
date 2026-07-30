@@ -17,7 +17,7 @@
     test, e2e-harness, and Blazor UI projects that have their own csproj.
   -->
   <ItemGroup>
-    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs" />
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\obj\**\*.cs;..\Forge.Core\bin\**\*.cs" />
     <None Remove="..\tests\**;..\tools\**;..\Forge.UI\**" />
     <EmbeddedResource Remove="..\tests\**" />
   </ItemGroup>
