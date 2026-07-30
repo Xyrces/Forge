@@ -63,7 +63,7 @@ graph cache, DataProtection keyring (`~/.aspnet/DataProtection-Keys/`).
 2. Stop the service: `systemctl --user stop forge`
 3. Migrate:
    ```bash
-   dotnet run --project Forge.Core.csproj -- \
+   dotnet run --project Forge.Core/Forge.Core.csproj -- \
      --config ~/.config/forge/appsettings.json \
      --migrate-db --target sqlserver \
      [--include-open-work] \
