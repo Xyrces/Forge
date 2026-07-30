@@ -54,7 +54,7 @@ orchestrator + its state dir.
 2. **Publish a release**:
 
    ```bash
-   dotnet publish Forge.Core.csproj -c Release -o /tmp/forge-$(git rev-parse --short HEAD)
+   dotnet publish Core/Forge.Core.csproj -c Release -o /tmp/forge-$(git rev-parse --short HEAD)
    ```
 
 3. **Drop an appsettings.json**:

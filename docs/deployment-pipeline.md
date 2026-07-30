@@ -176,7 +176,7 @@ or `/var/lib/forge` is ever git-tracked.
 ```bash
 # One-time, from root. Publish a first release manually before
 # running this.
-sudo dotnet publish Forge.Core.csproj -c Release -o /opt/forge/releases/bootstrap
+sudo dotnet publish Core/Forge.Core.csproj -c Release -o /opt/forge/releases/bootstrap
 
 sudo scripts/install-systemd-service.sh \
     --release-dir /opt/forge/releases/bootstrap

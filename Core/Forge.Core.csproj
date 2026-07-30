@@ -9,16 +9,17 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <NoWarn>NU1904;NU1903</NoWarn>
     <RootNamespace>Forge</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="tests/**/*.cs" />
-    <Compile Remove="tools/**/*.cs" />
-    <Compile Remove="Forge.UI\**\*.cs" />
-    <None Remove="tests/**" />
-    <None Remove="tools/**" />
-    <None Remove="Forge.UI\**" />
-    <EmbeddedResource Remove="tests/**" />
+    <!--
+      The project file lives in Core/ so the solution directory can be
+      unambiguous, but all backend source still lives under the repo root.
+      Pull in every .cs file under the root except the test, tool, UI, and
+      build output directories.
+    -->
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\bin\**\*.cs;..\obj\**\*.cs" />
   </ItemGroup>
 
   <!--
@@ -41,11 +42,13 @@
     next to Forge.Core.dll.
   -->
   <ItemGroup>
-    <Content Include="Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Content Include="..\Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
     <!-- Built-in MAF role prompts: copied next to the app so any
          project without its own agents/ dir still gets real role
          instructions (see Agents/RolePromptRoot.cs). -->
-    <Content Include="agents\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="agents\%(Filename)%(Extension)" />
+    <Content Include="..\agents\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="agents\%(Filename)%(Extension)" />
+    <!-- Example configuration files kept next to the solution. -->
+    <Content Include="..\appsettings*.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -62,7 +65,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="Forge.UI\Forge.UI.csproj" />
+    <ProjectReference Include="..\Forge.UI\Forge.UI.csproj" />
   </ItemGroup>
 
   <ItemGroup>

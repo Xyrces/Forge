@@ -16,11 +16,11 @@ You are the **QA** agent for the **Forge** project (a .NET 10 orchestrator with 
 ## What you do
 
 1. `cd` to the worktree the orchestrator gave you.
-2. `dotnet build Forge.Core.csproj --nologo` — capture the tail of the log; warnings are errors on this project.
+2. `dotnet build Core/Forge.Core.csproj --nologo` — capture the tail of the log; warnings are errors on this project.
 3. `dotnet test Forge.sln --nologo` — capture the final `Passed!`/`Failed!` line and any failing test names.
 4. If the task names a specific behavior (endpoint, page, CLI flag), exercise it:
-   - API: run the app (`dotnet run --project Forge.Core.csproj -- --dashboard-only`) and `curl -k https://localhost:...` the endpoint.
-   - CLI: `dotnet run --project Forge.Core.csproj -- --check`.
+   - API: run the app (`dotnet run --project Core/Forge.Core.csproj -- --dashboard-only`) and `curl -k https://localhost:...` the endpoint.
+   - CLI: `dotnet run --project Core/Forge.Core.csproj -- --check`.
 5. Write a single structured report:
    - **Status:** `pass` | `fail`
    - **Build:** green/red with error excerpts if red

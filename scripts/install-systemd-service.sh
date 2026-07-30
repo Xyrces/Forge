@@ -62,7 +62,7 @@ fi
 
 RELEASE_DIR="$(readlink -f "$RELEASE_DIR")"
 if [[ ! -f "$RELEASE_DIR/Forge.Core.dll" ]]; then
-    echo "ERROR: no Forge.Core.dll at $RELEASE_DIR — run 'dotnet publish Forge.Core.csproj -c Release -o <path>' first." >&2
+    echo "ERROR: no Forge.Core.dll at $RELEASE_DIR — run 'dotnet publish Core/Forge.Core.csproj -c Release -o <path>' first." >&2
     exit 1
 fi
 
