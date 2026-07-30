@@ -11,14 +11,19 @@
     <RootNamespace>Forge</RootNamespace>
   </PropertyGroup>
 
+  <!--
+    The project file lives under src/ so that the repository root contains
+    only Forge.sln. The default SDK globs are relative to the project
+    directory, so we disable the default compile items and explicitly include
+    all source files from the repository root, excluding the sibling test,
+    tool, and UI projects that have their own project files.
+  -->
+  <PropertyGroup>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
   <ItemGroup>
-    <Compile Remove="tests/**/*.cs" />
-    <Compile Remove="tools/**/*.cs" />
-    <Compile Remove="Forge.UI\**\*.cs" />
-    <None Remove="tests/**" />
-    <None Remove="tools/**" />
-    <None Remove="Forge.UI\**" />
-    <EmbeddedResource Remove="tests/**" />
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\bin\**\*.cs;..\obj\**\*.cs;..\src\bin\**\*.cs;..\src\obj\**\*.cs" />
   </ItemGroup>
 
   <!--
@@ -41,7 +46,7 @@
     next to Forge.Core.dll.
   -->
   <ItemGroup>
-    <Content Include="Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Content Include="..\Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>
@@ -58,7 +63,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="Forge.UI\Forge.UI.csproj" />
+    <ProjectReference Include="..\Forge.UI\Forge.UI.csproj" />
   </ItemGroup>
 
   <ItemGroup>
