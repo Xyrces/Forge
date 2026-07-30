@@ -14,7 +14,12 @@ public sealed record ProviderConfig(
     string BaseUrl,
     string? ApiKey,
     string? OrgId,
-    string DefaultModel);
+    string DefaultModel,
+    // Wire protocol: null/"openai" = chat completions (the default);
+    // "anthropic" = Anthropic Messages API (e.g. Kimi-for-Coding,
+    // whose chat lives at {base}/messages with x-api-key auth — the
+    // OpenAI-shaped /models listing works but chat 401s).
+    string? Api = null);
 
 /// <summary>
 /// Per-role model assignment. Resolved by looking up

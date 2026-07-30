@@ -174,6 +174,13 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
 
     private static IChatClient Build(ProviderConfig provider, string model)
     {
+        if (string.Equals(provider.Api, "anthropic", StringComparison.OrdinalIgnoreCase))
+        {
+            // Anthropic Messages protocol (Kimi-for-Coding): chat at
+            // {base}/messages, x-api-key auth.
+            return new AnthropicMessagesChatClient(provider.BaseUrl, provider.ApiKey ?? string.Empty, model);
+        }
+
         var options = new OpenAIClientOptions
         {
             Endpoint = new Uri(provider.BaseUrl),
