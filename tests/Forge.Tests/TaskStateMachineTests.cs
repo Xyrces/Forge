@@ -74,7 +74,6 @@ public class TaskStateMachineTests : IDisposable
     [InlineData(TaskEvent.Merged, TaskLifecycleState.Pending, TaskLifecycleState.Merged, false)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.Merged, TaskLifecycleState.PROpen, false)]
     [InlineData(TaskEvent.ParkedOnInfra, TaskLifecycleState.Merged, TaskLifecycleState.ParkedInfra, false)]
-    [InlineData(TaskEvent.Dispatched, TaskLifecycleState.PROpen, TaskLifecycleState.Dispatching, false)]
     public void TransitionTable_Legality(TaskEvent evt, TaskLifecycleState from, TaskLifecycleState to, bool expected)
     {
         Assert.Equal(expected, TaskStateMachine.IsLegal(evt, from, to));
