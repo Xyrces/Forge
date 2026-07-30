@@ -79,6 +79,14 @@
                 <svg width="30" height="8"><line x1="0" y1="4" x2="30" y2="4" stroke="var(--primary)" stroke-width="2.5" /></svg>
                 traced journey
             </span>
+            <span class="flow-legend__item">
+                <svg width="10" height="10"><polygon points="5,1 9,5 5,9 1,5" fill="none" stroke="var(--outline)" stroke-width="1.2" /></svg>
+                stage gate
+            </span>
+            <span class="flow-legend__item">
+                <svg width="10" height="10"><polygon points="5,1 9,5 5,9 1,5" fill="var(--warn)" stroke="var(--warn)" stroke-width="1.2" /></svg>
+                gate held
+            </span>
         </div>
 
         <div style="display:flex;gap:16px;align-items:flex-start">
@@ -131,15 +139,30 @@
                     var selected = _selectedNode == n.Id;
                     var inJourney = _journey?.Visits.Any(v => v.Node == n.Id) == true;
                     var isCurrent = _journey?.CurrentNode == n.Id;
+                    var hasGateNote = !string.IsNullOrEmpty(n.GateNote);
+                    var gateHeld = n.Gates.Count > 0 && n.Gates.Any(g => _fleet.GateStates?.GetValueOrDefault(g) == true);
+                    var labelY = hasGateNote ? pos.Y - 4 : pos.Y + 4;
                     <g style="cursor:pointer;outline:none" role="button" tabindex="0" aria-label="@($"Flow node {n.Label}")"
                        @onclick="@(() => SelectNode(n.Id))"
                        @onkeydown="@(e => { if (e.Key is "Enter" or " ") SelectNode(n.Id); })"
                        @onfocus="@(() => _focusedNode = n.Id)" @onblur="@(() => _focusedNode = null)">
                         <rect x="@SvgSmoothing.F(pos.X - w / 2)" y="@SvgSmoothing.F(pos.Y - h / 2)" width="@SvgSmoothing.F(w)" height="@SvgSmoothing.F(h)" rx="9"
                               fill="@(isCurrent ? "var(--primary-container, var(--surface))" : "var(--surface)")"
-                              stroke="@(isCurrent ? "var(--primary)" : inJourney ? "var(--primary)" : selected || _focusedNode == n.Id ? "var(--primary)" : "var(--outline-variant)")"
-                              stroke-width="@(isCurrent || selected || _focusedNode == n.Id ? 2.5 : inJourney ? 1.8 : 1.2)" />
-                        @SvgText(pos.X, pos.Y + 4, "var(--on-surface)", 12, "middle", n.Label)
+                              stroke="@(gateHeld ? "var(--warn)" : isCurrent ? "var(--primary)" : inJourney ? "var(--primary)" : selected || _focusedNode == n.Id ? "var(--primary)" : "var(--outline-variant)")"
+                              stroke-width="@(gateHeld || isCurrent || selected || _focusedNode == n.Id ? 2.5 : inJourney ? 1.8 : 1.2)" />
+                        @SvgText(pos.X, labelY, "var(--on-surface)", 12, "middle", n.Label)
+                        @if (hasGateNote)
+                        {
+                            @SvgText(pos.X, pos.Y + 15, "var(--on-surface-variant)", 9, "middle", n.GateNote!)
+                        }
+                        @if (n.Gates.Count > 0)
+                        {
+                            var gx = pos.X - w / 2 + 8;
+                            var gy = pos.Y - h / 2 + 10;
+                            var chipFill = gateHeld ? "var(--warn)" : "var(--on-surface-variant)";
+                            var label = gateHeld ? string.Join(" · ", n.Gates.Select(g => g + " HELD")) : string.Join(" · ", n.Gates);
+                            @SvgGateChip(gx, gy, chipFill, 8, $"stage gate: {string.Join(", ", n.Gates)}{(gateHeld ? " (HELD)" : " (open) — hold/release via the Sprints page or /api/gates")}", "◆ " + label)
+                        }
                         @if (n.Count > 0)
                         {
                             <circle cx="@SvgSmoothing.F(pos.X + w / 2 - 10)" cy="@SvgSmoothing.F(pos.Y - h / 2 + 6)" r="11" fill="var(--primary)" />
@@ -441,6 +464,11 @@
     public void Dispose() => _timer?.Dispose();
 
     // SVG <text> collides with Razor's <text> tag — emit it raw.
+    // Gate chip: a small left-anchored pill drawn inside a flow
+    // node, with a hover tooltip via SVG <title>.
+    private static MarkupString SvgGateChip(double x, double y, string fill, int size, string title, string content)
+        => new($"<text x=\"{SvgSmoothing.F(x)}\" y=\"{SvgSmoothing.F(y)}\" font-size=\"{size}\" fill=\"{fill}\" text-anchor=\"start\" font-weight=\"600\"><title>{System.Net.WebUtility.HtmlEncode(title)}</title>{System.Net.WebUtility.HtmlEncode(content)}</text>");
+
     private static MarkupString SvgText(double x, double y, string fill, int size, string anchor, string content, bool bold = false)
         => new($"<text x=\"{SvgSmoothing.F(x)}\" y=\"{SvgSmoothing.F(y)}\" fill=\"{fill}\" font-size=\"{size}\" text-anchor=\"{anchor}\"" +
                (bold ? " font-weight=\"600\"" : "") + $">{System.Net.WebUtility.HtmlEncode(content)}</text>");
@@ -454,7 +482,7 @@
 
     private sealed record FleetDto(
         string[] Lanes, List<NodeDto> Nodes, List<EdgeDto> Edges, string? ActiveSprintId,
-        List<IssueSampleDto> AllIssues, LayoutPayload? Layout);
+        List<IssueSampleDto> AllIssues, LayoutPayload? Layout, Dictionary<string, bool>? GateStates);
     private sealed class LayoutPayload
     {
         public double Width { get; set; }
@@ -474,7 +502,8 @@
     }
     private sealed class LayoutPointPayload { public double X { get; set; } public double Y { get; set; } }
     private sealed record NodeDto(
-        string Id, string Label, string Lane, double X, double Y, int Count, List<IssueSampleDto> Issues);
+        string Id, string Label, string Lane, double X, double Y, int Count, List<IssueSampleDto> Issues,
+        IReadOnlyList<string> Gates, string? GateNote);
     private sealed record EdgeDto(string From, string To, string? Kind, string? Label);
     private sealed record IssueSampleDto(string Id, string Title, string Status);
 

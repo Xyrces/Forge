@@ -18,6 +18,23 @@ public static class FlowEndpoints
 {
     private const int MaxSamplesPerNode = 8;
 
+    /// <summary>
+    /// Intrinsic (code-owned) gate mechanics per default-definition
+    /// step id — the plan gate, the pre-push verification gate, and
+    /// the CI+approval merge requirement are enforced in code (plan
+    /// gate hard gates, CommitPushPrExecutor's verify loop, the
+    /// PRWatcher's merge guard), NOT wired in the workflow
+    /// definition, so the definition can't carry them. Keyed by step
+    /// id: a custom workflow that renames the step simply renders no
+    /// note (graceful).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> GateNotes =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["agent"] = "plan gate: schema · territory · LLM critic → verify build+test before push",
+            ["pr"] = "gate: CI green + approval at head",
+        };
+
     private static object LayoutPayload(DirectedFlowLayout.Result layout) => new
     {
         width = layout.Width,
@@ -43,7 +60,8 @@ public static class FlowEndpoints
         ISpecStore specs,
         ISprintStore sprints,
         Orchestrator.MemoryExtractionStore? extractions = null,
-        WorkflowResolver? workflow = null)
+        WorkflowResolver? workflow = null,
+        MemoryStore? memory = null)
     {
         app.MapGet("/api/flow", async (CancellationToken ct) =>
         {
@@ -89,8 +107,19 @@ public static class FlowEndpoints
                 if (node is not null) Add(node, issue.Id, issue.Title, issue.Status.ToString());
             }
 
-            var layout = DirectedFlowLayout.Compute(definition);
+            var layout = DirectedFlowLayout.Compute(definition, GateNotes);
             var layoutH = DirectedFlowLayout.ComputeHorizontal(definition);
+
+            IReadOnlyDictionary<string, bool>? gateStates = null;
+            if (memory is not null)
+            {
+                try
+                {
+                    gateStates = await new StageGates(memory, workflow).SnapshotAsync(ct);
+                }
+                catch { /* gate states are additive; don't fail the flow view */ }
+            }
+
             return Results.Json(new
             {
                 lanes = new[] { WorkflowLanes.Planning, WorkflowLanes.Implementation },
@@ -103,6 +132,8 @@ public static class FlowEndpoints
                     y = n.Y,
                     count = counts[n.Id],
                     issues = samples[n.Id],
+                    gates = n.Gates,
+                    gateNote = GateNotes.TryGetValue(n.Id, out var note) ? note : null,
                 }),
                 edges = definition.Edges.Select(e => new { from = e.From, to = e.To, kind = e.Kind, label = e.Label }),
                 // Deterministic directed layout (centered spine,
@@ -119,6 +150,7 @@ public static class FlowEndpoints
                     .OrderByDescending(i => i.UpdatedAt)
                     .Take(300)
                     .Select(i => new { id = i.Id, title = i.Title, status = i.Status.ToString() }),
+                gateStates = gateStates?.ToDictionary(kv => kv.Key, kv => kv.Value),
             });
         });
 

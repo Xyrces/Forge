@@ -199,10 +199,20 @@
                         @foreach (var n in _flow.Nodes)
                         {
                             if (!lh.Nodes.TryGetValue(n.Id, out var p)) continue;
+                            var gateHeld = n.Gates.Count > 0 && n.Gates.Any(g => _flow.GateStates?.GetValueOrDefault(g) == true);
                             <rect x="@SvgSmoothing.F(p.X - p.W / 2)" y="@SvgSmoothing.F(p.Y - p.H / 2)" width="@SvgSmoothing.F(p.W)" height="@SvgSmoothing.F(p.H)" rx="9"
-                                  fill="var(--surface)" stroke="@(n.Count > 0 ? "var(--primary)" : "var(--outline-variant)")"
-                                  stroke-width="@(n.Count > 0 ? 1.8 : 1)" />
+                                  fill="var(--surface)" stroke="@(gateHeld ? "var(--warn)" : n.Count > 0 ? "var(--primary)" : "var(--outline-variant)")"
+                                  stroke-width="@(gateHeld || n.Count > 0 ? 1.8 : 1)" />
                             @SvgText((int)p.X, (int)(p.Y + 4), "var(--on-surface)", 12, "middle", n.Label)
+                            @if (n.Gates.Count > 0)
+                            {
+                                var gx = p.X - p.W / 2 + 6;
+                                var gy = p.Y - p.H / 2 + 9;
+                                var chipFill = gateHeld ? "var(--warn)" : "var(--on-surface-variant)";
+                                var chipText = gateHeld ? "◆ HELD" : "◆ " + string.Join(" · ", n.Gates);
+                                var chipTitle = $"stage gate: {string.Join(", ", n.Gates)}{(gateHeld ? " (HELD)" : " (open)")}";
+                                @((MarkupString)$"<text x=\"{SvgSmoothing.F(gx)}\" y=\"{SvgSmoothing.F(gy)}\" font-size=\"8\" fill=\"{chipFill}\" text-anchor=\"start\" font-weight=\"600\"><title>{System.Net.WebUtility.HtmlEncode(chipTitle)}</title>{System.Net.WebUtility.HtmlEncode(chipText)}</text>")
+                            }
                             @if (n.Count > 0)
                             {
                                 <circle cx="@SvgSmoothing.F(p.X + p.W / 2 - 10)" cy="@SvgSmoothing.F(p.Y - p.H / 2 + 6)" r="11" fill="var(--primary)" />
@@ -299,8 +309,14 @@
     private sealed record PulseDto(Dictionary<string, string> Gates, SprintDto? Sprint, DateTime? LastActivityAt);
     private sealed record SprintDto(string Id, string Name, int Done, int Total);
 
-    private sealed record FlowDto(List<FlowNodeDto> Nodes, List<FlowEdgeDto> Edges, FlowLayoutDto? LayoutHorizontal);
-    private sealed record FlowNodeDto(string Id, string Label, string Lane, int X, int Y, int Count);
+    private sealed record FlowDto(
+        List<FlowNodeDto> Nodes,
+        List<FlowEdgeDto> Edges,
+        FlowLayoutDto? LayoutHorizontal,
+        Dictionary<string, bool>? GateStates);
+    private sealed record FlowNodeDto(
+        string Id, string Label, string Lane, int X, int Y, int Count,
+        IReadOnlyList<string> Gates);
     private sealed record FlowEdgeDto(string From, string To);
     private sealed class FlowLayoutDto
     {

@@ -44,8 +44,11 @@ public static class DirectedFlowLayout
     private const double RankGap = 110;
     private const double TopMargin = 70;
     private const double NodeH = 46;
+    // Nodes carrying a gate note (plan gate / pre-push verify /
+    // CI+approval gate) grow one caption line taller.
+    private const double NoteExtraH = 18;
 
-    public static Result Compute(WorkflowDefinition definition)
+    public static Result Compute(WorkflowDefinition definition, IReadOnlyDictionary<string, string>? nodeNotes = null)
     {
         var steps = definition.Steps;
         var byId = steps.ToDictionary(s => s.Id, StringComparer.Ordinal);
@@ -110,9 +113,10 @@ public static class DirectedFlowLayout
         var pos = new Dictionary<string, LayoutNode>(StringComparer.Ordinal);
         foreach (var s in steps)
         {
+            var h = nodeNotes is not null && nodeNotes.ContainsKey(s.Id) ? NodeH + NoteExtraH : NodeH;
             var node = onSpine.Contains(s.Id)
-                ? new LayoutNode(s.Id, CenterX, Y(spineRank[s.Id]), W(s.Label), NodeH)
-                : new LayoutNode(s.Id, side[s.Id] == "left" ? LeftX : RightX, Y(rank[s.Id]), W(s.Label), NodeH);
+                ? new LayoutNode(s.Id, CenterX, Y(spineRank[s.Id]), W(s.Label), h)
+                : new LayoutNode(s.Id, side[s.Id] == "left" ? LeftX : RightX, Y(rank[s.Id]), W(s.Label), h);
             nodes.Add(node);
             pos[s.Id] = node;
         }
