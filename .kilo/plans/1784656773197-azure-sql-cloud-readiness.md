@@ -78,7 +78,7 @@ Forge's state database becomes portable: SQLite stays for tests/dev, Azure SQL b
    → qualifier-qualified name, paging, upsert, insert-returning-id, bool/datetime DDL+DML
    mapping, `CREATE TABLE` guard), `SqliteDialect`, `SqlServerDialect`.
    **No Dapper/EF** — keep hand-rolled ADO per repo culture; stores become `DbConnection`-agnostic.
-2. Add `Microsoft.Data.SqlClient` (6.x) to Forge.Core.csproj. Configure
+2. Add `Microsoft.Data.SqlClient` (6.x) to Forge.Core/Forge.Core.csproj. Configure
    `SqlConnection.RetryLogicProvider = SqlConfigurableRetryFactory` (covers 40613 serverless
    resume, 10060, 40197) + factory-level open retry (5 tries, exponential, max ~60s) so a
    paused dev DB resumes transparently.

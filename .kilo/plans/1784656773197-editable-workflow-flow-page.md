@@ -157,7 +157,7 @@ migration, no restart, no rewind of in-flight tasks. Publish/restore emit a
 
 ## Validation (each pass)
 
-- `dotnet build Forge.Core.csproj` clean (TreatWarningsAsErrors).
+- `dotnet build Forge.Core/Forge.Core.csproj` clean (TreatWarningsAsErrors).
 - `dotnet test tests/Forge.Tests/Forge.Tests.csproj` — suite green + new tests per
   pass (listed above).
 - `--check` pre-flight; deploy via publish + `systemctl --user restart forge`;
