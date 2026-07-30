@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -243,5 +243,20 @@ public class HeadroomChatClientFactoryTests : IDisposable
         // real LLM + a running Headroom sidecar.
         _factory.HeadroomProxyBaseUrl = "http://127.0.0.1:8787";
         Assert.Equal("http://127.0.0.1:8787", _factory.HeadroomProxyBaseUrl);
+    }
+
+    [Theory]
+    [InlineData("kilo-gateway", true)]
+    [InlineData("KILO-GATEWAY", true)]
+    [InlineData("kimi", false)]
+    [InlineData("azure", false)]
+    public void HeadroomRewrite_AppliesOnlyToFrontedProvider(string provider, bool expected)
+    {
+        // Observed live 2026-07-29: kimi requests were rewritten to the
+        // kilo-gateway Headroom proxy — OpenAI path 401'd with the
+        // gateway's error, Anthropic /messages 404'd. Only the
+        // provider the proxy fronts may be rewritten.
+        Assert.Equal(expected,
+            OpenAICompatibleChatClientFactory.ShouldRewriteForHeadroom(provider, "kilo-gateway"));
     }
 }

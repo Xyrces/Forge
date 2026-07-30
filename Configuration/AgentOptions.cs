@@ -82,6 +82,16 @@ public sealed record HeadroomOptions
     /// Local URL of the Headroom sidecar proxy.
     /// </summary>
     public string ProxyBaseUrl { get; set; } = "http://127.0.0.1:8787";
+
+    /// <summary>
+    /// The provider the proxy actually fronts (its
+    /// <c>--provider-name</c> / upstream). Only THIS provider's
+    /// baseUrl is rewritten to the proxy — the proxy speaks
+    /// OpenAI chat-completions to a single upstream, so rewriting
+    /// other providers misroutes them (observed live 2026-07-29:
+    /// kimi chat 401/404'd through the kilo-gateway proxy).
+    /// </summary>
+    public string ProviderName { get; set; } = "kilo-gateway";
     /// <summary>
     /// Mode passed to the proxy at boot. <c>token</c>
     /// (default): maximize compression. <c>cache</c>: freeze

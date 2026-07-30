@@ -43,6 +43,20 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     public string? HeadroomProxyBaseUrl { get; set; }
 
     /// <summary>
+    /// The provider the Headroom proxy fronts. The rewrite in
+    /// <see cref="Create"/> applies ONLY to this provider — the
+    /// proxy speaks OpenAI chat-completions to one upstream, so
+    /// rewriting any other provider misroutes it (kimi's requests
+    /// 401/404'd through the kilo-gateway proxy live).
+    /// </summary>
+    public string HeadroomProviderName { get; set; } = "kilo-gateway";
+
+    /// <summary>True when the Headroom baseUrl rewrite applies to this
+    /// provider: only the provider the proxy actually fronts.</summary>
+    internal static bool ShouldRewriteForHeadroom(string providerName, string headroomProviderName) =>
+        string.Equals(providerName, headroomProviderName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Optional <see cref="CostTracker"/> singleton. When set,
     /// the factory wraps every <see cref="IChatClient"/> it
     /// returns in a per-session <see cref="DelegatingChatClient"/>
@@ -99,7 +113,8 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
                 "Set the apiKey field in appsettings.json (providers[].apiKey). " +
                 "For tests, the LLM_API_KEY env var override is read by OpenAICompatibleChatClientFactory.TryFromEnv.");
         }
-        if (!string.IsNullOrEmpty(HeadroomProxyBaseUrl))
+        if (!string.IsNullOrEmpty(HeadroomProxyBaseUrl)
+            && ShouldRewriteForHeadroom(provider.Name, HeadroomProviderName))
         {
             // Rewrite the baseUrl so the OpenAI client talks to
             // Headroom. The Headroom proxy is started with the

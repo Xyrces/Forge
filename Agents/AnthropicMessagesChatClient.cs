@@ -65,7 +65,8 @@ public sealed class AnthropicMessagesChatClient : IChatClient
             // Keep the status + "rate limit" phrasing so
             // RateLimitAwareChatClient / IsLlmAuthFailure classify it.
             var note = (int)resp.StatusCode == 429 ? " rate limit" : string.Empty;
-            throw new HttpRequestException($"HTTP {(int)resp.StatusCode}{note}: {detail}");
+            throw new HttpRequestException(
+                $"HTTP {(int)resp.StatusCode}{note}: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]");
         }
         return ParseResponse(JsonNode.Parse(raw)!.AsObject());
     }

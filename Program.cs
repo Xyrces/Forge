@@ -1072,6 +1072,7 @@ Console.Error.WriteLine(ex.ToString());
             // Headroom. The proxy is started with the upstream URL
             // as a CLI flag, so it knows where to forward.
             factory.HeadroomProxyBaseUrl = headroom.ProxyBaseUrl;
+            factory.HeadroomProviderName = headroom.ProviderName;
             Console.Error.WriteLine(
                 $"Headroom: enabled (proxy={headroom.ProxyBaseUrl}, mode={headroom.Mode}, ccr={headroom.CcrEnabled}); chat client talks to the proxy.");
         }
