@@ -1270,6 +1270,28 @@ Console.Error.WriteLine(ex.ToString());
             openAiFactory.Overrides = roleModelOverrides;
             openAiFactory.RateLimits = modelRateLimits;
             openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
+
+            // Live provider keys: a Secrets-page rotation takes effect
+            // on the next run — no restart (restarts kill in-flight
+            // runs). Boot-time ResolveProviderApiKeysAsync stays for
+            // fail-fast startup + the model catalog.
+            var keyResolver = new Agents.ProviderApiKeyResolver(
+                secretStore,
+                async ct => (await projectStore.ListAsync(ct)).Select(p => p.Id).ToArray(),
+                loggerFactory.CreateLogger<Agents.ProviderApiKeyResolver>());
+            openAiFactory.KeyResolver = keyResolver;
+            var providerNames = llmConfig.Providers.Select(p => p.Name).ToArray();
+            await keyResolver.RefreshAsync(providerNames, CancellationToken.None);
+            _ = Task.Run(async () =>
+            {
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+                try
+                {
+                    while (await timer.WaitForNextTickAsync(externalStop))
+                        await keyResolver.RefreshAsync(providerNames, externalStop);
+                }
+                catch (OperationCanceledException) { }
+            });
         }
 
         // P5.5: auto-extract project memory from the model

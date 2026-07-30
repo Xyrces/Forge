@@ -34,7 +34,11 @@ public sealed class AnthropicMessagesChatClient : IChatClient
         _http.BaseAddress ??= new Uri(baseUrl.TrimEnd('/') + "/");
         if (!string.IsNullOrEmpty(apiKey) && !_http.DefaultRequestHeaders.Contains("x-api-key"))
         {
+            // Send both Anthropic-style and Bearer auth — Anthropic-compatible
+            // gateways vary on which they honor (Kimi-for-Coding's /messages
+            // 404s on x-api-key but answers Bearer).
             _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+            _http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
         }
         if (!_http.DefaultRequestHeaders.Contains("anthropic-version"))
         {

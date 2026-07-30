@@ -69,6 +69,15 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// </summary>
     public Core.ModelRateLimitTracker? RateLimits { get; set; }
 
+    /// <summary>
+    /// Live provider-key snapshot (refreshed on a loop by Program.cs).
+    /// When set, Create swaps in the freshest key for the resolved
+    /// provider — a Secrets-page rotation takes effect on the next run
+    /// without a restart. The client cache's key-hash then builds a
+    /// fresh client; the stale one is never used again.
+    /// </summary>
+    public ProviderApiKeyResolver? KeyResolver { get; set; }
+
     /// <summary>Max simultaneous round-trips per provider (the
     /// "several concurrent agents" cap). Default 2; 0 disables the
     /// permit (cooldown tracking still applies).</summary>
@@ -79,6 +88,10 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     public IChatClient Create(LlmConfig config, AgentType role)
     {
         var (provider, model, _) = config.ResolveEffective(role, Overrides);
+        // Live key first: a rotated secret must also rescue a config
+        // whose placeholder was never boot-resolved.
+        if (KeyResolver?.Get(provider.Name) is { Length: > 0 } freshKey)
+            provider = provider with { ApiKey = freshKey };
         if (string.IsNullOrEmpty(provider.ApiKey))
         {
             throw new InvalidOperationException(
