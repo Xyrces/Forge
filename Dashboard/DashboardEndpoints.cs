@@ -234,17 +234,20 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
             return Results.Json(ToSprintView(created), DashboardJson.Options, statusCode: 201);
         });
 
-        app.MapPatch("/api/sprints/{id}", async (string id, HttpContext ctx) =>
+        app.MapPatch("/api/sprints/{id}", async (string id, HttpContext ctx, string? projectId) =>
         {
+            var store = !string.IsNullOrWhiteSpace(projectId)
+                ? projectContexts?.Find(projectId)?.Sprints ?? sprints
+                : sprints;
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (patch is null) return Results.BadRequest();
             if (patch.TryGetValue("status", out var st) && st?.ToString()?.ToLowerInvariant() == "active")
             {
-                var s = await sprints.SetActiveAsync(id, ctx.RequestAborted);
+                var s = await store.SetActiveAsync(id, ctx.RequestAborted);
                 return Results.Json(ToSprintView(s), DashboardJson.Options);
             }
-            var updated = await sprints.UpdateAsync(id, patch, ctx.RequestAborted);
+            var updated = await store.UpdateAsync(id, patch, ctx.RequestAborted);
             return Results.Json(ToSprintView(updated), DashboardJson.Options);
         });
 
