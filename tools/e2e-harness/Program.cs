@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
@@ -328,18 +328,15 @@ if (useRealLlm)
         var meta = gitHub.PrStore.PrInfo[pr.Number];
         Console.WriteLine($"  PR #{pr.Number}: title=\"{meta.Title}\" head={meta.HeadBranch} base={meta.BaseBranch}");
 
-        // Find the watch task the workflow enqueued. We need
-        // its head SHA + branch to drive the PRWatcher closed
-        // loop. Filter by type=pr-watch (EnqueueWatchExecutor
-        // creates the watch task with this type).
-        var watchTask = (await issues.ListAsync(new IssueFilter(), default))
-            .FirstOrDefault(i => i.Type == "pr-watch" && i.GetMetadata("prNumber") == pr.Number.ToString());
-        if (watchTask is null)
+        // State-driven watching: no pr-watch row exists — the dev
+        // task itself carries prNumber and is driven directly.
+        var watchTask = (await issues.GetAsync(task.Id, default))!;
+        if (watchTask.GetMetadata("prNumber") != pr.Number.ToString())
         {
-            Console.WriteLine("  FAIL: no pr-watch task was enqueued by the workflow");
+            Console.WriteLine($"  FAIL: task {task.Id} has no prNumber metadata (state-driven watching)");
             return 1;
         }
-        Console.WriteLine($"  watch task {watchTask.Id} (prNumber={watchTask.GetMetadata("prNumber")})");
+        Console.WriteLine($"  watched task {watchTask.Id} (prNumber={watchTask.GetMetadata("prNumber")})");
 
         // Read the agent's worktree (the orchestrator's
         // GitWorktreeService creates a worktree per task). The
@@ -403,25 +400,21 @@ if (useRealLlm)
             NullLogger<PRWatcher>.Instance);
         // reviewsOverride returns Approved; PRWatcher sees
         // GreenAndApproved on its first poll.
-        var watchResult = await prWatcher.ProcessWatchTaskAsync(
+        var watchResult = await prWatcher.ProcessWatchedTaskAsync(
             watchTask, CancellationToken.None,
             reviewsOverride: _ => new[] { Octokit.PullRequestReviewState.Approved },
             headShaOverride: _ => headSha);
-        Console.WriteLine($"  PRWatcher.ProcessWatchTaskAsync exit code = {watchResult}");
+        Console.WriteLine($"  PRWatcher.ProcessWatchedTaskAsync exit code = {watchResult}");
 
         // Step 3: verify the closed loop closed. The PR should
-        // have been merged; the original task + watch task should
-        // both be Completed.
+        // have been merged and the task Completed.
         if (!gitHub.PrStore.WasMerged(pr.Number))
         {
             errors.Add("PR was not merged (LocalGitHubService.MergePullRequestAsync never returned true)");
         }
         var finalTask = (await issues.GetAsync(task.Id))!;
-        var finalWatch = (await issues.GetAsync(watchTask.Id))!;
         if (finalTask.Status != IssueStatus.Completed)
             errors.Add($"original task is {finalTask.Status}, expected Completed");
-        if (finalWatch.Status != IssueStatus.Completed)
-            errors.Add($"watch task is {finalWatch.Status}, expected Completed");
         if (finalTask.GetMetadata("prNumber") != pr.Number.ToString())
             errors.Add($"original task has prNumber={finalTask.GetMetadata("prNumber")}, expected {pr.Number}");
 

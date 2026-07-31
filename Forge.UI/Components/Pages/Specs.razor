@@ -28,16 +28,20 @@
         }
     </div>
 
-    @if (SpecsStore.Value.Loading)
+    @if (SpecsStore.Value.Loading && SpecsStore.Value.Rows.Count == 0)
     {
         <div class="page-subtitle">Loading…</div>
     }
     else if (SpecsStore.Value.Error is not null)
     {
-        <div class="page-subtitle">Error: @SpecsStore.Value.Error</div>
+        <div class="banner banner--error">Error: @SpecsStore.Value.Error</div>
     }
     else
     {
+        @if (SpecsStore.Value.Loading)
+        {
+            <div class="page-subtitle">Refreshing…</div>
+        }
         @if (_actionError is not null)
         {
             <div class="banner banner--error">
@@ -73,17 +77,16 @@
                         <td class="mono">@(row.ParentIssueId ?? row.ParentSpecId ?? "—")</td>
                         <td class="mono">@row.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</td>
                         <td @onclick:stopPropagation="true">
-                            @* Non-visual fast-path: Draft | ReadyForDesign | NeedsRevision
-                               -> Approved (operator review), then
-                               Approved/Designed/AssetReady -> Groom (decompose
-                               into stories/tasks). Mirrors /api/specs/{id}/actions. *@
-                            @if (row.Status is "Draft" or "ReadyForDesign" or "NeedsRevision")
+                            @* Buttons read the server-authoritative
+                               flags (Core.SpecActions via the list
+                               payload) — the UI ships no rules copy. *@
+                            @if (row.CanApprove)
                             {
                                 <button class="btn btn--small btn--primary" @onclick="@(() => Approve(row.Id))" disabled="@_acting">
                                     Approve
                                 </button>
                             }
-                            @if (row.Status is "Approved" or "Designed" or "AssetReady")
+                            @if (row.CanStartGrooming)
                             {
                                 <button class="btn btn--small btn--primary" @onclick="@(() => Groom(row.Id))" disabled="@_acting">
                                     @(_groomingId == row.Id ? "Grooming…" : "Groom")
@@ -147,9 +150,9 @@
             }
             _actionError = null;
             LoadForCurrentProject();
-            for (var i = 0; i < 8; i++)
+            for (var i = 0; i < 8 && !_disposeCts.IsCancellationRequested; i++)
             {
-                await Task.Delay(TimeSpan.FromSeconds(15));
+                await Task.Delay(TimeSpan.FromSeconds(15), _disposeCts.Token);
                 LoadForCurrentProject();
             }
         }
@@ -186,7 +189,11 @@
 
     public void Dispose()
     {
+        _disposeCts.Cancel();
+        _disposeCts.Dispose();
         SpecsStore.StateChanged -= OnStateChanged;
         ShellStore.StateChanged -= OnShellChanged;
     }
+
+    private readonly System.Threading.CancellationTokenSource _disposeCts = new();
 }

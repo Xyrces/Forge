@@ -16,7 +16,7 @@ public class OrchestratorStateTests : IDisposable
 
     public OrchestratorStateTests()
     {
-        _dir = Path.Combine(Path.GetTempPath(), $"ph-state-{Guid.NewGuid():N}");
+        _dir = TempRoot.Instance.NewDirectory("state");
         Directory.CreateDirectory(_dir);
         _store = new StateStore(_dir);
     }
@@ -61,7 +61,7 @@ public class OrchestratorStateTests : IDisposable
     public async Task Load_MissingFile_ReturnsDefault()
     {
         // Fresh directory, no state file written.
-        var dir2 = Path.Combine(Path.GetTempPath(), $"ph-state-empty-{Guid.NewGuid():N}");
+        var dir2 = TempRoot.Instance.NewDirectory("state-empty");
         try
         {
             var s = new StateStore(dir2);

@@ -60,15 +60,32 @@ public sealed class StartupRecovery
 
     private readonly Core.TaskStateMachine? _lifecycle;
 
+    /// <summary>Everything the recovery pass needs that is
+    /// project-scoped. The construction-time fields form the PRIMARY
+    /// context; Program.cs passes one context per additional
+    /// registered project (multi-project fix 2026-07-29: a restart
+    /// stranded a second project's InProgress tasks forever because
+    /// recovery only ever scanned the primary store — scanned=0
+    /// while porthorizon task-5/6 sat claimed with no run).</summary>
+    public sealed record ProjectRecoveryContext(
+        string ProjectId,
+        IIssueStore Issues,
+        GitWorktreeService Worktrees,
+        IGitHubRecovery GitHub,
+        string? DefaultBranch = null);
+
+    private ProjectRecoveryContext PrimaryContext =>
+        new("<primary>", _issues, _worktrees, _gitHub);
+
     /// <summary>Report an observed event to the lifecycle machine
     /// (best-effort — never breaks a recovery pass).</summary>
-    private async Task ReportLifecycleAsync(IssueRecord issue, Core.TaskEvent evt, CancellationToken ct)
+    private async Task ReportLifecycleAsync(IssueRecord issue, Core.TaskEvent evt, ProjectRecoveryContext ctx, CancellationToken ct)
     {
         if (_lifecycle is null) return;
         try
         {
-            var fresh = await _issues.GetAsync(issue.Id, ct) ?? issue;
-            await _lifecycle.ReportAsync(fresh, evt, watch: null, hasActiveDevRun: false, ct);
+            var fresh = await ctx.Issues.GetAsync(issue.Id, ct) ?? issue;
+            await _lifecycle.ReportAsync(ctx.Issues, fresh, evt, watch: null, hasActiveDevRun: false, ct);
         }
         catch (Exception ex)
         {
@@ -79,31 +96,41 @@ public sealed class StartupRecovery
     public StartupRecoveryOptions Options => _options;
 
     /// <summary>
-    /// Sweep every in-progress forge issue. Returns the
+    /// Sweep every in-progress forge issue in the primary store AND
+    /// every supplied project context. Returns the
     /// <see cref="RecoveryReportRecord"/> id of the audit row.
     /// </summary>
-    public async Task<long> RunAsync(string? specId = null, CancellationToken ct = default)
+    public async Task<long> RunAsync(
+        string? specId = null,
+        IReadOnlyList<ProjectRecoveryContext>? extraProjects = null,
+        CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
         var report = await _reports.StartAsync(specId, ct);
-        _logger.LogInformation("StartupRecovery: starting report {Id} (specId={Spec})", report.Id, specId ?? "<all>");
+        _logger.LogInformation("StartupRecovery: starting report {Id} (specId={Spec}, projects={Count})",
+            report.Id, specId ?? "<all>", 1 + (extraProjects?.Count ?? 0));
 
         var scanned = 0;
         var replayed = 0;
         var failed = 0;
         var actions = new List<RecoveryActionRecord>();
+        var contexts = new List<ProjectRecoveryContext> { PrimaryContext };
+        if (extraProjects is not null) contexts.AddRange(extraProjects);
         try
         {
-            var candidates = await _issues.ListInProgressForRecoveryAsync(ct);
-            scanned = candidates.Count;
-            foreach (var issue in candidates)
+            foreach (var ctx in contexts)
             {
-                ct.ThrowIfCancellationRequested();
-                if (specId is not null && issue.GetMetadata("specId") != specId) continue;
-                var action = await ReplayAsync(issue, ct);
-                actions.Add(action);
-                if (action.Action == "replay") replayed++;
-                else if (action.Action == "failed") failed++;
+                var candidates = await ctx.Issues.ListInProgressForRecoveryAsync(ct);
+                scanned += candidates.Count;
+                foreach (var issue in candidates)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (specId is not null && issue.GetMetadata("specId") != specId) continue;
+                    var action = await ReplayAsync(issue, ctx, ct);
+                    actions.Add(action);
+                    if (action.Action == "replay") replayed++;
+                    else if (action.Action == "failed") failed++;
+                }
             }
         }
         catch (Exception ex)
@@ -124,11 +151,14 @@ public sealed class StartupRecovery
     }
 
     /// <summary>
-    /// Inspect one issue and replay the next side-effect.
-    /// Returns a <see cref="RecoveryActionRecord"/> describing
-    /// what the recoverer did.
+    /// Inspect one issue and replay the next side-effect (primary
+    /// context). Returns a <see cref="RecoveryActionRecord"/>
+    /// describing what the recoverer did.
     /// </summary>
-    public async Task<RecoveryActionRecord> ReplayAsync(IssueRecord issue, CancellationToken ct = default)
+    public Task<RecoveryActionRecord> ReplayAsync(IssueRecord issue, CancellationToken ct = default)
+        => ReplayAsync(issue, PrimaryContext, ct);
+
+    private async Task<RecoveryActionRecord> ReplayAsync(IssueRecord issue, ProjectRecoveryContext ctx, CancellationToken ct)
     {
         var before = issue.DispatchCheckpoint?.ToDbValue();
         // Per-issue timeout: a single stuck GitHub API call or git
@@ -150,13 +180,13 @@ public sealed class StartupRecovery
 
                 case RecoveryAction.Failed:
                     _logger.LogWarning("Recovery({Id}): failing — {Reason}", issue.Id, decision.Reason);
-                    await _issues.IncrementRecoveryAttemptsAsync(issue.Id, issueCts.Token);
+                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, issueCts.Token);
                     if (issue.RecoveryAttempts + 1 >= _options.MaxAttempts)
                     {
                         // Hard fail: clean up worktree + transition to Failed.
-                        await ReportLifecycleAsync(issue, Core.TaskEvent.BreakerTripped, issueCts.Token);
-                        await TryRemoveWorktreeAsync(issue, issueCts.Token);
-                        await _issues.TransitionAsync(issue.Id, IssueStatus.Failed,
+                        await ReportLifecycleAsync(issue, Core.TaskEvent.BreakerTripped, ctx, issueCts.Token);
+                        await TryRemoveWorktreeAsync(issue, ctx, issueCts.Token);
+                        await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Failed,
                             $"recovered: {decision.Reason}", metadata: new Dictionary<string, object>
                             {
                                 ["lastError"] = $"recovered: {decision.Reason}",
@@ -176,8 +206,8 @@ public sealed class StartupRecovery
                     // The crashed run is a died run in lifecycle
                     // terms (its work may be partially committed);
                     // the replay's re-dispatch reports Dispatched.
-                    await ReportLifecycleAsync(issue, Core.TaskEvent.RunDied, issueCts.Token);
-                    return await ReplayFromCheckpointAsync(issue, decision, issueCts.Token);
+                    await ReportLifecycleAsync(issue, Core.TaskEvent.RunDied, ctx, issueCts.Token);
+                    return await ReplayFromCheckpointAsync(issue, decision, ctx, issueCts.Token);
 
                 default:
                     return new RecoveryActionRecord(issue.Id, before, before, "left_alone",
@@ -201,7 +231,7 @@ public sealed class StartupRecovery
     }
 
     private async Task<RecoveryActionRecord> ReplayFromCheckpointAsync(
-        IssueRecord issue, RecoveryDecision decision, CancellationToken ct)
+        IssueRecord issue, RecoveryDecision decision, ProjectRecoveryContext ctx, CancellationToken ct)
     {
         var before = issue.DispatchCheckpoint?.ToDbValue();
         var worktreePath = issue.GetMetadata("worktreePath");
@@ -211,7 +241,7 @@ public sealed class StartupRecovery
         if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
         {
             // The recoverer can't replay without the worktree. Fail it.
-            await _issues.TransitionAsync(issue.Id, IssueStatus.Failed,
+            await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Failed,
                 $"recovered: worktree missing at {worktreePath}",
                 metadata: new Dictionary<string, object>
                 {
@@ -237,7 +267,7 @@ public sealed class StartupRecovery
                     // InProgress assuming the loop re-claims it —
                     // but the loop only claims Pending issues, so
                     // those orphans sat forever.)
-                    await _issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                    await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
                         "recovery: orphaned at worktree_acquired by restart; re-queued", ct: ct);
                     _events.Publish(RecoveryEvent(issue.Id, "requeued",
                         "worktree_acquired; transitioned to Pending for re-dispatch"));
@@ -246,28 +276,28 @@ public sealed class StartupRecovery
 
                 case DispatchCheckpoint.AgentCompleted:
                     // Commit + push + PR.
-                    await CommitAndPushAsync(issue, worktreePath!, branch, ct);
-                    await TryOpenPrAsync(issue, branch, ct);
-                    await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await _issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
+                    await CommitAndPushAsync(issue, worktreePath!, branch, ctx, ct);
+                    await TryOpenPrAsync(issue, branch, ctx, ct);
+                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
+                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
                     _events.Publish(RecoveryEvent(issue.Id, "replay", "agent_completed -> pr_opened"));
                     return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
 
                 case DispatchCheckpoint.CommitDone:
                     _logger.LogInformation("Recovery({Id}): CommitDone step - pushing", issue.Id);
-                    await _worktrees.PushAsync(worktreePath!, branch, ct);
+                    await ctx.Worktrees.PushAsync(worktreePath!, branch, ct);
                     _logger.LogInformation("Recovery({Id}): push OK - opening PR", issue.Id);
-                    await TryOpenPrAsync(issue, branch, ct);
+                    await TryOpenPrAsync(issue, branch, ctx, ct);
                     _logger.LogInformation("Recovery({Id}): PR OK", issue.Id);
-                    await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await _issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
+                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
+                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
                     _events.Publish(RecoveryEvent(issue.Id, "replay", "commit_done -> pr_opened"));
                     return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
 
                 case DispatchCheckpoint.PushDone:
-                    await TryOpenPrAsync(issue, branch, ct);
-                    await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await _issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
+                    await TryOpenPrAsync(issue, branch, ctx, ct);
+                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
+                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
                     _events.Publish(RecoveryEvent(issue.Id, "replay", "push_done -> pr_opened"));
                     return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
 
@@ -350,9 +380,9 @@ public sealed class StartupRecovery
     }
 
     private async Task CommitAndPushAsync(
-        IssueRecord issue, string worktreePath, string branch, CancellationToken ct)
+        IssueRecord issue, string worktreePath, string branch, ProjectRecoveryContext ctx, CancellationToken ct)
     {
-        var commit = await _worktrees.CommitAllAsync(
+        var commit = await ctx.Worktrees.CommitAllAsync(
             worktreePath, $"Task({issue.Id}): {issue.Title}", ct);
         if (!commit.HasChanges)
         {
@@ -362,48 +392,38 @@ public sealed class StartupRecovery
         {
             _logger.LogInformation("Recovery({Id}): committed on {Branch}", issue.Id, branch);
         }
-        await _worktrees.PushAsync(worktreePath, branch, ct);
-        var headSha = await _worktrees.GetHeadShaAsync(worktreePath, ct);
-        await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
-        await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
+        await ctx.Worktrees.PushAsync(worktreePath, branch, ct);
+        var headSha = await ctx.Worktrees.GetHeadShaAsync(worktreePath, ct);
+        await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
+        await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
         // Record branchSha so the dispatch loop's PR step can pick it up.
-        await _issues.TransitionAsync(issue.Id, issue.Status, error: null,
+        await ctx.Issues.TransitionAsync(issue.Id, issue.Status, error: null,
             metadata: new Dictionary<string, object> { ["branchSha"] = headSha }, ct: ct);
     }
 
-    private async Task TryOpenPrAsync(IssueRecord issue, string branch, CancellationToken ct)
+    private async Task TryOpenPrAsync(IssueRecord issue, string branch, ProjectRecoveryContext ctx, CancellationToken ct)
     {
-        var pr = await _gitHub.CreatePullRequestAsync(
+        var pr = await ctx.GitHub.CreatePullRequestAsync(
             title: $"[{issue.Type}] {issue.Title}",
             body: $"Task: {issue.Id}\n\n(recovered by StartupRecovery after a crash)\n",
             headBranch: branch,
-            baseBranch: "main",
+            baseBranch: ctx.DefaultBranch ?? "main",
             cancellationToken: ct);
-        await _issues.TransitionAsync(issue.Id, issue.Status, error: null,
-            metadata: new Dictionary<string, object> { ["prNumber"] = pr.Number }, ct: ct);
-        _logger.LogInformation("Recovery({Id}): opened PR #{Pr}", issue.Id, pr.Number);
-
-        // Mirror OrchestratorAgent.EnqueueWatchIssueAsync so the
-        // PRWatcher actually observes the recovered PR; without a
-        // pr-watch issue the PR would sit unobserved forever.
-        var worktreePath = issue.GetMetadata("worktreePath") ?? string.Empty;
-        var watch = await _issues.CreateAsync(new Core.NewIssue(
-            Type: AgentTaskTypes.PrWatch,
-            Title: $"Watch PR #{pr.Number} for {issue.Id}",
-            Description: $"Wait for PR #{pr.Number} to be reviewed.",
-            Metadata: new Dictionary<string, object>
+        await ctx.Issues.TransitionAsync(issue.Id, issue.Status, error: null,
+            metadata: new Dictionary<string, object>
             {
                 ["prNumber"] = pr.Number,
-                ["branch"] = branch,
-                ["worktreePath"] = worktreePath,
-                ["taskId"] = issue.Id,
-            }), ct);
-        _logger.LogInformation("Recovery({Id}): enqueued watch issue {WatchId} for PR #{Pr}", issue.Id, watch.Id, pr.Number);
+                ["prOpenedAt"] = DateTime.UtcNow.ToString("O"),
+            }, ct: ct);
+        _logger.LogInformation("Recovery({Id}): opened PR #{Pr}", issue.Id, pr.Number);
+
+        // No watch row: the state-driven sweep discovers watched
+        // tasks by their prNumber metadata (written above).
     }
 
-    private async Task TryRemoveWorktreeAsync(IssueRecord issue, CancellationToken ct)
+    private async Task TryRemoveWorktreeAsync(IssueRecord issue, ProjectRecoveryContext ctx, CancellationToken ct)
     {
-        try { await _worktrees.RemoveAsync(issue.Id, ct); }
+        try { await ctx.Worktrees.RemoveAsync(issue.Id, ct); }
         catch (Exception ex) { _logger.LogWarning(ex, "Recovery({Id}): worktree removal failed", issue.Id); }
     }
 

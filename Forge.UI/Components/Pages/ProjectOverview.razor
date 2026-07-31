@@ -33,9 +33,9 @@
     {
         <div class="filter-bar">
             <button class="chip chip--active">Overview</button>
-            <a class="chip" href="@($"/projects/{Id}/backlog")">Backlog</a>
-            <a class="chip" href="@($"/projects/{Id}/sprints")">Sprints</a>
-            <a class="chip" href="@($"/projects/{Id}/tasks")">Tasks</a>
+            <button class="chip" @onclick='() => GoTo("/backlog")'>Backlog</button>
+            <button class="chip" @onclick='() => GoTo("/sprints")'>Sprints</button>
+            <button class="chip" @onclick='() => GoTo("/tasks")'>Tasks</button>
             <a class="chip" href="@($"/projects/{Id}/secrets")">Secrets</a>
         </div>
 
@@ -56,14 +56,23 @@
                 </div>
                 <div class="metric">
                     <div class="metric__label">Failed</div>
-                    <div class="metric__value">@proj.Failed</div>
+                    <div class="metric__value">
+                        @if (proj.Failed > 0)
+                        {
+                            <span class="pill pill--failed">@proj.Failed needs you</span>
+                        }
+                        else
+                        {
+                            @proj.Failed
+                        }
+                    </div>
                 </div>
             </div>
         </section>
 
         <section class="overview-section">
             <h2>Concurrency slots</h2>
-            <p class="page-subtitle page-subtitle--meta">Per-project in-process semaphores. Adjust via <code>PATCH /api/projects/{Id}/slots/{role}</code> with body <code>{ "max": N }</code>.</p>
+            <p class="page-subtitle page-subtitle--meta">Per-project in-process semaphores. Adjust via <code>PATCH /api/projects/@Id/slots/{role}</code> with body <code>{ "max": N }</code>.</p>
             <div class="slot-grid">
                 @foreach (var s in proj.Slots)
                 {
@@ -97,7 +106,7 @@
                     @foreach (var role in AllRoles(proj))
                     {
                         var isOverride = _roleEdits.ContainsKey(role);
-                        var effective = isOverride ? _roleEdits[role] : DefaultRoleCaps.GetValueOrDefault(role, 1);
+                        var effective = isOverride ? _roleEdits[role] : DefaultsFor(proj).GetValueOrDefault(role, 1);
                         <tr>
                             <td class="mono">@role</td>
                             <td>
@@ -116,7 +125,7 @@
                 <button class="btn btn--primary" @onclick="SaveRoles" disabled="@ProjectsStore.Value.RolesSaving">
                     @(ProjectsStore.Value.RolesSaving ? "Saving…" : "Save role caps")
                 </button>
-                <button class="btn" @onclick="ResetRoleEdits" disabled="@ProjectsStore.Value.RolesSaving">Reset to defaults</button>
+                <button class="btn" @onclick="ResetRoleEdits" disabled="@ProjectsStore.Value.RolesSaving" title="Discard unsaved edits and reload the current values">Discard edits</button>
             </div>
         </section>
     }
@@ -125,10 +134,22 @@
 @code {
     [Parameter] public string Id { get; set; } = string.Empty;
 
-    // Mirror of Configuration.DefaultProjectRoles.Default — used only to
-    // label rows as "default" vs "override" and to seed the edit grid.
-    // The server remains authoritative when it applies caps.
-    private static readonly Dictionary<string, int> DefaultRoleCaps = new(StringComparer.OrdinalIgnoreCase)
+    // Tab chips: there are no per-project routes for these boards —
+    // select THIS project in the shell store and go to the global
+    // page (was: hrefs to /projects/{id}/backlog|sprints|tasks that
+    // 404'd — found in the 2026-07-27 UI audit).
+    private void GoTo(string route)
+    {
+        Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.SelectProjectAction(Id));
+        Nav.NavigateTo(route);
+    }
+
+    // Server-provided defaults (ProjectDto.DefaultRoleCaps) with a
+    // last-resort mirror for older servers (audit: silent drift risk).
+    private IReadOnlyDictionary<string, int> DefaultsFor(Forge.Dashboard.Features.Projects.ProjectsEndpointRow proj) =>
+        proj.DefaultRoleCaps ?? DefaultRoleCapsFallback;
+
+    private static readonly Dictionary<string, int> DefaultRoleCapsFallback = new(StringComparer.OrdinalIgnoreCase)
     {
         ["coredev"] = 2,
         ["clientdev"] = 2,
@@ -168,7 +189,7 @@
     }
 
     private IEnumerable<string> AllRoles(ProjectsEndpointRow proj) =>
-        DefaultRoleCaps.Keys
+        DefaultsFor(proj).Keys
             .Concat(proj.Roles.Keys)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(r => r, StringComparer.OrdinalIgnoreCase);
@@ -178,7 +199,8 @@
         if (e.Value is string s && int.TryParse(s, out var n))
         {
             n = Math.Clamp(n, 1, 32);
-            if (DefaultRoleCaps.TryGetValue(role, out var d) && d == n)
+            var proj = ProjectsStore.Value.Projects.FirstOrDefault(p => string.Equals(p.Id, Id, StringComparison.OrdinalIgnoreCase));
+            if (proj is not null && DefaultsFor(proj).TryGetValue(role, out var d) && d == n)
                 _roleEdits.Remove(role); // same as default → no override
             else
                 _roleEdits[role] = n;

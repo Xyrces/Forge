@@ -80,7 +80,8 @@
                     </div>
                 }
                 <div class="intake-input">
-                    <input class="intake-input__field" @bind="_draft" placeholder="Type your message..." />
+                    <input class="intake-input__field" @bind="_draft" placeholder="Type your message..."
+                           @onkeydown="@(async e => { if (e.Key == "Enter" && !_sending) await SendMessage(); })" />
                     <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">Send</button>
                 </div>
             }
@@ -148,7 +149,7 @@
                                 @foreach (var mod in _graph.Files.GroupBy(f => f.Module).OrderByDescending(g => g.Count()).Take(20))
                                 {
                                     <div class="intake-module">
-                                        <span class="mono">@(string.IsNullOrEmpty(mod.Key) ? "(root)" : mod.Key)</span>
+                                        <span class="mono">@(string.IsNullOrEmpty(mod.Key) || mod.Key == "<root>" ? "(root)" : mod.Key)</span>
                                         <span class="page-subtitle">@mod.Count() files</span>
                                     </div>
                                 }
@@ -176,7 +177,7 @@
                         {
                             <div class="intake-memory-row">
                                 <span class="mono">@m.Key</span>
-                                <span class="page-subtitle">@Truncate(m.Value, 120)</span>
+                                <span class="page-subtitle">@Truncate(m.Body, 120)</span>
                             </div>
                         }
                     }
@@ -207,7 +208,7 @@
     public sealed record SessionSpecDto(string Id, string ProjectId, string Title, string Status, int CurrentVersion, string? Body);
     public sealed record GraphDto(string RepoRoot, string RepoSha, DateTime BuiltAt, int FileCount, int ImportCount, int ProjectEdgeCount, List<GraphFileDto> Files);
     public sealed record GraphFileDto(string Path, string Module, string Language);
-    public sealed record MemoryDto(string Key, string Value, DateTime UpdatedAt);
+    public sealed record MemoryDto(string Key, string Body, DateTime UpdatedAt);
 
     private void SelectTab(string tab)
     {
@@ -300,14 +301,27 @@
 
     protected override async Task OnInitializedAsync()
     {
+        ShellStore.StateChanged += OnShellChanged;
         await ReloadSessions();
+    }
+
+    private string? _loadedProject;
+
+    private void OnShellChanged(object? sender, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+            _ = InvokeAsync(ReloadSessions);
     }
 
     private async Task ReloadSessions()
     {
         try
         {
-            _sessions = await Http.GetFromJsonAsync<List<SessionDto>>("/api/intake/sessions");
+            var projectId = ShellStore.Value.CurrentProjectId;
+            _loadedProject = projectId;
+            _sessions = await Http.GetFromJsonAsync<List<SessionDto>>(
+                string.IsNullOrEmpty(projectId) ? "/api/intake/sessions"
+                    : $"/api/intake/sessions?project={Uri.EscapeDataString(projectId)}");
             if (_sessions is { Count: > 0 } && _activeSessionId is null)
             {
                 await SetActive(_sessions[0].Id);
@@ -408,5 +422,8 @@
 
     private Task RebuildGraph() => LoadGraph(forceRebuild: true);
 
-    public void Dispose() { }
+    public void Dispose()
+    {
+        ShellStore.StateChanged -= OnShellChanged;
+    }
 }

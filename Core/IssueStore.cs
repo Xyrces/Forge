@@ -1,4 +1,6 @@
-﻿using Microsoft.Data.Sqlite;
+﻿using System.Data.Common;
+using Forge.Core.Db;
+using Microsoft.Data.Sqlite;
 using System.Text.Json;
 
 namespace Forge.Core;
@@ -158,6 +160,15 @@ public interface IIssueStore
     /// operator clears it). Cheap: indexed lookup, single round-trip.
     /// </summary>
     Task<bool> IsBlockedAsync(string id, CancellationToken ct = default);
+    /// <summary>
+    /// The set of OPEN blocker ids across all <c>blocks</c> edges
+    /// pointing at any of <paramref name="blockedIds"/> — used by
+    /// sprint injection to find ad-hoc tasks that unblock ongoing
+    /// sprint work. Open = blocker status NOT IN
+    /// ('Completed','Closed') (Failed stays open until the operator
+    /// clears it, per the ReadyAsync rule).
+    /// </summary>
+    Task<HashSet<string>> ListBlockersOfAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -171,25 +182,40 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 23;
+    public const int CurrentSchemaVersion = 25;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
 
     public string DbPath => _dbPath;
 
+    /// <summary>Shared connection factory — sibling stores (ProjectStore,
+    /// SecretStore, …) hang off the same logical database via this.</summary>
+    public IDbConnectionFactory Db => _db;
+
     public IssueStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
     {
         _dbPath = dbPath;
-        Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
             Pooling = true,
         }.ToString();
+    }
+
+    public IssueStore(IDbConnectionFactory db)
+    {
+        _db = db;
+        _dbPath = "";
         InitializeSchema();
     }
 
@@ -204,7 +230,18 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
     private void InitializeSchema()
     {
-        using var conn = Open();
+        if (_db.Provider == ForgeDbProvider.SqlServer)
+        {
+            InitializeSchemaSqlServer();
+            return;
+        }
+        InitializeSchemaSqlite();
+    }
+
+    private void InitializeSchemaSqlite()
+    {
+        using var conn = new SqliteConnection(_db.ConnectionString);
+        conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             PRAGMA journal_mode = WAL;
@@ -316,6 +353,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             -- 30 days / newest 50 per task — transcripts are the
             -- high-volume data and the 35GB budget is protected by
             -- pruning, not by truncating content.
+            -- v25: phase (plan gate / implementing / verifying n/3 /
+            -- reviewing — the dashboard's "what is the run doing
+            -- right now" label) + resumed_session (the run resumed a
+            -- persisted MAF session instead of starting cold).
             CREATE TABLE IF NOT EXISTS agent_run (
                 id               TEXT PRIMARY KEY,
                 task_id          TEXT,
@@ -330,7 +371,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 text_chars       INTEGER,
                 error            TEXT,
                 transcript_json  TEXT,
-                last_activity_at TEXT
+                last_activity_at TEXT,
+                phase            TEXT,
+                resumed_session  INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_agent_run_started ON agent_run(started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run(task_id);
@@ -844,6 +887,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // be given to any set of roles; an empty set means global).
         ApplyV23SkillRoles(conn);
 
+        // v24 (post-init): skill.project_id + skill.source — per-project
+        // skills. project_id NULL = global (every project's runs see it);
+        // source 'forge' = UI-owned (dashboard edits win), 'repo' =
+        // imported from a project's .kilo/skills (repo is the source of
+        // truth; the dashboard is read-only for these).
+        ApplyV24SkillProjectScope(conn);
+
+        // v25 (post-init): agent_run.phase + agent_run.resumed_session —
+        // the run's live phase label (plan gate / implementing /
+        // verifying n/3 / reviewing) and the warm-session marker for
+        // pause/resume runs.
+        ApplyV25AgentRunPhase(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -855,6 +911,532 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             stamp.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
             stamp.ExecuteNonQuery();
         }
+    }
+
+    /// <summary>
+    /// SQL Server schema: fresh-create at <see cref="CurrentSchemaVersion"/>
+    /// in one shot. The SQLite v1→v24 migration chain is NOT ported — Azure
+    /// databases start at the final shape (roles_json, last_activity_at,
+    /// skill.roles + skill.project_id/source, agent.agent_name all present
+    /// from birth). Tables are
+    /// created inside the factory's per-project schema qualifier.
+    /// Integer column types match reader accessors exactly:
+    /// GetInt32-read columns are INT, identity/GetInt64 columns BIGINT.
+    /// </summary>
+    private void InitializeSchemaSqlServer()
+    {
+        var d = (SqlServerDialect)_db.Dialect;
+        var q = d.Qualifier;
+        using var conn = _db.Open();
+        using (var ensure = conn.CreateCommand())
+        {
+            ensure.CommandText = $"IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = '{q}') EXEC('CREATE SCHEMA [{q}]');";
+            ensure.ExecuteNonQuery();
+        }
+        using var cmd = conn.CreateCommand();
+        // Profile split (SQL Server): the Core schema gets only
+        // registry/global tables (project, secret, agent, skill) — a
+        // registry anchor never carries agent_run & co; a Workload
+        // project schema gets only the 26 workload tables. schema_version
+        // exists in both (per-schema version stamp, read by --check).
+        if (_db.Profile == ForgeSchemaProfile.Core)
+        {
+            cmd.CommandText = $$"""
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'schema_version')
+            CREATE TABLE {{d.Table("schema_version")}} (
+                version    BIGINT NOT NULL PRIMARY KEY,
+                applied_at NVARCHAR(64) NOT NULL
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'agent')
+            CREATE TABLE {{d.Table("agent")}} (
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
+                agent_name   NVARCHAR(128) NOT NULL UNIQUE,
+                display_name NVARCHAR(MAX) NOT NULL,
+                scope        NVARCHAR(MAX) NOT NULL DEFAULT '',
+                description  NVARCHAR(MAX) NULL,
+                enabled      INT           NOT NULL DEFAULT 1,
+                config_json  NVARCHAR(MAX) NOT NULL DEFAULT '{}',
+                created_at   NVARCHAR(64)  NOT NULL,
+                updated_at   NVARCHAR(64)  NOT NULL
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'project')
+            CREATE TABLE {{d.Table("project")}} (
+                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
+                name            NVARCHAR(MAX) NOT NULL,
+                repo_url        NVARCHAR(MAX) NOT NULL,
+                default_branch  NVARCHAR(128) NOT NULL DEFAULT 'main',
+                local_path      NVARCHAR(MAX) NULL,
+                created_at      NVARCHAR(64)  NOT NULL,
+                updated_at      NVARCHAR(64)  NOT NULL,
+                last_synced_at  NVARCHAR(64)  NULL,
+                last_sync_error NVARCHAR(MAX) NULL,
+                roles_json      NVARCHAR(MAX) NOT NULL DEFAULT '{}'
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'secret')
+            CREATE TABLE {{d.Table("secret")}} (
+                id          NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("project")}}(id) ON DELETE CASCADE,
+                kind        NVARCHAR(128) NOT NULL,
+                ciphertext  VARBINARY(MAX) NOT NULL,
+                created_at  NVARCHAR(64)  NOT NULL,
+                updated_at  NVARCHAR(64)  NOT NULL,
+                UNIQUE (project_id, kind)
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'skill')
+            CREATE TABLE {{d.Table("skill")}} (
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
+                name         NVARCHAR(128) NOT NULL,
+                description  NVARCHAR(MAX) NULL,
+                body         NVARCHAR(MAX) NOT NULL,
+                agent_id     NVARCHAR(128) NULL REFERENCES {{d.Table("agent")}}(id) ON DELETE CASCADE,
+                enabled      INT           NOT NULL DEFAULT 1,
+                created_at   NVARCHAR(64)  NOT NULL,
+                updated_at   NVARCHAR(64)  NOT NULL,
+                roles        NVARCHAR(MAX) NULL,
+                project_id   NVARCHAR(128) NULL,
+                source       NVARCHAR(16)  NOT NULL DEFAULT 'forge',
+                UNIQUE (name, project_id)
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_skill_agent' AND object_id = OBJECT_ID('{{d.Table("skill")}}'))
+                CREATE INDEX ix_skill_agent ON {{d.Table("skill")}}(agent_id);
+            """;
+            cmd.ExecuteNonQuery();
+        }
+        else
+        {
+        cmd.CommandText = $$"""
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue')
+            CREATE TABLE {{d.Table("issue")}} (
+                id                NVARCHAR(128) NOT NULL PRIMARY KEY,
+                short_id          NVARCHAR(128) NOT NULL,
+                type              NVARCHAR(128) NOT NULL,
+                title             NVARCHAR(MAX) NOT NULL,
+                description       NVARCHAR(MAX) NULL,
+                status            NVARCHAR(64)  NOT NULL,
+                priority          INT           NOT NULL DEFAULT 2,
+                assignee          NVARCHAR(128) NULL,
+                created_at        NVARCHAR(64)  NOT NULL,
+                updated_at        NVARCHAR(64)  NOT NULL,
+                closed_at         NVARCHAR(64)  NULL,
+                metadata_json     NVARCHAR(MAX) NOT NULL DEFAULT '{}',
+                parent_issue_id   NVARCHAR(128) NULL,
+                dispatch_checkpoint NVARCHAR(64) NULL,
+                checkpoint_at     NVARCHAR(64)  NULL,
+                recovery_attempts INT           NOT NULL DEFAULT 0
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_status' AND object_id = OBJECT_ID('{{d.Table("issue")}}'))
+                CREATE INDEX ix_issue_status     ON {{d.Table("issue")}}(status);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_assignee' AND object_id = OBJECT_ID('{{d.Table("issue")}}'))
+                CREATE INDEX ix_issue_assignee   ON {{d.Table("issue")}}(assignee);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_updated_at' AND object_id = OBJECT_ID('{{d.Table("issue")}}'))
+                CREATE INDEX ix_issue_updated_at ON {{d.Table("issue")}}(updated_at);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_type_short' AND object_id = OBJECT_ID('{{d.Table("issue")}}'))
+                CREATE INDEX ix_issue_type_short ON {{d.Table("issue")}}(type, short_id);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_parent' AND object_id = OBJECT_ID('{{d.Table("issue")}}'))
+                CREATE INDEX ix_issue_parent     ON {{d.Table("issue")}}(parent_issue_id);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_checkpoint' AND object_id = OBJECT_ID('{{d.Table("issue")}}'))
+                CREATE INDEX ix_issue_checkpoint ON {{d.Table("issue")}}(dispatch_checkpoint, status);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue_event')
+            CREATE TABLE {{d.Table("issue_event")}} (
+                id          BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                issue_id    NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
+                ts          NVARCHAR(64)  NOT NULL,
+                actor       NVARCHAR(128) NULL,
+                kind        NVARCHAR(128) NOT NULL,
+                detail      NVARCHAR(MAX) NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_event_issue' AND object_id = OBJECT_ID('{{d.Table("issue_event")}}'))
+                CREATE INDEX ix_issue_event_issue ON {{d.Table("issue_event")}}(issue_id, ts);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue_seq')
+            CREATE TABLE {{d.Table("issue_seq")}} (
+                type       NVARCHAR(128) NOT NULL PRIMARY KEY,
+                next_short BIGINT NOT NULL DEFAULT 1
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'schema_version')
+            CREATE TABLE {{d.Table("schema_version")}} (
+                version    BIGINT NOT NULL PRIMARY KEY,
+                applied_at NVARCHAR(64) NOT NULL
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'agent_run')
+            CREATE TABLE {{d.Table("agent_run")}} (
+                id               NVARCHAR(128) NOT NULL PRIMARY KEY,
+                task_id          NVARCHAR(128) NULL,
+                role             NVARCHAR(128) NOT NULL,
+                model            NVARCHAR(128) NULL,
+                status           NVARCHAR(64)  NOT NULL,
+                started_at       NVARCHAR(64)  NOT NULL,
+                finished_at      NVARCHAR(64)  NULL,
+                duration_ms      BIGINT        NULL,
+                message_count    INT           NULL,
+                tool_call_count  INT           NULL,
+                text_chars       INT           NULL,
+                error            NVARCHAR(MAX) NULL,
+                transcript_json  NVARCHAR(MAX) NULL,
+                last_activity_at NVARCHAR(64)  NULL,
+                phase            NVARCHAR(64)  NULL,
+                resumed_session  INT           NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_agent_run_started' AND object_id = OBJECT_ID('{{d.Table("agent_run")}}'))
+                CREATE INDEX idx_agent_run_started ON {{d.Table("agent_run")}}(started_at DESC);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_agent_run_task' AND object_id = OBJECT_ID('{{d.Table("agent_run")}}'))
+                CREATE INDEX idx_agent_run_task ON {{d.Table("agent_run")}}(task_id);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'sprint')
+            CREATE TABLE {{d.Table("sprint")}} (
+                id           NVARCHAR(128) NOT NULL PRIMARY KEY,
+                name         NVARCHAR(MAX) NOT NULL,
+                goal         NVARCHAR(MAX) NOT NULL,
+                start_date   NVARCHAR(64)  NOT NULL,
+                end_date     NVARCHAR(64)  NOT NULL,
+                status       NVARCHAR(64)  NOT NULL DEFAULT 'active',
+                created_at   NVARCHAR(64)  NOT NULL,
+                updated_at   NVARCHAR(64)  NOT NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_sprint_status' AND object_id = OBJECT_ID('{{d.Table("sprint")}}'))
+                CREATE INDEX ix_sprint_status ON {{d.Table("sprint")}}(status);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'uq_sprint_active' AND object_id = OBJECT_ID('{{d.Table("sprint")}}'))
+                CREATE UNIQUE INDEX uq_sprint_active ON {{d.Table("sprint")}}(status) WHERE status = 'active';
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'sprint_issue')
+            CREATE TABLE {{d.Table("sprint_issue")}} (
+                sprint_id   NVARCHAR(128) NOT NULL REFERENCES {{d.Table("sprint")}}(id) ON DELETE CASCADE,
+                issue_id    NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE NO ACTION,
+                added_at    NVARCHAR(64)  NOT NULL,
+                PRIMARY KEY (sprint_id, issue_id)
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_sprint_issue_sprint' AND object_id = OBJECT_ID('{{d.Table("sprint_issue")}}'))
+                CREATE INDEX ix_sprint_issue_sprint ON {{d.Table("sprint_issue")}}(sprint_id);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'intake_session')
+            CREATE TABLE {{d.Table("intake_session")}} (
+                id         NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id NVARCHAR(128) NOT NULL,
+                title      NVARCHAR(MAX) NOT NULL,
+                created_at NVARCHAR(64)  NOT NULL,
+                updated_at NVARCHAR(64)  NOT NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_intake_session_project' AND object_id = OBJECT_ID('{{d.Table("intake_session")}}'))
+                CREATE INDEX ix_intake_session_project ON {{d.Table("intake_session")}}(project_id, updated_at DESC);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'intake_message')
+            CREATE TABLE {{d.Table("intake_message")}} (
+                id                   BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                session_id           NVARCHAR(128) NOT NULL REFERENCES {{d.Table("intake_session")}}(id) ON DELETE CASCADE,
+                role                 NVARCHAR(128) NOT NULL,
+                content              NVARCHAR(MAX) NOT NULL,
+                ts                   NVARCHAR(64)  NOT NULL,
+                proposed_epic_id     NVARCHAR(128) NULL,
+                proposed_epic_title  NVARCHAR(MAX) NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_intake_message_session' AND object_id = OBJECT_ID('{{d.Table("intake_message")}}'))
+                CREATE INDEX ix_intake_message_session ON {{d.Table("intake_message")}}(session_id, id);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec')
+            CREATE TABLE {{d.Table("spec")}} (
+                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id      NVARCHAR(128) NOT NULL,
+                title           NVARCHAR(MAX) NOT NULL,
+                status          NVARCHAR(64)  NOT NULL,
+                parent_issue_id NVARCHAR(128) NULL,
+                parent_spec_id  NVARCHAR(128) NULL,
+                current_version INT           NOT NULL DEFAULT 1,
+                created_at      NVARCHAR(64)  NOT NULL,
+                updated_at      NVARCHAR(64)  NOT NULL,
+                extracted_at    NVARCHAR(64)  NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_spec_project' AND object_id = OBJECT_ID('{{d.Table("spec")}}'))
+                CREATE INDEX ix_spec_project ON {{d.Table("spec")}}(project_id, updated_at DESC);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_spec_status' AND object_id = OBJECT_ID('{{d.Table("spec")}}'))
+                CREATE INDEX ix_spec_status ON {{d.Table("spec")}}(status);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_version')
+            CREATE TABLE {{d.Table("spec_version")}} (
+                spec_id     NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                version     INT           NOT NULL,
+                body        NVARCHAR(MAX) NOT NULL,
+                author      NVARCHAR(128) NULL,
+                created_at  NVARCHAR(64)  NOT NULL,
+                PRIMARY KEY (spec_id, version)
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_spec_version_spec' AND object_id = OBJECT_ID('{{d.Table("spec_version")}}'))
+                CREATE INDEX ix_spec_version_spec ON {{d.Table("spec_version")}}(spec_id, version DESC);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_diagram')
+            CREATE TABLE {{d.Table("spec_diagram")}} (
+                spec_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                ordinal  INT           NOT NULL,
+                kind     NVARCHAR(128) NOT NULL,
+                source   NVARCHAR(MAX) NOT NULL,
+                title    NVARCHAR(MAX) NULL,
+                PRIMARY KEY (spec_id, ordinal)
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_touches')
+            CREATE TABLE {{d.Table("spec_touches")}} (
+                spec_id     NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                module_id   NVARCHAR(128) NOT NULL,
+                source      NVARCHAR(128) NOT NULL,
+                rationale   NVARCHAR(MAX) NULL,
+                created_at  NVARCHAR(64)  NOT NULL,
+                PRIMARY KEY (spec_id, module_id, source)
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_spec_touches_module' AND object_id = OBJECT_ID('{{d.Table("spec_touches")}}'))
+                CREATE INDEX ix_spec_touches_module ON {{d.Table("spec_touches")}}(module_id);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'spec_dep')
+            CREATE TABLE {{d.Table("spec_dep")}} (
+                from_spec_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("spec")}}(id) ON DELETE CASCADE,
+                to_spec_id    NVARCHAR(128) NOT NULL,
+                kind          NVARCHAR(128) NOT NULL,
+                rationale     NVARCHAR(MAX) NULL,
+                source        NVARCHAR(128) NOT NULL,
+                created_at    NVARCHAR(64)  NOT NULL,
+                PRIMARY KEY (from_spec_id, to_spec_id, kind)
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_spec_dep_to' AND object_id = OBJECT_ID('{{d.Table("spec_dep")}}'))
+                CREATE INDEX ix_spec_dep_to ON {{d.Table("spec_dep")}}(to_spec_id);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'codebase_graph_cache')
+            CREATE TABLE {{d.Table("codebase_graph_cache")}} (
+                repo_sha    NVARCHAR(128) NOT NULL PRIMARY KEY,
+                built_at    NVARCHAR(64)  NOT NULL,
+                file_count  INT           NOT NULL,
+                edge_count  INT           NOT NULL
+            );
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue_dep')
+            CREATE TABLE {{d.Table("issue_dep")}} (
+                blocker_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE CASCADE,
+                blocked_id  NVARCHAR(128) NOT NULL REFERENCES {{d.Table("issue")}}(id) ON DELETE NO ACTION,
+                kind        NVARCHAR(64)  NOT NULL DEFAULT 'blocks',
+                created_at  NVARCHAR(64)  NOT NULL,
+                PRIMARY KEY (blocker_id, blocked_id, kind)
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_dep_blocked' AND object_id = OBJECT_ID('{{d.Table("issue_dep")}}'))
+                CREATE INDEX ix_issue_dep_blocked ON {{d.Table("issue_dep")}}(blocked_id, kind);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_dep_blocker' AND object_id = OBJECT_ID('{{d.Table("issue_dep")}}'))
+                CREATE INDEX ix_issue_dep_blocker ON {{d.Table("issue_dep")}}(blocker_id, kind);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'memory')
+            CREATE TABLE {{d.Table("memory")}} (
+                id          BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts          NVARCHAR(64)  NOT NULL,
+                [key]       NVARCHAR(128) NOT NULL UNIQUE,
+                body        NVARCHAR(MAX) NOT NULL,
+                ttl_days    INT           NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_memory_key' AND object_id = OBJECT_ID('{{d.Table("memory")}}'))
+                CREATE INDEX ix_memory_key ON {{d.Table("memory")}}([key]);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'issue_groomer_run')
+            CREATE TABLE {{d.Table("issue_groomer_run")}} (
+                id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts                  NVARCHAR(64)  NOT NULL,
+                spec_id             NVARCHAR(128) NOT NULL,
+                trigger_kind        NVARCHAR(64)  NOT NULL,
+                status              NVARCHAR(64)  NOT NULL,
+                stories_produced    INT           NOT NULL DEFAULT 0,
+                tasks_produced      INT           NOT NULL DEFAULT 0,
+                error               NVARCHAR(MAX) NULL,
+                duration_ms         INT           NOT NULL DEFAULT 0
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_groomer_run_spec' AND object_id = OBJECT_ID('{{d.Table("issue_groomer_run")}}'))
+                CREATE INDEX ix_issue_groomer_run_spec ON {{d.Table("issue_groomer_run")}}(spec_id, ts);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_issue_groomer_run_ts' AND object_id = OBJECT_ID('{{d.Table("issue_groomer_run")}}'))
+                CREATE INDEX ix_issue_groomer_run_ts ON {{d.Table("issue_groomer_run")}}(ts);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'design_artifact')
+            CREATE TABLE {{d.Table("design_artifact")}} (
+                id                  NVARCHAR(128) NOT NULL PRIMARY KEY,
+                spec_id             NVARCHAR(128) NOT NULL,
+                kind                NVARCHAR(64)  NOT NULL,
+                title               NVARCHAR(MAX) NOT NULL,
+                body                NVARCHAR(MAX) NOT NULL,
+                body_kind           NVARCHAR(64)  NOT NULL,
+                references_json     NVARCHAR(MAX) NULL,
+                parent_artifact_id  NVARCHAR(128) NULL,
+                status              NVARCHAR(64)  NOT NULL DEFAULT 'draft',
+                author              NVARCHAR(128) NOT NULL,
+                created_at          NVARCHAR(64)  NOT NULL,
+                updated_at          NVARCHAR(64)  NOT NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_design_artifact_spec' AND object_id = OBJECT_ID('{{d.Table("design_artifact")}}'))
+                CREATE INDEX ix_design_artifact_spec ON {{d.Table("design_artifact")}}(spec_id, status);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'designer_run')
+            CREATE TABLE {{d.Table("designer_run")}} (
+                id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts                  NVARCHAR(64)  NOT NULL,
+                spec_id             NVARCHAR(128) NOT NULL,
+                trigger_kind        NVARCHAR(64)  NOT NULL,
+                status              NVARCHAR(64)  NOT NULL,
+                new_spec_status     NVARCHAR(64)  NULL,
+                design_artifact_ids NVARCHAR(MAX) NULL,
+                hygiene_report      NVARCHAR(MAX) NULL,
+                error               NVARCHAR(MAX) NULL,
+                duration_ms         INT           NOT NULL DEFAULT 0
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_designer_run_spec' AND object_id = OBJECT_ID('{{d.Table("designer_run")}}'))
+                CREATE INDEX ix_designer_run_spec ON {{d.Table("designer_run")}}(spec_id, ts);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_designer_run_ts' AND object_id = OBJECT_ID('{{d.Table("designer_run")}}'))
+                CREATE INDEX ix_designer_run_ts ON {{d.Table("designer_run")}}(ts);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'art_output')
+            CREATE TABLE {{d.Table("art_output")}} (
+                id                  NVARCHAR(128) NOT NULL PRIMARY KEY,
+                spec_id             NVARCHAR(128) NOT NULL,
+                kind                NVARCHAR(64)  NOT NULL,
+                title               NVARCHAR(MAX) NOT NULL,
+                body                NVARCHAR(MAX) NOT NULL,
+                body_kind           NVARCHAR(64)  NOT NULL,
+                references_json     NVARCHAR(MAX) NULL,
+                parent_artifact_id  NVARCHAR(128) NULL,
+                status              NVARCHAR(64)  NOT NULL DEFAULT 'draft',
+                author              NVARCHAR(128) NOT NULL,
+                created_at          NVARCHAR(64)  NOT NULL,
+                updated_at          NVARCHAR(64)  NOT NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_art_output_spec' AND object_id = OBJECT_ID('{{d.Table("art_output")}}'))
+                CREATE INDEX ix_art_output_spec ON {{d.Table("art_output")}}(spec_id, status);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_art_output_spec_kind' AND object_id = OBJECT_ID('{{d.Table("art_output")}}'))
+                CREATE INDEX ix_art_output_spec_kind ON {{d.Table("art_output")}}(spec_id, kind);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'artist_run')
+            CREATE TABLE {{d.Table("artist_run")}} (
+                id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts                  NVARCHAR(64)  NOT NULL,
+                spec_id             NVARCHAR(128) NOT NULL,
+                trigger_kind        NVARCHAR(64)  NOT NULL,
+                status              NVARCHAR(64)  NOT NULL,
+                new_spec_status     NVARCHAR(64)  NULL,
+                art_output_ids      NVARCHAR(MAX) NULL,
+                meshy_tasks         NVARCHAR(MAX) NULL,
+                error               NVARCHAR(MAX) NULL,
+                duration_ms         INT           NOT NULL DEFAULT 0
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_artist_run_spec' AND object_id = OBJECT_ID('{{d.Table("artist_run")}}'))
+                CREATE INDEX ix_artist_run_spec ON {{d.Table("artist_run")}}(spec_id, ts);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_artist_run_ts' AND object_id = OBJECT_ID('{{d.Table("artist_run")}}'))
+                CREATE INDEX ix_artist_run_ts ON {{d.Table("artist_run")}}(ts);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'recovery_report')
+            CREATE TABLE {{d.Table("recovery_report")}} (
+                id              BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts              NVARCHAR(64)  NOT NULL,
+                spec_id         NVARCHAR(128) NULL,
+                issues_scanned  INT           NOT NULL,
+                issues_replayed INT           NOT NULL,
+                issues_failed   INT           NOT NULL,
+                actions_json    NVARCHAR(MAX) NOT NULL,
+                duration_ms     INT           NOT NULL DEFAULT 0
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_recovery_report_ts' AND object_id = OBJECT_ID('{{d.Table("recovery_report")}}'))
+                CREATE INDEX ix_recovery_report_ts ON {{d.Table("recovery_report")}}(ts);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'context_handoff')
+            CREATE TABLE {{d.Table("context_handoff")}} (
+                id              BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts              NVARCHAR(64)  NOT NULL,
+                task_id         NVARCHAR(128) NOT NULL,
+                from_role       NVARCHAR(128) NOT NULL,
+                to_role         NVARCHAR(128) NOT NULL,
+                artifact_id     NVARCHAR(128) NOT NULL,
+                artifact_kind   NVARCHAR(64)  NOT NULL,
+                consumed        INT           NOT NULL DEFAULT 0
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_context_handoff_task' AND object_id = OBJECT_ID('{{d.Table("context_handoff")}}'))
+                CREATE INDEX ix_context_handoff_task ON {{d.Table("context_handoff")}}(task_id, ts);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_context_handoff_artifact' AND object_id = OBJECT_ID('{{d.Table("context_handoff")}}'))
+                CREATE INDEX ix_context_handoff_artifact ON {{d.Table("context_handoff")}}(artifact_id, ts);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'memory_extraction')
+            CREATE TABLE {{d.Table("memory_extraction")}} (
+                id                  BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts                  NVARCHAR(64)  NOT NULL,
+                task_id             NVARCHAR(128) NOT NULL,
+                source_chars        INT           NOT NULL,
+                extracted_count     INT           NOT NULL,
+                persisted_keys_json NVARCHAR(MAX) NOT NULL,
+                error               NVARCHAR(MAX) NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_memory_extraction_task' AND object_id = OBJECT_ID('{{d.Table("memory_extraction")}}'))
+                CREATE INDEX ix_memory_extraction_task ON {{d.Table("memory_extraction")}}(task_id, ts);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'sprint_proposal_audit')
+            CREATE TABLE {{d.Table("sprint_proposal_audit")}} (
+                id                      BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                ts                      NVARCHAR(64)  NOT NULL,
+                theme                   NVARCHAR(MAX) NULL,
+                goal                    NVARCHAR(MAX) NULL,
+                weights_json            NVARCHAR(MAX) NOT NULL,
+                candidates_json         NVARCHAR(MAX) NOT NULL,
+                selected_task_ids_json  NVARCHAR(MAX) NOT NULL,
+                committed_sprint_id     NVARCHAR(128) NULL,
+                committed_by            NVARCHAR(128) NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_sprint_proposal_audit_ts' AND object_id = OBJECT_ID('{{d.Table("sprint_proposal_audit")}}'))
+                CREATE INDEX ix_sprint_proposal_audit_ts ON {{d.Table("sprint_proposal_audit")}}(ts DESC);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'deployment')
+            CREATE TABLE {{d.Table("deployment")}} (
+                id              NVARCHAR(128) NOT NULL PRIMARY KEY,
+                project_id      NVARCHAR(128) NOT NULL,
+                commit_sha      NVARCHAR(128) NOT NULL,
+                commit_summary  NVARCHAR(MAX) NULL,
+                status          NVARCHAR(64)  NOT NULL,
+                requested_at    NVARCHAR(64)  NOT NULL,
+                requested_by    NVARCHAR(128) NULL,
+                build_log       NVARCHAR(MAX) NULL,
+                approved_at     NVARCHAR(64)  NULL,
+                approved_by     NVARCHAR(128) NULL,
+                deployed_at     NVARCHAR(64)  NULL,
+                deploy_log      NVARCHAR(MAX) NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_deployment_project' AND object_id = OBJECT_ID('{{d.Table("deployment")}}'))
+                CREATE INDEX ix_deployment_project ON {{d.Table("deployment")}}(project_id, requested_at DESC);
+            """;
+            cmd.ExecuteNonQuery();
+        }
+
+        // Ordered migrations for EXISTING databases (a schema just
+        // fresh-created above is born at the current shape — the
+        // migrations' guards make them no-ops there). Each applied
+        // step is stamped; schema_version keeps full history and
+        // --check reads MAX(version).
+        var applied = 0;
+        using (var ver = conn.CreateCommand())
+        {
+            ver.CommandText = $"SELECT COALESCE(MAX(version), 0) FROM {d.Table("schema_version")}";
+            applied = Convert.ToInt32(ver.ExecuteScalar());
+        }
+        foreach (var migration in SqlServerMigrations.All
+            .Where(m => m.Version > applied)
+            .OrderBy(m => m.Version))
+        {
+            migration.Up(conn, d, _db.Profile);
+            StampVersion(conn, d, migration.Version);
+        }
+        StampVersion(conn, d, SqlServerMigrations.ExpectedVersion);
+    }
+
+    private static void StampVersion(DbConnection conn, SqlServerDialect d, int version)
+    {
+        using var stamp = conn.CreateCommand();
+        stamp.CommandText = $"""
+            IF NOT EXISTS (SELECT 1 FROM {d.Table("schema_version")} WHERE version = @version)
+                INSERT INTO {d.Table("schema_version")}(version, applied_at) VALUES (@version, @now);
+            """;
+        stamp.AddParam("@version", version);
+        stamp.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+        stamp.ExecuteNonQuery();
     }
 
     private void ApplyV21AgentRunActivity(SqliteConnection conn)
@@ -915,6 +1497,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         drop.ExecuteNonQuery();
     }
 
+    private void ApplyV24SkillProjectScope(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('skill') WHERE name = 'project_id' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+        using var alter = conn.CreateCommand();
+        alter.CommandText = """
+            ALTER TABLE skill ADD COLUMN project_id TEXT;
+            ALTER TABLE skill ADD COLUMN source TEXT NOT NULL DEFAULT 'forge';
+            """;
+        alter.ExecuteNonQuery();
+    }
+
     private void ApplyV19ProjectRoles(SqliteConnection conn)
     {
         using var probe = conn.CreateCommand();
@@ -923,6 +1518,26 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE project ADD COLUMN roles_json TEXT NOT NULL DEFAULT '{}'";
         alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV25AgentRunPhase(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'phase' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        // Separate commands: SQLite executes one statement per
+        // DbCommand (multi-statement batches are driver-dependent).
+        using (var alter = conn.CreateCommand())
+        {
+            alter.CommandText = "ALTER TABLE agent_run ADD COLUMN phase TEXT";
+            alter.ExecuteNonQuery();
+        }
+        using (var alter = conn.CreateCommand())
+        {
+            alter.CommandText = "ALTER TABLE agent_run ADD COLUMN resumed_session INTEGER";
+            alter.ExecuteNonQuery();
+        }
     }
 
     private void ApplyLegacyKiloRenames(SqliteConnection conn)
@@ -945,18 +1560,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }
     }
 
-    private SqliteConnection Open()
-    {
-        var c = new SqliteConnection(_connectionString);
-        c.Open();
-        return c;
-    }
+    private string T(string name) => _db.Dialect.Table(name);
 
     public async Task<IssueRecord> CreateAsync(NewIssue spec, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
         // Per-type monotonic short_id; transaction keeps it race-safe.
         var shortId = await NextShortIdAsync(conn, tx, spec.Type);
@@ -968,21 +1577,21 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = """
-                INSERT INTO issue (id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, metadata_json, parent_issue_id)
-                VALUES ($id, $short, $type, $title, $desc, $status, $pri, $assignee, $now, $now, $meta, $parent);
+            cmd.CommandText = $"""
+                INSERT INTO {T("issue")} (id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, metadata_json, parent_issue_id)
+                VALUES (@id, @short, @type, @title, @desc, @status, @pri, @assignee, @now, @now, @meta, @parent);
                 """;
-            cmd.Parameters.AddWithValue("$id", id);
-            cmd.Parameters.AddWithValue("$short", shortId);
-            cmd.Parameters.AddWithValue("$type", spec.Type);
-            cmd.Parameters.AddWithValue("$title", spec.Title);
-            cmd.Parameters.AddWithValue("$desc", (object?)spec.Description ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$status", "Pending");
-            cmd.Parameters.AddWithValue("$pri", spec.Priority);
-            cmd.Parameters.AddWithValue("$assignee", (object?)spec.Assignee ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
-            cmd.Parameters.AddWithValue("$meta", metadataJson);
-            cmd.Parameters.AddWithValue("$parent", (object?)spec.ParentId ?? DBNull.Value);
+            cmd.AddParam("@id", id);
+            cmd.AddParam("@short", shortId);
+            cmd.AddParam("@type", spec.Type);
+            cmd.AddParam("@title", spec.Title);
+            cmd.AddParam("@desc", (object?)spec.Description ?? DBNull.Value);
+            cmd.AddParam("@status", "Pending");
+            cmd.AddParam("@pri", spec.Priority);
+            cmd.AddParam("@assignee", (object?)spec.Assignee ?? DBNull.Value);
+            cmd.AddParam("@now", now.ToString(DateFormat));
+            cmd.AddParam("@meta", metadataJson);
+            cmd.AddParam("@parent", (object?)spec.ParentId ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -994,20 +1603,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
     public async Task<IReadOnlyList<IssueRecord>> ListAsync(IssueFilter filter, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
 
-        var sql = "SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts FROM issue WHERE 1=1";
-        if (filter.Status is not null) sql += " AND status = $status";
-        if (filter.Assignee is not null) sql += " AND assignee = $assignee";
-        if (filter.Type is not null) sql += " AND type = $type";
+        var sql = $"SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts FROM {T("issue")} WHERE 1=1";
+        if (filter.Status is not null) sql += " AND status = @status";
+        if (filter.Assignee is not null) sql += " AND assignee = @assignee";
+        if (filter.Type is not null) sql += " AND type = @type";
         sql += " ORDER BY created_at";
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
-        if (filter.Status is not null) cmd.Parameters.AddWithValue("$status", filter.Status.ToString());
-        if (filter.Assignee is not null) cmd.Parameters.AddWithValue("$assignee", filter.Assignee);
-        if (filter.Type is not null) cmd.Parameters.AddWithValue("$type", filter.Type);
+        if (filter.Status is not null) cmd.AddParam("@status", filter.Status.ToString());
+        if (filter.Assignee is not null) cmd.AddParam("@assignee", filter.Assignee);
+        if (filter.Type is not null) cmd.AddParam("@type", filter.Type);
 
         var list = new List<IssueRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
@@ -1030,10 +1638,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // Open = blocker status NOT IN ('Completed', 'Closed'). Failed
         // is open-on-purpose: if a blocker failed, the operator must
         // explicitly clear it before dependents can proceed.
-        const string notBlockedPredicate = """
+        var notBlockedPredicate = $"""
             NOT EXISTS (
-                SELECT 1 FROM issue_dep d
-                INNER JOIN issue b ON b.id = d.blocker_id
+                SELECT 1 FROM {T("issue_dep")} d
+                INNER JOIN {T("issue")} b ON b.id = d.blocker_id
                 WHERE d.blocked_id = i.id
                   AND d.kind = 'blocks'
                   AND b.status NOT IN ('Completed', 'Closed')
@@ -1042,14 +1650,13 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         if (sprintId is null)
         {
-            await using var conn = new SqliteConnection(_connectionString);
-            await conn.OpenAsync(ct);
+            await using var conn = await _db.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = $"""
                 SELECT id, short_id, type, title, description, status, priority, assignee,
                        created_at, updated_at, closed_at, metadata_json, parent_issue_id,
                        dispatch_checkpoint, checkpoint_at, recovery_attempts
-                FROM issue i
+                FROM {T("issue")} i
                 WHERE status = 'Pending' AND {notBlockedPredicate}
                 ORDER BY priority ASC, created_at ASC
                 """;
@@ -1059,19 +1666,18 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             return limit > 0 ? list.Take(limit).ToList() : list;
         }
 
-        await using var conn2 = new SqliteConnection(_connectionString);
-        await conn2.OpenAsync(ct);
+        await using var conn2 = await _db.OpenAsync(ct);
         await using var cmd2 = conn2.CreateCommand();
         cmd2.CommandText = $"""
             SELECT i.id, i.short_id, i.type, i.title, i.description, i.status, i.priority, i.assignee,
                    i.created_at, i.updated_at, i.closed_at, i.metadata_json, i.parent_issue_id,
                    i.dispatch_checkpoint, i.checkpoint_at, i.recovery_attempts
-            FROM issue i
-            INNER JOIN sprint_issue si ON i.id = si.issue_id
-            WHERE i.status = 'Pending' AND si.sprint_id = $sid AND {notBlockedPredicate}
+            FROM {T("issue")} i
+            INNER JOIN {T("sprint_issue")} si ON i.id = si.issue_id
+            WHERE i.status = 'Pending' AND si.sprint_id = @sid AND {notBlockedPredicate}
             ORDER BY i.priority ASC, i.created_at ASC
             """;
-        cmd2.Parameters.AddWithValue("$sid", sprintId);
+        cmd2.AddParam("@sid", sprintId);
         var list2 = new List<IssueRecord>();
         await using var rd2 = await cmd2.ExecuteReaderAsync(ct);
         while (await rd2.ReadAsync(ct)) list2.Add(ReadIssue(rd2));
@@ -1085,9 +1691,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // predicates run inside one transaction so two dispatchers on the
         // same DB can't both claim a freshly-unblocked task in the same
         // tick.
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
         if (await IsBlockedAsync(id, ct))
         {
@@ -1100,16 +1705,16 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
-            cmd.CommandText = """
-                UPDATE issue
-                SET status = 'InProgress', assignee = $assignee, updated_at = $now,
-                    dispatch_checkpoint = $cp, checkpoint_at = $now
-                WHERE id = $id AND status = 'Pending'
+            cmd.CommandText = $"""
+                UPDATE {T("issue")}
+                SET status = 'InProgress', assignee = @assignee, updated_at = @now,
+                    dispatch_checkpoint = @cp, checkpoint_at = @now
+                WHERE id = @id AND status = 'Pending'
                 """;
-            cmd.Parameters.AddWithValue("$id", id);
-            cmd.Parameters.AddWithValue("$assignee", assignee);
-            cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
-            cmd.Parameters.AddWithValue("$cp", DispatchCheckpoint.Claimed.ToDbValue());
+            cmd.AddParam("@id", id);
+            cmd.AddParam("@assignee", assignee);
+            cmd.AddParam("@now", now.ToString(DateFormat));
+            cmd.AddParam("@cp", DispatchCheckpoint.Claimed.ToDbValue());
             rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0)
             {
@@ -1130,8 +1735,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         IDictionary<string, object>? metadata = null,
         CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
 
         var now = DateTime.UtcNow;
         var isTerminal = to is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Blocked or IssueStatus.Closed;
@@ -1148,12 +1752,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             // a future StartupRecovery sweep doesn't try to replay
             // an issue that's already completed / failed / closed.
             cmd.CommandText = isTerminal
-                ? """UPDATE issue SET status=$to, updated_at=$now, closed_at=$now, metadata_json=$meta, dispatch_checkpoint=NULL, checkpoint_at=NULL WHERE id=$id"""
-                : """UPDATE issue SET status=$to, updated_at=$now, metadata_json=$meta WHERE id=$id""";
-            cmd.Parameters.AddWithValue("$to", to.ToString());
-            cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
-            cmd.Parameters.AddWithValue("$meta", metadataJson);
-            cmd.Parameters.AddWithValue("$id", id);
+                ? $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, closed_at=@now, metadata_json=@meta, dispatch_checkpoint=NULL, checkpoint_at=NULL WHERE id=@id"""
+                : $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, metadata_json=@meta WHERE id=@id""";
+            cmd.AddParam("@to", to.ToString());
+            cmd.AddParam("@now", now.ToString(DateFormat));
+            cmd.AddParam("@meta", metadataJson);
+            cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
@@ -1164,23 +1768,21 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
     public async Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
 
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts
-            FROM issue WHERE id = $id
+            FROM {T("issue")} WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? ReadIssue(rd) : null;
     }
 
     public async Task<IssueEventRecord> AddEventAsync(string id, string kind, string? detail = null, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         return await InsertEventAsync(conn, null, id, kind, detail, ct);
     }
 
@@ -1189,24 +1791,22 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     public async Task SetCheckpointAsync(string id, DispatchCheckpoint checkpoint, CancellationToken ct = default)
     {
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE issue
-            SET dispatch_checkpoint = $cp, checkpoint_at = $now, updated_at = $now
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("issue")}
+            SET dispatch_checkpoint = @cp, checkpoint_at = @now, updated_at = @now
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$cp", checkpoint.ToDbValue());
-        cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@cp", checkpoint.ToDbValue());
+        cmd.AddParam("@now", now.ToString(DateFormat));
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<IReadOnlyList<IssueRecord>> ListInProgressForRecoveryAsync(CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         // InProgress + assignee=forge are the dispatch candidates
         // the recoverer inspects. Assignee is the durable marker
@@ -1214,9 +1814,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // (reviewer, manual) don't
         // go through the EngineeringDispatchWorkflow so they
         // don't need recovery.
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts
-            FROM issue
+            FROM {T("issue")}
             WHERE status = 'InProgress' AND assignee = 'forge'
             ORDER BY updated_at ASC
             """;
@@ -1228,32 +1828,30 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
     public async Task<int> IncrementRecoveryAttemptsAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE issue SET recovery_attempts = recovery_attempts + 1, updated_at = $now
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("issue")} SET recovery_attempts = recovery_attempts + 1, updated_at = @now
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task<IReadOnlyList<IssueEventRecord>> ListEventsAsync(string issueId, int limit = 50, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, issue_id, ts, actor, kind, detail
-            FROM issue_event
-            WHERE issue_id = $id
+        cmd.CommandText = $"""
+            SELECT {_db.Dialect.TopParam("@limit")}id, issue_id, ts, actor, kind, detail
+            FROM {T("issue_event")}
+            WHERE issue_id = @id
             ORDER BY ts DESC, id DESC
-            LIMIT $limit
+            {_db.Dialect.LimitParam("@limit")}
             """;
-        cmd.Parameters.AddWithValue("$id", issueId);
-        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.AddParam("@id", issueId);
+        cmd.AddParam("@limit", limit);
         var list = new List<IssueEventRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
@@ -1279,8 +1877,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         if (string.IsNullOrWhiteSpace(blockedId)) throw new ArgumentException("blockedId required", nameof(blockedId));
         if (blockerId == blockedId) throw new ArgumentException("an issue cannot block itself");
 
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
 
         // Validate both issues exist. Keeps FK violations as a 400-shaped
         // error rather than a SQLite constraint blow-up.
@@ -1291,15 +1888,24 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         var now = DateTime.UtcNow;
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO issue_dep(blocker_id, blocked_id, kind, created_at)
-            VALUES($blocker, $blocked, $kind, $now)
-            ON CONFLICT(blocker_id, blocked_id, kind) DO UPDATE SET created_at = $now
-            """;
-        cmd.Parameters.AddWithValue("$blocker", blocker.Id);
-        cmd.Parameters.AddWithValue("$blocked", blocked.Id);
-        cmd.Parameters.AddWithValue("$kind", kind.ToDbValue());
-        cmd.Parameters.AddWithValue("$now", now.ToString(DateFormat));
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                MERGE {T("issue_dep")} WITH (HOLDLOCK) AS t
+                USING (SELECT @blocker AS blocker_id, @blocked AS blocked_id, @kind AS kind) AS s
+                    ON t.blocker_id = s.blocker_id AND t.blocked_id = s.blocked_id AND t.kind = s.kind
+                WHEN MATCHED THEN UPDATE SET created_at = @now
+                WHEN NOT MATCHED THEN INSERT (blocker_id, blocked_id, kind, created_at)
+                    VALUES (@blocker, @blocked, @kind, @now);
+                """
+            : """
+                INSERT INTO issue_dep(blocker_id, blocked_id, kind, created_at)
+                VALUES(@blocker, @blocked, @kind, @now)
+                ON CONFLICT(blocker_id, blocked_id, kind) DO UPDATE SET created_at = @now
+                """;
+        cmd.AddParam("@blocker", blocker.Id);
+        cmd.AddParam("@blocked", blocked.Id);
+        cmd.AddParam("@kind", kind.ToDbValue());
+        cmd.AddParam("@now", now.ToString(DateFormat));
         await cmd.ExecuteNonQueryAsync(ct);
 
         await InsertEventAsync(conn, null, blockedId,
@@ -1311,16 +1917,15 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     public async Task<bool> RemoveDependencyAsync(
         string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            DELETE FROM issue_dep
-            WHERE blocker_id = $blocker AND blocked_id = $blocked AND kind = $kind
+        cmd.CommandText = $"""
+            DELETE FROM {T("issue_dep")}
+            WHERE blocker_id = @blocker AND blocked_id = @blocked AND kind = @kind
             """;
-        cmd.Parameters.AddWithValue("$blocker", blockerId);
-        cmd.Parameters.AddWithValue("$blocked", blockedId);
-        cmd.Parameters.AddWithValue("$kind", kind.ToDbValue());
+        cmd.AddParam("@blocker", blockerId);
+        cmd.AddParam("@blocked", blockedId);
+        cmd.AddParam("@kind", kind.ToDbValue());
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         if (rows > 0)
         {
@@ -1336,16 +1941,15 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // Returns both directions: edges where `id` is the blocker AND
         // edges where `id` is the blocked. Caller can filter by kind or
         // direction (this matches what a graph view needs).
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        cmd.CommandText = $"""
             SELECT blocker_id, blocked_id, kind, created_at
-            FROM issue_dep
-            WHERE blocker_id = $id OR blocked_id = $id
+            FROM {T("issue_dep")}
+            WHERE blocker_id = @id OR blocked_id = @id
             ORDER BY created_at ASC
             """;
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.AddParam("@id", id);
         var list = new List<IssueEdge>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
@@ -1368,57 +1972,94 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // Failed is intentionally treated as open — if the blocker
         // failed, the operator must explicitly clear it (close or
         // remove the edge) before dependents can proceed.
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT 1
-            FROM issue_dep d
-            INNER JOIN issue b ON b.id = d.blocker_id
-            WHERE d.blocked_id = $id
+        cmd.CommandText = $"""
+            SELECT {_db.Dialect.Top(1)}1
+            FROM {T("issue_dep")} d
+            INNER JOIN {T("issue")} b ON b.id = d.blocker_id
+            WHERE d.blocked_id = @id
               AND d.kind = 'blocks'
               AND b.status NOT IN ('Completed', 'Closed')
-            LIMIT 1
+            {_db.Dialect.Limit(1)}
             """;
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.AddParam("@id", id);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is not null;
     }
 
-    private static async Task<int> NextShortIdAsync(SqliteConnection conn, SqliteTransaction tx, string type)
+    public async Task<HashSet<string>> ListBlockersOfAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (blockedIds.Count == 0) return set;
+        await using var conn = await _db.OpenAsync(ct);
+        // IN-list built from parameters (blockedIds are internal
+        // sprint-member ids, never user text).
+        var names = blockedIds.Select((_, i) => $"@id{i}").ToArray();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT DISTINCT d.blocker_id
+            FROM {T("issue_dep")} d
+            INNER JOIN {T("issue")} b ON b.id = d.blocker_id
+            WHERE d.blocked_id IN ({string.Join(",", names)})
+              AND d.kind = 'blocks'
+              AND b.status NOT IN ('Completed', 'Closed')
+            """;
+        var i = 0;
+        foreach (var id in blockedIds) cmd.AddParam(names[i++], id);
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct)) set.Add(rd.GetString(0));
+        return set;
+    }
+
+    private async Task<int> NextShortIdAsync(DbConnection conn, DbTransaction tx, string type)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = """
-            INSERT INTO issue_seq(type, next_short) VALUES($t, 2)
-            ON CONFLICT(type) DO UPDATE SET next_short = next_short + 1
-            RETURNING next_short - 1
-            """;
-        cmd.Parameters.AddWithValue("$t", type);
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                MERGE {T("issue_seq")} WITH (HOLDLOCK) AS t
+                USING (SELECT @t AS type) AS s ON t.type = s.type
+                WHEN MATCHED THEN UPDATE SET next_short = next_short + 1
+                WHEN NOT MATCHED THEN INSERT (type, next_short) VALUES (@t, 2)
+                OUTPUT INSERTED.next_short - 1;
+                """
+            : """
+                INSERT INTO issue_seq(type, next_short) VALUES(@t, 2)
+                ON CONFLICT(type) DO UPDATE SET next_short = next_short + 1
+                RETURNING next_short - 1
+                """;
+        cmd.AddParam("@t", type);
         var result = await cmd.ExecuteScalarAsync();
         return Convert.ToInt32(result);
     }
 
-    private static async Task<IssueEventRecord> InsertEventAsync(
-        SqliteConnection conn, SqliteTransaction? tx, string issueId, string kind, string? detail, CancellationToken ct)
+    private async Task<IssueEventRecord> InsertEventAsync(
+        DbConnection conn, DbTransaction? tx, string issueId, string kind, string? detail, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = """
-            INSERT INTO issue_event(issue_id, ts, actor, kind, detail)
-            VALUES($id, $ts, $actor, $kind, $detail);
-            SELECT last_insert_rowid();
-            """;
-        cmd.Parameters.AddWithValue("$id", issueId);
-        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString(DateFormat));
-        cmd.Parameters.AddWithValue("$actor", "orchestrator");
-        cmd.Parameters.AddWithValue("$kind", kind);
-        cmd.Parameters.AddWithValue("$detail", (object?)detail ?? DBNull.Value);
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                INSERT INTO {T("issue_event")}(issue_id, ts, actor, kind, detail)
+                OUTPUT INSERTED.id
+                VALUES(@id, @ts, @actor, @kind, @detail);
+                """
+            : """
+                INSERT INTO issue_event(issue_id, ts, actor, kind, detail)
+                VALUES(@id, @ts, @actor, @kind, @detail);
+                SELECT last_insert_rowid();
+                """;
+        cmd.AddParam("@id", issueId);
+        cmd.AddParam("@ts", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@actor", "orchestrator");
+        cmd.AddParam("@kind", kind);
+        cmd.AddParam("@detail", (object?)detail ?? DBNull.Value);
         var id = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
         return new IssueEventRecord(id, issueId, DateTime.UtcNow, "orchestrator", kind, detail);
     }
 
-    private static IssueRecord ReadIssue(SqliteDataReader rd)
+    private static IssueRecord ReadIssue(DbDataReader rd)
         => new(
             Id: rd.GetString(0),
             ShortId: rd.GetString(1),
@@ -1472,7 +2113,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         return JsonSerializer.Serialize(merged);
     }
 
-    public string ConnectionString => _connectionString;
+    public string ConnectionString => _db.ConnectionString;
 
     public static string DateFormatTime(DateTime dt) => dt.ToString(DateFormat, System.Globalization.CultureInfo.InvariantCulture);
     public static DateTime ParseTime(string s) => DateTime.ParseExact(s, DateFormat, System.Globalization.CultureInfo.InvariantCulture);

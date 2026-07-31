@@ -15,12 +15,12 @@ public class DeploymentBuildRunnerTests : IDisposable
 
     public DeploymentBuildRunnerTests()
     {
-        _repoDir = Path.Combine(Path.GetTempPath(), $"ph-buildrun-{Guid.NewGuid():N}");
+        _repoDir = TempRoot.Instance.NewDirectory("buildrun");
         Directory.CreateDirectory(_repoDir);
         InitRepo(_repoDir);
         _headSha = RunGit(_repoDir, "rev-parse HEAD").Trim();
 
-        var dbDir = Path.Combine(Path.GetTempPath(), $"ph-buildrun-db-{Guid.NewGuid():N}");
+        var dbDir = TempRoot.Instance.NewDirectory("buildrun-db");
         Directory.CreateDirectory(dbDir);
         _dbPath = Path.Combine(dbDir, "issues.db");
         _ = new Core.IssueStore(_dbPath);

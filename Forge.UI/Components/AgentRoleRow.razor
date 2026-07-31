@@ -372,13 +372,17 @@
     {
         var msgs = run.MessageCount ?? 0;
         var tools = run.ToolCallCount ?? 0;
+        // v25: the phase prefix answers "what is the run doing right
+        // now" — a 3-minute verify round no longer reads as stalled.
+        var phase = string.IsNullOrEmpty(run.Phase) ? "" : $"{run.Phase} · ";
+        var resumed = run.ResumedSession == true ? " · resumed session" : "";
         if (msgs == 0 && tools == 0)
         {
             var waiting = run.LastActivityAt is null ? Elapsed(run.StartedAt) : Elapsed(run.LastActivityAt.Value);
-            return $"no model output yet — waiting {waiting} (provider may be hanging)";
+            return $"{phase}no model output yet — waiting {waiting} (provider may be hanging){resumed}";
         }
         var ago = run.LastActivityAt is null ? "" : $" · active {Elapsed(run.LastActivityAt.Value)} ago";
-        return $"{msgs} msgs · {tools} tools{ago}";
+        return $"{phase}{msgs} msgs · {tools} tools{ago}{resumed}";
     }
 
     private static string FormatWhen(DateTime? when)
@@ -394,7 +398,8 @@
     public sealed record ModelInfo(string? Provider, string? Model, string Source);
     public sealed record SlotInfo(int InFlight, int Max);
     public sealed record RunInfo(string Id, string? TaskId, DateTime StartedAt,
-        DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount);
+        DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount,
+        string? Phase, bool? ResumedSession);
     public sealed record LastRunInfo(string Id, string? TaskId, string Status,
         DateTime? FinishedAt, long? DurationMs, string? Error);
     public sealed record PromptInfo(string Source, string? Path, string? Content);

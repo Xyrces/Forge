@@ -1,5 +1,5 @@
-using Microsoft.Data.Sqlite;
 using Forge.Core;
+using Forge.Core.Db;
 
 namespace Forge.Codebase;
 
@@ -23,14 +23,15 @@ public sealed class CodebaseGraphCacheStore : ICodebaseGraphCacheStore, IAsyncDi
     private readonly IssueStore _issues;
     public CodebaseGraphCacheStore(IssueStore issues) { _issues = issues; }
 
+    private string T(string name) => _issues.Db.Dialect.Table(name);
+
     public async Task<CodebaseGraphCache?> GetAsync(string repoRoot, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT repo_sha, built_at, file_count, edge_count
-                            FROM codebase_graph_cache
-                            WHERE repo_sha = (SELECT MAX(repo_sha) FROM codebase_graph_cache)";
+        cmd.CommandText = $@"SELECT repo_sha, built_at, file_count, edge_count
+                            FROM {T("codebase_graph_cache")}
+                            WHERE repo_sha = (SELECT MAX(repo_sha) FROM {T("codebase_graph_cache")})";
         // We use MAX(repo_sha) as a stand-in for "most recent" since we
         // have one row per sha. For multi-repo we'd key by repoRoot;
         // not yet supported.
@@ -46,28 +47,35 @@ public sealed class CodebaseGraphCacheStore : ICodebaseGraphCacheStore, IAsyncDi
 
     public async Task UpsertAsync(CodebaseGraphCache entry, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"INSERT INTO codebase_graph_cache (repo_sha, built_at, file_count, edge_count)
-                            VALUES ($sha, $built, $files, $edges)
-                            ON CONFLICT(repo_sha) DO UPDATE SET
-                              built_at = excluded.built_at,
-                              file_count = excluded.file_count,
-                              edge_count = excluded.edge_count";
-        cmd.Parameters.AddWithValue("$sha", entry.RepoSha);
-        cmd.Parameters.AddWithValue("$built", IssueStore.DateFormatTime(entry.BuiltAt));
-        cmd.Parameters.AddWithValue("$files", entry.FileCount);
-        cmd.Parameters.AddWithValue("$edges", entry.EdgeCount);
+        cmd.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                MERGE {T("codebase_graph_cache")} WITH (HOLDLOCK) AS t
+                USING (SELECT @sha AS repo_sha) AS s ON t.repo_sha = s.repo_sha
+                WHEN MATCHED THEN UPDATE SET built_at = @built, file_count = @files, edge_count = @edges
+                WHEN NOT MATCHED THEN INSERT (repo_sha, built_at, file_count, edge_count) VALUES (@sha, @built, @files, @edges);
+                """
+            : $"""
+                INSERT INTO {T("codebase_graph_cache")} (repo_sha, built_at, file_count, edge_count)
+                VALUES (@sha, @built, @files, @edges)
+                ON CONFLICT(repo_sha) DO UPDATE SET
+                  built_at = excluded.built_at,
+                  file_count = excluded.file_count,
+                  edge_count = excluded.edge_count
+                """;
+        cmd.AddParam("@sha", entry.RepoSha);
+        cmd.AddParam("@built", IssueStore.DateFormatTime(entry.BuiltAt));
+        cmd.AddParam("@files", entry.FileCount);
+        cmd.AddParam("@edges", entry.EdgeCount);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task ClearAsync(CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM codebase_graph_cache";
+        cmd.CommandText = $"DELETE FROM {T("codebase_graph_cache")}";
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

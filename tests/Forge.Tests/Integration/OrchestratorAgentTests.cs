@@ -46,8 +46,8 @@ public sealed class OrchestratorAgentTests : IDisposable
 
     public OrchestratorAgentTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-orch-{Guid.NewGuid():N}");
-        _dataRoot = Path.Combine(Path.GetTempPath(), $"ph-orch-data-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("orch");
+        _dataRoot = TempRoot.Instance.NewDirectory("orch-data");
         Directory.CreateDirectory(_workDir);
         Directory.CreateDirectory(_dataRoot);
 

@@ -8,7 +8,7 @@ using Xunit;
 namespace Forge.Tests.Integration;
 
 /// <summary>
-/// The review/rework loop: PRWatcher.PollWatchOnceAsync consults CI
+/// The review/rework loop: PRWatcher.PollWatchedTaskAsync consults CI
 /// (GitHub) + the reviewer agent's verdict (watch metadata) and, on
 /// failure, requeues the task for a bounded rework round instead of
 /// going terminal. Circuit breaker at MaxReworkAttempts.
@@ -22,7 +22,7 @@ public class PRWatcherReworkTests : IDisposable
 
     public PRWatcherReworkTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-rework-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("rework");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);
@@ -43,6 +43,7 @@ public class PRWatcherReworkTests : IDisposable
         public IReadOnlyList<string> FailedChecks = Array.Empty<string>();
         public bool MergeResult = true;
         public int MergeCalls;
+        public List<PullRequestReview> Reviews = new();
         public FakeGitHub() : base("o", "r", null) { }
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult(new PullRequest(number));
@@ -53,7 +54,7 @@ public class PRWatcherReworkTests : IDisposable
         public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default)
             => Task.FromResult(FailedChecks);
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
-            => Task.FromResult((IReadOnlyList<PullRequestReview>)Array.Empty<PullRequestReview>());
+            => Task.FromResult((IReadOnlyList<PullRequestReview>)Reviews);
         public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
         {
             MergeCalls++;
@@ -63,7 +64,8 @@ public class PRWatcherReworkTests : IDisposable
             => Task.FromResult(true);
     }
 
-    private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null) => new(
+    private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null,
+        Forge.Core.Workflow.WorkflowResolver? workflow = null) => new(
         gh,
         worktrees: new AgentTools.GitWorktreeService(
             new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -74,27 +76,48 @@ public class PRWatcherReworkTests : IDisposable
         events: _events,
         logger: NullLogger<PRWatcher>.Instance,
         gates: gates,
-        lifecycle: new Forge.Core.TaskStateMachine(_issues, writeAuthority: false, NullLogger.Instance));
+        lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
+        workflow: workflow);
 
-    private async Task<(IssueRecord task, IssueRecord watch)> SeedAsync(
+    private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
+    {
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Policies = new Dictionary<string, string>(Forge.Core.Workflow.WorkflowDefaults.Definition.Policies)
+            {
+                [key] = value,
+            },
+        };
+        return ResolverWith(def);
+    }
+
+    private Forge.Core.Workflow.WorkflowResolver ResolverWith(Forge.Core.Workflow.WorkflowDefinition def)
+    {
+        var memory = new MemoryStore(_dbPath);
+        memory.RememberAsync(Forge.Core.Workflow.WorkflowResolver.LiveKey,
+            Forge.Core.Workflow.WorkflowResolver.Serialize(def)).GetAwaiter().GetResult();
+        return new Forge.Core.Workflow.WorkflowResolver(memory);
+    }
+
+    private async Task<IssueRecord> SeedAsync(
         Dictionary<string, object>? taskMeta = null,
         Dictionary<string, object>? watchMeta = null)
     {
-        // Production shape at watch time: the task is InProgress and
-        // carries prNumber on its OWN metadata (written by the
-        // dispatch executors) — the machine's derivation reads it.
+        // State-driven watching: the task IS the watch — prNumber,
+        // branch, and any reviewer-verdict metadata all live on the
+        // task row (watchMeta folds in for verdict seeding).
         var tm = taskMeta ?? new Dictionary<string, object>();
+        if (watchMeta is not null)
+        {
+            foreach (var kv in watchMeta) tm[kv.Key] = kv.Value;
+        }
         tm["prNumber"] = "42";
         var task = await _issues.CreateAsync(new Forge.Core.NewIssue(
             Type: "task", Title: "implement X", Metadata: tm));
         await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null);
-        var meta = watchMeta ?? new Dictionary<string, object>();
-        meta["prNumber"] = 42;
-        meta["taskId"] = task.Id;
-        meta["branch"] = $"agent/{task.Id}";
-        var watch = await _issues.CreateAsync(new Forge.Core.NewIssue(
-            Type: AgentTaskTypes.PrWatch, Title: "watch", Metadata: meta));
-        return ((await _issues.GetAsync(task.Id))!, (await _issues.GetAsync(watch.Id))!);
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null,
+            metadata: new Dictionary<string, object> { ["branch"] = $"agent/{task.Id}" });
+        return (await _issues.GetAsync(task.Id))!;
     }
 
     private static PullRequest Pr(int n) => new(n);
@@ -109,10 +132,10 @@ public class PRWatcherReworkTests : IDisposable
         // complete). The green path must route to the conflict sync
         // round, and must NOT attempt the merge.
         var gh = new FakeGitHub { Ci = CommitState.Success };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None,
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
             reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
             headShaOverride: _ => "abc123",
             mergeableOverride: _ => false);
@@ -131,11 +154,11 @@ public class PRWatcherReworkTests : IDisposable
         // Mergeable was null at first read (still computing); the
         // merge attempt 405s; the re-check lands as conflicting.
         var gh = new FakeGitHub { Ci = CommitState.Success, MergeResult = false };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
         var calls = 0;
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None,
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
             reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
             headShaOverride: _ => "abc123",
             mergeableOverride: _ => ++calls == 1 ? null : false);
@@ -152,14 +175,14 @@ public class PRWatcherReworkTests : IDisposable
         // polling after task-161 + PR #34 were closed — a CI-failure
         // fire would have resurrected the Closed task to Pending).
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
         await _issues.TransitionAsync(task.Id, IssueStatus.Closed, "operator closeout");
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
-        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(watch.Id))!.Status);
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
         // The task is untouched — critically, NOT resurrected to Pending.
         Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(task.Id))!.Status);
         Assert.Equal(0, gh.MergeCalls);
@@ -174,11 +197,11 @@ public class PRWatcherReworkTests : IDisposable
         await gates.HoldAsync(Forge.Core.StageGates.Merge);
 
         var gh = new FakeGitHub { Ci = CommitState.Success };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
         var watcher = NewWatcher(gh, gates);
 
-        var held = await watcher.PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+        var held = await watcher.PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, held);
@@ -188,8 +211,8 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
 
         await gates.ReleaseAsync(Forge.Core.StageGates.Merge);
-        var released = await watcher.PollWatchOnceAsync(
-            await _issues.GetAsync(watch.Id) ?? watch, CancellationToken.None,
+        var released = await watcher.PollWatchedTaskAsync(
+            await _issues.GetAsync(task.Id) ?? task, CancellationToken.None,
             reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
             headShaOverride: _ => "abc123");
 
@@ -207,10 +230,10 @@ public class PRWatcherReworkTests : IDisposable
         // waits forever. The watcher must dispatch a sync rework
         // round (merge main into the same branch) instead.
         var gh = new FakeGitHub { Ci = CommitState.Pending };   // no CI runs exist for conflicting PRs
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None,
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
             reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
             headShaOverride: _ => "abc123",
             mergeableOverride: _ => false);
@@ -230,15 +253,182 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
+    public async Task Structure_CiRedBranchBlock_CiFailure_GoesTerminalBlocked()
+    {
+        // Pass 4 branch option: CI-red switched from rework to block —
+        // a genuine CI failure goes straight to terminal Blocked for
+        // the operator, no rework round, no strike.
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Edges = Forge.Core.Workflow.WorkflowDefaults.Definition.Edges
+                .Select(e => e is { From: "pr", To: "rework" } ? e with { Selected = "block" } : e)
+                .ToList(),
+        };
+        var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Success };
+        var task = await SeedAsync();
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWith(def)).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Blocked, after.Status);
+        Assert.Null(after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task Structure_ReviewStepDisabled_AgentVerdictIgnored()
+    {
+        // Pass 4 step toggle: review disabled = the reviewer-agent
+        // verdict doesn't count. CI green + agent Approve at the
+        // current head but NO formal review -> NOT merged (merge now
+        // requires a formal review at the current head).
+        var def = Forge.Core.Workflow.WorkflowDefaults.Definition with
+        {
+            Steps = Forge.Core.Workflow.WorkflowDefaults.Definition.Steps
+                .Select(s => s.Id == "review" ? s with { Enabled = false } : s).ToList(),
+        };
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync(
+            watchMeta: new Dictionary<string, object>
+            {
+                ["reviewVerdict"] = "Approve",
+                ["reviewSha"] = "abc123",
+            });
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWith(def)).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => true);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
+    public async Task Policy_MaxStrikesOne_BreakerTripsImmediately()
+    {
+        // Pass 3: the strike budget is a workflow policy. With
+        // maxStrikes=1 and one strike already recorded, the very next
+        // CI failure trips the breaker instead of requeueing — the
+        // same task under the default budget would requeue (covered
+        // by CiFailed_RequeuesTask_WithContext_WatchStaysLive).
+        var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Success };
+        var task = await SeedAsync(
+            taskMeta: new Dictionary<string, object> { ["reworkAttempts"] = "1" });
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWithPolicy("maxStrikes", "1")).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.CiFailed, outcome);
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(0, gh.MergeCalls);
+    }
+
+    [Fact]
+    public async Task Policy_ParkDisabled_PreExistingBaseFailure_StrikesNormally()
+    {
+        // parkOnInfra=false: a CI failure that is ALSO red on the base
+        // branch is treated as a genuine PR failure — strike + rework
+        // round instead of the no-strike park.
+        var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Failure };
+        var task = await SeedAsync();
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWithPolicy("parkOnInfra", "false")).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal("1", after.GetMetadata("reworkAttempts"));
+        Assert.NotEqual("ParkedInfra", after.GetMetadata("state"));
+    }
+
+    [Fact]
+    public async Task Policy_AutoMergeFalse_GreenApproved_DoesNotMerge()
+    {
+        // autoMerge=false: green + approved at the current head stays
+        // put — the operator merges by hand (external-merge detection
+        // still closes the loop, covered elsewhere).
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync();
+
+        var outcome = await NewWatcher(gh, workflow: ResolverWithPolicy("autoMerge", "false")).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => true);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        Assert.Equal(0, gh.MergeCalls);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task StaleFormalApproval_AtPriorHead_DoesNotMerge()
+    {
+        // The merge rule is an approval AT THE CURRENT HEAD (formal
+        // review or reviewer-agent). The agent verdict was always
+        // SHA-scoped; formal GitHub reviews were not — an operator
+        // approval at head A survived a rework push and could merge
+        // head B unreviewed. Real-path reviews are now filtered by
+        // CommitId == head; a stale approval must not merge.
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        gh.Reviews.Add(NewReview(PullRequestReviewState.Approved, commitId: "old-head"));
+        var task = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            headShaOverride: _ => "new-head");
+
+        Assert.NotEqual(PRWatcher.WatchPollOutcome.Merged, outcome);
+        Assert.Equal(0, gh.MergeCalls);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task FormalApproval_AtCurrentHead_Merges()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        gh.Reviews.Add(NewReview(PullRequestReviewState.Approved, commitId: "new-head"));
+        var task = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            headShaOverride: _ => "new-head");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
+        Assert.Equal(1, gh.MergeCalls);
+        Assert.Equal(IssueStatus.Completed, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    private static PullRequestReview NewReview(PullRequestReviewState state, string commitId)
+    {
+        var review = new PullRequestReview();
+        typeof(PullRequestReview).GetProperty(nameof(PullRequestReview.State))!
+            .SetValue(review, new Octokit.StringEnum<PullRequestReviewState>(state));
+        typeof(PullRequestReview).GetProperty(nameof(PullRequestReview.CommitId))!
+            .SetValue(review, commitId);
+        return review;
+    }
+
+    [Fact]
     public async Task MergeableNullWhileComputing_DoesNotFireConflictRework()
     {
         // GitHub computes mergeability asynchronously; null must
         // mean "not yet known" (keep polling), never "conflicting".
         var gh = new FakeGitHub { Ci = CommitState.Pending };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None,
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
             reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
             headShaOverride: _ => "abc123",
             mergeableOverride: _ => null);
@@ -254,10 +444,10 @@ public class PRWatcherReworkTests : IDisposable
     public async Task CiFailed_RequeuesTask_WithContext_WatchStaysLive()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
@@ -265,8 +455,6 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal(IssueStatus.Pending, taskAfter.Status);
         Assert.Equal("1", taskAfter.GetMetadata("reworkAttempts"));
         Assert.Contains("CI", taskAfter.GetMetadata("reworkContext"));
-        var watchAfter = (await _issues.GetAsync(watch.Id))!;
-        Assert.Equal(IssueStatus.Pending, watchAfter.Status);
         // Round record on the task via the machine (Phase 3).
         Assert.Equal("abc123", taskAfter.GetMetadata("reworkForSha"));
         Assert.Equal("ReworkQueued", taskAfter.GetMetadata("state"));
@@ -276,13 +464,13 @@ public class PRWatcherReworkTests : IDisposable
     public async Task CiFailed_SameHeadTwice_NoDoubleRework()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
         var watcher = NewWatcher(gh);
 
-        await watcher.PollWatchOnceAsync(watch, CancellationToken.None,
+        await watcher.PollWatchedTaskAsync(task, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
-        var watchAfter = (await _issues.GetAsync(watch.Id))!;
-        var second = await watcher.PollWatchOnceAsync(watchAfter, CancellationToken.None,
+        var freshTask = (await _issues.GetAsync(task.Id))!;
+        var second = await watcher.PollWatchedTaskAsync(freshTask, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, second);
@@ -296,10 +484,10 @@ public class PRWatcherReworkTests : IDisposable
         // on the base branch head is infra breakage, not the PR's
         // fault — park the watch without consuming a rework strike.
         var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Failure };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
@@ -322,10 +510,10 @@ public class PRWatcherReworkTests : IDisposable
             BaseCi = CommitState.Success,
             FailedChecks = new[] { "build + test + e2e harness: Failure — e2e: no PRs were opened" },
         };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
@@ -339,15 +527,15 @@ public class PRWatcherReworkTests : IDisposable
     public async Task ParkedWatch_BaseStillRed_StaysParked()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Failure };
-        var (task, watch) = await SeedAsync(
+        var task = await SeedAsync(
             taskMeta: new Dictionary<string, object>
             {
                 ["state"] = "ParkedInfra",
                 ["parkedForSha"] = "abc123",
             });
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
@@ -362,7 +550,7 @@ public class PRWatcherReworkTests : IDisposable
         // retrigger CI — fire ONE refresh round WITHOUT consuming
         // breaker budget; the machine record moves to ReworkQueued.
         var gh = new FakeGitHub { Ci = CommitState.Failure, BaseCi = CommitState.Success };
-        var (task, watch) = await SeedAsync(
+        var task = await SeedAsync(
             taskMeta: new Dictionary<string, object>
             {
                 ["reworkAttempts"] = "2",
@@ -370,8 +558,8 @@ public class PRWatcherReworkTests : IDisposable
                 ["parkedForSha"] = "abc123",
             });
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
@@ -395,7 +583,7 @@ public class PRWatcherReworkTests : IDisposable
         // With the round stale past the grace window, the watcher
         // must re-fire (another strike) instead of waiting forever.
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
         var watcher = new PRWatcher(gh,
             worktrees: new AgentTools.GitWorktreeService(
                 new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -408,15 +596,15 @@ public class PRWatcherReworkTests : IDisposable
             reworkRoundGrace: TimeSpan.Zero);   // every consumed round is instantly "stale"
 
         // Round 1 fires normally.
-        await watcher.PollWatchOnceAsync(watch, CancellationToken.None,
+        await watcher.PollWatchedTaskAsync(task, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
         Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
 
         // Simulate the round being claimed and then dying without a
         // push (task InProgress, head unmoved).
         await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, ct: CancellationToken.None);
-        var watchAfter = (await _issues.GetAsync(watch.Id))!;
-        var second = await watcher.PollWatchOnceAsync(watchAfter, CancellationToken.None,
+        var freshTask = (await _issues.GetAsync(task.Id))!;
+        var second = await watcher.PollWatchedTaskAsync(freshTask, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, second);
@@ -430,14 +618,14 @@ public class PRWatcherReworkTests : IDisposable
         // yet moved, still inside the grace window) must NOT be
         // re-fired — that would double-strike a healthy round.
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var (task, watch) = await SeedAsync();
+        var task = await SeedAsync();
         var watcher = NewWatcher(gh);   // default 35m grace
 
-        await watcher.PollWatchOnceAsync(watch, CancellationToken.None,
+        await watcher.PollWatchedTaskAsync(task, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
         await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, ct: CancellationToken.None);
-        var watchAfter = (await _issues.GetAsync(watch.Id))!;
-        var second = await watcher.PollWatchOnceAsync(watchAfter, CancellationToken.None,
+        var freshTask = (await _issues.GetAsync(task.Id))!;
+        var second = await watcher.PollWatchedTaskAsync(freshTask, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, second);
@@ -445,26 +633,62 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
+    public async Task ConsumedRound_ActiveRunInRegistry_NeverStalls_EvenPastGrace()
+    {
+        // The 2026-07-27 false-stall: clock measured from rework-fire
+        // time could exceed grace while a healthy run was still
+        // working (queue + 30-min run). With an active run in the
+        // registry, the guard must NOT re-fire regardless of age.
+        var gh = new FakeGitHub { Ci = CommitState.Failure };
+        var task = await SeedAsync();
+        // The agent_run table lives in IssueStore's schema — bootstrap it.
+        await using (var bootstrap = new IssueStore(Path.Combine(_workDir, "runs.db"))) { }
+        var runs = new Forge.Core.AgentRunStore(Path.Combine(_workDir, "runs.db"));
+        await runs.StartAsync("run-1", task.Id, "CoreDev", "test-model");
+        var watcher = new PRWatcher(gh,
+            worktrees: new AgentTools.GitWorktreeService(
+                new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+                NullLogger<AgentTools.GitWorktreeService>.Instance),
+            issues: _issues,
+            pollInterval: TimeSpan.FromSeconds(1),
+            staleAfter: TimeSpan.FromHours(1),
+            events: _events,
+            logger: NullLogger<PRWatcher>.Instance,
+            lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
+            runs: runs,
+            reworkRoundGrace: TimeSpan.Zero);   // would "stall" instantly without the run check
+
+        await watcher.PollWatchedTaskAsync(task, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, ct: CancellationToken.None);
+        var freshTask = (await _issues.GetAsync(task.Id))!;
+        var second = await watcher.PollWatchedTaskAsync(freshTask, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, second);   // NOT re-fired
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
     public async Task CircuitBreaker_FourthFailure_TerminalFailed()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var (task, watch) = await SeedAsync(
+        var task = await SeedAsync(
             taskMeta: new Dictionary<string, object> { ["reworkAttempts"] = PRWatcher.MaxReworkAttempts.ToString() });
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.CiFailed, outcome);
         Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
-        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(watch.Id))!.Status);
     }
 
     [Fact]
     public async Task ChangesRequested_AgentVerdict_RequeuesWithNotes()
     {
         var gh = new FakeGitHub { Ci = CommitState.Success };
-        var (task, watch) = await SeedAsync(watchMeta: new Dictionary<string, object>
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
         {
             ["reviewSha"] = "abc123",
             // The ReviewerDispatcher records nameof(ReviewerVerdict.*)
@@ -475,8 +699,8 @@ public class PRWatcherReworkTests : IDisposable
             ["reviewNotes"] = "MetaEndpoints.cs: use OfType<string> instead of the null-forgiving Select",
         });
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
@@ -491,14 +715,14 @@ public class PRWatcherReworkTests : IDisposable
         // Verdict recorded for an OLD head; the agent pushed since.
         // CI green + no current verdict => keep polling, no rework.
         var gh = new FakeGitHub { Ci = CommitState.Success };
-        var (_, watch) = await SeedAsync(watchMeta: new Dictionary<string, object>
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
         {
             ["reviewSha"] = "oldsha",
             ["reviewVerdict"] = "RequestChanges",
         });
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "newsha");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
@@ -508,39 +732,37 @@ public class PRWatcherReworkTests : IDisposable
     public async Task ApprovedAgentVerdict_GreenCi_Merges()
     {
         var gh = new FakeGitHub { Ci = CommitState.Success };
-        var (task, watch) = await SeedAsync(watchMeta: new Dictionary<string, object>
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
         {
             ["reviewSha"] = "abc123",
             ["reviewVerdict"] = "Approve",
         });
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
         Assert.Equal(1, gh.MergeCalls);
         Assert.Equal(IssueStatus.Completed, (await _issues.GetAsync(task.Id))!.Status);
-        Assert.Equal(IssueStatus.Completed, (await _issues.GetAsync(watch.Id))!.Status);
     }
 
     [Fact]
     public async Task ReviewerError_ThirdRound_BlocksForOperator()
     {
         var gh = new FakeGitHub { Ci = CommitState.Success };
-        var (task, watch) = await SeedAsync(watchMeta: new Dictionary<string, object>
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
         {
             ["reviewSha"] = "abc123",
             ["reviewVerdict"] = "Error",
             ["reviewRound"] = PRWatcher.MaxReworkAttempts.ToString(),
         });
 
-        var outcome = await NewWatcher(gh).PollWatchOnceAsync(
-            watch, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
         Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(task.Id))!.Status);
-        Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(watch.Id))!.Status);
     }
 }

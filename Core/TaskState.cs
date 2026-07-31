@@ -53,8 +53,15 @@ public static class TaskStateProjector
         IssueRecord task,
         IssueRecord? watch,
         bool hasActiveDevRun,
-        DateTime utcNow)
+        DateTime utcNow,
+        int? maxStrikes = null,
+        TimeSpan? stallGrace = null)
     {
+        // Workflow policies (pass 3): callers that have the resolved
+        // definition pass its values; the constants remain the
+        // fallback so pre-definition behavior is unchanged.
+        var max = maxStrikes ?? MaxStrikes;
+        var grace = stallGrace ?? StallGrace;
         var prNumber = task.GetMetadata("prNumber");
         var reworkReason = task.GetMetadata("reworkReason");
         var strikes = int.TryParse(task.GetMetadata("reworkAttempts"), out var s) ? s : 0;
@@ -70,13 +77,13 @@ public static class TaskStateProjector
         {
             case IssueStatus.Completed:
                 return new(prNumber is not null ? TaskLifecycleState.Merged : TaskLifecycleState.Completed,
-                    null, "done", strikes, MaxStrikes);
+                    null, "done", strikes, max);
             case IssueStatus.Failed:
-                return new(TaskLifecycleState.Failed, null, "operator (failed — inspect, then requeue or close)", strikes, MaxStrikes);
+                return new(TaskLifecycleState.Failed, null, "operator (failed — inspect, then requeue or close)", strikes, max);
             case IssueStatus.Blocked:
-                return new(TaskLifecycleState.BlockedOperator, null, "operator decision required", strikes, MaxStrikes);
+                return new(TaskLifecycleState.BlockedOperator, null, "operator decision required", strikes, max);
             case IssueStatus.Closed:
-                return new(TaskLifecycleState.Closed, null, "closed", strikes, MaxStrikes);
+                return new(TaskLifecycleState.Closed, null, "closed", strikes, max);
         }
 
         // Parked on infra: the watch recorded that the PR's CI
@@ -84,7 +91,7 @@ public static class TaskStateProjector
         if (parked is not null)
         {
             return new(TaskLifecycleState.ParkedInfra, null,
-                "base-branch CI recovery (parked — no strikes burning)", strikes, MaxStrikes);
+                "base-branch CI recovery (parked — no strikes burning)", strikes, max);
         }
 
         // A live dev run trumps everything else. Substate from the
@@ -94,7 +101,7 @@ public static class TaskStateProjector
         {
             var substate = SubstateOf(task);
             return new(strikes > 0 ? TaskLifecycleState.ReworkRunning : TaskLifecycleState.AgentRunning,
-                substate, $"dev agent ({substate})", strikes, MaxStrikes);
+                substate, $"dev agent ({substate})", strikes, max);
         }
 
         // Authority semantics (Phase 3): the machine's recorded state
@@ -105,7 +112,7 @@ public static class TaskStateProjector
         // task in ReworkRunning forever (observed live 2026-07-26).
         if (Enum.TryParse<TaskLifecycleState>(machineState, out var recordedState))
         {
-            return new(recordedState, null, WaitingOnFor(recordedState), strikes, MaxStrikes);
+            return new(recordedState, null, WaitingOnFor(recordedState), strikes, max);
         }
 
         // Rework bookkeeping without a live run.
@@ -114,23 +121,23 @@ public static class TaskStateProjector
             if (task.Status == IssueStatus.Pending)
             {
                 return new(TaskLifecycleState.ReworkQueued, null,
-                    "dispatch slot (rework round queued)", strikes, MaxStrikes);
+                    "dispatch slot (rework round queued)", strikes, max);
             }
             // Claimed but no live run: fresh = starting, stale = stalled.
-            if (utcNow - task.UpdatedAt > StallGrace)
+            if (utcNow - task.UpdatedAt > grace)
             {
                 return new(TaskLifecycleState.StalledRework, null,
                     $"stalled — no push and no task update for {(int)(utcNow - task.UpdatedAt).TotalMinutes}m (stall-breaker re-fires as a strike)",
-                    strikes, MaxStrikes);
+                    strikes, max);
             }
             return new(TaskLifecycleState.ReworkRunning, "starting",
-                "dev agent (starting)", strikes, MaxStrikes);
+                "dev agent (starting)", strikes, max);
         }
 
         if (task.Status == IssueStatus.Pending)
         {
             return new(TaskLifecycleState.Pending, null,
-                "dispatch slot (first run)", strikes, MaxStrikes);
+                "dispatch slot (first run)", strikes, max);
         }
 
         // InProgress with a PR: waiting on the review/merge side.
@@ -144,16 +151,16 @@ public static class TaskStateProjector
             if (string.Equals(verdict, "Approve", StringComparison.Ordinal) && verdictSha is not null)
             {
                 return new(TaskLifecycleState.MergeReady, null,
-                    $"merge gate (approved at {verdictSha[..Math.Min(7, verdictSha.Length)]}, CI permitting)", strikes, MaxStrikes);
+                    $"merge gate (approved at {verdictSha[..Math.Min(7, verdictSha.Length)]}, CI permitting)", strikes, max);
             }
             return new(TaskLifecycleState.PROpen, null,
-                "CI + reviewer verdict", strikes, MaxStrikes);
+                "CI + reviewer verdict", strikes, max);
         }
 
         // InProgress, no PR, no live run: the workflow is between
         // executors (or recovering).
         return new(TaskLifecycleState.Dispatching, null,
-            "workflow (between steps)", strikes, MaxStrikes);
+            "workflow (between steps)", strikes, max);
     }
 
     private static string WaitingOnFor(TaskLifecycleState state) => state switch

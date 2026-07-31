@@ -3,84 +3,35 @@ using Forge.Core;
 namespace Forge.Dashboard.Flow;
 
 /// <summary>
-/// The pipeline flow graph: a declarative, fixed-layout DAG of the
-/// stages an issue passes through, split into two lanes —
-/// <b>planning</b> (intake → design → groom → backlog → sprint;
-/// fed by specs + ad-hoc tasks) and <b>implementation</b>
-/// (setup → agent → PR → review → rework → merge; fed by tasks).
+/// Classification + journey logic for the pipeline flow view: maps
+/// specs and issues onto the step ids of the resolved workflow
+/// definition (<see cref="Forge.Core.Workflow.WorkflowDefaults"/>),
+/// and rebuilds per-issue journeys from the issue_event timeline.
 ///
 /// <para>
-/// Everything here is DERIVED from existing stores (issue rows,
-/// spec rows, sprint memberships, watch metadata, issue_event
-/// timelines). No new tables, no new writes — the flow view cannot
-/// bloat the datastore, by construction.
+/// The graph SHAPE (steps/edges/layout) lives in the workflow
+/// definition, resolved per request — this file only knows how to
+/// place reality onto its step ids. Everything here is DERIVED from
+/// existing stores (issue rows, spec rows, sprint memberships,
+/// watch metadata, issue_event timelines). No new tables, no new
+/// writes — the flow view cannot bloat the datastore, by
+/// construction.
 /// </para>
 /// </summary>
 public static class FlowGraph
 {
-    public const string LanePlanning = "planning";
-    public const string LaneImplementation = "implementation";
-
-    public sealed record Node(string Id, string Label, string Lane, int X, int Y);
-    public sealed record Edge(string From, string To);
-
-    public static readonly IReadOnlyList<Node> Nodes = new Node[]
-    {
-        // Planning lane (left → right).
-        new("intake",  "Intake",        LanePlanning, 60,  90),
-        new("design",  "Design",        LanePlanning, 210, 90),
-        new("groom",   "Groom",         LanePlanning, 360, 90),
-        new("backlog", "Groomed backlog", LanePlanning, 510, 90),
-        new("sprint",  "Sprint",        LanePlanning, 660, 90),
-        // Implementation lane (snakes right → left under planning).
-        // Maps 1:1 onto the lifecycle state machine (Core/TaskState.cs):
-        // setup=Dispatching, agent=AgentRunning, pr=PROpen,
-        // review=MergeReady, rework=ReworkQueued/Running/Stalled,
-        // parked=ParkedInfra, blocked=Failed/BlockedOperator, done.
-        new("setup",   "Dispatching",   LaneImplementation, 660, 290),
-        new("agent",   "Agent run",     LaneImplementation, 510, 290),
-        new("pr",      "PR open (CI + review)", LaneImplementation, 360, 290),
-        new("review",  "Approved / merge-ready", LaneImplementation, 210, 290),
-        new("done",    "Merged / done", LaneImplementation, 60,  290),
-        // Loop + failure sinks below the implementation lane.
-        new("rework",  "Rework loop",   LaneImplementation, 360, 420),
-        new("parked",  "Parked (infra wait)", LaneImplementation, 210, 420),
-        new("blocked", "Blocked / failed", LaneImplementation, 60, 420),
-    };
-
-    public static readonly IReadOnlyList<Edge> Edges = new Edge[]
-    {
-        new("intake", "design"),   // send-to-designer (visual)
-        new("intake", "groom"),    // operator approve (non-visual fast path)
-        new("design", "groom"),    // designed → groomable
-        new("groom", "backlog"),   // spec groomed / ad-hoc approved
-        new("backlog", "sprint"),  // assembler ingests
-        new("sprint", "setup"),    // dispatch claims
-        new("setup", "agent"),     // worktree ready → run
-        new("agent", "pr"),        // diff → commit/push/PR
-        new("agent", "done"),      // verified NO_CHANGES_NEEDED
-        new("agent", "blocked"),   // no-progress breaker / unrecoverable
-        new("pr", "review"),       // CI green + approval
-        new("pr", "rework"),       // CI fail / changes requested / conflict
-        new("pr", "parked"),       // CI failure pre-existing on base branch
-        new("parked", "rework"),   // base recovered → no-strike refresh round
-        new("review", "done"),     // merge
-        new("review", "rework"),   // base moved after approval (conflict)
-        new("rework", "agent"),    // redispatch, same branch/PR
-        new("rework", "blocked"),  // rework circuit breaker (3)
-    };
-
-    public static Node? Find(string id) => Nodes.FirstOrDefault(n => n.Id == id);
-
     /// <summary>
     /// Classify a spec into its planning-lane node, or null when the
     /// spec has left planning (Groomed and beyond — its tasks carry
-    /// the flow from there).
+    /// the flow from there). When the design step is disabled in the
+    /// workflow definition (pass 4), a ReadyForDesign spec has
+    /// nowhere to go — it classifies back to intake, where the
+    /// operator's fast path (approve) lives.
     /// </summary>
-    public static string? ClassifySpec(SpecStatus status) => status switch
+    public static string? ClassifySpec(SpecStatus status, bool designEnabled = true) => status switch
     {
         SpecStatus.Draft => "intake",
-        SpecStatus.ReadyForDesign => "design",
+        SpecStatus.ReadyForDesign => designEnabled ? "design" : "intake",
         SpecStatus.Designed => "groom",
         SpecStatus.AssetReady => "groom",
         SpecStatus.Approved => "groom",
@@ -228,8 +179,10 @@ public static class FlowGraph
                     {
                         Push(prNumber is not null ? "rework" : "sprint", at,
                             detail.Contains("llm-429", StringComparison.Ordinal) ? "LLM 429 requeue"
+                            : detail.Contains("llm-auth", StringComparison.Ordinal) ? "LLM auth requeue (provider credentials)"
                             : detail.Contains("no diff", StringComparison.Ordinal) ? "no-progress requeue"
-                            : prNumber is not null ? "rework queued" : "requeued");
+                            : detail.Contains("pre-push verification failed", StringComparison.OrdinalIgnoreCase) ? "pre-push verification failed"
+                            : prNumber is not null ? ReworkNote(issue) : "requeued");
                         inRun = false;
                     }
                     else if (detail.Contains("->InProgress", StringComparison.Ordinal))
@@ -268,5 +221,21 @@ public static class FlowGraph
             Push(currentNode, issue.UpdatedAt, "current");
         }
         return visits;
+    }
+
+    /// <summary>Journey note for a rework requeue: names the round
+    /// and the cause from the task's metadata (the transition detail
+    /// itself carries no error for rework rounds), and flags the
+    /// warm-session resume when a persisted session exists.</summary>
+    private static string ReworkNote(IssueRecord issue)
+    {
+        var reason = issue.GetMetadata("reworkReason") ?? "";
+        var round = int.TryParse(issue.GetMetadata("reviewRound"), out var rr) ? rr : 0;
+        var note = reason.Contains("reviewer requested changes", StringComparison.OrdinalIgnoreCase)
+            ? $"review requested changes{(round > 0 ? $" (round {round})" : "")}"
+            : reason.Length > 0 ? reason : "rework queued";
+        return !string.IsNullOrEmpty(issue.GetMetadata("agentSessionId"))
+            ? note + " — resumes warm session"
+            : note;
     }
 }

@@ -24,7 +24,7 @@ public class DesignHygieneCheckerTests : IDisposable
 
     public DesignHygieneCheckerTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-hygiene-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("hygiene");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
@@ -385,5 +385,52 @@ public class DesignHygieneCheckerTests : IDisposable
         var findings = report.Findings.Where(x => x.Rule == "unknown_artifact_kind").ToList();
         Assert.Single(findings);
         Assert.Contains("made-up-kind", findings[0].Message);
+    }
+
+    [Fact]
+    public async Task NamespaceTouch_InsideKnownModule_Passes()
+    {
+        // Graph modules are csproj-granular ('PortHorizon.Core'); a
+        // touches entry naming a namespace inside it is more specific,
+        // not undefined (live 2026-07-29: epic-2's spec touched
+        // 'PortHorizon.Core.Construction' and was hygiene-failed).
+        var body = HealthyBody.Replace("- PortHorizon.Core", "- PortHorizon.Core.Construction");
+        var spec = await CreateSpecAsync(body);
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.DoesNotContain(report.Findings, f => f.Rule == "touches_undefined_module");
+    }
+
+    [Fact]
+    public async Task TouchesCheckedAgainstSpecProjectRoot_NotPrimaryRoot()
+    {
+        // Regression for the live 2026-07-29 epic-2 design failure: a
+        // porthorizon spec touching PortHorizon.Core.* modules was
+        // hygiene-failed because the graph was built from the PRIMARY
+        // (forge) workspace. The checker must resolve the graph root
+        // per spec project.
+        var primaryRoot = TempRoot.Instance.NewDirectory("hygiene-primary");
+        Directory.CreateDirectory(primaryRoot);
+        InitRepo(primaryRoot);   // git repo, but no PortHorizon.Core project
+        try
+        {
+            File.Delete(Path.Combine(primaryRoot, "PortHorizon.Core", "PortHorizon.Core.csproj"));
+            File.Delete(Path.Combine(primaryRoot, "PortHorizon.Core", "Program.cs"));
+            Directory.Delete(Path.Combine(primaryRoot, "PortHorizon.Core"));
+
+            var checker = new DesignHygieneChecker(
+                _specs, _graphCache, _graphBuilder, primaryRoot,
+                projectRootLookup: id => id == "porthorizon" ? _workDir : null);
+            var spec = await _specs.CreateAsync(new NewSpec("porthorizon", "Test", HealthyBody));
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
+            spec = (await _specs.GetAsync(spec.Id))!;
+
+            var report = await checker.CheckAsync(spec);
+
+            Assert.DoesNotContain(report.Findings, f => f.Rule == "touches_undefined_module");
+        }
+        finally
+        {
+            try { Directory.Delete(primaryRoot, recursive: true); } catch { }
+        }
     }
 }

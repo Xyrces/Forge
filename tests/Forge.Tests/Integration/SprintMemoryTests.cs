@@ -22,7 +22,7 @@ public class SprintMemoryTests : IDisposable
 
     public SprintMemoryTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-sprint-mem-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("sprint-mem");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "memory.db");
     }
@@ -99,7 +99,7 @@ public class SprintMemoryTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-sp-md-{Guid.NewGuid():N}"),
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("sp-md"),
             memory: memories);
 
         await runner.RunAsync(
@@ -138,7 +138,7 @@ public class SprintMemoryTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-sp-md-{Guid.NewGuid():N}"),
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("sp-md"),
             memory: memories);
 
         await runner.RunAsync(AgentType.CoreDev, "do the task", sessionId: null, context: null, ct: default);

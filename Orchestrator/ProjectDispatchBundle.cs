@@ -217,11 +217,14 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
 
         var dbPath = ForgesystemPaths.IssuesDb(_dataRoot, project.Id);
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        var issueStore = new IssueStore(dbPath);
+        var issueStore = new IssueStore(
+            Core.Db.ForgeDb.ForProject(_options.Db.IsSqlServer, _options.Db.ConnectionString, project.Id, dbPath));
         var agents = new AgentStore(issueStore);
         var sprints = new SprintStore(issueStore);
-        var designArtifacts = new DesignArtifactStore(dbPath);
-        var artOutputs = new ArtOutputStore(dbPath);
+        // Sibling stores share the project's connection factory (same
+        // per-project schema on SQL Server; same file on SQLite).
+        var designArtifacts = new DesignArtifactStore(issueStore.Db);
+        var artOutputs = new ArtOutputStore(issueStore.Db);
 
         var worktrees = new GitWorktreeService(
             new WorkspaceOptions
@@ -239,7 +242,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             gitHub, worktrees, issueStore,
             pollInterval: TimeSpan.FromSeconds(30),
             // Stale window for the sequential watch sweep. Anchored to
-            // the watch's CreatedAt (see PRWatcher.PollWatchOnceAsync),
+            // prOpenedAt metadata (see PRWatcher.PollWatchedTaskAsync),
             // so it must cover the operator-merge latency: the solo-
             // identity model means a human merges by hand, possibly
             // hours after the PR opens. 30 minutes (the old poll-loop

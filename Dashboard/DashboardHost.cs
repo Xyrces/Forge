@@ -397,6 +397,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         if (_projectFactory is not null && _slots is not null)
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
+            ProjectLookupEndpoints.MapProjectLookupEndpoints(_app);
             SecretsEndpoints.MapSecretsEndpoints(_app);
             DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
         }
@@ -454,13 +455,17 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_memory is not null)
         {
-            GateEndpoints.MapGateEndpoints(_app, new StageGates(_memory), _logger);
+            GateEndpoints.MapGateEndpoints(_app,
+                new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _logger);
             RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(_app, _gateOptions ?? new GateOptions(), _memory, _logger);
+            WorkflowEndpoints.MapWorkflowEndpoints(_app, _memory, _bus, _logger);
         }
         GateVerdictEndpoints.MapGateVerdictEndpoints(_app, _issues, _logger);
 
-        FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions);
-        NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory);
+        FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions,
+            _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
+            _memory);
+        NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory, _agentRuns);
         if (_agentRuns is not null)
         {
             AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns);
@@ -512,7 +517,8 @@ if (_groomerRuns is not null)
                 SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger);
             }
 
-            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns);
+            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
+                _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null);
         }
 
         _app.MapBuildInfoEndpoint();

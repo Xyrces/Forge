@@ -43,16 +43,21 @@ public static class DashboardEndpoints
             return Results.Json(ToIssueView(created), DashboardJson.Options, statusCode: 201);
         });
 
-app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
+app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string? projectId) =>
         {
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (patch is null) return Results.BadRequest(new { error = "empty body" });
-            var existing = await issues.GetAsync(id, ctx.RequestAborted);
+            // Multi-project: operator task mutations route to the
+            // owning project's store (the default is the primary).
+            var store = !string.IsNullOrWhiteSpace(projectId)
+                ? projectContexts?.Find(projectId)?.Issues ?? issues
+                : issues;
+            var existing = await store.GetAsync(id, ctx.RequestAborted);
             if (existing is null) return Results.NotFound();
             if (patch.TryGetValue("status", out var st) && Enum.TryParse<IssueStatus>(st?.ToString() ?? "", out var toStatus))
             {
-                var updated = await issues.TransitionAsync(id, toStatus,
+                var updated = await store.TransitionAsync(id, toStatus,
                     patch.TryGetValue("error", out var e) ? e?.ToString() : null,
                     ct: ctx.RequestAborted);
                 return Results.Json(ToIssueView(updated), DashboardJson.Options);
@@ -156,9 +161,11 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         });
 
         // ---- Skills ----
-        app.MapGet("/api/skills", async (string? role, string? global, CancellationToken ct) =>
+        app.MapGet("/api/skills", async (string? role, string? global, string? projectId, CancellationToken ct) =>
         {
             var list = await skills.ListByRoleAsync(role, global == "true", ct);
+            if (!string.IsNullOrWhiteSpace(projectId))
+                list = list.Where(s => s.ProjectId is null || string.Equals(s.ProjectId, projectId, StringComparison.OrdinalIgnoreCase)).ToList();
             return Results.Json(list.Select(ToSkillView).ToArray(), DashboardJson.Options);
         });
 
@@ -166,7 +173,9 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         {
             var spec = await JsonSerializer.DeserializeAsync<NewSkill>(ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (spec is null || string.IsNullOrWhiteSpace(spec.Name)) return Results.BadRequest();
-            var created = await skills.CreateAsync(spec, ctx.RequestAborted);
+            // UI-created skills are always Forge-owned — the repo
+            // source is reserved for the startup importer.
+            var created = await skills.CreateAsync(spec with { Source = Core.SkillSources.Forge }, ctx.RequestAborted);
             return Results.Json(ToSkillView(created), DashboardJson.Options, statusCode: 201);
         });
 
@@ -175,25 +184,44 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (patch is null) return Results.BadRequest();
-            var updated = await skills.UpdateAsync(id, patch, ctx.RequestAborted);
-            return Results.Json(ToSkillView(updated), DashboardJson.Options);
+            try
+            {
+                var updated = await skills.UpdateAsync(id, patch, ctx.RequestAborted);
+                return Results.Json(ToSkillView(updated), DashboardJson.Options);
+            }
+            catch (Core.RepoOwnedSkillException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
         });
 
         app.MapDelete("/api/skills/{id}", async (string id, CancellationToken ct) =>
         {
-            await skills.DeleteAsync(id, ct);
-            return Results.NoContent();
+            try
+            {
+                await skills.DeleteAsync(id, ct);
+                return Results.NoContent();
+            }
+            catch (Core.RepoOwnedSkillException ex)
+            {
+                return Results.Conflict(new { error = ex.Message });
+            }
         });
 
         // ---- Sprints ----
-        app.MapGet("/api/sprints", async (string? active, CancellationToken ct) =>
+        app.MapGet("/api/sprints", async (string? active, string? projectId, CancellationToken ct) =>
         {
+            // Multi-project: sprint reads route to the owning project's
+            // store (default is the primary), same as issue reads.
+            var store = !string.IsNullOrWhiteSpace(projectId)
+                ? projectContexts?.Find(projectId)?.Sprints ?? sprints
+                : sprints;
             if (active == "true")
             {
-                var s = await sprints.GetActiveAsync(ct);
+                var s = await store.GetActiveAsync(ct);
                 return Results.Json(s is null ? Array.Empty<object>() : new[] { ToSprintView(s) }, DashboardJson.Options);
             }
-            var list = await sprints.ListAsync(activeOnly: false, ct);
+            var list = await store.ListAsync(activeOnly: false, ct);
             return Results.Json(list.Select(ToSprintView).ToArray(), DashboardJson.Options);
         });
 
@@ -206,17 +234,20 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
             return Results.Json(ToSprintView(created), DashboardJson.Options, statusCode: 201);
         });
 
-        app.MapPatch("/api/sprints/{id}", async (string id, HttpContext ctx) =>
+        app.MapPatch("/api/sprints/{id}", async (string id, HttpContext ctx, string? projectId) =>
         {
+            var store = !string.IsNullOrWhiteSpace(projectId)
+                ? projectContexts?.Find(projectId)?.Sprints ?? sprints
+                : sprints;
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (patch is null) return Results.BadRequest();
             if (patch.TryGetValue("status", out var st) && st?.ToString()?.ToLowerInvariant() == "active")
             {
-                var s = await sprints.SetActiveAsync(id, ctx.RequestAborted);
+                var s = await store.SetActiveAsync(id, ctx.RequestAborted);
                 return Results.Json(ToSprintView(s), DashboardJson.Options);
             }
-            var updated = await sprints.UpdateAsync(id, patch, ctx.RequestAborted);
+            var updated = await store.UpdateAsync(id, patch, ctx.RequestAborted);
             return Results.Json(ToSprintView(updated), DashboardJson.Options);
         });
 
@@ -326,6 +357,8 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx) =>
         agentId = s.AgentId,
         roles = s.Roles,
         enabled = s.Enabled,
+        projectId = s.ProjectId,
+        source = s.Source,
         createdAt = s.CreatedAt,
         updatedAt = s.UpdatedAt
     };

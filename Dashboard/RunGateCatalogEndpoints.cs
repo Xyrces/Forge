@@ -113,6 +113,18 @@ public static class RunGateCatalogEndpoints
             return new { name, kind, description, source };
         }).ToList();
 
-        return Results.Json(new { checkpoint, source, gates }, DashboardJson.Options);
+        var unknownNames = names.Where(n => !RunGatePipeline.GateCatalog.ContainsKey(n)).ToList();
+
+        // Full catalog so the UI can render the disabled list and
+        // descriptions without hardcoding its own copy (the audit
+        // found the page's hardcoded catalog had already drifted).
+        var catalog = RunGatePipeline.GateCatalog
+            .Select(kv => new { name = kv.Key, kind = kv.Value.Kind.ToString(), description = kv.Value.Description })
+            .OrderBy(g => g.name)
+            .ToList();
+        var defaults = RunGatePipeline.Defaults.TryGetValue(checkpoint, out var d)
+            ? d : Array.Empty<string>();
+
+        return Results.Json(new { checkpoint, source, gates, unknownNames, catalog, defaults }, DashboardJson.Options);
     }
 }

@@ -9,6 +9,7 @@ namespace Forge.Core;
 public enum TaskEvent
 {
     Dispatched,
+    RunStarted,
     RunCompletedDiff,
     RunCompletedNoDiff,
     RunDied,
@@ -47,16 +48,19 @@ public enum TaskEvent
 /// </summary>
 public sealed class TaskStateMachine
 {
-    private readonly IIssueStore _issues;
     private readonly bool _writeAuthority;
     private readonly ILogger _logger;
 
+    /// <summary>The machine is store-AGNOSTIC (multi-project fix
+    /// 2026-07-29): every report passes the store that owns the task.
+    /// The previous construction-time store silently wrote lifecycle
+    /// state to the primary project's store, so a second project's
+    /// tasks failed every report with "Issue not found" and their
+    /// state never advanced.</summary>
     public TaskStateMachine(
-        IIssueStore issues,
         bool writeAuthority,
         ILogger logger)
     {
-        _issues = issues;
         _writeAuthority = writeAuthority;
         _logger = logger;
     }
@@ -87,15 +91,40 @@ public sealed class TaskStateMachine
             // requeues and is claimed again — observed live
             // 2026-07-26: Dispatching+Dispatched and
             // StalledRework+Dispatched violations).
-            TaskLifecycleState.Dispatching, TaskLifecycleState.StalledRework);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.StalledRework,
+            // Claim-race tolerance: a CI/review requeue makes the task
+            // claimable while the record still says PROpen (observed
+            // live 2026-07-30: task-9 violation during the rework
+            // storm). Same class as the ReworkQueued entries.
+            TaskLifecycleState.PROpen);
+        Add(TaskEvent.RunStarted, TaskLifecycleState.AgentRunning,
+            // The model run actually begins — advances the recorded
+            // state and (critically) refreshes stateEnteredAt, so the
+            // stall guard's clock measures from run-start, not from
+            // the rework fire (observed live 2026-07-27: retried
+            // stalls looked frozen at Dispatching for the whole run).
+            TaskLifecycleState.Dispatching, TaskLifecycleState.AgentRunning,
+            // Claim-race tolerance: the requeue transition makes the
+            // task claimable before the ReworkFired machine write is
+            // visible, so the run's events can arrive while the record
+            // still says ReworkQueued (observed live 2026-07-29:
+            // task-12's record stranded after a Dispatched violation).
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.RunCompletedDiff, TaskLifecycleState.PROpen,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
-            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.RunCompletedNoDiff, TaskLifecycleState.Completed,
-            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Completed);
+            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning, TaskLifecycleState.Completed,
+            // A fast no-diff run can complete before the RunStarted
+            // report lands (sibling events RunCompletedDiff and
+            // RunDied already allow Dispatching — observed live
+            // 2026-07-29: porthorizon task-11 stateViolation).
+            TaskLifecycleState.Dispatching, TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.RunDied, TaskLifecycleState.StalledRework,
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
-            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen);
+            TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.PrOpened, TaskLifecycleState.PROpen,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
             // A rework round's workflow re-uses the open PR — the
@@ -105,7 +134,8 @@ public sealed class TaskStateMachine
             // A push after approval: the new head invalidates the
             // approval — back to PROpen (observed live: task-193,
             // MergeReady+PrOpened).
-            TaskLifecycleState.MergeReady);
+            TaskLifecycleState.MergeReady,
+            TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.ReworkFired, TaskLifecycleState.ReworkQueued,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady, TaskLifecycleState.StalledRework,
             TaskLifecycleState.ParkedInfra, TaskLifecycleState.ReworkQueued);
@@ -142,8 +172,11 @@ public sealed class TaskStateMachine
     /// validate the transition, record state metadata. The legacy
     /// flag writes stay at the call sites until Phase 3 — the
     /// machine SHADOWS them for now. Returns the new state.
+    /// <paramref name="issues"/> is the store that OWNS the task
+    /// (the task's project store) — the machine writes nowhere else.
     /// </summary>
     public async Task<TaskLifecycleState> ReportAsync(
+        IIssueStore issues,
         IssueRecord task,
         TaskEvent evt,
         IssueRecord? watch,
@@ -192,7 +225,7 @@ public sealed class TaskStateMachine
         {
             foreach (var kv in extraMetadata) metadata[kv.Key] = kv.Value;
         }
-        await _issues.TransitionAsync(task.Id, task.Status, error: null, metadata: metadata, ct: ct);
+        await issues.TransitionAsync(task.Id, task.Status, error: null, metadata: metadata, ct: ct);
         return next;
     }
 }

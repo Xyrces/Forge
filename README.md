@@ -124,9 +124,24 @@ dotnet run --project Forge -- \
   --task-type ecs \
   --task-desc "..." \
   --branch "agent/positions"
+
+# One-shot SQLite -> Azure SQL state migration (service must be stopped first).
+# --target sqlserver                Only target currently supported
+# --connection-string "..."         Or set db.connectionString in config
+# --include-open-work               Also migrate pending/in-progress tasks (default: skip)
+# --reset                           Recreate target schema before migrating
+dotnet run --project Forge -- \
+  --migrate-db --target sqlserver \
+  --connection-string "Server=tcp:...;Initial Catalog=...;Authentication=Active Directory Default;"
+
+# Provision the contained DB user (db_owner) for the forge-mi managed identity.
+# Run as Entra admin once before the future ACA/AKS cutover. Idempotent.
+# --connection-string "..."         Or set db.connectionString in config
+# --mi-name forge-mi                User-assigned managed identity name (default: forge-mi)
+dotnet run --project Forge -- --init-azure-sql
 ```
 
-`--once` runs a single dispatch cycle and exits. Use it for cron-driven or trigger-driven dispatch. `--dashboard-only` is convenient for inspecting state without taking dispatch slots.
+`--once` runs a single dispatch cycle and exits. Use it for cron-driven or trigger-driven dispatch. `--dashboard-only` is convenient for inspecting state without taking dispatch slots. See `docs/azure-sql-cutover.md` for the full Azure SQL cutover runbook (rehearsal already executed end-to-end on 2026-07-27).
 
 ## Dashboard
 

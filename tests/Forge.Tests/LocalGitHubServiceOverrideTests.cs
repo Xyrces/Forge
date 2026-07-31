@@ -70,6 +70,7 @@ public class LocalGitHubServiceOverrideTests
             "DeleteBranchAsync",
             "GetBranchHeadShaAsync",
             "GetCommitStatusAsync",
+            "GetCompareDiffAsync",
             "GetFailedCheckRunSummariesAsync",
             "GetOpenPullRequestForBranchAsync",
             "GetPullRequestAsync",

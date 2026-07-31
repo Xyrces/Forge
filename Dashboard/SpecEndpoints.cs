@@ -291,11 +291,15 @@ public static class SpecEndpoints
                 // piles up duplicates (observed 2026-07-22: ~27 repeat
                 // grooms of one spec → 83 stories / 147 tasks / 28 PRs).
                 // Intentional re-decomposition passes ?force=true.
+                // The stories live in the SPEC'S PROJECT's store (the
+                // groomer routes by spec.ProjectId), so the guard must
+                // look there — not in the primary store.
                 if (spec.Status == SpecStatus.Groomed
                     && issues is not null
                     && !string.Equals(force, "true", StringComparison.OrdinalIgnoreCase))
                 {
-                    var existing = await issues.ListAsync(
+                    var storyStore = projectContexts?.Find(spec.ProjectId)?.Issues ?? issues;
+                    var existing = await storyStore.ListAsync(
                         new Forge.Core.IssueFilter { Type = "story" }, ct);
                     if (existing.Any(s => string.Equals(s.ParentIssueId, spec.Id, StringComparison.Ordinal)))
                     {
@@ -312,7 +316,7 @@ public static class SpecEndpoints
                 // and watch the event stream. The manual run is
                 // recorded in issue_groomer_run (P3.5) so the
                 // dashboard's Groomer timeline can show it.
-                var agent = groomerFactory.Create();
+                var agent = groomerFactory.Create(projectId: spec.ProjectId);
                 var runs = groomerRuns;
                 _ = Task.Run(async () =>
                 {
@@ -360,14 +364,16 @@ public static class SpecEndpoints
             var spec = await specs.GetAsync(id, ct);
             if (spec is null) return Results.NotFound();
 
-            var canApprove = spec.Status == SpecStatus.Draft;
-            var canStartGrooming = spec.Status is SpecStatus.Approved or SpecStatus.Designed or SpecStatus.AssetReady;
-            var canShip = spec.Status == SpecStatus.Groomed;
+            // Single source of truth: Core.SpecActions (the UI
+            // consumes the same rules for its buttons).
+            var canApprove = SpecActions.CanApprove(spec.Status);
+            var canStartGrooming = SpecActions.CanStartGrooming(spec.Status);
+            var canShip = SpecActions.CanShip(spec.Status);
             // Designer path: a Draft spec can be sent to the Designer
             // agent (Draft -> ReadyForDesign; the DesignerScheduler
             // picks it up automatically and populates the design
             // board).
-            var canSendToDesign = spec.Status == SpecStatus.Draft;
+            var canSendToDesign = SpecActions.CanSendToDesign(spec.Status);
 
             return Results.Json(new
             {
@@ -421,7 +427,11 @@ public static class SpecEndpoints
         createdAt = s.CreatedAt,
         updatedAt = s.UpdatedAt,
         body = s.Body,
-        author = s.Author
+        author = s.Author,
+        // Server-authoritative action availability (Core.SpecActions)
+        // — the UI must not ship its own copy of these rules.
+        canApprove = SpecActions.CanApprove(s.Status),
+        canStartGrooming = SpecActions.CanStartGrooming(s.Status),
     };
 
     private static object ToVersionView(SpecVersionRecord v) => new
