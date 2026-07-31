@@ -499,7 +499,7 @@ if (useRealLlm)
         while (dir is not null)
         {
             if (Directory.Exists(Path.Combine(dir, ".git"))
-                && File.Exists(Path.Combine(dir, "Forge.Core.csproj")))
+                && File.Exists(Path.Combine(dir, "Forge.Core", "Forge.Core.csproj")))
                 return dir;
             dir = Path.GetDirectoryName(dir);
         }
