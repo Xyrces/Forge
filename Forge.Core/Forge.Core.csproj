@@ -12,6 +12,13 @@
   </PropertyGroup>
 
   <!--
+    The project file lives in Forge.Core/ and source files live under
+    Forge.Core/. SDK default Compile globs include all .cs files here
+    recursively, so nested directories (Agents/Gates, Orchestrator/Slots,
+    Dashboard/Flow, etc.) are compiled automatically.
+  -->
+
+  <!--
     The Blazor WASM UI (Forge.UI) lives in a sibling project with
     StaticWebAssetsEnabled=true. The static web assets (app.css,
     app.js, _framework/*) flow into this project through the
@@ -42,6 +49,8 @@
     <PackageReference Include="Microsoft.Agents.AI" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.Workflows" Version="1.12.0" />
     <PackageReference Include="Microsoft.Agents.AI.DurableTask" Version="1.1.0-preview.260410.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.0.2" />
     <PackageReference Include="Microsoft.DurableTask.Client.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.DurableTask.Worker.AzureManaged" Version="1.18.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />

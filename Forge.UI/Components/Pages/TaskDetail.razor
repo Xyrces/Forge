@@ -9,7 +9,8 @@
 <div class="page">
     <div class="page-header">
         <h1>
-            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/backlog"))">← Backlog</button>
+            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/sprints"))">← Sprints</button>
+            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/backlog"))">Backlog</button>
             @(Prop(_task, "title") ?? TaskId)
         </h1>
         <div class="page-header__actions">
@@ -22,7 +23,7 @@
     {
         <div class="banner banner--error"><span>@_error</span></div>
     }
-    @if (_task is null)
+    @if (_task is null && _error is null)
     {
         <div class="page-subtitle">Loading…</div>
     }
@@ -39,6 +40,14 @@
                     {
                         <span class="pill pill--blocked">@_state.Strikes/@_state.MaxStrikes strikes</span>
                     }
+                }
+                @if (Meta("reviewStartedAt") is not null)
+                {
+                    <span class="pill pill--info">reviewing…</span>
+                }
+                else if (IsReviewPending)
+                {
+                    <span class="pill pill--info">review pending</span>
                 }
                 <span class="mono">@Prop(_task, "type")</span>
                 <span class="mono">@TaskId</span>
@@ -81,6 +90,37 @@
                     @if (Meta("reworkContext") is { } reworkCtx)
                     {
                         <tr><td>Rework context</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@reworkCtx</pre></td></tr>
+                    }
+                    @if (Meta("reviewVerdict") is not null || Meta("reviewSha") is not null)
+                    {
+                        var reviewVerdict = Meta("reviewVerdict");
+                        <tr>
+                            <td>Review</td>
+                            <td>
+                                @if (reviewVerdict is not null)
+                                {
+                                    <span class="pill pill--@(reviewVerdict == "Approve" ? "success" : reviewVerdict == "RequestChanges" ? "blocked" : "warn")">
+                                        @(reviewVerdict == "Approve" ? "approved" : reviewVerdict == "RequestChanges" ? "changes requested" : reviewVerdict.ToLowerInvariant())
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="pill">pending</span>
+                                }
+                                @if (Meta("reviewRound") is { } reviewRound)
+                                {
+                                    <span class="pill pill--blocked">R@(reviewRound)</span>
+                                }
+                                @if (Meta("reviewSha") is { } reviewSha)
+                                {
+                                    <span class="mono meta-text">@("@")@reviewSha.Substring(0, Math.Min(7, reviewSha.Length))</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                    @if (Meta("reviewNotes") is { Length: > 0 } reviewNotes)
+                    {
+                        <tr><td>Review notes</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@reviewNotes</pre></td></tr>
                     }
                     @if (PlanGate is { } pg)
                     {
@@ -125,11 +165,11 @@
                             </td>
                         </tr>
                     }
-                    <tr><td>Created</td><td class="mono">@Prop(_task, "createdAt")</td></tr>
-                    <tr><td>Updated</td><td class="mono">@Prop(_task, "updatedAt")</td></tr>
+                    <tr><td>Created</td><td class="mono">@FmtDate(Prop(_task, "createdAt"))</td></tr>
+                    <tr><td>Updated</td><td class="mono">@FmtDate(Prop(_task, "updatedAt"))</td></tr>
                     @if (Prop(_task, "closedAt") is { } closed)
                     {
-                        <tr><td>Closed</td><td class="mono">@closed</td></tr>
+                        <tr><td>Closed</td><td class="mono">@FmtDate(closed)</td></tr>
                     }
                 </tbody>
             </table>
@@ -163,10 +203,14 @@
                                     <a href="/runs/@r.Id">
                                         <span class="pill @(r.Status == "succeeded" ? "pill--completed" : r.Status == "running" ? "pill--inprogress" : "pill--failed")">@r.Status</span>
                                     </a>
+                                    @if (r.ResumedSession == true)
+                                    {
+                                        <span class="pill pill--info">resumed</span>
+                                    }
                                 </td>
                                 <td class="mono">@r.StartedAt.ToString("MM-dd HH:mm:ss")</td>
                                 <td class="mono">@(r.DurationMs is null ? "…" : $"{TimeSpan.FromMilliseconds(r.DurationMs.Value).TotalSeconds:F0}s")</td>
-                                <td class="mono">@(r.MessageCount ?? 0) msgs · @(r.ToolCallCount ?? 0) tools</td>
+                                <td class="mono">@(r.Phase is { Length: > 0 } p ? p + " · " : "")@(r.MessageCount ?? 0) msgs · @(r.ToolCallCount ?? 0) tools</td>
                                 <td class="mono" style="font-size:11px; max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="@r.Error">@(r.Error ?? "")</td>
                             </tr>
                         }
@@ -207,6 +251,9 @@
 </div>
 
 @code {
+    private static string FmtDate(string? iso) =>
+        DateTime.TryParse(iso, out var d) ? d.ToString("yyyy-MM-dd HH:mm") : iso ?? "—";
+
     [Parameter] public string TaskId { get; set; } = "";
 
     private JsonElement? _task;
@@ -294,7 +341,9 @@
                                 DurationMs: long.TryParse(Prop(r, "durationMs"), out var dm) ? dm : null,
                                 MessageCount: int.TryParse(Prop(r, "messageCount"), out var mc) ? mc : null,
                                 ToolCallCount: int.TryParse(Prop(r, "toolCallCount"), out var tc) ? tc : null,
-                                Error: Prop(r, "error")));
+                                Error: Prop(r, "error"),
+                                Phase: Prop(r, "phase"),
+                                ResumedSession: r.TryGetProperty("resumedSession", out var rs) && rs.ValueKind == JsonValueKind.True));
                         }
                     }
                 }
@@ -378,5 +427,25 @@
     private sealed record StateVm(string State, string? Substate, string WaitingOn, int Strikes, int MaxStrikes);
 
     private sealed record RunVm(string Id, string Status, DateTime StartedAt,
-        long? DurationMs, int? MessageCount, int? ToolCallCount, string? Error);
+        long? DurationMs, int? MessageCount, int? ToolCallCount, string? Error,
+        string? Phase, bool? ResumedSession);
+
+    /// <summary>"Awaiting review": the task has an open PR but no
+    /// verdict against the current pushed head (branchSha) yet. The
+    /// "reviewing…" marker (reviewStartedAt) takes precedence and is
+    /// rendered separately.</summary>
+    private bool IsReviewPending
+    {
+        get
+        {
+            var status = Prop(_task, "status");
+            if (status is not ("InProgress" or "Pending")) return false;
+            if (Meta("prNumber") is null) return false;
+            var verdict = Meta("reviewVerdict");
+            var reviewedSha = Meta("reviewSha");
+            var headSha = Meta("branchSha");
+            if (string.IsNullOrEmpty(verdict)) return true;
+            return headSha is not null && !string.Equals(reviewedSha, headSha, StringComparison.Ordinal);
+        }
+    }
 }

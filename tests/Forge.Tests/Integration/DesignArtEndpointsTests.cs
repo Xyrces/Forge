@@ -25,7 +25,7 @@ public class DesignArtEndpointsTests : IDisposable
 
     public DesignArtEndpointsTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-design-art-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("design-art");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

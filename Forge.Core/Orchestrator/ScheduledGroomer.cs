@@ -38,6 +38,7 @@ public sealed class ScheduledGroomer
     private readonly IIssueStore? _issues;
     private readonly ISprintStore? _sprints;
     private readonly StageGates? _gates;
+    private readonly Projects.ProjectContextFactory? _projectContexts;
 
     /// <summary>Max ad-hoc tasks groomed per tick (LLM cost bound).</summary>
     internal const int MaxTaskGroomsPerTick = 3;
@@ -51,7 +52,12 @@ public sealed class ScheduledGroomer
         TimeSpan? interval = null,
         IIssueStore? issues = null,
         ISprintStore? sprints = null,
-        StageGates? gates = null)
+        StageGates? gates = null,
+        // Multi-project: when set, the ad-hoc pass sweeps EVERY
+        // registered project's store (each groomed against its own
+        // queue) instead of only the primary store. Spec-driven
+        // grooming routes via the factory regardless.
+        Projects.ProjectContextFactory? projectContexts = null)
     {
         _specs = specs;
         _groomerFactory = groomerFactory;
@@ -62,6 +68,7 @@ public sealed class ScheduledGroomer
         _issues = issues;
         _sprints = sprints;
         _gates = gates;
+        _projectContexts = projectContexts;
     }
 
     public TimeSpan Interval => _interval;
@@ -148,11 +155,37 @@ public sealed class ScheduledGroomer
     /// </summary>
     private async Task GroomAdHocTasksAsync(CancellationToken ct)
     {
+        // Multi-project: sweep each registered project's own queue.
+        // Without this the ad-hoc pass only ever saw the PRIMARY
+        // store, so a second project's ad-hoc tasks never became
+        // sprint-eligible.
+        if (_projectContexts is not null)
+        {
+            foreach (var project in _projectContexts.KnownProjects)
+            {
+                var ctx = _projectContexts.Find(project.Id);
+                if (ctx is null) continue;
+                try
+                {
+                    await GroomAdHocTasksForStoreAsync(project.Id, ctx.Issues, ctx.Sprints, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "ScheduledGroomer: ad-hoc sweep failed for project {ProjectId}; continuing", project.Id);
+                }
+            }
+            return;
+        }
         if (_issues is null) return;
+        await GroomAdHocTasksForStoreAsync(projectId: null, _issues, _sprints, ct);
+    }
+
+    private async Task GroomAdHocTasksForStoreAsync(string? projectId, IIssueStore issues, ISprintStore? sprints, CancellationToken ct)
+    {
         List<IssueRecord> pending;
         try
         {
-            pending = (await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct)).ToList();
+            pending = (await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct)).ToList();
         }
         catch (Exception ex)
         {
@@ -160,13 +193,13 @@ public sealed class ScheduledGroomer
             return;
         }
 
-        var byId = (await _issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
+        var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
         var sprinted = new HashSet<string>(StringComparer.Ordinal);
-        if (_sprints is not null)
+        if (sprints is not null)
         {
-            foreach (var s in await _sprints.ListAsync(activeOnly: false, ct))
+            foreach (var s in await sprints.ListAsync(activeOnly: false, ct))
             {
-                foreach (var id in await _sprints.GetIssueIdsAsync(s.Id, ct))
+                foreach (var id in await sprints.GetIssueIdsAsync(s.Id, ct))
                 {
                     sprinted.Add(id);
                 }
@@ -187,7 +220,7 @@ public sealed class ScheduledGroomer
         {
             try
             {
-                var groomer = _groomerFactory.Create();
+                var groomer = _groomerFactory.Create(projectId: projectId);
                 var outcome = await groomer.GroomTaskAsync(task.Id, ct);
                 _logger.LogInformation("ScheduledGroomer: ad-hoc task {Id} groom outcome={Outcome}", task.Id, outcome ?? "no-decision");
             }
@@ -222,7 +255,7 @@ public sealed class ScheduledGroomer
 
         try
         {
-            var groomer = _groomerFactory.Create();
+            var groomer = _groomerFactory.Create(projectId: spec.ProjectId);
             var result = await groomer.GroomAsync(spec.Id, ct);
             var duration = DateTime.UtcNow - startedAt;
             await _runStore.FinishAsync(

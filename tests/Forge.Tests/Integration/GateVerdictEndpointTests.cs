@@ -20,7 +20,7 @@ public class GateVerdictEndpointTests : IDisposable
 
     public GateVerdictEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-gv-ep-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("gv-ep");
         _store = new IssueStore(_dbPath);
 
         var port = GetEphemeralPort();

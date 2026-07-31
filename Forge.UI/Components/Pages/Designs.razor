@@ -22,18 +22,18 @@
     else
     {
         <div class="filter-bar">
-            <span class="chip chip--active">All</span>
-            <span class="chip">Ready For Design</span>
-            <span class="chip">Needs Revision</span>
-            <span class="chip">Designed</span>
+            @foreach (var f in new[] { "All", "ReadyForDesign", "NeedsRevision", "Designed" })
+            {
+                <button class="chip @(_filter == f ? "chip--active" : "")" @onclick="() => _filter = f">@f</button>
+            }
         </div>
 
         <div class="design-grid">
-            @foreach (var row in DesignsStore.Value.Rows)
+            @foreach (var row in DesignsStore.Value.Rows.Where(r => _filter == "All" || r.Status == _filter))
             {
                 <div class="design-card">
                     <div class="design-card__thumb"></div>
-                    <div class="design-card__id mono">@row.SpecId</div>
+                    <div class="design-card__id mono"><a href="/specs/@row.SpecId">@row.SpecId</a></div>
                     <div class="design-card__title">@row.Title</div>
                     <div class="design-card__meta">
                         <span class="pill pill--@row.Status.ToLowerInvariant()">@row.Status</span>
@@ -51,6 +51,7 @@
 
 @code {
     private string? _loadedProject;
+    private string _filter = "All";
 
     protected override void OnInitialized()
     {

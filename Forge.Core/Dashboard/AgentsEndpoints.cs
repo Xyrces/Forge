@@ -95,6 +95,8 @@ public static class AgentsEndpoints
                         lastActivityAt = activeRun.LastActivityAt,
                         messageCount = activeRun.MessageCount,
                         toolCallCount = activeRun.ToolCallCount,
+                        phase = activeRun.Phase,
+                        resumedSession = activeRun.ResumedSession,
                     },
                     lastRun = lastRun is null ? null : new
                     {
@@ -174,7 +176,7 @@ public static class AgentsEndpoints
             if (provider is null)
                 return Results.NotFound(new { error = $"unknown provider '{name}'" });
             var models = await ProviderModelCatalog.GetModelsAsync(provider, ct);
-            return (IResult)Results.Ok(new { provider = provider.Name, models });
+            return (IResult)Results.Ok(new { provider = provider.Name, models, fetchError = ProviderModelCatalog.LastError(provider.Name) });
         });
 
         app.MapPut("/api/agents/roles/{name}/model", async (string name, PutRoleModelRequest? body, CancellationToken ct) =>

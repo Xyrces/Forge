@@ -7,6 +7,7 @@ using Forge.AgentTools;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Core.Db;
 using Forge.Dashboard;
 using Forge.Orchestrator.Slots;
 using Forge.Projects;
@@ -96,6 +97,12 @@ if (mode == CliMode.DashboardOnly)
         if (mode == CliMode.RecoverAndStart)
             return await RunRecoverAsync(options, loggerFactory, logger, dryRun: false);
 
+        if (mode == CliMode.MigrateDb)
+            return await RunMigrateDbAsync(args, options, loggerFactory);
+
+        if (mode == CliMode.InitAzureSql)
+            return await RunInitAzureSqlAsync(args, options, loggerFactory);
+
         // systemd hosting. When launched by systemd (Type=notify),
         // stdin/stdout are not a console and Console.CancelKeyPress
         // never fires on stop -- systemd instead expects the process
@@ -150,7 +157,7 @@ if (mode == CliMode.DashboardOnly)
         }
     }
 
-    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart }
+    private enum CliMode { Run, Once, Status, Enqueue, DashboardOnly, WorktreeSmoke, Check, RecoverDryRun, RecoverAndStart, MigrateDb, InitAzureSql }
 
     private static CliMode ParseMode(string[] args)
     {
@@ -162,6 +169,8 @@ if (mode == CliMode.DashboardOnly)
         if (args.Any(a => a == "--check")) return CliMode.Check;
         if (args.Any(a => a == "--recover")) return CliMode.RecoverDryRun;
         if (args.Any(a => a == "--recover-and-start")) return CliMode.RecoverAndStart;
+        if (args.Any(a => a == "--migrate-db")) return CliMode.MigrateDb;
+        if (args.Any(a => a == "--init-azure-sql")) return CliMode.InitAzureSql;
         return CliMode.Run;
     }
 
@@ -187,7 +196,7 @@ if (mode == CliMode.DashboardOnly)
                 return 1;
             }
             var primary = projects[0];
-            await using var issues = new IssueStore(dbByProject[primary.Id]);
+            await using var issues = new IssueStore(FactoryFor(options.Db, primary.Id, dbByProject[primary.Id]));
             var all = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
             Console.WriteLine($"Project   : {primary.Id} ({primary.Root})");
             Console.WriteLine($"Pending:    {all.Count(i => i.Status == IssueStatus.Pending)}");
@@ -220,7 +229,7 @@ if (mode == CliMode.DashboardOnly)
             return 1;
         }
         var primary = projects[0];
-        var issues = new IssueStore(dbByProject[primary.Id]);
+        var issues = new IssueStore(FactoryFor(options.Db, primary.Id, dbByProject[primary.Id]));
 
 
         // Stable, caller-supplied id: prefer explicit --task-id, else slugify the title.
@@ -318,7 +327,8 @@ if (mode == CliMode.DashboardOnly)
         // scoped by project_id).
         var primaryDbPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
         Directory.CreateDirectory(Path.GetDirectoryName(primaryDbPath)!);
-        var primaryStore = new Core.IssueStore(primaryDbPath);
+        var primaryStore = new Core.IssueStore(
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDbPath));
         var projectStore = new Core.ProjectStore(primaryStore);
         var secretStore = new Core.SecretStore(
             primaryStore,
@@ -326,7 +336,6 @@ if (mode == CliMode.DashboardOnly)
             loggerFactory.CreateLogger<Core.SecretStore>());
 
         var cloner = new Projects.ProjectCloner(dataRoot, null);
-        var bootstrap = new Projects.ProjectBootstrap(dataRoot, cloner, options.GitHub, null);
         var registry = ProjectRegistryLoader.LoadAsync(projectStore, CancellationToken.None)
             .GetAwaiter().GetResult();
 
@@ -344,6 +353,12 @@ if (mode == CliMode.DashboardOnly)
         var dbByProject = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var p in registry)
         {
+            // Per-project github_token secret overrides the global PAT
+            // for the boot-time clone (same rule as the endpoints).
+            var effectiveGitHub = Projects.GitHubTokenResolver
+                .ResolveAsync(p.Id, options.GitHub, secretStore, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            var bootstrap = new Projects.ProjectBootstrap(dataRoot, cloner, effectiveGitHub, null);
             var result = bootstrap.EnsureProject(p);
             finalised.Add(result.Project);
             dbByProject[result.Project.Id] = result.IssuesDbPath;
@@ -356,6 +371,145 @@ if (mode == CliMode.DashboardOnly)
         return (finalised, dbByProject, dataRoot, projectStore, cloner, secretStore);
     }
 
+    /// <summary>
+    /// <c>--migrate-db --target sqlserver [--connection-string "..."]
+    /// [--include-open-work] [--reset]</c>: one-shot SQLite -> Azure SQL
+    /// state migration (registry + secrets ciphertext + memory keys;
+    /// open work only with the flag). Idempotent; prints a per-table
+    /// verification report. The service must be stopped first — the
+    /// migration reads the SQLite files read-only but the operator
+    /// model is "cut over while nothing writes".
+    /// </summary>
+    private static async Task<int> RunMigrateDbAsync(string[] args, AgentOptions options, ILoggerFactory loggerFactory)
+    {
+        var target = ParseArg(args, "--target") ?? "sqlserver";
+        if (!string.Equals(target, "sqlserver", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine($"--target '{target}' is not supported (only 'sqlserver').");
+            return 1;
+        }
+        var connectionString = ParseArg(args, "--connection-string") ?? options.Db.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            Console.Error.WriteLine("No target connection string. Pass --connection-string or set db.connectionString in config.");
+            return 1;
+        }
+        var includeOpenWork = args.Any(a => a == "--include-open-work");
+        var reset = args.Any(a => a == "--reset");
+
+        var (projects, dbByProject, dataRoot, _, _, _) = BuildProjectBootstrap(options, loggerFactory);
+        var sources = projects
+            .Select(p => new Core.Db.StateMigrator.ProjectSource(
+                p.Id,
+                dbByProject[p.Id],
+                Path.Combine(Path.GetDirectoryName(dbByProject[p.Id])!, "memory.db")))
+            .ToList();
+        // The registry anchor ('default') may not be a registered
+        // project — always include it so project/secret rows migrate.
+        if (sources.All(sx => !string.Equals(sx.ProjectId, "default", StringComparison.OrdinalIgnoreCase)))
+        {
+            var defaultPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
+            if (File.Exists(defaultPath))
+            {
+                sources.Insert(0, new Core.Db.StateMigrator.ProjectSource(
+                    "default", defaultPath,
+                    Path.Combine(Path.GetDirectoryName(defaultPath)!, "memory.db")));
+            }
+        }
+
+        if (reset)
+        {
+            Console.WriteLine($"Resetting {sources.Count} project schema(s) on the target...");
+            await Core.Db.StateMigrator.ResetAsync(
+                connectionString, sources.Select(sx => sx.ProjectId).ToList());
+            Console.WriteLine("Reset complete.");
+        }
+
+        Console.WriteLine($"Migrating {sources.Count} project source(s) -> Azure SQL (includeOpenWork={includeOpenWork})");
+        var report = await Core.Db.StateMigrator.MigrateAsync(
+            sources, connectionString,
+            new Core.Db.StateMigrator.MigrateOptions(IncludeOpenWork: includeOpenWork));
+        foreach (var line in report) Console.WriteLine($"  {line}");
+        Console.WriteLine("Migration complete. Verify with --check after flipping db.provider=sqlserver.");
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>--init-azure-sql [--connection-string "..."] [--mi-name forge-mi]</c>:
+    /// one-shot Azure SQL provisioning, run as the Entra admin. Creates the
+    /// contained database user for the user-assigned managed identity
+    /// (db_owner — the app does DDL at startup) so the future ACA/AKS
+    /// cutover is a pure config change. Idempotent.
+    /// </summary>
+    private static async Task<int> RunInitAzureSqlAsync(string[] args, AgentOptions options, ILoggerFactory loggerFactory)
+    {
+        var connectionString = ParseArg(args, "--connection-string") ?? options.Db.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            Console.Error.WriteLine("No target connection string. Pass --connection-string or set db.connectionString in config.");
+            return 1;
+        }
+        var miName = ParseArg(args, "--mi-name") ?? "forge-mi";
+        var factory = Core.Db.ForgeDb.SqlServer(connectionString, "dbo");
+        await using var conn = await factory.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @mi)
+                CREATE USER [{miName}] FROM EXTERNAL PROVIDER;
+            IF NOT EXISTS (SELECT 1 FROM sys.database_role_members rm
+                           JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id
+                           JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id
+                           WHERE r.name = 'db_owner' AND m.name = @mi)
+                ALTER ROLE db_owner ADD MEMBER [{miName}];
+            SELECT name, type_desc FROM sys.database_principals WHERE name = @mi;
+            """;
+        cmd.AddParam("@mi", miName);
+        await using var rd = await cmd.ExecuteReaderAsync();
+        var found = false;
+        while (await rd.ReadAsync())
+        {
+            found = true;
+            Console.WriteLine($"  [ok] contained user: {rd.GetString(0)} ({rd.GetString(1)})");
+        }
+        if (!found)
+        {
+            Console.Error.WriteLine($"  fail: contained user '{miName}' not present after init.");
+            return 1;
+        }
+        Console.WriteLine($"  [ok] '{miName}' is db_owner (idempotent)");
+        return 0;
+    }
+
+    /// <summary>
+    /// Appended to --check DB failures on the SQL Server provider:
+    /// the dominant failure mode is an expired az CLI session
+    /// (Active Directory Default resolves via AzureCliCredential on
+    /// this machine), so name the remediation explicitly.
+    /// </summary>
+    private static string DbAuthHint(Exception ex, AgentOptions options)
+    {
+        if (!options.Db.IsSqlServer) return "";
+        var msg = ex.ToString();
+        if (msg.Contains("az login", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("AzureCliCredential", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("DefaultAzureCredential", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("AADSTS", StringComparison.OrdinalIgnoreCase))
+        {
+            return " [hint: Entra token acquisition failed — run `az login` (this machine) or check the managed-identity assignment (Azure)]";
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// Resolve the connection factory for one project's logical state
+    /// database. SQLite: per-project .db file at <paramref name="sqlitePath"/>
+    /// (settings match IssueStore's canonical builder). SQL Server: the
+    /// shared database, schema-per-project (proj_&lt;id&gt;) — the first
+    /// IssueStore construction against a schema creates it and all tables.
+    /// </summary>
+    private static Core.Db.IDbConnectionFactory FactoryFor(DbOptions db, string projectId, string sqlitePath)
+        => Core.Db.ForgeDb.ForProject(db.IsSqlServer, db.ConnectionString, projectId, sqlitePath);
+
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
     {
@@ -363,13 +517,16 @@ if (mode == CliMode.DashboardOnly)
         var defaultDb = dashboardOnlyProjects.Count > 0
             ? dbByProject[dashboardOnlyProjects[0].Id]
             : throw new InvalidOperationException("At least one project is required to run the dashboard.");
-        var issues = new IssueStore(defaultDb);
-        var agents = new AgentStore(issues);
-        var skills = new SkillStore(issues);
+        var issues = new IssueStore(FactoryFor(options.Db, dashboardOnlyProjects[0].Id, defaultDb));
+        var registryIssues = new IssueStore(
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, defaultDb));
+        var agents = new AgentStore(registryIssues);
+        var skills = new SkillStore(registryIssues);
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
-        var dashboardOnlyFactory = new ProjectContextFactory(projectStore, dataRoot, dbByProject);
+        var dashboardOnlyFactory = new ProjectContextFactory(projectStore, dataRoot, dbByProject,
+            (pid, path) => FactoryFor(options.Db, pid, path));
         var dashboardOnlySlots = new SlotTable();
         var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
         foreach (var pp in dashboardOnlyProjects)
@@ -511,8 +668,9 @@ Console.Error.WriteLine(ex.ToString());
             var primary = projects[0];
             var primaryDb = dbByProject[primary.Id];
             var stateDir = Path.GetDirectoryName(primaryDb)!;
-            await using var issues = new IssueStore(primaryDb);
-            var recoveryReports = new RecoveryReportStore(primaryDb);
+            var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
+            await using var issues = new IssueStore(primaryFactory);
+            var recoveryReports = new RecoveryReportStore(primaryFactory);
             var worktrees = new GitWorktreeService(
                 new WorkspaceOptions
                 {
@@ -623,75 +781,76 @@ Console.Error.WriteLine(ex.ToString());
             Console.WriteLine($"  [ok] project '{primary.Id}' is a git repo at {primary.Root}");
         }
 
-        // 2. IssueStore opens + schema version is current
+        // 2. State DB opens + schema version is current (both
+        //    providers; SQL Server also validates the Entra token
+        //    path and reports round-trip latency).
         try
         {
-            await using var issues = new IssueStore(Path.Combine(stateDir, "issues.db"));
-            // Trigger InitializeSchema by listing (cheap read).
+            await using var issues = new IssueStore(FactoryFor(options.Db, primary.Id, Path.Combine(stateDir, "issues.db")));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var probe = await issues.ListAsync(new IssueFilter(), CancellationToken.None);
-            var expectedSchema = IssueStore.CurrentSchemaVersion;
-            // Read the actual schema_version from the DB.
+            sw.Stop();
+            var expectedSchema = issues.Db.Provider == ForgeDbProvider.SqlServer
+                ? Core.Db.SqlServerMigrations.ExpectedVersion
+                : IssueStore.CurrentSchemaVersion;
             int actualSchema = -1;
-            await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(issues.ConnectionString))
+            await using (var conn = await issues.Db.OpenAsync())
             {
-                await conn.OpenAsync();
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM schema_version;";
+                cmd.CommandText = $"SELECT COALESCE(MAX(version), 0) FROM {issues.Db.Dialect.Table("schema_version")};";
                 var result = await cmd.ExecuteScalarAsync();
                 actualSchema = Convert.ToInt32(result);
             }
+            var dbLabel = issues.Db.Provider == ForgeDbProvider.SqlServer
+                ? $"sqlserver ({issues.Db.Qualifier}, {sw.ElapsedMilliseconds}ms)"
+                : "sqlite";
             if (actualSchema == expectedSchema)
             {
-                Console.WriteLine($"  [ok] issues.db schema v{actualSchema} (current)");
+                Console.WriteLine($"  [ok] db provider={dbLabel} schema v{actualSchema} (current)");
             }
             else
             {
-                failures.Add($"issues.db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+                failures.Add($"db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
             }
             _ = probe;
         }
         catch (Exception ex)
         {
-            failures.Add($"issues.db: {ex.GetType().Name}: {ex.Message}");
+            failures.Add($"db: {ex.GetType().Name}: {ex.Message}{DbAuthHint(ex, options)}");
         }
 
-        // 3. MemoryStore opens + schema version is current
+        // 3. Memory table reachable (same schema on SQL Server;
+        //    separate memory.db file on SQLite).
         try
         {
             var memPath = Path.Combine(stateDir, "memory.db");
-            if (!File.Exists(memPath))
+            if (!options.Db.IsSqlServer && !File.Exists(memPath))
             {
                 Console.WriteLine("  [skip] memory.db does not exist yet (will be created on first start)");
             }
             else
             {
-                // Reuse IssueStore to bootstrap the schema, then check.
-                _ = new IssueStore(memPath);
-                await using var mem = new MemoryStore(memPath);
-                var memProbe = await mem.RecallAsync();
-                int actualSchema = -1;
-                await using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(mem.ConnectionString))
+                MemoryStore mem;
+                if (options.Db.IsSqlServer)
                 {
-                    await conn.OpenAsync();
-                    await using var cmd = conn.CreateCommand();
-                    cmd.CommandText = "SELECT COALESCE(MAX(version), 0) FROM schema_version;";
-                    var result = await cmd.ExecuteScalarAsync();
-                    actualSchema = Convert.ToInt32(result);
-                }
-                var expectedSchema = IssueStore.CurrentSchemaVersion;
-                if (actualSchema == expectedSchema)
-                {
-                    Console.WriteLine($"  [ok] memory.db schema v{actualSchema} (current)");
+                    mem = new MemoryStore(FactoryFor(options.Db, primary.Id, memPath));
                 }
                 else
                 {
-                    failures.Add($"memory.db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+                    // Reuse IssueStore to bootstrap the schema, then check.
+                    _ = new IssueStore(memPath);
+                    mem = new MemoryStore(memPath);
+                }
+                await using (mem)
+                {
+                    var memProbe = await mem.RecallAsync();
+                    Console.WriteLine($"  [ok] memory store reachable ({memProbe.Count} keys)");
                 }
             }
         }
         catch (Exception ex)
         {
-            failures.Add($"memory.db: {ex.GetType().Name}: {ex.Message}");
+            failures.Add($"memory store: {ex.GetType().Name}: {ex.Message}{DbAuthHint(ex, options)}");
         }
 
         // 4. LLM provider + key configured. The kilo gateway key is
@@ -913,6 +1072,7 @@ Console.Error.WriteLine(ex.ToString());
             // Headroom. The proxy is started with the upstream URL
             // as a CLI flag, so it knows where to forward.
             factory.HeadroomProxyBaseUrl = headroom.ProxyBaseUrl;
+            factory.HeadroomProviderName = headroom.ProviderName;
             Console.Error.WriteLine(
                 $"Headroom: enabled (proxy={headroom.ProxyBaseUrl}, mode={headroom.Mode}, ccr={headroom.CcrEnabled}); chat client talks to the proxy.");
         }
@@ -947,12 +1107,32 @@ Console.Error.WriteLine(ex.ToString());
             return 1;
         }
         var primary = knownProjects[0];
+
+        // Project registry factory: lazily builds per-project IssueStore
+        // bundles AND serves as the project-id → clone-root lookup for
+        // per-project role prompts / skills / groomer grounding.
+        // Constructed early so the agent runner + factories below can
+        // take the lookup. Live mode: KnownProjects re-reads the store,
+        // so runtime project adds resolve without a restart.
+        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
+            (pid, path) => FactoryFor(options.Db, pid, path));
+        string? ProjectRootLookup(string projectId) =>
+            projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
+                ?.Root;
+        IReadOnlyDictionary<string, Core.RoleTerritory>? ProjectTerritoryLookup(string projectId) =>
+            projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
+                ?.Territories;
         var primaryDb = orchDbByProject[primary.Id];
         var primaryStateDir = Path.GetDirectoryName(primaryDb)!;
         var stateStore = new StateStore(primaryStateDir);
-        var issues = new IssueStore(primaryDb);
-        var agents = new AgentStore(issues);
-        var skills = new SkillStore(issues);
+        var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
+        var issues = new IssueStore(primaryFactory);
+        var registryIssues = new IssueStore(
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDb));
+        var agents = new AgentStore(registryIssues);
+        var skills = new SkillStore(registryIssues);
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var worktrees = new GitWorktreeService(
@@ -966,32 +1146,48 @@ Console.Error.WriteLine(ex.ToString());
             githubToken: options.GitHub?.Token);
         var gitHub = BuildGitHubService(options.GitHub ?? new Forge.Configuration.GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         var roleRegistry = new RoleAgentRegistry();
-        var agentsStore = new Core.AgentStore(issues);
-        var skillsStore = new Core.SkillStore(issues);
+        var agentsStore = new Core.AgentStore(registryIssues);
+        var skillsStore = new Core.SkillStore(registryIssues);
         var skillSource = new SqliteSkillSource(skillsStore, roleRegistry);
-        // Seed the skill catalog (seed-if-absent; operator edits via
-        // the dashboard win): pipeline-behavior skills per role +
-        // the repo's .kilo/skills imported as global skills.
+        // Seed the skill catalog: pipeline-behavior skills per role
+        // (Forge-owned, seed-if-absent — operator edits win) + EVERY
+        // registered project's .kilo/skills imported as repo-owned,
+        // project-scoped rows (repo is the source of truth — SKILL.md
+        // edits propagate on startup; removed files remove rows).
         await Agents.SkillSeeder.SeedAsync(
             skillsStore,
-            Path.Combine(primary.Root, ".kilo", "skills"),
+            knownProjects
+                .Select(p => new Agents.SkillSeeder.ProjectSkillSource(
+                    p.Id, Path.Combine(p.Root, ".kilo", "skills")))
+                .ToList(),
             loggerFactory.CreateLogger("Forge.SkillSeeder"),
             CancellationToken.None);
-        // The memory table lives in IssueStore's schema (v7). Construct an
-        // IssueStore against the memory DB once at startup so the schema
-        // (and any future migrations) run before MemoryStore touches it.
-        // MemoryStore itself does not own migrations.
+        // The memory table lives in IssueStore's schema (v7). On SQLite
+        // it lives in a separate memory.db file, so construct an
+        // IssueStore against it once at startup to run the schema (and
+        // any future migrations) before MemoryStore touches it.
+        // MemoryStore itself does not own migrations. On SQL Server the
+        // memory table lives in the same per-project schema — no
+        // separate bootstrap needed.
         var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
-        var memoryBootstrap = new Core.IssueStore(memoryDbPath);
-        var memoryStore = new MemoryStore(memoryDbPath);
+        MemoryStore memoryStore;
+        if (options.Db.IsSqlServer)
+        {
+            memoryStore = new MemoryStore(primaryFactory);
+        }
+        else
+        {
+            _ = new Core.IssueStore(memoryDbPath);
+            memoryStore = new MemoryStore(memoryDbPath);
+        }
         // Agent run registry + transcripts (schema v20 table on the
         // primary project's issues.db): who ran what, when, and the
         // full conversation for the run-detail view.
-        var agentRunStore = new Core.AgentRunStore(primaryDb);
+        var agentRunStore = new Core.AgentRunStore(primaryFactory);
         // Optional operator review gates at the major automatic
         // transitions (design / groom / sprint / merge). v1: backed
         // by the primary project's memory store.
-        var stageGates = new Core.StageGates(memoryStore);
+        var stageGates = new Core.StageGates(memoryStore, new Core.Workflow.WorkflowResolver(memoryStore));
 
         // Phase 4: JSONL mirror of the issue store. Background service
         // rewrites the file every 5s so it's safe to tail -f.
@@ -1003,7 +1199,7 @@ Console.Error.WriteLine(ex.ToString());
             // (the v8 migration is applied at IssueStore's ctor).
             // The groomer_runs table has a foreign key on issue.id,
             // so the runs must live in the same DB as the issue rows.
-            var groomerRunsDb = primaryDb;
+            var groomerRunsDb = primaryFactory;
             var groomerRuns = new Core.IssueGroomerRunStore(groomerRunsDb);
             // P2.a: design_artifact + designer_run share the issues.db
             // (the v9 migration created both tables). The IssueStore
@@ -1075,6 +1271,28 @@ Console.Error.WriteLine(ex.ToString());
             openAiFactory.Overrides = roleModelOverrides;
             openAiFactory.RateLimits = modelRateLimits;
             openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
+
+            // Live provider keys: a Secrets-page rotation takes effect
+            // on the next run — no restart (restarts kill in-flight
+            // runs). Boot-time ResolveProviderApiKeysAsync stays for
+            // fail-fast startup + the model catalog.
+            var keyResolver = new Agents.ProviderApiKeyResolver(
+                secretStore,
+                async ct => (await projectStore.ListAsync(ct)).Select(p => p.Id).ToArray(),
+                loggerFactory.CreateLogger<Agents.ProviderApiKeyResolver>());
+            openAiFactory.KeyResolver = keyResolver;
+            var providerNames = llmConfig.Providers.Select(p => p.Name).ToArray();
+            await keyResolver.RefreshAsync(providerNames, CancellationToken.None);
+            _ = Task.Run(async () =>
+            {
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+                try
+                {
+                    while (await timer.WaitForNextTickAsync(externalStop))
+                        await keyResolver.RefreshAsync(providerNames, externalStop);
+                }
+                catch (OperationCanceledException) { }
+            });
         }
 
         // P5.5: auto-extract project memory from the model
@@ -1100,6 +1318,11 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
             rolePromptsRoot: rolePromptsRoot,
+            projectRootLookup: ProjectRootLookup,
+            projectTerritoryLookup: ProjectTerritoryLookup,
+            verifyCommandsLookup: id => projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))
+                ?.VerifyCommands,
             memory: memoryStore,
             handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
             designArtifacts: () => designArtifacts,
@@ -1112,7 +1335,7 @@ Console.Error.WriteLine(ex.ToString());
             gates: options.Gates);
         var eventBus = new InMemoryDashboardEventBus();
         var lifecycle = new Core.TaskStateMachine(
-            issues, options.State.WriteAuthority,
+            options.State.WriteAuthority,
             loggerFactory.CreateLogger<Core.TaskStateMachine>());
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issues,
@@ -1120,7 +1343,9 @@ Console.Error.WriteLine(ex.ToString());
             eventBus,
             loggerFactory.CreateLogger<PRWatcher>(),
             gates: stageGates,
-            lifecycle: lifecycle);
+            lifecycle: lifecycle,
+            runs: agentRunStore,
+            workflow: new Core.Workflow.WorkflowResolver(memoryStore));
         // P4 Stage B — pick the workflow runtime based on
 // appsettings.json. The InProcess dispatcher (default) is a
 // thin lambda over the existing EngineeringDispatchWorkflow +
@@ -1144,7 +1369,10 @@ Console.Error.WriteLine(ex.ToString());
                 memoryExtractor, extractionStore,
                 loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
                 projectId: primary.Id,
-                timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes)
+                timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
+                lifecycle: lifecycle,
+                workflow: new Core.Workflow.WorkflowResolver(memoryStore),
+                verifyCommands: primary.VerifyCommands)
                 .Build();
             var services = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -1179,7 +1407,44 @@ Console.Error.WriteLine(ex.ToString());
                         projectId: bundle.Project.Id,
                         loggerFactory: loggerFactory,
                         sprints: bundle.Sprints,
-                        timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes);
+                        timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
+                        workflow: new Core.Workflow.WorkflowResolver(memoryStore),
+                        verifyCommands: bundle.Project.VerifyCommands,
+                        // Event-driven review trigger (pause/resume
+                        // architecture): the reviewer starts on the
+                        // pushed head while CI runs — verdict and CI
+                        // arrive together. Fire-and-forget (the dev's
+                        // role slot must release at push); the watch
+                        // sweep stays the backstop.
+                        onPrOpened: (task, ct) =>
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    var resolver = new Core.Workflow.WorkflowResolver(memoryStore);
+                                    if (!Core.Workflow.WorkflowExtensions.IsStepEnabled(
+                                            await resolver.ResolveAsync(CancellationToken.None), "review")) return;
+                                    var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+                                        bundle.IssueStore, bundle.GitHub, agentRunner,
+                                        loggerFactory.CreateLogger<Forge.Reviewer.ReviewerDispatcher>(),
+                                        lifecycle: lifecycle,
+                                        events: eventBus,
+                                        projectId: bundle.Project.Id);
+                                    var outcome = await reviewer.ReviewOnceAsync(task, CancellationToken.None);
+                                    if (outcome is not null && outcome.Error is null)
+                                    {
+                                        logger.LogInformation("PR-open review trigger: verdict {Verdict} for task {Id} (PR head {Sha})",
+                                            outcome.Verdict, task.Id, outcome.HeadSha);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogWarning(ex, "PR-open review trigger failed for task {Id}; the watch sweep is the backstop", task.Id);
+                                }
+                            });
+                            return Task.CompletedTask;
+                        });
                     await workflow.RunAsync(issue, ct);
                 },
                 loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
@@ -1204,7 +1469,8 @@ Console.Error.WriteLine(ex.ToString());
             loggerFactory: loggerFactory,
             slots: slots,
             modelCooldowns: modelRateLimits,
-            lifecycle: lifecycle);
+            lifecycle: lifecycle,
+            workflow: new Core.Workflow.WorkflowResolver(memoryStore));
         orchestrator.BindOptions(options);
         var intakeStore = new Core.IntakeStore(issues);
         var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
@@ -1213,8 +1479,12 @@ Console.Error.WriteLine(ex.ToString());
             new IntakeAgent(
                 projectId,
                 intakeStore,
-                issues,
-                sprints,
+                // Epics (and every other issue the intake agent
+                // creates) belong to the SESSION'S project store —
+                // the primary store would put them in the wrong
+                // sprint lane (routing incident 2026-07-29).
+                projectFactory.Find(projectId)?.Issues ?? issues,
+                projectFactory.Find(projectId)?.Sprints ?? sprints,
                 chatClientFactory,
                 llmConfig,
                 roleRegistry,
@@ -1241,13 +1511,16 @@ Console.Error.WriteLine(ex.ToString());
         _productRefinementQueue = productRefinementQueue;
         var groomerFactory = new Agents.GroomerAgentFactory(
             issues, specStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
-            memory: memoryStore, projectRoot: primary.Root);
+            memory: memoryStore, projectRoot: primary.Root,
+            projectRootLookup: ProjectRootLookup,
+            issueStoreLookup: id => projectFactory.Find(id)?.Issues);
         // P2.a: Designer pipeline. The hygiene checker is shared
         // between the manual endpoint, the scheduled run, and the
         // agent's first step. The factory builds fresh DesignerAgent
         // instances per run.
         var designHygiene = new Orchestrator.DesignHygieneChecker(
-            specStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root);
+            specStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root,
+            projectRootLookup: ProjectRootLookup);
         var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
             specStore, designArtifacts, designerRuns, memoryStore, designHygiene,
             chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,
@@ -1295,8 +1568,9 @@ Console.Error.WriteLine(ex.ToString());
         // workspace.root is set) and lazily construct per-project
         // IssueStore bundles. The per-(project, role) SlotTable was
         // created above (BuildSlotTable) and is shared with the
-        // orchestrator's dispatch loop.
-        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject);
+        // orchestrator's dispatch loop. (Constructed earlier, right
+        // after the registry bootstrap — the agent runner and the
+        // planning-lane factories take it as the project-root lookup.)
         if (knownProjects.Count > 0)
         {
             logger.LogInformation(
@@ -1386,7 +1660,24 @@ try
             // dispatch loop starts) so any in-flight issues from
             // a previous crash are replayed before the new
             // dispatch cycle begins.
-            await startupRecovery.RunAsync(ct: shutdownCts.Token);
+            // Multi-project: one recovery context per NON-primary
+            // project (the primary is the recovery service's own
+            // construction context). Without this a restart strands a
+            // second project's InProgress tasks forever (observed live
+            // 2026-07-29: porthorizon task-5/6 claimed pre-restart,
+            // recovery scanned only the primary store — scanned=0).
+            var recoveryContexts = knownProjects
+                .Where(p => !string.Equals(p.Id, primary.Id, StringComparison.OrdinalIgnoreCase))
+                .Select(p =>
+                {
+                    var b = dispatchBundleFactory.Build(p);
+                    return new Orchestrator.StartupRecovery.ProjectRecoveryContext(
+                        p.Id, b.IssueStore, b.Worktrees,
+                        new Orchestrator.GitHubRecoveryAdapter(b.GitHub),
+                        p.DefaultBranch);
+                })
+                .ToList();
+            await startupRecovery.RunAsync(extraProjects: recoveryContexts, ct: shutdownCts.Token);
 
             // P4 Stage B — bring the workflow dispatcher host up.
             // For InProcess this is a no-op. For Durable this
@@ -1414,7 +1705,8 @@ try
                 specStore, groomerFactory, groomerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
                 interval: TimeSpan.FromMinutes(5),
-                issues: issues, sprints: sprints, gates: stageGates);
+                issues: issues, sprints: sprints, gates: stageGates,
+                projectContexts: projectFactory);
             _ = scheduledGroomer.RunAsync(shutdownCts.Token);
             _scheduledGroomer = scheduledGroomer;
 
@@ -1426,7 +1718,8 @@ try
                 specStore, designerAgentFactory, designerRuns, eventBus,
                 loggerFactory.CreateLogger<Orchestrator.DesignerScheduler>(),
                 interval: TimeSpan.FromMinutes(5),
-                gates: stageGates);
+                gates: stageGates,
+                workflow: new Core.Workflow.WorkflowResolver(memoryStore));
             _ = scheduledDesigner.RunAsync(shutdownCts.Token);
             _scheduledDesigner = scheduledDesigner;
 
@@ -1467,6 +1760,12 @@ try
         catch (Exception ex)
         {
             logger.LogCritical(ex, "Orchestrator crashed");
+            try { await dashboard.StopAsync(); } catch { }
+            // Die for real: a logged crash that leaves the process
+            // alive is a zombie systemd never restarts (observed live
+            // 2026-07-30 — host shut down at 03:08, process lingered
+            // for hours, dashboard dead, systemd blind).
+            Environment.Exit(1);
             return 1;
         }
         finally

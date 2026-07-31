@@ -61,7 +61,7 @@ public class MeshyClientTests
         });
         return new MeshyClient(handler, options,
             NullLogger<MeshyClient>.Instance,
-            artOutputRoot: artRoot ?? Path.Combine(Path.GetTempPath(), $"ph-meshy-{Guid.NewGuid():N}"));
+            artOutputRoot: artRoot ?? TempRoot.Instance.NewDirectory("meshy"));
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public class MeshyClientTests
     public async Task DownloadGlb_StreamsToLocalPath()
     {
         var handler = new StubHandler { AllowAnyGlbDownload = true };
-        var root = Path.Combine(Path.GetTempPath(), $"ph-meshy-dl-{Guid.NewGuid():N}");
+        var root = TempRoot.Instance.NewDirectory("meshy-dl");
         var client = NewClient(handler, artRoot: root);
         var rel = await client.DownloadGlbAsync("https://signed.example/whatever.glb", "spec-x", "art-test-1");
         Assert.StartsWith("spec-x/", rel);

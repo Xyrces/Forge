@@ -24,7 +24,7 @@ public class GroomerRunTests : IDisposable
 
     public GroomerRunTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-groomer-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("groomer");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
 

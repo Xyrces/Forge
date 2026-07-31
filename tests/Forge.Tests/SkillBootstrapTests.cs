@@ -19,7 +19,7 @@ public class SkillBootstrapTests : IDisposable
 
     public SkillBootstrapTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-skill-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("skill");
         _ = new IssueStore(_dbPath);  // bootstrap the v9 schema
         _memory = new MemoryStore(_dbPath);
     }

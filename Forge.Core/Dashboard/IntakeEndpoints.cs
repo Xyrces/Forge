@@ -22,10 +22,19 @@ public static class IntakeEndpoints
         IIntakeStore intakeStore,
         ILogger logger)
     {
-        // List all intake sessions.
-        app.MapGet("/api/intake/sessions", async (CancellationToken ct) =>
+        // List intake sessions (optionally scoped to one project —
+        // the dashboard's intake page is project-scoped like every
+        // other surface; the audit found cross-project sessions
+        // indistinguishable in the list).
+        app.MapGet("/api/intake/sessions", async (string? project, CancellationToken ct) =>
         {
             var sessions = await intakeStore.ListAsync(ct);
+            if (project is not null)
+            {
+                sessions = sessions
+                    .Where(s => string.Equals(s.ProjectId, project, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+            }
             return Results.Json(sessions.Select(ToSessionView).ToArray(), DashboardJson.Options);
         });
 

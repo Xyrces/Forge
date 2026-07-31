@@ -102,7 +102,7 @@ public sealed class ProductAgent
         var context = await _projectContext.BuildAsync(projectId, ct);
         var skillContents = _skills is null
             ? Array.Empty<SkillContent>()
-            : await _skills.LoadForRoleAsync(AgentType.CoreDev, ct);
+            : await _skills.LoadForRoleAsync(AgentType.CoreDev, projectId, ct);
         var skills = string.Join("\n\n", skillContents.Select(s => s.Body));
 
         var roleInstructions = LoadRoleInstructions("product");

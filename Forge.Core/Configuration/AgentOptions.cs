@@ -41,6 +41,12 @@ public sealed record AgentOptions
     /// </summary>
     public ForgesystemOptions Forgesystem { get; set; } = new();
     /// <summary>
+    /// State-database backend. <c>db.provider</c> = sqlite (default)
+    /// or sqlserver; <c>db.connectionString</c> carries the SQL Server
+    /// target (Entra auth, no secrets). See <see cref="DbOptions"/>.
+    /// </summary>
+    public DbOptions Db { get; set; } = new();
+    /// <summary>
     /// P4 Stage B — runtime selection. "InProcess" (default)
     /// uses Microsoft.Agents.AI.Workflows InProcessExecution;
     /// "Durable" uses Microsoft.Agents.AI.DurableTask +
@@ -76,6 +82,16 @@ public sealed record HeadroomOptions
     /// Local URL of the Headroom sidecar proxy.
     /// </summary>
     public string ProxyBaseUrl { get; set; } = "http://127.0.0.1:8787";
+
+    /// <summary>
+    /// The provider the proxy actually fronts (its
+    /// <c>--provider-name</c> / upstream). Only THIS provider's
+    /// baseUrl is rewritten to the proxy — the proxy speaks
+    /// OpenAI chat-completions to a single upstream, so rewriting
+    /// other providers misroutes them (observed live 2026-07-29:
+    /// kimi chat 401/404'd through the kilo-gateway proxy).
+    /// </summary>
+    public string ProviderName { get; set; } = "kilo-gateway";
     /// <summary>
     /// Mode passed to the proxy at boot. <c>token</c>
     /// (default): maximize compression. <c>cache</c>: freeze
@@ -273,6 +289,10 @@ public sealed record LlmProviderOptions
     public string ApiKey { get; set; } = string.Empty;
     public string OrgId { get; set; } = string.Empty;
     public string DefaultModel { get; set; } = string.Empty;
+
+    // Wire protocol: "openai" (default) | "anthropic" (Anthropic
+    // Messages API, e.g. Kimi-for-Coding).
+    public string Api { get; set; } = string.Empty;
 }
 
 public sealed record LlmRoleModelOptions

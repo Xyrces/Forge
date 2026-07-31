@@ -22,8 +22,16 @@ namespace Forge.Agents;
 /// </summary>
 public interface ISkillSource
 {
+    /// <summary>
+    /// Skills a run should see: role set empty or containing
+    /// <paramref name="role"/>, intersect project scope NULL (global)
+    /// or equal to <paramref name="projectId"/> (null = global skills
+    /// only — a run with no project never sees project skills).
+    /// Same-name global + project copies resolve in favor of the
+    /// project copy. Disabled skills are always excluded.
+    /// </summary>
     Task<IReadOnlyList<SkillContent>> LoadForRoleAsync(
-        AgentType role, CancellationToken ct = default);
+        AgentType role, string? projectId = null, CancellationToken ct = default);
 }
 
 /// <summary>

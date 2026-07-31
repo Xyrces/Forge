@@ -1,3 +1,5 @@
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 
 namespace Forge.Deploy;
@@ -14,12 +16,22 @@ public sealed class DeploymentStore
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
 
     public DeploymentStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
+    {
+    }
+
+    public DeploymentStore(IDbConnectionFactory db)
+    {
+        _db = db;
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+        return new SqliteConnectionStringBuilder
         {
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
@@ -28,28 +40,29 @@ public sealed class DeploymentStore
         }.ToString();
     }
 
+    private string T(string name) => _db.Dialect.Table(name);
+
     public async Task<DeploymentCandidate> CreateAsync(
         string projectId, string commitSha, string? commitSummary, string? requestedBy,
         CancellationToken ct = default)
     {
         var id = $"deploy-{Guid.NewGuid():N}";
         var now = DateTime.UtcNow.ToString(DateFormat);
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO deployment(
+        cmd.CommandText = $"""
+            INSERT INTO {T("deployment")}(
                 id, project_id, commit_sha, commit_summary, status,
                 requested_at, requested_by)
-            VALUES ($id, $pid, $sha, $summary, $status, $now, $by)
+            VALUES (@id, @pid, @sha, @summary, @status, @now, @by)
             """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$pid", projectId);
-        cmd.Parameters.AddWithValue("$sha", commitSha);
-        cmd.Parameters.AddWithValue("$summary", (object?)commitSummary ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$status", DeploymentStatus.Pending.ToString());
-        cmd.Parameters.AddWithValue("$now", now);
-        cmd.Parameters.AddWithValue("$by", (object?)requestedBy ?? DBNull.Value);
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@pid", projectId);
+        cmd.AddParam("@sha", commitSha);
+        cmd.AddParam("@summary", (object?)commitSummary ?? DBNull.Value);
+        cmd.AddParam("@status", DeploymentStatus.Pending.ToString());
+        cmd.AddParam("@now", now);
+        cmd.AddParam("@by", (object?)requestedBy ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
 
         return new DeploymentCandidate(
@@ -60,11 +73,10 @@ public sealed class DeploymentStore
 
     public async Task<DeploymentCandidate?> GetAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = SelectColumns + " WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
+        cmd.CommandText = SelectColumns + " WHERE id = @id";
+        cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
@@ -72,14 +84,14 @@ public sealed class DeploymentStore
     public async Task<IReadOnlyList<DeploymentCandidate>> ListAsync(
         string? projectId = null, int limit = 100, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = SelectColumns +
-            (projectId is null ? "" : " WHERE project_id = $pid") +
-            " ORDER BY requested_at DESC LIMIT $limit";
-        if (projectId is not null) cmd.Parameters.AddWithValue("$pid", projectId);
-        cmd.Parameters.AddWithValue("$limit", limit);
+        var d = _db.Dialect;
+        cmd.CommandText = SelectColumnsTop +
+            (projectId is null ? "" : " WHERE project_id = @pid") +
+            $" ORDER BY requested_at DESC{d.LimitParam("@limit")}";
+        if (projectId is not null) cmd.AddParam("@pid", projectId);
+        cmd.AddParam("@limit", limit);
         var list = new List<DeploymentCandidate>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(Read(rd));
@@ -87,17 +99,17 @@ public sealed class DeploymentStore
     }
 
     public Task SetStatusAsync(string id, DeploymentStatus status, CancellationToken ct = default) =>
-        ExecAsync("UPDATE deployment SET status = $s WHERE id = $id",
-            c => { c.Parameters.AddWithValue("$s", status.ToString()); c.Parameters.AddWithValue("$id", id); }, ct);
+        ExecAsync($"UPDATE {T("deployment")} SET status = @s WHERE id = @id",
+            c => { c.AddParam("@s", status.ToString()); c.AddParam("@id", id); }, ct);
 
     public Task AppendBuildLogAsync(string id, DeploymentStatus status, string log, CancellationToken ct = default) =>
         ExecAsync(
-            "UPDATE deployment SET status = $s, build_log = $log WHERE id = $id",
+            $"UPDATE {T("deployment")} SET status = @s, build_log = @log WHERE id = @id",
             c =>
             {
-                c.Parameters.AddWithValue("$s", status.ToString());
-                c.Parameters.AddWithValue("$log", log);
-                c.Parameters.AddWithValue("$id", id);
+                c.AddParam("@s", status.ToString());
+                c.AddParam("@log", log);
+                c.AddParam("@id", id);
             }, ct);
 
     // Atomic CAS: the UPDATE's WHERE clause re-checks status at the
@@ -109,20 +121,19 @@ public sealed class DeploymentStore
     // this guarantee against a second request racing in between.
     public async Task<bool> TryApproveAsync(string id, string? approvedBy, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE deployment
-            SET status = $s, approved_at = $now, approved_by = $by
-            WHERE id = $id AND status IN ($fromPending, $fromBuildPassed)
+        cmd.CommandText = $"""
+            UPDATE {T("deployment")}
+            SET status = @s, approved_at = @now, approved_by = @by
+            WHERE id = @id AND status IN (@fromPending, @fromBuildPassed)
             """;
-        cmd.Parameters.AddWithValue("$s", DeploymentStatus.Approved.ToString());
-        cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
-        cmd.Parameters.AddWithValue("$by", (object?)approvedBy ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$fromPending", DeploymentStatus.Pending.ToString());
-        cmd.Parameters.AddWithValue("$fromBuildPassed", DeploymentStatus.BuildPassed.ToString());
+        cmd.AddParam("@s", DeploymentStatus.Approved.ToString());
+        cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@by", (object?)approvedBy ?? DBNull.Value);
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@fromPending", DeploymentStatus.Pending.ToString());
+        cmd.AddParam("@fromBuildPassed", DeploymentStatus.BuildPassed.ToString());
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         return rows > 0;
     }
@@ -134,62 +145,67 @@ public sealed class DeploymentStore
     // and destroy the audit trail, so those transitions are refused.
     public async Task<bool> TryRejectAsync(string id, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE deployment SET status = $s
-            WHERE id = $id AND status IN ($p1, $p2, $p3, $p4)
+        cmd.CommandText = $"""
+            UPDATE {T("deployment")} SET status = @s
+            WHERE id = @id AND status IN (@p1, @p2, @p3, @p4)
             """;
-        cmd.Parameters.AddWithValue("$s", DeploymentStatus.Rejected.ToString());
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$p1", DeploymentStatus.Pending.ToString());
-        cmd.Parameters.AddWithValue("$p2", DeploymentStatus.BuildRunning.ToString());
-        cmd.Parameters.AddWithValue("$p3", DeploymentStatus.BuildPassed.ToString());
-        cmd.Parameters.AddWithValue("$p4", DeploymentStatus.BuildFailed.ToString());
+        cmd.AddParam("@s", DeploymentStatus.Rejected.ToString());
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@p1", DeploymentStatus.Pending.ToString());
+        cmd.AddParam("@p2", DeploymentStatus.BuildRunning.ToString());
+        cmd.AddParam("@p3", DeploymentStatus.BuildPassed.ToString());
+        cmd.AddParam("@p4", DeploymentStatus.BuildFailed.ToString());
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         return rows > 0;
     }
 
     public Task MarkDeployedAsync(string id, string deployLog, CancellationToken ct = default) =>
         ExecAsync(
-            "UPDATE deployment SET status = $s, deployed_at = $now, deploy_log = $log WHERE id = $id",
+            $"UPDATE {T("deployment")} SET status = @s, deployed_at = @now, deploy_log = @log WHERE id = @id",
             c =>
             {
-                c.Parameters.AddWithValue("$s", DeploymentStatus.Deployed.ToString());
-                c.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString(DateFormat));
-                c.Parameters.AddWithValue("$log", deployLog);
-                c.Parameters.AddWithValue("$id", id);
+                c.AddParam("@s", DeploymentStatus.Deployed.ToString());
+                c.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+                c.AddParam("@log", deployLog);
+                c.AddParam("@id", id);
             }, ct);
 
     public Task MarkDeployFailedAsync(string id, string deployLog, CancellationToken ct = default) =>
         ExecAsync(
-            "UPDATE deployment SET status = $s, deploy_log = $log WHERE id = $id",
+            $"UPDATE {T("deployment")} SET status = @s, deploy_log = @log WHERE id = @id",
             c =>
             {
-                c.Parameters.AddWithValue("$s", DeploymentStatus.DeployFailed.ToString());
-                c.Parameters.AddWithValue("$log", deployLog);
-                c.Parameters.AddWithValue("$id", id);
+                c.AddParam("@s", DeploymentStatus.DeployFailed.ToString());
+                c.AddParam("@log", deployLog);
+                c.AddParam("@id", id);
             }, ct);
 
-    private async Task ExecAsync(string sql, Action<SqliteCommand> bind, CancellationToken ct)
+    private async Task ExecAsync(string sql, Action<System.Data.Common.DbCommand> bind, CancellationToken ct)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         bind(cmd);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private const string SelectColumns = """
+    private string SelectColumns => $"""
         SELECT id, project_id, commit_sha, commit_summary, status,
                requested_at, requested_by, build_log, approved_at,
                approved_by, deployed_at, deploy_log
-        FROM deployment
+        FROM {T("deployment")}
         """;
 
-    private static DeploymentCandidate Read(SqliteDataReader rd) => new(
+    private string SelectColumnsTop => $"""
+        SELECT {_db.Dialect.TopParam("@limit")}id, project_id, commit_sha, commit_summary, status,
+               requested_at, requested_by, build_log, approved_at,
+               approved_by, deployed_at, deploy_log
+        FROM {T("deployment")}
+        """;
+
+    private static DeploymentCandidate Read(DbDataReader rd) => new(
         Id: rd.GetString(0),
         ProjectId: rd.GetString(1),
         CommitSha: rd.GetString(2),

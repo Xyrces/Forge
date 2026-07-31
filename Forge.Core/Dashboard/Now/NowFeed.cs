@@ -21,7 +21,7 @@ public static class NowFeed
         string? Detail,
         string? IssueId);
 
-    public sealed record LiveItem(string IssueId, string Title, string Stage, long ElapsedMs);
+    public sealed record LiveItem(string IssueId, string Title, string Stage, long ElapsedMs, string? Phase = null);
     public sealed record WaitingItem(string IssueId, string Title, string Reason, long WaitingMs);
 
     /// <summary>Failed/Blocked tasks + breaker risks + unverified no-ops.</summary>
@@ -63,6 +63,20 @@ public static class NowFeed
                         $"{i.Id}: rework round {rw}/3 in flight",
                         i.GetMetadata("reworkContext"), i.Id));
                 }
+                if (IsAwaitingReview(i, utcNow))
+                {
+                    items.Add(new("info", "awaiting-review",
+                        $"{i.Id}: PR #{i.GetMetadata("prNumber")} awaiting review",
+                        "no verdict against the current head — the reviewer may be down or the review trigger missed",
+                        i.Id));
+                }
+            }
+            else if (i.Status == IssueStatus.InProgress && IsAwaitingReview(i, utcNow))
+            {
+                items.Add(new("info", "awaiting-review",
+                    $"{i.Id}: PR #{i.GetMetadata("prNumber")} awaiting review",
+                    "no verdict against the current head — the reviewer may be down or the review trigger missed",
+                    i.Id));
             }
             else if (i.Status == IssueStatus.Completed
                 && i.GetMetadata("prNumber") is null
@@ -94,13 +108,18 @@ public static class NowFeed
             .ToList();
     }
 
-    /// <summary>In-flight work with a plain-English stage.</summary>
+    /// <summary>In-flight work with a plain-English stage.
+    /// <paramref name="phases"/> maps task id → the live run's phase
+    /// label (plan gate / implementing / verifying n/3 / reviewing)
+    /// so a verifying run doesn't read as idle.</summary>
     public static IReadOnlyList<LiveItem> BuildLive(
-        IReadOnlyList<IssueRecord> issues, DateTime utcNow)
+        IReadOnlyList<IssueRecord> issues, DateTime utcNow,
+        IReadOnlyDictionary<string, string?>? phases = null)
         => issues
             .Where(i => i.Status == IssueStatus.InProgress && i.Type != AgentTaskTypes.PrWatch && !AgentTaskTypes.IsContainer(i.Type))
             .OrderByDescending(i => i.UpdatedAt)
-            .Select(i => new LiveItem(i.Id, i.Title, StageOf(i), (long)(utcNow - i.UpdatedAt).TotalMilliseconds))
+            .Select(i => new LiveItem(i.Id, i.Title, StageOf(i), (long)(utcNow - i.UpdatedAt).TotalMilliseconds,
+                phases is not null && phases.TryGetValue(i.Id, out var p) ? p : null))
             .ToList();
 
     private static string StageOf(IssueRecord i) => i.DispatchCheckpoint switch
@@ -112,6 +131,31 @@ public static class NowFeed
         >= DispatchCheckpoint.PrOpened => "in review — CI + reviewer",
         _ => "running",
     };
+
+    /// <summary>The review-wait threshold: the event-driven trigger
+    /// starts the reviewer at PR-open, so a PR with no verdict against
+    /// its current head this long after open means the reviewer is
+    /// down, cooling on a 429, or the trigger missed.</summary>
+    private static readonly TimeSpan AwaitingReviewAfter = TimeSpan.FromMinutes(10);
+
+    /// <summary>True when the task has an open PR with no verdict
+    /// against the current pushed head (branchSha), no review
+    /// actively running (reviewStartedAt), and the PR has been open
+    /// past the review-wait threshold (anchored to prOpenedAt).</summary>
+    private static bool IsAwaitingReview(IssueRecord i, DateTime utcNow)
+    {
+        if (i.GetMetadata("prNumber") is null) return false;
+        if (i.GetMetadata("reviewStartedAt") is not null) return false;
+        var verdict = i.GetMetadata("reviewVerdict");
+        var reviewedSha = i.GetMetadata("reviewSha");
+        var headSha = i.GetMetadata("branchSha");
+        var verdictCurrent = !string.IsNullOrEmpty(verdict)
+            && (headSha is null || string.Equals(reviewedSha, headSha, StringComparison.Ordinal));
+        if (verdictCurrent) return false;
+        var anchor = DateTimeOffset.TryParse(i.GetMetadata("prOpenedAt"), out var openedAt)
+            ? openedAt.UtcDateTime : i.UpdatedAt;
+        return utcNow - anchor > AwaitingReviewAfter;
+    }
 
     /// <summary>One-line reason each Pending item is waiting.</summary>
     public static WaitingItem Reason(

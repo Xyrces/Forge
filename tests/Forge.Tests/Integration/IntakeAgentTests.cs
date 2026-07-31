@@ -23,7 +23,7 @@ public class IntakeAgentTests : IDisposable
 
     public IntakeAgentTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-intake-agent-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("intake-agent");
         _issues = new IssueStore(_dbPath);
         _sprints = new SprintStore(_issues);
         _intake = new IntakeStore(_issues);

@@ -1,6 +1,7 @@
+using System.Data.Common;
 using System.Text;
+using Forge.Core.Db;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 
 namespace Forge.Core;
@@ -17,6 +18,9 @@ public static class SecretKinds
     public const string GitHubToken = "github_token";
     public const string KiloGatewayApiKey = "kilo_gateway_api_key";
     public const string MeshyApiKey = "meshy_api_key";
+    /// <summary>Kimi.com (Moonshot) direct API key — the kimi LLM
+    /// provider for quality roles (reviewer/critic/groomer).</summary>
+    public const string KimiApiKey = "kimi_api_key";
 }
 
 public sealed record SecretRecord(
@@ -71,6 +75,9 @@ public sealed class SecretStore : ISecretStore, IAsyncDisposable
     private readonly IDataProtector _protector;
     private readonly ILogger<SecretStore>? _logger;
 
+    private string T(string name) => _issues.Db.Dialect.Table(name);
+    private ISqlDialect D => _issues.Db.Dialect;
+
     public SecretStore(IssueStore issues, IDataProtectionProvider provider, ILogger<SecretStore>? logger = null)
     {
         _issues = issues;
@@ -84,12 +91,11 @@ public sealed class SecretStore : ISecretStore, IAsyncDisposable
 
     public async Task<SecretRecord?> GetMetadataAsync(string projectId, string kind, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, project_id, kind, created_at, updated_at FROM secret WHERE project_id = $p AND kind = $k LIMIT 1";
-        cmd.Parameters.AddWithValue("$p", projectId);
-        cmd.Parameters.AddWithValue("$k", kind);
+        cmd.CommandText = $"SELECT {D.Top(1)}id, project_id, kind, created_at, updated_at FROM {T("secret")} WHERE project_id = @p AND kind = @k{D.Limit(1)}";
+        cmd.AddParam("@p", projectId);
+        cmd.AddParam("@k", kind);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? new SecretRecord(
             Id: rd.GetString(0),
@@ -101,12 +107,11 @@ public sealed class SecretStore : ISecretStore, IAsyncDisposable
 
     public async Task<string?> GetPlaintextAsync(string projectId, string kind, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT ciphertext FROM secret WHERE project_id = $p AND kind = $k LIMIT 1";
-        cmd.Parameters.AddWithValue("$p", projectId);
-        cmd.Parameters.AddWithValue("$k", kind);
+        cmd.CommandText = $"SELECT {D.Top(1)}ciphertext FROM {T("secret")} WHERE project_id = @p AND kind = @k{D.Limit(1)}";
+        cmd.AddParam("@p", projectId);
+        cmd.AddParam("@k", kind);
         var result = await cmd.ExecuteScalarAsync(ct);
         if (result is null or DBNull) return null;
         try
@@ -127,11 +132,10 @@ public sealed class SecretStore : ISecretStore, IAsyncDisposable
 
     public async Task<IReadOnlyList<SecretRecord>> ListAsync(string projectId, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, project_id, kind, created_at, updated_at FROM secret WHERE project_id = $p ORDER BY kind";
-        cmd.Parameters.AddWithValue("$p", projectId);
+        cmd.CommandText = $"SELECT id, project_id, kind, created_at, updated_at FROM {T("secret")} WHERE project_id = @p ORDER BY kind";
+        cmd.AddParam("@p", projectId);
         var list = new List<SecretRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct))
@@ -158,25 +162,31 @@ public sealed class SecretStore : ISecretStore, IAsyncDisposable
         var ciphertext = _protector.Protect(secret.Plaintext);
         var now = DateTime.UtcNow;
 
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
-        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         // Insert-or-replace keyed on (project_id, kind). The id
         // is a fresh UUID per write so audit logging can see
         // "secret X rotated" as a new event.
         await using (var upsert = conn.CreateCommand())
         {
-            upsert.Transaction = (SqliteTransaction)tx;
-            upsert.CommandText = @"INSERT INTO secret (id, project_id, kind, ciphertext, created_at, updated_at)
-                VALUES ($id, $p, $k, $c, $now, $now)
-                ON CONFLICT(project_id, kind) DO UPDATE SET
-                    ciphertext  = excluded.ciphertext,
-                    updated_at  = excluded.updated_at";
-            upsert.Parameters.AddWithValue("$id", $"secret-{Guid.NewGuid():N}");
-            upsert.Parameters.AddWithValue("$p", secret.ProjectId);
-            upsert.Parameters.AddWithValue("$k", secret.Kind);
-            upsert.Parameters.AddWithValue("$c", ciphertext);
-            upsert.Parameters.AddWithValue("$now", IssueStore.DateFormatTime(now));
+            upsert.Transaction = tx;
+            upsert.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
+                ? "MERGE " + T("secret") + @" WITH (HOLDLOCK) AS t
+                    USING (SELECT @p AS project_id, @k AS kind) AS s
+                        ON t.project_id = s.project_id AND t.kind = s.kind
+                    WHEN MATCHED THEN UPDATE SET ciphertext = @c, updated_at = @now
+                    WHEN NOT MATCHED THEN INSERT (id, project_id, kind, ciphertext, created_at, updated_at)
+                        VALUES (@id, @p, @k, @c, @now, @now);"
+                : @"INSERT INTO secret (id, project_id, kind, ciphertext, created_at, updated_at)
+                    VALUES (@id, @p, @k, @c, @now, @now)
+                    ON CONFLICT(project_id, kind) DO UPDATE SET
+                        ciphertext  = excluded.ciphertext,
+                        updated_at  = excluded.updated_at";
+            upsert.AddParam("@id", $"secret-{Guid.NewGuid():N}");
+            upsert.AddParam("@p", secret.ProjectId);
+            upsert.AddParam("@k", secret.Kind);
+            upsert.AddParam("@c", ciphertext);
+            upsert.AddParam("@now", IssueStore.DateFormatTime(now));
             await upsert.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -187,12 +197,11 @@ public sealed class SecretStore : ISecretStore, IAsyncDisposable
 
     public async Task<bool> DeleteAsync(string projectId, string kind, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_issues.ConnectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM secret WHERE project_id = $p AND kind = $k";
-        cmd.Parameters.AddWithValue("$p", projectId);
-        cmd.Parameters.AddWithValue("$k", kind);
+        cmd.CommandText = $"DELETE FROM {T("secret")} WHERE project_id = @p AND kind = @k";
+        cmd.AddParam("@p", projectId);
+        cmd.AddParam("@k", kind);
         return await cmd.ExecuteNonQueryAsync(ct) > 0;
     }
 

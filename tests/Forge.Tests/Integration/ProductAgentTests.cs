@@ -32,7 +32,7 @@ public class ProductAgentTests : IDisposable
 
     public ProductAgentTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-product-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("product");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
         _skills = new SkillStore(_issues);
@@ -170,7 +170,7 @@ public class ProductRefinementQueueTests : IDisposable
 
     public ProductRefinementQueueTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-queue-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("queue");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
         _skills = new SkillStore(_issues);
@@ -243,7 +243,7 @@ public class FilesystemProjectContextSourceTests : IDisposable
 
     public FilesystemProjectContextSourceTests()
     {
-        _repoRoot = Path.Combine(Path.GetTempPath(), $"ph-context-{Guid.NewGuid():N}");
+        _repoRoot = TempRoot.Instance.NewDirectory("context");
         Directory.CreateDirectory(_repoRoot);
     }
 
@@ -253,12 +253,12 @@ public class FilesystemProjectContextSourceTests : IDisposable
     }
 
     private static IssueStore IssueStore() => new(
-        Path.Combine(Path.GetTempPath(), $"ph-context-i-{Guid.NewGuid():N}.db"));
+        TempRoot.Instance.NewDbPath("context-i"));
 
     [Fact]
     public async Task BuildAsync_EmptyRepo_ReturnsEmptyContext()
     {
-        var dbPath = Path.Combine(Path.GetTempPath(), $"ph-c-{Guid.NewGuid():N}.db");
+        var dbPath = TempRoot.Instance.NewDbPath("c");
         try
         {
             var issues = new IssueStore(dbPath);
@@ -277,7 +277,7 @@ public class FilesystemProjectContextSourceTests : IDisposable
     [Fact]
     public async Task BuildAsync_RepoWithReadme_IncludesReadmeSnippet()
     {
-        var dbPath = Path.Combine(Path.GetTempPath(), $"ph-c-{Guid.NewGuid():N}.db");
+        var dbPath = TempRoot.Instance.NewDbPath("c");
         try
         {
             var issues = new IssueStore(dbPath);

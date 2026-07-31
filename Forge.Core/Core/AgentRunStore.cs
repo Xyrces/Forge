@@ -1,3 +1,5 @@
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 
 namespace Forge.Core;
@@ -20,17 +22,24 @@ public sealed class AgentRunStore : IDisposable
     private static readonly TimeSpan Retention = TimeSpan.FromDays(30);
     private const int MaxRunsPerTask = 50;
 
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
 
     public AgentRunStore(string dbPath)
-    {
-        _connectionString = new SqliteConnectionStringBuilder
+        : this(ForgeDb.Sqlite(new SqliteConnectionStringBuilder
         {
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Shared,
-        }.ToString();
+        }.ToString()))
+    {
     }
+
+    public AgentRunStore(IDbConnectionFactory db)
+    {
+        _db = db;
+    }
+
+    private string T(string name) => _db.Dialect.Table(name);
 
     public sealed record AgentRunRecord(
         string Id,
@@ -46,23 +55,41 @@ public sealed class AgentRunStore : IDisposable
         int? TextChars,
         string? Error,
         string? TranscriptJson,
-        DateTime? LastActivityAt);
+        DateTime? LastActivityAt,
+        // v25: live phase label (plan gate / implementing /
+        // verifying n/3 / reviewing) + the warm-session marker
+        // (the run resumed a persisted MAF session).
+        string? Phase,
+        bool? ResumedSession);
 
-    public async Task StartAsync(string id, string? taskId, string role, string? model, CancellationToken ct = default)
+    public async Task StartAsync(string id, string? taskId, string role, string? model, CancellationToken ct = default,
+        bool resumedSession = false)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT OR REPLACE INTO agent_run
-                (id, task_id, role, model, status, started_at)
-            VALUES ($id, $task, $role, $model, 'running', $started)
-            """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$task", (object?)taskId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$role", role);
-        cmd.Parameters.AddWithValue("$model", (object?)model ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$started", DateTime.UtcNow.ToString(DateFormat));
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                MERGE {T("agent_run")} WITH (HOLDLOCK) AS t
+                USING (SELECT @id AS id) AS s ON t.id = s.id
+                WHEN MATCHED THEN UPDATE SET task_id = @task, role = @role, model = @model,
+                    status = 'running', started_at = @started, finished_at = NULL, duration_ms = NULL,
+                    message_count = NULL, tool_call_count = NULL, text_chars = NULL,
+                    error = NULL, transcript_json = NULL, last_activity_at = NULL,
+                    phase = NULL, resumed_session = @resumed
+                WHEN NOT MATCHED THEN INSERT (id, task_id, role, model, status, started_at, resumed_session)
+                    VALUES (@id, @task, @role, @model, 'running', @started, @resumed);
+                """
+            : """
+                INSERT OR REPLACE INTO agent_run
+                    (id, task_id, role, model, status, started_at, resumed_session)
+                VALUES (@id, @task, @role, @model, 'running', @started, @resumed)
+                """;
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@task", (object?)taskId ?? DBNull.Value);
+        cmd.AddParam("@role", role);
+        cmd.AddParam("@model", (object?)model ?? DBNull.Value);
+        cmd.AddParam("@started", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@resumed", resumedSession ? 1 : 0);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -74,26 +101,29 @@ public sealed class AgentRunStore : IDisposable
     /// is provided the accumulated live transcript is persisted too —
     /// the run-detail page streams the conversation AS IT HAPPENS.
     /// Cheap single-row UPDATE; the activity tracker calls it after
-    /// every model round-trip.
+    /// every model round-trip. <paramref name="phase"/> is the run's
+    /// live phase label (plan gate / implementing / verifying n/3 /
+    /// reviewing); null keeps the previously written value.
     /// </summary>
-    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, string? transcriptJson = null, CancellationToken ct = default)
+    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, string? transcriptJson = null, CancellationToken ct = default, string? phase = null)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE agent_run SET
-                message_count = $msgs, tool_call_count = $tools,
-                text_chars = $chars, last_activity_at = $activity,
-                transcript_json = COALESCE($transcript, transcript_json)
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("agent_run")} SET
+                message_count = @msgs, tool_call_count = @tools,
+                text_chars = @chars, last_activity_at = @activity,
+                transcript_json = COALESCE(@transcript, transcript_json),
+                phase = COALESCE(@phase, phase)
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$msgs", messageCount);
-        cmd.Parameters.AddWithValue("$tools", toolCallCount);
-        cmd.Parameters.AddWithValue("$chars", textChars);
-        cmd.Parameters.AddWithValue("$activity", DateTime.UtcNow.ToString(DateFormat));
-        cmd.Parameters.AddWithValue("$transcript", (object?)transcriptJson ?? DBNull.Value);
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@msgs", messageCount);
+        cmd.AddParam("@tools", toolCallCount);
+        cmd.AddParam("@chars", textChars);
+        cmd.AddParam("@activity", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@transcript", (object?)transcriptJson ?? DBNull.Value);
+        cmd.AddParam("@phase", (object?)phase ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -102,73 +132,80 @@ public sealed class AgentRunStore : IDisposable
         int messageCount, int toolCallCount, int textChars,
         string? error, string? transcriptJson, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            UPDATE agent_run SET
-                status = $status, finished_at = $finished, duration_ms = $dur,
-                message_count = $msgs, tool_call_count = $tools, text_chars = $chars,
-                error = $err, transcript_json = $transcript, last_activity_at = $finished
-            WHERE id = $id
+        cmd.CommandText = $"""
+            UPDATE {T("agent_run")} SET
+                status = @status, finished_at = @finished, duration_ms = @dur,
+                message_count = @msgs, tool_call_count = @tools, text_chars = @chars,
+                error = @err, transcript_json = @transcript, last_activity_at = @finished
+            WHERE id = @id
             """;
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$status", status);
-        cmd.Parameters.AddWithValue("$finished", DateTime.UtcNow.ToString(DateFormat));
-        cmd.Parameters.AddWithValue("$dur", durationMs);
-        cmd.Parameters.AddWithValue("$msgs", messageCount);
-        cmd.Parameters.AddWithValue("$tools", toolCallCount);
-        cmd.Parameters.AddWithValue("$chars", textChars);
-        cmd.Parameters.AddWithValue("$err", (object?)error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$transcript", (object?)transcriptJson ?? DBNull.Value);
+        cmd.AddParam("@id", id);
+        cmd.AddParam("@status", status);
+        cmd.AddParam("@finished", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@dur", durationMs);
+        cmd.AddParam("@msgs", messageCount);
+        cmd.AddParam("@tools", toolCallCount);
+        cmd.AddParam("@chars", textChars);
+        cmd.AddParam("@err", (object?)error ?? DBNull.Value);
+        cmd.AddParam("@transcript", (object?)transcriptJson ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
         await PruneAsync(conn, ct);
     }
 
-    private static async Task PruneAsync(SqliteConnection conn, CancellationToken ct)
+    private async Task PruneAsync(DbConnection conn, CancellationToken ct)
     {
         await using (var age = conn.CreateCommand())
         {
-            age.CommandText = "DELETE FROM agent_run WHERE started_at < $cutoff";
-            age.Parameters.AddWithValue("$cutoff", (DateTime.UtcNow - Retention).ToString(DateFormat));
+            age.CommandText = $"DELETE FROM {T("agent_run")} WHERE started_at < @cutoff";
+            age.AddParam("@cutoff", (DateTime.UtcNow - Retention).ToString(DateFormat));
             await age.ExecuteNonQueryAsync(ct);
         }
         await using (var perTask = conn.CreateCommand())
         {
-            perTask.CommandText = """
-                DELETE FROM agent_run WHERE task_id IS NOT NULL AND id NOT IN (
-                    SELECT id FROM agent_run r2
-                    WHERE r2.task_id = agent_run.task_id
-                    ORDER BY started_at DESC LIMIT 50)
-                """;
+            perTask.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+                ? $"""
+                    DELETE a FROM {T("agent_run")} a
+                    WHERE a.task_id IS NOT NULL AND a.id NOT IN (
+                        SELECT TOP ({MaxRunsPerTask}) id FROM {T("agent_run")} r2
+                        WHERE r2.task_id = a.task_id
+                        ORDER BY started_at DESC)
+                    """
+                : $"""
+                    DELETE FROM agent_run WHERE task_id IS NOT NULL AND id NOT IN (
+                        SELECT id FROM agent_run r2
+                        WHERE r2.task_id = agent_run.task_id
+                        ORDER BY started_at DESC LIMIT {MaxRunsPerTask})
+                    """;
             await perTask.ExecuteNonQueryAsync(ct);
         }
     }
 
     public async Task<IReadOnlyList<AgentRunRecord>> ListActiveAsync(CancellationToken ct = default)
-        => await QueryAsync("WHERE status = 'running' ORDER BY started_at DESC", ct);
+        => await QueryAsync("WHERE status = 'running' ORDER BY started_at DESC", null, ct);
 
     public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, string? role = null, CancellationToken ct = default)
     {
         var where = "WHERE status != 'running'";
         if (taskId is not null) where += $" AND task_id = '{taskId.Replace("'", "''")}'";
         if (role is not null) where += $" AND role = '{role.Replace("'", "''")}'";
-        return await QueryAsync($"{where} ORDER BY started_at DESC LIMIT {Math.Clamp(limit, 1, 500)}", ct);
+        return await QueryAsync($"{where} ORDER BY started_at DESC", Math.Clamp(limit, 1, 500), ct);
     }
 
     public async Task<AgentRunRecord?> GetAsync(string id, CancellationToken ct = default)
-        => (await QueryAsync($"WHERE id = '{id.Replace("'", "''")}' LIMIT 1", ct)).FirstOrDefault();
+        => (await QueryAsync($"WHERE id = '{id.Replace("'", "''")}'", 1, ct)).FirstOrDefault();
 
-    private async Task<IReadOnlyList<AgentRunRecord>> QueryAsync(string whereSql, CancellationToken ct)
+    private async Task<IReadOnlyList<AgentRunRecord>> QueryAsync(string whereSql, int? limit, CancellationToken ct)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        var d = _db.Dialect;
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
-            SELECT id, task_id, role, model, status, started_at, finished_at,
+            SELECT {(limit is { } n ? d.Top(n) : "")}id, task_id, role, model, status, started_at, finished_at,
                    duration_ms, message_count, tool_call_count, text_chars, error, transcript_json,
-                   last_activity_at
-            FROM agent_run {whereSql}
+                   last_activity_at, phase, resumed_session
+            FROM {T("agent_run")} {whereSql}{(limit is { } m ? d.Limit(m) : "")}
             """;
         var list = new List<AgentRunRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
@@ -188,7 +225,9 @@ public sealed class AgentRunStore : IDisposable
                 TextChars: rd.IsDBNull(10) ? null : rd.GetInt32(10),
                 Error: rd.IsDBNull(11) ? null : rd.GetString(11),
                 TranscriptJson: rd.IsDBNull(12) ? null : rd.GetString(12),
-                LastActivityAt: rd.IsDBNull(13) ? null : DateTime.ParseExact(rd.GetString(13), DateFormat, System.Globalization.CultureInfo.InvariantCulture)));
+                LastActivityAt: rd.IsDBNull(13) ? null : DateTime.ParseExact(rd.GetString(13), DateFormat, System.Globalization.CultureInfo.InvariantCulture),
+                Phase: rd.IsDBNull(14) ? null : rd.GetString(14),
+                ResumedSession: rd.IsDBNull(15) ? null : rd.GetInt32(15) != 0));
         }
         return list;
     }

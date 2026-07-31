@@ -1,3 +1,5 @@
+using System.Data.Common;
+using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 using System.Text;
 
@@ -26,21 +28,34 @@ public sealed class MemoryStore : IAsyncDisposable
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
-    private readonly string _connectionString;
+    private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
 
     public MemoryStore(string dbPath)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
     {
         _dbPath = dbPath;
-        Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
-        _connectionString = new SqliteConnectionStringBuilder
+    }
+
+    public MemoryStore(IDbConnectionFactory db)
+    {
+        _db = db;
+        _dbPath = "";
+    }
+
+    private static string BuildSqliteConnectionString(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        return new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
             Pooling = true,
         }.ToString();
     }
+
+    private string T(string name) => _db.Dialect.Table(name);
 
     /// <summary>
     /// Upsert by <paramref name="key"/>. Returns the row after the write.
@@ -54,21 +69,27 @@ public sealed class MemoryStore : IAsyncDisposable
         if (body is null) throw new ArgumentNullException(nameof(body));
 
         var now = DateTime.UtcNow;
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO memory(ts, key, body, ttl_days)
-            VALUES($ts, $key, $body, $ttl)
-            ON CONFLICT(key) DO UPDATE SET
-                ts = $ts,
-                body = $body,
-                ttl_days = $ttl
-            """;
-        cmd.Parameters.AddWithValue("$ts", now.ToString(DateFormat));
-        cmd.Parameters.AddWithValue("$key", key);
-        cmd.Parameters.AddWithValue("$body", body);
-        cmd.Parameters.AddWithValue("$ttl", (object?)ttlDays ?? DBNull.Value);
+        cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
+            ? $"""
+                MERGE {T("memory")} WITH (HOLDLOCK) AS t
+                USING (SELECT @key AS [key]) AS s ON t.[key] = s.[key]
+                WHEN MATCHED THEN UPDATE SET ts = @ts, body = @body, ttl_days = @ttl
+                WHEN NOT MATCHED THEN INSERT (ts, [key], body, ttl_days) VALUES (@ts, @key, @body, @ttl);
+                """
+            : """
+                INSERT INTO memory(ts, [key], body, ttl_days)
+                VALUES(@ts, @key, @body, @ttl)
+                ON CONFLICT([key]) DO UPDATE SET
+                    ts = @ts,
+                    body = @body,
+                    ttl_days = @ttl
+                """;
+        cmd.AddParam("@ts", now.ToString(DateFormat));
+        cmd.AddParam("@key", key);
+        cmd.AddParam("@body", body);
+        cmd.AddParam("@ttl", (object?)ttlDays ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
 
         var expiresAt = ttlDays is null ? (DateTime?)null : now.AddDays(ttlDays.Value);
@@ -110,17 +131,16 @@ public sealed class MemoryStore : IAsyncDisposable
     public async Task<IReadOnlyList<MemoryRecord>> RecallAsync(
         string? keyPrefix = null, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, ts, key, body, ttl_days
-            FROM memory
-            WHERE ($prefix IS NULL OR key LIKE $prefixPattern)
+        cmd.CommandText = $"""
+            SELECT id, ts, [key], body, ttl_days
+            FROM {T("memory")}
+            WHERE (@prefix IS NULL OR [key] LIKE @prefixPattern)
             ORDER BY ts ASC
             """;
-        cmd.Parameters.AddWithValue("$prefix", (object?)keyPrefix ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$prefixPattern",
+        cmd.AddParam("@prefix", (object?)keyPrefix ?? DBNull.Value);
+        cmd.AddParam("@prefixPattern",
             keyPrefix is null ? (object)DBNull.Value : keyPrefix + "%");
         var list = new List<MemoryRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
@@ -148,11 +168,10 @@ public sealed class MemoryStore : IAsyncDisposable
     /// </summary>
     public async Task<bool> ForgetAsync(string key, CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM memory WHERE key = $key";
-        cmd.Parameters.AddWithValue("$key", key);
+        cmd.CommandText = $"DELETE FROM {T("memory")} WHERE [key] = @key";
+        cmd.AddParam("@key", key);
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         return rows > 0;
     }
@@ -162,14 +181,29 @@ public sealed class MemoryStore : IAsyncDisposable
     /// </summary>
     public async Task<int> PurgeExpiredAsync(CancellationToken ct = default)
     {
-        await using var conn = new SqliteConnection(_connectionString);
-        await conn.OpenAsync(ct);
+        await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            DELETE FROM memory
-            WHERE ttl_days IS NOT NULL
-              AND datetime(ts, '+' || ttl_days || ' days') <= datetime('now')
-            """;
+        // Provider-neutral: select TTL rows, filter expiry in C#,
+        // delete by id. Purge is a rare manual maintenance call, so
+        // the extra round-trip is fine and avoids provider-specific
+        // date arithmetic on string-typed timestamps.
+        var expiredIds = new List<long>();
+        var now = DateTime.UtcNow;
+        await using (var read = conn.CreateCommand())
+        {
+            read.CommandText = $"SELECT id, ts, ttl_days FROM {T("memory")} WHERE ttl_days IS NOT NULL";
+            await using var rd = await read.ExecuteReaderAsync(ct);
+            while (await rd.ReadAsync(ct))
+            {
+                var createdAt = ParseDate(rd.GetString(1));
+                if (createdAt.AddDays(rd.GetInt32(2)) <= now)
+                    expiredIds.Add(rd.GetInt64(0));
+            }
+        }
+        if (expiredIds.Count == 0) return 0;
+        var names = expiredIds.Select((_, i) => $"@id{i}").ToArray();
+        cmd.CommandText = $"DELETE FROM {T("memory")} WHERE id IN ({string.Join(",", names)})";
+        for (var i = 0; i < expiredIds.Count; i++) cmd.AddParam(names[i], expiredIds[i]);
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -208,7 +242,10 @@ public sealed class MemoryStore : IAsyncDisposable
 
     private static DateTime ParseDate(string s) => DateTime.ParseExact(s, DateFormat, System.Globalization.CultureInfo.InvariantCulture);
 
-    public string ConnectionString => _connectionString;
+    public string ConnectionString => _db.ConnectionString;
+
+    /// <summary>Connection factory (migration tooling reads raw rows).</summary>
+    public IDbConnectionFactory Db => _db;
 
     public async ValueTask DisposeAsync()
     {

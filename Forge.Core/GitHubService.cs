@@ -220,4 +220,24 @@ public class GitHubService
             new Uri(pr.Url), headers, "application/vnd.github.v3.diff");
         return diff.Body ?? "";
     }
+
+    /// <summary>
+    /// 2026-07-30 (pause/resume review architecture): fetch the
+    /// INCREMENTAL unified diff between two commits. The reviewer's
+    /// re-review prompt scopes to what changed since the last
+    /// reviewed head (<paramref name="baseSha"/>..<paramref name="headSha"/>)
+    /// instead of re-reading the whole PR.
+    /// </summary>
+    public virtual async Task<string> GetCompareDiffAsync(
+        string baseSha, string headSha, CancellationToken cancellationToken = default)
+    {
+        var headers = new System.Collections.Generic.Dictionary<string, string>
+        {
+            ["Accept"] = "application/vnd.github.v3.diff"
+        };
+        var diff = await _client.Connection.Get<string>(
+            new Uri($"repos/{_owner}/{_repo}/compare/{baseSha}...{headSha}", UriKind.Relative),
+            headers, "application/vnd.github.v3.diff");
+        return diff.Body ?? "";
+    }
 }

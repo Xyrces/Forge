@@ -10,7 +10,7 @@ public class DeploymentStoreTests : IDisposable
 
     public DeploymentStoreTests()
     {
-        var dir = Path.Combine(Path.GetTempPath(), $"ph-deploy-{Guid.NewGuid():N}");
+        var dir = TempRoot.Instance.NewDirectory("deploy");
         Directory.CreateDirectory(dir);
         _dbPath = Path.Combine(dir, "issues.db");
         // The `deployment` table is created by IssueStore's schema
