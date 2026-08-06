@@ -1269,6 +1269,7 @@ Console.Error.WriteLine(ex.ToString());
         // client fails fast during cooldown + runs under the
         // per-provider concurrency permit.
         var modelRateLimits = new Core.ModelRateLimitTracker();
+        Agents.ProviderApiKeyResolver? providerKeyResolver = null;
         if (chatClientFactory is Agents.OpenAICompatibleChatClientFactory openAiFactory)
         {
             openAiFactory.Overrides = roleModelOverrides;
@@ -1285,6 +1286,7 @@ Console.Error.WriteLine(ex.ToString());
                 async ct => (await projectStore.ListAsync(ct)).Select(p => p.Id).ToArray(),
                 loggerFactory.CreateLogger<Agents.ProviderApiKeyResolver>());
             openAiFactory.KeyResolver = keyResolver;
+            providerKeyResolver = keyResolver;
             var providerNames = llmConfig.Providers.Select(p => p.Name).ToArray();
             await keyResolver.RefreshAsync(providerNames, CancellationToken.None);
             _ = Task.Run(async () =>
@@ -1667,7 +1669,8 @@ Console.Error.WriteLine(ex.ToString());
             gateOptions: options.Gates,
             lifecycle: lifecycle,
             modelRateLimits: modelRateLimits,
-            gitHubForProject: GitHubForProject);
+            gitHubForProject: GitHubForProject,
+            providerApiKeys: providerKeyResolver);
 
         // externalStop is the Windows Service host's stoppingToken when
         // running under the SCM (default(CancellationToken) -- never

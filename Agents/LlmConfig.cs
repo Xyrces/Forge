@@ -39,7 +39,13 @@ public sealed record ProviderConfig(
     // or "bearer" (MiniMax /anthropic endpoint — subscription keys
     // authenticate as Authorization: Bearer). Ignored on the
     // OpenAI-protocol path (always Bearer there).
-    string? Auth = null);
+    string? Auth = null,
+    // Explicit model-catalog URL for the Agents page dropdown.
+    // Default: {BaseUrl}/models (OpenAI shape). Anthropic-protocol
+    // providers whose chat base isn't the OpenAI-shaped root need
+    // this — MiniMax chat is api.minimax.io/anthropic/v1 but its
+    // model listing lives at api.minimax.io/v1/models.
+    string? ModelsUrl = null);
 
 /// <summary>
 /// Per-role model assignment. Resolved by looking up

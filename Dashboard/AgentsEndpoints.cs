@@ -31,7 +31,8 @@ public static class AgentsEndpoints
         RoleModelOverrides? overrides,
         SlotTable? slots,
         AgentRunStore? runs,
-        ProjectContextFactory? projectFactory)
+        ProjectContextFactory? projectFactory,
+        Agents.ProviderApiKeyResolver? apiKeys = null)
     {
         app.MapGet("/api/agents/roles", async (string? projectId, CancellationToken ct) =>
         {
@@ -196,7 +197,13 @@ public static class AgentsEndpoints
                 string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
             if (provider is null)
                 return Results.NotFound(new { error = $"unknown provider '{name}'" });
-            var models = await ProviderModelCatalog.GetModelsAsync(provider, ct);
+            // Substitute the DB-resolved key (Secrets page) for the
+            // config placeholder — the catalog call must authenticate
+            // with the same key the runs use.
+            var effective = apiKeys?.Get(name) is { Length: > 0 } resolved
+                ? provider with { ApiKey = resolved }
+                : provider;
+            var models = await ProviderModelCatalog.GetModelsAsync(effective, ct);
             return (IResult)Results.Ok(new { provider = provider.Name, models, fetchError = ProviderModelCatalog.LastError(provider.Name) });
         });
 

@@ -63,6 +63,29 @@ public class ProviderModelCatalogTests
         Assert.Empty(await ProviderModelCatalog.FetchModelsAsync(Provider, throwing, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Fetch_UsesModelsUrlOverride_WhenSet()
+    {
+        // Anthropic-protocol providers whose chat base isn't the
+        // OpenAI-shaped root (MiniMax: chat at /anthropic/v1, model
+        // listing at /v1/models) carry an explicit modelsUrl.
+        var provider = Provider with
+        {
+            BaseUrl = "https://api.minimax.io/anthropic/v1",
+            ModelsUrl = "https://api.minimax.io/v1/models",
+        };
+        var handler = new StubHandler(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"data":[{"id":"MiniMax-M3"}]}"""),
+        });
+        var http = new HttpClient(handler);
+
+        var models = await ProviderModelCatalog.FetchModelsAsync(provider, http, CancellationToken.None);
+
+        Assert.Equal(new[] { "MiniMax-M3" }, models);
+        Assert.Equal("https://api.minimax.io/v1/models", handler.LastRequest!.RequestUri!.ToString());
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly HttpResponseMessage _response;

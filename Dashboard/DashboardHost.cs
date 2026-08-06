@@ -65,6 +65,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
+    private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
     private readonly GitHubOptions? _githubOptions;
     private readonly GateOptions? _gateOptions;
     private readonly ILogger<DashboardHost> _logger;
@@ -120,7 +121,8 @@ public sealed class DashboardHost : IAsyncDisposable
         Forge.Agents.RoleModelOverrides? roleModelOverrides = null,
         Forge.Core.TaskStateMachine? lifecycle = null,
         Forge.Core.ModelRateLimitTracker? modelRateLimits = null,
-        Func<string, GitHubService?>? gitHubForProject = null)
+        Func<string, GitHubService?>? gitHubForProject = null,
+        Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null)
     {
         _options = options;
         _headroom = headroom;
@@ -171,6 +173,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _lifecycle = lifecycle;
         _modelRateLimits = modelRateLimits;
         _gitHubForProject = gitHubForProject;
+        _providerApiKeys = providerApiKeys;
     }
 
     public string BaseUrl => ResolveBaseUrl();
@@ -499,7 +502,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory);
         }
         AgentsEndpoints.MapAgentsEndpoints(_app, new Agents.RoleAgentRegistry(),
-            _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory);
+            _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory,
+            _providerApiKeys);
         QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
             _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
 

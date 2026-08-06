@@ -39,7 +39,8 @@ public static class ProviderModelCatalog
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, provider.BaseUrl.TrimEnd('/') + "/models");
+            using var req = new HttpRequestMessage(HttpMethod.Get,
+                provider.ModelsUrl ?? provider.BaseUrl.TrimEnd('/') + "/models");
             if (!string.IsNullOrEmpty(provider.ApiKey))
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", provider.ApiKey);
             using var resp = await http.SendAsync(req, ct);
