@@ -60,6 +60,27 @@ public class AnthropicMessagesChatClientTests
     }
 
     [Fact]
+    public async Task BearerAuthScheme_SendsAuthorizationHeader_NotXApiKey()
+    {
+        // MiniMax's /anthropic endpoint authenticates subscription
+        // keys as Authorization: Bearer (their documented scheme);
+        // Kimi's gateway requires x-api-key ONLY (a Bearer header
+        // makes it 404). The scheme is a per-provider config hint.
+        var handler = new FakeHandler(_ => Json(HttpStatusCode.OK,
+            """{"id":"m1","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}"""));
+        var http = new HttpClient(handler);
+        var client = new Forge.Agents.AnthropicMessagesChatClient(
+            "https://api.minimax.io/anthropic/v1", "sub-key", "MiniMax-M3", http,
+            authScheme: Forge.Agents.AnthropicMessagesChatClient.AuthSchemeBearer);
+
+        await client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hello") });
+
+        Assert.Equal("Bearer sub-key", handler.LastRequest!.Headers.GetValues("Authorization").Single());
+        Assert.False(handler.LastRequest.Headers.Contains("x-api-key"));
+        Assert.Equal("/anthropic/v1/messages", handler.LastRequest.RequestUri!.AbsolutePath);
+    }
+
+    [Fact]
     public async Task ToolUse_RoundTrip()
     {
         var (client, handler) = NewClient(_ => Json(HttpStatusCode.OK,

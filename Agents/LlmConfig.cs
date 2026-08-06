@@ -34,7 +34,12 @@ public sealed record ProviderConfig(
     // results are evicted/truncated before the request exceeds the
     // window. Null = no compaction (safe default when the provider's
     // true window is unknown — measure before guessing).
-    int? ContextWindowTokens = null);
+    int? ContextWindowTokens = null,
+    // Anthropic-protocol auth scheme: "x-api-key" (default; Kimi)
+    // or "bearer" (MiniMax /anthropic endpoint — subscription keys
+    // authenticate as Authorization: Bearer). Ignored on the
+    // OpenAI-protocol path (always Bearer there).
+    string? Auth = null);
 
 /// <summary>
 /// Per-role model assignment. Resolved by looking up

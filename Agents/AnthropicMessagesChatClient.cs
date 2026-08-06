@@ -30,18 +30,30 @@ public sealed class AnthropicMessagesChatClient : IChatClient
     private readonly int _defaultMaxOutputTokens;
     private readonly int? _thinkingBudgetTokens;
 
+    /// <summary>Anthropic-protocol auth schemes observed in the wild:
+    /// "x-api-key" (Kimi-for-Coding — a Bearer header makes its
+    /// gateway 404) and "bearer" (MiniMax's /anthropic endpoint
+    /// documents Authorization: Bearer for subscription keys).</summary>
+    public const string AuthSchemeXApiKey = "x-api-key";
+    public const string AuthSchemeBearer = "bearer";
+
     public AnthropicMessagesChatClient(string baseUrl, string apiKey, string model, HttpClient? http = null,
-        int defaultMaxOutputTokens = 8192, int? thinkingBudgetTokens = null)
+        int defaultMaxOutputTokens = 8192, int? thinkingBudgetTokens = null, string authScheme = AuthSchemeXApiKey)
     {
         _http = http ?? new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
         _http.BaseAddress ??= new Uri(baseUrl.TrimEnd('/') + "/");
-        if (!string.IsNullOrEmpty(apiKey) && !_http.DefaultRequestHeaders.Contains("x-api-key"))
+        if (!string.IsNullOrEmpty(apiKey)
+            && !_http.DefaultRequestHeaders.Contains("x-api-key")
+            && !_http.DefaultRequestHeaders.Contains("Authorization"))
         {
-            // Anthropic-style auth only. Verified live against
-            // api.kimi.com/coding/v1/messages: x-api-key alone works;
-            // adding an Authorization Bearer header makes the gateway
-            // 404 the request.
-            _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+            if (string.Equals(authScheme, AuthSchemeBearer, StringComparison.OrdinalIgnoreCase))
+            {
+                _http.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
+            }
+            else
+            {
+                _http.DefaultRequestHeaders.Add("x-api-key", apiKey);
+            }
         }
         if (!_http.DefaultRequestHeaders.Contains("anthropic-version"))
         {

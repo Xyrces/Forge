@@ -212,8 +212,11 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
             : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(provider.ApiKey)))[..12];
         // The thinking budget rides the key too: CoreDev/Reviewer get
-        // their own client instance with reasoning enabled.
-        var key = provider.Name + "|" + model + "|" + keyHash + "|" + (thinkingBudgetTokens?.ToString() ?? "-");
+        // their own client instance with reasoning enabled. Auth
+        // scheme likewise (a provider edit must not reuse a client
+        // built with the old header).
+        var key = provider.Name + "|" + model + "|" + keyHash + "|" + (thinkingBudgetTokens?.ToString() ?? "-")
+            + "|" + (provider.Auth ?? "-");
         return _cache.GetOrAdd(key, _ => WrapForRateLimits(Build(provider, model, thinkingBudgetTokens), provider, model));
     }
 
@@ -235,7 +238,8 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
             // {base}/messages, x-api-key auth.
             return new AnthropicMessagesChatClient(provider.BaseUrl, provider.ApiKey ?? string.Empty, model,
                 defaultMaxOutputTokens: provider.MaxOutputTokens ?? 8192,
-                thinkingBudgetTokens: thinkingBudgetTokens);
+                thinkingBudgetTokens: thinkingBudgetTokens,
+                authScheme: provider.Auth ?? AnthropicMessagesChatClient.AuthSchemeXApiKey);
         }
 
         var options = new OpenAIClientOptions
