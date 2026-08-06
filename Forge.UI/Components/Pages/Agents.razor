@@ -34,7 +34,7 @@
                                   Kind="@role.AgentType"
                                   Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
                                   Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
-                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount, role.CurrentRun.Phase, role.CurrentRun.ResumedSession))"
+                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount, role.CurrentRun.Phase, role.CurrentRun.ResumedSession, role.CurrentRun.CurrentContextTokens))"
                                   LastRun="@(role.LastRun is null ? null : new AgentRoleRow.LastRunInfo(role.LastRun.Id, role.LastRun.TaskId, role.LastRun.Status, role.LastRun.FinishedAt, role.LastRun.DurationMs, role.LastRun.Error))"
                                   Territory="@role.Territory"
                                   Tools="@role.Tools"
@@ -177,7 +177,7 @@
     private sealed record PromptDto(string Source, string? Path, string? Content);
     private sealed record CurrentRunDto(string Id, string? TaskId, DateTime StartedAt,
         DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount,
-        string? Phase, bool? ResumedSession);
+        string? Phase, bool? ResumedSession, long? CurrentContextTokens);
     private sealed record LastRunDto(string Id, string? TaskId, string Status,
         DateTime? FinishedAt, long? DurationMs, string? Error);
 }

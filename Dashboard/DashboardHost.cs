@@ -527,7 +527,8 @@ if (_groomerRuns is not null)
                 }
                 if (_costTracker is not null)
                 {
-                    CostEndpoints.MapCostEndpoints(_app, _costTracker, _logger);
+                    CostEndpoints.MapCostEndpoints(_app, _costTracker, _logger,
+                        _agentRuns, _projectFactory);
                     OpsEndpoints.MapOpsEndpoints(_app, _costTracker, _headroom, _logger);
                 }
                 else

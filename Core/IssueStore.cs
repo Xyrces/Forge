@@ -193,7 +193,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 30;
+    public const int CurrentSchemaVersion = 31;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -386,7 +386,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 phase            TEXT,
                 resumed_session  INTEGER,
                 project_id       TEXT,
-                dispatch_id      TEXT
+                dispatch_id      TEXT,
+                input_tokens     INTEGER,
+                output_tokens    INTEGER,
+                cache_read_tokens INTEGER,
+                current_context_tokens INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_agent_run_started ON agent_run(started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run(task_id);
@@ -940,6 +944,13 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // (postmortem tracing, operator 2026-08-01).
         ApplyV30AgentRunDispatchId(conn);
 
+        // v31 (post-init): agent_run token observability —
+        // input/output/cache-read totals at finish + the live
+        // context size per heartbeat (operator 2026-08-06: "do we
+        // have insight?" — quota burn was invisible; only chars÷4
+        // proxies existed).
+        ApplyV31AgentRunTokens(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -1124,7 +1135,11 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 phase            NVARCHAR(64)  NULL,
                 resumed_session  INT           NULL,
                 project_id       NVARCHAR(128) NULL,
-                dispatch_id      NVARCHAR(64)  NULL
+                dispatch_id      NVARCHAR(64)  NULL,
+                input_tokens     BIGINT        NULL,
+                output_tokens    BIGINT        NULL,
+                cache_read_tokens BIGINT       NULL,
+                current_context_tokens BIGINT  NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_agent_run_started' AND object_id = OBJECT_ID('{{d.Table("agent_run")}}'))
                 CREATE INDEX idx_agent_run_started ON {{d.Table("agent_run")}}(started_at DESC);
@@ -1637,6 +1652,21 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE agent_run ADD COLUMN dispatch_id TEXT;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV31AgentRunTokens(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'input_tokens' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText =
+            "ALTER TABLE agent_run ADD COLUMN input_tokens INTEGER;" +
+            "ALTER TABLE agent_run ADD COLUMN output_tokens INTEGER;" +
+            "ALTER TABLE agent_run ADD COLUMN cache_read_tokens INTEGER;" +
+            "ALTER TABLE agent_run ADD COLUMN current_context_tokens INTEGER;";
         alter.ExecuteNonQuery();
     }
 

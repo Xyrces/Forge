@@ -382,7 +382,12 @@
             return $"{phase}no model output yet — waiting {waiting} (provider may be hanging){resumed}";
         }
         var ago = run.LastActivityAt is null ? "" : $" · active {Elapsed(run.LastActivityAt.Value)} ago";
-        return $"{phase}{msgs} msgs · {tools} tools{ago}{resumed}";
+        // v31: the live context size — the "are we abusing the
+        // window?" signal on the running run itself.
+        var ctx = run.CurrentContextTokens is > 0
+            ? $" · context {(run.CurrentContextTokens.Value >= 1_000_000 ? $"{run.CurrentContextTokens.Value / 1_000_000.0:0.0}M" : $"{run.CurrentContextTokens.Value / 1_000.0:0.0}k")}"
+            : "";
+        return $"{phase}{msgs} msgs · {tools} tools{ago}{resumed}{ctx}";
     }
 
     private static string FormatWhen(DateTime? when)
@@ -399,7 +404,7 @@
     public sealed record SlotInfo(int InFlight, int Max);
     public sealed record RunInfo(string Id, string? TaskId, DateTime StartedAt,
         DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount,
-        string? Phase, bool? ResumedSession);
+        string? Phase, bool? ResumedSession, long? CurrentContextTokens);
     public sealed record LastRunInfo(string Id, string? TaskId, string Status,
         DateTime? FinishedAt, long? DurationMs, string? Error);
     public sealed record PromptInfo(string Source, string? Path, string? Content);

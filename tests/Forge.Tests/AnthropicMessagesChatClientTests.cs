@@ -60,6 +60,23 @@ public class AnthropicMessagesChatClientTests
     }
 
     [Fact]
+    public async Task UsageMapping_CapturesPromptCacheCounts()
+    {
+        // MiniMax (and real Anthropic) report prompt-cache hits —
+        // the difference between "the conversation is huge" and
+        // "we're PAYING for huge". They ride UsageDetails.
+        // AdditionalCounts so the run row can persist them (v31).
+        var (client, _) = NewClient(_ => Json(HttpStatusCode.OK,
+            """{"id":"m1","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":5,"cache_read_input_tokens":800,"cache_creation_input_tokens":50}}"""));
+
+        var resp = await client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hello") });
+
+        Assert.Equal(1000, resp.Usage?.InputTokenCount);
+        Assert.Equal(800, resp.Usage?.AdditionalCounts?["cache_read_input_tokens"]);
+        Assert.Equal(50, resp.Usage?.AdditionalCounts?["cache_creation_input_tokens"]);
+    }
+
+    [Fact]
     public async Task BearerAuthScheme_SendsAuthorizationHeader_NotXApiKey()
     {
         // MiniMax's /anthropic endpoint authenticates subscription

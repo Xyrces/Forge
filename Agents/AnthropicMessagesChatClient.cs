@@ -296,6 +296,17 @@ public sealed class AnthropicMessagesChatClient : IChatClient
                 InputTokenCount = usage["input_tokens"]?.GetValue<int>(),
                 OutputTokenCount = usage["output_tokens"]?.GetValue<int>(),
             };
+            // Prompt-cache accounting (MiniMax reports these; real
+            // Anthropic does too) — the difference between "the
+            // conversation is huge" and "we're PAYING for huge".
+            var cacheRead = usage["cache_read_input_tokens"]?.GetValue<long>() ?? 0;
+            var cacheCreate = usage["cache_creation_input_tokens"]?.GetValue<long>() ?? 0;
+            if (cacheRead > 0 || cacheCreate > 0)
+            {
+                response.Usage.AdditionalCounts ??= new AdditionalPropertiesDictionary<long>();
+                if (cacheRead > 0) response.Usage.AdditionalCounts["cache_read_input_tokens"] = cacheRead;
+                if (cacheCreate > 0) response.Usage.AdditionalCounts["cache_creation_input_tokens"] = cacheCreate;
+            }
         }
         return response;
     }

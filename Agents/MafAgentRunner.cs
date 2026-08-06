@@ -324,10 +324,13 @@ public async Task<AgentRunResult> RunAsync(
         // Per-round-trip activity heartbeat. Wraps the RAW provider
         // client so MAF's internal model→tool→model loop (inside one
         // agent.RunAsync) is visible in near-real-time; wrapping the
-        // outer client would only fire once per RunAsync call.
-        var trackedClient = runStore is null
-            ? chatClient
+        // outer client would only fire once per RunAsync call. Also
+        // the token accounting point: provider usage is captured per
+        // round-trip here and persisted to the run row (v31).
+        var tracker = runStore is null
+            ? null
             : new ActivityTrackingChatClient(chatClient, runId, runStore, ComputePhase);
+        var trackedClient = (IChatClient?)tracker ?? chatClient;
         // Wrap with function invocation so MAF actually executes the
         // tools the model calls (instead of just leaving them in the
         // response). Cap raised from the 40 default: complex tasks
@@ -561,7 +564,10 @@ public async Task<AgentRunResult> RunAsync(
                     await runStore.FinishAsync(runId, "succeeded",
                         (long)elapsed.TotalMilliseconds,
                         transcriptMessages.Count, toolCalls, text.Length,
-                        error: null, transcriptJson: transcript, ct: CancellationToken.None);
+                        error: null, transcriptJson: transcript, ct: CancellationToken.None,
+                        inputTokens: tracker?.TotalInputTokens,
+                        outputTokens: tracker?.TotalOutputTokens,
+                        cacheReadTokens: tracker?.TotalCacheReadTokens);
                 }
                 catch (Exception ex)
                 {
@@ -572,8 +578,8 @@ public async Task<AgentRunResult> RunAsync(
             return new AgentRunResult(
     Text: text,
     SessionId: newSessionId,
-    InputTokens: 0,
-    OutputTokens: 0,
+    InputTokens: tracker?.TotalInputTokens ?? 0,
+    OutputTokens: tracker?.TotalOutputTokens ?? 0,
     Elapsed: elapsed);
         }
         catch (Exception ex) when (poisonRestart == 0 && IsPoisonedSessionError(ex))
@@ -611,7 +617,10 @@ public async Task<AgentRunResult> RunAsync(
                     (long)(DateTime.UtcNow - startedAt).TotalMilliseconds,
                     transcriptMessages.Count, toolCalls, textChars,
                     $"{ex.GetType().Name}: {ex.Message}",
-                    transcriptJson: partial, ct: CancellationToken.None);
+                    transcriptJson: partial, ct: CancellationToken.None,
+                    inputTokens: tracker?.TotalInputTokens,
+                    outputTokens: tracker?.TotalOutputTokens,
+                    cacheReadTokens: tracker?.TotalCacheReadTokens);
             }
             catch { /* best-effort */ }
             throw;

@@ -156,4 +156,50 @@ public class AgentRunStoreTests : IDisposable
         Assert.Single(forgeOnly);
         Assert.Equal("run-forge", forgeOnly[0].Id);
     }
+
+    [Fact]
+    public async Task TokenObservability_RoundTrips_ThroughProgressAndFinish()
+    {
+        // v31 (operator 2026-08-06): provider-reported tokens persist —
+        // live context size on heartbeats, cumulative totals at finish.
+        await _runs.StartAsync("run-tok", "task-9", "CoreDev", "MiniMax-M3");
+
+        await _runs.UpdateProgressAsync("run-tok", messageCount: 4, toolCallCount: 2, textChars: 500,
+            currentContextTokens: 42_000, inputTokens: 100_000, outputTokens: 3_000, cacheReadTokens: 55_000);
+        var live = (await _runs.ListActiveAsync()).Single();
+        Assert.Equal(42_000, live.CurrentContextTokens);
+        Assert.Equal(100_000, live.InputTokens);
+        Assert.Equal(55_000, live.CacheReadTokens);
+
+        await _runs.FinishAsync("run-tok", "succeeded", 1000, 10, 5, 900, null, null,
+            inputTokens: 260_000, outputTokens: 8_500, cacheReadTokens: 140_000);
+        var done = await _runs.GetAsync("run-tok");
+        Assert.Equal(260_000, done!.InputTokens);
+        Assert.Equal(8_500, done.OutputTokens);
+        Assert.Equal(140_000, done.CacheReadTokens);
+        Assert.Equal(42_000, done.CurrentContextTokens); // last heartbeat value survives finish
+    }
+
+    [Fact]
+    public async Task SummarizeTokensByRole_AggregatesPerRole()
+    {
+        await _runs.StartAsync("run-d1", "task-1", "CoreDev", "m");
+        await _runs.FinishAsync("run-d1", "succeeded", 100, 5, 2, 100, null, null,
+            inputTokens: 200_000, outputTokens: 10_000, cacheReadTokens: 120_000);
+        await _runs.StartAsync("run-d2", "task-2", "CoreDev", "m");
+        await _runs.FinishAsync("run-d2", "succeeded", 100, 5, 2, 100, null, null,
+            inputTokens: 100_000, outputTokens: 5_000);
+        await _runs.StartAsync("run-r1", "task-3", "Reviewer", "m");
+        await _runs.FinishAsync("run-r1", "succeeded", 100, 5, 2, 100, null, null,
+            inputTokens: 50_000, outputTokens: 2_000);
+
+        var rows = await _runs.SummarizeTokensByRoleAsync(days: 7);
+        var coredev = rows.Single(r => r.Role == "CoreDev");
+        Assert.Equal(2, coredev.Runs);
+        Assert.Equal(300_000, coredev.InputTokens);
+        Assert.Equal(15_000, coredev.OutputTokens);
+        Assert.Equal(120_000, coredev.CacheReadTokens);
+        var reviewer = rows.Single(r => r.Role == "Reviewer");
+        Assert.Equal(50_000, reviewer.InputTokens);
+    }
 }

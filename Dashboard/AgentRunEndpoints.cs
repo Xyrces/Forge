@@ -94,5 +94,9 @@ public static class AgentRunEndpoints
         phase = r.Phase,
         resumedSession = r.ResumedSession,
         projectId = r.ProjectId,
+        inputTokens = r.InputTokens,
+        outputTokens = r.OutputTokens,
+        cacheReadTokens = r.CacheReadTokens,
+        currentContextTokens = r.CurrentContextTokens,
     };
 }

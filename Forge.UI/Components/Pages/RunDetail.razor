@@ -35,6 +35,16 @@
                 @v.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
                 · @(v.DurationMs is null ? "…" : Fmt(v.DurationMs.Value))
                 · @v.MessageCount msgs · @v.ToolCallCount tool calls
+                @if (v.InputTokens is not null)
+                {
+                    <span class="meta-text" style="margin-left:6px">
+                        · ↓@FmtTokens(v.InputTokens.Value) ↑@FmtTokens(v.OutputTokens ?? 0) tokens@(v.CacheReadTokens is > 0 ? $" · {FmtTokens(v.CacheReadTokens.Value)} cache-read" : "")
+                    </span>
+                }
+                @if (v.Status == "running" && v.CurrentContextTokens is > 0)
+                {
+                    <span class="pill pill--info" style="margin-left:6px">context @FmtTokens(v.CurrentContextTokens.Value)</span>
+                }
                 @if (v.Status == "running" && v.LastActivityAt is not null)
                 {
                     <span class="pill pill--inprogress" style="margin-left:6px">LIVE · active @Ago(v.LastActivityAt.Value) ago</span>
@@ -217,7 +227,8 @@
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
         string? Error, bool HasTranscript, DateTime? LastActivityAt,
-        string? Phase, bool? ResumedSession, string? ProjectId);
+        string? Phase, bool? ResumedSession, string? ProjectId,
+        long? InputTokens, long? OutputTokens, long? CacheReadTokens, long? CurrentContextTokens);
 
     private sealed record ChatMsg(string Kind, string Text, List<ToolCall> Calls);
     private sealed record ToolCall(string Name, string Args, string? Result);
@@ -313,4 +324,9 @@
         if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m {ts.Seconds}s";
         return $"{(int)ts.TotalSeconds}s";
     }
+
+    private static string FmtTokens(long tokens)
+        => tokens >= 1_000_000 ? $"{tokens / 1_000_000.0:0.0}M"
+         : tokens >= 1_000 ? $"{tokens / 1_000.0:0.0}k"
+         : tokens.ToString();
 }

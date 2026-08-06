@@ -117,6 +117,7 @@ public static class AgentsEndpoints
                         toolCallCount = activeRun.ToolCallCount,
                         phase = activeRun.Phase,
                         resumedSession = activeRun.ResumedSession,
+                        currentContextTokens = activeRun.CurrentContextTokens,
                     },
                     lastRun = lastRun is null ? null : new
                     {

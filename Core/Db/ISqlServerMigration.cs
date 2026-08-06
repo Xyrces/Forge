@@ -42,6 +42,7 @@ public static class SqlServerMigrations
         new M029WatchdogFinding(),
         new M030FollowUpDraftDisposition(),
         new M031AgentRunDispatchId(),
+        new M032AgentRunTokens(),
     };
 
     public static int ExpectedVersion =>

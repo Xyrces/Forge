@@ -48,7 +48,11 @@ public class DispatchCheckpointTests : IDisposable
 // chain: M029).
 // v29 = followup_draft.disposition — triage outcomes per draft
 // (SQL Server chain: M030).
-        Assert.Equal(30, IssueStore.CurrentSchemaVersion);
+// v30 = agent_run.dispatch_id — dispatch correlation id (SQL Server
+// chain: M031).
+// v31 = agent_run token observability (input/output/cache-read/
+// current-context) (SQL Server chain: M032).
+        Assert.Equal(31, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]
