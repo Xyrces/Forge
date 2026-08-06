@@ -411,8 +411,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
                     issue.Id, branch, input.Worktree.BaseBranch);
                 pr = await gitHub.CreatePullRequestAsync(
-                    title: $"[{issue.Type}] {issue.Title}",
-                    body: BuildPrBody(issue, headSha, input.Text),
+                    title: PrText.Title(issue),
+                    body: PrText.Body(issue, headSha, input.Text),
                     headBranch: branch,
                     baseBranch: input.Worktree.BaseBranch,
                     cancellationToken: ct);
@@ -511,9 +511,6 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
 
         return new PrOpened(input, PrResult.Ok, pr.Number, headSha);
     }
-
-    private static string BuildPrBody(IssueRecord issue, string headSha, string? modelText)
-        => $"Task: {issue.Id}\n\nSHA: {headSha}\n\n## Model response\n\n{modelText ?? string.Empty}";
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
 

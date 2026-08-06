@@ -517,8 +517,9 @@ public sealed class StartupRecovery
     private async Task TryOpenPrAsync(IssueRecord issue, string branch, ProjectRecoveryContext ctx, CancellationToken ct)
     {
         var pr = await ctx.GitHub.CreatePullRequestAsync(
-            title: $"[{issue.Type}] {issue.Title}",
-            body: $"Task: {issue.Id}\n\n(recovered by StartupRecovery after a crash)\n",
+            title: PrText.Title(issue),
+            body: PrText.Body(issue, headSha: null, modelText: null,
+                note: "recovered by StartupRecovery after a crash"),
             headBranch: branch,
             baseBranch: ctx.DefaultBranch ?? "main",
             cancellationToken: ct);
