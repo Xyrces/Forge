@@ -129,7 +129,7 @@ public sealed class IntakeAgent
             .Select(m => new ChatMessage(MapRole(m.Role), m.Content))
             .ToList();
 
-        var chatClient = _chatClientFactory.Create(_config, AgentType.Intake);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.Intake, _projectId);
         // Wrap the client with the function-invocation middleware so the
         // ChatClientAgent actually executes AIFunctions in its tool list
         // and feeds the result back to the LLM. Without this, the agent

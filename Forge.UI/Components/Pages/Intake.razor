@@ -288,6 +288,8 @@
     {
         try
         {
+            // Memory is a single global store with project-PREFIXED
+            // keys (vision/<projectId> etc.) — no store lens.
             _memory = await Http.GetFromJsonAsync<List<MemoryDto>>("/api/memory");
         }
         catch { _memory = new(); }

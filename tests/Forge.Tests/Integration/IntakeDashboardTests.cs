@@ -65,7 +65,6 @@ public class IntakeDashboardTests : IDisposable
 
     private IHost BuildHost()
     {
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -73,7 +72,7 @@ public class IntakeDashboardTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
 
         // Mount the same endpoints the real dashboard does.
@@ -194,7 +193,7 @@ public class IntakeDashboardTests : IDisposable
     {
         private readonly IChatClient _client;
         public StubFactory(IChatClient client) { _client = client; }
-        public IChatClient Create(LlmConfig config, AgentType role) => _client;
+        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => _client;
     }
 }
 

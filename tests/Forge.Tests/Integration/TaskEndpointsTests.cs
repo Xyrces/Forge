@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -33,16 +34,17 @@ public class TaskEndpointsTests : IDisposable
         _issues = new IssueStore(_dbPath);
         _bus = new AgentMessageBus();
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
-        TaskEndpoints.MapTaskEndpoints(app, _issues, _bus, null, NullLogger<DashboardHost>.Instance);
+        TaskEndpoints.MapTaskEndpoints(app, _issues, _bus, null, NullLogger<DashboardHost>.Instance,
+            lifecycle: new TaskStateMachine(writeAuthority: true, NullLogger<TaskStateMachine>.Instance),
+            gitHubForProject: _ => new CloseCapturingGitHub());
         _host = app;
         _host.Start();
         _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_host.GetPort()}/") };
@@ -105,6 +107,115 @@ public class TaskEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Requeue_WithOpenPr_RestartsStaleWindow()
+    {
+        // Regression (observed live 2026-07-30, task-12): a requeued
+        // task with an hours-old PR tripped the watcher's pr-stale
+        // guard (anchored to prOpenedAt) minutes after the requeue.
+        // The requeue is explicit progress intent — it must restart
+        // the stale window.
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom",
+            new Dictionary<string, object>
+            {
+                ["prNumber"] = "123",
+                ["prOpenedAt"] = DateTime.UtcNow.AddDays(-3).ToString("O"),
+                ["state"] = "Failed",
+            }, default);
+
+        var before = DateTime.UtcNow.AddSeconds(-5);
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/requeue", new { });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal("Pending", after.GetMetadata("state"));
+        var anchor = DateTimeOffset.Parse(after.GetMetadata("prOpenedAt")!).UtcDateTime;
+        Assert.True(anchor >= before, $"prOpenedAt should be refreshed to ~now, got {anchor:O}");
+    }
+
+    [Fact]
+    public async Task Requeue_WithoutPr_LeavesPrOpenedAtUnset()
+    {
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom", default);
+
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/requeue", new { });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Null(after.GetMetadata("prOpenedAt"));
+    }
+
+    [Fact]
+    public async Task ResetStrikes_ClearsAllCounters_AndRequeues()
+    {
+        // Operator recovery nudge (2026-07-31): every strike counter
+        // cleared, verdict de-armed (fresh review, no instant
+        // re-trip), stale window restarted, Blocked → Pending.
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "circuit breaker",
+            new Dictionary<string, object>
+            {
+                ["prNumber"] = "123",
+                ["prOpenedAt"] = DateTime.UtcNow.AddDays(-3).ToString("O"),
+                ["reworkAttempts"] = "3",
+                ["reworkForSha"] = "abc",
+                ["noProgressAttempts"] = "2",
+                ["autoResumeAttempts"] = "3",
+                ["reviewRound"] = "3",
+                ["reviewVerdict"] = "RequestChanges",
+                ["reviewSha"] = "abc",
+                ["blockedKind"] = "reviewer-unavailable",
+                ["state"] = "BlockedOperator",
+            }, default);
+
+        var before = DateTime.UtcNow.AddSeconds(-5);
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/reset-strikes", new { });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        // The lifecycle state must be reset too — otherwise the next
+        // dispatch violates (BlockedOperator+Dispatched illegal) and
+        // the board shows a live run inside a "blocked" card
+        // (observed live 2026-08-01: task-18).
+        Assert.Equal("Pending", after.GetMetadata("state"));
+        Assert.Equal("1", after.GetMetadata("strikeResetCount"));
+        foreach (var key in new[] { "reworkAttempts", "reworkForSha", "noProgressAttempts", "autoResumeAttempts",
+                     "reviewRound", "reviewVerdict", "reviewSha", "blockedKind" })
+        {
+            Assert.Null(after.GetMetadata(key));
+        }
+        Assert.True(DateTimeOffset.Parse(after.GetMetadata("prOpenedAt")!).UtcDateTime >= before);
+        Assert.NotNull(after.GetMetadata("requeuedFromFailedAt"));
+    }
+
+    [Fact]
+    public async Task ResetStrikes_InProgress_StaysInProgress()
+    {
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null,
+            new Dictionary<string, object> { ["reworkAttempts"] = "2" }, default);
+
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/reset-strikes", new { });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.InProgress, after.Status);
+        Assert.Null(after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task ResetStrikes_PendingTask_Conflicts()
+    {
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/reset-strikes", new { });
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task Recover_NoRecoveryService_Returns503()
     {
         var resp = await _client.PostAsync("/api/tasks/T-42/recover", null);
@@ -144,5 +255,56 @@ public class TaskEndpointsTests : IDisposable
     {
         public string Kind { get; set; } = "";
         public DateTime At { get; set; }
+    }
+
+    [Fact]
+    public async Task Close_ObsoleteTask_ClosesAndReportsOperatorClosed()
+    {
+        // Operator close-obsolete (2026-08-01): retires the task and
+        // reports the machine event so the state record ends at
+        // Closed rather than a stale Failed.
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "obsolete"), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "breaker",
+            new Dictionary<string, object> { ["state"] = "Failed" }, default);
+
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/close",
+            new { reason = "obsolete: fix already on main", closePr = false });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.Closed, after.Status);
+        Assert.Equal("Closed", after.GetMetadata("state"));
+
+        // Terminal tasks refuse a second close.
+        var again = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/close",
+            new { reason = "again", closePr = false });
+        Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+    }
+
+    [Fact]
+    public async Task Close_WithClosePr_ClosesLinkedPrViaProjectGitHub()
+    {
+        CloseCapturingGitHub.LastClosedPr = null;
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "obsolete",
+            Metadata: new Dictionary<string, object> { ["prNumber"] = "769" }), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "breaker", default);
+
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/close",
+            new { reason = "obsolete", closePr = true });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("prClosed").GetBoolean());
+        Assert.Equal(769, CloseCapturingGitHub.LastClosedPr);
+    }
+
+    private sealed class CloseCapturingGitHub : GitHubService
+    {
+        public static int? LastClosedPr;
+        public CloseCapturingGitHub() : base("o", "r") { }
+        public override Task<Octokit.PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+        {
+            LastClosedPr = prNumber;
+            return Task.FromResult(new Octokit.PullRequest());
+        }
     }
 }

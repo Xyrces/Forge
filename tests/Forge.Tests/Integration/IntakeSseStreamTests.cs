@@ -52,7 +52,6 @@ public class IntakeSseStreamTests : IDisposable
 
     private IHost BuildHost()
     {
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -60,7 +59,7 @@ public class IntakeSseStreamTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
 
         // We mount only SpecEndpoints + the events stream (the same SSE

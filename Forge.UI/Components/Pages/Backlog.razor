@@ -21,7 +21,7 @@
         </div>
         <div class="page-header__actions">
             <button class="btn" @onclick="() => _showNewTask = !_showNewTask">@(_showNewTask ? "Cancel" : "New task")</button>
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId)))">Refresh</button>
+            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId, Background: true)))">Refresh</button>
         </div>
     </div>
 

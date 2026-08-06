@@ -1,6 +1,7 @@
 @page "/runs"
 @inject HttpClient Http
 @inject NavigationManager Nav
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @implements IDisposable
 @using System.Net.Http.Json
 
@@ -34,13 +35,14 @@
                             <span class="run-active-card__role">
                                 <span class="agent-row__dot"></span>
                                 <strong>@r.Role</strong>
+                                <span class="pill">@ProjectBadge(r.ProjectId)</span>
                             </span>
                             <span class="mono run-active-card__elapsed">@Elapsed(r)</span>
                         </div>
                         <div class="run-active-card__body">
                             @if (r.TaskId is not null)
                             {
-                                <a href="/tasks/@r.TaskId" class="mono">@r.TaskId</a>
+                                <a href="@($"/tasks/{r.TaskId}{ProjectQuery(r.ProjectId)}")" class="mono">@r.TaskId</a>
                             }
                             else
                             {
@@ -80,10 +82,11 @@
                 }
                 @foreach (var r in _data.Recent)
                 {
-                    <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/runs/{r.Id}"))">
+                    <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/runs/{r.Id}{ProjectQuery(r.ProjectId)}"))">
                         <td class="mono">@r.StartedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
                         <td>
                             @r.Role
+                            <span class="pill">@ProjectBadge(r.ProjectId)</span>
                             @if (r.ResumedSession == true)
                             {
                                 <span class="pill pill--info">resumed</span>
@@ -120,11 +123,22 @@
             TimeSpan.Zero, TimeSpan.FromSeconds(5));
     }
 
+    private static string ProjectBadge(string? projectId) => projectId ?? "legacy";
+    private static string ProjectQuery(string? projectId) =>
+        projectId is null ? "" : $"?project={Uri.EscapeDataString(projectId)}";
+
     private async Task LoadAsync()
     {
         try
         {
-            _data = await Http.GetFromJsonAsync<RunsDto>("/api/agent-runs");
+            // agent_run is per-project workload data: follow the
+            // active-project lens (the 5s poll re-reads it). Rows
+            // pre-dating the per-project writers live in the primary
+            // store and show the "legacy" badge.
+            var lens = ShellStore.Value.CurrentProjectId is { } pid
+                ? $"?projectId={Uri.EscapeDataString(pid)}"
+                : string.Empty;
+            _data = await Http.GetFromJsonAsync<RunsDto>("/api/agent-runs" + lens);
             _loadError = null;
             StateHasChanged();
         }
@@ -149,5 +163,6 @@
         string Id, string? TaskId, string Role, string? Model, string Status,
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
-        string? Error, bool HasTranscript, string? Phase, bool? ResumedSession);
+        string? Error, bool HasTranscript, string? Phase, bool? ResumedSession,
+        string? ProjectId);
 }

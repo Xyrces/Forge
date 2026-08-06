@@ -29,7 +29,13 @@
                 <button class="alert-inbox__row" @onclick="@(() => Go(a.Link))">
                     <span class="alert-inbox__dot" style="background:@Dot(a.Severity)"></span>
                     <span class="alert-inbox__text">
-                        <span class="alert-inbox__title">@a.Title</span>
+                        <span class="alert-inbox__title">
+                            @if (a.ProjectId is not null)
+                            {
+                                <span class="pill">@a.ProjectId</span>
+                            }
+                            @a.Title
+                        </span>
                         @if (a.Detail is not null)
                         {
                             <span class="alert-inbox__detail">@a.Detail</span>
@@ -61,6 +67,9 @@
     {
         try
         {
+            // The attention feed is the UNIFIED cross-project view
+            // (operator rule 2026-07-30: Now/alerts are the admin
+            // surface; everything else is per-project).
             var feed = await Http.GetFromJsonAsync<NowFeedDto>("/api/now");
             _items = feed?.Attention ?? new();
             StateHasChanged();
@@ -87,5 +96,5 @@
     public void Dispose() => _timer?.Dispose();
 
     private sealed record NowFeedDto(List<AttentionDto> Attention);
-    private sealed record AttentionDto(string Severity, string Kind, string Title, string? Detail, string? IssueId, string Link);
+    private sealed record AttentionDto(string Severity, string Kind, string Title, string? Detail, string? IssueId, string? ProjectId, string Link);
 }

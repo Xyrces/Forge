@@ -55,7 +55,6 @@ public class SpecDashboardTests : IDisposable
 
     private IHost BuildHost()
     {
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -63,7 +62,7 @@ public class SpecDashboardTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
 
         SpecEndpoints.MapSpecEndpoints(
@@ -378,7 +377,6 @@ public class SpecGroomerEndpointTests : IDisposable
 
     private IHost BuildHost(GroomerAgentFactory groomerFactory)
     {
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -386,7 +384,7 @@ public class SpecGroomerEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
 
         SpecEndpoints.MapSpecEndpoints(

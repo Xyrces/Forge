@@ -340,7 +340,7 @@ internal sealed class CapturingFactory : IChatClientFactory
 {
     private readonly IChatClient _client;
     public CapturingFactory(IChatClient client) { _client = client; }
-    public IChatClient Create(LlmConfig config, AgentType role) => _client;
+    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => _client;
 }
 
 internal sealed class ThrowingChatClient : IChatClient

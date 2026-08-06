@@ -19,7 +19,22 @@ public sealed record ProviderConfig(
     // "anthropic" = Anthropic Messages API (e.g. Kimi-for-Coding,
     // whose chat lives at {base}/messages with x-api-key auth — the
     // OpenAI-shaped /models listing works but chat 401s).
-    string? Api = null);
+    string? Api = null,
+    // Account-level quota shared across all models (Kimi): a quota
+    // 429 cools the whole provider, not just the tripped model.
+    bool SharedQuota = false,
+    // Provider-level default max_tokens for Anthropic-protocol calls
+    // (Kimi meters TPM on prompt + REQUESTED max_tokens). Null = 8192.
+    int? MaxOutputTokens = null,
+    // Effective input window in tokens, enabling intra-run context
+    // compaction (operator-approved 2026-08-06 — task-560 died
+    // mid-run at a 481KB transcript when minimax-m3's window
+    // overflowed). When set, tool-loop runs wrap the client with a
+    // ContextWindowCompactionStrategy reducer so accumulated tool
+    // results are evicted/truncated before the request exceeds the
+    // window. Null = no compaction (safe default when the provider's
+    // true window is unknown — measure before guessing).
+    int? ContextWindowTokens = null);
 
 /// <summary>
 /// Per-role model assignment. Resolved by looking up
@@ -112,7 +127,9 @@ public static class LlmConfigAdapter
             ApiKey: string.IsNullOrEmpty(p.ApiKey) ? null : p.ApiKey,
             OrgId: string.IsNullOrEmpty(p.OrgId) ? null : p.OrgId,
             DefaultModel: p.DefaultModel,
-            Api: string.IsNullOrEmpty(p.Api) ? null : p.Api)).ToList();
+            Api: string.IsNullOrEmpty(p.Api) ? null : p.Api,
+            SharedQuota: p.SharedQuota,
+            MaxOutputTokens: p.MaxOutputTokens > 0 ? p.MaxOutputTokens : null)).ToList();
         var roles = new Dictionary<AgentType, RoleModel>(capacity: options.Roles.Count);
         foreach (var (key, value) in options.Roles)
         {

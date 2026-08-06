@@ -37,14 +37,13 @@ public class SprintProposeEndpointTests : IDisposable
         _audit = new SprintProposalAuditStore(_dbPath);
         _service = new SprintProposeService(_issues, _sprints, new DeterministicScorer(), _audit);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         SprintProposeEndpoints.MapSprintProposeEndpoints(app, _service, _audit,
             NullLogger<DashboardHost>.Instance);

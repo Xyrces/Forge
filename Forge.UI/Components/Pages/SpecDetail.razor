@@ -161,6 +161,9 @@
 
 @code {
     [Parameter] public string SpecId { get; set; } = "";
+    // Cross-project links carry the item's OWNING project — it wins
+    // over the topbar lens (spec ids collide across projects).
+    [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
 
     private JsonElement? _spec;
     private JsonElement? _actions;
@@ -200,17 +203,22 @@
         };
     }
 
+    private string LensQuery =>
+        (Project ?? ShellStore.Value.CurrentProjectId) is { } pid
+            ? $"?project={Uri.EscapeDataString(pid)}"
+            : string.Empty;
+
     private async Task LoadAsync()
     {
         _error = null;
         try
         {
-            var tree = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/tree");
+            var tree = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/tree" + LensQuery);
             _spec = tree.GetProperty("spec");
             _stories = tree.GetProperty("stories").EnumerateArray().Select(StoryVm.From).ToList();
             _orphanTasks = tree.GetProperty("orphanTasks").EnumerateArray().Select(TaskVm.From).ToList();
             _groomRuns = tree.GetProperty("groomRuns").EnumerateArray().Select(GroomRunVm.From).ToList();
-            try { _actions = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/actions"); }
+            try { _actions = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/actions" + LensQuery); }
             catch { _actions = null; }
             if (_repoUrl is null)
             {
@@ -242,7 +250,7 @@
         _acting = true;
         try
         {
-            var resp = await Http.PatchAsJsonAsync($"/api/specs/{SpecId}", new { op = "set_status", status });
+            var resp = await Http.PatchAsJsonAsync($"/api/specs/{SpecId}" + LensQuery, new { op = "set_status", status });
             if (!resp.IsSuccessStatusCode)
             {
                 _actionError = $"{status} failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
@@ -269,7 +277,8 @@
         _offerForceGroom = false;
         try
         {
-            var url = force ? $"/api/specs/{SpecId}/groom?force=true" : $"/api/specs/{SpecId}/groom";
+            var url = $"/api/specs/{SpecId}/groom" + LensQuery
+                + (force ? (LensQuery.Length > 0 ? "&" : "?") + "force=true" : "");
             var resp = await Http.PostAsync(url, null);
             if (resp.StatusCode == System.Net.HttpStatusCode.Conflict && !force)
             {

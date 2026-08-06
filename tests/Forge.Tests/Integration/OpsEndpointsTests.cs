@@ -34,14 +34,13 @@ public class OpsEndpointsTests : IDisposable
         _memory = new MemoryStore(_dbPath);
         _extractions = new MemoryExtractionStore(_dbPath);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         MemoryEndpoints.MapMemoryEndpoints(app, _memory, NullLogger<DashboardHost>.Instance);
         MemoryEndpoints.MapExtractionEndpoints(app, _extractions, NullLogger<DashboardHost>.Instance);
@@ -90,13 +89,12 @@ public class OpsEndpointsTests : IDisposable
     [Fact]
     public async Task HeadroomStats_EnabledUnreachable_ReturnsError()
     {
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         OpsEndpoints.MapOpsEndpoints(app, null,
             new HeadroomOptions { Enabled = true, ProxyBaseUrl = "http://127.0.0.1:1" },

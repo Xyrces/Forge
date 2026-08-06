@@ -112,12 +112,17 @@
     private string? _groomingId;
     private string? _actionError;
 
+    private string LensQuery =>
+        ShellStore.Value.CurrentProjectId is { } pid
+            ? $"?project={Uri.EscapeDataString(pid)}"
+            : string.Empty;
+
     private async Task Approve(string specId)
     {
         _acting = true;
         try
         {
-            var resp = await Http.PatchAsJsonAsync($"/api/specs/{specId}",
+            var resp = await Http.PatchAsJsonAsync($"/api/specs/{specId}" + LensQuery,
                 new { op = "set_status", status = "Approved" });
             if (!resp.IsSuccessStatusCode)
             {
@@ -142,7 +147,7 @@
             // while creating story/task issues. Poll the list a few
             // times so the user sees the transition without leaving
             // the page.
-            var resp = await Http.PostAsync($"/api/specs/{specId}/groom", null);
+            var resp = await Http.PostAsync($"/api/specs/{specId}/groom" + LensQuery, null);
             if (!resp.IsSuccessStatusCode)
             {
                 _actionError = $"Groom failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";

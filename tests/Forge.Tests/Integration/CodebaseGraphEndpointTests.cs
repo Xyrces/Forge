@@ -55,7 +55,6 @@ public class CodebaseGraphEndpointTests : IDisposable
 
     private IHost BuildHost()
     {
-        var port = GetEphemeralPort();
         var workDir = Path.GetTempPath();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -64,7 +63,7 @@ public class CodebaseGraphEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
 
         var graphBuilder = new DotnetCodebaseGraphBuilder();

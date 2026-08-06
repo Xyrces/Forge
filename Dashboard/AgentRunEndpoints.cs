@@ -11,12 +11,39 @@ namespace Forge.Dashboard;
 /// </summary>
 public static class AgentRunEndpoints
 {
-    public static void MapAgentRunEndpoints(WebApplication app, AgentRunStore runs)
+    public static void MapAgentRunEndpoints(
+        WebApplication app,
+        AgentRunStore runs,
+        Projects.ProjectContextFactory? projectContexts = null)
     {
-        app.MapGet("/api/agent-runs", async (string? taskId, CancellationToken ct) =>
+        // Multi-project: agent_run is per-project workload data — the
+        // runner writes each run to the OWNING project's schema
+        // (operator rule 2026-07-30). ?projectId= reads that project's
+        // run store; absent = primary. Unknown project 404s. (Runs
+        // pre-dating the per-project writers live in the primary
+        // store with project_id NULL — the "legacy" badge.)
+        AgentRunStore? ResolveRuns(string? projectId, out IResult? error)
         {
-            var active = await runs.ListActiveAsync(ct);
-            var recent = await runs.ListRecentAsync(limit: 50, taskId: taskId, ct: ct);
+            error = null;
+            if (projectId is null || projectContexts is null) return runs;
+            var ctx = projectContexts.Find(projectId);
+            if (ctx is null)
+            {
+                error = Results.NotFound(new { error = "project not found", projectId });
+                return null;
+            }
+            return new AgentRunStore(((IssueStore)ctx.Issues).Db);
+        }
+
+        app.MapGet("/api/agent-runs", async (string? taskId, string? projectId, CancellationToken ct) =>
+        {
+            var store = ResolveRuns(projectId, out var err);
+            if (err is not null) return err;
+            // The resolved store IS the project scope — no column
+            // filter (a filter would hide legacy project_id NULL rows
+            // stranded in the primary store).
+            var active = await store!.ListActiveAsync(ct);
+            var recent = await store.ListRecentAsync(limit: 50, taskId: taskId, ct: ct);
             return Results.Json(new
             {
                 // The task detail page renders BOTH buckets — the
@@ -24,14 +51,18 @@ public static class AgentRunEndpoints
                 // concurrent run for an unrelated task shows up as a
                 // phantom "running" row (observed live: task-174's
                 // CoreDev run rendered on task-167's page).
-                active = active.Where(r => taskId is null || r.TaskId == taskId).Select(ToView),
+                active = active
+                    .Where(r => taskId is null || r.TaskId == taskId)
+                    .Select(ToView),
                 recent = recent.Select(ToView),
             });
         });
 
-        app.MapGet("/api/agent-runs/{id}", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/agent-runs/{id}", async (string id, string? projectId, CancellationToken ct) =>
         {
-            var run = await runs.GetAsync(id, ct);
+            var store = ResolveRuns(projectId, out var err);
+            if (err is not null) return err;
+            var run = await store!.GetAsync(id, ct);
             if (run is null) return Results.NotFound();
             object transcript = run.TranscriptJson is null
                 ? Array.Empty<object>()
@@ -62,5 +93,6 @@ public static class AgentRunEndpoints
         lastActivityAt = r.LastActivityAt,
         phase = r.Phase,
         resumedSession = r.ResumedSession,
+        projectId = r.ProjectId,
     };
 }

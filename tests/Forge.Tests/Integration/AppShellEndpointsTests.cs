@@ -38,7 +38,6 @@ public class AppShellEndpointsTests : IDisposable
         _sprints = new SprintStore(_issues);
         _memory = new MemoryStore(_dbPath);
 
-        var port = GetEphemeralPort();
         // Pass the test's temp dir as contentRoot via WebApplicationOptions
         // -- setting it via UseContentRoot after CreateBuilder throws
         // NotSupportedException in net10.
@@ -48,7 +47,7 @@ public class AppShellEndpointsTests : IDisposable
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         AppShellEndpoints.MapAppShellEndpoints(app, _issues, _sprints, _specs, _memory,
             NullLogger<DashboardHost>.Instance);

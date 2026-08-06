@@ -137,4 +137,23 @@ public class AgentRunStoreTests : IDisposable
         await _runs.UpdateProgressAsync("run-ph", 6, 2, 950);
         Assert.Equal("verifying 1/3", (await _runs.ListActiveAsync()).Single().Phase);
     }
+
+    [Fact]
+    public async Task ProjectId_RoundTrips_AndFilters()
+    {
+        await _runs.StartAsync("run-forge", "task-1", "CoreDev", "m", projectId: "forge");
+        await _runs.StartAsync("run-ph", "task-7", "CoreDev", "m", projectId: "porthorizon");
+        await _runs.StartAsync("run-legacy", "task-2", "Reviewer", "m");
+        foreach (var id in new[] { "run-forge", "run-ph", "run-legacy" })
+            await _runs.FinishAsync(id, "succeeded", 10, 1, 0, 5, null, null);
+
+        var all = await _runs.ListRecentAsync();
+        Assert.Equal("forge", all.Single(r => r.Id == "run-forge").ProjectId);
+        Assert.Equal("porthorizon", all.Single(r => r.Id == "run-ph").ProjectId);
+        Assert.Null(all.Single(r => r.Id == "run-legacy").ProjectId);   // pre-v26 shape
+
+        var forgeOnly = await _runs.ListRecentAsync(projectId: "forge");
+        Assert.Single(forgeOnly);
+        Assert.Equal("run-forge", forgeOnly[0].Id);
+    }
 }

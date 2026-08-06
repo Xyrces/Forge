@@ -46,4 +46,4 @@ If you cannot verify without editing code, report `needs-info` and stop.
 
 ## Out-of-scope findings
 
-For defects outside your verification scope, call `file_followup` (self-contained title + description) instead of expanding your run. Follow-ups are groomed before scheduling; duplicates get closed.
+For defects outside your verification scope, call `file_followup` (self-contained title + description) instead of expanding your run. Findings are TRACKED and become tasks at sprint completion (then groomed); duplicates get closed. If a defect BLOCKS in-flight work, pass `blocksIssueId` — the only path that creates a task immediately.

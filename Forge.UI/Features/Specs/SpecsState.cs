@@ -55,8 +55,12 @@ public sealed class SpecsClient
         return await _http.GetFromJsonAsync<List<SpecRow>>(url, ct) ?? new List<SpecRow>();
     }
 
-    public async Task<ActionsDto> GetActionsAsync(string id, CancellationToken ct)
-        => await _http.GetFromJsonAsync<ActionsDto>($"/api/specs/{Uri.EscapeDataString(id)}/actions", ct) ?? new ActionsDto(false, false, false, null);
+    public async Task<ActionsDto> GetActionsAsync(string id, string? projectId, CancellationToken ct)
+    {
+        var url = $"/api/specs/{Uri.EscapeDataString(id)}/actions";
+        if (!string.IsNullOrEmpty(projectId)) url += $"?project={Uri.EscapeDataString(projectId)}";
+        return await _http.GetFromJsonAsync<ActionsDto>(url, ct) ?? new ActionsDto(false, false, false, null);
+    }
 }
 
 public sealed record ActionsDto(bool CanApprove, bool CanStartGrooming, bool CanShip, string? Reason);

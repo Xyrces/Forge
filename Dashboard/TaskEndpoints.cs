@@ -44,7 +44,9 @@ public static class TaskEndpoints
         Projects.ProjectContextFactory? projectContexts = null,
         ISprintStore? sprints = null,
         AgentRunStore? runs = null,
-        Forge.Core.Workflow.WorkflowResolver? workflow = null)
+        Forge.Core.Workflow.WorkflowResolver? workflow = null,
+        Forge.Core.TaskStateMachine? lifecycle = null,
+        Func<string, GitHubService?>? gitHubForProject = null)
     {
         // Derived lifecycle state (Phase 1 read-model): what the task
         // is doing + what it's waiting on, projected from the task,
@@ -193,7 +195,7 @@ public static class TaskEndpoints
             }
         });
 
-        app.MapPost("/api/tasks/{id}/retry-message", async (string id, HttpContext ctx) =>
+        app.MapPost("/api/tasks/{id}/retry-message", async (string id, string? projectId, HttpContext ctx) =>
         {
             if (messageBus is null) return Results.Problem(detail: "AgentMessageBus not configured", statusCode: 503);
             try
@@ -206,8 +208,17 @@ public static class TaskEndpoints
                     return Results.BadRequest(new { error = "text cannot be empty" });
 
                 // The audit found this returned success for any id —
-                // a typo'd task id must not silently succeed.
-                if (await issues.GetAsync(id, ctx.RequestAborted) is null)
+                // a typo'd task id must not silently succeed. Ids are
+                // per-project sequences, so the existence check must
+                // run against the OWNING project's store.
+                var store = issues;
+                if (projectId is not null && projectContexts is not null)
+                {
+                    var pctx = projectContexts.Find(projectId);
+                    if (pctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                    store = pctx.Issues;
+                }
+                if (await store.GetAsync(id, ctx.RequestAborted) is null)
                     return Results.NotFound(new { error = "task not found", id });
 
                 messageBus.Enqueue(id, text);
@@ -280,15 +291,191 @@ public static class TaskEndpoints
                 };
                 if (!string.IsNullOrWhiteSpace(guideReason)) meta["reworkReason"] = guideReason;
                 if (!string.IsNullOrWhiteSpace(guideContext)) meta["reworkContext"] = guideContext;
+                // A requeue IS the nudge: for a task with an open PR
+                // the watch sweep re-adopts it immediately — and the
+                // stale guard anchors to prOpenedAt, so a requeue of
+                // an hours-old PR would trip "pr-stale" on the very
+                // first poll (observed live 2026-07-30: task-12
+                // re-Failed 3 minutes after requeue). The operator's
+                // requeue is explicit progress intent — restart the
+                // stale window.
+                if (t.GetMetadata("prNumber") is not null)
+                    meta["prOpenedAt"] = DateTime.UtcNow.ToString("O");
                 await store.TransitionAsync(id, IssueStatus.Pending,
                     "operator requeue from Failed (failure + rework bookkeeping cleared)",
                     meta, ct);
+                // The status transition alone leaves the lifecycle
+                // state at Failed — and Failed+Dispatched is an
+                // ILLEGAL machine transition, so the next run would
+                // carry state=Failed for its whole life (observed
+                // live 2026-08-01: task-18 "coredev live" in the
+                // Needs-you lane). Report the requeue through the
+                // machine so state goes back to Pending.
+                if (lifecycle is not null)
+                {
+                    var requeued = await store.GetAsync(id, ct);
+                    if (requeued is not null)
+                        await lifecycle.ReportAsync(store, requeued, Forge.Core.TaskEvent.OperatorRequeue,
+                            watch: null, hasActiveDevRun: false, ct);
+                }
                 logger.LogInformation("POST /api/tasks/{Id}/requeue: Failed -> Pending, failure + rework metadata cleared (guided={Guided})", id, guideReason is not null);
                 return Results.Json(new { taskId = id, status = "Pending" });
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "POST /api/tasks/{Id}/requeue failed", id);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+
+        // Operator strike reset (2026-07-31): the full nudge for a
+        // stuck task — clears EVERY strike counter (rework rounds,
+        // no-progress rounds, auto-resume budget, review rounds) plus
+        // the recorded verdict (so the head gets a fresh review, not
+        // an instant re-trip on the stale RequestChanges) and the
+        // blockedKind marker, restarts the stale window, and requeues
+        // Failed/Blocked to Pending. Unlike /requeue this also
+        // de-arms the review + auto-resume bookkeeping that would
+        // otherwise re-fire within one sweep. Audited via
+        // strikeResetCount.
+        app.MapPost("/api/tasks/{id}/close", async (string id, CloseTaskRequest? body, string? projectId, CancellationToken ct) =>
+        {
+            // Operator close-obsolete (2026-08-01): retire a task
+            // outright — work already on main via another task,
+            // superseded, won't-fix. Optionally closes the linked PR
+            // unmerged (the common case for obsolete PR-carrying
+            // tasks). Reported to the machine as OperatorClosed so
+            // the state record ends at Closed, not a stale Failed.
+            var store = issues;
+            var pid = projectId;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx2 = projectContexts.Find(projectId);
+                if (ctx2 is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx2.Issues;
+            }
+            try
+            {
+                var t = await store.GetAsync(id, ct);
+                if (t is null) return Results.NotFound(new { error = "task not found", id });
+                if (t.Status is IssueStatus.Completed or IssueStatus.Closed)
+                    return Results.Conflict(new { error = $"task is already terminal ({t.Status})" });
+
+                var reason = string.IsNullOrWhiteSpace(body?.Reason)
+                    ? "operator closed"
+                    : body!.Reason!;
+                await store.TransitionAsync(id, IssueStatus.Closed,
+                    $"operator close: {reason}", ct: ct);
+                if (lifecycle is not null)
+                {
+                    var closed = await store.GetAsync(id, ct);
+                    if (closed is not null)
+                        await lifecycle.ReportAsync(store, closed, Forge.Core.TaskEvent.OperatorClosed,
+                            watch: null, hasActiveDevRun: false, ct);
+                }
+
+                bool? prClosed = null;
+                string? prCloseError = null;
+                if (body?.ClosePr == true && t.GetMetadata("prNumber") is { } prText
+                    && int.TryParse(prText, out var prNumber))
+                {
+                    var gh = pid is not null ? gitHubForProject?.Invoke(pid) : gitHubForProject?.Invoke("");
+                    if (gh is null)
+                    {
+                        prCloseError = "no GitHub service resolvable for this project";
+                    }
+                    else
+                    {
+                        try
+                        {
+                            await gh.ClosePullRequestAsync(prNumber, ct);
+                            prClosed = true;
+                            logger.LogInformation("POST /api/tasks/{Id}/close: PR #{Pr} closed unmerged ({Reason})", id, prNumber, reason);
+                        }
+                        catch (Exception ex)
+                        {
+                            prCloseError = ex.Message;
+                            logger.LogWarning(ex, "POST /api/tasks/{Id}/close: PR #{Pr} close failed (task closed regardless)", id, prNumber);
+                        }
+                    }
+                }
+
+                logger.LogInformation("POST /api/tasks/{Id}/close: task closed ({Reason}, prClosed={PrClosed})", id, reason, prClosed);
+                return Results.Json(new { taskId = id, status = "Closed", reason, prClosed, prCloseError });
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "POST /api/tasks/{Id}/close failed", id);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+
+        app.MapPost("/api/tasks/{id}/reset-strikes", async (string id, string? projectId, HttpContext ctx, CancellationToken ct) =>
+        {
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx2 = projectContexts.Find(projectId);
+                if (ctx2 is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx2.Issues;
+            }
+            try
+            {
+                var t = await store.GetAsync(id, ct);
+                if (t is null) return Results.NotFound(new { error = "task not found", id });
+                if (t.Status is not (IssueStatus.Failed or IssueStatus.Blocked or IssueStatus.InProgress))
+                    return Results.Conflict(new { error = $"only Failed, Blocked, or InProgress tasks can have strikes reset (status is {t.Status})" });
+
+                var resets = int.TryParse(t.GetMetadata("strikeResetCount"), out var n) ? n + 1 : 1;
+                var meta = new Dictionary<string, object>
+                {
+                    ["retryCount"] = null!,
+                    ["reworkAttempts"] = null!,
+                    ["reworkForSha"] = null!,
+                    ["reworkReason"] = null!,
+                    ["reworkContext"] = null!,
+                    ["noProgressAttempts"] = null!,
+                    ["autoResumeAttempts"] = null!,
+                    ["reviewRound"] = null!,
+                    ["reviewVerdict"] = null!,
+                    ["reviewSha"] = null!,
+                    ["reviewNotes"] = null!,
+                    ["blockedKind"] = null!,
+                    ["lastError"] = null!,
+                    ["lastErrorAt"] = null!,
+                    ["strikeResetCount"] = resets.ToString(),
+                };
+                if (t.GetMetadata("prNumber") is not null)
+                    meta["prOpenedAt"] = DateTime.UtcNow.ToString("O");
+                // Failed/Blocked requeue to Pending (dispatch re-claims
+                // or the watch re-adopts); InProgress stays — the watch
+                // owns it, the cleared verdict triggers a fresh review.
+                var to = t.Status is IssueStatus.Failed or IssueStatus.Blocked
+                    ? IssueStatus.Pending
+                    : IssueStatus.InProgress;
+                if (to == IssueStatus.Pending)
+                    meta["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O");
+                await store.TransitionAsync(id, to,
+                    $"operator strike reset #{resets} (rework/review/no-progress/auto-resume strikes cleared)",
+                    meta, ct);
+                // Same lifecycle repair as /requeue: without the
+                // machine report the state metadata stays Failed/
+                // BlockedOperator and the next dispatch violates
+                // (state stuck, board contradicts itself).
+                if (to == IssueStatus.Pending && lifecycle is not null)
+                {
+                    var requeued = await store.GetAsync(id, ct);
+                    if (requeued is not null)
+                        await lifecycle.ReportAsync(store, requeued, Forge.Core.TaskEvent.OperatorRequeue,
+                            watch: null, hasActiveDevRun: false, ct);
+                }
+                logger.LogInformation("POST /api/tasks/{Id}/reset-strikes: {From} -> {To}, all strike counters cleared (reset #{N})",
+                    id, t.Status, to, resets);
+                return Results.Json(new { taskId = id, status = to.ToString(), strikeResetCount = resets });
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "POST /api/tasks/{Id}/reset-strikes failed", id);
                 return Results.Problem(detail: ex.Message, statusCode: 500);
             }
         });
@@ -338,12 +525,21 @@ public static class TaskEndpoints
             }
         });
 
-        app.MapPost("/api/tasks/{id}/recover", async (string id, CancellationToken ct) =>
+        app.MapPost("/api/tasks/{id}/recover", async (string id, string? projectId, CancellationToken ct) =>
         {
             if (recovery is null) return Results.Problem(detail: "StartupRecovery not configured", statusCode: 503);
             try
             {
-                if (await issues.GetAsync(id, ct) is null)
+                // Ids are per-project sequences — the existence check
+                // must run against the OWNING project's store.
+                var store = issues;
+                if (projectId is not null && projectContexts is not null)
+                {
+                    var pctx = projectContexts.Find(projectId);
+                    if (pctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                    store = pctx.Issues;
+                }
+                if (await store.GetAsync(id, ct) is null)
                     return Results.NotFound(new { error = "task not found", id });
                 var reportId = await recovery.RunAsync(specId: null, ct: ct);
                 return Results.Json(new { taskId = id, reportId });
@@ -357,6 +553,11 @@ public static class TaskEndpoints
     }
 
     public sealed record AdoptPrRequest(int PrNumber, string Branch, string? WorktreePath);
+
+    /// <summary>Body for POST /api/tasks/{id}/close: the operator's
+    /// reason (audit trail) and whether to also close the linked PR
+    /// unmerged.</summary>
+    public sealed record CloseTaskRequest(string? Reason, bool ClosePr);
 
     private static Dictionary<string, object?> ParseMetadata(string? metadataJson)
     {

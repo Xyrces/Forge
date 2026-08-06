@@ -36,7 +36,6 @@ public class MemoryExtractionEndpointTests : IDisposable
         _ = new IssueStore(_dbPath);
         _extractions = new MemoryExtractionStore(_dbPath);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -44,7 +43,7 @@ public class MemoryExtractionEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         MemoryEndpoints.MapExtractionEndpoints(
             app, _extractions, NullLogger<DashboardHost>.Instance);

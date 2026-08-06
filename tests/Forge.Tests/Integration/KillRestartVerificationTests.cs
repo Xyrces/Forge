@@ -224,15 +224,16 @@ public class KillRestartVerificationTests : IDisposable
     }
 
     /// <summary>
-    /// Negative case: orchestrator crashes BEFORE creating a
-    /// worktree (only claimed + assignee=forge). The recoverer
-    /// can't replay the LLM; the right thing to do is leave
-    /// the issue alone and let the dispatch loop pick it up
-    /// on the next ReadyAsync tick (which will re-claim and
-    /// re-create the worktree idempotently).
+    /// Orchestrator crashes BEFORE creating a worktree (only claimed
+    /// + assignee=forge). At boot there are no live runs, so the
+    /// claim is orphaned — and the dispatch loop only claims Pending,
+    /// so "leave it alone" strands the task until the 30-min reaper
+    /// (observed live 2026-07-31: task-18). The recoverer re-queues
+    /// to Pending immediately; the next tick re-claims and
+    /// re-creates the worktree idempotently.
     /// </summary>
     [Fact]
-    public async Task KillAfterClaimBeforeWorktree_RecoveryLeavesAlone()
+    public async Task KillAfterClaimBeforeWorktree_RecoveryRequeues()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Sketch"));
         await _issues.ClaimAsync(issue.Id, "forge");
@@ -246,9 +247,10 @@ public class KillRestartVerificationTests : IDisposable
         Assert.Equal(0, report.IssuesFailed);
         Assert.Equal(0, _gitHub.Calls.Count);
 
-        // Issue is still InProgress + claimed. Dispatch loop will re-pick.
+        // Re-queued to Pending: the dispatch loop re-claims it on the
+        // next tick. Checkpoint unchanged — re-dispatch starts clean.
         var after = (await _issues.GetAsync(issue.Id))!;
-        Assert.Equal(IssueStatus.InProgress, after.Status);
+        Assert.Equal(IssueStatus.Pending, after.Status);
         Assert.Equal(DispatchCheckpoint.Claimed, after.DispatchCheckpoint);
     }
 

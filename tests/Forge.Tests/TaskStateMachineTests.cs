@@ -70,6 +70,12 @@ public class TaskStateMachineTests : IDisposable
     [InlineData(TaskEvent.Merged, TaskLifecycleState.MergeReady, TaskLifecycleState.Merged, true)]
     [InlineData(TaskEvent.BreakerTripped, TaskLifecycleState.StalledRework, TaskLifecycleState.Failed, true)]
     [InlineData(TaskEvent.OperatorRequeue, TaskLifecycleState.Failed, TaskLifecycleState.Pending, true)]
+    // Operator requeues from DB-Blocked rows whose machine record is
+    // a PR-phase or stalled state (task-365, 2026-08-01).
+    [InlineData(TaskEvent.OperatorRequeue, TaskLifecycleState.StalledRework, TaskLifecycleState.Pending, true)]
+    [InlineData(TaskEvent.OperatorRequeue, TaskLifecycleState.ParkedInfra, TaskLifecycleState.Pending, true)]
+    [InlineData(TaskEvent.OperatorRequeue, TaskLifecycleState.PROpen, TaskLifecycleState.Pending, true)]
+    [InlineData(TaskEvent.OperatorRequeue, TaskLifecycleState.MergeReady, TaskLifecycleState.Pending, true)]
     // Illegal: these are the corruption shapes the table exists to flag.
     [InlineData(TaskEvent.Merged, TaskLifecycleState.Pending, TaskLifecycleState.Merged, false)]
     [InlineData(TaskEvent.PrOpened, TaskLifecycleState.Merged, TaskLifecycleState.PROpen, false)]
@@ -87,6 +93,12 @@ public class TaskStateMachineTests : IDisposable
         Assert.True(TaskStateMachine.IsLegal(TaskEvent.ReworkFired, TaskLifecycleState.ReworkQueued, TaskLifecycleState.ReworkQueued));
         Assert.True(TaskStateMachine.IsLegal(TaskEvent.PrOpened, TaskLifecycleState.PROpen, TaskLifecycleState.PROpen));
         Assert.False(TaskStateMachine.IsLegal(TaskEvent.Merged, TaskLifecycleState.Pending, TaskLifecycleState.Pending));
+        // Auto-resume of a transiently-blocked watch re-enters PROpen
+        // (self-transition included: the machine record still reads
+        // PROpen when the block bypassed it — observed live).
+        Assert.True(TaskStateMachine.IsLegal(TaskEvent.WatchResumed, TaskLifecycleState.BlockedOperator, TaskLifecycleState.PROpen));
+        Assert.True(TaskStateMachine.IsLegal(TaskEvent.WatchResumed, TaskLifecycleState.PROpen, TaskLifecycleState.PROpen));
+        Assert.False(TaskStateMachine.IsLegal(TaskEvent.WatchResumed, TaskLifecycleState.Failed, TaskLifecycleState.PROpen));
     }
 
     [Fact]
@@ -237,13 +249,32 @@ public class TaskStateMachineTests : IDisposable
                 Assert.True(exits.Count == 0,
                     $"terminal state {from} must not exit to another state, exits via [{string.Join(",", exits)}]");
             }
-            else if (from is TaskLifecycleState.Failed or TaskLifecycleState.BlockedOperator)
+            else if (from == TaskLifecycleState.BlockedOperator)
             {
-                // Operator-terminal: exactly one way out — the
-                // operator requeue. Nothing else may leave.
+                // Operator-terminal, with TWO exceptions: WatchResumed
+                // nudges a transiently-blocked watch
+                // (blockedKind=reviewer-unavailable) back to PROpen
+                // once the reviewer model recovers, and OperatorClosed
+                // retires the task outright (operator decisions are
+                // legal from operator-owned states by definition —
+                // the close-obsolete path, 2026-08-01). Everything
+                // else still requires the operator requeue.
                 var exits = events.Where(evt => ProbeTo(evt, from)).ToList();
-                Assert.True(exits.Count == 1 && exits[0] == TaskEvent.OperatorRequeue,
-                    $"{from} must exit only via OperatorRequeue, has [{string.Join(",", exits)}]");
+                Assert.True(exits.Count == 3
+                        && exits.Contains(TaskEvent.OperatorRequeue)
+                        && exits.Contains(TaskEvent.WatchResumed)
+                        && exits.Contains(TaskEvent.OperatorClosed),
+                    $"{from} must exit only via OperatorRequeue, WatchResumed, or OperatorClosed, has [{string.Join(",", exits)}]");
+            }
+            else if (from == TaskLifecycleState.Failed)
+            {
+                // Failed: exactly two ways out — the operator requeue
+                // or the operator's close-obsolete.
+                var exits = events.Where(evt => ProbeTo(evt, from)).ToList();
+                Assert.True(exits.Count == 2
+                        && exits.Contains(TaskEvent.OperatorRequeue)
+                        && exits.Contains(TaskEvent.OperatorClosed),
+                    $"{from} must exit only via OperatorRequeue or OperatorClosed, has [{string.Join(",", exits)}]");
             }
             else
             {

@@ -89,6 +89,45 @@ public class IssueStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Transition_NonInProgress_ClearsAssignee()
+    {
+        // assignee means "held by a live run right now" — terminal,
+        // Blocked, and requeue transitions all release the hold,
+        // otherwise the board shows dead runs as held (operator
+        // 2026-08-01: Failed cards displaying assignee=forge).
+        var issue = await _store.CreateAsync(new NewIssue(Type: "task", Title: "first"));
+        await _store.ClaimAsync(issue.Id, "forge");
+        Assert.Equal("forge", (await _store.GetAsync(issue.Id))!.Assignee);
+
+        await _store.TransitionAsync(issue.Id, IssueStatus.Failed, "boom");
+        Assert.Null((await _store.GetAsync(issue.Id))!.Assignee);
+
+        var blocked = await _store.CreateAsync(new NewIssue(Type: "task", Title: "second"));
+        await _store.ClaimAsync(blocked.Id, "forge");
+        await _store.TransitionAsync(blocked.Id, IssueStatus.Blocked, "breaker");
+        Assert.Null((await _store.GetAsync(blocked.Id))!.Assignee);
+
+        var requeued = await _store.CreateAsync(new NewIssue(Type: "task", Title: "third"));
+        await _store.ClaimAsync(requeued.Id, "forge");
+        await _store.TransitionAsync(requeued.Id, IssueStatus.Pending, null);
+        Assert.Null((await _store.GetAsync(requeued.Id))!.Assignee);
+    }
+
+    [Fact]
+    public async Task Transition_InProgressMetadataUpdate_PreservesAssignee()
+    {
+        // Live runs get same-status metadata writes (plan gate,
+        // follow-up audit) — those must NOT release the hold.
+        var issue = await _store.CreateAsync(new NewIssue(Type: "task", Title: "first"));
+        await _store.ClaimAsync(issue.Id, "forge");
+        await _store.TransitionAsync(issue.Id, IssueStatus.InProgress, null,
+            metadata: new Dictionary<string, object> { ["planGate"] = "approved" });
+        var after = await _store.GetAsync(issue.Id);
+        Assert.Equal("forge", after!.Assignee);
+        Assert.Equal("approved", after.GetMetadata("planGate"));
+    }
+
+    [Fact]
     public async Task ReadyAsync_ReturnsOnlyPendingIssues()
     {
         await _store.CreateAsync(new NewIssue(Type: "task", Title: "a"));

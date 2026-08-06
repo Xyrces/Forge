@@ -194,40 +194,55 @@ public sealed class ScheduledGroomer
         }
 
         var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
-        var sprinted = new HashSet<string>(StringComparer.Ordinal);
-        if (sprints is not null)
-        {
-            foreach (var s in await sprints.ListAsync(activeOnly: false, ct))
-            {
-                foreach (var id in await sprints.GetIssueIdsAsync(s.Id, ct))
-                {
-                    sprinted.Add(id);
-                }
-            }
-        }
 
-        var ungroomed = pending
+        var ungroomedAll = pending
             .Where(i => !AgentTaskTypes.IsContainer(i.Type)
                 && i.Type != AgentTaskTypes.PrWatch
-                && !sprinted.Contains(i.Id)
+                // Sprint membership does NOT exempt an ad-hoc task:
+                // blocksIssueId blockers are now BORN into the active
+                // sprint ungroomed (FollowUpTool 2026-07-31), and the
+                // dispatch loop refuses ungroomed parentless members —
+                // if this sweep also skipped sprinted tasks, those
+                // blockers would deadlock the sprint (observed live
+                // 2026-08-01: task-365/366 wedged 6h, flagged by the
+                // groomer-wedge watchdog check). Spec-CHAIN members
+                // are still excluded — by the AdHocGroupName test:
+                // they have a parent chain, ad-hoc tasks don't.
                 && Sprint.SprintAssembler.ResolveGroupKey(i, byId) == Sprint.SprintAssembler.AdHocGroupName
                 && !string.Equals(i.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
             .OrderBy(i => i.CreatedAt)
-            .Take(MaxTaskGroomsPerTick)
             .ToList();
+        var totalUngroomed = ungroomedAll.Count;
+        var ungroomed = ungroomedAll.Take(MaxTaskGroomsPerTick).ToList();
 
+        var processed = 0;
         foreach (var task in ungroomed)
         {
+            processed++;
+            string? outcome;
             try
             {
                 var groomer = _groomerFactory.Create(projectId: projectId);
-                var outcome = await groomer.GroomTaskAsync(task.Id, ct);
+                outcome = await groomer.GroomTaskAsync(task.Id, ct);
                 _logger.LogInformation("ScheduledGroomer: ad-hoc task {Id} groom outcome={Outcome}", task.Id, outcome ?? "no-decision");
             }
             catch (Exception ex)
             {
+                outcome = "failed";
                 _logger.LogWarning(ex, "ScheduledGroomer: ad-hoc task {Id} groom failed; continuing", task.Id);
             }
+            // Build-state visibility (operator request 2026-08-06):
+            // one event per groomed task so the Sprints page shows
+            // the grooming countdown draining in real time instead of
+            // a sprint that appears stuck between ticks.
+            _events.Publish(new Dashboard.DashboardEvent(DateTime.UtcNow, Dashboard.DashboardEventKind.GroomerAdHocCompleted,
+                task.Id, $"Ad-hoc groom {outcome ?? "no-decision"}: {task.Title}",
+                new Dictionary<string, object?>
+                {
+                    ["projectId"] = projectId,
+                    ["outcome"] = outcome ?? "no-decision",
+                    ["remaining"] = Math.Max(0, totalUngroomed - processed),
+                }));
         }
     }
 

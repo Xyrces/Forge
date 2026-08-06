@@ -33,8 +33,7 @@ public class AnthropicMessagesChatClientTests
 
     [Fact]
     public async Task RequestShape_SystemExtracted_HeadersSent()
-    {
-        var (client, handler) = NewClient(_ => Json(HttpStatusCode.OK,
+    {        var (client, handler) = NewClient(_ => Json(HttpStatusCode.OK,
             """{"id":"m1","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}"""));
 
         var resp = await client.GetResponseAsync(new[]
@@ -127,9 +126,100 @@ public class AnthropicMessagesChatClientTests
         var (client, _) = NewClient(_ => Json(HttpStatusCode.TooManyRequests,
             """{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"""));
 
-        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+        var ex = await Assert.ThrowsAsync<Forge.Agents.LlmRateLimitException>(() =>
             client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hi") }));
         Assert.Contains("429", ex.Message);
         Assert.Contains("rate limit", ex.Message);
+    }
+
+    [Fact]
+    public async Task Overload429_ThrowsTypedException_WithRetryAfter()
+    {
+        var (client, _) = NewClient(_ =>
+        {
+            var resp = Json(HttpStatusCode.TooManyRequests,
+                """{"type":"error","error":{"type":"rate_limit_error","message":"The engine is currently overloaded, please try again later"}}""");
+            resp.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(7));
+            return resp;
+        });
+
+        var ex = await Assert.ThrowsAsync<Forge.Agents.LlmRateLimitException>(() =>
+            client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hi") }));
+
+        Assert.Equal(Forge.Agents.RateLimitKind.Overloaded, ex.Kind);
+        Assert.Equal(TimeSpan.FromSeconds(7), ex.RetryAfter);
+        Assert.Contains("429", ex.Message);
+        Assert.Contains("rate limit", ex.Message);
+    }
+
+    [Fact]
+    public async Task Quota429_ClassifiedAsQuota_WithoutRetryAfter()
+    {
+        var (client, _) = NewClient(_ => Json(HttpStatusCode.TooManyRequests,
+            """{"type":"error","error":{"type":"rate_limit_error","message":"Organization-level RPM limit reached"}}"""));
+
+        var ex = await Assert.ThrowsAsync<Forge.Agents.LlmRateLimitException>(() =>
+            client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hi") }));
+
+        Assert.Equal(Forge.Agents.RateLimitKind.Quota, ex.Kind);
+        Assert.Null(ex.RetryAfter);
+    }
+
+    [Fact]
+    public async Task MaxTokens_UsesConfiguredDefault_AndHonorsPerCallOverride()
+    {
+        var handler = new FakeHandler(_ => Json(HttpStatusCode.OK,
+            """{"id":"m4","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}"""));
+        var client = new Forge.Agents.AnthropicMessagesChatClient(
+            "https://api.kimi.com/coding/v1", "test-key", "kimi-for-coding",
+            new HttpClient(handler), defaultMaxOutputTokens: 2048);
+
+        await client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hi") });
+        using (var doc = JsonDocument.Parse(handler.LastBody!))
+            Assert.Equal(2048, doc.RootElement.GetProperty("max_tokens").GetInt32());
+
+        await client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hi") },
+            new ChatOptions { MaxOutputTokens = 600 });
+        using (var doc = JsonDocument.Parse(handler.LastBody!))
+            Assert.Equal(600, doc.RootElement.GetProperty("max_tokens").GetInt32());
+    }
+
+    [Fact]
+    public async Task ThinkingBudget_SendsThinkingBlock_ParsesReasoning()
+    {
+        // Operator-approved 2026-08-01 (Reviewer+CoreDev, 4k): the
+        // request carries the anthropic thinking block and the
+        // response's thinking content lands as TextReasoningContent —
+        // the type the transcript pipeline persists and the Runs
+        // page renders as "model reasoning".
+        var handler = new FakeHandler(_ => Json(HttpStatusCode.OK,
+            """{"id":"m5","content":[{"type":"thinking","thinking":"let me reason about this"},{"type":"text","text":"done"}],"stop_reason":"end_turn"}"""));
+        var client = new Forge.Agents.AnthropicMessagesChatClient(
+            "https://api.kimi.com/coding/v1", "test-key", "kimi-for-coding",
+            new HttpClient(handler), thinkingBudgetTokens: 4000);
+
+        var resp = await client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hi") });
+
+        using (var doc = JsonDocument.Parse(handler.LastBody!))
+        {
+            var thinking = doc.RootElement.GetProperty("thinking");
+            Assert.Equal("enabled", thinking.GetProperty("type").GetString());
+            Assert.Equal(4000, thinking.GetProperty("budget_tokens").GetInt32());
+        }
+        var reasoning = resp.Messages.SelectMany(m => m.Contents).OfType<TextReasoningContent>().Single();
+        Assert.Equal("let me reason about this", reasoning.Text);
+        Assert.Equal("done", resp.Text);
+    }
+
+    [Fact]
+    public async Task NoThinkingBudget_OmitsThinkingBlock()
+    {
+        var (client, handler) = NewClient(_ => Json(HttpStatusCode.OK,
+            """{"id":"m6","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}"""));
+
+        await client.GetResponseAsync(new[] { new ChatMessage(ChatRole.User, "hi") });
+
+        using var doc = JsonDocument.Parse(handler.LastBody!);
+        Assert.False(doc.RootElement.TryGetProperty("thinking", out _));
     }
 }

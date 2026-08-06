@@ -60,10 +60,19 @@ public sealed class AgentRunStore : IDisposable
         // verifying n/3 / reviewing) + the warm-session marker
         // (the run resumed a persisted MAF session).
         string? Phase,
-        bool? ResumedSession);
+        bool? ResumedSession,
+        // v26: run attribution. agent_run is a single GLOBAL registry
+        // (all projects' runners write here); the dashboard breaks
+        // runs down by project via this column. NULL = pre-v26 run.
+        string? ProjectId,
+        // v30: the dispatch correlation id (d-xxxxxxxx) — threads one
+        // engineering dispatch through claim → worktree → run → push
+        // for postmortem tracing. NULL for watch-side runs (reviews)
+        // and pre-v30 rows.
+        string? DispatchId);
 
     public async Task StartAsync(string id, string? taskId, string role, string? model, CancellationToken ct = default,
-        bool resumedSession = false)
+        bool resumedSession = false, string? projectId = null, string? dispatchId = null)
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -75,14 +84,14 @@ public sealed class AgentRunStore : IDisposable
                     status = 'running', started_at = @started, finished_at = NULL, duration_ms = NULL,
                     message_count = NULL, tool_call_count = NULL, text_chars = NULL,
                     error = NULL, transcript_json = NULL, last_activity_at = NULL,
-                    phase = NULL, resumed_session = @resumed
-                WHEN NOT MATCHED THEN INSERT (id, task_id, role, model, status, started_at, resumed_session)
-                    VALUES (@id, @task, @role, @model, 'running', @started, @resumed);
+                    phase = NULL, resumed_session = @resumed, project_id = @project, dispatch_id = @dispatch
+                WHEN NOT MATCHED THEN INSERT (id, task_id, role, model, status, started_at, resumed_session, project_id, dispatch_id)
+                    VALUES (@id, @task, @role, @model, 'running', @started, @resumed, @project, @dispatch);
                 """
             : """
                 INSERT OR REPLACE INTO agent_run
-                    (id, task_id, role, model, status, started_at, resumed_session)
-                VALUES (@id, @task, @role, @model, 'running', @started, @resumed)
+                    (id, task_id, role, model, status, started_at, resumed_session, project_id, dispatch_id)
+                VALUES (@id, @task, @role, @model, 'running', @started, @resumed, @project, @dispatch)
                 """;
         cmd.AddParam("@id", id);
         cmd.AddParam("@task", (object?)taskId ?? DBNull.Value);
@@ -90,6 +99,8 @@ public sealed class AgentRunStore : IDisposable
         cmd.AddParam("@model", (object?)model ?? DBNull.Value);
         cmd.AddParam("@started", DateTime.UtcNow.ToString(DateFormat));
         cmd.AddParam("@resumed", resumedSession ? 1 : 0);
+        cmd.AddParam("@project", (object?)projectId ?? DBNull.Value);
+        cmd.AddParam("@dispatch", (object?)dispatchId ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -185,11 +196,50 @@ public sealed class AgentRunStore : IDisposable
     public async Task<IReadOnlyList<AgentRunRecord>> ListActiveAsync(CancellationToken ct = default)
         => await QueryAsync("WHERE status = 'running' ORDER BY started_at DESC", null, ct);
 
-    public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, string? role = null, CancellationToken ct = default)
+    /// <summary>
+    /// Fail 'running' rows whose heartbeat went stale (or ALL running
+    /// rows when <paramref name="staleBefore"/> is null — service
+    /// startup: no run can survive a process restart). A zombie row
+    /// is not just a UI lie on the board ("active" sessions for dead
+    /// runs — observed live 2026-08-01: 4 reviewer rows, up to 9h
+    /// old) — it also BLOCKS the orphan-claim reaper, which treats
+    /// an active run row as proof the task's claim is alive.
+    /// Returns the ids of the rows closed.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> FailZombieRunsAsync(DateTime? staleBefore, string reason, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var ids = new List<string>();
+        await using (var sel = conn.CreateCommand())
+        {
+            sel.CommandText = staleBefore is null
+                ? $"SELECT id FROM {T("agent_run")} WHERE status = 'running'"
+                : $"""SELECT id FROM {T("agent_run")} WHERE status = 'running' AND COALESCE(last_activity_at, started_at) < @stale""";
+            if (staleBefore is not null)
+                sel.AddParam("@stale", staleBefore.Value.ToString(DateFormat));
+            await using var rd = await sel.ExecuteReaderAsync(ct);
+            while (await rd.ReadAsync(ct)) ids.Add(rd.GetString(0));
+        }
+        if (ids.Count == 0) return ids;
+        await using var cmd = conn.CreateCommand();
+        var names = ids.Select((_, i) => $"@id{i}").ToArray();
+        cmd.CommandText = $"""
+            UPDATE {T("agent_run")} SET status = 'failed', finished_at = @now, error = @err
+            WHERE id IN ({string.Join(",", names)})
+            """;
+        cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@err", reason);
+        for (var i = 0; i < ids.Count; i++) cmd.AddParam(names[i], ids[i]);
+        await cmd.ExecuteNonQueryAsync(ct);
+        return ids;
+    }
+
+    public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, string? role = null, CancellationToken ct = default, string? projectId = null)
     {
         var where = "WHERE status != 'running'";
         if (taskId is not null) where += $" AND task_id = '{taskId.Replace("'", "''")}'";
         if (role is not null) where += $" AND role = '{role.Replace("'", "''")}'";
+        if (projectId is not null) where += $" AND project_id = '{projectId.Replace("'", "''")}'";
         return await QueryAsync($"{where} ORDER BY started_at DESC", Math.Clamp(limit, 1, 500), ct);
     }
 
@@ -204,7 +254,7 @@ public sealed class AgentRunStore : IDisposable
         cmd.CommandText = $"""
             SELECT {(limit is { } n ? d.Top(n) : "")}id, task_id, role, model, status, started_at, finished_at,
                    duration_ms, message_count, tool_call_count, text_chars, error, transcript_json,
-                   last_activity_at, phase, resumed_session
+                   last_activity_at, phase, resumed_session, project_id, dispatch_id
             FROM {T("agent_run")} {whereSql}{(limit is { } m ? d.Limit(m) : "")}
             """;
         var list = new List<AgentRunRecord>();
@@ -227,7 +277,9 @@ public sealed class AgentRunStore : IDisposable
                 TranscriptJson: rd.IsDBNull(12) ? null : rd.GetString(12),
                 LastActivityAt: rd.IsDBNull(13) ? null : DateTime.ParseExact(rd.GetString(13), DateFormat, System.Globalization.CultureInfo.InvariantCulture),
                 Phase: rd.IsDBNull(14) ? null : rd.GetString(14),
-                ResumedSession: rd.IsDBNull(15) ? null : rd.GetInt32(15) != 0));
+                ResumedSession: rd.IsDBNull(15) ? null : rd.GetInt32(15) != 0,
+                ProjectId: rd.IsDBNull(16) ? null : rd.GetString(16),
+                DispatchId: rd.IsDBNull(17) ? null : rd.GetString(17)));
         }
         return list;
     }

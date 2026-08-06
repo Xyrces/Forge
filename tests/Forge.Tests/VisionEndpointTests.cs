@@ -37,7 +37,6 @@ public class VisionEndpointTests : IDisposable
         var vision = new VisionStore(_workDir, "docs/MASTER_DESIGN.md");
         vision.Reload();
 
-        var port = GetEphemeralPort();
         // Pin contentRoot to _workDir so WebApplication doesn't fall back
         // to a stale cwd when the build runner has a different directory.
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -47,7 +46,7 @@ public class VisionEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         VisionEndpoints.MapVisionEndpoints(app, vision, NullLogger<DashboardHost>.Instance);
         _host = app;

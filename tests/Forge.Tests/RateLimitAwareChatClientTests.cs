@@ -73,6 +73,152 @@ public class RateLimitAwareChatClientTests
         Assert.False(tracker.IsCoolingDown("gw", "m"));
     }
 
+    [Fact]
+    public async Task Overload429_IsRetriedInPlace_ThenSucceeds()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failures = new Exception[]
+            {
+                new LlmRateLimitException("HTTP 429 rate limit: The engine is currently overloaded", null, RateLimitKind.Overloaded),
+                new LlmRateLimitException("HTTP 429 rate limit: The engine is currently overloaded", null, RateLimitKind.Overloaded),
+            },
+        };
+        var client = new RateLimitAwareChatClient(inner, "kimi", "k3", tracker, new SemaphoreSlim(2),
+            delay: (_, _) => Task.CompletedTask);
+
+        var resp = await client.GetResponseAsync(Msgs);
+
+        Assert.Equal("ok", resp.Text);
+        Assert.Equal(3, inner.Calls);              // initial + 2 retries
+        // The shed cooldown recorded during backoff is cleared on success.
+        Assert.False(tracker.IsCoolingDown("kimi", "k3"));
+    }
+
+    [Fact]
+    public async Task Overload429_RetriesExhausted_RecordsModelCooldown()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failure = new LlmRateLimitException("HTTP 429 rate limit: The engine is currently overloaded",
+                null, RateLimitKind.Overloaded),
+        };
+        var client = new RateLimitAwareChatClient(inner, "kimi", "k3", tracker, new SemaphoreSlim(2),
+            overloadRetries: 2, delay: (_, _) => Task.CompletedTask);
+
+        await Assert.ThrowsAsync<LlmRateLimitException>(() => client.GetResponseAsync(Msgs));
+
+        Assert.Equal(3, inner.Calls);              // initial + 2 retries, then give up
+        // No Retry-After hint → the tracker's default cooldown.
+        var until = tracker.CoolingDownUntil("kimi", "k3");
+        Assert.NotNull(until);
+        Assert.True(until.Value > DateTime.UtcNow.AddMinutes(2));
+        Assert.False(tracker.IsCoolingDown("kimi", "other-model"));  // overload cools per-model
+    }
+
+    [Fact]
+    public async Task Overload429_WithLongRetryAfter_CoolsForHint_WithoutRetrying()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failure = new LlmRateLimitException("HTTP 429 rate limit: The engine is currently overloaded",
+                TimeSpan.FromMinutes(10), RateLimitKind.Overloaded),
+        };
+        var client = new RateLimitAwareChatClient(inner, "kimi", "k3", tracker, new SemaphoreSlim(2),
+            delay: (_, _) => Task.CompletedTask);
+
+        await Assert.ThrowsAsync<LlmRateLimitException>(() => client.GetResponseAsync(Msgs));
+
+        Assert.Equal(1, inner.Calls);   // a hint that long is a real cooldown, not a blip
+        var until = tracker.CoolingDownUntil("kimi", "k3");
+        Assert.NotNull(until);
+        Assert.True(until.Value > DateTime.UtcNow.AddMinutes(9));
+    }
+
+    [Fact]
+    public async Task OverloadBackoff_ReleasesPermit_OtherModelProceeds()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var permit = new SemaphoreSlim(2);
+        var delayGate = new TaskCompletionSource();
+        var aInner = new CountingClient
+        {
+            Failure = new LlmRateLimitException("HTTP 429 rate limit: The engine is currently overloaded",
+                null, RateLimitKind.Overloaded),
+        };
+        var a = new RateLimitAwareChatClient(aInner, "kimi", "k3", tracker, permit,
+            overloadRetries: 1, delay: async (_, _) => await delayGate.Task);
+        var b = new RateLimitAwareChatClient(new CountingClient(), "kimi", "kimi-for-coding", tracker, permit);
+
+        var aCall = a.GetResponseAsync(Msgs);
+        // A is now in backoff: shed cooldown recorded, permit released.
+        await WaitForAsync(() => tracker.IsCoolingDown("kimi", "k3"));
+
+        // B (same provider permit pool, different model) is not
+        // starved behind A's sleep.
+        var bResp = await b.GetResponseAsync(Msgs);
+        Assert.Equal("ok", bResp.Text);
+
+        delayGate.SetResult();
+        await Assert.ThrowsAsync<LlmRateLimitException>(() => aCall);
+    }
+
+    [Fact]
+    public async Task Quota429_IsNotRetried()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failure = new LlmRateLimitException("HTTP 429 rate limit: Organization-level RPM limit reached",
+                null, RateLimitKind.Quota),
+        };
+        var client = new RateLimitAwareChatClient(inner, "kimi", "k3", tracker, new SemaphoreSlim(2),
+            delay: (_, _) => Task.CompletedTask);
+
+        await Assert.ThrowsAsync<LlmRateLimitException>(() => client.GetResponseAsync(Msgs));
+        Assert.Equal(1, inner.Calls);
+    }
+
+    [Fact]
+    public async Task Quota429_WithSharedQuota_CoolsTheWholeProvider()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failure = new LlmRateLimitException("HTTP 429 rate limit: Organization-level TPM limit reached",
+                null, RateLimitKind.Quota),
+        };
+        var client = new RateLimitAwareChatClient(inner, "kimi", "k3", tracker, new SemaphoreSlim(2),
+            sharedQuota: true, delay: (_, _) => Task.CompletedTask);
+
+        await Assert.ThrowsAsync<LlmRateLimitException>(() => client.GetResponseAsync(Msgs));
+
+        Assert.True(tracker.IsCoolingDown("kimi", "k3"));
+        Assert.True(tracker.IsCoolingDown("kimi", "kimi-for-coding"));  // provider-wide
+        Assert.False(tracker.IsCoolingDown("gw", "k3"));                // other provider untouched
+    }
+
+    [Fact]
+    public async Task Quota429_WithoutSharedQuota_CoolsOnlyThatModel()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failure = new LlmRateLimitException("HTTP 429 rate limit: Organization-level RPM limit reached",
+                null, RateLimitKind.Quota),
+        };
+        var client = new RateLimitAwareChatClient(inner, "gw", "m", tracker, new SemaphoreSlim(2),
+            delay: (_, _) => Task.CompletedTask);
+
+        await Assert.ThrowsAsync<LlmRateLimitException>(() => client.GetResponseAsync(Msgs));
+
+        Assert.True(tracker.IsCoolingDown("gw", "m"));
+        Assert.False(tracker.IsCoolingDown("gw", "other-model"));
+    }
+
     private static async Task WaitForAsync(Func<bool> cond)
     {
         for (var i = 0; i < 100 && !cond(); i++) await Task.Delay(50);
@@ -83,13 +229,15 @@ public class RateLimitAwareChatClientTests
     {
         public int Calls;
         public Exception? Failure;
+        public IReadOnlyList<Exception>? Failures;
         public TaskCompletionSource? Gate;
 
         public async Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
-            Interlocked.Increment(ref Calls);
+            var call = Interlocked.Increment(ref Calls);
             if (Gate is not null) await Gate.Task;
+            if (Failures is not null && call <= Failures.Count) throw Failures[call - 1];
             if (Failure is not null) throw Failure;
             return new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok"));
         }

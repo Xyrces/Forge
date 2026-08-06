@@ -105,9 +105,17 @@ public class GitHubService
         return failed;
     }
 
-    public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    /// <summary>Close a PR without merging (operator close-obsolete
+    /// path, 2026-08-01 — e.g. work already on main via another
+    /// task). Returns the closed PR.</summary>
+    public virtual async Task<PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
     {
-        try
+        return await _client.PullRequest.Update(_owner, _repo, prNumber,
+            new PullRequestUpdate { State = ItemState.Closed });
+    }
+
+    public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    {        try
         {
             var merge = new MergePullRequest();
             var result = await _client.PullRequest.Merge(_owner, _repo, prNumber, merge);
@@ -240,4 +248,30 @@ public class GitHubService
             headers, "application/vnd.github.v3.diff");
         return diff.Body ?? "";
     }
+
+    /// <summary>PR conversation comment (issue comments on the PR —
+    /// where both the reviewer-agent's audit comments and the
+    /// operator's hand-written notes land).</summary>
+    public sealed record PrComment(string Author, DateTimeOffset CreatedAt, string Body);
+
+    /// <summary>Lightweight commit descriptor for review context
+    /// (Octokit's commit types are ctor-hostile in tests).</summary>
+    public sealed record PrCommit(string Sha, string Message, DateTimeOffset Date);
+
+    /// <summary>Full PR conversation, oldest first. The reviewer
+    /// needs the whole thread — operator comments on the PR are
+    /// review input, not noise.</summary>
+    public virtual async Task<IReadOnlyList<PrComment>> GetIssueCommentsAsync(
+        int prNumber, CancellationToken cancellationToken = default)
+        => (await _client.Issue.Comment.GetAllForIssue(_owner, _repo, prNumber))
+            .Select(c => new PrComment(c.User?.Login ?? "unknown", c.CreatedAt, c.Body ?? ""))
+            .ToList();
+
+    /// <summary>Commits between two heads (oldest first) — the
+    /// re-review's "what happened since my last verdict" list.</summary>
+    public virtual async Task<IReadOnlyList<PrCommit>> GetCompareCommitsAsync(
+        string baseSha, string headSha, CancellationToken cancellationToken = default)
+        => (await _client.Repository.Commit.Compare(_owner, _repo, baseSha, headSha)).Commits
+            .Select(c => new PrCommit(c.Sha, c.Commit?.Message ?? "", c.Commit?.Committer?.Date ?? DateTimeOffset.MinValue))
+            .ToList();
 }

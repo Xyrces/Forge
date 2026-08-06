@@ -24,6 +24,30 @@ public static class DashboardEndpoints
         ILogger logger,
         Projects.ProjectContextFactory? projectContexts = null)
     {
+        // Multi-project store resolution: an explicit but UNKNOWN
+        // projectId 404s — silently falling back to the primary store
+        // misroutes reads AND writes onto the primary project's
+        // same-numbered rows (ids are per-project sequences). Absent
+        // projectId = primary (legacy).
+        IIssueStore? ResolveIssues(string? projectId, out IResult? error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(projectId) || projectContexts is null) return issues;
+            var pctx = projectContexts.Find(projectId);
+            if (pctx is not null) return pctx.Issues;
+            error = Results.NotFound(new { error = "project not found", projectId });
+            return null;
+        }
+        ISprintStore? ResolveSprints(string? projectId, out IResult? error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(projectId) || projectContexts is null) return sprints;
+            var pctx = projectContexts.Find(projectId);
+            if (pctx is not null) return pctx.Sprints;
+            error = Results.NotFound(new { error = "project not found", projectId });
+            return null;
+        }
+
         // ---- Issues (POST + PATCH) ----
         app.MapPost("/api/state/issues", async (HttpContext ctx, string? projectId) =>
         {
@@ -50,10 +74,9 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
             if (patch is null) return Results.BadRequest(new { error = "empty body" });
             // Multi-project: operator task mutations route to the
             // owning project's store (the default is the primary).
-            var store = !string.IsNullOrWhiteSpace(projectId)
-                ? projectContexts?.Find(projectId)?.Issues ?? issues
-                : issues;
-            var existing = await store.GetAsync(id, ctx.RequestAborted);
+            var store = ResolveIssues(projectId, out var issueErr);
+            if (issueErr is not null) return issueErr;
+            var existing = await store!.GetAsync(id, ctx.RequestAborted);
             if (existing is null) return Results.NotFound();
             if (patch.TryGetValue("status", out var st) && Enum.TryParse<IssueStatus>(st?.ToString() ?? "", out var toStatus))
             {
@@ -66,12 +89,16 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
         });
 
         // ---- Issue dependency graph (Phase 2 of docs/embedded-issues.md) ----
-        app.MapGet("/api/state/issues/{id}/deps", async (string id, CancellationToken ct) =>
+        // Ids are per-project sequences — dep reads/writes route to
+        // the owning project's store (default is the primary).
+        app.MapGet("/api/state/issues/{id}/deps", async (string id, string? projectId, CancellationToken ct) =>
         {
-            var existing = await issues.GetAsync(id, ct);
+            var store = ResolveIssues(projectId, out var err);
+            if (err is not null) return err;
+            var existing = await store!.GetAsync(id, ct);
             if (existing is null) return Results.NotFound();
-            var deps = await issues.DependenciesAsync(id, ct);
-            var blocked = await issues.IsBlockedAsync(id, ct);
+            var deps = await store.DependenciesAsync(id, ct);
+            var blocked = await store.IsBlockedAsync(id, ct);
             return Results.Json(new
             {
                 issueId = id,
@@ -86,7 +113,7 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
             }, DashboardJson.Options);
         });
 
-        app.MapPost("/api/state/issues/{id}/deps", async (string id, HttpContext ctx) =>
+        app.MapPost("/api/state/issues/{id}/deps", async (string id, HttpContext ctx, string? projectId) =>
         {
             var body = await JsonSerializer.DeserializeAsync<Dictionary<string, object>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
@@ -100,9 +127,11 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
             if (!IssueDepKindExtensions.TryParseDb(kindStr, out var kind))
                 return Results.BadRequest(new { error = $"unknown kind '{kindStr}'" });
 
+            var store = ResolveIssues(projectId, out var err);
+            if (err is not null) return err;
             try
             {
-                var edge = await issues.AddDependencyAsync(blockerId, id, kind, ctx.RequestAborted);
+                var edge = await store!.AddDependencyAsync(blockerId, id, kind, ctx.RequestAborted);
                 return Results.Json(new
                 {
                     blockerId = edge.BlockerId,
@@ -121,11 +150,13 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
             }
         });
 
-        app.MapDelete("/api/state/issues/{id}/deps/{blockerId}/{kind}", async (string id, string blockerId, string kind, CancellationToken ct) =>
+        app.MapDelete("/api/state/issues/{id}/deps/{blockerId}/{kind}", async (string id, string blockerId, string kind, string? projectId, CancellationToken ct) =>
         {
             if (!IssueDepKindExtensions.TryParseDb(kind, out var kindEnum))
                 return Results.BadRequest(new { error = $"unknown kind '{kind}'" });
-            var removed = await issues.RemoveDependencyAsync(blockerId, id, kindEnum, ct);
+            var store = ResolveIssues(projectId, out var err);
+            if (err is not null) return err;
+            var removed = await store!.RemoveDependencyAsync(blockerId, id, kindEnum, ct);
             return removed ? Results.NoContent() : Results.NotFound();
         });
 
@@ -213,69 +244,107 @@ app.MapPatch("/api/state/issues/{id}", async (string id, HttpContext ctx, string
         {
             // Multi-project: sprint reads route to the owning project's
             // store (default is the primary), same as issue reads.
-            var store = !string.IsNullOrWhiteSpace(projectId)
-                ? projectContexts?.Find(projectId)?.Sprints ?? sprints
-                : sprints;
+            var store = ResolveSprints(projectId, out var err);
+            if (err is not null) return err;
             if (active == "true")
             {
-                var s = await store.GetActiveAsync(ct);
+                var s = await store!.GetActiveAsync(ct);
                 return Results.Json(s is null ? Array.Empty<object>() : new[] { ToSprintView(s) }, DashboardJson.Options);
             }
-            var list = await store.ListAsync(activeOnly: false, ct);
+            var list = await store!.ListAsync(activeOnly: false, ct);
             return Results.Json(list.Select(ToSprintView).ToArray(), DashboardJson.Options);
         });
 
-        app.MapPost("/api/sprints", async (HttpContext ctx) =>
+        app.MapPost("/api/sprints", async (HttpContext ctx, string? projectId) =>
         {
             var spec = await JsonSerializer.DeserializeAsync<NewSprint>(ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (spec is null || string.IsNullOrWhiteSpace(spec.Name) || string.IsNullOrWhiteSpace(spec.Goal))
                 return Results.BadRequest(new { error = "name and goal required" });
-            var created = await sprints.CreateAsync(spec, ctx.RequestAborted);
+            // Sprint writes route to the owning project's store
+            // (default is the primary) — same rule as sprint reads.
+            var store = ResolveSprints(projectId, out var err);
+            if (err is not null) return err;
+            var created = await store!.CreateAsync(spec, ctx.RequestAborted);
             return Results.Json(ToSprintView(created), DashboardJson.Options, statusCode: 201);
         });
 
         app.MapPatch("/api/sprints/{id}", async (string id, HttpContext ctx, string? projectId) =>
         {
-            var store = !string.IsNullOrWhiteSpace(projectId)
-                ? projectContexts?.Find(projectId)?.Sprints ?? sprints
-                : sprints;
+            var store = ResolveSprints(projectId, out var err);
+            if (err is not null) return err;
             var patch = await JsonSerializer.DeserializeAsync<Dictionary<string, object?>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (patch is null) return Results.BadRequest();
             if (patch.TryGetValue("status", out var st) && st?.ToString()?.ToLowerInvariant() == "active")
             {
-                var s = await store.SetActiveAsync(id, ctx.RequestAborted);
+                var s = await store!.SetActiveAsync(id, ctx.RequestAborted);
                 return Results.Json(ToSprintView(s), DashboardJson.Options);
             }
-            var updated = await store.UpdateAsync(id, patch, ctx.RequestAborted);
+            var updated = await store!.UpdateAsync(id, patch, ctx.RequestAborted);
             return Results.Json(ToSprintView(updated), DashboardJson.Options);
         });
 
-        app.MapPost("/api/sprints/{id}/issues", async (string id, HttpContext ctx) =>
+        app.MapPost("/api/sprints/{id}/issues", async (string id, HttpContext ctx, string? projectId) =>
         {
             var body = await JsonSerializer.DeserializeAsync<Dictionary<string, string>>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (body is null || !body.TryGetValue("issueId", out var issueId) || string.IsNullOrEmpty(issueId))
                 return Results.BadRequest(new { error = "issueId required" });
-            await sprints.AddIssueAsync(id, issueId, ctx.RequestAborted);
+            var store = ResolveSprints(projectId, out var err);
+            if (err is not null) return err;
+            await store!.AddIssueAsync(id, issueId, ctx.RequestAborted);
             return Results.NoContent();
         });
 
-        app.MapDelete("/api/sprints/{id}/issues/{issueId}", async (string id, string issueId, CancellationToken ct) =>
+        app.MapDelete("/api/sprints/{id}/issues/{issueId}", async (string id, string issueId, string? projectId, CancellationToken ct) =>
         {
-            await sprints.RemoveIssueAsync(id, issueId, ct);
+            var store = ResolveSprints(projectId, out var err);
+            if (err is not null) return err;
+            await store!.RemoveIssueAsync(id, issueId, ct);
             return Results.NoContent();
         });
 
-        app.MapGet("/api/sprints/{id}/issues", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/sprints/{id}/issues", async (string id, string? projectId, CancellationToken ct) =>
         {
-            var ids = await sprints.GetIssueIdsAsync(id, ct);
+            var store = ResolveSprints(projectId, out var err);
+            if (err is not null) return err;
+            var ids = await store!.GetIssueIdsAsync(id, ct);
             return Results.Json(ids, DashboardJson.Options);
         });
 
-        app.MapDelete("/api/sprints/{id}", async (string id, CancellationToken ct) =>
+        // Inter-sprint build state (operator request 2026-08-06) —
+        // separate mapper so tests can mount it in isolation.
+        SprintBuildEndpoints.Map(app, issues, projectContexts);
+
+
+        app.MapGet("/api/sprints/{id}/followup-drafts", async (string id, string? projectId, CancellationToken ct) =>
         {
-            await sprints.DeleteAsync(id, ct);
+            var issueStore = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var pctx = projectContexts.Find(projectId);
+                if (pctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                issueStore = pctx.Issues;
+            }
+            var drafts = await new Forge.Core.FollowUpDraftStore((Forge.Core.IssueStore)issueStore)
+                .ListOpenForSprintAsync(id, ct);
+            return Results.Json(drafts.Select(d => new
+            {
+                id = d.Id,
+                title = d.Title,
+                description = d.Description,
+                priority = d.Priority,
+                sourceIssueId = d.SourceIssueId,
+                sourceRole = d.SourceRole,
+                createdAt = d.CreatedAt,
+            }), DashboardJson.Options);
+        });
+
+        app.MapDelete("/api/sprints/{id}", async (string id, string? projectId, CancellationToken ct) =>
+        {
+            var store = ResolveSprints(projectId, out var err);
+            if (err is not null) return err;
+            await store!.DeleteAsync(id, ct);
             return Results.NoContent();
         });
 

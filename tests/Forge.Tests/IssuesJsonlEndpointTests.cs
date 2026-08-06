@@ -33,7 +33,6 @@ public class IssuesJsonlEndpointTests : IDisposable
         _issues = new IssueStore(_dbPath);
         File.WriteAllText(_jsonlPath, "{\"id\":\"task-1\"}\n{\"id\":\"task-2\"}\n");
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -41,7 +40,7 @@ public class IssuesJsonlEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         IssuesJsonlEndpoints.MapIssuesJsonlEndpoints(app, _jsonlPath, NullLogger<DashboardHost>.Instance);
         _host = app;

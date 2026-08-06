@@ -177,7 +177,7 @@ public sealed class ProductAgent
             {skills}
             """;
 
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, projectId);
         // UseFunctionInvocation: required so the agent's tool calls
         // actually execute the function and feed the result back.
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();

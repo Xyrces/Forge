@@ -61,10 +61,26 @@ public static class FlowEndpoints
         ISprintStore sprints,
         Orchestrator.MemoryExtractionStore? extractions = null,
         WorkflowResolver? workflow = null,
-        MemoryStore? memory = null)
+        MemoryStore? memory = null,
+        Projects.ProjectContextFactory? projectContexts = null)
     {
-        app.MapGet("/api/flow", async (CancellationToken ct) =>
+        app.MapGet("/api/flow", async (string? projectId, CancellationToken ct) =>
         {
+            // Multi-project: ?projectId= reads that project's stores;
+            // absent = primary. Ids are per-project sequences — reading
+            // the wrong store silently returns the primary project's
+            // same-numbered rows.
+            var issueStore = issues;
+            var specStore = specs;
+            var sprintStore = sprints;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var pctx = projectContexts.Find(projectId);
+                if (pctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                issueStore = pctx.Issues;
+                specStore = pctx.Specs;
+                sprintStore = pctx.Sprints;
+            }
             // The graph shape comes from the RESOLVED workflow
             // definition (published override → built-in default);
             // classification maps reality onto its step ids.
@@ -86,19 +102,19 @@ public static class FlowEndpoints
             // Planning lane: specs still planning. Classification
             // honors disabled steps (pass 4).
             var designEnabled = definition.IsStepEnabled("design");
-            foreach (var spec in await specs.ListAsync(projectId: null, status: null, ct))
+            foreach (var spec in await specStore.ListAsync(projectId: null, status: null, ct))
             {
                 var node = FlowGraph.ClassifySpec(spec.Status, designEnabled);
                 if (node is not null) Add(node, spec.Id, spec.Title, spec.Status.ToString());
             }
 
             // Implementation lane + ad-hoc planning: tasks.
-            var all = (await issues.ListAsync(new IssueFilter(), ct)).ToList();
+            var all = (await issueStore.ListAsync(new IssueFilter(), ct)).ToList();
             var byId = all.ToDictionary(i => i.Id);
-            var active = await sprints.GetActiveAsync(ct);
+            var active = await sprintStore.GetActiveAsync(ct);
             var sprintMembers = active is null
                 ? new HashSet<string>(StringComparer.Ordinal)
-                : new HashSet<string>(await sprints.GetIssueIdsAsync(active.Id, ct), StringComparer.Ordinal);
+                : new HashSet<string>(await sprintStore.GetIssueIdsAsync(active.Id, ct), StringComparer.Ordinal);
 
             foreach (var issue in all)
             {
@@ -154,21 +170,40 @@ public static class FlowEndpoints
             });
         });
 
-        app.MapGet("/api/flow/issues/{id}", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/flow/issues/{id}", async (string id, string? projectId, CancellationToken ct) =>
         {
-            var issue = await issues.GetAsync(id, ct);
+            var issueStore = issues;
+            var specStore = specs;
+            var sprintStore = sprints;
+            var extractionStore = extractions;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var pctx = projectContexts.Find(projectId);
+                if (pctx is null) return Results.NotFound(new { error = "project not found", projectId });
+                issueStore = pctx.Issues;
+                specStore = pctx.Specs;
+                sprintStore = pctx.Sprints;
+                // memory_extraction is per-project workload data keyed
+                // by the COLLIDING per-project task ids — reading the
+                // primary store here would render another project's
+                // extraction rows on this journey.
+                extractionStore = extractions is null
+                    ? null
+                    : new Orchestrator.MemoryExtractionStore(((Core.IssueStore)pctx.Issues).Db);
+            }
+            var issue = await issueStore.GetAsync(id, ct);
             if (issue is null) return Results.NotFound();
 
-            var all = (await issues.ListAsync(new IssueFilter(), ct)).ToList();
+            var all = (await issueStore.ListAsync(new IssueFilter(), ct)).ToList();
             var byId = all.ToDictionary(i => i.Id);
-            var active = await sprints.GetActiveAsync(ct);
+            var active = await sprintStore.GetActiveAsync(ct);
             var sprintMembers = active is null
                 ? new HashSet<string>(StringComparer.Ordinal)
-                : new HashSet<string>(await sprints.GetIssueIdsAsync(active.Id, ct), StringComparer.Ordinal);
+                : new HashSet<string>(await sprintStore.GetIssueIdsAsync(active.Id, ct), StringComparer.Ordinal);
             var hasSpecChain = SprintAssembler.ResolveGroupKey(issue, byId) != SprintAssembler.AdHocGroupName;
             var currentNode = FlowGraph.ClassifyIssue(issue, sprintMembers.Contains(issue.Id), hasSpecChain);
 
-            var events = await issues.ListEventsAsync(id, limit: 200, ct);
+            var events = await issueStore.ListEventsAsync(id, limit: 200, ct);
             var journey = FlowGraph.BuildJourney(
                 issue,
                 // Store returns newest-first; the journey is chronological.
@@ -182,11 +217,11 @@ public static class FlowEndpoints
             var watch = all.FirstOrDefault(i =>
                 i.Type == AgentTaskTypes.PrWatch
                 && string.Equals(i.GetMetadata("taskId"), issue.Id, StringComparison.Ordinal));
-            var extractionRuns = extractions is null
+            var extractionRuns = extractionStore is null
                 ? (IReadOnlyList<Orchestrator.MemoryExtractionRecord>)Array.Empty<Orchestrator.MemoryExtractionRecord>()
-                : await extractions.ListForTaskAsync(issue.Id, ct);
+                : await extractionStore.ListForTaskAsync(issue.Id, ct);
             string? specId = hasSpecChain ? SprintAssembler.ResolveGroupKey(issue, byId) : null;
-            var spec = specId is not null ? await specs.GetAsync(specId, ct) : null;
+            var spec = specId is not null ? await specStore.GetAsync(specId, ct) : null;
 
             var visits = new List<object>();
             for (var i = 0; i < journey.Count; i++)

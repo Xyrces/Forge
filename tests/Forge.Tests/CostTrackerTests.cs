@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Forge.Agents;
 using Forge.Core;
 using Forge.Dashboard;
+using Forge.Tests.Integration;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -125,7 +126,6 @@ public class CostTrackerTests : IDisposable
         _tracker.Record(new UsageDetails { InputTokenCount = 1000, OutputTokenCount = 200 }, "CoreDev");
         _tracker.Record(new UsageDetails { InputTokenCount = 500, OutputTokenCount = 100 }, "QA");
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -133,13 +133,13 @@ public class CostTrackerTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         CostEndpoints.MapCostEndpoints(app, _tracker, NullLogger<DashboardHost>.Instance);
         await app.StartAsync();
         try
         {
-            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
             var resp = await http.GetFromJsonAsync<JsonElement>("/api/cost/stats");
             Assert.Equal(2, resp.GetProperty("callCount").GetInt32());
             Assert.Equal(1500, resp.GetProperty("totalInputTokens").GetInt32());
@@ -160,20 +160,19 @@ public class CostTrackerTests : IDisposable
     public async Task CostEndpoints_ResetClearsCounters()
     {
         _tracker.Record(new UsageDetails { InputTokenCount = 1000 }, "CoreDev");
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         CostEndpoints.MapCostEndpoints(app, _tracker, NullLogger<DashboardHost>.Instance);
         await app.StartAsync();
         try
         {
-            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+            using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
             var reset = await http.PostAsync("/api/cost/reset", content: null);
             Assert.Equal(HttpStatusCode.OK, reset.StatusCode);
             var snap = _tracker.Snapshot();

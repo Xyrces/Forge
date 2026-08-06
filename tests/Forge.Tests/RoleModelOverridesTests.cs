@@ -114,4 +114,59 @@ public class RoleModelOverridesTests : IDisposable
         Assert.Equal("minimax/minimax-m3", m);
         Assert.False(isOverride);
     }
+
+    [Fact]
+    public async Task ProjectOverride_NeverLeaksIntoOtherProjects()
+    {
+        // Operator rule 2026-07-30: an override set for one project
+        // must not change another project's runs.
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetAsync(AgentType.CoreDev, "openai", "gpt-5-mini", projectId: "porthorizon");
+
+        Assert.Null(overrides.Get(AgentType.CoreDev, "forge"));
+        Assert.Equal("gpt-5-mini", overrides.Get(AgentType.CoreDev, "porthorizon")!.Model);
+        Assert.Null(overrides.Get(AgentType.CoreDev));            // global: unset
+        Assert.Equal("project", overrides.GetScope(AgentType.CoreDev, "porthorizon"));
+        Assert.Null(overrides.GetScope(AgentType.CoreDev, "forge"));
+
+        // Resolution: porthorizon gets the override; forge falls to config.
+        var config = Config();
+        var (pPh, mPh, isOvPh) = config.ResolveEffective(AgentType.CoreDev, overrides, "porthorizon");
+        Assert.Equal("openai", pPh.Name);
+        Assert.True(isOvPh);
+        var (pForge, mForge, isOvForge) = config.ResolveEffective(AgentType.CoreDev, overrides, "forge");
+        Assert.Equal("kilo-gateway", pForge.Name);
+        Assert.False(isOvForge);
+    }
+
+    [Fact]
+    public async Task ProjectOverride_WinsOverGlobal_GlobalIsFallback()
+    {
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetAsync(AgentType.Reviewer, "kilo-gateway", "global-model");
+        await overrides.SetAsync(AgentType.Reviewer, "openai", "scoped-model", projectId: "porthorizon");
+
+        Assert.Equal("scoped-model", overrides.Get(AgentType.Reviewer, "porthorizon")!.Model);
+        Assert.Equal("global-model", overrides.Get(AgentType.Reviewer, "forge")!.Model);
+        Assert.Equal("project", overrides.GetScope(AgentType.Reviewer, "porthorizon"));
+        Assert.Equal("global", overrides.GetScope(AgentType.Reviewer, "forge"));
+
+        // Clearing the project override re-exposes the global one.
+        await overrides.ClearAsync(AgentType.Reviewer, projectId: "porthorizon");
+        Assert.Equal("global-model", overrides.Get(AgentType.Reviewer, "porthorizon")!.Model);
+    }
+
+    [Fact]
+    public async Task LoadAsync_RehydratesScopedKeys()
+    {
+        var first = new RoleModelOverrides(_memory);
+        await first.SetAsync(AgentType.CoreDev, "openai", "global-model");
+        await first.SetAsync(AgentType.CoreDev, "openai", "scoped-model", projectId: "porthorizon");
+
+        var second = new RoleModelOverrides(_memory);
+        await second.LoadAsync();
+
+        Assert.Equal("scoped-model", second.Get(AgentType.CoreDev, "porthorizon")!.Model);
+        Assert.Equal("global-model", second.Get(AgentType.CoreDev, "forge")!.Model);
+    }
 }

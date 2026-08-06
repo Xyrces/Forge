@@ -15,9 +15,47 @@
         </h1>
         <div class="page-header__actions">
             <a class="btn" href="/flow?issue=@TaskId">View in flow</a>
+            @if (Prop(_task, "status") is "Failed" or "Blocked" or "InProgress")
+            {
+                <button class="btn" disabled="@_resetting" @onclick="ResetStrikesAsync"
+                        title="Clear all strike counters (rework, review, no-progress, auto-resume), refresh the stale window, and requeue if Failed/Blocked">
+                    @(_resetting ? "Resetting…" : "Clear strikes & requeue")
+                </button>
+            }
+            @if (Prop(_task, "status") is not ("Completed" or "Closed") && Prop(_task, "status") is not null)
+            {
+                <button class="btn" disabled="@_closing" @onclick="@(() => _closeOpen = !_closeOpen)"
+                        title="Retire this task outright — work already on main via another task, superseded, won't-fix. Optionally closes the linked PR unmerged.">
+                    Close task…
+                </button>
+            }
             <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
         </div>
     </div>
+
+    @if (_closeOpen)
+    {
+        <div class="card" style="margin-bottom:14px">
+            <div class="page-subtitle" style="margin-bottom:8px">Close task as obsolete / won't-fix</div>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+                <input class="mono" style="flex:1; min-width:280px; background:var(--surface-1); border:1px solid var(--outline); color:var(--on-surface); padding:6px 8px; border-radius:var(--radius-md)"
+                       placeholder="Reason (audit trail) — e.g. obsolete: task-351's 1939d2e on main already carries the fix"
+                       @bind="_closeReason" />
+                <label style="display:flex; gap:6px; align-items:center">
+                    <input type="checkbox" @bind="_closePr" />
+                    <span class="meta-text">also close linked PR unmerged</span>
+                </label>
+                <button class="btn btn--primary" disabled="@(_closing || string.IsNullOrWhiteSpace(_closeReason))" @onclick="CloseTaskAsync">
+                    @(_closing ? "Closing…" : "Confirm close")
+                </button>
+                <button class="btn" @onclick="@(() => _closeOpen = false)">Cancel</button>
+            </div>
+            @if (_closeResult is not null)
+            {
+                <div class="meta-text" style="margin-top:8px">@_closeResult</div>
+            }
+        </div>
+    }
 
     @if (_error is not null)
     {
@@ -200,7 +238,8 @@
                         {
                             <tr>
                                 <td>
-                                    <a href="/runs/@r.Id">
+                                    <span class="pill role-@r.Role.ToLowerInvariant()">@r.Role</span>
+                                    <a href="@($"/runs/{r.Id}{ProjectQuery(r.ProjectId)}")">
                                         <span class="pill @(r.Status == "succeeded" ? "pill--completed" : r.Status == "running" ? "pill--inprogress" : "pill--failed")">@r.Status</span>
                                     </a>
                                     @if (r.ResumedSession == true)
@@ -255,6 +294,10 @@
         DateTime.TryParse(iso, out var d) ? d.ToString("yyyy-MM-dd HH:mm") : iso ?? "—";
 
     [Parameter] public string TaskId { get; set; } = "";
+    // Cross-project links (the unified /now feed, alert inbox) carry
+    // the item's OWNING project — it wins over the topbar lens (task
+    // ids collide across projects).
+    [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
 
     private JsonElement? _task;
     private StateVm? _state;
@@ -294,7 +337,7 @@
         _error = null;
         try
         {
-            var projectId = ShellStore.Value.CurrentProjectId;
+            var projectId = Project ?? ShellStore.Value.CurrentProjectId;
             var url = string.IsNullOrEmpty(projectId)
                 ? $"/api/tasks/{TaskId}"
                 : $"/api/tasks/{TaskId}?projectId={Uri.EscapeDataString(projectId)}";
@@ -326,7 +369,10 @@
             // what did they actually do" trail). Same shape as /runs.
             try
             {
-                var runsDoc = await Http.GetFromJsonAsync<JsonElement>($"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}");
+                var runsUrl = string.IsNullOrEmpty(projectId)
+                    ? $"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}"
+                    : $"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}&projectId={Uri.EscapeDataString(projectId)}";
+                var runsDoc = await Http.GetFromJsonAsync<JsonElement>(runsUrl);
                 var runs = new List<RunVm>();
                 foreach (var bucket in new[] { "active", "recent" })
                 {
@@ -336,8 +382,12 @@
                         {
                             runs.Add(new RunVm(
                                 Id: Prop(r, "id") ?? "",
+                                Role: Prop(r, "role") ?? "",
+                                ProjectId: Prop(r, "projectId"),
                                 Status: Prop(r, "status") ?? "",
                                 StartedAt: DateTime.TryParse(Prop(r, "startedAt"), out var sa) ? sa : DateTime.MinValue,
+                                FinishedAt: DateTime.TryParse(Prop(r, "finishedAt"), out var fa) ? fa : null,
+                                LastActivityAt: DateTime.TryParse(Prop(r, "lastActivityAt"), out var la) ? la : null,
                                 DurationMs: long.TryParse(Prop(r, "durationMs"), out var dm) ? dm : null,
                                 MessageCount: int.TryParse(Prop(r, "messageCount"), out var mc) ? mc : null,
                                 ToolCallCount: int.TryParse(Prop(r, "toolCallCount"), out var tc) ? tc : null,
@@ -347,7 +397,10 @@
                         }
                     }
                 }
-                _runs = runs.OrderByDescending(r => r.StartedAt).ToList();
+                // "Last run" = latest OUTCOME, not latest start — a
+                // review that started before a dev run but failed
+                // after it succeeded is the more recent event.
+                _runs = runs.OrderByDescending(r => r.FinishedAt ?? r.LastActivityAt ?? r.StartedAt).ToList();
             }
             catch { /* runs are additive — never break the task page */ }
             if (_repoUrl is null && !string.IsNullOrEmpty(projectId))
@@ -364,6 +417,72 @@
             }
         }
         catch (Exception ex) { _error = ex.Message; }
+    }
+
+    private static string ProjectQuery(string? projectId) =>
+        projectId is null ? "" : $"?project={Uri.EscapeDataString(projectId)}";
+
+    private bool _resetting;
+
+    /// <summary>Operator recovery nudge: clear every strike counter
+    /// and requeue (POST /api/tasks/{id}/reset-strikes).</summary>
+    private async Task ResetStrikesAsync()
+    {
+        _resetting = true;
+        try
+        {
+            var projectId = Project ?? ShellStore.Value.CurrentProjectId;
+            var url = string.IsNullOrEmpty(projectId)
+                ? $"/api/tasks/{TaskId}/reset-strikes"
+                : $"/api/tasks/{TaskId}/reset-strikes?projectId={Uri.EscapeDataString(projectId)}";
+            var resp = await Http.PostAsync(url, content: null);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _error = $"strike reset failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+            }
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _resetting = false; }
+        await LoadAsync();
+    }
+
+    private bool _closeOpen;
+    private bool _closing;
+    private bool _closePr = true;
+    private string? _closeReason;
+    private string? _closeResult;
+
+    /// <summary>Operator close-obsolete (POST /api/tasks/{id}/close):
+    /// retires the task; optionally closes the linked PR unmerged.</summary>
+    private async Task CloseTaskAsync()
+    {
+        _closing = true;
+        _closeResult = null;
+        try
+        {
+            var projectId = Project ?? ShellStore.Value.CurrentProjectId;
+            var url = string.IsNullOrEmpty(projectId)
+                ? $"/api/tasks/{TaskId}/close"
+                : $"/api/tasks/{TaskId}/close?projectId={Uri.EscapeDataString(projectId)}";
+            var resp = await Http.PostAsJsonAsync(url, new { reason = _closeReason, closePr = _closePr });
+            if (resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+                var prClosed = body.TryGetProperty("prClosed", out var pc) && pc.ValueKind == JsonValueKind.True;
+                var prErr = body.TryGetProperty("prCloseError", out var pe) && pe.ValueKind == JsonValueKind.String ? pe.GetString() : null;
+                _closeResult = prClosed ? "Task closed; PR closed unmerged."
+                    : prErr is not null ? $"Task closed; PR close failed: {prErr}"
+                    : "Task closed.";
+                _closeOpen = false;
+            }
+            else
+            {
+                _closeResult = $"close failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+            }
+        }
+        catch (Exception ex) { _closeResult = ex.Message; }
+        finally { _closing = false; }
+        await LoadAsync();
     }
 
     private string? Meta(string key)
@@ -426,7 +545,8 @@
 
     private sealed record StateVm(string State, string? Substate, string WaitingOn, int Strikes, int MaxStrikes);
 
-    private sealed record RunVm(string Id, string Status, DateTime StartedAt,
+    private sealed record RunVm(string Id, string Role, string? ProjectId, string Status, DateTime StartedAt,
+        DateTime? FinishedAt, DateTime? LastActivityAt,
         long? DurationMs, int? MessageCount, int? ToolCallCount, string? Error,
         string? Phase, bool? ResumedSession);
 

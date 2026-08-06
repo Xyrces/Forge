@@ -79,6 +79,14 @@ public sealed class StartupRecovery
 
     /// <summary>Report an observed event to the lifecycle machine
     /// (best-effort — never breaks a recovery pass).</summary>
+    /// <summary>Engineering claim identities: the legacy literal plus
+    /// every slot-role name (the claim identity is the role since
+    /// 2026-08-01). Anything else (e.g. a human assignee) is not the
+    /// orchestrator's to recover.</summary>
+    internal static bool IsEngineeringClaimant(string assignee)
+        => string.Equals(assignee, "forge", StringComparison.Ordinal)
+           || Agents.RoleAgentRegistry.AllSlotRoles.Contains(assignee, StringComparer.Ordinal);
+
     private async Task ReportLifecycleAsync(IssueRecord issue, Core.TaskEvent evt, ProjectRecoveryContext ctx, CancellationToken ct)
     {
         if (_lifecycle is null) return;
@@ -90,6 +98,26 @@ public sealed class StartupRecovery
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "lifecycle report {Event} failed for {Id}; continuing", evt, issue.Id);
+        }
+    }
+
+    /// <summary>
+    /// A requeue whose recorded lifecycle state is TERMINAL (Failed /
+    /// BlockedOperator — possible when a terminal-failed task was
+    /// reclaimed without a machine requeue report) must be coerced
+    /// back through the machine: Failed+Dispatched is an illegal
+    /// transition, so without this the state stays Failed for the
+    /// task's whole next round and the board contradicts itself
+    /// (observed live 2026-08-01: task-18). OperatorRequeue is the
+    /// table's Failed/BlockedOperator → Pending entry — the requeue
+    /// IS that event regardless of who triggered it.
+    /// </summary>
+    private async Task CoerceTerminalStateAsync(IssueRecord issue, ProjectRecoveryContext ctx, CancellationToken ct)
+    {
+        var state = issue.GetMetadata("state");
+        if (state is nameof(Core.TaskLifecycleState.Failed) or nameof(Core.TaskLifecycleState.BlockedOperator))
+        {
+            await ReportLifecycleAsync(issue, Core.TaskEvent.OperatorRequeue, ctx, ct);
         }
     }
 
@@ -120,7 +148,31 @@ public sealed class StartupRecovery
         {
             foreach (var ctx in contexts)
             {
-                var candidates = await ctx.Issues.ListInProgressForRecoveryAsync(ct);
+                // Zombie run rows cannot be alive — this process just
+                // started. Closing them is load-bearing beyond board
+                // truth: the orphan-claim reaper treats an active
+                // agent_run row as proof the task's claim is alive,
+                // so a zombie shields its orphaned claim forever
+                // (observed live 2026-08-01: reviewer rows 9h old).
+                if (ctx.Issues is Core.IssueStore concrete)
+                {
+                    var zombies = await new Core.AgentRunStore(concrete.Db)
+                        .FailZombieRunsAsync(null, "service restart — no run survives a process restart", ct);
+                    foreach (var z in zombies)
+                    {
+                        _logger.LogInformation("StartupRecovery: closed zombie agent run {RunId} (project={Project})", z, ctx.ProjectId);
+                    }
+                }
+
+                // The store returns every held InProgress row
+                // (assignee = live-hold). Recovery acts only on
+                // ENGINEERING claims — the legacy "forge" identity or
+                // a slot-role name (coredev/clientdev/qa/reviewer/
+                // pipeline). A human-held row is durable intent, not
+                // a dead run: leave it alone.
+                var candidates = (await ctx.Issues.ListInProgressForRecoveryAsync(ct))
+                    .Where(i => i.Assignee is not null && IsEngineeringClaimant(i.Assignee))
+                    .ToList();
                 scanned += candidates.Count;
                 foreach (var issue in candidates)
                 {
@@ -236,6 +288,22 @@ public sealed class StartupRecovery
         var before = issue.DispatchCheckpoint?.ToDbValue();
         var worktreePath = issue.GetMetadata("worktreePath");
         var branch = issue.GetMetadata("branch") ?? $"agent/{issue.Id}";
+
+        // Claimed (or no checkpoint at all — a terminal transition
+        // cleared it): nothing usable was acquired — re-queue
+        // without the worktree requirement (there IS no worktree at
+        // this point; the missing-worktree failure below is for
+        // checkpoints that already recorded one).
+        if (issue.DispatchCheckpoint is null or Core.DispatchCheckpoint.Claimed)
+        {
+            await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                "recovery: orphaned just after claim by restart; re-queued", ct: ct);
+            await CoerceTerminalStateAsync(issue, ctx, ct);
+            _events.Publish(RecoveryEvent(issue.Id, "requeued",
+                "claimed; transitioned to Pending for re-dispatch"));
+            return new RecoveryActionRecord(issue.Id, before, before, "requeued", null);
+        }
+
         _logger.LogInformation("Recovery({Id}): replaying from {Cp} on branch {Branch}",
             issue.Id, before, branch);
         if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
@@ -261,16 +329,16 @@ public sealed class StartupRecovery
                     // loading the AgentSession which is Stage B).
                     // The cheapest correct thing is: transition the
                     // issue back to Pending so the next dispatch tick
-                    // re-claims it and re-runs from scratch. The
-                    // worktree already exists, so re-acquire is a
-                    // no-op. (Previously this left the issue
-                    // InProgress assuming the loop re-claims it —
-                    // but the loop only claims Pending issues, so
-                    // those orphans sat forever.)
+                    // re-claims it and re-runs from scratch. For
+                    // worktree_acquired the worktree already exists,
+                    // so re-acquire is a no-op. (Previously this left
+                    // the issue InProgress assuming the loop
+                    // re-claims it — but the loop only claims Pending
+                    // issues, so those orphans sat forever.)
                     await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
-                        "recovery: orphaned at worktree_acquired by restart; re-queued", ct: ct);
+                        $"recovery: orphaned at {issue.DispatchCheckpoint?.ToDbValue()} by restart; re-queued", ct: ct);
                     _events.Publish(RecoveryEvent(issue.Id, "requeued",
-                        "worktree_acquired; transitioned to Pending for re-dispatch"));
+                        $"{issue.DispatchCheckpoint?.ToDbValue()}; transitioned to Pending for re-dispatch"));
                     return new RecoveryActionRecord(issue.Id, before, before, "requeued",
                         "worktree_acquired; transitioned to Pending for re-dispatch");
 
@@ -301,6 +369,21 @@ public sealed class StartupRecovery
                     _events.Publish(RecoveryEvent(issue.Id, "replay", "push_done -> pr_opened"));
                     return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
 
+                case DispatchCheckpoint.PrOpened:
+                    // Engineering-owed rework round whose run died
+                    // (Classify only routes prNumber tasks here when
+                    // the lifecycle state is NOT a PR-phase state).
+                    // Nothing to replay in git — PR/branch/worktree
+                    // all exist; the round re-runs as a fresh
+                    // engineering dispatch with its rework context
+                    // intact. Re-queue like worktree_acquired.
+                    await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        "recovery: orphaned rework round (run died with PR open); re-queued", ct: ct);
+                    await CoerceTerminalStateAsync(issue, ctx, ct);
+                    _events.Publish(RecoveryEvent(issue.Id, "requeued",
+                        "pr_opened + engineering-owed state; transitioned to Pending for rework re-dispatch"));
+                    return new RecoveryActionRecord(issue.Id, before, before, "requeued", null);
+
                 default:
                     return new RecoveryActionRecord(issue.Id, before, before, "left_alone",
                         $"no replay path for checkpoint {before}");
@@ -327,27 +410,47 @@ public sealed class StartupRecovery
         var branch = issue.GetMetadata("branch") ?? $"agent/{issue.Id}";
         var prNumber = issue.GetMetadata("prNumber");
 
-        // Already has a PR — leave alone. The watch path is
-        // independent of the workflow.
-        if (!string.IsNullOrEmpty(prNumber) && int.TryParse(prNumber, out _))
+        // Already has a PR AND is in a watch-owned (PR-phase) state —
+        // leave alone; the watch path is independent of the workflow.
+        // A prNumber task in an ENGINEERING-owed state (ReworkQueued
+        // etc.) is a rework round whose run died — fall THROUGH to
+        // checkpoint classification so it re-queues (observed live
+        // 2026-07-31: task-360/361/362/364 orphaned InProgress +
+        // ReworkQueued, "left alone" at every boot while nothing
+        // re-dispatched them).
+        var state = issue.GetMetadata("state");
+        if (!string.IsNullOrEmpty(prNumber) && int.TryParse(prNumber, out _)
+            && Core.OrphanedClaimReaper.IsWatchOwnedPhase(state))
         {
             return new RecoveryDecision(RecoveryAction.LeftAlone, "prNumber already recorded");
         }
 
-        // No checkpoint recorded (legacy issue from before v11) —
-        // treat as claimed; the next dispatch tick will re-acquire
-        // (idempotent).
+        // No checkpoint recorded — either a pre-v11 legacy row or a
+        // task that went terminal (terminal transitions CLEAR the
+        // checkpoint) and was later requeued + reclaimed. At boot no
+        // runs are alive and the dispatch loop only claims Pending,
+        // so "leave it" strands it exactly like the claimed case
+        // (observed live 2026-08-01: task-18 — Failed cleared the
+        // checkpoint, strike-reset reclaimed it, restart orphaned
+        // it). Re-queue for re-dispatch.
         if (issue.DispatchCheckpoint is null)
         {
-            return new RecoveryDecision(RecoveryAction.LeftAlone,
-                "no checkpoint recorded (pre-v11 issue); dispatch loop will re-pick");
+            return new RecoveryDecision(RecoveryAction.Replay,
+                "no checkpoint recorded; re-queue orphaned claim for re-dispatch");
         }
 
         switch (issue.DispatchCheckpoint)
         {
             case DispatchCheckpoint.Claimed:
-                return new RecoveryDecision(RecoveryAction.LeftAlone,
-                    "just-claimed; dispatch loop will pick up on next tick");
+                // At boot there are NO live runs (recovery executes
+                // before dispatch starts), so a claimed task is by
+                // definition orphaned — and the dispatch loop only
+                // claims Pending, so "leave it" strands it until the
+                // 30-min orphan reaper (observed live 2026-07-31:
+                // task-18). Re-queue immediately; nothing was
+                // acquired yet, so re-dispatch starts clean.
+                return new RecoveryDecision(RecoveryAction.Replay,
+                    "just-claimed orphan at boot; re-queue for re-dispatch");
 
             case DispatchCheckpoint.WorktreeAcquired:
                 if (!worktreeExists)
@@ -369,6 +472,16 @@ public sealed class StartupRecovery
                     $"replay from {issue.DispatchCheckpoint}");
 
             case DispatchCheckpoint.PrOpened:
+                // Reached with a prNumber only when the gate above
+                // determined the task is ENGINEERING-owed (rework
+                // round — state ReworkQueued etc.) and its run died:
+                // re-queue it like the worktree_acquired replay. The
+                // dispatch loop never claims InProgress, so leaving
+                // it orphans the round (observed live 2026-07-31:
+                // task-360/361/362/364 "left alone" at every boot).
+                if (!string.IsNullOrEmpty(prNumber))
+                    return new RecoveryDecision(RecoveryAction.Replay,
+                        "engineering-owed rework round (prNumber + non-PR-phase state); re-queue for re-dispatch");
                 // pr_opened but no prNumber — odd, leave alone and
                 // let the dispatch loop figure it out.
                 return new RecoveryDecision(RecoveryAction.LeftAlone,

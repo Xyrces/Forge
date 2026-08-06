@@ -27,8 +27,11 @@ public sealed class AnthropicMessagesChatClient : IChatClient
 
     private readonly HttpClient _http;
     private readonly string _model;
+    private readonly int _defaultMaxOutputTokens;
+    private readonly int? _thinkingBudgetTokens;
 
-    public AnthropicMessagesChatClient(string baseUrl, string apiKey, string model, HttpClient? http = null)
+    public AnthropicMessagesChatClient(string baseUrl, string apiKey, string model, HttpClient? http = null,
+        int defaultMaxOutputTokens = 8192, int? thinkingBudgetTokens = null)
     {
         _http = http ?? new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
         _http.BaseAddress ??= new Uri(baseUrl.TrimEnd('/') + "/");
@@ -45,6 +48,8 @@ public sealed class AnthropicMessagesChatClient : IChatClient
             _http.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
         }
         _model = model;
+        _defaultMaxOutputTokens = defaultMaxOutputTokens;
+        _thinkingBudgetTokens = thinkingBudgetTokens;
     }
 
     public async Task<ChatResponse> GetResponseAsync(
@@ -64,9 +69,18 @@ public sealed class AnthropicMessagesChatClient : IChatClient
             catch (JsonException) { detail = raw; }
             // Keep the status + "rate limit" phrasing so
             // RateLimitAwareChatClient / IsLlmAuthFailure classify it.
-            var note = (int)resp.StatusCode == 429 ? " rate limit" : string.Empty;
+            if ((int)resp.StatusCode == 429)
+            {
+                // Typed 429: carry Retry-After + the overload-vs-quota
+                // classification up to RateLimitAwareChatClient — Kimi
+                // documents Retry-After on overload responses, and the
+                // flat default cooldown is wrong in both directions.
+                throw new LlmRateLimitException(
+                    $"HTTP 429 rate limit: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]",
+                    ParseRetryAfter(resp), LlmRateLimitException.Classify(detail));
+            }
             throw new HttpRequestException(
-                $"HTTP {(int)resp.StatusCode}{note}: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]");
+                $"HTTP {(int)resp.StatusCode}: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]");
         }
         return ParseResponse(JsonNode.Parse(raw)!.AsObject());
     }
@@ -90,6 +104,20 @@ public sealed class AnthropicMessagesChatClient : IChatClient
         // run. Disposing the shared HttpClient here would poison the
         // cache entry ("Cannot access a disposed object" on the next
         // run). The HttpClient dies with the process.
+    }
+
+    private static TimeSpan? ParseRetryAfter(HttpResponseMessage resp)
+    {
+        var h = resp.Headers.RetryAfter;
+        if (h?.Delta is { } delta && delta > TimeSpan.Zero && delta < TimeSpan.FromHours(1))
+            return delta;
+        if (h?.Date is { } date)
+        {
+            var wait = date - DateTimeOffset.UtcNow;
+            if (wait > TimeSpan.Zero && wait < TimeSpan.FromHours(1))
+                return wait;
+        }
+        return null;
     }
 
     private JsonObject BuildRequest(IEnumerable<ChatMessage> messages, ChatOptions? options)
@@ -161,10 +189,23 @@ public sealed class AnthropicMessagesChatClient : IChatClient
         var body = new JsonObject
         {
             ["model"] = _model,
-            ["max_tokens"] = options?.MaxOutputTokens ?? 8192,
+            ["max_tokens"] = options?.MaxOutputTokens ?? _defaultMaxOutputTokens,
             ["messages"] = outMessages,
         };
         if (system.Length > 0) body["system"] = system.ToString().TrimEnd();
+        // Extended thinking (operator-approved 2026-08-01: Reviewer +
+        // CoreDev, 4k budget): the response then carries `thinking`
+        // content blocks, which the runner's transcript persists and
+        // the Runs page renders as "model reasoning". Anthropic
+        // requires max_tokens > budget_tokens (8192 > 4000 here).
+        if (_thinkingBudgetTokens is > 0)
+        {
+            body["thinking"] = new JsonObject
+            {
+                ["type"] = "enabled",
+                ["budget_tokens"] = _thinkingBudgetTokens.Value,
+            };
+        }
         if (options?.Temperature is not null) body["temperature"] = options.Temperature.Value;
         if (options?.TopP is not null) body["top_p"] = options.TopP.Value;
         if (options?.StopSequences is { Count: > 0 } stops)
@@ -201,6 +242,14 @@ public sealed class AnthropicMessagesChatClient : IChatClient
             if (block is not JsonObject b) continue;
             switch (b["type"]?.GetValue<string>())
             {
+                case "thinking":
+                    // Extended-thinking block: the reasoning rides in
+                    // the "thinking" field. Surfaced as
+                    // TextReasoningContent so the transcript pipeline
+                    // persists + renders it (BuildTranscriptJson
+                    // already handles that type).
+                    contents.Add(new TextReasoningContent(b["thinking"]?.GetValue<string>() ?? string.Empty));
+                    break;
                 case "text":
                     contents.Add(new TextContent(b["text"]?.GetValue<string>() ?? string.Empty));
                     break;

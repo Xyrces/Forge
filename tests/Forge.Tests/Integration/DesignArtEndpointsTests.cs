@@ -32,14 +32,13 @@ public class DesignArtEndpointsTests : IDisposable
         _designs = new DesignArtifactStore(_dbPath);
         _arts = new ArtOutputStore(_dbPath);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         DesignArtEndpoints.MapDesignArtEndpoints(app, _designs, _arts, null, null,
             NullLogger<DashboardHost>.Instance);

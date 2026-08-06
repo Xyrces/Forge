@@ -102,6 +102,14 @@ public sealed class LocalGitHubService : GitHubService
         return Task.FromResult(true);
     }
 
+    public override Task<PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    {
+        // The local harness has no close-unmerged concept; closing is
+        // a no-op state-wise (PR stays open in PrInfo) — the operator
+        // close-obsolete path only needs the call to succeed.
+        return Task.FromResult(new PullRequest());
+    }
+
     public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
         => Task.FromResult(_prStore.GetCommitStatus(sha));
 
@@ -170,6 +178,14 @@ public sealed class LocalGitHubService : GitHubService
     public override Task<string> GetCompareDiffAsync(
         string baseSha, string headSha, CancellationToken cancellationToken = default)
         => Task.FromResult(string.Empty);
+
+    public override Task<IReadOnlyList<PrComment>> GetIssueCommentsAsync(
+        int prNumber, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<PrComment>>(Array.Empty<PrComment>());
+
+    public override Task<IReadOnlyList<PrCommit>> GetCompareCommitsAsync(
+        string baseSha, string headSha, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlyList<PrCommit>>(Array.Empty<PrCommit>());
 }
 
 /// <summary>

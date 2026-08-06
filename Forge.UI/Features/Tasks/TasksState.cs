@@ -64,15 +64,19 @@ public sealed class TasksClient
         return await _http.GetFromJsonAsync<List<TaskRow>>(url, ct) ?? new List<TaskRow>();
     }
 
-    public async Task RetryMessageAsync(string taskId, string text, CancellationToken ct)
+    public async Task RetryMessageAsync(string taskId, string text, string? projectId, CancellationToken ct)
     {
-        var resp = await _http.PostAsJsonAsync($"/api/tasks/{Uri.EscapeDataString(taskId)}/retry-message", new { text }, ct);
+        var url = $"/api/tasks/{Uri.EscapeDataString(taskId)}/retry-message";
+        if (projectId is not null) url += $"?projectId={Uri.EscapeDataString(projectId)}";
+        var resp = await _http.PostAsJsonAsync(url, new { text }, ct);
         resp.EnsureSuccessStatusCode();
     }
 
-    public async Task<RecoverResultDto?> RecoverAsync(string taskId, CancellationToken ct)
+    public async Task<RecoverResultDto?> RecoverAsync(string taskId, string? projectId, CancellationToken ct)
     {
-        var resp = await _http.PostAsync($"/api/tasks/{Uri.EscapeDataString(taskId)}/recover", null, ct);
+        var url = $"/api/tasks/{Uri.EscapeDataString(taskId)}/recover";
+        if (projectId is not null) url += $"?projectId={Uri.EscapeDataString(projectId)}";
+        var resp = await _http.PostAsync(url, null, ct);
         resp.EnsureSuccessStatusCode();
         return await resp.Content.ReadFromJsonAsync<RecoverResultDto>(cancellationToken: ct);
     }

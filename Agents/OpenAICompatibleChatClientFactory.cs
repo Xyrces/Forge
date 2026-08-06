@@ -97,11 +97,15 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// permit (cooldown tracking still applies).</summary>
     public int MaxConcurrentRequests { get; set; } = 2;
 
+    /// <summary>In-place retries for transient engine-overload 429s
+    /// before a cooldown is recorded. Default 3; 0 disables.</summary>
+    public int OverloadRetryCount { get; set; } = 3;
+
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _permits = new(StringComparer.OrdinalIgnoreCase);
 
-    public IChatClient Create(LlmConfig config, AgentType role)
+    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null)
     {
-        var (provider, model, _) = config.ResolveEffective(role, Overrides);
+        var (provider, model, _) = config.ResolveEffective(role, Overrides, projectId);
         // Live key first: a rotated secret must also rescue a config
         // whose placeholder was never boot-resolved.
         if (KeyResolver?.Get(provider.Name) is { Length: > 0 } freshKey)
@@ -122,7 +126,7 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
             // forward requests.
             provider = provider with { BaseUrl = HeadroomProxyBaseUrl };
         }
-        var inner = GetOrCreate(provider, model);
+        var inner = GetOrCreate(provider, model, ThinkingBudgetFor(role));
         if (CostTracker is null) return inner;
         // Per-session wrapper: forwards UsageDetails into the
         // shared CostTracker. The inner client is cached so
@@ -176,7 +180,27 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
         // LlmConfig built around `provider` into Create().
     }
 
-    private IChatClient GetOrCreate(ProviderConfig provider, string model)
+    /// <summary>Extended-thinking budget (operator-approved
+    /// 2026-08-01: Reviewer + CoreDev only, 4k tokens). Anthropic-api
+    /// providers get the `thinking` request block; the reasoning
+    /// lands in the run transcript as "model reasoning".</summary>
+    public const int ThinkingBudgetTokens = 4000;
+
+    /// <summary>Thinking is enabled where reading the model's
+    /// reasoning has real diagnostic value (operator 2026-08-01):
+    /// review verdicts, implementation choices, AND the planning-lane
+    /// roles — intake's epic decomposition and the groomer's
+    /// sprint-readiness judgments are the highest-leverage reasoning
+    /// in the system ("probably moreso than most"). The groomer
+    /// creates its client as AgentType.CoreDev, so it inherits the
+    /// budget through that branch. Only meaningful for anthropic-api
+    /// providers — Build ignores it elsewhere.</summary>
+    private static int? ThinkingBudgetFor(AgentType role)
+        => role is AgentType.CoreDev or AgentType.Reviewer or AgentType.Intake
+            ? ThinkingBudgetTokens
+            : null;
+
+    private IChatClient GetOrCreate(ProviderConfig provider, string model, int? thinkingBudgetTokens)
     {
         // The cache key includes a short hash of the API key so a key
         // change (operator rotation via the Secrets page, or the
@@ -187,8 +211,10 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
             ? string.Empty
             : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(provider.ApiKey)))[..12];
-        var key = provider.Name + "|" + model + "|" + keyHash;
-        return _cache.GetOrAdd(key, _ => WrapForRateLimits(Build(provider, model), provider, model));
+        // The thinking budget rides the key too: CoreDev/Reviewer get
+        // their own client instance with reasoning enabled.
+        var key = provider.Name + "|" + model + "|" + keyHash + "|" + (thinkingBudgetTokens?.ToString() ?? "-");
+        return _cache.GetOrAdd(key, _ => WrapForRateLimits(Build(provider, model, thinkingBudgetTokens), provider, model));
     }
 
     private IChatClient WrapForRateLimits(IChatClient inner, ProviderConfig provider, string model)
@@ -197,16 +223,19 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
         var permit = _permits.GetOrAdd(provider.Name,
             _ => new SemaphoreSlim(Math.Max(1, MaxConcurrentRequests)));
         return new RateLimitAwareChatClient(inner, provider.Name, model,
-            RateLimits ?? new Core.ModelRateLimitTracker(), permit);
+            RateLimits ?? new Core.ModelRateLimitTracker(), permit,
+            provider.SharedQuota, OverloadRetryCount);
     }
 
-    private static IChatClient Build(ProviderConfig provider, string model)
+    private static IChatClient Build(ProviderConfig provider, string model, int? thinkingBudgetTokens = null)
     {
         if (string.Equals(provider.Api, "anthropic", StringComparison.OrdinalIgnoreCase))
         {
             // Anthropic Messages protocol (Kimi-for-Coding): chat at
             // {base}/messages, x-api-key auth.
-            return new AnthropicMessagesChatClient(provider.BaseUrl, provider.ApiKey ?? string.Empty, model);
+            return new AnthropicMessagesChatClient(provider.BaseUrl, provider.ApiKey ?? string.Empty, model,
+                defaultMaxOutputTokens: provider.MaxOutputTokens ?? 8192,
+                thinkingBudgetTokens: thinkingBudgetTokens);
         }
 
         var options = new OpenAIClientOptions

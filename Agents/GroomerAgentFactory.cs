@@ -65,6 +65,6 @@ public sealed class GroomerAgentFactory
         return new(issues, _specs, _events, _chatClientFactory, _config,
             _loggerFactory.CreateLogger<GroomerAgent>(),
             runId: runId, memory: _memory, projectRoot: _projectRoot,
-            projectRootLookup: _projectRootLookup);
+            projectId: projectId, projectRootLookup: _projectRootLookup);
     }
 }

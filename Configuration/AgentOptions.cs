@@ -269,6 +269,12 @@ public sealed record LlmOptions
     // account-level rate quotas against multi-agent bursts.
     public int MaxConcurrentRequests { get; set; } = 2;
 
+    // In-place retries for transient "engine overloaded" 429s
+    // (server-side capacity, NOT account quota) before the model is
+    // cooled down. Exponential backoff + jitter; Retry-After honored.
+    // 0 disables (every overload 429 cools immediately).
+    public int OverloadRetryCount { get; set; } = 3;
+
     // P2.b: Meshy config. The Meshy REST API is a different
     // service from the LLM providers; keep its config
     // top-level under llm.* for ease of operator editing.
@@ -293,6 +299,18 @@ public sealed record LlmProviderOptions
     // Wire protocol: "openai" (default) | "anthropic" (Anthropic
     // Messages API, e.g. Kimi-for-Coding).
     public string Api { get; set; } = string.Empty;
+
+    // True when the provider's rate limits are account-level and
+    // shared across ALL models (Kimi documents this): a quota 429 on
+    // one model cools every model on the provider. Default false
+    // (per-model cooldowns — the kilo-gateway behavior).
+    public bool SharedQuota { get; set; }
+
+    // Default max_tokens for Anthropic-protocol requests when the
+    // caller doesn't set ChatOptions.MaxOutputTokens. 0 = 8192. Kimi
+    // meters TPM as prompt_tokens + REQUESTED max_tokens, so a lower
+    // default directly reduces TPM pressure.
+    public int MaxOutputTokens { get; set; }
 }
 
 public sealed record LlmRoleModelOptions

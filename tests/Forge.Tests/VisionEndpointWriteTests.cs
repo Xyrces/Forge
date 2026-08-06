@@ -43,7 +43,6 @@ public class VisionEndpointWriteTests : IAsyncLifetime
         await bootstrap.DisposeAsync();
         _memory = new MemoryStore(Path.Combine(_workDir, "memory.db"));
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -51,7 +50,7 @@ public class VisionEndpointWriteTests : IAsyncLifetime
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         VisionEndpoints.MapVisionEndpoints(app, _vision, NullLogger<DashboardHost>.Instance, _memory);
         _host = app;

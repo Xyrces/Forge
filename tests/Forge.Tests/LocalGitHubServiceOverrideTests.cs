@@ -64,14 +64,17 @@ public class LocalGitHubServiceOverrideTests
 
         var expected = new[]
         {
+            "ClosePullRequestAsync",
             "CreateBranchAsync",
             "CreateIssueCommentAsync",
             "CreatePullRequestAsync",
             "DeleteBranchAsync",
             "GetBranchHeadShaAsync",
             "GetCommitStatusAsync",
+            "GetCompareCommitsAsync",
             "GetCompareDiffAsync",
             "GetFailedCheckRunSummariesAsync",
+            "GetIssueCommentsAsync",
             "GetOpenPullRequestForBranchAsync",
             "GetPullRequestAsync",
             "GetPullRequestDiffAsync",

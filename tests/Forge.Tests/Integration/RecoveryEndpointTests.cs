@@ -60,7 +60,6 @@ public class RecoveryEndpointTests : IDisposable
         _recovery = new StartupRecovery(_issues, _reports, _worktrees, _gitHub, _events,
             NullLogger<StartupRecovery>.Instance);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -68,7 +67,7 @@ public class RecoveryEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         RecoveryEndpoints.MapRecoveryEndpoints(app, _issues, _reports, _recovery,
             NullLogger<DashboardHost>.Instance);

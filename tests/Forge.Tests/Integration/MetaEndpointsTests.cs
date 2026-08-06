@@ -33,14 +33,13 @@ public class MetaEndpointsTests : IDisposable
         _workDir = Path.Combine(Path.GetTempPath(), $"ph-meta-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_workDir);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
 
         var app = builder.Build();
 

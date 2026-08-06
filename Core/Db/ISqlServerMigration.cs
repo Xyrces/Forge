@@ -37,6 +37,11 @@ public static class SqlServerMigrations
         new M024ProfileSplit(),
         new M025SkillProjectScope(),
         new M026AgentRunPhase(),
+        new M027AgentRunProject(),
+        new M028FollowUpDraft(),
+        new M029WatchdogFinding(),
+        new M030FollowUpDraftDisposition(),
+        new M031AgentRunDispatchId(),
     };
 
     public static int ExpectedVersion =>

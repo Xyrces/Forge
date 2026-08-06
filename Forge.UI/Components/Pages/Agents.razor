@@ -115,9 +115,14 @@
     {
         try
         {
-            var projectId = ShellStore.Value.CurrentProjectId ?? "forge";
+            var projectId = ShellStore.Value.CurrentProjectId;
             _loadedProject = projectId;
-            _data = await Http.GetFromJsonAsync<RolesResponse>($"/api/agents/roles?projectId={Uri.EscapeDataString(projectId)}");
+            // No client-side project default: absent param lets the
+            // server resolve the primary project.
+            var url = projectId is null
+                ? "/api/agents/roles"
+                : $"/api/agents/roles?projectId={Uri.EscapeDataString(projectId)}";
+            _data = await Http.GetFromJsonAsync<RolesResponse>(url);
             _error = null;
             await InvokeAsync(StateHasChanged);
         }
@@ -130,8 +135,10 @@
     private async Task SaveModelAsync((string Role, string Provider, string Model) edit)
     {
         _editError = null;
+        // Project-scoped override: the lens project's runs change,
+        // never another project's (operator rule 2026-07-30).
         var resp = await Http.PutAsJsonAsync($"/api/agents/roles/{edit.Role}/model",
-            new { provider = edit.Provider, model = edit.Model });
+            new { provider = edit.Provider, model = edit.Model, projectId = ShellStore.Value.CurrentProjectId });
         if (!resp.IsSuccessStatusCode)
         {
             _editError = await resp.Content.ReadAsStringAsync();
@@ -143,7 +150,10 @@
 
     private async Task ClearModelAsync(string roleName)
     {
-        await Http.DeleteAsync($"/api/agents/roles/{roleName}/model");
+        var lens = ShellStore.Value.CurrentProjectId is { } pid
+            ? $"?projectId={Uri.EscapeDataString(pid)}"
+            : string.Empty;
+        await Http.DeleteAsync($"/api/agents/roles/{roleName}/model" + lens);
         await LoadAsync();
     }
 
