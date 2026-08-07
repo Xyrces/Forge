@@ -1,32 +1,35 @@
 # Forge
 
-A long-lived .NET 10 orchestrator that drives AI coding agents (M3 by default) against any project that follows the conventions in `docs/agent-framework-design.md`. The first deployment targets the [Xyrces/PortHorizon](https://github.com/Xyrces/PortHorizon) Godot-ECS game repo, but `WorkspaceOptions` is fully configurable: pointing `workspace.root` at a different git repo + `github.owner`/`repo` at the corresponding GitHub project is the full deployment-time config. The orchestrator owns the task queue, git worktrees, GitHub PR lifecycle, and review-gated merge. **The model owns the code.**
+A long-lived .NET 10 orchestrator that drives AI coding agents against any registered git project. Forge owns the task queue, sprint assembly, git worktrees, the GitHub PR lifecycle, and the review-gated merge — **the model owns the code.**
 
-The runtime uses the [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) 1.12.0 with [`Microsoft.Agents.AI.Workflows`](https://www.nuget.org/packages/Microsoft.Agents.AI.Workflows) for the dispatch pipeline. Agents are powered by the [kilo gateway](https://kilo.ai/docs/gateway) — an OpenAI-compatible HTTP endpoint. No separate `kilo serve` subprocess, no ACP, no per-session worktree cwd gymnastics.
+Forge is project-agnostic. Projects live in a DB-backed registry (the `project` table) and are added through the dashboard or the API — there is no hardcoded target repo in the codebase. Forge's first deployment target was the [Xyrces/PortHorizon](https://github.com/Xyrces/PortHorizon) Godot-ECS game repo, and Forge now also builds itself: the `forge` project is registered like any other and its tasks dispatch against this repo.
+
+The runtime uses the [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) 1.12.0 with [`Microsoft.Agents.AI.Workflows`](https://www.nuget.org/packages/Microsoft.Agents.AI.Workflows) for the dispatch pipeline. LLM inference goes through configurable OpenAI-compatible or Anthropic-protocol providers (kilo gateway, MiniMax direct, Kimi, …) with per-role provider/model assignments and per-project overrides.
 
 ```
 Forge (.NET orchestrator, long-lived)
-├── IssueStore (SQLite)         task queue + dep graph + memory + event log
-├── MemoryStore (SQLite)         persistent project memory (bd remember/prime)
+├── IssueStore / MemoryStore     task queue + dep graph + sprints + memory (SQLite or Azure SQL)
 ├── IssuesJsonlMirror            background tail -f mirror of the issue store
 ├── GitWorktreeService           per-task `git worktree add` lifecycle
 ├── GitHubService                PR open / status polling / merge
-├── OrchestratorAgent            dispatch loop (claim → run → commit → PR)
-├── MafAgentRunner               MAF ChatClientAgent + bash AIFunction
-├── PRWatcher                    monitors PRs until CI+review gate passes
-└── DashboardHost                http://127.0.0.1:4097 (Kestrel, static HTML)
+├── OrchestratorAgent            dispatch loop → 5-stage MAF workflow per task
+├── SprintAssembler              completes Active sprint, assembles + activates the next (5-min tick)
+├── MafAgentRunner               MAF ChatClientAgent + bash AIFunction + secret env injection
+├── PRWatcher                    state-driven PR sweep: CI + review gate, rework rounds, merge
+├── SlotTable                    per-(project, role) concurrency semaphores
+└── DashboardHost                http://127.0.0.1:4097 (Kestrel + Blazor Server UI, Fluxor state)
 
 External
-├── kilo gateway (HTTPS)         LLM inference (OpenAI-compatible)
-└── GitHub.com                   PRs, status checks, merges
+├── LLM providers (HTTPS)        OpenAI-compatible or Anthropic-protocol endpoints
+└── GitHub.com                   PRs, check runs, reviews, merges
 ```
 
 ## Prerequisites
 
 1. **.NET 10 SDK** — `dotnet --version` should print `10.0.x`.
-2. **kilo gateway API key** — see [`install-kilo.md`](install-kilo.md). JWT from <https://kilo.ai>.
-3. **GitHub PAT** with `repo` scope on the target repo — `gh auth token` or <https://github.com/settings/tokens>.
-4. **Git** with worktree support (any modern Git for Windows).
+2. **At least one LLM provider key** — e.g. a kilo gateway JWT (see [`install-kilo.md`](install-kilo.md)), a MiniMax Token Plan key, or a Kimi key. Any endpoint speaking OpenAI chat-completions or Anthropic Messages works.
+3. **GitHub PAT** with `repo` scope on each target repo — stored per project as the `github_token` secret (encrypted at rest); a global `GITHUB_TOKEN` is the fallback.
+4. **Git** with worktree support.
 
 ## Build
 
@@ -42,18 +45,18 @@ dotnet build Forge.sln
 dotnet test Forge.sln
 ```
 
-Current coverage: **402 passing, 2 skipped** (real-LLM tests gated on having a kilo gateway key configured). Test infrastructure includes:
+Current suite: **1,200+ passing** (xUnit, hand-rolled fakes — no mocking frameworks; real-LLM tests are gated on configured provider keys). Highlights:
 
-- `IssueStoreTests`, `IssueDepTests`, `IssuesJsonlMirrorTests` — SQLite store
+- `IssueStoreTests`, `IssueDepTests`, `IssuesJsonlMirrorTests` — store + dep graph + mirror
 - `MemoryStoreTests`, `MemoryEndpointTests` — memory table + HTTP
 - `BashToolTests`, `MafAgentRunnerBashToolTests` — MAF tool-call plumbing
-- `ClaimExecutorTests` → `EnqueueWatchExecutorTests` — P3 workflow executors
+- `ClaimExecutorTests` → `EnqueueWatchExecutorTests` — workflow executors
 - `EngineeringDispatchWorkflowTests` — end-to-end workflow against a real temp git repo
-- `OrchestratorAgentTests`, `PRWatcherTests`, `RoleAgentRegistryTests` — integration
+- `OrchestratorAgentTests`, `PRWatcherTests`, `SprintAssemblerTests`, `ShellMutationClassifierTests` — integration
 
 ## Configuration
 
-Copy `appsettings.example.json` to `appsettings.json` and fill in:
+Copy `appsettings.example.json` to `appsettings.json` and fill in (gitignored). Top-level sections:
 
 ```jsonc
 {
@@ -66,7 +69,11 @@ Copy `appsettings.example.json` to `appsettings.json` and fill in:
         "apiKey": "KILO_GATEWAY_API_KEY",
         "defaultModel": "minimax/minimax-m3"
       }
+      // Anthropic-protocol providers (Kimi, MiniMax direct, ...) add:
+      //   "api": "anthropic", "auth": "bearer", "sharedQuota": true,
+      //   "maxOutputTokens": 8192, "contextWindowTokens": 900000, "modelsUrl": "..."
     ],
+    "overloadRetryCount": 3,
     "roles": {
       "CoreDev":   { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
       "ClientDev": { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" },
@@ -75,23 +82,20 @@ Copy `appsettings.example.json` to `appsettings.json` and fill in:
       "Intake":    { "providerName": "kilo-gateway", "model": "minimax/minimax-m3" }
     }
   },
-  "github":    { "owner": "Xyrces", "repo": "PortHorizon", "token": "GITHUB_TOKEN" },
-  "workspace": { "root": "C:\\path\\to\\PortHorizon", "worktreeRoot": ".portHorizon\\worktrees", "defaultBranch": "main" },
+  "github":    { "owner": "...", "repo": "...", "token": "GITHUB_TOKEN" },  // fallback only; per-project github_token secret wins
+  "workspace": { "worktreeRoot": ".portHorizon/worktrees", "defaultBranch": "main" },
+  "db":        { "provider": "sqlite" },  // or "sqlserver" + db.connectionString (Azure SQL)
   "spawner":   { "maxConcurrentSessions": 4, "pollIntervalSeconds": 3, "staleMinutes": 30 },
-  "dashboard":  { "enabled": true, "port": 4097, "hostname": "127.0.0.1" }
+  "orchestrator": { "execution": "InProcess" },  // or "Durable" + dtsConnectionString
+  "dashboard": { "enabled": true, "port": 4097, "hostname": "127.0.0.1" }
 }
 ```
 
-Environment variables override any field (use `__` for nested keys):
+Notes:
 
-| Var | Maps to |
-|---|---|
-| `KILO_GATEWAY_API_KEY` | `llm.providers[0].apiKey` |
-| `KILO_MODEL` | `llm.providers[0].defaultModel` |
-| `GITHUB_TOKEN` | `github.token` |
-| `Workspace__Root` | `workspace.root` |
-
-Use the env-var path for CI / shared hosts; use `appsettings.json` for local dev (the file is gitignored).
+- **Projects are DB-registered, not config-registered.** The `appsettings.json` `projects[]` array is deprecated and ignored at boot. Add projects via the dashboard **Projects** page or `POST /api/projects`; the registry row owns the repo URL, local clone path, default branch, and per-project role caps (`roles_json`).
+- **Role model resolution order:** live DB override (`PUT /api/agents/roles/{name}/model`, project-scoped) → `llm.roles` config → provider default. Overrides apply without restart.
+- Environment variables override any field (use `__` for nested keys), e.g. `GITHUB_TOKEN`, `Workspace__Root`, `db__connectionString`.
 
 ## CLI
 
@@ -99,173 +103,140 @@ Use the env-var path for CI / shared hosts; use `appsettings.json` for local dev
 # Long-running orchestrator + dashboard
 dotnet run --project Forge
 
-# One shot: process the queue once and exit
+# Pre-flight: config + DB schemas + GitHub + LLM auth (exits non-zero on failure)
+dotnet run --project Forge -- --check
+
+# Print queue summary and exit
+dotnet run --project Forge -- --status
+
+# One dispatch cycle, then exit (cron / trigger-driven)
 dotnet run --project Forge -- --once
 
 # Dashboard only — host the UI without dispatching
 dotnet run --project Forge -- --dashboard-only
 
-# Print queue summary and exit
-dotnet run --project Forge -- --status
-
-# Pre-flight check: config + DB schemas + GitHub + kilo gateway auth
-# (no dispatch; exits non-zero on any failure; useful for CI/smoke)
-dotnet run --project Forge -- --check
-
 # Dry-run recovery: see what StartupRecovery would do (no side-effects)
 dotnet run --project Forge -- --recover
 
-# Recovery + start: replay unfinished side-effects, then start dispatch
+# Replay unfinished side-effects, then start dispatch
 dotnet run --project Forge -- --recover-and-start
 
 # Enqueue a task
 dotnet run --project Forge -- \
   --enqueue-task "Add Position ECS component" \
-  --task-type ecs \
-  --task-desc "..." \
-  --branch "agent/positions"
+  --task-type ecs --task-desc "..." --branch "agent/positions" [--task-id task-123]
 
-# One-shot SQLite -> Azure SQL state migration (service must be stopped first).
-# --target sqlserver                Only target currently supported
-# --connection-string "..."         Or set db.connectionString in config
-# --include-open-work               Also migrate pending/in-progress tasks (default: skip)
-# --reset                           Recreate target schema before migrating
+# Worktree lifecycle smoke test against a real repo
+dotnet run --project Forge -- --worktree-smoke
+
+# One-shot SQLite -> Azure SQL state migration (stop the service first)
 dotnet run --project Forge -- \
   --migrate-db --target sqlserver \
-  --connection-string "Server=tcp:...;Initial Catalog=...;Authentication=Active Directory Default;"
+  --connection-string "Server=tcp:...;Initial Catalog=...;Authentication=Active Directory Default;" \
+  [--include-open-work] [--reset]
 
-# Provision the contained DB user (db_owner) for the forge-mi managed identity.
-# Run as Entra admin once before the future ACA/AKS cutover. Idempotent.
-# --connection-string "..."         Or set db.connectionString in config
-# --mi-name forge-mi                User-assigned managed identity name (default: forge-mi)
-dotnet run --project Forge -- --init-azure-sql
+# Provision the contained DB user (db_owner) for the forge-mi managed identity (idempotent)
+dotnet run --project Forge -- --init-azure-sql [--mi-name forge-mi]
+
+# Any mode accepts --config <path> to point at a specific appsettings file
+dotnet run --project Forge -- --config /etc/forge/appsettings.json --check
 ```
 
-`--once` runs a single dispatch cycle and exits. Use it for cron-driven or trigger-driven dispatch. `--dashboard-only` is convenient for inspecting state without taking dispatch slots. See `docs/azure-sql-cutover.md` for the full Azure SQL cutover runbook (rehearsal already executed end-to-end on 2026-07-27).
+See `docs/azure-sql-cutover.md` for the Azure SQL migration runbook.
 
 ## Dashboard
 
-The orchestrator hosts a local web UI on `http://127.0.0.1:4097` (configurable via `dashboard.*`).
+The orchestrator hosts a Blazor Server UI (Fluxor state management, SSE live updates) on `http://127.0.0.1:4097` (configurable via `dashboard.*`; optional multi-endpoint HTTP/HTTPS Kestrel binding is supported).
 
-Tabs:
+Pages (grouped as in the nav):
 
-| Tab | What it shows |
+| Area | Pages |
 |---|---|
-| **Tasks** | every issue in the store, filterable by status / type / assignee |
-| **Spec** | specs + the Groomer agent for converting Approved specs into stories |
-| **Intake** | OperatorAgent inbox, session list, AI-extracted tables |
-| **Events** | live SSE stream of state transitions, agent runs, PR lifecycle |
-| **Memory** | the `bd remember` / `prime` analog — list, add, delete persistent insights |
+| Overview | `/` Home, `/now` (unified cross-project admin view + alert inbox) |
+| Planning | `/intake`, `/vision`, `/specs`, `/designs`, `/art`, `/backlog` |
+| Execution | `/sprints`, `/tasks`, `/flow` (pipeline DAG + workflow edit mode), `/runs`, `/board` |
+| Projects | `/projects`, `/projects/{id}/overview`, `/projects/{id}/secrets` |
+| Operations | `/deployments`, `/agents` (agent control surface), `/skills`, `/ops/gates`, `/ops/recovery`, `/ops/cost`, `/ops/memory` |
 
-Endpoints:
-
-| Path | Purpose |
-|---|---|
-| `GET /` (or `/index.html`) | the dashboard HTML page |
-| `GET /api/state` | current task + agent + skill + sprint + heartbeat rollup |
-| `GET /api/state/issues` | full issue list with metadata |
-| `POST /api/state/issues` | enqueue a new task |
-| `PATCH /api/state/issues/{id}` | transition status (e.g. set status=Failed) |
-| `GET /api/state/issues/{id}/deps` | this issue's dependency edges + blocked flag |
-| `POST /api/state/issues/{id}/deps` | add a blocks/related edge |
-| `DELETE /api/state/issues/{id}/deps/{blockerId}/{kind}` | remove an edge |
-| `GET /api/specs` | spec CRUD + version history |
-| `POST /api/specs/{id}/groom` | trigger the GroomerAgent to decompose an Approved spec |
-| `GET /api/memory[?prefix=...]` | list project memory (optionally filtered by key prefix) |
-| `POST /api/memory` | add a memory |
-| `DELETE /api/memory/{key}` | remove a memory |
-| `GET /api/issues.jsonl` | stream the JSONL mirror of the issue store (`tail -f` equivalent) |
-| `GET /api/issues.jsonl/path` | the absolute file path the mirror writes to |
-| `GET /api/events` | SSE stream of `DashboardEvent` records (last ~1024 replayed on connect) |
-
-The page polls `/api/state` every 2s and subscribes to `/api/events` for instant updates. The JSONL endpoint is safe to `curl` / `tail` from outside the orchestrator host.
+The API surface includes `/api/state`, `/api/tasks/*`, `/api/sprints/*` (incl. propose/commit), `/api/gates*`, `/api/projects/*`, `/api/agents/*`, `/api/skills`, `/api/specs/*`, `/api/memory`, `/api/intake/*`, `/api/flow*`, `/api/workflow*` (draft/publish), `/api/agent-runs`, `/api/cost/*`, `/api/recovery/*`, `/api/events` (SSE), `/api/issues.jsonl`, plus health/meta endpoints. `GET /api/meta/endpoints` lists the live route table.
 
 ## How a task flows
 
-1. Operator enqueues a task (via the CLI, the dashboard, or `POST /api/state/issues`).
-2. Orchestrator's `DispatchSingleTaskAsync` claims it (`IssueStore.ClaimAsync` is atomic — `Pending` → `InProgress`).
-3. `GitWorktreeService` creates `agent/<id>` from `main` and a worktree at `.portHorizon/worktrees/<id>`.
-4. The orchestrator builds a prompt: role's instructions + memory recall + task description + worktree path + operator-message-bus drain.
-5. `MafAgentRunner` constructs a `ChatClientAgent` with the `bash` AIFunction and runs the MAF agent loop. The model emits structured `tool_calls`; MAF invokes bash, stdout flows back, the model iterates.
-6. `MafAgentRunner` captures the model response in issue metadata (`modelResponse`).
-7. `GitWorktreeService.CommitAllAsync` + `PushAsync` commit + push the branch.
-8. `GitHubService.CreatePullRequestAsync` opens the PR (`[type] title`).
-9. `OrchestratorAgent` enqueues a `pr-watch` follow-up issue.
-10. `PRWatcher` polls GitHub every 30s. On green CI + approval, it merges, deletes the branch, removes the worktree, and marks the dev task `Completed`. On `REQUEST_CHANGES`, it marks `Blocked`. On red CI, it marks `Failed`.
-11. **Restart safety**: P4 Stage A (default, in-process) — `StartupRecovery` runs at every startup, classifies every `InProgress + assignee=forge` issue by its `dispatch_checkpoint`, and replays unfinished side-effects (commit / push / PR open). Use `--recover` to dry-run. See `docs/p4-restart-safety.md` for the full contract + the audit row format. P4 Stage B (opt-in, requires Docker or Podman) persists the entire workflow state in a Durable Task Scheduler sidecar via `Microsoft.Agents.AI.DurableTask`. Bring up the sidecar with `docker compose -f deploy/docker-compose.yml up -d` (or `podman-compose ... up -d`) and set `Orchestrator:Execution=Durable`. See `deploy/README.md` for the full operation.
+1. **Intake.** New work enters as an epic via the Intake agent (operator chat at `/intake`) or as an ad-hoc task (CLI / dashboard / agent-filed follow-up).
+2. **Grooming.** The pipeline schedulers (designer → groomer, 5-min ticks) refine specs into stories/tasks. Ad-hoc tasks must be marked `groomed=true` by the ScheduledGroomer before they are sprint-eligible.
+3. **Sprint.** ALL engineering work happens inside a sprint. The `SprintAssembler` (5-min tick) completes the Active sprint when its tasks are terminal and assembles + activates the next from eligible Pending tasks. There is deliberately no UI button to create sprints.
+4. **Dispatch.** The orchestrator claims a ready sprint task (`IssueStore.ClaimAsync` is atomic), acquires a per-(project, role) slot from `SlotTable`, and hands it to the 5-stage MAF workflow: **Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch**.
+5. **Plan gate.** Before mutating, CoreDev/ClientDev runs must `submit_plan`; the bash tool refuses classified-mutating commands until deterministic gates (schema, territory) and the LLM plan-critic approve.
+6. **Run.** `MafAgentRunner` builds the prompt (role instructions + memory recall + sprint context + task), injects per-project secrets as env vars (by reference — values never enter LLM context), and runs the MAF agent loop with the bash tool.
+7. **PR.** The orchestrator commits, pushes `agent/<id>`, and opens the PR. Agents never open PRs themselves.
+8. **Watch.** No separate watch row: the task IS the watch. The sweep (every 15 min) polls every live task with a `prNumber`. Merge requires green check runs AND an approval (formal review or reviewer-agent verdict) at the current head SHA. CI failure or changes-requested requeues the task for a rework round on the same branch/PR — circuit breaker at 3 attempts, then the task goes Blocked/Failed for the operator.
+9. **Merge.** On green CI + approval (and with the `merge` stage gate released), the watcher merges, deletes the branch, removes the worktree, and marks the task Completed. Externally-merged PRs are detected too.
+10. **Restart safety.** `StartupRecovery` runs at every startup, classifies every `InProgress + assignee=forge` issue by its `dispatch_checkpoint`, and replays unfinished side-effects (commit / push / PR open). Use `--recover` to dry-run. Opt-in P4 Stage B persists workflow state in a Durable Task Scheduler sidecar (`orchestrator.execution=Durable`). See `docs/p4-restart-safety.md`.
 
-Optional: a `DependencyGraph` exists in `IssueStore` (`blocks` / `related` / `duplicates` edges). `ReadyAsync` excludes issues with an open `blocks` edge whose blocker is not `Completed`/`Closed`. `Failed` blockers are **not** auto-cleared — the operator must explicitly close them or remove the edge.
+Optional: a dependency graph exists in `IssueStore` (`blocks` / `related` / `duplicates` edges). `ReadyAsync` excludes issues with an open `blocks` edge. `Failed` blockers are **not** auto-cleared — the operator must explicitly close them or remove the edge.
 
 ## Role agents
 
-Configured in `Agents/RoleAgentRegistry.cs`:
+Nine slot pools, configured in `Agents/RoleAgentRegistry.cs`:
 
-| Role | Project scope | Tools (allowed) | Purpose |
+| Role | Territory | Tools | Purpose |
 |---|---|---|---|
-| `CoreDev`   | `PortHorizon.Core/`   | bash, read, edit, grep, glob, webfetch | ECS components, systems, atmospherics, pathfinding |
-| `ClientDev` | `PortHorizon.Client/` | bash, read, edit, grep, glob, webfetch | Godot 4.x scenes, scripts, UI, SyncBridge |
+| `CoreDev`   | project backend dirs  | bash, read, edit, grep, glob, webfetch | Core engineering |
+| `ClientDev` | project client/UI dirs | bash, read, edit, grep, glob, webfetch | Client/UI engineering |
 | `QA`        | (read-only)            | bash, read, grep, glob | Build + test verification, no edits |
-| `Reviewer`  | (read-only)            | read, grep, glob, webfetch | Architecture-compliance review on GitHub |
-| `Intake`    | (interactive)          | chat + tool emits | operator inbox → proposed spec + epic |
+| `Reviewer`  | (read-only)            | read, grep, glob, webfetch | Architecture-compliance review on PRs |
+| `Intake`    | (pipeline)             | chat + tool emits | operator inbox → proposed epic |
+| `Designer`  | (pipeline)             | scheduler-side | spec → design |
+| `Artist`    | (pipeline)             | scheduler-side | art/asset generation |
+| `Groomer`   | (pipeline)             | scheduler-side | spec → stories/tasks; ad-hoc grooming |
+| `Orchestrator` | (pipeline)          | no LLM | dispatch bookkeeping |
 
-The system prompt for each role is loaded from `<workspace>/agents/<role>.md` (YAML frontmatter's `description:` field). Missing files get a generic fallback and a warning log.
+Role prompts resolve per project: `<projectRoot>/agents/<role>.md` wins (the project ships its own role instructions); otherwise the built-in copies next to the app are used. Engineering concurrency is per-role (default caps: coredev/clientdev/reviewer=2, others=1; live-tunable via `PUT /api/projects/{id}/roles`).
 
 ## State files
 
-Persisted under `.portHorizon/`:
+All persisted state lives under the project state root (`.portHorizon/state/` for the default project; `<dataRoot>/projects/{id}/.forge/state/` for registered projects; `/var/lib/forge/state/` under systemd):
 
 ```
-.portHorizon/
-├── state/
-│   ├── issues.db              # IssueStore (SQLite, schema v7)
-│   ├── issues.jsonl           # IssuesJsonlMirror tail -f mirror
-│   ├── memory.db              # MemoryStore (SQLite, schema v7)
-│   ├── orchestrator-state.json  # heartbeat + counters (schema v3)
-│   └── *.jsonl (transient)    # schema-migration tmp files
-└── worktrees/                  # one subdir per task
-    └── <id>/                   # agent/<id> branch + checkout
+state/
+├── issues.db                 # IssueStore family (schema v31): tasks, deps, sprints, secrets, skills, agent runs
+├── issues.jsonl              # IssuesJsonlMirror tail -f mirror (regenerated every 5s)
+├── memory.db                 # MemoryStore
+└── orchestrator-state.json   # heartbeat + counters (schema v3)
 ```
 
-The orchestrator refuses to start if any state file is corrupt or has an unknown schema version. The migration between schema versions is automatic on startup (the issue store reads the current `schema_version` row and applies any missing blocks).
+With `db.provider=sqlserver`, issue/memory data lives in Azure SQL instead (fresh-created at the current schema); the JSONL mirror still writes locally. The SQLite path migrates automatically on startup (`schema_version` row + migration chain); the orchestrator refuses to start on corrupt state or an unknown schema version.
 
 ## Logs
 
-Structured single-line console logs:
-
-```
-13:42:01.102 info: Forge[0] Starting dashboard
-13:42:01.731 info: Forge.Dashboard.DashboardHost[0] Dashboard listening on http://127.0.0.1:4097
-13:42:01.750 info: Forge[0] Orchestrator starting
-13:42:05.221 info: Forge.Orchestrator.OrchestratorAgent[0] Issue task-1 transition Pending -> InProgress (type=task)
-13:42:48.901 info: Forge.Orchestrator.OrchestratorAgent[0] Agent session for task-1 completed in 43680ms
-13:42:48.940 info: Forge.Orchestrator.OrchestratorAgent[0] Opened PR #42 for task-1
-13:42:48.965 info: Forge.Orchestrator.OrchestratorAgent[0] Task task-1 dispatched to PR #42 (duration 43743ms)
-```
-
-Set `Logging__LogLevel__Default=Debug` for verbose output (raw LLM requests, executor trace).
+Structured single-line console logs (`journalctl -u forge -f` under systemd). Per-run agent diagnostics land in `<dataRoot>/logs/agent.log` (message roles, tool-call names, text lengths) — the first stop when a run "completes" with no diff. Set `Logging__LogLevel__Default=Debug` for verbose output (raw LLM requests, executor trace).
 
 ## Operational notes
 
-- **Cross-process safety.** The issue store uses SQLite WAL mode. Run only one orchestrator per state directory.
-- **Concurrency.** `Spawner.MaxConcurrentSessions` (default 4) is the upper bound on simultaneous in-flight agent runs.
-- **Retries.** `StartupRecovery` (P4 Stage A) replays unfinished side-effects at startup. After `StartupRecoveryOptions.MaxAttempts` (default 3) recoveries the issue is hard-failed. Use the dashboard's Recovery tab to inspect the audit row + run a fresh sweep. **P4 Stage B** (opt-in via `Orchestrator:Execution=Durable`) eliminates most retries entirely — workflow state persists in the DTS sidecar across orchestrator crashes.
-- **Memory.** Project memory is injected into every agent prompt. Use `POST /api/memory` to add a key like `coding-style/no-linq-in-hot-paths` with a body. The agent sees the block under "## Project memory".
-- **Spec → Groomer.** A spec with `status: Approved` can be decomposed into 1–3 stories × 1–3 tasks via `POST /api/specs/{id}/groom`. The GroomerAgent (also MAF) is fire-and-forget.
+- **Cross-process safety.** Run only one orchestrator per state directory. SQLite WAL allows concurrent readers; a second writer waits on the busy-timeout.
+- **Concurrency.** Dev dispatch is bounded per (project, role) by `SlotTable`; `spawner.maxConcurrentSessions` no longer gates dev dispatch. A shared process-wide rate-limit tracker cools a provider+model for ALL subsystems on a 429, and a per-provider semaphore (`llm.maxConcurrentRequests`, default 2) caps simultaneous round-trips.
+- **Stage gates.** Optional operator hold/release at four automatic transitions — `design`, `groom`, `sprint` (assembly only), `merge` — via `GET/POST /api/gates*` or the `/ops/gates` page. A held stage skips its scheduler tick; a held merge leaves the watch live.
+- **Retries.** `StartupRecovery` replays unfinished side-effects at startup; after `MaxAttempts` (default 3) the issue is hard-failed. Inspect the audit row and run fresh sweeps from `/ops/recovery`.
+- **Memory.** Project memory is injected into every agent prompt under "## Project memory" (`POST /api/memory` or `/ops/memory`).
+- **Secrets.** Per-project encrypted secrets (`github_token`, `kilo_gateway_api_key`, custom kinds) are managed at `/projects/{id}/secrets` and injected by reference into agent bash env as `FORGE_SECRET_<KIND>`. Values never enter prompts, tool-call JSON, or logs.
 
 ## Architecture
 
-The dispatch loop is currently sequential (in `OrchestratorAgent.DispatchSingleTaskAsync`). A parallel MAF WorkflowBuilder implementation lives in `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` with the same five stages (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch) as typed `FunctionExecutor<TIn, TOut>` instances. The workflow version is exercised by `EngineeringDispatchWorkflowTests` against a real temp git repo; the orchestrator stays on the sequential code until behavioral parity on `AlreadyClaimed` / `NoDiff` short-circuits is fully verified.
+The dispatch path is a MAF `WorkflowBuilder` graph in `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` — five typed `FunctionExecutor<TIn, TOut>` stages (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch). `OrchestratorAgent` claims the task and hands it to an `IWorkflowDispatcher`: InProcess (default) or Durable (DTS sidecar). The editable workflow definition (`/flow?mode=edit`) controls wiring and policy — gates, auto-merge, rework limits, step toggles — resolved per evaluation without restart; the task state transition table stays code-owned.
 
-For the broader design intent (dep graph, JSONL, memory, durable execution, …), see `docs/embedded-issues.md`, `docs/agent-framework-design.md`, and `docs/system-flow.md`.
+Module boundaries are non-negotiable: `Core/` has no I/O beyond the state DB, `Agents/` adds LLM + tools, `Orchestrator/` glues git + GitHub, `Dashboard/` + `Forge.UI/` render state. See `AGENTS.md` for the full rule layer and `docs/system-flow.md` for the narrative.
+
+## Documentation
+
+- **Guides:** [`docs/user-guide.md`](docs/user-guide.md) (operating Forge day-to-day) · [`docs/administrator-guide.md`](docs/administrator-guide.md) (install, config, deployment, security, ops)
+- **Design & flow:** `docs/system-flow.md`, `docs/agent-framework-design.md`, `docs/embedded-issues.md`
+- **Runbooks:** `docs/operator-cookbook.md`, `docs/linux-deployment.md`, `docs/azure-sql-cutover.md`, `docs/p4-restart-safety.md`, `docs/ui-troubleshooting.md`
+- **Contributing:** `CONTRIBUTING.md`, `AGENTS.md`
 
 ## Out of scope (deferred)
 
 - Per-task permission overrides beyond per-role
-- Webhook-based `PRWatcher` (currently 30s polling)
+- Webhook-based PR watching (currently a 15-min sweep)
 - Roslyn / NetArchTest architecture gates
 - MCP playtest harness
 - Godot headless smoke test
-- Wire `EngineeringDispatchWorkflow` into `OrchestratorAgent` (architectural, not functional)
-- Durable execution via `Microsoft.Agents.AI.Hosting` (P4 in `agent-framework-design.md`)
-
-For the operator cookbook (common scenarios) and the system flow diagram, see `docs/operator-cookbook.md` and `docs/system-flow.md`.
