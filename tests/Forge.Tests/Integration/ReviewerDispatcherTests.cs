@@ -54,6 +54,17 @@ public class ReviewerDispatcherTests : IDisposable
         }
         public override Task<long> SubmitReviewAsync(int prNumber, string commitSha, string body, PullRequestReviewState state, CancellationToken cancellationToken = default)
             => Task.FromResult(1L);
+        public override Task<IReadOnlyList<PrComment>> GetIssueCommentsAsync(int prNumber, CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<PrComment>>(new[]
+            {
+                new PrComment("alice", new DateTimeOffset(2026, 7, 30, 12, 0, 0, TimeSpan.Zero),
+                    "please also check the nav edge cases"),
+            });
+        public override Task<IReadOnlyList<PrCommit>> GetCompareCommitsAsync(string baseSha, string headSha, CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<PrCommit>>(new[]
+            {
+                new PrCommit("c0ffee1234567890", "wire the thing", new DateTimeOffset(2026, 7, 30, 13, 0, 0, TimeSpan.Zero)),
+            });
     }
 
     private sealed class ScriptedRunner : IAgentRunner
@@ -70,9 +81,16 @@ public class ReviewerDispatcherTests : IDisposable
 
     private async Task<IssueRecord> SeedWatchAsync()
     {
+        // Reviewer worktree access is mandatory (operator rule
+        // 2026-07-30): seeds point at a real directory.
         var watch = await _issues.CreateAsync(new Forge.Core.NewIssue(
             Type: AgentTaskTypes.PrWatch, Title: "watch",
-            Metadata: new Dictionary<string, object> { ["prNumber"] = 7, ["taskId"] = "task-1" }));
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 7,
+                ["taskId"] = "task-1",
+                ["worktreePath"] = _workDir,
+            }));
         return (await _issues.GetAsync(watch.Id))!;
     }
 
@@ -183,6 +201,7 @@ public class ReviewerDispatcherTests : IDisposable
             Metadata: new Dictionary<string, object>
             {
                 ["prNumber"] = 7,
+                ["worktreePath"] = _workDir,
                 ["reviewSha"] = "old111aaa",
                 ["reviewVerdict"] = "RequestChanges",
                 ["reviewNotes"] = "fix F.cs null check",
@@ -219,14 +238,83 @@ public class ReviewerDispatcherTests : IDisposable
         Assert.Contains("diff --git a/F.cs", runner.Prompt);
     }
 
+    [Fact]
+    public async Task Review_WithExistingWorktree_PassesItToRunner_AndPromptsForInspection()
+    {
+        // Truncation remediation (2026-07-30, porthorizon task-17):
+        // the reviewer gets the PR worktree (read-only bash) so a
+        // truncated diff paste can't produce "unconfirmed coverage"
+        // blocks.
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), $"ph-rv-{Guid.NewGuid():N}")).FullName;
+        try
+        {
+            var gh = new FakeGitHub();
+            var runner = new CapturingRunner("REVIEWER_VERDICT: APPROVE");
+            var dispatcher = new ReviewerDispatcher(_issues, gh, runner, NullLogger<ReviewerDispatcher>.Instance);
+            var task = await _issues.CreateAsync(new Forge.Core.NewIssue(
+                Type: "task", Title: "t",
+                Metadata: new Dictionary<string, object>
+                {
+                    ["prNumber"] = 7,
+                    ["worktreePath"] = worktree,
+                }));
+
+            await dispatcher.ReviewOnceAsync((await _issues.GetAsync(task.Id))!, headShaOverride: _ => "abc123");
+
+            Assert.NotNull(runner.Context);
+            Assert.Equal(worktree, runner.Context!["worktreePath"]?.ToString());
+            Assert.Equal("diff --git a/F.cs b/F.cs\n+added", runner.Context["reviewDiff"]?.ToString());
+            Assert.Contains("READ-ONLY", runner.Prompt);
+            Assert.Contains(worktree, runner.Prompt);
+            Assert.Contains("pr_diff", runner.Prompt);
+            // Full context sections are retrieved programmatically.
+            Assert.Contains("PR conversation", runner.Prompt);
+            Assert.Contains("Commits on this PR", runner.Prompt);
+            Assert.Contains("CI at the head under review", runner.Prompt);
+            Assert.Contains("alice: please also check the nav edge cases", runner.Prompt);
+        }
+        finally
+        {
+            try { Directory.Delete(worktree, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Review_WithMissingWorktree_ErrorsWithoutCallingRunner()
+    {
+        // Operator rule 2026-07-30: the reviewer MUST have worktree
+        // access — no degraded paste-only review. Missing worktree is
+        // an Error outcome (retried next sweep), never a verdict.
+        var gh = new FakeGitHub();
+        var runner = new CapturingRunner("REVIEWER_VERDICT: APPROVE");
+        var dispatcher = new ReviewerDispatcher(_issues, gh, runner, NullLogger<ReviewerDispatcher>.Instance);
+        var task = await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: "task", Title: "t",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 7,
+                ["worktreePath"] = "/nonexistent/path/that/does/not/exist",
+            }));
+
+        var outcome = await dispatcher.ReviewOnceAsync((await _issues.GetAsync(task.Id))!, headShaOverride: _ => "abc123");
+
+        Assert.NotNull(outcome);
+        Assert.Equal(ReviewerVerdict.Error, outcome!.Verdict);
+        Assert.Null(runner.Context);
+        Assert.Equal("", runner.Prompt);
+    }
+
+
     private sealed class CapturingRunner : IAgentRunner
     {
         private readonly string _response;
         public string Prompt { get; private set; } = "";
+        public IReadOnlyDictionary<string, object>? Context { get; private set; }
         public CapturingRunner(string response) { _response = response; }
         public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context = null, CancellationToken ct = default)
         {
             Prompt = prompt;
+            Context = context;
             return Task.FromResult(new AgentRunResult(_response, null, 0, 0, TimeSpan.Zero));
         }
     }

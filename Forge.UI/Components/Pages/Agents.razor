@@ -34,7 +34,7 @@
                                   Kind="@role.AgentType"
                                   Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
                                   Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
-                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount, role.CurrentRun.Phase, role.CurrentRun.ResumedSession))"
+                                  CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount, role.CurrentRun.Phase, role.CurrentRun.ResumedSession, role.CurrentRun.CurrentContextTokens))"
                                   LastRun="@(role.LastRun is null ? null : new AgentRoleRow.LastRunInfo(role.LastRun.Id, role.LastRun.TaskId, role.LastRun.Status, role.LastRun.FinishedAt, role.LastRun.DurationMs, role.LastRun.Error))"
                                   Territory="@role.Territory"
                                   Tools="@role.Tools"
@@ -115,9 +115,14 @@
     {
         try
         {
-            var projectId = ShellStore.Value.CurrentProjectId ?? "forge";
+            var projectId = ShellStore.Value.CurrentProjectId;
             _loadedProject = projectId;
-            _data = await Http.GetFromJsonAsync<RolesResponse>($"/api/agents/roles?projectId={Uri.EscapeDataString(projectId)}");
+            // No client-side project default: absent param lets the
+            // server resolve the primary project.
+            var url = projectId is null
+                ? "/api/agents/roles"
+                : $"/api/agents/roles?projectId={Uri.EscapeDataString(projectId)}";
+            _data = await Http.GetFromJsonAsync<RolesResponse>(url);
             _error = null;
             await InvokeAsync(StateHasChanged);
         }
@@ -130,8 +135,10 @@
     private async Task SaveModelAsync((string Role, string Provider, string Model) edit)
     {
         _editError = null;
+        // Project-scoped override: the lens project's runs change,
+        // never another project's (operator rule 2026-07-30).
         var resp = await Http.PutAsJsonAsync($"/api/agents/roles/{edit.Role}/model",
-            new { provider = edit.Provider, model = edit.Model });
+            new { provider = edit.Provider, model = edit.Model, projectId = ShellStore.Value.CurrentProjectId });
         if (!resp.IsSuccessStatusCode)
         {
             _editError = await resp.Content.ReadAsStringAsync();
@@ -143,7 +150,10 @@
 
     private async Task ClearModelAsync(string roleName)
     {
-        await Http.DeleteAsync($"/api/agents/roles/{roleName}/model");
+        var lens = ShellStore.Value.CurrentProjectId is { } pid
+            ? $"?projectId={Uri.EscapeDataString(pid)}"
+            : string.Empty;
+        await Http.DeleteAsync($"/api/agents/roles/{roleName}/model" + lens);
         await LoadAsync();
     }
 
@@ -167,7 +177,7 @@
     private sealed record PromptDto(string Source, string? Path, string? Content);
     private sealed record CurrentRunDto(string Id, string? TaskId, DateTime StartedAt,
         DateTime? LastActivityAt, int? MessageCount, int? ToolCallCount,
-        string? Phase, bool? ResumedSession);
+        string? Phase, bool? ResumedSession, long? CurrentContextTokens);
     private sealed record LastRunDto(string Id, string? TaskId, string Status,
         DateTime? FinishedAt, long? DurationMs, string? Error);
 }

@@ -46,6 +46,30 @@ public class IssueDepTests : IDisposable
     }
 
     [Fact]
+    public async Task OpenBlockers_MapsBlockedToOpenBlockers()
+    {
+        var blocker = await CreateTaskAsync("blocker");
+        var doneBlocker = await CreateTaskAsync("done blocker");
+        var blocked = await CreateTaskAsync("blocked");
+        var free = await CreateTaskAsync("free");
+        await _store.AddDependencyAsync(blocker.Id, blocked.Id, IssueDepKind.Blocks);
+        await _store.AddDependencyAsync(doneBlocker.Id, blocked.Id, IssueDepKind.Blocks);
+        await _store.TransitionAsync(doneBlocker.Id, IssueStatus.Completed, null);
+
+        var map = await _store.OpenBlockersAsync(new[] { blocked.Id, free.Id });
+
+        Assert.True(map.TryGetValue(blocked.Id, out var blockers));
+        Assert.Equal(new[] { blocker.Id }, blockers!.ToArray());  // Completed blocker excluded
+        Assert.False(map.ContainsKey(free.Id));
+    }
+
+    [Fact]
+    public async Task OpenBlockers_EmptyInput_EmptyMap()
+    {
+        Assert.Empty(await _store.OpenBlockersAsync(Array.Empty<string>()));
+    }
+
+    [Fact]
     public async Task AddDependency_SelfLoop_Throws()
     {
         var a = await CreateTaskAsync("A");
@@ -213,6 +237,40 @@ public class IssueDepTests : IDisposable
         await _store.TransitionAsync(blocker.Id, IssueStatus.Completed, error: null);
 
         Assert.Contains(await _store.ReadyAsync(100), i => i.Id == blocked.Id);
+    }
+
+    [Fact]
+    public async Task ReadyAsync_BlockerOfOpenWork_JumpsQueue()
+    {
+        // Operator rule 2026-07-31: a blocker of open work is the
+        // critical path — it queues ahead of higher-priority
+        // non-blockers.
+        var p1 = await _store.CreateAsync(new NewIssue(Type: "task", Title: "p1", Priority: 1));
+        var p2 = await _store.CreateAsync(new NewIssue(Type: "task", Title: "p2", Priority: 2));
+        var blocker = await _store.CreateAsync(new NewIssue(Type: "task", Title: "blocker", Priority: 3));
+        var blocked = await _store.CreateAsync(new NewIssue(Type: "task", Title: "blocked", Priority: 1));
+        await _store.AddDependencyAsync(blocker.Id, blocked.Id, IssueDepKind.Blocks);
+
+        var list = await _store.ReadyAsync(100);
+
+        Assert.Equal(new[] { blocker.Id, p1.Id, p2.Id },
+            list.Where(i => i.Id != blocked.Id).Select(i => i.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task ReadyAsync_BlockerOfClosedWork_NoBoost()
+    {
+        var p1 = await _store.CreateAsync(new NewIssue(Type: "task", Title: "p1", Priority: 1));
+        var blocker = await _store.CreateAsync(new NewIssue(Type: "task", Title: "blocker", Priority: 3));
+        var done = await _store.CreateAsync(new NewIssue(Type: "task", Title: "done", Priority: 5));
+        await _store.AddDependencyAsync(blocker.Id, done.Id, IssueDepKind.Blocks);
+        await _store.ClaimAsync(done.Id, "agent");
+        await _store.TransitionAsync(done.Id, IssueStatus.Completed, error: null);
+
+        var list = await _store.ReadyAsync(100);
+
+        Assert.True(list.Select(i => i.Id).ToList().IndexOf(p1.Id)
+            < list.Select(i => i.Id).ToList().IndexOf(blocker.Id));
     }
 
     [Fact]

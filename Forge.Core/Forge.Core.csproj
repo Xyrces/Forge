@@ -16,11 +16,13 @@
     remain at the repository root. Include all root .cs files except the
     test, e2e-harness, and Blazor UI projects that have their own csproj.
     Also exclude the project directory itself (so SDK default Compile
-    items own sources placed under Forge.Core/) and any stale root obj/
-    or bin/ directories left behind by builds before the project move.
+    items own sources placed under Forge.Core/), any stale root obj/
+    or bin/ directories left behind by builds before the project move,
+    and the gitignored .portHorizon/ state directory (e2e clones and
+    agent worktrees under it contain their own .cs files).
   -->
   <ItemGroup>
-    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\**\*.cs;..\obj\**\*.cs;..\bin\**\*.cs" />
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\**\*.cs;..\obj\**\*.cs;..\bin\**\*.cs;..\.portHorizon\**\*.cs" />
     <None Remove="..\tests\**;..\tools\**;..\Forge.UI\**" />
     <EmbeddedResource Remove="..\tests\**" />
   </ItemGroup>

@@ -63,6 +63,9 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Agents.LlmConfig? _llmConfig;
     private readonly Forge.Agents.RoleModelOverrides? _roleModelOverrides;
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
+    private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
+    private readonly Func<string, GitHubService?>? _gitHubForProject;
+    private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
     private readonly GitHubOptions? _githubOptions;
     private readonly GateOptions? _gateOptions;
     private readonly ILogger<DashboardHost> _logger;
@@ -116,7 +119,10 @@ public sealed class DashboardHost : IAsyncDisposable
         AgentRunStore? agentRuns = null,
         Forge.Agents.LlmConfig? llmConfig = null,
         Forge.Agents.RoleModelOverrides? roleModelOverrides = null,
-        Forge.Core.TaskStateMachine? lifecycle = null)
+        Forge.Core.TaskStateMachine? lifecycle = null,
+        Forge.Core.ModelRateLimitTracker? modelRateLimits = null,
+        Func<string, GitHubService?>? gitHubForProject = null,
+        Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null)
     {
         _options = options;
         _headroom = headroom;
@@ -165,6 +171,9 @@ public sealed class DashboardHost : IAsyncDisposable
         _llmConfig = llmConfig;
         _roleModelOverrides = roleModelOverrides;
         _lifecycle = lifecycle;
+        _modelRateLimits = modelRateLimits;
+        _gitHubForProject = gitHubForProject;
+        _providerApiKeys = providerApiKeys;
     }
 
     public string BaseUrl => ResolveBaseUrl();
@@ -305,16 +314,38 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
                 // excluded) + terminal counts so the Sprints page can
                 // render progress without a second query round-trip.
                 var statusById = tasks.ToDictionary(t => t.Id);
+                // One dep query for the whole payload: blocked id →
+                // open blocker ids (sprint board "blocked by" badge).
+                var allMemberIds = new List<string>();
+                var memberIdsBySprint = new Dictionary<string, List<string>>();
+                foreach (var sp0 in sprints)
+                {
+                    var ids0 = await sprintStore.GetIssueIdsAsync(sp0.Id, ct);
+                    memberIdsBySprint[sp0.Id] = ids0.ToList();
+                    allMemberIds.AddRange(ids0);
+                }
+                var openBlockers = await issueStore.OpenBlockersAsync(allMemberIds, ct);
                 var sprintViews = new List<object>();
                 foreach (var sp in sprints)
                 {
-                    var memberIds = await sprintStore.GetIssueIdsAsync(sp.Id, ct);
+                    var memberIds = memberIdsBySprint[sp.Id];
                     var members = memberIds
                         .Select(id => statusById.TryGetValue(id, out var t) ? t : null)
                         .Where(t => t is not null
                             && !AgentTaskTypes.IsContainer(t.Type)
                             && t.Type != AgentTaskTypes.PrWatch)
-                        .Select(t => new { id = t!.Id, title = t.Title, status = t.Status.ToString() })
+                        .Select(t => new
+                        {
+                            id = t!.Id,
+                            title = t.Title,
+                            status = t.Status.ToString(),
+                            blockedBy = openBlockers.TryGetValue(t.Id, out var bb) ? bb : null,
+                            // Board self-sufficiency (operator
+                            // 2026-07-31): why it's in its column +
+                            // what happens next, computed server-side.
+                            situation = Forge.Core.TaskSituation.Describe(t).Text,
+                            situationTone = Forge.Core.TaskSituation.Describe(t).Tone,
+                        })
                         .ToArray();
                     sprintViews.Add(new
                     {
@@ -464,14 +495,17 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         FlowEndpoints.MapFlowEndpoints(_app, _issues, _specs, _sprints, _extractions,
             _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
-            _memory);
-        NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory, _agentRuns);
+            _memory, _projectFactory);
+        NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory, _agentRuns, _projectFactory);
         if (_agentRuns is not null)
         {
-            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns);
+            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory);
         }
         AgentsEndpoints.MapAgentsEndpoints(_app, new Agents.RoleAgentRegistry(),
-            _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory);
+            _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory,
+            _providerApiKeys);
+        QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
+            _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
 
 if (_groomerRuns is not null)
             {
@@ -493,7 +527,8 @@ if (_groomerRuns is not null)
                 }
                 if (_costTracker is not null)
                 {
-                    CostEndpoints.MapCostEndpoints(_app, _costTracker, _logger);
+                    CostEndpoints.MapCostEndpoints(_app, _costTracker, _logger,
+                        _agentRuns, _projectFactory);
                     OpsEndpoints.MapOpsEndpoints(_app, _costTracker, _headroom, _logger);
                 }
                 else
@@ -514,11 +549,12 @@ if (_groomerRuns is not null)
 
             if (_sprintPropose is not null && _sprintProposalAudit is not null)
             {
-                SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger);
+                SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger, _projectFactory, _issues);
             }
 
             TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
-                _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null);
+                _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
+                _lifecycle, _gitHubForProject);
         }
 
         _app.MapBuildInfoEndpoint();

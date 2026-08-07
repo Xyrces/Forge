@@ -63,6 +63,36 @@ public class MafAgentRunnerRunStoreTests : IDisposable
         runs: _runs);
 
     [Fact]
+    public async Task Run_WritesToResolvedProjectStore()
+    {
+        // Per-project run registry (operator rule 2026-07-30): the run
+        // row lands in the OWNING project's store, tagged with its
+        // project_id; the primary store stays empty.
+        var projectDb = Path.Combine(_workDir, "proj-beta.db");
+        _ = new IssueStore(projectDb);   // workload schema incl. agent_run
+        var betaRuns = new AgentRunStore(projectDb);
+        var client = new ToolCallThenTextClient();
+        client.Release.SetResult();   // no mid-run observation here
+        var runner = new MafAgentRunner(
+            chatClientFactory: new SingleFactory(client),
+            config: new LlmConfig(new ProviderConfig("stub", "", null, null, "stub-model")),
+            roles: new RoleAgentRegistry(),
+            logger: NullLogger<MafAgentRunner>.Instance,
+            skills: null,
+            rolePromptsRoot: _workDir,
+            runs: _runs,
+            runsByProject: pid => pid == "beta" ? betaRuns : _runs);
+        var context = new Dictionary<string, object> { ["issueId"] = "task-1", ["projectId"] = "beta" };
+
+        await runner.RunAsync(AgentType.CoreDev, "do the thing", sessionId: null, context, CancellationToken.None);
+
+        var row = Assert.Single(await betaRuns.ListRecentAsync());
+        Assert.Equal("beta", row.ProjectId);
+        Assert.Equal("succeeded", row.Status);
+        Assert.Empty(await _runs.ListRecentAsync());
+    }
+
+    [Fact]
     public async Task SuccessfulRun_PersistsTranscript_WithToolCallAndResult()
     {
         var client = new ToolCallThenTextClient();
@@ -111,7 +141,7 @@ public class MafAgentRunnerRunStoreTests : IDisposable
     {
         private readonly IChatClient _client;
         public SingleFactory(IChatClient client) { _client = client; }
-        public IChatClient Create(LlmConfig config, AgentType role) => _client;
+        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => _client;
     }
 
     /// <summary>First turn: a bash tool call (waits so the test can

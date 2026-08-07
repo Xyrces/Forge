@@ -35,7 +35,6 @@ public class WorkflowEndpointTests : IDisposable
         _ = new IssueStore(_dbPath);
         _memory = new MemoryStore(_dbPath);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -43,7 +42,7 @@ public class WorkflowEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         WorkflowEndpoints.MapWorkflowEndpoints(app, _memory, new InMemoryDashboardEventBus(),
             NullLogger<DashboardHost>.Instance);

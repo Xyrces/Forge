@@ -105,6 +105,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
     private readonly ILoggerFactory _loggerFactory;
     private readonly ISecretStore? _secrets;
     private readonly StageGates? _gates;
+    private readonly Core.TaskStateMachine? _lifecycle;
 
     public ProjectDispatchBundleFactory(
         AgentOptions options,
@@ -118,7 +119,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         IDashboardEventBus events,
         ILoggerFactory loggerFactory,
         ISecretStore? secrets = null,
-        StageGates? gates = null)
+        StageGates? gates = null,
+        Core.TaskStateMachine? lifecycle = null)
     {
         _options = options;
         _dataRoot = dataRoot;
@@ -132,6 +134,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         _loggerFactory = loggerFactory;
         _secrets = secrets;
         _gates = gates;
+        _lifecycle = lifecycle;
     }
 
     /// <summary>
@@ -250,7 +253,18 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             staleAfter: TimeSpan.FromHours(24),
             _events,
             _loggerFactory.CreateLogger<PRWatcher>(),
-            gates: _gates);
+            gates: _gates,
+            // The lifecycle machine is MANDATORY here: without it the
+            // watcher's reports no-op, reworkForSha never lands, and
+            // the rework guard stops suppressing — a strike re-fires
+            // every sweep against any queue-starved watched task and
+            // the breaker trips without a single rework round running
+            // (observed live 2026-07-31: porthorizon tasks 9/12/13).
+            lifecycle: _lifecycle,
+            // The watcher's "active dev run" guard reads the OWNING
+            // project's run registry — run rows are per-project
+            // workload data (operator rule 2026-07-30).
+            runs: new Core.AgentRunStore(issueStore.Db));
 
         return new ProjectDispatchBundle(
             ensured.Project,

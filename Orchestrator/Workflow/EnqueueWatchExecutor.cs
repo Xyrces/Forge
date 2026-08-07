@@ -20,7 +20,7 @@ public sealed class EnqueueWatchExecutor : FunctionExecutor<PrOpened, WatchEnque
     public EnqueueWatchExecutor(IIssueStore issues, ILogger<EnqueueWatchExecutor> logger)
         : base(
             "enqueue-watch",
-            (input, ctx, ct) => HandleAsync(input, issues, logger, ct),
+            ExecutorFaultGuard.Wrap<PrOpened, WatchEnqueued>("enqueue-watch", logger, (input, ctx, ct) => HandleAsync(input, issues, logger, ct)),
             null,
             new[] { typeof(PrOpened) },
             new[] { typeof(WatchEnqueued) })

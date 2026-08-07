@@ -45,6 +45,22 @@ public static class SpecEndpoints
             return specs;
         }
 
+        // Multi-project id-addressed routes: spec ids are per-project
+        // sequences, so without ?project= spec-5 resolves to the
+        // PRIMARY project's spec-5. An explicit but unknown project
+        // 404s rather than silently falling back to the primary.
+        (ISpecStore Specs, Forge.Core.IIssueStore? Issues, ISpecExtractionReader Extractor)? ResolveOwned(string? project)
+        {
+            if (project is null || projectContexts is null)
+                return (specs, issues, extractor);
+            var ctx = projectContexts.Find(project);
+            if (ctx is null) return null;
+            var ex = extractor is SpecExtractionReader && ctx.Issues is Forge.Core.IssueStore concrete
+                ? new SpecExtractionReader(concrete)
+                : extractor;
+            return (ctx.Specs, ctx.Issues, ex);
+        }
+
         app.MapGet("/api/specs", async (string? project, string? status, CancellationToken ct) =>
         {
             SpecStatus? statusFilter = null;
@@ -61,34 +77,40 @@ public static class SpecEndpoints
             return Results.Json(list.Select(ToSpecView).ToArray(), DashboardJson.Options);
         });
 
-        app.MapGet("/api/specs/{id}", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/specs/{id}", async (string id, string? project, CancellationToken ct) =>
         {
-            var spec = await specs.GetAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            var spec = await owned.Value.Specs.GetAsync(id, ct);
             return spec is null
                 ? Results.NotFound()
                 : Results.Json(ToSpecView(spec), DashboardJson.Options);
         });
 
-        app.MapGet("/api/specs/{id}/versions", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/specs/{id}/versions", async (string id, string? project, CancellationToken ct) =>
         {
-            var versions = await specs.ListVersionsAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            var versions = await owned.Value.Specs.ListVersionsAsync(id, ct);
             return Results.Json(versions.Select(ToVersionView).ToArray(), DashboardJson.Options);
         });
 
         // Spec drill-down: the decomposition tree the groomer
         // produced (stories -> tasks, via parent_issue_id) plus the
         // groom-run history. Powers the /specs/{id} detail page.
-        app.MapGet("/api/specs/{id}/tree", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/specs/{id}/tree", async (string id, string? project, CancellationToken ct) =>
         {
-            var spec = await specs.GetAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            var spec = await owned.Value.Specs.GetAsync(id, ct);
             if (spec is null) return Results.NotFound();
 
             var storyViews = new List<object>();
             var orphanTaskViews = new List<object>();
             var groomRunViews = new List<object>();
-            if (issues is not null)
+            if (owned.Value.Issues is not null)
             {
-                var all = await issues.ListAsync(new Forge.Core.IssueFilter(), ct);
+                var all = await owned.Value.Issues.ListAsync(new Forge.Core.IssueFilter(), ct);
                 var stories = all.Where(i => string.Equals(i.Type, "story", StringComparison.OrdinalIgnoreCase)
                     && string.Equals(i.ParentIssueId, spec.Id, StringComparison.Ordinal)).ToList();
                 var tasks = all.Where(i => !Forge.Core.AgentTaskTypes.IsContainer(i.Type)
@@ -140,9 +162,11 @@ public static class SpecEndpoints
         // Phase 2b: extracted-tables reads. The dashboard's Spec
         // side-panel renders diagrams from spec_diagram; the Graph
         // tab reads spec_touches; the Deps tab reads spec_dep.
-        app.MapGet("/api/specs/{id}/diagrams", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/specs/{id}/diagrams", async (string id, string? project, CancellationToken ct) =>
         {
-            var diagrams = await extractor.GetDiagramsAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            var diagrams = await owned.Value.Extractor.GetDiagramsAsync(id, ct);
             return Results.Json(diagrams.Select(d => new
             {
                 specId = d.SpecId,
@@ -153,9 +177,11 @@ public static class SpecEndpoints
             }).ToArray(), DashboardJson.Options);
         });
 
-        app.MapGet("/api/specs/{id}/touches", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/specs/{id}/touches", async (string id, string? project, CancellationToken ct) =>
         {
-            var touches = await extractor.GetTouchesAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            var touches = await owned.Value.Extractor.GetTouchesAsync(id, ct);
             return Results.Json(touches.Select(t => new
             {
                 specId = t.SpecId,
@@ -166,9 +192,11 @@ public static class SpecEndpoints
             }).ToArray(), DashboardJson.Options);
         });
 
-        app.MapGet("/api/specs/{id}/deps", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/specs/{id}/deps", async (string id, string? project, CancellationToken ct) =>
         {
-            var deps = await extractor.GetDepsAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            var deps = await owned.Value.Extractor.GetDepsAsync(id, ct);
             return Results.Json(deps.Select(d => new
             {
                 fromSpecId = d.FromSpecId,
@@ -207,9 +235,19 @@ public static class SpecEndpoints
             var spec = await JsonSerializer.DeserializeAsync<NewSpec>(ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (spec is null || string.IsNullOrWhiteSpace(spec.ProjectId) || string.IsNullOrWhiteSpace(spec.Title))
                 return Results.BadRequest(new { error = "projectId and title required" });
+            // Planning-lane routing: the row belongs to the store
+            // OWNED by spec.ProjectId, never the primary store.
+            var store = specs;
+            if (projectContexts is not null)
+            {
+                var owned = projectContexts.Find(spec.ProjectId);
+                if (owned is null)
+                    return Results.BadRequest(new { error = "unknown project", projectId = spec.ProjectId });
+                store = owned.Specs;
+            }
             try
             {
-                var created = await specs.CreateAsync(spec, ctx.RequestAborted);
+                var created = await store.CreateAsync(spec, ctx.RequestAborted);
                 return Results.Json(ToSpecView(created), DashboardJson.Options, statusCode: 201);
             }
             catch (ArgumentException ex)
@@ -221,8 +259,10 @@ public static class SpecEndpoints
         // PATCH supports two operations: replace the body (creates a new
         // version) OR change the status. The request body's `op` field
         // picks which one: "update_body" or "set_status".
-        app.MapPatch("/api/specs/{id}", async (string id, HttpContext ctx) =>
+        app.MapPatch("/api/specs/{id}", async (string id, HttpContext ctx, string? project) =>
         {
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
             using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
                 return Results.BadRequest(new { error = "expected object body" });
@@ -235,14 +275,14 @@ public static class SpecEndpoints
                 if (op == "set_status" && root.TryGetProperty("status", out var stEl)
                     && Enum.TryParse<SpecStatus>(stEl.GetString() ?? "", ignoreCase: true, out var newStatus))
                 {
-                    var updated = await specs.SetStatusAsync(id, newStatus, ctx.RequestAborted);
+                    var updated = await owned.Value.Specs.SetStatusAsync(id, newStatus, ctx.RequestAborted);
                     return Results.Json(ToSpecView(updated), DashboardJson.Options);
                 }
                 if (op == "update_body" && root.TryGetProperty("body", out var bodyEl))
                 {
                     var bodyText = bodyEl.GetString() ?? "";
                     var author = root.TryGetProperty("author", out var aEl) ? aEl.GetString() : null;
-                    var updated = await specs.UpdateBodyAsync(id, new UpdateSpecBody(bodyText, author), ctx.RequestAborted);
+                    var updated = await owned.Value.Specs.UpdateBodyAsync(id, new UpdateSpecBody(bodyText, author), ctx.RequestAborted);
                     return Results.Json(ToSpecView(updated), DashboardJson.Options);
                 }
                 return Results.BadRequest(new { error = "unknown op (use 'update_body' or 'set_status')" });
@@ -253,9 +293,11 @@ public static class SpecEndpoints
             }
         });
 
-        app.MapDelete("/api/specs/{id}", async (string id, CancellationToken ct) =>
+        app.MapDelete("/api/specs/{id}", async (string id, string? project, CancellationToken ct) =>
         {
-            await specs.DeleteAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            await owned.Value.Specs.DeleteAsync(id, ct);
             return Results.NoContent();
         });
 
@@ -264,9 +306,11 @@ public static class SpecEndpoints
         // (groomer.run.started / completed / failed) as it works.
         if (groomerFactory is not null)
         {
-            app.MapPost("/api/specs/{id}/groom", async (string id, string? force, CancellationToken ct) =>
+            app.MapPost("/api/specs/{id}/groom", async (string id, string? force, string? project, CancellationToken ct) =>
             {
-                var spec = await specs.GetAsync(id, ct);
+                var owned = ResolveOwned(project);
+                if (owned is null) return Results.NotFound(new { error = "project not found", project });
+                var spec = await owned.Value.Specs.GetAsync(id, ct);
                 if (spec is null)
                     return Results.NotFound(new { error = "spec_not_found" });
                 // P2.a: the manual groom endpoint now accepts any of
@@ -359,9 +403,11 @@ public static class SpecEndpoints
         // (Approve only on Draft, Start Grooming only on Approved |
         // Designed, etc.) so the UI doesn't ship its own copy of the
         // state machine.
-        app.MapGet("/api/specs/{id}/actions", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/specs/{id}/actions", async (string id, string? project, CancellationToken ct) =>
         {
-            var spec = await specs.GetAsync(id, ct);
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound(new { error = "project not found", project });
+            var spec = await owned.Value.Specs.GetAsync(id, ct);
             if (spec is null) return Results.NotFound();
 
             // Single source of truth: Core.SpecActions (the UI

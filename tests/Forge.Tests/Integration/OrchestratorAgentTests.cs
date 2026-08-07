@@ -106,6 +106,25 @@ public sealed class OrchestratorAgentTests : IDisposable
         foreach (var id in issueIds)
         {
             await _bundle.Sprints.AddIssueAsync(sprint.Id, id);
+            // The real assembler only adds groomed work; the dispatch
+            // loop refuses ungroomed parentless members (operator rule
+            // 2026-07-23/31). Mirror the invariant here.
+            var issue = await _issues.GetAsync(id);
+            if (issue is not null && issue.ParentIssueId is null
+                && issue.GetMetadata("groomed") is null)
+            {
+                var meta = new Dictionary<string, object>();
+                if (!string.IsNullOrWhiteSpace(issue.MetadataJson))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(issue.MetadataJson);
+                    foreach (var p in doc.RootElement.EnumerateObject())
+                    {
+                        meta[p.Name] = p.Value.GetRawText();
+                    }
+                }
+                meta["groomed"] = "true";
+                await _issues.TransitionAsync(id, issue.Status, error: null, metadata: meta);
+            }
         }
         return sprint.Id;
     }
@@ -200,7 +219,8 @@ public sealed class OrchestratorAgentTests : IDisposable
         // NOW a kimi-k3 task enters the sprint — mid-cooldown for
         // minimax. A global cooldown would hold it for 3 minutes;
         // per-model lets it claim immediately.
-        var ui = await _issues.CreateAsync(new NewIssue(Type: "ui", Title: "ui task", Description: "x"));
+        var ui = await _issues.CreateAsync(new NewIssue(Type: "ui", Title: "ui task", Description: "x",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
         await _bundle.Sprints.AddIssueAsync(sprintId, ui.Id);
 
         await WaitForAsync(async () =>
@@ -581,6 +601,129 @@ public sealed class OrchestratorAgentTests : IDisposable
             await Task.Delay(100);
         }
         Assert.Fail("condition not met within timeout");
+    }
+
+    [Fact]
+    public async Task ShouldLaunchReview_SkipsFreshMarkerAndInFlight()
+    {
+        // Off-loop reviews (2026-07-31): the sweep must not stack
+        // launches — a fresh reviewStartedAt marker (review running,
+        // possibly started pre-restart) or an in-memory in-flight
+        // entry both suppress relaunch.
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
+        var task = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "t", Description: "x"));
+
+        // No marker, nothing in flight → launch.
+        Assert.True(orch.ShouldLaunchReview(task, "test"));
+
+        // Fresh marker → skip.
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null,
+            new Dictionary<string, object> { ["reviewStartedAt"] = DateTime.UtcNow.ToString("O") });
+        task = (await _issues.GetAsync(task.Id))!;
+        Assert.False(orch.ShouldLaunchReview(task, "test"));
+
+        // Stale marker (crashed/restarted mid-review) → relaunch.
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null,
+            new Dictionary<string, object> { ["reviewStartedAt"] = DateTime.UtcNow.AddMinutes(-30).ToString("O") });
+        task = (await _issues.GetAsync(task.Id))!;
+        Assert.True(orch.ShouldLaunchReview(task, "test"));
+    }
+
+    private async Task<IssueRecord> SeedBlockedWatchAsync(Dictionary<string, object> metadata)
+    {
+        var task = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "watched", Description: "x"));
+        metadata["prNumber"] = "123";
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "blocked for test", metadata);
+        return (await _issues.GetAsync(task.Id))!;
+    }
+
+    [Fact]
+    public async Task WatchSweep_TransientReviewerBlock_AutoResumes()
+    {
+        // Unblock nudge: a task Blocked solely because the reviewer
+        // model was unavailable (blockedKind=reviewer-unavailable) is
+        // resumed by the sweep once the model is back — status back to
+        // InProgress, stale review bookkeeping cleared, marker removed.
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        BindMaf(orch);
+        var task = await SeedBlockedWatchAsync(new Dictionary<string, object>
+        {
+            ["blockedKind"] = Forge.Reviewer.PRWatcher.BlockedKindReviewerUnavailable,
+            ["reviewVerdict"] = "Error",
+            ["reviewSha"] = "abc123",
+            ["reviewRound"] = "3",
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var loop = orch.ExecuteAsync(cts.Token);
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            var t = await _issues.GetAsync(task.Id);
+            return t!.Status == IssueStatus.InProgress && t.GetMetadata("blockedKind") is null;
+        }, TimeSpan.FromSeconds(15));
+
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.InProgress, after.Status);
+        Assert.Equal("1", after.GetMetadata("autoResumeAttempts"));
+        Assert.Null(after.GetMetadata("blockedKind"));
+    }
+
+    [Fact]
+    public async Task WatchSweep_GenuineBlock_StaysBlocked()
+    {
+        // Operator-decision blocks (no blockedKind marker) must NOT be
+        // auto-resumed — the sweep leaves them alone.
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        BindMaf(orch);
+        var task = await SeedBlockedWatchAsync(new Dictionary<string, object>
+        {
+            ["reworkAttempts"] = "3",
+            ["reworkReason"] = "PR conflicts with the base branch",
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var loop = orch.ExecuteAsync(cts.Token);
+        await Task.Delay(4000);
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Blocked, after.Status);
+        Assert.Null(after.GetMetadata("autoResumeAttempts"));
+    }
+
+    [Fact]
+    public async Task WatchSweep_AutoResumeBudgetExhausted_ClearsMarkerAndStaysBlocked()
+    {
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        BindMaf(orch);
+        var task = await SeedBlockedWatchAsync(new Dictionary<string, object>
+        {
+            ["blockedKind"] = Forge.Reviewer.PRWatcher.BlockedKindReviewerUnavailable,
+            ["autoResumeAttempts"] = "3",
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var loop = orch.ExecuteAsync(cts.Token);
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            return (await _issues.GetAsync(task.Id))!.GetMetadata("blockedKind") is null;
+        }, TimeSpan.FromSeconds(15));
+
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Blocked, after.Status);
+        Assert.Null(after.GetMetadata("blockedKind"));
     }
 
     [Fact]

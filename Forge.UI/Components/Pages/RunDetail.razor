@@ -1,5 +1,6 @@
 @page "/runs/{RunId}"
 @inject HttpClient Http
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @implements IDisposable
 @using System.Net.Http.Json
 @using System.Text.Json
@@ -22,6 +23,7 @@
             <h1>@v.Role <span style="font-weight:400;color:var(--on-surface-variant)">run</span></h1>
             <div class="page-header__meta">
                 <span class="pill @(v.Status == "succeeded" ? "pill--completed" : v.Status == "running" ? "pill--inprogress" : "pill--failed")">@v.Status</span>
+                <span class="pill">@(v.ProjectId ?? "legacy")</span>
                 @if (v.ResumedSession == true)
                 {
                     <span class="pill pill--info">resumed session</span>
@@ -33,6 +35,16 @@
                 @v.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
                 · @(v.DurationMs is null ? "…" : Fmt(v.DurationMs.Value))
                 · @v.MessageCount msgs · @v.ToolCallCount tool calls
+                @if (v.InputTokens is not null)
+                {
+                    <span class="meta-text" style="margin-left:6px">
+                        · ↓@FmtTokens(v.InputTokens.Value) ↑@FmtTokens(v.OutputTokens ?? 0) tokens@(v.CacheReadTokens is > 0 ? $" · {FmtTokens(v.CacheReadTokens.Value)} cache-read" : "")
+                    </span>
+                }
+                @if (v.Status == "running" && v.CurrentContextTokens is > 0)
+                {
+                    <span class="pill pill--info" style="margin-left:6px">context @FmtTokens(v.CurrentContextTokens.Value)</span>
+                }
                 @if (v.Status == "running" && v.LastActivityAt is not null)
                 {
                     <span class="pill pill--inprogress" style="margin-left:6px">LIVE · active @Ago(v.LastActivityAt.Value) ago</span>
@@ -45,7 +57,7 @@
             <div class="page-header__actions">
                 @if (v.TaskId is not null)
                 {
-                    <a class="btn" href="/tasks/@v.TaskId">Task @v.TaskId</a>
+                    <a class="btn" href="@($"/tasks/{v.TaskId}{ProjectQuery(v.ProjectId)}")">Task @v.TaskId</a>
                 }
                 <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
             </div>
@@ -134,7 +146,11 @@
 </div>
 
 @code {
+    private static string ProjectQuery(string? projectId) =>
+        projectId is null ? "" : $"?project={Uri.EscapeDataString(projectId)}";
+
     [Parameter] public string RunId { get; set; } = "";
+    [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
 
     private RunDto? _run;
     private readonly CancellationTokenSource _pollCts = new();
@@ -160,7 +176,17 @@
     {
         try
         {
-            var resp = await Http.GetAsync($"/api/agent-runs/{RunId}");
+            // Run rows live in the OWNING project's store — read
+            // through the active-project lens (legacy rows pre-dating
+            // the per-project writers are in the primary store).
+            // ?project= deep-link wins over the shell lens — run rows
+            // are per-project, and a link from another project's
+            // surface must not resolve against the wrong store.
+            var effectiveProject = Project ?? ShellStore.Value.CurrentProjectId;
+            var lens = effectiveProject is { } pid
+                ? $"?projectId={Uri.EscapeDataString(pid)}"
+                : string.Empty;
+            var resp = await Http.GetAsync($"/api/agent-runs/{RunId}" + lens);
             if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
                 _notFound = true;
@@ -201,7 +227,8 @@
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
         string? Error, bool HasTranscript, DateTime? LastActivityAt,
-        string? Phase, bool? ResumedSession);
+        string? Phase, bool? ResumedSession, string? ProjectId,
+        long? InputTokens, long? OutputTokens, long? CacheReadTokens, long? CurrentContextTokens);
 
     private sealed record ChatMsg(string Kind, string Text, List<ToolCall> Calls);
     private sealed record ToolCall(string Name, string Args, string? Result);
@@ -297,4 +324,9 @@
         if (ts.TotalMinutes >= 1) return $"{(int)ts.TotalMinutes}m {ts.Seconds}s";
         return $"{(int)ts.TotalSeconds}s";
     }
+
+    private static string FmtTokens(long tokens)
+        => tokens >= 1_000_000 ? $"{tokens / 1_000_000.0:0.0}M"
+         : tokens >= 1_000 ? $"{tokens / 1_000.0:0.0}k"
+         : tokens.ToString();
 }

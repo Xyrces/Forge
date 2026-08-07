@@ -23,14 +23,13 @@ public class GateVerdictEndpointTests : IDisposable
         _dbPath = TempRoot.Instance.NewDbPath("gv-ep");
         _store = new IssueStore(_dbPath);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetTempPath(),
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(o => o.Listen(System.Net.IPAddress.Loopback, port));
+        builder.WebHost.ConfigureKestrel(o => o.Listen(System.Net.IPAddress.Loopback, 0));
 
         var app = builder.Build();
         GateVerdictEndpoints.MapGateVerdictEndpoints(app, _store, 
@@ -38,7 +37,7 @@ public class GateVerdictEndpointTests : IDisposable
 
         _host = app;
         _host.Start();
-        _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+        _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_host.GetPort()}/") };
     }
 
     public void Dispose()

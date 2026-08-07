@@ -180,14 +180,18 @@ public class StartupRecoveryTests : IDisposable
     }
 
     [Fact]
-    public void Classify_PreCheckpoint_LeavesAlone()
+    public void Classify_PreCheckpoint_RequeuesForRedispatch()
     {
+        // No checkpoint = pre-v11 row OR a terminal transition cleared
+        // it. Either way an InProgress claim at boot is orphaned and
+        // the dispatch loop only claims Pending — re-queue
+        // (2026-08-01: task-18 stranded by the old leave-alone).
         var issue = new IssueRecord("i1", "i1", "task", "x", null,
             IssueStatus.InProgress, 2, "forge",
             DateTime.UtcNow, DateTime.UtcNow, null, "{}", ParentIssueId: null,
             DispatchCheckpoint: null, CheckpointAt: null, RecoveryAttempts: 0);
         var d = _recovery.Classify(issue);
-        Assert.Equal(RecoveryAction.LeftAlone, d.Action);
+        Assert.Equal(RecoveryAction.Replay, d.Action);
     }
 
     [Fact]
@@ -196,6 +200,54 @@ public class StartupRecoveryTests : IDisposable
         var id = await SeedIssueAsync(DispatchCheckpoint.PrOpened, withPrNumber: true);
         var issue = (await _issues.GetAsync(id))!;
         var d = _recovery.Classify(issue);
+        Assert.Equal(RecoveryAction.LeftAlone, d.Action);
+    }
+
+    private static IssueRecord PrIssue(string metadataJson, DispatchCheckpoint? checkpoint)
+        => new("i1", "i1", "task", "x", null,
+            IssueStatus.InProgress, 2, "forge",
+            DateTime.UtcNow, DateTime.UtcNow, null, metadataJson, ParentIssueId: null,
+            DispatchCheckpoint: checkpoint, CheckpointAt: null, RecoveryAttempts: 0);
+
+    [Fact]
+    public void Classify_PrNumber_PROpenState_LeavesAlone()
+    {
+        var d = _recovery.Classify(PrIssue(
+            """{"prNumber":"758","state":"PROpen"}""", DispatchCheckpoint.PrOpened));
+        Assert.Equal(RecoveryAction.LeftAlone, d.Action);
+    }
+
+    [Fact]
+    public void Classify_PrNumber_ReworkQueued_FallsThroughToCheckpoint()
+    {
+        // Live 2026-07-31: a rework round whose run died (InProgress +
+        // ReworkQueued + prNumber) must NOT be left alone as
+        // "watch-owned" — the watch already fired; engineering owes
+        // the round. Checkpoint classification decides instead.
+        var worktree = Path.Combine(Path.GetTempPath(), $"ph-rec-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(worktree);
+        try
+        {
+            var meta = $$"""{"prNumber":"758","state":"ReworkQueued","worktreePath":"{{worktree.Replace("\\", "\\\\")}}"}""";
+            var d = _recovery.Classify(PrIssue(meta, DispatchCheckpoint.WorktreeAcquired));
+            Assert.Equal(RecoveryAction.Replay, d.Action);
+
+            // The real live shape: the checkpoint stays PrOpened
+            // across rework rounds (same PR) — that path re-queues too.
+            var d2 = _recovery.Classify(PrIssue(meta, DispatchCheckpoint.PrOpened));
+            Assert.Equal(RecoveryAction.Replay, d2.Action);
+        }
+        finally
+        {
+            try { Directory.Delete(worktree, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Classify_PrNumber_MissingState_ConservativelyWatchOwned()
+    {
+        var d = _recovery.Classify(PrIssue(
+            """{"prNumber":"758"}""", DispatchCheckpoint.PrOpened));
         Assert.Equal(RecoveryAction.LeftAlone, d.Action);
     }
 
@@ -344,7 +396,7 @@ public class StartupRecoveryTests : IDisposable
     public async Task RunAsync_Sweep_SixFixtureStates()
     {
         // Build 6 issues in different states:
-        //  1. claimed (just claimed, no worktree yet) -> left alone
+        //  1. claimed (just claimed, no worktree yet) -> requeued to Pending
         //  2. worktree_acquired (worktree exists) -> requeued to Pending
         //  3. worktree_acquired (worktree missing) -> failed
         //  4. agent_completed -> replay -> pr_opened
@@ -380,7 +432,10 @@ public class StartupRecoveryTests : IDisposable
         Assert.Equal(6, actions.Count);
 
         // Verify each issue's final state.
-        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(claimedOnly.Id))!.Status);
+        // claimed is requeued to Pending for re-dispatch (boot-time
+        // orphan: no live runs exist at recovery time, and the
+        // dispatch loop only claims Pending).
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(claimedOnly.Id))!.Status);
         // wtOk is requeued to Pending for re-dispatch.
         Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(wtOk))!.Status);
         // wt_missing is left_alone (recoveryAttempts < MaxAttempts -> retry).

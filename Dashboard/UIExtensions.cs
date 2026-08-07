@@ -50,6 +50,8 @@ public static class UIExtensions
         // address as the typed clients.
         services.AddHttpClient("ForgeApi", c => c.BaseAddress = localBaseAddress);
         services.AddScoped(sp => sp.GetRequiredService<IHttpClientFactory>().CreateClient("ForgeApi"));
+        // Server-push board updates (SSE /api/events → components).
+        services.AddScoped<Forge.Dashboard.Services.DashboardEventStream>();
         return services;
     }
 

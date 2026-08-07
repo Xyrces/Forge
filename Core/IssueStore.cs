@@ -169,7 +169,18 @@ public interface IIssueStore
     /// clears it, per the ReadyAsync rule).
     /// </summary>
     Task<HashSet<string>> ListBlockersOfAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default);
-}
+
+    /// <summary>Map of blocked id → OPEN blocker ids (kind=blocks,
+    /// blocker not Completed/Closed), in one query. Powers the
+    /// sprint board's "blocked by task-X" badge.</summary>
+    Task<IReadOnlyDictionary<string, IReadOnlyList<string>>> OpenBlockersAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default);
+
+    /// <summary>
+    /// Reverse of <see cref="OpenBlockersAsync"/>: given candidate
+    /// BLOCKER ids, returns the subset that block at least one
+    /// still-open issue (the set the ready-queue boost applies to).
+    /// </summary>
+    Task<HashSet<string>> OpenBlockingAsync(IReadOnlyCollection<string> blockerIds, CancellationToken ct = default);}
 
 /// <summary>
 /// SQLite-backed issue store. WAL mode + busy_timeout make the store safe
@@ -182,7 +193,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 25;
+    public const int CurrentSchemaVersion = 31;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -373,7 +384,13 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 transcript_json  TEXT,
                 last_activity_at TEXT,
                 phase            TEXT,
-                resumed_session  INTEGER
+                resumed_session  INTEGER,
+                project_id       TEXT,
+                dispatch_id      TEXT,
+                input_tokens     INTEGER,
+                output_tokens    INTEGER,
+                cache_read_tokens INTEGER,
+                current_context_tokens INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_agent_run_started ON agent_run(started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_agent_run_task ON agent_run(task_id);
@@ -900,6 +917,40 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // pause/resume runs.
         ApplyV25AgentRunPhase(conn);
 
+        // v26 (post-init): agent_run.project_id — run attribution.
+        // agent_run stays a single GLOBAL registry (all projects'
+        // runners write here), so the Runs page breaks runs down by
+        // project via the column, not by per-project stores. NULL =
+        // pre-v26 historical run.
+        ApplyV26AgentRunProject(conn);
+
+        // v27 (post-init): followup_draft — follow-ups are TRACKED
+        // during a sprint (no live task rows), materialized into real
+        // tasks at sprint completion (operator model 2026-07-31).
+        ApplyV27FollowUpDraft(conn);
+
+        // v28 (post-init): watchdog_finding — the watchdog scanner's
+        // deduped open/resolved findings (alert-only v1).
+        ApplyV28WatchdogFinding(conn);
+
+        // v29 (post-init): followup_draft.disposition +
+        // disposition_detail — the completion-time triage records
+        // what happened to each draft (materialized/merged/epic/
+        // discarded).
+        ApplyV29FollowUpDraftDisposition(conn);
+
+        // v30 (post-init): agent_run.dispatch_id — the correlation id
+        // threading a dispatch through claim → worktree → run → push
+        // (postmortem tracing, operator 2026-08-01).
+        ApplyV30AgentRunDispatchId(conn);
+
+        // v31 (post-init): agent_run token observability —
+        // input/output/cache-read totals at finish + the live
+        // context size per heartbeat (operator 2026-08-06: "do we
+        // have insight?" — quota burn was invisible; only chars÷4
+        // proxies existed).
+        ApplyV31AgentRunTokens(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -1082,7 +1133,13 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 transcript_json  NVARCHAR(MAX) NULL,
                 last_activity_at NVARCHAR(64)  NULL,
                 phase            NVARCHAR(64)  NULL,
-                resumed_session  INT           NULL
+                resumed_session  INT           NULL,
+                project_id       NVARCHAR(128) NULL,
+                dispatch_id      NVARCHAR(64)  NULL,
+                input_tokens     BIGINT        NULL,
+                output_tokens    BIGINT        NULL,
+                cache_read_tokens BIGINT       NULL,
+                current_context_tokens BIGINT  NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_agent_run_started' AND object_id = OBJECT_ID('{{d.Table("agent_run")}}'))
                 CREATE INDEX idx_agent_run_started ON {{d.Table("agent_run")}}(started_at DESC);
@@ -1406,6 +1463,53 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             cmd.ExecuteNonQuery();
         }
 
+        // v27+: followup_draft — follow-ups tracked during a sprint,
+        // materialized at completion (operator model 2026-07-31).
+        {
+            using var cmdDraft = conn.CreateCommand();
+            cmdDraft.CommandText = $$"""
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'followup_draft')
+            CREATE TABLE {{d.Table("followup_draft")}} (
+                id              INT IDENTITY(1,1) PRIMARY KEY,
+                sprint_id       NVARCHAR(128) NULL,
+                source_issue_id NVARCHAR(128) NOT NULL,
+                source_role     NVARCHAR(64) NOT NULL,
+                title           NVARCHAR(512) NOT NULL,
+                description     NVARCHAR(MAX) NOT NULL,
+                priority        INT NOT NULL DEFAULT 3,
+                blocks_issue_id NVARCHAR(128) NULL,
+                created_at      NVARCHAR(40) NOT NULL,
+                consumed_at     NVARCHAR(40) NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_followup_draft_open' AND object_id = OBJECT_ID('{{d.Table("followup_draft")}}'))
+                CREATE INDEX ix_followup_draft_open ON {{d.Table("followup_draft")}}(consumed_at, sprint_id);
+            """;
+            cmdDraft.ExecuteNonQuery();
+        }
+
+        // v28+: watchdog_finding — the watchdog scanner's deduped
+        // findings (alert-only v1).
+        {
+            using var cmdWatch = conn.CreateCommand();
+            cmdWatch.CommandText = $$"""
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'watchdog_finding')
+            CREATE TABLE {{d.Table("watchdog_finding")}} (
+                id            INT IDENTITY(1,1) PRIMARY KEY,
+                kind          NVARCHAR(64)  NOT NULL,
+                target_id     NVARCHAR(128) NOT NULL,
+                severity      NVARCHAR(16)  NOT NULL,
+                detail        NVARCHAR(MAX) NOT NULL,
+                status        NVARCHAR(16)  NOT NULL,
+                first_seen_at NVARCHAR(40)  NOT NULL,
+                last_seen_at  NVARCHAR(40)  NOT NULL,
+                resolved_at   NVARCHAR(40)  NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_watchdog_finding_open' AND object_id = OBJECT_ID('{{d.Table("watchdog_finding")}}'))
+                CREATE INDEX ix_watchdog_finding_open ON {{d.Table("watchdog_finding")}}(status, kind, target_id);
+            """;
+            cmdWatch.ExecuteNonQuery();
+        }
+
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the
         // migrations' guards make them no-ops there). Each applied
@@ -1540,6 +1644,105 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }
     }
 
+    private void ApplyV30AgentRunDispatchId(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'dispatch_id' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE agent_run ADD COLUMN dispatch_id TEXT;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV31AgentRunTokens(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'input_tokens' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText =
+            "ALTER TABLE agent_run ADD COLUMN input_tokens INTEGER;" +
+            "ALTER TABLE agent_run ADD COLUMN output_tokens INTEGER;" +
+            "ALTER TABLE agent_run ADD COLUMN cache_read_tokens INTEGER;" +
+            "ALTER TABLE agent_run ADD COLUMN current_context_tokens INTEGER;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV29FollowUpDraftDisposition(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('followup_draft') WHERE name = 'disposition' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText =
+            "ALTER TABLE followup_draft ADD COLUMN disposition TEXT;" +
+            "ALTER TABLE followup_draft ADD COLUMN disposition_detail TEXT;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV28WatchdogFinding(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='watchdog_finding'";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var create = conn.CreateCommand();
+        create.CommandText =
+            "CREATE TABLE watchdog_finding (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "kind TEXT NOT NULL, " +
+            "target_id TEXT NOT NULL, " +
+            "severity TEXT NOT NULL, " +
+            "detail TEXT NOT NULL, " +
+            "status TEXT NOT NULL, " +
+            "first_seen_at TEXT NOT NULL, " +
+            "last_seen_at TEXT NOT NULL, " +
+            "resolved_at TEXT" +
+            ");" +
+            "CREATE INDEX ix_watchdog_finding_open ON watchdog_finding(status, kind, target_id);";
+        create.ExecuteNonQuery();
+    }
+
+    private void ApplyV27FollowUpDraft(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='followup_draft'";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var create = conn.CreateCommand();
+        create.CommandText =
+            "CREATE TABLE followup_draft (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "sprint_id TEXT, " +
+            "source_issue_id TEXT NOT NULL, " +
+            "source_role TEXT NOT NULL, " +
+            "title TEXT NOT NULL, " +
+            "description TEXT NOT NULL, " +
+            "priority INTEGER NOT NULL DEFAULT 3, " +
+            "blocks_issue_id TEXT, " +
+            "created_at TEXT NOT NULL, " +
+            "consumed_at TEXT" +
+            ");" +
+            "CREATE INDEX ix_followup_draft_open ON followup_draft(consumed_at, sprint_id);";
+        create.ExecuteNonQuery();
+    }
+
+    private void ApplyV26AgentRunProject(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('agent_run') WHERE name = 'project_id' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using (var alter = conn.CreateCommand())
+        {
+            alter.CommandText = "ALTER TABLE agent_run ADD COLUMN project_id TEXT";
+            alter.ExecuteNonQuery();
+        }
+    }
+
     private void ApplyLegacyKiloRenames(SqliteConnection conn)
     {
         using (var probe = conn.CreateCommand())
@@ -1648,6 +1851,20 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             )
             """;
 
+        // Operator rule 2026-07-31: work that unblocks OTHER open work
+        // is the critical path — it queues ahead of same-priority
+        // (and higher-priority) non-blockers. CASE WHEN keeps this
+        // portable across SQLite and T-SQL (no bare boolean ORDER BY).
+        var blockerBoost = $"""
+            CASE WHEN EXISTS (
+                SELECT 1 FROM {T("issue_dep")} d
+                INNER JOIN {T("issue")} x ON x.id = d.blocked_id
+                WHERE d.blocker_id = i.id
+                  AND d.kind = 'blocks'
+                  AND x.status NOT IN ('Completed', 'Closed')
+            ) THEN 0 ELSE 1 END
+            """;
+
         if (sprintId is null)
         {
             await using var conn = await _db.OpenAsync(ct);
@@ -1658,7 +1875,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                        dispatch_checkpoint, checkpoint_at, recovery_attempts
                 FROM {T("issue")} i
                 WHERE status = 'Pending' AND {notBlockedPredicate}
-                ORDER BY priority ASC, created_at ASC
+                ORDER BY {blockerBoost}, priority ASC, created_at ASC
                 """;
             var list = new List<IssueRecord>();
             await using var rd = await cmd.ExecuteReaderAsync(ct);
@@ -1675,7 +1892,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             FROM {T("issue")} i
             INNER JOIN {T("sprint_issue")} si ON i.id = si.issue_id
             WHERE i.status = 'Pending' AND si.sprint_id = @sid AND {notBlockedPredicate}
-            ORDER BY i.priority ASC, i.created_at ASC
+            ORDER BY {blockerBoost}, i.priority ASC, i.created_at ASC
             """;
         cmd2.AddParam("@sid", sprintId);
         var list2 = new List<IssueRecord>();
@@ -1751,9 +1968,20 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             // Terminal transitions clear the dispatch_checkpoint so
             // a future StartupRecovery sweep doesn't try to replay
             // an issue that's already completed / failed / closed.
+            //
+            // assignee means "held by a live run RIGHT NOW" — only
+            // InProgress rows may carry it. Every other transition
+            // (terminal, Blocked, requeue-to-Pending) releases the
+            // hold; otherwise Failed/Blocked cards render an agent
+            // chip on the board long after the run died, and the
+            // operator can't trust what the board says is held
+            // (operator 2026-08-01: task-9/12/13 Failed for hours
+            // still showing assignee=forge).
             cmd.CommandText = isTerminal
-                ? $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, closed_at=@now, metadata_json=@meta, dispatch_checkpoint=NULL, checkpoint_at=NULL WHERE id=@id"""
-                : $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, metadata_json=@meta WHERE id=@id""";
+                ? $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, closed_at=@now, metadata_json=@meta, dispatch_checkpoint=NULL, checkpoint_at=NULL, assignee=NULL WHERE id=@id"""
+                : to != IssueStatus.InProgress
+                    ? $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, metadata_json=@meta, assignee=NULL WHERE id=@id"""
+                    : $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, metadata_json=@meta WHERE id=@id""";
             cmd.AddParam("@to", to.ToString());
             cmd.AddParam("@now", now.ToString(DateFormat));
             cmd.AddParam("@meta", metadataJson);
@@ -1808,16 +2036,18 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        // InProgress + assignee=forge are the dispatch candidates
-        // the recoverer inspects. Assignee is the durable marker
-        // identifying the orchestrator's runner; other agents
-        // (reviewer, manual) don't
-        // go through the EngineeringDispatchWorkflow so they
-        // don't need recovery.
+        // InProgress with ANY assignee is a held claim the recoverer
+        // inspects. assignee means "held by a live run" (2026-08-01
+        // invariant) and only the engineering dispatch path claims —
+        // reviewer/manual work never touches the column. The legacy
+        // filter was the literal 'forge'; after the claim-identity
+        // change (role names as assignee) that filter made every
+        // engineering orphan invisible to boot recovery (observed
+        // live 2026-08-01: task-18, scanned=0).
         cmd.CommandText = $"""
             SELECT id, short_id, type, title, description, status, priority, assignee, created_at, updated_at, closed_at, metadata_json, parent_issue_id, dispatch_checkpoint, checkpoint_at, recovery_attempts
             FROM {T("issue")}
-            WHERE status = 'InProgress' AND assignee = 'forge'
+            WHERE status = 'InProgress' AND assignee IS NOT NULL
             ORDER BY updated_at ASC
             """;
         var list = new List<IssueRecord>();
@@ -2010,6 +2240,58 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) set.Add(rd.GetString(0));
         return set;
+    }
+
+    public async Task<HashSet<string>> OpenBlockingAsync(IReadOnlyCollection<string> blockerIds, CancellationToken ct = default)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (blockerIds.Count == 0) return set;
+        await using var conn = await _db.OpenAsync(ct);
+        var names = blockerIds.Select((_, i) => $"@id{i}").ToArray();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT DISTINCT d.blocker_id
+            FROM {T("issue_dep")} d
+            INNER JOIN {T("issue")} x ON x.id = d.blocked_id
+            WHERE d.blocker_id IN ({string.Join(",", names)})
+              AND d.kind = 'blocks'
+              AND x.status NOT IN ('Completed', 'Closed')
+            """;
+        var i = 0;
+        foreach (var id in blockerIds) cmd.AddParam(names[i++], id);
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct)) set.Add(rd.GetString(0));
+        return set;
+    }
+
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<string>>> OpenBlockersAsync(
+        IReadOnlyCollection<string> blockedIds, CancellationToken ct = default)
+    {        var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        if (blockedIds.Count == 0) return map;
+        await using var conn = await _db.OpenAsync(ct);
+        var names = blockedIds.Select((_, i) => $"@id{i}").ToArray();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT d.blocked_id, d.blocker_id
+            FROM {T("issue_dep")} d
+            INNER JOIN {T("issue")} b ON b.id = d.blocker_id
+            WHERE d.blocked_id IN ({string.Join(",", names)})
+              AND d.kind = 'blocks'
+              AND b.status NOT IN ('Completed', 'Closed')
+            ORDER BY d.blocked_id, d.blocker_id
+            """;
+        var i = 0;
+        foreach (var id in blockedIds) cmd.AddParam(names[i++], id);
+        var lists = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct))
+        {
+            if (!lists.TryGetValue(rd.GetString(0), out var l))
+                lists[rd.GetString(0)] = l = new List<string>();
+            if (!l.Contains(rd.GetString(1))) l.Add(rd.GetString(1));
+        }
+        foreach (var (k, v) in lists) map[k] = v;
+        return map;
     }
 
     private async Task<int> NextShortIdAsync(DbConnection conn, DbTransaction tx, string type)

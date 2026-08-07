@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Forge.AgentTools;
@@ -46,6 +47,8 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
     private readonly AgentRunStore? _runs;
+    private readonly Func<string?, AgentRunStore?>? _runsByProject;
+    private readonly Func<string?, IIssueStore?>? _issueStoreLookup;
     private readonly RoleModelOverrides? _modelOverrides;
     private readonly Configuration.GateOptions _gateOptions;
 
@@ -94,6 +97,20 @@ public sealed class MafAgentRunner : IAgentRunner
         ISecretStore? secrets = null,
         IIssueStore? issues = null,
         AgentRunStore? runs = null,
+        // Per-project run registry (operator rule 2026-07-30: run
+        // history is workload data and belongs to the OWNING project's
+        // schema). Resolves the AgentRunStore for the run's project;
+        // the result is used for the WHOLE run (start + heartbeats +
+        // finish). Null/unknown project → the construction-time store
+        // (legacy single-registry behavior for unattributed runs).
+        Func<string?, AgentRunStore?>? runsByProject = null,
+        // Per-project follow-up store (operator rule 2026-07-31:
+        // file_followup rows are workload data for the RUN's project —
+        // the construction-time store is the primary, which stranded
+        // porthorizon follow-ups in the forge backlog, where forge's
+        // assembler sprinted + dispatched them against the forge repo).
+        // Resolves by context projectId; null/unknown → _issues.
+        Func<string?, IIssueStore?>? issueStoreLookup = null,
         RoleModelOverrides? modelOverrides = null,
         Configuration.GateOptions? gates = null)
     {
@@ -114,6 +131,8 @@ public sealed class MafAgentRunner : IAgentRunner
         _secrets = secrets;
         _issues = issues;
         _runs = runs;
+        _runsByProject = runsByProject;
+        _issueStoreLookup = issueStoreLookup;
         _modelOverrides = modelOverrides;
         _gateOptions = gates ?? new Configuration.GateOptions();
     }
@@ -132,6 +151,9 @@ public async Task<AgentRunResult> RunAsync(
         var roleDef = _roles.ForType(role);
         var projectId = ResolveContextString(context, "projectId");
         if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
+        // The run registry row belongs to the OWNING project's schema:
+        // one store for the whole run (start + heartbeats + finish).
+        var runStore = _runsByProject?.Invoke(projectId) ?? _runs;
         var roleInstructions = LoadRoleInstructions(roleDef.AgentName, projectId);
         var skillInstructions = _skills is null
             ? string.Empty
@@ -168,6 +190,7 @@ public async Task<AgentRunResult> RunAsync(
             // deterministic mutation classifier. Fast-path (mechanical
             // rework rounds) auto-approves on submit.
             Func<bool>? mutationsAllowed = null;
+            string? mutationRefusalMessage = null;
             if (role is AgentType.CoreDev or AgentType.ClientDev)
             {
                 gateState = new Gates.RunGateState
@@ -176,7 +199,7 @@ public async Task<AgentRunResult> RunAsync(
                         ResolveContextString(context, "planFastPath"), "true", StringComparison.OrdinalIgnoreCase),
                 };
                 var gatePipeline = new Gates.RunGatePipeline(
-                    _gateOptions, _memory, name => BuildRunGate(name), _logger);
+                    _gateOptions, _memory, name => BuildRunGate(name, projectId), _logger);
                 var projectTerritories = projectId is not null && _projectTerritoryLookup is not null
                     ? _projectTerritoryLookup(projectId)
                     : null;
@@ -196,9 +219,30 @@ public async Task<AgentRunResult> RunAsync(
                     logger: _logger).AsAIFunction());
                 mutationsAllowed = () => gateState.PlanApproved;
             }
+            else if (role is AgentType.Reviewer)
+            {
+                // Reviewer is read-only by policy: it gets the PR
+                // worktree for evidence-gathering (the review prompt
+                // diff paste is truncated — the reviewer must inspect
+                // the branch itself), with mutations hard-refused.
+                mutationsAllowed = () => false;
+                mutationRefusalMessage =
+                    "exit=-1\nstdout:\nstderr: REFUSED — the Reviewer role is read-only. Use read-only commands: git log/diff/show/status/fetch, cat, sed -n, grep, find, ls, dotnet build/test.";
+            }
 
             tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv,
-                mutationsAllowed: mutationsAllowed).AsAIFunction());
+                mutationsAllowed: mutationsAllowed, mutationRefusalMessage: mutationRefusalMessage).AsAIFunction());
+        }
+
+        // Reviewer drill-in: the dispatcher hands the FULL diff via
+        // context (never inlined whole); the pr_diff tool pages it.
+        if (role is AgentType.Reviewer
+            && context is not null
+            && context.TryGetValue("reviewDiff", out var reviewDiffObj)
+            && reviewDiffObj is string reviewDiff
+            && reviewDiff.Length > 0)
+        {
+            tools.Add(new AgentTools.PrDiffTool(reviewDiff).AsAIFunction());
         }
 
         // P5.1 — ArtifactReadTool is always available when the
@@ -229,7 +273,23 @@ public async Task<AgentRunResult> RunAsync(
             && issueIdObj is string followUpSource
             && !string.IsNullOrWhiteSpace(followUpSource))
         {
-            tools.Add(new FollowUpTool(_issues, followUpSource, role.ToString()).AsAIFunction());
+            // The follow-up belongs to the RUN's project store, not
+            // the runner's construction-time (primary) store.
+            var followUpStore = (_issueStoreLookup is not null
+                    && context.TryGetValue("projectId", out var fpidObj)
+                    && fpidObj is string fpid
+                    ? _issueStoreLookup(fpid)
+                    : null) ?? _issues;
+            // Operator model 2026-07-31: deferred findings are tracked
+            // as drafts on the active sprint (materialized at
+            // completion); only blocksIssueId filings become real
+            // tasks immediately.
+            var drafts = new Core.FollowUpDraftStore((Core.IssueStore)followUpStore);
+            var followUpSprints = new Core.SprintStore((Core.IssueStore)followUpStore);
+            tools.Add(new FollowUpTool(followUpStore, followUpSource, role.ToString(),
+                drafts,
+                activeSprintId: async ct2 => (await followUpSprints.GetActiveAsync(ct2))?.Id,
+                sprints: followUpSprints).AsAIFunction());
         }
 
         // Run identity + start timestamp must exist BEFORE the chat
@@ -260,14 +320,17 @@ public async Task<AgentRunResult> RunAsync(
             return null;
         }
 
-        var chatClient = _chatClientFactory.Create(_config, role);
+        var chatClient = _chatClientFactory.Create(_config, role, projectId);
         // Per-round-trip activity heartbeat. Wraps the RAW provider
         // client so MAF's internal model→tool→model loop (inside one
         // agent.RunAsync) is visible in near-real-time; wrapping the
-        // outer client would only fire once per RunAsync call.
-        var trackedClient = _runs is null
-            ? chatClient
-            : new ActivityTrackingChatClient(chatClient, runId, _runs, ComputePhase);
+        // outer client would only fire once per RunAsync call. Also
+        // the token accounting point: provider usage is captured per
+        // round-trip here and persisted to the run row (v31).
+        var tracker = runStore is null
+            ? null
+            : new ActivityTrackingChatClient(chatClient, runId, runStore, ComputePhase);
+        var trackedClient = (IChatClient?)tracker ?? chatClient;
         // Wrap with function invocation so MAF actually executes the
         // tools the model calls (instead of just leaving them in the
         // response). Cap raised from the 40 default: complex tasks
@@ -276,9 +339,7 @@ public async Task<AgentRunResult> RunAsync(
         // no-diff path marked the task done (observed live: all six
         // tasks of the dispatcher-resilience sprint hollow-completed).
         var chatClientWithTools = tools.Count > 0
-            ? new ChatClientBuilder(trackedClient)
-                .UseFunctionInvocation(configure: c => c.MaximumIterationsPerRequest = 200)
-                .Build()
+            ? BuildToolLoopClient(trackedClient, role, projectId)
             : trackedClient;
 
         var agent = new ChatClientAgent(
@@ -316,13 +377,14 @@ public async Task<AgentRunResult> RunAsync(
         // plus a coarser stitch here after each continuation) and the
         // full transcript is persisted when the run finishes (partial
         // transcript on failure). Best-effort — never breaks a run.
-        if (_runs is not null)
+        if (runStore is not null)
         {
             try
             {
-                var (_, runModel, _) = _config.ResolveEffective(role, _modelOverrides);
-                await _runs.StartAsync(runId, runTaskId, role.ToString(), runModel, ct,
-                    resumedSession: resumedSession);
+                var (_, runModel, _) = _config.ResolveEffective(role, _modelOverrides, projectId);
+                await runStore.StartAsync(runId, runTaskId, role.ToString(), runModel, ct,
+                    resumedSession: resumedSession, projectId: projectId,
+                    dispatchId: ResolveContextString(context, "dispatchId"));
             }
             catch (Exception ex)
             {
@@ -342,12 +404,29 @@ public async Task<AgentRunResult> RunAsync(
         // a run that dies on turn 8 of 10 still leaves a resumable
         // conversation for the retry.
         var sessionPersisted = false;
+        // Poisoned-session recovery: a run that dies mid-tool-loop
+        // persists a session whose tail is an assistant tool_calls
+        // message with no tool responses; every resume then 400s
+        // deterministically ("must be followed by tool messages") —
+        // observed live 2026-07-30: porthorizon task-20 burned two
+        // dispatch cycles on the same poisoned session. Detect the
+        // provider error, drop the stored session, and restart COLD
+        // once. The flag also suppresses the finally's persist, which
+        // would otherwise re-poison the key we just deleted.
+        var sessionPoisoned = false;
+        // Set by the poison catch so the finally skips disposing the
+        // chat client — the cold restart reuses it. Cleared on loop
+        // re-entry so the retry's own finally disposes normally.
+        var restartPending = false;
 
+        for (var poisonRestart = 0; ; poisonRestart++)
+        {
+        restartPending = false;
         try
         {
             var response = await agent.RunAsync(message, session, cancellationToken: ct);
             transcriptMessages.AddRange(response.Messages);
-            await HeartbeatAsync(runId, transcriptMessages);
+            await HeartbeatAsync(runStore, runId, transcriptMessages);
 
             // minimax-m3 quirk: near the end of long tool-call runs the
             // model sometimes emits its next tool call as literal text
@@ -372,7 +451,7 @@ public async Task<AgentRunResult> RunAsync(
                     session, cancellationToken: ct);
                 transcriptMessages.Add(nudge);
                 transcriptMessages.AddRange(response.Messages);
-                await HeartbeatAsync(runId, transcriptMessages);
+                await HeartbeatAsync(runStore, runId, transcriptMessages);
             }
             var elapsed = DateTime.UtcNow - startedAt;
 
@@ -432,7 +511,7 @@ public async Task<AgentRunResult> RunAsync(
                     response = await agent.RunAsync(feedback, session, cancellationToken: ct);
                     transcriptMessages.Add(feedback);
                     transcriptMessages.AddRange(response.Messages);
-                    await HeartbeatAsync(runId, transcriptMessages);
+                    await HeartbeatAsync(runStore, runId, transcriptMessages);
                 }
             }
 
@@ -475,17 +554,20 @@ public async Task<AgentRunResult> RunAsync(
                 // best-effort
             }
 
-            if (_runs is not null)
+            if (runStore is not null)
             {
                 try
                 {
                     var transcript = BuildTranscriptJson(transcriptMessages);
                     var toolCalls = transcriptMessages.Sum(m =>
                         m.Contents.OfType<Microsoft.Extensions.AI.FunctionCallContent>().Count());
-                    await _runs.FinishAsync(runId, "succeeded",
+                    await runStore.FinishAsync(runId, "succeeded",
                         (long)elapsed.TotalMilliseconds,
                         transcriptMessages.Count, toolCalls, text.Length,
-                        error: null, transcriptJson: transcript, ct: CancellationToken.None);
+                        error: null, transcriptJson: transcript, ct: CancellationToken.None,
+                        inputTokens: tracker?.TotalInputTokens,
+                        outputTokens: tracker?.TotalOutputTokens,
+                        cacheReadTokens: tracker?.TotalCacheReadTokens);
                 }
                 catch (Exception ex)
                 {
@@ -496,11 +578,27 @@ public async Task<AgentRunResult> RunAsync(
             return new AgentRunResult(
     Text: text,
     SessionId: newSessionId,
-    InputTokens: 0,
-    OutputTokens: 0,
+    InputTokens: tracker?.TotalInputTokens ?? 0,
+    OutputTokens: tracker?.TotalOutputTokens ?? 0,
     Elapsed: elapsed);
         }
-        catch (Exception ex) when (_runs is not null)
+        catch (Exception ex) when (poisonRestart == 0 && IsPoisonedSessionError(ex))
+        {
+            _logger.LogWarning(
+                "Role {Role}: persisted session is unusable (provider rejected it: dangling tool_calls or transcript over the request cap); dropping it and restarting cold",
+                role);
+            if (sessionKey is not null && _memory is not null)
+            {
+                try { await _memory.ForgetAsync(sessionKey, CancellationToken.None); }
+                catch (Exception forgetEx) { _logger.LogDebug(forgetEx, "poisoned session delete failed for {Key}; continuing", sessionKey); }
+            }
+            sessionPoisoned = true;
+            restartPending = true;
+            session = await agent.CreateSessionAsync(ct);
+            transcriptMessages = new List<ChatMessage> { message };
+            // Loop iterates: one cold restart with the same prompt.
+        }
+        catch (Exception ex) when (runStore is not null)
         {
             try
             {
@@ -515,11 +613,14 @@ public async Task<AgentRunResult> RunAsync(
                 var textChars = transcriptMessages
                     .Where(m => m.Role == ChatRole.Assistant)
                     .Sum(m => (m.Text ?? "").Length);
-                await _runs.FinishAsync(runId, "failed",
+                await runStore.FinishAsync(runId, "failed",
                     (long)(DateTime.UtcNow - startedAt).TotalMilliseconds,
                     transcriptMessages.Count, toolCalls, textChars,
                     $"{ex.GetType().Name}: {ex.Message}",
-                    transcriptJson: partial, ct: CancellationToken.None);
+                    transcriptJson: partial, ct: CancellationToken.None,
+                    inputTokens: tracker?.TotalInputTokens,
+                    outputTokens: tracker?.TotalOutputTokens,
+                    cacheReadTokens: tracker?.TotalCacheReadTokens);
             }
             catch { /* best-effort */ }
             throw;
@@ -530,7 +631,10 @@ public async Task<AgentRunResult> RunAsync(
             // (partial sessions resume fine — the retry continues
             // where this run died instead of re-exploring from
             // scratch). Best-effort; never masks the real exception.
-            if (!sessionPersisted)
+            // Skipped on a poison restart: the old session is exactly
+            // what we just deleted from the store — persisting it
+            // would re-poison the key before the cold retry reads it.
+            if (!sessionPersisted && !sessionPoisoned)
             {
                 try
                 {
@@ -546,9 +650,61 @@ public async Task<AgentRunResult> RunAsync(
             // IDisposable. Best-effort dispose; real providers handle their own
             // connection pools. When function invocation is in play, the
             // ChatClientBuilder wrapper is what holds the underlying client.
-            var disposable = chatClientWithTools as IDisposable ?? chatClient;
-            if (disposable is IDisposable d) d.Dispose();
+            // Skipped while a poison restart is pending — the cold
+            // retry still needs the client.
+            if (!restartPending)
+            {
+                var disposable = chatClientWithTools as IDisposable ?? chatClient;
+                if (disposable is IDisposable d) d.Dispose();
+            }
         }
+        }
+    }
+
+    /// <summary>True for the provider 400 that a poisoned session
+    /// produces: an assistant message with tool_calls not followed by
+    /// the matching tool responses. Walks the inner-exception chain —
+    /// the gateway wraps the upstream OpenAI error.</summary>
+    /// <summary>
+    /// Session-is-the-problem errors: the provider rejects the
+    /// RESUMED transcript, not the request shape. Two classes:
+    /// (a) structural poison — dangling tool_calls after a mid-run
+    /// kill; (b) size — the accumulated transcript (rework rounds,
+    /// full-file reads) blows the provider's request cap (observed
+    /// live 2026-08-01: task-365, "total message size 35670664
+    /// exceeds limit" / "exceeded model token limit" — every retry
+    /// 400s instantly until the session is dropped). Both recover
+    /// the same way: forget the session, cold-restart once — the
+    /// prompt's rework context carries what matters.
+    /// </summary>
+    internal static bool IsPoisonedSessionError(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException!)
+        {
+            if (e.Message.Contains("tool_calls", StringComparison.OrdinalIgnoreCase)
+                && e.Message.Contains("must be followed by tool messages", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (e.Message.Contains("exceeded model token limit", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (e.Message.Contains("total message size", StringComparison.OrdinalIgnoreCase)
+                && e.Message.Contains("exceeds", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            // MiniMax phrasing (observed live 2026-08-06: task-546,
+            // "invalid params, context window exceeds limit (2013)"
+            // — an intermittent kilo-gateway upstream 400; the
+            // cold-restart retry lands on a healthy upstream).
+            if (e.Message.Contains("context window exceeds limit", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static string? ResolveWorktreePath(IReadOnlyDictionary<string, object>? context)
@@ -556,6 +712,56 @@ public async Task<AgentRunResult> RunAsync(
         if (context is null) return null;
         if (!context.TryGetValue("worktreePath", out var raw) || raw is null) return null;
         return raw.ToString();
+    }
+
+    /// <summary>
+    /// The tool-loop pipeline: function invocation outermost, the
+    /// context-window reducer INSIDE it so every model→tool→model
+    /// round-trip is budget-checked, not just the first. Without
+    /// compaction a long engineering run accumulates unbounded tool
+    /// results (file reads, bash output) until the provider 400s
+    /// mid-run — observed live 2026-08-06: task-560, 382 messages /
+    /// 481KB transcript, killed when minimax-m3's window overflowed
+    /// (operator-approved fix). The audit transcript
+    /// (transcriptMessages) keeps the FULL text; only provider-bound
+    /// requests are compacted. Disabled per provider when
+    /// ContextWindowTokens is unset (unknown window — never guess).
+    /// </summary>
+    private IChatClient BuildToolLoopClient(IChatClient trackedClient, AgentType role, string? projectId)
+    {
+        var builder = new ChatClientBuilder(trackedClient)
+            .UseFunctionInvocation(configure: c => c.MaximumIterationsPerRequest = 200);
+        var (windowTokens, maxOutputTokens) = ResolveCompactionBudget(role, projectId);
+        if (windowTokens is not null)
+        {
+            // MAAI001: MAF's compaction strategies are marked
+            // evaluation-only in 1.12. Accepted risk — the reducer
+            // only rewrites provider-BOUND requests; the audit
+            // transcript and session state are untouched, so a
+            // future API break is a build error here, not a runtime
+            // behavior change.
+#pragma warning disable MAAI001
+            builder.UseChatReducer(
+                new Microsoft.Agents.AI.Compaction.ContextWindowCompactionStrategy(
+                    windowTokens.Value, maxOutputTokens).AsChatReducer(),
+                configure: null);
+#pragma warning restore MAAI001
+        }
+        return builder.Build();
+    }
+
+    private (int? WindowTokens, int MaxOutputTokens) ResolveCompactionBudget(AgentType role, string? projectId)
+    {
+        try
+        {
+            var (provider, _, _) = _config.ResolveEffective(role, _modelOverrides, projectId);
+            return (provider.ContextWindowTokens, provider.MaxOutputTokens ?? 8192);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "compaction budget resolution failed for {Role}; running without compaction", role);
+            return (null, 8192);
+        }
     }
 
     /// <summary>Verify commands for a run: the project's $verify
@@ -574,12 +780,12 @@ public async Task<AgentRunResult> RunAsync(
 
     /// <summary>Gate factory for the run-gate pipeline. Unknown names
     /// return null (the pipeline skips them with a warning).</summary>
-    private Gates.IRunGate? BuildRunGate(string name) => name switch
+    private Gates.IRunGate? BuildRunGate(string name, string? projectId) => name switch
     {
         Gates.PlanSchemaGate.GateName => new Gates.PlanSchemaGate(),
         Gates.PlanTerritoryGate.GateName => new Gates.PlanTerritoryGate(),
         Gates.PlanLlmReviewGate.GateName => new Gates.PlanLlmReviewGate(
-            () => _chatClientFactory.Create(_config, AgentType.Reviewer), _logger),
+            () => _chatClientFactory.Create(_config, AgentType.Reviewer, projectId), _logger),
         _ => null,
     };
 
@@ -635,9 +841,9 @@ public async Task<AgentRunResult> RunAsync(
     /// tell "actively working" from "hung waiting on the provider".
     /// Best-effort — never breaks a run.
     /// </summary>
-    private async Task HeartbeatAsync(string runId, List<ChatMessage> transcriptMessages)
+    private async Task HeartbeatAsync(AgentRunStore? runStore, string runId, List<ChatMessage> transcriptMessages)
     {
-        if (_runs is null) return;
+        if (runStore is null) return;
         try
         {
             var toolCalls = transcriptMessages.Sum(m =>
@@ -645,7 +851,7 @@ public async Task<AgentRunResult> RunAsync(
             var textChars = transcriptMessages
                 .Where(m => m.Role == ChatRole.Assistant)
                 .Sum(m => (m.Text ?? "").Length);
-            await _runs.UpdateProgressAsync(runId, transcriptMessages.Count, toolCalls, textChars,
+            await runStore.UpdateProgressAsync(runId, transcriptMessages.Count, toolCalls, textChars,
                 transcriptJson: BuildTranscriptJson(transcriptMessages),
                 ct: CancellationToken.None);
         }

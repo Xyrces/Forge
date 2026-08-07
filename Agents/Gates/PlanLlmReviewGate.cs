@@ -73,7 +73,11 @@ public sealed class PlanLlmReviewGate : IRunGate
             // agent run's own time budget. Timeout = fail open.
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.Ct);
             timeoutCts.CancelAfter(CriticTimeout);
-            var response = await client.GetResponseAsync(prompt, cancellationToken: timeoutCts.Token);
+            // The verdict is 2-6 sentences + one VERDICT line — cap
+            // max_tokens well below the provider default (Kimi meters
+            // TPM as prompt + REQUESTED max_tokens).
+            var response = await client.GetResponseAsync(prompt,
+                options: new ChatOptions { MaxOutputTokens = 1024 }, cancellationToken: timeoutCts.Token);
             text = response.Text ?? "";
         }
         catch (Exception ex)

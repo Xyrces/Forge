@@ -81,7 +81,6 @@ public class GateEndpointTests : IAsyncLifetime
         bootstrap.Dispose();
         _memory = new MemoryStore(Path.Combine(_workDir, "memory.db"));
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -89,7 +88,7 @@ public class GateEndpointTests : IAsyncLifetime
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         GateEndpoints.MapGateEndpoints(app, new StageGates(_memory), NullLogger<DashboardHost>.Instance);
         _host = app;

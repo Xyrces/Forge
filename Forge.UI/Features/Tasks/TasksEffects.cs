@@ -32,7 +32,7 @@ public sealed class TasksEffects
     {
         try
         {
-            await _client.RetryMessageAsync(action.TaskId, action.Text, CancellationToken.None);
+            await _client.RetryMessageAsync(action.TaskId, action.Text, _shell.Value.CurrentProjectId, CancellationToken.None);
             dispatcher.Dispatch(new TasksActions.RetryMessageSucceededAction(action.TaskId));
             dispatcher.Dispatch(new TasksActions.LoadTasksAction(_shell.Value.CurrentProjectId));
         }
@@ -47,7 +47,7 @@ public sealed class TasksEffects
     {
         try
         {
-            var result = await _client.RecoverAsync(action.TaskId, CancellationToken.None);
+            var result = await _client.RecoverAsync(action.TaskId, _shell.Value.CurrentProjectId, CancellationToken.None);
             dispatcher.Dispatch(new TasksActions.RecoverTaskSucceededAction(action.TaskId, result?.ReportId));
             dispatcher.Dispatch(new TasksActions.LoadTasksAction(_shell.Value.CurrentProjectId));
         }

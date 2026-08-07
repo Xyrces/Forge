@@ -29,6 +29,8 @@ public enum TaskEvent
     ExternallyMerged,
     OperatorRequeue,
     OperatorBlocked,
+    OperatorClosed,
+    WatchResumed,
 }
 
 /// <summary>
@@ -157,8 +159,47 @@ public sealed class TaskStateMachine
             TaskLifecycleState.MergeReady, TaskLifecycleState.PROpen);
         Add(TaskEvent.ExternallyMerged, TaskLifecycleState.Merged, working);
         Add(TaskEvent.OperatorRequeue, TaskLifecycleState.Pending,
-            TaskLifecycleState.Failed, TaskLifecycleState.BlockedOperator);
+            TaskLifecycleState.Failed, TaskLifecycleState.BlockedOperator,
+            // Operator requeues land on DB-Failed/Blocked tasks, but
+            // the machine record under a DB-Blocked row can be any
+            // PR-phase or stalled state (breaker trips park in
+            // StalledRework; infra parks in ParkedInfra; a blocked
+            // watch still reads PROpen/MergeReady). The strike-reset
+            // endpoint fires OperatorRequeue for all of them
+            // (observed live 2026-08-01: task-365 violation from
+            // StalledRework on strike-reset).
+            TaskLifecycleState.StalledRework, TaskLifecycleState.ParkedInfra,
+            TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady);
         Add(TaskEvent.OperatorBlocked, TaskLifecycleState.BlockedOperator, working);
+        // Operator close-obsolete (2026-08-01): the operator retires
+        // a task outright (work already on main via another task,
+        // superseded, won't-fix) from ANY live or failed state. The
+        // /api/tasks/{id}/close endpoint reports it; terminal, so no
+        // outgoing transitions.
+        Add(TaskEvent.OperatorClosed, TaskLifecycleState.Closed,
+            TaskLifecycleState.Pending, TaskLifecycleState.Dispatching,
+            TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkQueued,
+            TaskLifecycleState.ReworkRunning, TaskLifecycleState.StalledRework,
+            TaskLifecycleState.PROpen, TaskLifecycleState.ParkedInfra,
+            TaskLifecycleState.MergeReady, TaskLifecycleState.Failed,
+            TaskLifecycleState.BlockedOperator);
+        // Stalled tasks are still polled by the sweep (InProgress +
+        // prNumber), so CI/conflict observations keep arriving while
+        // the round is parked. They change nothing — the stall guard
+        // owns the exit — record them as self-transitions instead of
+        // violations (observed live 2026-08-01: task-364 CiGreen and
+        // task-370 ConflictDetected violations from StalledRework).
+        Add(TaskEvent.CiGreen, TaskLifecycleState.StalledRework, TaskLifecycleState.StalledRework);
+        Add(TaskEvent.ConflictDetected, TaskLifecycleState.StalledRework, TaskLifecycleState.StalledRework);
+        // Auto-resume of a transiently-blocked watch (e.g. reviewer
+        // model rate-limited at block time, available again now): the
+        // task re-enters PROpen and the sweep re-reviews the head.
+        // PROpen self-transition: the block was written via a raw
+        // status transition, so the machine record still reads PROpen
+        // when the resume fires (observed live 2026-07-30: task-18/19
+        // stateViolation on the first auto-resume).
+        Add(TaskEvent.WatchResumed, TaskLifecycleState.PROpen,
+            TaskLifecycleState.BlockedOperator, TaskLifecycleState.PROpen);
         return t;
     }
 

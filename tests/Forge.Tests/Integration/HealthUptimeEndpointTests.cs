@@ -22,19 +22,18 @@ public class HealthUptimeEndpointTests : IDisposable
     {
         _workDir = TempRoot.Instance.NewDirectory("uptime-ep");
         Directory.CreateDirectory(_workDir);
-        var port = GetEphemeralPort();
-        _baseAddress = new Uri($"http://127.0.0.1:{port}/");
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(o => o.Listen(System.Net.IPAddress.Loopback, port));
+        builder.WebHost.ConfigureKestrel(o => o.Listen(System.Net.IPAddress.Loopback, 0));
         var app = builder.Build();
         HealthEndpoint.MapHealthEndpoint(app, new DefaultHealthSnapshotFactory());
         _host = app;
         _host.Start();
+        _baseAddress = new Uri($"http://127.0.0.1:{_host.GetPort()}/");
         _client = new HttpClient { BaseAddress = _baseAddress };
     }
 

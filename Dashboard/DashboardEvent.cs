@@ -53,7 +53,24 @@ public static class DashboardEventKind
     // next sprint is assembled + activated (sprint.started).
     public const string SprintCompleted = "sprint.completed";
     public const string SprintStarted = "sprint.started";
+    // Inter-sprint build visibility (operator request 2026-08-06):
+    // the phase BETWEEN sprint.completed and sprint.started (batch
+    // triage → materialization → follow-up grooming) was only
+    // visible in journal logs — a completed sprint looked "stuck".
+    // SprintAssembler publishes these and snapshots the full state
+    // to the project's memory store (sprint/build) every tick;
+    // GET /api/sprints/building reads it back.
+    public const string SprintTriageCompleted = "sprint.triage.completed";
+    public const string SprintMaterialized = "sprint.materialized";
+    public const string SprintAssemblyWaiting = "sprint.assembly.waiting";
+    // ScheduledGroomer ad-hoc pass: one event per groomed task so the
+    // board shows the grooming countdown draining in real time.
+    public const string GroomerAdHocCompleted = "groomer.adhoc.completed";
     // Editable workflow: definition published / restored from the
     // Flow page Edit mode. Detail carries the human-readable diff.
     public const string WorkflowPublished = "workflow.published";
+    // Watchdog: a new structural-stall finding (alert-only v1).
+    // Detail carries "watchdog/<kind>: <detail>"; Data carries
+    // projectId + severity.
+    public const string WatchdogFinding = "watchdog.finding";
 }

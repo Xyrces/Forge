@@ -75,7 +75,7 @@ public sealed class ScriptedChatClient : IChatClient
 
 public sealed class StubbedChatClientFactory : IChatClientFactory
 {
-    public IChatClient Create(LlmConfig config, AgentType role)
+    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null)
     {
         // The stub factory ignores role + provider config and always returns
         // a fresh ScriptedChatClient. Tests pre-enqueue scripted responses

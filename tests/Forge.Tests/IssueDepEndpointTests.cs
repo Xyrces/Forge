@@ -36,7 +36,6 @@ public class IssueDepEndpointTests : IDisposable
         var sprints = new SprintStore(_issues);
         var bus = new AgentMessageBus();
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -44,7 +43,7 @@ public class IssueDepEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         DashboardEndpoints.MapP1Endpoints(app, _issues, agents, skills, sprints, bus, NullLogger<DashboardHost>.Instance);
         _host = app;

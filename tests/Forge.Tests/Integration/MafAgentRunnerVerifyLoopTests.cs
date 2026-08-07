@@ -75,7 +75,7 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
 
     private sealed class ScriptingFactory(IChatClient client) : IChatClientFactory
     {
-        public IChatClient Create(LlmConfig config, AgentType role) => client;
+        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => client;
     }
 
     [Fact]

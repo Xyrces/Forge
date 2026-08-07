@@ -313,10 +313,12 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task AdHocFollowUp_InjectsIntoActiveSprint_UnrelatedStaysOut()
+    public async Task AdHocFollowUp_DoesNotInject_SameWorkTriggerRemoved()
     {
-        // Injection trigger 1: the task's followUpOf chain reaches a
-        // sprint member — it is a continuation of the sprint's work.
+        // Operator model 2026-07-31: followUpOf-chain "same work"
+        // injection is REMOVED — follow-ups materialize at sprint
+        // completion and join a LATER sprint through grooming. Only
+        // blocks edges / operator signals inject mid-sprint.
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
@@ -324,15 +326,181 @@ public class SprintAssemblerTests : IDisposable
         var followUp = await _issues.CreateAsync(new NewIssue(
             Type: "task", Title: "follow-up of sprint work",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = aTasks[0] }));
-        var unrelated = await _issues.CreateAsync(new NewIssue(
-            Type: "task", Title: "unrelated one-off",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
 
         await Tick();
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(followUp.Id, members);
-        Assert.DoesNotContain(unrelated.Id, members);
+        Assert.DoesNotContain(followUp.Id, members);
+    }
+
+    [Fact]
+    public async Task SprintCompletion_MaterializesDrafts_IntoTasks()
+    {
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var drafts = new FollowUpDraftStore(_issues);
+        await drafts.FileAsync(new FollowUpDraft(0, active.Id, aTasks[0], "Reviewer",
+            "deferred finding", "something to fix later", 2, null, DateTime.UtcNow, null));
+
+        foreach (var id in aTasks)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+        await Tick();
+
+        var materialized = (await _issues.ListAsync(new IssueFilter()))
+            .Where(i => i.GetMetadata("fromDraft") is not null).ToList();
+        var task = Assert.Single(materialized);
+        Assert.Equal("deferred finding", task.Title);
+        Assert.Equal(aTasks[0], task.GetMetadata("followUpOf"));
+        Assert.Equal(IssueStatus.Pending, task.Status);
+        Assert.Empty(await drafts.ListUnconsumedAsync());
+    }
+
+    [Fact]
+    public async Task Assembly_WaitsForFollowUpGrooming()
+    {
+        // The next sprint does not start until materialized
+        // follow-ups are groomed (operator model 2026-07-31).
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        foreach (var id in aTasks)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "ungroomed follow-up",
+            Metadata: new Dictionary<string, object> { ["followUpOf"] = aTasks[0] }));
+
+        await Tick();
+
+        Assert.Null(await _sprints.GetActiveAsync());
+        // Groom it → assembly proceeds on the next tick.
+        var fup = (await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }))
+            .First(i => i.GetMetadata("followUpOf") is not null);
+        await _issues.TransitionAsync(fup.Id, IssueStatus.Pending, null,
+            new Dictionary<string, object> { ["groomed"] = "true" });
+        await Tick();
+        Assert.NotNull(await _sprints.GetActiveAsync());
+    }
+
+    [Fact]
+    public async Task Assembly_PrefersHigherPriorityGroup()
+    {
+        // Operator direction 2026-07-31: priority-first assembly, not
+        // oldest-spec FIFO.
+        var (_, _, oldTasks) = await SeedGroomedSpecAsync("Old low-priority", 1);
+        foreach (var id in oldTasks)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Pending, null,
+                new Dictionary<string, object> { ["groomed"] = "true" });
+            // SeedGroomedSpec tasks default to priority 2.
+        }
+        var p1 = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "urgent one-off", Priority: 1,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+
+        await Tick();
+
+        var active = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Sprint 1: urgent one-off", active.Name);
+    }
+
+    [Fact]
+    public async Task SprintCompletion_TriageMergesAndDiscards_UncitedFallback()
+    {
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+
+        var drafts = new FollowUpDraftStore(_issues);
+        var d1 = await drafts.FileAsync(new FollowUpDraft(0, active.Id, aTasks[0], "Reviewer", "dupe one", "same bug A", 2, null, DateTime.UtcNow, null));
+        var d2 = await drafts.FileAsync(new FollowUpDraft(0, active.Id, aTasks[0], "Reviewer", "dupe two", "same bug B", 3, null, DateTime.UtcNow, null));
+        var d3 = await drafts.FileAsync(new FollowUpDraft(0, active.Id, aTasks[0], "Reviewer", "junk", "noise", 4, null, DateTime.UtcNow, null));
+        var d4 = await drafts.FileAsync(new FollowUpDraft(0, active.Id, aTasks[0], "Reviewer", "uncited", "the triage never mentions me", 2, null, DateTime.UtcNow, null));
+
+        var triage = new StubTriage(new FollowUpTriageDecision(new TriageItem[]
+        {
+            new("merge", new long[] { d1, d2 }, Title: "merged: same bug", Description: "both bugs"),
+            new("discard", new long[] { d3 }, Reason: "noise"),
+            new("create", new long[] { 9999 }, Title: "phantom"), // unknown id — dropped
+        }));
+        var assembler = new SprintAssembler(
+            new ProjectContextFactory(new List<ProjectOptions>()), _events,
+            NullLogger<SprintAssembler>.Instance, followUpTriage: triage);
+
+        foreach (var id in aTasks)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+        await assembler.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
+
+        var all = await _issues.ListAsync(new IssueFilter());
+        var merged = all.SingleOrDefault(i => i.Title == "merged: same bug");
+        Assert.NotNull(merged);
+        Assert.Equal("both bugs", merged!.Description);
+        Assert.Equal("1,2", merged.GetMetadata("fromDraft"));
+        Assert.Null(all.SingleOrDefault(i => i.Title == "junk"));
+        Assert.Null(all.SingleOrDefault(i => i.Title == "phantom"));
+        // Uncited draft materialized 1:1 (never lose work).
+        var uncited = all.SingleOrDefault(i => i.Title == "uncited");
+        Assert.NotNull(uncited);
+        // Dispositions recorded.
+        var consumed = await _issues.ListAsync(new IssueFilter());
+        Assert.Equal("merged", (await GetDraft(d1)).Disposition);
+        Assert.Equal("merged", (await GetDraft(d2)).Disposition);
+        Assert.Equal("discarded", (await GetDraft(d3)).Disposition);
+        Assert.Equal("materialized", (await GetDraft(d4)).Disposition);
+    }
+
+    private async Task<FollowUpDraft> GetDraft(long id) =>
+        await new FollowUpDraftStore(_issues).GetAsync(id)
+        ?? throw new InvalidOperationException($"draft {id} missing");
+
+    private sealed class StubTriage : IFollowUpTriage
+    {
+        private readonly FollowUpTriageDecision? _decision;
+        public StubTriage(FollowUpTriageDecision? decision) { _decision = decision; }
+        public Task<FollowUpTriageDecision?> TriageAsync(
+            string projectId, IReadOnlyList<FollowUpDraft> drafts, CancellationToken ct = default)
+            => Task.FromResult(_decision);
+    }
+
+    [Fact]
+    public async Task Assembly_SkipsTasksWithOpenBlockers_UntilBlockerLands()
+    {
+        // Operator report 2026-07-31: a blocked task assembled
+        // without its blocker stalls the sprint forever (dispatch
+        // only claims members). Assembly must skip it; it becomes
+        // eligible when the blocker completes.
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "blocked work",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        var blocked = (await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending })).Single(i => i.Title == "blocked work");
+        var blocker = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "the blocker", Priority: 1,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await _issues.AddDependencyAsync(blocker.Id, blocked.Id, IssueDepKind.Blocks, CancellationToken.None);
+
+        await Tick();
+
+        var active = (await _sprints.GetActiveAsync())!;
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.DoesNotContain(blocked.Id, members);
+
+        // Blocker lands → the blocked task assembles next.
+        await _issues.TransitionAsync(blocker.Id, IssueStatus.Completed, null);
+        var sprint1 = active.Id;
+        await Tick(); // completes sprint 1 (blocker terminal)
+        // The groomed ad-hoc blocked task assembles as its own solo sprint.
+        var active2 = await _sprints.GetActiveAsync();
+        if (active2 is not null && active2.Id != sprint1)
+        {
+            var members2 = await _sprints.GetIssueIdsAsync(active2.Id);
+            Assert.Contains(blocked.Id, members2);
+        }
     }
 
     [Fact]
@@ -523,5 +691,143 @@ public class SprintAssemblerTests : IDisposable
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
         Assert.Contains(task.Id, await _sprints.GetIssueIdsAsync(active!.Id));
+    }
+
+    // ---- Inter-sprint build-state snapshot (operator request
+    // 2026-08-06): every tick snapshots the between-sprints phase to
+    // the project's memory store (sprint/build) so the dashboard can
+    // show WHY there's no active sprint. ----
+
+    private async Task<SprintAssembler.SprintBuildState?> ReadBuildStateAsync()
+    {
+        var mem = new MemoryStore(_issues.Db);
+        var hit = (await mem.RecallAsync(SprintAssembler.BuildStateKey))
+            .FirstOrDefault(m => m.Key == SprintAssembler.BuildStateKey);
+        return hit is null ? null
+            : System.Text.Json.JsonSerializer.Deserialize<SprintAssembler.SprintBuildState>(
+                hit.Body, new System.Text.Json.JsonSerializerOptions(
+                    System.Text.Json.JsonSerializerDefaults.Web));
+    }
+
+    [Fact]
+    public async Task BuildState_RunningSnapshot_TracksTerminalProgress()
+    {
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
+        await Tick();
+
+        var state = await ReadBuildStateAsync();
+        Assert.NotNull(state);
+        Assert.Equal("running", state!.Phase);
+        Assert.Equal(2, state.ActiveTotal);
+        Assert.Equal(0, state.ActiveTerminal);
+        Assert.NotNull(state.ActiveSprintId);
+
+        await _issues.TransitionAsync(aTasks[0], IssueStatus.Completed, null);
+        await Tick();
+        state = await ReadBuildStateAsync();
+        Assert.Equal("running", state!.Phase);
+        Assert.Equal(1, state.ActiveTerminal);
+    }
+
+    [Fact]
+    public async Task BuildState_AwaitingGroom_CapturesPendingFollowUps_PublishesOnChangeOnly()
+    {
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        // A second groomed-spec group so the snapshot can show what's
+        // queued BEHIND the grooming wait.
+        await SeedGroomedSpecAsync("Sprint B", 2);
+        await Tick();
+        foreach (var id in aTasks)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+        var fup = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "ungroomed follow-up",
+            Metadata: new Dictionary<string, object> { ["followUpOf"] = aTasks[0] }));
+
+        await Tick();
+
+        var state = await ReadBuildStateAsync();
+        Assert.NotNull(state);
+        Assert.Equal("awaiting-groom", state!.Phase);
+        Assert.EndsWith("Sprint A", state.CompletedSprintName);
+        var item = Assert.Single(state.PendingGroom);
+        Assert.Equal(fup.Id, item.Id);
+        Assert.Equal("ungroomed follow-up", item.Title);
+        var group = Assert.Single(state.EligibleGroups);
+        Assert.Equal("Sprint B", group.Name);
+        Assert.Equal(2, group.TaskCount);
+
+        // The waiting event fires on the transition into
+        // awaiting-groom…
+        Assert.Single(_events.GetHistorySnapshot()
+            .Where(e => e.Kind == DashboardEventKind.SprintAssemblyWaiting));
+
+        // …but NOT on every 5-minute tick while nothing changes —
+        // the feed would drown in identical "waiting" entries.
+        await Tick();
+        Assert.Single(_events.GetHistorySnapshot()
+            .Where(e => e.Kind == DashboardEventKind.SprintAssemblyWaiting));
+
+        // Groom it → assembly proceeds; the snapshot flips to running.
+        await _issues.TransitionAsync(fup.Id, IssueStatus.Pending, null,
+            new Dictionary<string, object> { ["groomed"] = "true" });
+        await Tick();
+        state = await ReadBuildStateAsync();
+        Assert.Equal("running", state!.Phase);
+        Assert.NotNull(state.ActiveSprintId);
+    }
+
+    [Fact]
+    public async Task BuildState_Idle_WhenBacklogEmpty()
+    {
+        await Tick();
+        var state = await ReadBuildStateAsync();
+        Assert.NotNull(state);
+        Assert.Equal("idle", state!.Phase);
+    }
+
+    [Fact]
+    public async Task BuildState_Held_WhenOperatorGateHeld()
+    {
+        var gates = NewGates();
+        var gated = new SprintAssembler(
+            new ProjectContextFactory(new List<ProjectOptions>()),
+            _events, NullLogger<SprintAssembler>.Instance, gates: gates);
+        await SeedGroomedSpecAsync("Pipeline work", 1);
+        await gates.HoldAsync(StageGates.Sprint);
+
+        await gated.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
+
+        var state = await ReadBuildStateAsync();
+        Assert.NotNull(state);
+        Assert.Equal("held", state!.Phase);
+        Assert.Single(state.EligibleGroups);
+    }
+
+    [Fact]
+    public async Task BuildState_Materialization_PublishesEvent_AndSnapshotShowsGroomWait()
+    {
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var drafts = new FollowUpDraftStore(_issues);
+        await drafts.FileAsync(new FollowUpDraft(0, active.Id, aTasks[0], "Reviewer",
+            "deferred finding", "something to fix later", 2, null, DateTime.UtcNow, null));
+        foreach (var id in aTasks)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+
+        await Tick();
+
+        var evt = Assert.Single(_events.GetHistorySnapshot()
+            .Where(e => e.Kind == DashboardEventKind.SprintMaterialized));
+        Assert.Equal(1, Assert.IsType<int>(evt.Data!["created"]));
+        var state = await ReadBuildStateAsync();
+        Assert.NotNull(state);
+        Assert.Equal("awaiting-groom", state!.Phase);
+        Assert.Single(state.PendingGroom);
+        Assert.EndsWith("Sprint A", state.CompletedSprintName);
     }
 }

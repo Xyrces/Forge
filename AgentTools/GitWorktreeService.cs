@@ -50,6 +50,37 @@ public sealed class GitWorktreeService
             // executor's later push refspec still matches the checkout
             // (found live: task-29 reused an agent/<id> checkout while
             // the metadata branch was a custom name).
+            //
+            // First, clear killed-round debris: a conflict-sync round
+            // that died mid-merge leaves MERGE_HEAD + unmerged paths,
+            // and `git checkout -B` refuses to run in that state — the
+            // throw was swallowed by MAF's in-process execution and
+            // the workflow halted silently at checkpoint Claimed, so
+            // every rework dispatch on these tasks phantom-completed
+            // without running (observed live 2026-08-01: task-18/364).
+            // A half-merge from a dead round is never work to
+            // preserve: the round's prompt has the agent redo the
+            // merge itself. Abort merge/rebase best-effort.
+            if (await RunGitInAsync(worktreePath, "rev-parse -q --verify MERGE_HEAD", cancellationToken) is { ExitCode: 0 })
+            {
+                _logger.LogWarning("Worktree {TaskId} has an in-progress merge from a killed round — aborting it before reuse", taskId);
+                var abort = await RunGitInAsync(worktreePath, "merge --abort", cancellationToken);
+                if (abort.ExitCode != 0)
+                {
+                    // A wedged index ("Entry not uptodate") refuses
+                    // merge --abort; the round's merge is redone by
+                    // the agent anyway, so a hard reset to HEAD is
+                    // the honest recovery (observed live 2026-08-01:
+                    // task-364's worktree).
+                    _logger.LogWarning("Worktree {TaskId}: merge --abort failed ({Err}) — falling back to reset --hard HEAD", taskId, abort.Stderr);
+                    await RunGitInAsync(worktreePath, "reset --hard HEAD", cancellationToken);
+                }
+            }
+            if (await RunGitInAsync(worktreePath, "rev-parse -q --verify REBASE_HEAD", cancellationToken) is { ExitCode: 0 })
+            {
+                _logger.LogWarning("Worktree {TaskId} has an in-progress rebase from a killed round — aborting it before reuse", taskId);
+                await RunGitInAsync(worktreePath, "rebase --abort", cancellationToken);
+            }
             if (branchOverride is not null)
             {
                 var checkout = await RunGitInAsync(worktreePath, $"checkout -B \"{branchOverride}\"", cancellationToken);
@@ -228,6 +259,15 @@ public sealed class GitWorktreeService
         return int.TryParse(result.Stdout.Trim(), out var n) ? n : 0;
     }
 
+    /// <summary>Paths of files ADDED on HEAD relative to the base
+    /// (origin-preferred), for the pre-push hygiene gate.</summary>
+    public async Task<IReadOnlyList<string>> GetAddedFilesAsync(string worktreePath, string baseBranch, CancellationToken cancellationToken = default)
+    {
+        var baseRef = await ResolveRemoteBaseRefAsync(worktreePath, baseBranch, cancellationToken);
+        var result = await RunGitInAsync(worktreePath, $"diff --name-only --diff-filter=A \"{baseRef}...HEAD\"", cancellationToken);
+        return result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
     /// <summary>The local <c>main</c> ref in a worktree can be
     /// arbitrarily stale (created with the worktree, never moved).
     /// <c>origin/&lt;base&gt;</c> is refreshed by every sync/fetch
@@ -346,6 +386,19 @@ public sealed class GitWorktreeService
                 return true;
         }
         return false;
+    }
+
+    /// <summary>True when <paramref name="ancestorRef"/> is an ancestor
+    /// of <paramref name="descendantRef"/> (git merge-base
+    /// --is-ancestor). The rework divergence guard: a rework branch
+    /// must contain the PR head, or its push is a non-fast-forward
+    /// rejection (observed live 2026-08-01: task-377's agent reset
+    /// onto main mid-round and every push silently failed).</summary>
+    public async Task<bool> IsAncestorAsync(string worktreePath, string ancestorRef, string descendantRef, CancellationToken cancellationToken = default)
+    {
+        var result = await RunGitInAsync(worktreePath,
+            $"merge-base --is-ancestor \"{ancestorRef}\" \"{descendantRef}\"", cancellationToken);
+        return result.ExitCode == 0;
     }
 
     private async Task<GitResult> RunGitAsync(string arguments, CancellationToken cancellationToken)

@@ -76,6 +76,8 @@ public class ClaimExecutorTests : IDisposable
 
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.InProgress, after!.Status);
-        Assert.Equal("forge", after.Assignee);
+        // Claim identity is the owning role, not the legacy opaque
+        // "forge" literal (operator 2026-08-01).
+        Assert.Equal("coredev", after.Assignee);
     }
 }

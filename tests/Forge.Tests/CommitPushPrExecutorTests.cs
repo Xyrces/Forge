@@ -272,6 +272,147 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task VerifyFailure_BounceSeedsReworkContext()
+    {
+        // Operator rule 2026-07-31: a failed build returns to the run
+        // CONTEXT to be fixed — the bounce must seed the
+        // reworkReason/reworkContext the next round's prompt renders.
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var wtPath = worktree.WorktreePath!;
+        Run("git", "config user.email test@test", wtPath);
+        Run("git", "config user.name Test", wtPath);
+        File.WriteAllText(Path.Combine(wtPath, "New.cs"), "class New {}");
+        Run("git", "add -A", wtPath);
+        Run("git", "commit -q -m agent-work", wtPath);
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null,
+            verifyCommands: new[] { "exit 1" }, ct: default);
+
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+        Assert.Equal("pre-push verification failed (attempt 1)", after.GetMetadata("reworkReason"));
+        var ctx = after.GetMetadata("reworkContext");
+        Assert.Contains("FAILED the pre-push build/test verification", ctx);
+    }
+
+    [Fact]
+    public async Task ReworkBranchDiverged_BouncesWithGuidance_NoPush()
+    {
+        // Live 2026-08-01 (task-377): the agent reset the rework
+        // branch onto main mid-round — the PR head is no longer an
+        // ancestor, the push is a non-fast-forward rejection, and
+        // before the guard that throw vanished into MAF's silent
+        // halt while the stall guard burned strikes. The executor
+        // must bounce with explicit "build on the PR branch"
+        // guidance instead.
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x",
+            Metadata: new Dictionary<string, object> { ["prNumber"] = "775" }));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+        var wtPath = worktree.WorktreePath!;
+        Run("git", "config user.email test@test", wtPath);
+        Run("git", "config user.name Test", wtPath);
+        File.WriteAllText(Path.Combine(wtPath, "New.cs"), "class New {}");
+        Run("git", "add -A", wtPath);
+        Run("git", "commit -q -m agent-work", wtPath);
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null,
+            verifyCommands: Array.Empty<string>(), ct: default);
+
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+        Assert.Equal("rework branch diverged from PR head (attempt 1)", after.GetMetadata("reworkReason"));
+        Assert.Contains("Do NOT reset or rebase", after.GetMetadata("reworkContext"));
+    }
+
+    [Fact]
+    public async Task PushSuccess_ClearsNoProgressCounterAndBounceContext()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+        var wtPath = worktree.WorktreePath!;
+        Run("git", "config user.email test@test", wtPath);
+        Run("git", "config user.name Test", wtPath);
+        File.WriteAllText(Path.Combine(wtPath, "New.cs"), "class New {}");
+        Run("git", "add -A", wtPath);
+        Run("git", "commit -q -m agent-work", wtPath);
+        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, null,
+            new Dictionary<string, object>
+            {
+                ["noProgressAttempts"] = "1",
+                ["reworkReason"] = "pre-push verification failed (attempt 1)",
+                ["reworkContext"] = "old failure output",
+            });
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CommitPushPrExecutor.HandleAsync(
+                agent, _issues, _worktrees, new StubGitHub(), _events,
+                new NoOpMemoryExtractor(),
+                new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+                NullLogger<CommitPushPrExecutor>.Instance, null,
+                verifyCommands: Array.Empty<string>(), ct: default).AsTask());
+
+        Assert.Contains("CreatePullRequestAsync should not be called", ex.Message);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Null(after!.GetMetadata("noProgressAttempts"));
+        Assert.Null(after.GetMetadata("reworkReason"));
+        Assert.Null(after.GetMetadata("reworkContext"));
+    }
+
+    [Fact]
+    public async Task NoDiff_BounceSeedsReworkContext()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var agent = new AgentCompleted(worktree, AgentResult.Ok,
+            "Now I have a comprehensive understanding.", null);
+
+        await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
+
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Contains("no diff", after.GetMetadata("reworkReason"));
+        Assert.Contains("produced NO changes", after.GetMetadata("reworkContext"));
+    }
+
+    [Fact]
     public async Task NoDiff_TaskAlreadyTerminal_LeavesItAlone()
     {
         // Stale-dispatch race: a long agent run finishes AFTER the

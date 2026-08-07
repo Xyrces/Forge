@@ -42,6 +42,7 @@ public sealed class GroomerAgent
     private readonly ILogger<GroomerAgent> _logger;
     private readonly MemoryStore? _memory;
     private readonly string? _projectRoot;
+    private readonly string? _projectId;
     private readonly Func<string, string?>? _projectRootLookup;
     private readonly string _runId;
 
@@ -55,6 +56,7 @@ public sealed class GroomerAgent
         string? runId = null,
         MemoryStore? memory = null,
         string? projectRoot = null,
+        string? projectId = null,
         Func<string, string?>? projectRootLookup = null)
     {
         _issues = issues;
@@ -65,6 +67,7 @@ public sealed class GroomerAgent
         _logger = logger;
         _memory = memory;
         _projectRoot = projectRoot;
+        _projectId = projectId;
         _projectRootLookup = projectRootLookup;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
     }
@@ -114,6 +117,7 @@ public sealed class GroomerAgent
         List<string> CreateStoryList() => createdStoryIds;
 
         var grounding = await BuildGroundingBlockAsync(spec.ProjectId, ct);
+        var runProjectId = spec.ProjectId;
 
         var systemPrompt = $"""
             You are the GroomerAgent for project {spec.ProjectId}. Given an
@@ -144,7 +148,7 @@ public sealed class GroomerAgent
             {grounding}
             """;
 
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, runProjectId);
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
 
         var createStoryTool = AIFunctionFactory.Create(
@@ -303,6 +307,7 @@ public sealed class GroomerAgent
         }
 
         var grounding = await BuildGroundingBlockAsync(projectId: null, ct, excludeIssueId: issue.Id);
+        var runProjectId = _projectId;
 
         var approveTool = AIFunctionFactory.Create(
             ([Description("One sentence: why this task serves the vision and how it fits current state.")] string note) =>
@@ -335,7 +340,7 @@ public sealed class GroomerAgent
             {grounding}
             """;
 
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, runProjectId);
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
         var agent = new ChatClientAgent(
             chatClient,

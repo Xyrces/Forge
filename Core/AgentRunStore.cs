@@ -60,10 +60,30 @@ public sealed class AgentRunStore : IDisposable
         // verifying n/3 / reviewing) + the warm-session marker
         // (the run resumed a persisted MAF session).
         string? Phase,
-        bool? ResumedSession);
+        bool? ResumedSession,
+        // v26: run attribution. agent_run is a single GLOBAL registry
+        // (all projects' runners write here); the dashboard breaks
+        // runs down by project via this column. NULL = pre-v26 run.
+        string? ProjectId,
+        // v30: the dispatch correlation id (d-xxxxxxxx) — threads one
+        // engineering dispatch through claim → worktree → run → push
+        // for postmortem tracing. NULL for watch-side runs (reviews)
+        // and pre-v30 rows.
+        string? DispatchId,
+        // v31: provider-reported token observability (operator
+        // 2026-08-06 — quota burn was invisible). Input/output are
+        // the run's CUMULATIVE round-trip totals at finish;
+        // cache-read is the provider's prompt-cache hits (MiniMax /
+        // Anthropic report them); current-context is the LAST
+        // round-trip's input size, heartbeat-updated while running —
+        // the live "how big is this conversation right now" signal.
+        long? InputTokens,
+        long? OutputTokens,
+        long? CacheReadTokens,
+        long? CurrentContextTokens);
 
     public async Task StartAsync(string id, string? taskId, string role, string? model, CancellationToken ct = default,
-        bool resumedSession = false)
+        bool resumedSession = false, string? projectId = null, string? dispatchId = null)
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -75,14 +95,14 @@ public sealed class AgentRunStore : IDisposable
                     status = 'running', started_at = @started, finished_at = NULL, duration_ms = NULL,
                     message_count = NULL, tool_call_count = NULL, text_chars = NULL,
                     error = NULL, transcript_json = NULL, last_activity_at = NULL,
-                    phase = NULL, resumed_session = @resumed
-                WHEN NOT MATCHED THEN INSERT (id, task_id, role, model, status, started_at, resumed_session)
-                    VALUES (@id, @task, @role, @model, 'running', @started, @resumed);
+                    phase = NULL, resumed_session = @resumed, project_id = @project, dispatch_id = @dispatch
+                WHEN NOT MATCHED THEN INSERT (id, task_id, role, model, status, started_at, resumed_session, project_id, dispatch_id)
+                    VALUES (@id, @task, @role, @model, 'running', @started, @resumed, @project, @dispatch);
                 """
             : """
                 INSERT OR REPLACE INTO agent_run
-                    (id, task_id, role, model, status, started_at, resumed_session)
-                VALUES (@id, @task, @role, @model, 'running', @started, @resumed)
+                    (id, task_id, role, model, status, started_at, resumed_session, project_id, dispatch_id)
+                VALUES (@id, @task, @role, @model, 'running', @started, @resumed, @project, @dispatch)
                 """;
         cmd.AddParam("@id", id);
         cmd.AddParam("@task", (object?)taskId ?? DBNull.Value);
@@ -90,6 +110,8 @@ public sealed class AgentRunStore : IDisposable
         cmd.AddParam("@model", (object?)model ?? DBNull.Value);
         cmd.AddParam("@started", DateTime.UtcNow.ToString(DateFormat));
         cmd.AddParam("@resumed", resumedSession ? 1 : 0);
+        cmd.AddParam("@project", (object?)projectId ?? DBNull.Value);
+        cmd.AddParam("@dispatch", (object?)dispatchId ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -105,7 +127,8 @@ public sealed class AgentRunStore : IDisposable
     /// live phase label (plan gate / implementing / verifying n/3 /
     /// reviewing); null keeps the previously written value.
     /// </summary>
-    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, string? transcriptJson = null, CancellationToken ct = default, string? phase = null)
+    public async Task UpdateProgressAsync(string id, int messageCount, int toolCallCount, int textChars, string? transcriptJson = null, CancellationToken ct = default, string? phase = null,
+        long? currentContextTokens = null, long? inputTokens = null, long? outputTokens = null, long? cacheReadTokens = null)
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -114,7 +137,11 @@ public sealed class AgentRunStore : IDisposable
                 message_count = @msgs, tool_call_count = @tools,
                 text_chars = @chars, last_activity_at = @activity,
                 transcript_json = COALESCE(@transcript, transcript_json),
-                phase = COALESCE(@phase, phase)
+                phase = COALESCE(@phase, phase),
+                current_context_tokens = COALESCE(@ctx, current_context_tokens),
+                input_tokens = COALESCE(@input, input_tokens),
+                output_tokens = COALESCE(@output, output_tokens),
+                cache_read_tokens = COALESCE(@cacheRead, cache_read_tokens)
             WHERE id = @id
             """;
         cmd.AddParam("@id", id);
@@ -124,13 +151,18 @@ public sealed class AgentRunStore : IDisposable
         cmd.AddParam("@activity", DateTime.UtcNow.ToString(DateFormat));
         cmd.AddParam("@transcript", (object?)transcriptJson ?? DBNull.Value);
         cmd.AddParam("@phase", (object?)phase ?? DBNull.Value);
+        cmd.AddParam("@ctx", (object?)currentContextTokens ?? DBNull.Value);
+        cmd.AddParam("@input", (object?)inputTokens ?? DBNull.Value);
+        cmd.AddParam("@output", (object?)outputTokens ?? DBNull.Value);
+        cmd.AddParam("@cacheRead", (object?)cacheReadTokens ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task FinishAsync(
         string id, string status, long durationMs,
         int messageCount, int toolCallCount, int textChars,
-        string? error, string? transcriptJson, CancellationToken ct = default)
+        string? error, string? transcriptJson, CancellationToken ct = default,
+        long? inputTokens = null, long? outputTokens = null, long? cacheReadTokens = null)
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -138,7 +170,10 @@ public sealed class AgentRunStore : IDisposable
             UPDATE {T("agent_run")} SET
                 status = @status, finished_at = @finished, duration_ms = @dur,
                 message_count = @msgs, tool_call_count = @tools, text_chars = @chars,
-                error = @err, transcript_json = @transcript, last_activity_at = @finished
+                error = @err, transcript_json = @transcript, last_activity_at = @finished,
+                input_tokens = COALESCE(@input, input_tokens),
+                output_tokens = COALESCE(@output, output_tokens),
+                cache_read_tokens = COALESCE(@cacheRead, cache_read_tokens)
             WHERE id = @id
             """;
         cmd.AddParam("@id", id);
@@ -150,6 +185,9 @@ public sealed class AgentRunStore : IDisposable
         cmd.AddParam("@chars", textChars);
         cmd.AddParam("@err", (object?)error ?? DBNull.Value);
         cmd.AddParam("@transcript", (object?)transcriptJson ?? DBNull.Value);
+        cmd.AddParam("@input", (object?)inputTokens ?? DBNull.Value);
+        cmd.AddParam("@output", (object?)outputTokens ?? DBNull.Value);
+        cmd.AddParam("@cacheRead", (object?)cacheReadTokens ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
         await PruneAsync(conn, ct);
     }
@@ -185,11 +223,50 @@ public sealed class AgentRunStore : IDisposable
     public async Task<IReadOnlyList<AgentRunRecord>> ListActiveAsync(CancellationToken ct = default)
         => await QueryAsync("WHERE status = 'running' ORDER BY started_at DESC", null, ct);
 
-    public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, string? role = null, CancellationToken ct = default)
+    /// <summary>
+    /// Fail 'running' rows whose heartbeat went stale (or ALL running
+    /// rows when <paramref name="staleBefore"/> is null — service
+    /// startup: no run can survive a process restart). A zombie row
+    /// is not just a UI lie on the board ("active" sessions for dead
+    /// runs — observed live 2026-08-01: 4 reviewer rows, up to 9h
+    /// old) — it also BLOCKS the orphan-claim reaper, which treats
+    /// an active run row as proof the task's claim is alive.
+    /// Returns the ids of the rows closed.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> FailZombieRunsAsync(DateTime? staleBefore, string reason, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var ids = new List<string>();
+        await using (var sel = conn.CreateCommand())
+        {
+            sel.CommandText = staleBefore is null
+                ? $"SELECT id FROM {T("agent_run")} WHERE status = 'running'"
+                : $"""SELECT id FROM {T("agent_run")} WHERE status = 'running' AND COALESCE(last_activity_at, started_at) < @stale""";
+            if (staleBefore is not null)
+                sel.AddParam("@stale", staleBefore.Value.ToString(DateFormat));
+            await using var rd = await sel.ExecuteReaderAsync(ct);
+            while (await rd.ReadAsync(ct)) ids.Add(rd.GetString(0));
+        }
+        if (ids.Count == 0) return ids;
+        await using var cmd = conn.CreateCommand();
+        var names = ids.Select((_, i) => $"@id{i}").ToArray();
+        cmd.CommandText = $"""
+            UPDATE {T("agent_run")} SET status = 'failed', finished_at = @now, error = @err
+            WHERE id IN ({string.Join(",", names)})
+            """;
+        cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+        cmd.AddParam("@err", reason);
+        for (var i = 0; i < ids.Count; i++) cmd.AddParam(names[i], ids[i]);
+        await cmd.ExecuteNonQueryAsync(ct);
+        return ids;
+    }
+
+    public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, string? role = null, CancellationToken ct = default, string? projectId = null)
     {
         var where = "WHERE status != 'running'";
         if (taskId is not null) where += $" AND task_id = '{taskId.Replace("'", "''")}'";
         if (role is not null) where += $" AND role = '{role.Replace("'", "''")}'";
+        if (projectId is not null) where += $" AND project_id = '{projectId.Replace("'", "''")}'";
         return await QueryAsync($"{where} ORDER BY started_at DESC", Math.Clamp(limit, 1, 500), ct);
     }
 
@@ -204,7 +281,8 @@ public sealed class AgentRunStore : IDisposable
         cmd.CommandText = $"""
             SELECT {(limit is { } n ? d.Top(n) : "")}id, task_id, role, model, status, started_at, finished_at,
                    duration_ms, message_count, tool_call_count, text_chars, error, transcript_json,
-                   last_activity_at, phase, resumed_session
+                   last_activity_at, phase, resumed_session, project_id, dispatch_id,
+                   input_tokens, output_tokens, cache_read_tokens, current_context_tokens
             FROM {T("agent_run")} {whereSql}{(limit is { } m ? d.Limit(m) : "")}
             """;
         var list = new List<AgentRunRecord>();
@@ -227,10 +305,62 @@ public sealed class AgentRunStore : IDisposable
                 TranscriptJson: rd.IsDBNull(12) ? null : rd.GetString(12),
                 LastActivityAt: rd.IsDBNull(13) ? null : DateTime.ParseExact(rd.GetString(13), DateFormat, System.Globalization.CultureInfo.InvariantCulture),
                 Phase: rd.IsDBNull(14) ? null : rd.GetString(14),
-                ResumedSession: rd.IsDBNull(15) ? null : rd.GetInt32(15) != 0));
+                ResumedSession: rd.IsDBNull(15) ? null : rd.GetInt32(15) != 0,
+                ProjectId: rd.IsDBNull(16) ? null : rd.GetString(16),
+                DispatchId: rd.IsDBNull(17) ? null : rd.GetString(17),
+                // GetValue + Convert: the SQL Server columns are BIGINT
+                // (GetInt64) but SQLite reports Int64/Int32 by value —
+                // never GetInt32/GetInt64 directly on these.
+                InputTokens: rd.IsDBNull(18) ? null : Convert.ToInt64(rd.GetValue(18)),
+                OutputTokens: rd.IsDBNull(19) ? null : Convert.ToInt64(rd.GetValue(19)),
+                CacheReadTokens: rd.IsDBNull(20) ? null : Convert.ToInt64(rd.GetValue(20)),
+                CurrentContextTokens: rd.IsDBNull(21) ? null : Convert.ToInt64(rd.GetValue(21))));
         }
         return list;
     }
 
     public void Dispose() { }
+
+    /// <summary>
+    /// Per-role token rollup over finished runs in the last N days
+    /// (operator 2026-08-06: quota-burn visibility — the in-memory
+    /// CostTracker dies on restart and isn't attributable to a
+    /// project; these rows are persisted per project). Nullable
+    /// token columns (pre-v31 rows, providers that don't report
+    /// usage) contribute 0 via COALESCE.
+    /// </summary>
+    public async Task<IReadOnlyList<RoleTokenUsage>> SummarizeTokensByRoleAsync(int days, CancellationToken ct = default)
+    {
+        var cutoff = DateTime.UtcNow.AddDays(-Math.Max(1, days)).ToString(DateFormat);
+        await using var conn = await _db.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT role, COUNT(*),
+                   SUM(COALESCE(input_tokens, 0)),
+                   SUM(COALESCE(output_tokens, 0)),
+                   SUM(COALESCE(cache_read_tokens, 0)),
+                   MAX(COALESCE(current_context_tokens, 0))
+            FROM {T("agent_run")}
+            WHERE started_at >= @cutoff
+            GROUP BY role
+            ORDER BY 3 DESC
+            """;
+        cmd.AddParam("@cutoff", cutoff);
+        var list = new List<RoleTokenUsage>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct))
+        {
+            list.Add(new RoleTokenUsage(
+                Role: rd.GetString(0),
+                Runs: Convert.ToInt64(rd.GetValue(1)),
+                InputTokens: Convert.ToInt64(rd.GetValue(2)),
+                OutputTokens: Convert.ToInt64(rd.GetValue(3)),
+                CacheReadTokens: Convert.ToInt64(rd.GetValue(4)),
+                PeakContextTokens: Convert.ToInt64(rd.GetValue(5))));
+        }
+        return list;
+    }
+
+    public sealed record RoleTokenUsage(
+        string Role, long Runs, long InputTokens, long OutputTokens, long CacheReadTokens, long PeakContextTokens);
 }

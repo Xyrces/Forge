@@ -37,7 +37,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
         : base(
             "commit-push-pr",
-            (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened),
+            ExecutorFaultGuard.Wrap<AgentCompleted, PrOpened>("commit-push-pr", logger, (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened)),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -163,7 +163,20 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                         explicitNoOp
                             ? $"NO_CHANGES_NEEDED rejected by workflow policy noDiffOutcome=rework (attempt {attempts})"
                             : $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
-                        new Dictionary<string, object> { ["noProgressAttempts"] = attempts.ToString() }, ct);
+                        new Dictionary<string, object>
+                        {
+                            ["noProgressAttempts"] = attempts.ToString(),
+                            // Same context-carrying bounce: the next
+                            // round's prompt renders this as "##
+                            // Rework required" so the agent does the
+                            // work instead of idling again.
+                            ["reworkReason"] = explicitNoOp
+                                ? $"NO_CHANGES_NEEDED rejected by policy (attempt {attempts})"
+                                : $"no diff produced (attempt {attempts})",
+                            ["reworkContext"] = "Your previous attempt produced NO changes — the task requires a real code change. " +
+                                "Do the work: make the edits, run the tests, commit. If you genuinely believe nothing is needed, " +
+                                "explain why in detail in your final response.\n\nLast response tail:\n" + Truncate(input.Text ?? "", 1500),
+                        }, ct);
                     events.Publish(new DashboardEvent(
                         DateTime.UtcNow, DashboardEventKind.TaskTransition,
                         issue.Id, $"Requeued (no progress, attempt {attempts})",
@@ -192,16 +205,38 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             return new PrOpened(input, PrResult.NoDiff, 0, null);
         }
 
+        // Pre-push hygiene gate (deterministic, runs BEFORE the
+        // build/test verification): junk artifacts and oversized NEW
+        // files never reach a PR — this class of mistake must not
+        // depend on the reviewer catching it (observed live
+        // 2026-07-30: porthorizon task-17 pushed
+        // UmbilicalConnectorSystem.cs.bak, a working backup swept in
+        // by git add -A; the reviewer burned a round flagging it).
+        var addedFiles = await worktrees.GetAddedFilesAsync(worktreePath, input.Worktree.BaseBranch, ct);
+        var hygieneViolations = AgentTools.PushHygiene.Check(worktreePath, addedFiles);
+
         // Pre-push verification gate: run the project's build/test
         // commands in the worktree BEFORE pushing. A failure here
         // bounces the task back to the agent with the output — no PR
         // churn, no watch round; GitHub CI stays the safety net.
         // verifyCommands: null = auto-detect (dotnet), empty = disabled.
         var commands = verifyCommands ?? AgentTools.RunVerification.DefaultCommands(worktreePath);
-        if (commands.Count > 0)
+        if (hygieneViolations.Count > 0 || commands.Count > 0)
         {
-            logger.LogInformation("CommitPushPr({Id}): running {Count} verification command(s) before push", issue.Id, commands.Count);
-            var verification = await AgentTools.RunVerification.RunAsync(worktreePath, commands, logger, ct);
+            AgentTools.RunVerification.Result verification;
+            if (hygieneViolations.Count > 0)
+            {
+                // Fast-fail on hygiene: no point burning build/test
+                // minutes on a push that will be refused anyway.
+                logger.LogWarning("CommitPushPr({Id}): pre-push hygiene violations: {Violations}", issue.Id, string.Join("; ", hygieneViolations));
+                verification = new AgentTools.RunVerification.Result(false,
+                    hygieneViolations.Select(v => "pre-push hygiene check failed (junk/oversized files added to the branch):\n" + v).ToList());
+            }
+            else
+            {
+                logger.LogInformation("CommitPushPr({Id}): running {Count} verification command(s) before push", issue.Id, commands.Count);
+                verification = await AgentTools.RunVerification.RunAsync(worktreePath, commands, logger, ct);
+            }
             if (!verification.Ok)
             {
                 var attempts = int.TryParse(
@@ -225,6 +260,13 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 }
                 else
                 {
+                    // Bounce WITH context (operator rule 2026-07-31:
+                    // a failed build/test returns to the run context
+                    // to be fixed — it is NOT a task failure). The
+                    // reworkReason/reworkContext pair is what
+                    // RunAgentExecutor renders as "## Rework required"
+                    // on the next round; without it the agent was
+                    // blind and repeated the same failure.
                     await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
                         $"pre-push verification failed (attempt {attempts}): {verification.Failures[0][..Math.Min(200, verification.Failures[0].Length)]}",
                         new Dictionary<string, object>
@@ -232,6 +274,9 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                             ["noProgressAttempts"] = attempts.ToString(),
                             ["lastError"] = $"pre-push verification failed:\n{detail}",
                             ["lastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                            ["reworkReason"] = $"pre-push verification failed (attempt {attempts})",
+                            ["reworkContext"] = $"Your previous attempt's code FAILED the pre-push build/test verification — nothing was pushed. " +
+                                $"Fix the failure below and re-run the build/tests yourself before finishing:\n\n{Truncate(detail, 2000)}",
                         }, ct);
                     events.Publish(new DashboardEvent(
                         DateTime.UtcNow, DashboardEventKind.TaskTransition,
@@ -244,6 +289,51 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             logger.LogInformation("CommitPushPr({Id}): verification passed", issue.Id);
         }
 
+        // Rework divergence guard (2026-08-01): on a rework round
+        // (prNumber already recorded) the branch MUST still contain
+        // the PR head. An agent that resets onto main mid-round
+        // builds a divergent branch whose push is rejected
+        // non-fast-forward — and before this guard the throw vanished
+        // into MAF's silent halt, so rounds did the work, could never
+        // land it, and the stall guard burned strikes against a head
+        // that couldn't move (observed live: task-377, strikes 2+3).
+        // Bounce with explicit guidance; shares the no-progress
+        // budget so a repeat offender trips the breaker instead of
+        // looping forever.
+        var prNumberForGuard = issue.GetMetadata("prNumber");
+        if (!string.IsNullOrEmpty(prNumberForGuard)
+            && !await worktrees.IsAncestorAsync(worktreePath, $"origin/{branch}", "HEAD", ct))
+        {
+            var divAttempts = int.TryParse(
+                (await issues.GetAsync(issue.Id, ct))?.GetMetadata("noProgressAttempts"), out var dn) ? dn + 1 : 1;
+            if (divAttempts >= MaxNoProgressAttempts)
+            {
+                await issues.TransitionAsync(issue.Id, IssueStatus.Failed,
+                    $"rework branch diverged from PR head in {divAttempts} attempts",
+                    new Dictionary<string, object>
+                    {
+                        ["lastError"] = "rework branch diverged from PR head (non-fast-forward push)",
+                        ["lastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                    }, ct);
+                return new PrOpened(input, PrResult.NoDiff, 0, null);
+            }
+            await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                "rework branch diverged from the PR head; requeued with guidance",
+                new Dictionary<string, object>
+                {
+                    ["noProgressAttempts"] = divAttempts.ToString(),
+                    ["lastError"] = "rework branch diverged from PR head (non-fast-forward push)",
+                    ["lastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                    ["reworkReason"] = $"rework branch diverged from PR head (attempt {divAttempts})",
+                    ["reworkContext"] = "Your previous attempt was built on a branch that does NOT contain the PR's current head — the push was rejected as non-fast-forward and nothing landed. Do NOT reset or rebase the branch onto main. The worktree starts synced to the PR head: build your changes ON TOP of that branch, and if main has moved, merge origin/main INTO the branch (do not reset to it).",
+                }, ct);
+            events.Publish(new DashboardEvent(
+                DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                issue.Id, $"Requeued (branch diverged from PR head, attempt {divAttempts})", null));
+            logger.LogWarning("CommitPushPr({Id}): rework branch diverged from PR head — push would be non-fast-forward; requeued (attempt {Attempts})", issue.Id, divAttempts);
+            return new PrOpened(input, PrResult.NoDiff, 0, null);
+        }
+
         // P4 Stage A: advance through the dispatch checkpoints so
         // a StartupRecovery pass can resume from push_done if we
         // crash between push and PR-open, or from pr_opened if we
@@ -251,9 +341,40 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         logger.LogInformation("CommitPushPr({Id}): setting CommitDone", issue.Id);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
         logger.LogInformation("CommitPushPr({Id}): calling PushAsync", issue.Id);
-        await worktrees.PushAsync(worktreePath, branch, ct);
+        try
+        {
+            await worktrees.PushAsync(worktreePath, branch, ct);
+        }
+        catch (Exception ex)
+        {
+            // MAF's in-process execution swallows executor faults —
+            // the run halts and the orchestrator's halt guard sees a
+            // checkpoint, never the error. Log here or the push
+            // failure text is invisible (observed live 2026-08-01:
+            // task-377's non-fast-forward rejections).
+            logger.LogError(ex, "CommitPushPr({Id}): push failed", issue.Id);
+            throw;
+        }
         logger.LogInformation("CommitPushPr({Id}): push done, setting PushDone", issue.Id);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
+
+        // Push success = progress: reset the no-progress counter and
+        // drop any pre-push bounce context so later rounds don't
+        // render stale "rework required" guidance (operator rule
+        // 2026-07-31: rounds must be meaningful, budgets honest).
+        var successClear = new Dictionary<string, object> { ["noProgressAttempts"] = null! };
+        // Re-read: the executor's input record was materialized at
+        // claim time and misses metadata seeded since (bounce
+        // context lands between claim and push).
+        var seededReason = (await issues.GetAsync(issue.Id, ct))?.GetMetadata("reworkReason") ?? "";
+        if (seededReason.StartsWith("pre-push", StringComparison.OrdinalIgnoreCase)
+            || seededReason.StartsWith("no diff", StringComparison.OrdinalIgnoreCase)
+            || seededReason.StartsWith("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase))
+        {
+            successClear["reworkReason"] = null!;
+            successClear["reworkContext"] = null!;
+        }
+        await issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: successClear, ct: ct);
         var headSha = await worktrees.GetHeadShaAsync(worktreePath, ct);
         logger.LogInformation("CommitPushPr({Id}): got head sha {Sha}", issue.Id, headSha);
 
@@ -290,8 +411,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 logger.LogInformation("CommitPushPr({Id}): calling CreatePullRequestAsync ({Branch} -> {Base})",
                     issue.Id, branch, input.Worktree.BaseBranch);
                 pr = await gitHub.CreatePullRequestAsync(
-                    title: $"[{issue.Type}] {issue.Title}",
-                    body: BuildPrBody(issue, headSha, input.Text),
+                    title: PrText.Title(issue),
+                    body: PrText.Body(issue, headSha, input.Text),
                     headBranch: branch,
                     baseBranch: input.Worktree.BaseBranch,
                     cancellationToken: ct);
@@ -390,9 +511,6 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
 
         return new PrOpened(input, PrResult.Ok, pr.Number, headSha);
     }
-
-    private static string BuildPrBody(IssueRecord issue, string headSha, string? modelText)
-        => $"Task: {issue.Id}\n\nSHA: {headSha}\n\n## Model response\n\n{modelText ?? string.Empty}";
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
 

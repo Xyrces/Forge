@@ -25,11 +25,12 @@ public sealed class ProjectContext : IAsyncDisposable
         Options = options;
         _issues = issues;
         _issues.EnsureSchema();
-        // Deployment rows live in the same sqlite file as issues (v15
-        // migration, applied above by EnsureSchema); DeploymentStore
-        // is a thin typed layer over that table, so it's safe to
-        // construct lazily against the same path.
-        _deployments = new Lazy<DeploymentStore>(() => new DeploymentStore(_issues.DbPath));
+        // Deployment rows live in the same store/schema as issues
+        // (v15 migration, applied above by EnsureSchema); build the
+        // typed layer over the SAME connection factory — DbPath is
+        // empty under the SQL Server provider, so a path-based
+        // construction would silently fabricate a SQLite store.
+        _deployments = new Lazy<DeploymentStore>(() => new DeploymentStore(_issues.Db));
         // Spec + sprint rows also live in the issues sqlite file
         // (created by EnsureSchema); both stores are typed layers
         // over the same IssueStore instance.

@@ -33,14 +33,13 @@ public class SpecActionsEndpointTests : IDisposable
         _specs = new SpecStore(_issues, designArtifacts: designArtifacts);
         holder.Set(_specs);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         SpecEndpoints.MapSpecEndpoints(app, _specs, new NullSpecExtractionReader(),
             NullLogger<DashboardHost>.Instance);

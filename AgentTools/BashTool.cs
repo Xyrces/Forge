@@ -33,6 +33,7 @@ public sealed class BashTool
     private readonly TimeSpan _defaultTimeout;
     private readonly IReadOnlyDictionary<string, string>? _envVars;
     private readonly Func<bool>? _mutationsAllowed;
+    private readonly string? _mutationRefusalMessage;
 
     /// <param name="envVars">
     /// Extra environment variables injected into every spawned
@@ -46,14 +47,21 @@ public sealed class BashTool
     /// predicate returns true (plan approved). Read/explore/build/
     /// test commands are never gated.
     /// </param>
+    /// <param name="mutationRefusalMessage">
+    /// Override for the refusal text returned for a gated mutating
+    /// command — read-only roles (Reviewer) need their own wording;
+    /// the default explains the plan-gate flow.
+    /// </param>
     public BashTool(string workingDirectory, TimeSpan? defaultTimeout = null, ILogger<BashTool>? logger = null,
-        IReadOnlyDictionary<string, string>? envVars = null, Func<bool>? mutationsAllowed = null)
+        IReadOnlyDictionary<string, string>? envVars = null, Func<bool>? mutationsAllowed = null,
+        string? mutationRefusalMessage = null)
     {
         _workingDirectory = workingDirectory;
         _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(30);
         _logger = logger;
         _envVars = envVars;
         _mutationsAllowed = mutationsAllowed;
+        _mutationRefusalMessage = mutationRefusalMessage;
     }
 
     public string WorkingDirectory => _workingDirectory;
@@ -78,10 +86,16 @@ public sealed class BashTool
         // build/test commands pass ungated so the agent can ground
         // its plan in the actual repo.
         if (_mutationsAllowed is not null && !_mutationsAllowed()
-            && ShellMutationClassifier.IsMutating(command))
+            && ShellMutationClassifier.IsMutating(command, out var refusalReason))
         {
             _logger?.LogInformation("BashTool: refused mutating command pre-plan-approval: {Cmd}", command);
-            return "exit=-1\nstdout:\nstderr: REFUSED — no approved plan yet. Explore the repo (read-only commands are fine), then call submit_plan with your structured plan (goal / files / approach / test / done). Mutating commands unlock after approval.";
+            // Name the reason — an unexplained refusal makes the agent
+            // conclude ALL commands are blocked (observed live
+            // 2026-08-06, task-382 run) and waste plan revisions.
+            var why = refusalReason is null ? "" : $" (classified as: {refusalReason})";
+            return _mutationRefusalMessage is null
+                ? $"exit=-1\nstdout:\nstderr: REFUSED — no approved plan yet{why}. Explore the repo (read-only commands are fine), then call submit_plan with your structured plan (goal / files / approach / test / done). Mutating commands unlock after approval."
+                : _mutationRefusalMessage + why;
         }
 
         var cwd = string.IsNullOrWhiteSpace(workingDirectory) ? _workingDirectory : workingDirectory;

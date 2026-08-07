@@ -46,6 +46,52 @@ public class ModelRateLimitTrackerTests
         Assert.Single(snap);
         Assert.True(snap.ContainsKey("kilo-gateway|minimax/minimax-m3"));
     }
+
+    [Fact]
+    public void ProviderWideCooldown_CoolsEveryModelOnTheProvider()
+    {
+        var t = new ModelRateLimitTracker();
+        t.RecordProviderRateLimit("kimi", TimeSpan.FromMinutes(3));
+
+        Assert.True(t.IsCoolingDown("kimi", "kimi-for-coding"));
+        Assert.True(t.IsCoolingDown("kimi", "k3"));
+        Assert.False(t.IsCoolingDown("kilo-gateway", "kimi-k3"));
+    }
+
+    [Fact]
+    public void ProviderWideCooldown_ReturnsTheLaterExpiry()
+    {
+        var t = new ModelRateLimitTracker();
+        t.RecordRateLimit("kimi", "k3", TimeSpan.FromMinutes(1));
+        t.RecordProviderRateLimit("kimi", TimeSpan.FromMinutes(10));
+
+        var until = t.CoolingDownUntil("kimi", "k3");
+        Assert.NotNull(until);
+        Assert.True(until.Value > DateTime.UtcNow.AddMinutes(9));
+    }
+
+    [Fact]
+    public void Clear_LiftsModelCooldown()
+    {
+        var t = new ModelRateLimitTracker();
+        t.RecordRateLimit("kimi", "k3", TimeSpan.FromMinutes(3));
+
+        t.Clear("kimi", "k3");
+
+        Assert.False(t.IsCoolingDown("kimi", "k3"));
+    }
+
+    [Fact]
+    public void Clear_KeepsProviderWideCooldown()
+    {
+        var t = new ModelRateLimitTracker();
+        t.RecordRateLimit("kimi", "k3", TimeSpan.FromMinutes(3));
+        t.RecordProviderRateLimit("kimi", TimeSpan.FromMinutes(3));
+
+        t.Clear("kimi", "k3");
+
+        Assert.True(t.IsCoolingDown("kimi", "k3"));  // provider-wide still active
+    }
 }
 
 public class LlmAuthFailureClassificationTests

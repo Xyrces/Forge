@@ -31,21 +31,39 @@ public static class AgentsEndpoints
         RoleModelOverrides? overrides,
         SlotTable? slots,
         AgentRunStore? runs,
-        ProjectContextFactory? projectFactory)
+        ProjectContextFactory? projectFactory,
+        Agents.ProviderApiKeyResolver? apiKeys = null)
     {
         app.MapGet("/api/agents/roles", async (string? projectId, CancellationToken ct) =>
         {
-            var pid = string.IsNullOrWhiteSpace(projectId) ? "forge" : projectId;
+            // No hardcoded project id: absent param = the PRIMARY
+            // project (first registered), never a literal id — a
+            // registry whose first project isn't "forge" must not
+            // silently load a nonexistent/forge context.
+            var pid = string.IsNullOrWhiteSpace(projectId)
+                ? projectFactory?.KnownProjects.FirstOrDefault()?.Id
+                : projectId;
             string? projectRoot = null;
             IReadOnlyDictionary<string, int> projectRoles = new Dictionary<string, int>();
-            var ctx = projectFactory?.Find(pid);
+            var ctx = pid is null ? null : projectFactory?.Find(pid);
+            // Slot accounting needs a concrete project id; an
+            // unresolved project reports 0 in-flight and falls back
+            // to the default caps below.
+            var slotPid = pid ?? string.Empty;
             if (ctx is not null)
             {
                 projectRoot = ctx.Options.Root;
                 projectRoles = ctx.Options.Roles;
             }
 
-            var active = runs is not null ? await runs.ListActiveAsync(ct) : Array.Empty<AgentRunStore.AgentRunRecord>();
+            // agent_run is per-project workload data (the runner
+            // writes to the owning project's schema) — the run panels
+            // read the LENS project's store. Rows pre-dating the
+            // per-project writers live in the primary store.
+            var runStore = runs is not null && ctx is not null
+                ? new AgentRunStore(((Core.IssueStore)ctx.Issues).Db)
+                : runs;
+            var active = runStore is not null ? await runStore.ListActiveAsync(ct) : Array.Empty<AgentRunStore.AgentRunRecord>();
             var roles = new List<object>();
             foreach (var (agentType, role) in registry.All())
             {
@@ -57,8 +75,9 @@ public static class AgentsEndpoints
                 }
                 else
                 {
-                    var (p, m, isOverride) = llmConfig.ResolveEffective(agentType, overrides);
-                    var source = isOverride ? "override"
+                    var (p, m, isOverride) = llmConfig.ResolveEffective(agentType, overrides, pid);
+                    var source = isOverride
+                        ? (overrides?.GetScope(agentType, pid) == "project" ? "override (project)" : "override (global)")
                         : llmConfig.Roles.ContainsKey(agentType) ? "config"
                         : "default";
                     model = new { provider = (string?)p.Name, model = (string?)m, source };
@@ -69,11 +88,11 @@ public static class AgentsEndpoints
 
                 var activeRun = active.FirstOrDefault(r =>
                     string.Equals(r.Role, agentType.ToString(), StringComparison.OrdinalIgnoreCase));
-                var lastRun = runs is not null
-                    ? (await runs.ListRecentAsync(limit: 1, role: agentType.ToString(), ct: ct)).FirstOrDefault()
+                var lastRun = runStore is not null
+                    ? (await runStore.ListRecentAsync(limit: 1, role: agentType.ToString(), ct: ct)).FirstOrDefault()
                     : null;
 
-                var slotMax = slots?.MaxFor(pid, role.AgentName) ?? 0;
+                var slotMax = slots?.MaxFor(slotPid, role.AgentName) ?? 0;
                 if (slotMax == 0)
                     slotMax = Configuration.DefaultProjectRoles.MaxFor(
                         new Dictionary<string, int>(projectRoles, StringComparer.OrdinalIgnoreCase), role.AgentName);
@@ -85,23 +104,26 @@ public static class AgentsEndpoints
                     territory = role.ProjectSubdir,
                     tools = role.AllowedTools,
                     model,
-                    slot = new { inFlight = slots?.InFlight(pid, role.AgentName) ?? 0, max = slotMax },
+                    slot = new { inFlight = slots?.InFlight(slotPid, role.AgentName) ?? 0, max = slotMax },
                     prompt = new { source = promptSource, path = promptPath, content = promptContent },
                     currentRun = activeRun is null ? null : new
                     {
                         id = activeRun.Id,
                         taskId = activeRun.TaskId,
+                        projectId = activeRun.ProjectId,
                         startedAt = activeRun.StartedAt,
                         lastActivityAt = activeRun.LastActivityAt,
                         messageCount = activeRun.MessageCount,
                         toolCallCount = activeRun.ToolCallCount,
                         phase = activeRun.Phase,
                         resumedSession = activeRun.ResumedSession,
+                        currentContextTokens = activeRun.CurrentContextTokens,
                     },
                     lastRun = lastRun is null ? null : new
                     {
                         id = lastRun.Id,
                         taskId = lastRun.TaskId,
+                        projectId = lastRun.ProjectId,
                         status = lastRun.Status,
                         finishedAt = lastRun.FinishedAt,
                         durationMs = lastRun.DurationMs,
@@ -126,15 +148,16 @@ public static class AgentsEndpoints
                 }
                 else if (pr.ModelType is { } mt)
                 {
-                    var (p, m, isOverride) = llmConfig.ResolveEffective(mt, overrides);
-                    var source = isOverride ? "override"
+                    var (p, m, isOverride) = llmConfig.ResolveEffective(mt, overrides, pid);
+                    var source = isOverride
+                        ? (overrides?.GetScope(mt, pid) == "project" ? "override (project)" : "override (global)")
                         : llmConfig.Roles.ContainsKey(mt) ? "config"
                         : "default";
                     pModel = new { provider = (string?)p.Name, model = (string?)m, source };
                 }
                 else if (pr.InheritsModelFrom is not null)
                 {
-                    var (p, m, _) = llmConfig.ResolveEffective(Core.AgentType.CoreDev, overrides);
+                    var (p, m, _) = llmConfig.ResolveEffective(Core.AgentType.CoreDev, overrides, pid);
                     pModel = new { provider = (string?)p.Name, model = (string?)m, source = $"inherits {pr.InheritsModelFrom}" };
                 }
                 else
@@ -142,7 +165,7 @@ public static class AgentsEndpoints
                     pModel = new { provider = (string?)null, model = (string?)null, source = "none" };
                 }
 
-                var pSlotMax = slots?.MaxFor(pid, pr.AgentName) ?? 0;
+                var pSlotMax = slots?.MaxFor(slotPid, pr.AgentName) ?? 0;
                 if (pSlotMax == 0)
                     pSlotMax = Configuration.DefaultProjectRoles.MaxFor(
                         new Dictionary<string, int>(projectRoles, StringComparer.OrdinalIgnoreCase), pr.AgentName);
@@ -154,7 +177,7 @@ public static class AgentsEndpoints
                     surface = pr.Surface,
                     model = pModel,
                     modelEditable = pr.ModelType is not null,
-                    slot = new { inFlight = slots?.InFlight(pid, pr.AgentName) ?? 0, max = pSlotMax },
+                    slot = new { inFlight = slots?.InFlight(slotPid, pr.AgentName) ?? 0, max = pSlotMax },
                 });
             }
 
@@ -175,7 +198,13 @@ public static class AgentsEndpoints
                 string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
             if (provider is null)
                 return Results.NotFound(new { error = $"unknown provider '{name}'" });
-            var models = await ProviderModelCatalog.GetModelsAsync(provider, ct);
+            // Substitute the DB-resolved key (Secrets page) for the
+            // config placeholder — the catalog call must authenticate
+            // with the same key the runs use.
+            var effective = apiKeys?.Get(name) is { Length: > 0 } resolved
+                ? provider with { ApiKey = resolved }
+                : provider;
+            var models = await ProviderModelCatalog.GetModelsAsync(effective, ct);
             return (IResult)Results.Ok(new { provider = provider.Name, models, fetchError = ProviderModelCatalog.LastError(provider.Name) });
         });
 
@@ -191,19 +220,22 @@ public static class AgentsEndpoints
             if (llmConfig.Providers.All(p => !string.Equals(p.Name, body.Provider, StringComparison.OrdinalIgnoreCase)))
                 return Results.BadRequest(new { error = $"provider '{body.Provider}' is not configured; known: {string.Join(", ", llmConfig.Providers.Select(p => p.Name))}" });
 
-            await overrides.SetAsync(agentType.Value, body.Provider, body.Model, ct);
+            // Project-scoped by default (operator rule 2026-07-30:
+            // an override set for one project must never leak into
+            // another's runs); explicit null projectId = global.
+            await overrides.SetAsync(agentType.Value, body.Provider, body.Model, ct, projectId: body.ProjectId);
             return Results.Ok(new { role = name, provider = body.Provider, model = body.Model, source = "override" });
         });
 
-        app.MapDelete("/api/agents/roles/{name}/model", async (string name, CancellationToken ct) =>
+        app.MapDelete("/api/agents/roles/{name}/model", async (string name, string? projectId, CancellationToken ct) =>
         {
             if (overrides is null)
                 return Results.Json(new { error = "model overrides are not available in this mode" }, statusCode: 503);
             var agentType = ResolveAgentType(registry, name);
             if (agentType is null)
                 return Results.NotFound(new { error = $"unknown role '{name}'" });
-            await overrides.ClearAsync(agentType.Value, ct);
-            return Results.Ok(new { role = name, source = "config-or-default" });
+            await overrides.ClearAsync(agentType.Value, ct, projectId: projectId);
+            return Results.Ok(new { role = name, projectId, source = "config-or-default" });
         });
     }
 
@@ -237,5 +269,5 @@ public static class AgentsEndpoints
         }
     }
 
-    public sealed record PutRoleModelRequest(string Provider, string Model);
+    public sealed record PutRoleModelRequest(string Provider, string Model, string? ProjectId);
 }

@@ -181,13 +181,20 @@ public sealed class OrchestratorAgent : IAgent
                 // carries prNumber + the lifecycle states, so a
                 // separate subscription row was pure duplication).
                 // Any live task with a PR number is watched, regardless
-                // of sprint state. Legacy pr-watch rows still in the
-                // queue are closed here (their tasks are picked up by
-                // the same sweep — the metadata lives on the task).
+                // of sprint state. Blocked tasks with a PR join the
+                // sweep too — RunWatchSweepAsync resumes the resumable
+                // ones (transient reviewer-unavailable marker, or the
+                // merge gate now passing after an external fix) and
+                // leaves the rest operator-decision (auto-nudge on
+                // unblock).
+                // Legacy pr-watch rows still in the queue are closed
+                // here (their tasks are picked up by the same sweep —
+                // the metadata lives on the task).
                 var watchedTasks = (await bundle.IssueStore.ListAsync(new IssueFilter(), cancellationToken))
                     .Where(t => !AgentTaskTypes.IsContainer(t.Type)
                         && t.Type != AgentTaskTypes.PrWatch
-                        && t.Status is IssueStatus.Pending or IssueStatus.InProgress
+                        && (t.Status is IssueStatus.Pending or IssueStatus.InProgress
+                            || (t.Status == IssueStatus.Blocked && t.GetMetadata("prNumber") is not null))
                         && t.GetMetadata("prNumber") is not null)
                     .ToList();
                 var legacyWatches = allReady.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
@@ -234,7 +241,16 @@ public sealed class OrchestratorAgent : IAgent
                 var ready = allReady.Where(i => i.Type != AgentTaskTypes.PrWatch
                     && !AgentTaskTypes.IsContainer(i.Type)
                     && sprintMemberIds.Contains(i.Id)
-                    && !_inFlight.ContainsKey(i.Id))
+                    && !_inFlight.ContainsKey(i.Id)
+                    // Operator rule 2026-07-23/31: no task RUNS in a
+                    // sprint without technical grooming. The assembler
+                    // only adds groomed work, but a blocksIssueId
+                    // follow-up is now BORN into the sprint ungroomed
+                    // (FollowUpTool) — it sits as a member until the
+                    // groomer's ad-hoc pass clears it. Spec-chain tasks
+                    // (parented) derive eligibility from their chain.
+                    && (i.ParentIssueId is not null
+                        || string.Equals(i.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)))
                     .ToList();
                 // Per-(provider, model) 429 cooldowns: skip only the
                 // tasks whose model is cooling down. A minimax 429
@@ -243,7 +259,7 @@ public sealed class OrchestratorAgent : IAgent
                 var claimable = new List<IssueRecord>(ready.Count);
                 foreach (var t in ready)
                 {
-                    var mk = ResolveModelKey(t.Type);
+                    var mk = ResolveModelKey(t.Type, bundle.Project.Id);
                     var until = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
                     if (until is null) claimable.Add(t);
                     else coolingModels[mk.Provider + "/" + mk.Model] = until.Value;
@@ -329,6 +345,10 @@ public sealed class OrchestratorAgent : IAgent
     {
         for (var e = ex; e is not null; e = e.InnerException)
         {
+            // Typed 429 from the chat-client layer — classify without
+            // depending on message text (message rewordings must never
+            // silently turn a requeue into a task hard-fail).
+            if (e is Agents.LlmRateLimitException) return true;
             if (e is System.ClientModel.ClientResultException cre && cre.Status == 429) return true;
             var msg = e.Message;
             if (!msg.Contains("429")) continue;
@@ -382,6 +402,142 @@ public sealed class OrchestratorAgent : IAgent
     /// and arms the cooldown. Watch issues stay Pending between
     /// sweeps (by design: the watch IS a long-lived subscription).
     /// </summary>
+    /// <summary>Maximum auto-resume rounds for a transiently-blocked
+    /// watch before the task falls back to operator-decision (the
+    /// blockedKind marker is cleared so the sweep stops picking it
+    /// up).</summary>
+    private const int MaxAutoResumeAttempts = Forge.Reviewer.PRWatcher.MaxAutoResumeAttempts;
+
+    /// <summary>True for a Blocked task whose block is transient
+    /// (reviewer model unavailable at block time) — eligible for the
+    /// sweep's auto-resume nudge once the model recovers.</summary>
+    private static bool IsAutoResumableBlock(IssueRecord task) =>
+        task.Status == IssueStatus.Blocked
+        && string.Equals(task.GetMetadata("blockedKind"),
+            Forge.Reviewer.PRWatcher.BlockedKindReviewerUnavailable, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Resume a transiently-blocked watched task: reviewer model back
+    /// =&gt; clear the stale review bookkeeping (the old Error verdict
+    /// and consumed rounds are meaningless against the current head),
+    /// transition Blocked -&gt; InProgress, and hand the task back to
+    /// the sweep. Returns null when the task should stay blocked this
+    /// cycle (reviewer model still cooling, or resume budget
+    /// exhausted — in which case the marker is cleared so the block
+    /// becomes operator-decision).
+    /// </summary>
+    private async Task<IssueRecord?> TryResumeBlockedWatchAsync(
+        IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    {
+        var mk = ResolveModelKey("review", bundle.Project.Id);
+        var cooling = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
+        if (cooling is not null)
+        {
+            _logger.LogDebug(
+                "Watch (task {Id}): auto-resume deferred — reviewer model {Provider}/{Model} cooling until {Until:HH:mm:ss}",
+                task.Id, mk.Provider, mk.Model, cooling.Value);
+            return null;
+        }
+
+        var attempts = int.TryParse(task.GetMetadata("autoResumeAttempts"), out var a) ? a : 0;
+        if (attempts >= MaxAutoResumeAttempts)
+        {
+            _logger.LogWarning(
+                "Watch (task {Id}): auto-resume budget ({Max}) exhausted — clearing the transient marker; operator review required",
+                task.Id, MaxAutoResumeAttempts);
+            await bundle.IssueStore.TransitionAsync(task.Id, IssueStatus.Blocked,
+                "auto-resume budget exhausted — operator review required",
+                new Dictionary<string, object> { ["blockedKind"] = null! }, ct: cancellationToken);
+            return null;
+        }
+
+        var metadata = new Dictionary<string, object>
+        {
+            ["blockedKind"] = null!,
+            ["reviewVerdict"] = null!,
+            ["reviewSha"] = null!,
+            ["reviewNotes"] = null!,
+            ["reviewRound"] = null!,
+            ["lastError"] = null!,
+            ["lastErrorAt"] = null!,
+            ["autoResumeAttempts"] = (attempts + 1).ToString(),
+            // The resume is a nudge — restart the stale window or an
+            // hours-old PR trips the pr-stale guard on the first poll
+            // after resume (same failure shape as the requeue path).
+            ["prOpenedAt"] = DateTime.UtcNow.ToString("O"),
+        };
+        var resumed = await bundle.IssueStore.TransitionAsync(task.Id, IssueStatus.InProgress,
+            $"auto-resumed (round {attempts + 1}/{MaxAutoResumeAttempts}): reviewer model available again — re-reviewing the PR head",
+            metadata, ct: cancellationToken);
+        await ReportLifecycleAsync(resumed, Core.TaskEvent.WatchResumed, bundle, cancellationToken);
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+            task.Id, $"Watch auto-resumed (round {attempts + 1}/{MaxAutoResumeAttempts}): reviewer model available again"));
+        _logger.LogInformation(
+            "Watch (task {Id}): auto-resumed from transient reviewer-unavailable block (round {N}/{Max}, project={Project})",
+            task.Id, attempts + 1, MaxAutoResumeAttempts, bundle.Project.Id);
+        return resumed;
+    }
+
+    /// <summary>Reviews launched off-loop, keyed
+    /// project/task. A review that outlives
+    /// <see cref="ReviewRelaunchAfter"/> without landing a verdict
+    /// (crashed silently, process restarted mid-review) becomes
+    /// eligible for relaunch — the dispatcher's own
+    /// ReviewRunTimeout is the inner bound.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _reviewsInFlight = new();
+    private static readonly TimeSpan ReviewRelaunchAfter = TimeSpan.FromMinutes(15);
+
+    /// <summary>Launch decision, separated for tests: skip when a
+    /// review is in flight (in-memory) or the task's reviewStartedAt
+    /// marker is fresh (covers pre-restart reviews).</summary>
+    internal bool ShouldLaunchReview(IssueRecord task, string projectId)
+    {
+        var key = projectId + "/" + task.Id;
+        if (_reviewsInFlight.TryGetValue(key, out var inFlight) && !inFlight.IsCompleted)
+        {
+            return false;
+        }
+        if (DateTime.TryParse(task.GetMetadata("reviewStartedAt"), out var started)
+            && DateTime.UtcNow - started.ToUniversalTime() < ReviewRelaunchAfter)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Launch the reviewer for a watched task in the background.
+    /// The review records its own verdict metadata; the sweep never
+    /// awaits it.
+    /// </summary>
+    private void TryLaunchBackgroundReview(IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    {
+        var key = bundle.Project.Id + "/" + task.Id;
+        if (!ShouldLaunchReview(task, bundle.Project.Id))
+        {
+            return;
+        }
+
+        var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+            bundle.IssueStore, bundle.GitHub, _runner,
+            _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
+                ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
+            lifecycle: _lifecycle,
+            events: _events,
+            projectId: bundle.Project.Id);
+        var run = reviewer.ReviewOnceAsync(task, cancellationToken);
+        _reviewsInFlight[key] = run;
+        _ = run.ContinueWith(t =>
+        {
+            _reviewsInFlight.TryRemove(key, out _);
+            if (t.IsFaulted)
+            {
+                _logger.LogError(t.Exception, "background review for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
+            }
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
+    }
+
     private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchedTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
         _logger.LogInformation("Watch sweep: polling {N} watched task(s) (project={Project})",
@@ -391,31 +547,40 @@ public sealed class OrchestratorAgent : IAgent
             if (cancellationToken.IsCancellationRequested) return;
             try
             {
+                // Blocked watch recovery (unblock nudge): transient
+                // reviewer-unavailable blocks resume when the model is
+                // back; ANY other Blocked task gets the mergeable gate
+                // check — if the blockage cleared externally (operator
+                // resolved the conflict, CI went green, approval
+                // landed), the watch resumes and merges without an
+                // operator roundtrip. Everything else stays
+                // operator-decision.
+                var polled = watched;
+                if (watched.Status == IssueStatus.Blocked)
+                {
+                    IssueRecord? resumed = IsAutoResumableBlock(watched)
+                        ? await TryResumeBlockedWatchAsync(watched, bundle, cancellationToken)
+                        : await bundle.PrWatcher.TryResumeMergeableBlockedAsync(watched, cancellationToken);
+                    if (resumed is null) continue;
+                    polled = resumed;
+                }
                 // Review first (verdict metadata on the task), then
-                // decide. The reviewer is constructed per sweep — it
-                // shares the bundle's stores + the shared agent runner.
+                // decide — but OFF THE LOOP: an agentic review (tools,
+                // pr_diff paging, several round-trips) takes minutes,
+                // and awaiting it here would stall dispatch + all
+                // other watches (the pre-tools design ran the whole
+                // review synchronously in the sweep). The review runs
+                // in the background and records its verdict in the
+                // task metadata; the NEXT sweep's poll merges on it.
                 // Review step disabled in the workflow definition
                 // (pass 4): no reviewer-agent runs — merges require a
                 // formal review at the current head.
-                var fresh = watched;
+                var fresh = polled;
                 var reviewEnabled = _workflow is null
                     || (await _workflow.ResolveAsync(cancellationToken)).IsStepEnabled("review");
                 if (reviewEnabled)
                 {
-                    var reviewer = new Forge.Reviewer.ReviewerDispatcher(
-                        bundle.IssueStore, bundle.GitHub, _runner,
-                        _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
-                            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
-                        lifecycle: _lifecycle,
-                        events: _events,
-                        projectId: bundle.Project.Id);
-                    var outcome = await reviewer.ReviewOnceAsync(watched, cancellationToken);
-                    if (outcome is not null)
-                    {
-                        // The review updated the task's metadata;
-                        // re-read so the poll sees the fresh verdict.
-                        fresh = await bundle.IssueStore.GetAsync(watched.Id, cancellationToken) ?? watched;
-                    }
+                    TryLaunchBackgroundReview(polled, bundle, cancellationToken);
                 }
                 var poll = await bundle.PrWatcher.PollWatchedTaskAsync(fresh, cancellationToken);
                 _logger.LogDebug("Watch (task {Id}): {Outcome}", watched.Id, poll);
@@ -452,7 +617,42 @@ public sealed class OrchestratorAgent : IAgent
             // Report BEFORE the claim changes the record (derivation
             // must see the pre-claim state: Pending or ReworkQueued).
             await ReportLifecycleAsync(issue, Core.TaskEvent.Dispatched, bundle, cancellationToken);
-            var claimed = await bundle.IssueStore.ClaimAsync(issue.Id, "forge", cancellationToken);
+            // Dispatch correlation id (v30): one id threads claim →
+            // worktree → agent run → push → journal lines, so a
+            // postmortem joins every artifact for this dispatch
+            // without timestamp guesswork (operator 2026-08-01).
+            // Persisted on the issue (the workflow input carries it
+            // to RunAgentExecutor → the agent_run row) and scoped
+            // onto every log line this dispatch writes.
+            var dispatchId = "d-" + Guid.NewGuid().ToString("N")[..8];
+            {
+                var claimedMeta = new Dictionary<string, object>();
+                var existingMeta = (await bundle.IssueStore.GetAsync(issue.Id, cancellationToken))?.MetadataJson;
+                if (!string.IsNullOrWhiteSpace(existingMeta))
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(existingMeta);
+                    foreach (var p in doc.RootElement.EnumerateObject())
+                    {
+                        // Store convention: strings as plain values
+                        // (GetRawText would double-encode them and
+                        // break int.TryParse readers like
+                        // reworkAttempts — observed in
+                        // DispatchSingleTask_ReworkRound_ tests);
+                        // JSON null is the delete idiom — skip it.
+                        if (p.Value.ValueKind == System.Text.Json.JsonValueKind.Null) continue;
+                        claimedMeta[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                            ? p.Value.GetString()! : p.Value.GetRawText();
+                    }
+                }
+                claimedMeta["dispatchId"] = dispatchId;
+                await bundle.IssueStore.TransitionAsync(issue.Id, issue.Status, error: null, metadata: claimedMeta, ct: cancellationToken);
+            }
+            using var dispatchScope = _logger.BeginScope("DispatchId={DispatchId}", dispatchId);
+            // Claim identity = the owning role (coredev/clientdev/
+            // qa), not the opaque literal "forge" — the board shows
+            // the assignee chip, and "forge" on a PortHorizon card
+            // reads as the wrong project (operator 2026-08-01).
+            var claimed = await bundle.IssueStore.ClaimAsync(issue.Id, ResolveRoleName(issue.Type), cancellationToken);
             if (claimed is null)
             {
                 _logger.LogDebug("Issue {Id} already claimed elsewhere", issue.Id);
@@ -478,7 +678,7 @@ public sealed class OrchestratorAgent : IAgent
             {
                 if (IsLlmAuthFailure(ex))
                 {
-                    var mk = ResolveModelKey(preClaimed.Type);
+                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
                     _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
                         preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
@@ -487,7 +687,7 @@ public sealed class OrchestratorAgent : IAgent
                 }
                 if (IsLlmRateLimited(ex))
                 {
-                    var mk = ResolveModelKey(preClaimed.Type);
+                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
                     _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
                         preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
@@ -545,7 +745,7 @@ public sealed class OrchestratorAgent : IAgent
                 var alreadyTerminal = after?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed;
                 if (IsLlmAuthFailure(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
-                    var mk = ResolveModelKey(preClaimed.Type);
+                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
                     _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
                         preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
@@ -554,7 +754,7 @@ public sealed class OrchestratorAgent : IAgent
                 }
                 if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
-                    var mk = ResolveModelKey(preClaimed.Type);
+                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
                     _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
                         preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
@@ -569,6 +769,37 @@ public sealed class OrchestratorAgent : IAgent
                 return new Result(false, lastError);
             }
             var prNumber = after?.GetMetadata("prNumber");
+            // Mid-pipeline halt detection MUST come before the
+            // prNumber success return: a REWORK round already carries
+            // prNumber from the previous round, so a workflow that
+            // faulted silently (MAF InProcessExecution swallows
+            // executor faults — the run just halts) would read as
+            // "PR opened" success and the round would never actually
+            // run (observed live 2026-08-01: task-18/364 "dispatch
+            // completed in ~600ms" with zero executor logs, stall
+            // guard re-firing strikes against rounds that never
+            // happened). The checkpoint is the discriminator, and it
+            // differs per dispatch kind: a FRESH dispatch succeeds at
+            // PrOpened, so anything earlier is a halt; a REWORK round
+            // succeeds by pushing to the EXISTING PR (checkpoint
+            // PushDone — no PR-open step), so a stop before PushDone
+            // is a halt. (CommitDone was too lax: a swallowed push
+            // fault halts between CommitDone and PushDone — observed
+            // live 2026-08-01: task-377's silent non-fast-forward
+            // rejections read as "completed".)
+            var halted = after?.Status == IssueStatus.InProgress
+                && after.DispatchCheckpoint is not null
+                && (string.IsNullOrEmpty(prNumber)
+                    ? after.DispatchCheckpoint < DispatchCheckpoint.PrOpened
+                    : after.DispatchCheckpoint < DispatchCheckpoint.PushDone);
+            if (halted)
+            {
+                var msg = $"workflow halted mid-pipeline at checkpoint {after!.DispatchCheckpoint} without surfacing an error";
+                _logger.LogWarning("Workflow dispatch for {Id}: {Msg}", preClaimed.Id, msg);
+                await ReportLifecycleAsync(preClaimed, Core.TaskEvent.RunDied, bundle, cancellationToken);
+                await HandleFailureAsync(preClaimed, new InvalidOperationException(msg), bundle, cancellationToken);
+                return new Result(false, msg);
+            }
             _logger.LogInformation("Workflow dispatch for {Id} completed in {Ms}ms (status={Status} prNumber={Pr})",
                 preClaimed.Id, (DateTime.UtcNow - startedAt).TotalMilliseconds, after?.Status, prNumber);
             if (!string.IsNullOrEmpty(prNumber))
@@ -581,23 +812,7 @@ public sealed class OrchestratorAgent : IAgent
                 await ReportLifecycleAsync(after, Core.TaskEvent.RunCompletedNoDiff, bundle, cancellationToken);
                 return new Result(true, "completed with no diff");
             }
-            // Mid-pipeline halt detection: the workflow run returned
-            // but the issue never reached PrOpened and has no
-            // lastError. MAF InProcessExecution swallows executor
-            // faults (the run just halts), so without this check the
-            // issue would sit InProgress forever with no retry and
-            // no error anywhere. Treat as a dispatch failure and let
-            // the retry/hard-fail policy handle it.
-            if (after?.Status == IssueStatus.InProgress
-                && after.DispatchCheckpoint is not null
-                && after.DispatchCheckpoint < DispatchCheckpoint.PrOpened)
-            {
-                var msg = $"workflow halted mid-pipeline at checkpoint {after.DispatchCheckpoint} without surfacing an error";
-                _logger.LogWarning("Workflow dispatch for {Id}: {Msg}", preClaimed.Id, msg);
-                await ReportLifecycleAsync(preClaimed, Core.TaskEvent.RunDied, bundle, cancellationToken);
-                await HandleFailureAsync(preClaimed, new InvalidOperationException(msg), bundle, cancellationToken);
-                return new Result(false, msg);
-            }
+            // (halt guard moved above — see comment there)
             return new Result(true, "workflow completed");
         }
         catch (OperationCanceledException)
@@ -650,12 +865,19 @@ public sealed class OrchestratorAgent : IAgent
     /// bound (tests) or the role's entry is broken, which reproduces
     /// the pre-per-model global cooldown for that bucket.
     /// </summary>
-    private (string Provider, string Model) ResolveModelKey(string taskType)
+    /// <summary>DB model overrides (per project → global), bound at
+    /// startup — the cooldown key must be the EFFECTIVE model for the
+    /// task's project or a cooldown meant for one project's override
+    /// skips another project's tasks (operator rule 2026-07-30).</summary>
+    public Agents.RoleModelOverrides? ModelOverrides { get; set; }
+
+    private (string Provider, string Model) ResolveModelKey(string taskType, string? projectId)
     {
         if (_llmConfig is null) return ("default", "default");
         try
         {
-            var (provider, model) = _llmConfig.Resolve(RoleAgentRegistry.FromTaskType(taskType));
+            var (provider, model, _) = _llmConfig.ResolveEffective(
+                RoleAgentRegistry.FromTaskType(taskType), ModelOverrides, projectId);
             return (provider.Name, model);
         }
         catch (InvalidOperationException)

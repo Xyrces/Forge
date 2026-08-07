@@ -36,7 +36,6 @@ public class RunGateCatalogEndpointTests : IDisposable
         _memory = new MemoryStore(_dbPath);
         _gateOptions = new GateOptions();
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -44,13 +43,13 @@ public class RunGateCatalogEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         _app = builder.Build();
 
         RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(_app, _gateOptions, _memory, NullLogger<RunGatePipeline>.Instance);
 
         _app.Start();
-        _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+        _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_app.GetPort()}/") };
     }
 
     public void Dispose()
@@ -108,7 +107,6 @@ public class RunGateCatalogEndpointTests : IDisposable
     [Fact]
     public async Task Get_ResolutionSourceIsConfig_WhenGateOptionsConfigured()
     {
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -116,7 +114,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
 
         var configOptions = new GateOptions();
         configOptions.Run["preImplementation"] = new[] { "plan-schema" };
@@ -124,7 +122,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(app, configOptions, _memory, NullLogger<RunGatePipeline>.Instance);
         app.Start();
 
-        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
         var resp = await client.GetAsync("/api/gates/preImplementation");
         var body = await resp.Content.ReadFromJsonAsync<CatalogResponse>();
         Assert.Equal("config", body!.Source);
@@ -165,7 +163,6 @@ public class RunGateCatalogEndpointTests : IDisposable
     [Fact]
     public async Task Get_ReturnsUnknownNames_ForUnrecognizedGate()
     {
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetTempPath(),
@@ -173,7 +170,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
 
         var configOptions = new GateOptions();
         configOptions.Run["preImplementation"] = new[] { "plan-schema", "bogus-gate" };
@@ -181,7 +178,7 @@ public class RunGateCatalogEndpointTests : IDisposable
         RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(app, configOptions, null!, NullLogger<RunGatePipeline>.Instance);
         app.Start();
 
-        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
         var resp = await client.GetAsync("/api/gates/preImplementation");
         var body = await resp.Content.ReadFromJsonAsync<CatalogResponse>();
         Assert.Contains("bogus-gate", body!.UnknownNames);
@@ -269,7 +266,6 @@ public class RunGateCatalogEndpointTests : IDisposable
     public async Task Put_Returns503_WhenMemoryIsNull()
     {
         // Arrange: build a separate app with null memory
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -277,12 +273,12 @@ public class RunGateCatalogEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(app, _gateOptions, null, NullLogger<RunGatePipeline>.Instance);
         app.Start();
 
-        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
 
         // Act
         var putResp = await client.PutAsJsonAsync("/api/gates/preImplementation", new { gates = new[] { "plan-schema" } });
@@ -296,7 +292,6 @@ public class RunGateCatalogEndpointTests : IDisposable
     public async Task Delete_Returns503_WhenMemoryIsNull()
     {
         // Arrange: build a separate app with null memory
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -304,12 +299,12 @@ public class RunGateCatalogEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(app, _gateOptions, null, NullLogger<RunGatePipeline>.Instance);
         app.Start();
 
-        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
+        using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
 
         // Act
         var delResp = await client.DeleteAsync("/api/gates/preImplementation");

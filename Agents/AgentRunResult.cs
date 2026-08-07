@@ -19,7 +19,7 @@
 public sealed record AgentRunResult(
     string Text,
     string? SessionId,
-    int InputTokens,
-    int OutputTokens,
+    long InputTokens,
+    long OutputTokens,
     TimeSpan Elapsed);
 

@@ -16,6 +16,9 @@ public interface IChatClientFactory
     /// Build a chat client for the given role. The role is used to resolve
     /// which provider + model to use when <see cref="LlmConfig.Roles"/> is
     /// populated; otherwise the default provider + model is used.
+    /// <paramref name="projectId"/> scopes DB model overrides: a
+    /// project-scoped override wins over the global one (an override
+    /// set for another project never applies).
     /// </summary>
-    IChatClient Create(LlmConfig config, AgentType role);
+    IChatClient Create(LlmConfig config, AgentType role, string? projectId = null);
 }

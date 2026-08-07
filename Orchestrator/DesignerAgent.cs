@@ -140,7 +140,7 @@ public sealed class DesignerAgent
         // config when the "designer" role isn't configured.
         var designerRole = _roles.ByAgentName(RoleAgentRegistry.DesignerAgentName);
         var roleForClient = designerRole ?? _roles.ForType(AgentType.CoreDev);
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, spec.ProjectId);
         // Function-invocation middleware: the LLM's tool_calls get
         // executed and the result feeds back into the next turn.
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();

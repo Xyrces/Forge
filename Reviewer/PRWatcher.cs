@@ -30,6 +30,12 @@ public sealed class PRWatcher
     private readonly StageGates? _gates;
     private readonly IDashboardEventBus _events;
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
+
+    /// <summary>True when the lifecycle machine is wired — exposed
+    /// for composition-wiring tests. A watcher without it no-ops
+    /// every report and silently disables the rework guard (observed
+    /// live 2026-07-31).</summary>
+    internal bool HasLifecycle => _lifecycle is not null;
     private readonly AgentRunStore? _runs;
     private readonly Forge.Core.Workflow.WorkflowResolver? _workflow;
 
@@ -301,7 +307,7 @@ public sealed class PRWatcher
                 await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
                     task, worktreePath, sha,
-                    reason: "PR conflicts with the base branch",
+                    reason: ConflictReworkReason,
                     context: ConflictContext,
                     terminalStatus: IssueStatus.Blocked,
                     terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
@@ -348,7 +354,7 @@ public sealed class PRWatcher
                 await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
                     task, worktreePath, sha,
-                    reason: "PR conflicts with the base branch",
+                    reason: ConflictReworkReason,
                     context: ConflictContext,
                     terminalStatus: IssueStatus.Blocked,
                     terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
@@ -478,8 +484,17 @@ public sealed class PRWatcher
             var rounds = int.TryParse(task.GetMetadata("reviewRound"), out var r) ? r : 1;
             if (rounds >= maxStrikes)
             {
-                _logger.LogWarning("PR #{PrNumber}: reviewer unavailable after {Rounds} rounds; blocking for operator review", prNumber, rounds);
-                await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "reviewer unavailable — operator review required", ct: cancellationToken);
+                _logger.LogWarning("PR #{PrNumber}: reviewer unavailable after {Rounds} rounds; blocking until the reviewer model recovers", prNumber, rounds);
+                // Transient block: the reviewer MODEL was unavailable
+                // (LLM outage / rate-limit), the PR itself may be
+                // fine. blockedKind marks the task for the dispatch
+                // loop's auto-resume sweep — it re-reviews the head
+                // once the model is back instead of waiting for an
+                // operator. Genuine blocks (circuit breaker, CI-red
+                // 'block', conflicts) carry no marker and stay
+                // operator-decision.
+                await _issues.TransitionAsync(taskId, IssueStatus.Blocked, "reviewer unavailable — will auto-resume when the reviewer model recovers",
+                    new Dictionary<string, object> { ["blockedKind"] = BlockedKindReviewerUnavailable }, ct: cancellationToken);
                 return WatchPollOutcome.Blocked;
             }
             return WatchPollOutcome.Pending;
@@ -503,7 +518,7 @@ public sealed class PRWatcher
             await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
             return await ReworkOrTripAsync(
                 task, worktreePath, sha,
-                reason: "PR conflicts with the base branch",
+                reason: ConflictReworkReason,
                 context: ConflictContext,
                 terminalStatus: IssueStatus.Blocked,
                 terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
@@ -524,11 +539,166 @@ public sealed class PRWatcher
     /// </summary>
     public const int MaxReworkAttempts = 3;
 
+    /// <summary><c>blockedKind</c> metadata value written when a task
+    /// is Blocked solely because the reviewer model was unavailable
+    /// (LLM outage / rate-limit). The dispatch loop's watch sweep
+    /// auto-resumes tasks carrying this marker once the reviewer model
+    /// is no longer cooling down; all other Blocked tasks remain
+    /// operator-decision.</summary>
+    public const string BlockedKindReviewerUnavailable = "reviewer-unavailable";
+
+    /// <summary>Max auto-resume rounds for a blocked watch before
+    /// the task falls back to operator-decision. Shared by the
+    /// transient reviewer-unavailable resume and the
+    /// mergeable-gate resume.</summary>
+    public const int MaxAutoResumeAttempts = 3;
+
+    /// <summary>The rework reason marking a conflict-sync round —
+    /// the conflict mutex keys on it, so it must be a single
+    /// literal.</summary>
+    internal const string ConflictReworkReason = "PR conflicts with the base branch";
+
     /// <summary>Shared context for conflict sync rounds (used by the
     /// green+approved-conflicting route and the non-green conflict
     /// check).</summary>
     private const string ConflictContext =
         "The PR branch has merge conflicts with the base branch and cannot be merged — GitHub does not even run CI on a conflicting PR. Merge the base branch into your branch (git fetch origin && git merge origin/main), resolve the conflicts minimally, run the full test suite, and push to the SAME branch. Keep your earlier changes intact; do not restructure unrelated work.";
+
+    /// <summary>
+    /// External-fix recovery for a Blocked watched task (operator
+    /// ask 2026-07-31: blocked tasks must self-heal when the world
+    /// improves). Resume only when the merge gate would pass RIGHT
+    /// NOW: PR open + mergeable + CI green at the head + an approval
+    /// recorded at that head (reviewer-agent verdict or formal
+    /// review). Genuine blocks whose condition has NOT cleared
+    /// (conflicting, CI red, changes-requested at head) stay
+    /// operator-decision. Shares the autoResumeAttempts budget with
+    /// the transient reviewer-unavailable resume.
+    /// Returns the resumed task, or null when the gate fails.
+    /// </summary>
+    public async Task<IssueRecord?> TryResumeMergeableBlockedAsync(
+        IssueRecord task, CancellationToken cancellationToken = default,
+        Func<PullRequest, string>? headShaOverride = null,
+        Func<PullRequest, bool?>? mergeableOverride = null,
+        Func<int, IEnumerable<PullRequestReviewState>>? reviewsOverride = null)
+    {
+        if (task.Status != IssueStatus.Blocked) return null;
+        var prText = task.GetMetadata("prNumber");
+        if (!int.TryParse(prText, out var prNumber)) return null;
+
+        var attempts = int.TryParse(task.GetMetadata("autoResumeAttempts"), out var a) ? a : 0;
+        if (attempts >= MaxAutoResumeAttempts)
+        {
+            _logger.LogDebug("Task {Id}: mergeable-resume budget exhausted; stays operator-decision", task.Id);
+            return null;
+        }
+
+        PullRequest pr;
+        try
+        {
+            pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Task {Id}: mergeable-resume PR fetch failed; skipping", task.Id);
+            return null;
+        }
+        // Octokit fakes in tests leave State unset; a PR we just
+        // fetched for a live watch is treated as open unless the API
+        // says otherwise.
+        try
+        {
+            if (pr.State.Value != ItemState.Open) return null;
+        }
+        catch (ArgumentException) { /* unset on test fakes — treat as open */ }
+        var sha = headShaOverride?.Invoke(pr) ?? pr.Head.Sha;
+        var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
+        if (mergeable != true) return null;
+
+        CommitState ci;
+        try
+        {
+            ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Task {Id}: mergeable-resume CI fetch failed; skipping", task.Id);
+            return null;
+        }
+        if (ci != CommitState.Success) return null;
+
+        // Approval at head: recorded reviewer verdict, or a formal
+        // review at the current head.
+        var recordedApprove =
+            string.Equals(task.GetMetadata("reviewSha"), sha, StringComparison.Ordinal)
+            && task.GetMetadata("reviewVerdict") == "Approve";
+        var formalApprove = false;
+        try
+        {
+            if (reviewsOverride is not null)
+            {
+                formalApprove = reviewsOverride(prNumber).Contains(PullRequestReviewState.Approved);
+            }
+            else
+            {
+                var reviews = await _gitHub.GetReviewsAsync(prNumber, cancellationToken);
+                formalApprove = reviews.Any(r => r.State.Value == PullRequestReviewState.Approved
+                    && string.Equals(r.CommitId, sha, StringComparison.Ordinal));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Task {Id}: mergeable-resume reviews fetch failed; using recorded verdict only", task.Id);
+        }
+        if (!recordedApprove && !formalApprove) return null;
+
+        _logger.LogInformation(
+            "PR #{PrNumber} (task {Id}): blockage cleared externally — mergeable + CI green + approved at {Sha}; resuming watch",
+            prNumber, task.Id, sha[..Math.Min(7, sha.Length)]);
+        var resumed = await _issues.TransitionAsync(task.Id, IssueStatus.InProgress,
+            $"auto-resumed (round {attempts + 1}/{MaxAutoResumeAttempts}): PR mergeable again — blockage cleared externally",
+            new Dictionary<string, object>
+            {
+                ["blockedKind"] = null!,
+                ["lastError"] = null!,
+                ["lastErrorAt"] = null!,
+                ["prOpenedAt"] = DateTime.UtcNow.ToString("O"),
+                ["autoResumeAttempts"] = (attempts + 1).ToString(),
+            }, ct: cancellationToken);
+        await ReportLifecycleAsync(resumed, Forge.Core.TaskEvent.WatchResumed, cancellationToken);
+        return resumed;
+    }
+
+    /// <summary>True when another task in this store has a
+    /// conflict-sync round claimed AND LIVE (InProgress carrying the
+    /// conflict rework reason with an active run). The conflict
+    /// mutex: one sync at a time so parallel rounds stop racing a
+    /// moving main (observed live 2026-07-31: PRs #739 + #742).
+    ///
+    /// <para>An InProgress conflict-claim with NO active run is an
+    /// orphan (restart killed the sync round) — it must NOT hold the
+    /// mutex, or every conflict sync defers behind a dead claim and
+    /// the whole merge pipeline deadlocks (observed live 2026-08-01:
+    /// task-18/20/364 all orphaned mid-sync; 367/370 deferred
+    /// forever). Orphans re-enter through the sweep's normal
+    /// rework requeue — the same poll that was deferring on their
+    /// behalf.</para>
+    /// </summary>
+    private async Task<bool> ConflictSyncInFlightAsync(string selfTaskId, CancellationToken ct)
+    {
+        var claimed = (await _issues.ListAsync(
+                new Forge.Core.IssueFilter { Status = IssueStatus.InProgress }, ct))
+            .Where(t => t.Id != selfTaskId
+                && t.GetMetadata("reworkReason") == ConflictReworkReason)
+            .ToList();
+        if (claimed.Count == 0) return false;
+        if (_runs is null) return true;   // no registry — conservative
+        var activeTaskIds = (await _runs.ListActiveAsync(ct))
+            .Where(r => r.TaskId is not null)
+            .Select(r => r.TaskId!)
+            .ToHashSet(StringComparer.Ordinal);
+        return claimed.Any(t => activeTaskIds.Contains(t.Id));
+    }
 
     /// <summary>Phase 2 shadow-authority helper: report an observed
     /// event to the lifecycle machine. Best-effort — never breaks the
@@ -570,6 +740,23 @@ public sealed class PRWatcher
         int? maxStrikes = null)
     {
         var taskId = task.Id;
+        // Conflict-sync mutex (2026-07-31): one sync round at a time
+        // per project. Concurrent syncs race a moving main — every
+        // merge re-dirties the other conflicting PRs, so parallel
+        // rounds keep re-conflicting each other and burn breaker
+        // strikes without ever landing (observed live: PRs #739 +
+        // #742 sync-raced four merges on main). While another task's
+        // conflict-sync round is claimed, wait — the strike fires
+        // once the base stops moving. Single choke point: every
+        // conflict branch (MergeReady, CI-red, 2b) routes here.
+        if (reason == ConflictReworkReason
+            && await ConflictSyncInFlightAsync(taskId, cancellationToken))
+        {
+            _logger.LogInformation(
+                "Task {Id}: conflict-sync round deferred — another sync is in flight; serializing",
+                taskId);
+            return WatchPollOutcome.Pending;
+        }
         // Re-read: the caller's record predates the lifecycle reports
         // fired on the way here (BaseRecovered et al.), and the
         // metadata merge below must not clobber the machine's fresh
@@ -592,6 +779,13 @@ public sealed class PRWatcher
                 taskId, attempts, reason);
             await ReportLifecycleAsync(task, Forge.Core.TaskEvent.BreakerTripped, cancellationToken);
             await _issues.TransitionAsync(taskId, terminalStatus, terminalError, ct: cancellationToken);
+            // Breaker-trip snapshot (operator 2026-08-01, postmortem
+            // tooling): the WHY-bundle captured atomically at trip
+            // time — task record + recent run outcomes + the reason
+            // chain — under memory key breaker/<taskId>/<utc ticks>.
+            // Without it a postmortem re-assembles the moment from
+            // four stores by timestamp.
+            await WriteBreakerSnapshotAsync(task, reason, attempts, cancellationToken);
             if (terminalStatus == IssueStatus.Failed)
             {
                 await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
@@ -629,9 +823,53 @@ public sealed class PRWatcher
         return WatchPollOutcome.Reworking;
     }
 
-    private static Dictionary<string, object> ParseMetadataDict(string? metadataJson)
+    /// <summary>
+    /// Persist the breaker-trip WHY-bundle: task state, the strike
+    /// chain, and the last few run outcomes (role/status/duration/
+    /// error/dispatchId) as a single JSON artifact under memory key
+    /// breaker/&lt;taskId&gt;/&lt;utcTicks&gt;. Best-effort — never
+    /// blocks the terminal transition.
+    /// </summary>
+    private async Task WriteBreakerSnapshotAsync(IssueRecord task, string reason, int attempts, CancellationToken ct)
     {
-        var metadata = new Dictionary<string, object>();
+        try
+        {
+            var recentRuns = _runs is null
+                ? (object?)null
+                : (await _runs.ListRecentAsync(5, taskId: task.Id, ct: ct))
+                    .Select(r => new
+                    {
+                        r.Id, r.Role, r.Status, r.StartedAt, r.DurationMs, r.Error, r.DispatchId,
+                    }).ToList();
+            var snapshot = new
+            {
+                taskId = task.Id,
+                title = task.Title,
+                trippedAt = DateTime.UtcNow,
+                reason,
+                reworkAttempts = attempts,
+                prNumber = task.GetMetadata("prNumber"),
+                state = task.GetMetadata("state"),
+                reviewVerdict = task.GetMetadata("reviewVerdict"),
+                reviewSha = task.GetMetadata("reviewSha"),
+                metadata = ParseMetadataDict(task.MetadataJson),
+                recentRuns,
+            };
+            if (_issues is not Forge.Core.IssueStore concrete) return;
+            await using var memory = new Forge.Core.MemoryStore(concrete.Db);
+            var key = $"breaker/{task.Id}/{DateTime.UtcNow.Ticks}";
+            await memory.RememberAsync(key,
+                System.Text.Json.JsonSerializer.Serialize(snapshot), ttlDays: 30, ct);
+            _logger.LogInformation("PR watch (task {TaskId}): breaker snapshot recorded at memory key {Key}", task.Id, key);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "breaker snapshot write failed for {TaskId}; continuing", task.Id);
+        }
+    }
+
+    private static Dictionary<string, object> ParseMetadataDict(string? metadataJson)
+    {        var metadata = new Dictionary<string, object>();
         if (string.IsNullOrWhiteSpace(metadataJson)) return metadata;
         try
         {

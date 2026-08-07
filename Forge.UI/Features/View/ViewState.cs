@@ -7,6 +7,14 @@ namespace Forge.Dashboard.Features.View;
 public sealed record ViewState
 {
     public bool Loading { get; init; }
+    /// <summary>
+    /// A background re-fetch is in flight. Pages keep rendering the
+    /// CURRENT data while this is set — only the initial load
+    /// (<see cref="Loading"/>) may replace content with a placeholder,
+    /// otherwise every poll/event-driven reload would tear down the
+    /// DOM and the whole panel blinks (operator 2026-07-31).
+    /// </summary>
+    public bool Refreshing { get; init; }
     public string? Error { get; init; }
     public DateTime? LastFetchedAt { get; init; }
     public IReadOnlyList<ViewTask> Tasks { get; init; } = Array.Empty<ViewTask>();
@@ -106,11 +114,17 @@ public sealed record ViewSprint(
 public sealed record ViewSprintMember(
     string Id,
     string Title,
-    string Status);
+    string Status,
+    IReadOnlyList<string>? BlockedBy = null,
+    string? Situation = null,
+    string? SituationTone = null);
 
 public static class ViewActions
 {
-    public sealed record LoadViewAction(string? ProjectId = null);
+    /// <param name="Background">True for polls and event-driven
+    /// reloads: the store keeps showing current data (Refreshing
+    /// flag) instead of entering the full Loading state.</param>
+    public sealed record LoadViewAction(string? ProjectId = null, bool Background = false);
     public sealed record ViewLoadedAction(
         ViewState State);
     public sealed record ViewLoadFailedAction(string Error);
@@ -161,7 +175,7 @@ public sealed class ViewClient
                 sp.status ?? "Unknown",
                 sp.issueCount, sp.doneCount,
                 (sp.members ?? Array.Empty<SprintMemberDto>())
-                    .Select(m => new ViewSprintMember(m.id, m.title, m.status)).ToArray())).ToArray(),
+                    .Select(m => new ViewSprintMember(m.id, m.title, m.status, m.blockedBy, m.situation, m.situationTone)).ToArray())).ToArray(),
             CompletedTasks: resp.completedTasks,
             FailedTasks: resp.failedTasks);
         return snapshot;
@@ -229,7 +243,10 @@ public sealed class ViewClient
     private sealed record SprintMemberDto(
         string id,
         string title,
-        string status);
+        string status,
+        string[]? blockedBy = null,
+        string? situation = null,
+        string? situationTone = null);
 }
 
 public sealed record ViewSnapshot(

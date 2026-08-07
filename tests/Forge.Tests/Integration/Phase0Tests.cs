@@ -149,6 +149,6 @@ public class Phase0Tests
     {
         private readonly ScriptedChatClient _inner;
         public ScriptingFactory(ScriptedChatClient inner) { _inner = inner; }
-        public IChatClient Create(LlmConfig config, AgentType role) => _inner;
+        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => _inner;
     }
 }

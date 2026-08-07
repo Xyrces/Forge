@@ -33,7 +33,6 @@ public class AgentRunEndpointTests : IDisposable
         _runs = new AgentRunStore(_dbPath);
         _memory = new MemoryStore(_dbPath);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = Path.GetDirectoryName(_dbPath) ?? Path.GetTempPath(),
@@ -41,7 +40,7 @@ public class AgentRunEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         AgentRunEndpoints.MapAgentRunEndpoints(app, _runs);
         MemoryEndpoints.MapMemoryEndpoints(app, _memory, NullLogger<DashboardHost>.Instance);

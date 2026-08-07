@@ -56,7 +56,6 @@ public class ArtistEndpointTests : IDisposable
         _events = new InMemoryDashboardEventBus();
         _meshy = NewMeshy();
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -64,7 +63,7 @@ public class ArtistEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         ArtistEndpoints.MapArtistEndpoints(app, _specs,
             artistFactory: null, _runs, _artOutputs, _meshy,

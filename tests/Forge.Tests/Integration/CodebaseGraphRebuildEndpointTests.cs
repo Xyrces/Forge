@@ -32,14 +32,13 @@ public class CodebaseGraphRebuildEndpointTests : IDisposable
         _issues = new IssueStore(_dbPath);
         _cache = new CodebaseGraphCacheStore(_issues);
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
             ApplicationName = "Forge.Tests",
         });
         builder.Logging.ClearProviders();
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         app.MapPost("/api/codebase-graph/rebuild", async (string repoRoot, CancellationToken ct) =>
         {

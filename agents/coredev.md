@@ -90,4 +90,6 @@ Rules:
 
 ## Out-of-scope discoveries
 
-If you find work that matters but is NOT part of your task (a bug elsewhere, tech debt, a missing test for adjacent code), do NOT fix it in this run — call `file_followup` with a self-contained title + description and keep working. Filed follow-ups go through technical grooming before any sprint; the groomer closes duplicates. Never file a follow-up for work your current task already covers.
+If you find work that matters but is NOT part of your task (a bug elsewhere, tech debt, a missing test for adjacent code), do NOT fix it in this run — call `file_followup` with a self-contained title + description and keep working. Filed findings are TRACKED, not scheduled: they become tasks only when the current sprint completes (the work they reference is merged by then), then go through grooming. Never file a follow-up for work your current task already covers, and file sparingly — each finding is reviewed before it becomes work.
+
+If the discovery BLOCKS in-flight work (another task cannot proceed until it lands — e.g. you found a shared-component bug that breaks an in-flight feature), pass `blocksIssueId` with that task's id: that creates a real blocking task + dependency edge immediately, the only exception to the tracked model. Use it only for genuine blockers.

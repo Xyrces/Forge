@@ -23,6 +23,19 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
     private int _roundTrips;
     private int _toolCalls;
     private int _textChars;
+    // Provider-reported token accounting (v31): cumulative across
+    // round-trips + the last round-trip's input size (= the live
+    // context size). Read by the runner at finish to persist real
+    // totals — AgentRunResult no longer hardcodes zeros.
+    private long _inputTokens;
+    private long _outputTokens;
+    private long _cacheReadTokens;
+    private long _lastInputTokens;
+
+    public long TotalInputTokens => Interlocked.Read(ref _inputTokens);
+    public long TotalOutputTokens => Interlocked.Read(ref _outputTokens);
+    public long TotalCacheReadTokens => Interlocked.Read(ref _cacheReadTokens);
+    public long LastInputTokens => Interlocked.Read(ref _lastInputTokens);
     // Live transcript accumulation. The response only carries the
     // assistant turn; tool RESULTS arrive in the NEXT call's incoming
     // history (appended by the function-invocation layer), so we diff
@@ -54,6 +67,23 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
         var toolCalls = Interlocked.Add(ref _toolCalls, tools);
         var textChars = Interlocked.Add(ref _textChars, chars);
 
+        var usage = response.Usage;
+        if (usage is not null)
+        {
+            var inTok = usage.InputTokenCount ?? 0;
+            var outTok = usage.OutputTokenCount ?? 0;
+            Interlocked.Add(ref _inputTokens, inTok);
+            Interlocked.Add(ref _outputTokens, outTok);
+            var cacheRead = usage.AdditionalCounts?.TryGetValue("cache_read_input_tokens", out var cr) == true ? cr : 0;
+            var cacheCreate = usage.AdditionalCounts?.TryGetValue("cache_creation_input_tokens", out var cc) == true ? cc : 0;
+            Interlocked.Add(ref _cacheReadTokens, cacheRead);
+            // Anthropic-style usage reports the CACHED prefix separately
+            // — input_tokens is only the non-cached tail. The live
+            // context size is the sum (observed live 2026-08-06:
+            // task-547 reported ctx=55 while cache-reading 43k/turn).
+            Interlocked.Exchange(ref _lastInputTokens, inTok + cacheRead + cacheCreate);
+        }
+
         // New history since the last call (tool results, layer-added
         // messages) + this response = the conversation as it stands.
         for (var i = _seenHistory; i < incoming.Count; i++)
@@ -66,7 +96,11 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
             await _runs.UpdateProgressAsync(_runId, roundTrips, toolCalls, textChars,
                 transcriptJson: MafAgentRunner.BuildTranscriptJson(_liveTranscript),
                 ct: CancellationToken.None,
-                phase: _phaseProvider?.Invoke());
+                phase: _phaseProvider?.Invoke(),
+                currentContextTokens: usage is null ? null : LastInputTokens,
+                inputTokens: TotalInputTokens,
+                outputTokens: TotalOutputTokens,
+                cacheReadTokens: TotalCacheReadTokens);
         }
         catch { /* best-effort — never break a run */ }
 

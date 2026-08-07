@@ -61,7 +61,6 @@ public class DesignerEndpointTests : IDisposable
         _runs = new DesignerRunStore(_dbPath);
         _events = new InMemoryDashboardEventBus();
 
-        var port = GetEphemeralPort();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             ContentRootPath = _workDir,
@@ -69,7 +68,7 @@ public class DesignerEndpointTests : IDisposable
         });
         builder.Logging.ClearProviders();
         builder.Logging.AddProvider(NullLoggerProvider.Instance);
-        builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
         var app = builder.Build();
         DesignerEndpoints.MapDesignerEndpoints(app, _specs, designerFactory: null, _runs, _artifacts, NullLogger<DashboardHost>.Instance);
         _host = app;

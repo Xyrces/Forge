@@ -40,7 +40,19 @@ public class DispatchCheckpointTests : IDisposable
 // v24 = skill.project_id + skill.source — per-project, repo-owned skills.
 // v25 = agent_run.phase + agent_run.resumed_session — pause/resume
 // run observability (SQL Server chain: M026).
-        Assert.Equal(25, IssueStore.CurrentSchemaVersion);
+// v26 = agent_run.project_id — run attribution for the global run
+// registry (SQL Server chain: M027).
+// v27 = followup_draft — follow-ups tracked during a sprint,
+// materialized at completion (SQL Server chain: M028).
+// v28 = watchdog_finding — deduped watchdog findings (SQL Server
+// chain: M029).
+// v29 = followup_draft.disposition — triage outcomes per draft
+// (SQL Server chain: M030).
+// v30 = agent_run.dispatch_id — dispatch correlation id (SQL Server
+// chain: M031).
+// v31 = agent_run token observability (input/output/cache-read/
+// current-context) (SQL Server chain: M032).
+        Assert.Equal(31, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]
@@ -98,10 +110,13 @@ public class DispatchCheckpointTests : IDisposable
     }
 
     [Fact]
-    public async Task ListInProgressForRecoveryAsync_ReturnsOnlyForgeInProgress()
+    public async Task ListInProgressForRecoveryAsync_ReturnsAllHeldInProgress()
     {
-        // Three candidates: forge+InProgress (should appear),
-        // human+InProgress (should NOT appear), forge+Pending (should NOT appear).
+        // assignee means "held by a live run" (2026-08-01 invariant):
+        // the store returns EVERY held InProgress row — the legacy
+        // 'forge' literal filter made role-claimed orphans invisible
+        // (task-18). Distinguishing engineering claims from
+        // human-held rows is StartupRecovery's job, not the store's.
         var forge = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "k"));
         var human = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "h", Assignee: "human"));
         var pending = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "p"));
@@ -109,13 +124,23 @@ public class DispatchCheckpointTests : IDisposable
         await _issues.ClaimAsync(forge.Id, "forge");
         // Force the human-assigned issue into InProgress without
         // touching the checkpoint (mimics a manual state).
-        var humanIssue = (await _issues.GetAsync(human.Id))!;
         await _issues.TransitionAsync(human.Id, IssueStatus.InProgress, "manual");
 
         var list = await _issues.ListInProgressForRecoveryAsync();
-        Assert.Single(list);
-        Assert.Equal(forge.Id, list[0].Id);
-        Assert.Equal(DispatchCheckpoint.Claimed, list[0].DispatchCheckpoint);
+        Assert.Equal(2, list.Count);
+        Assert.Contains(list, i => i.Id == forge.Id && i.DispatchCheckpoint == DispatchCheckpoint.Claimed);
+        Assert.Contains(list, i => i.Id == human.Id);
+        Assert.DoesNotContain(list, i => i.Id == pending.Id);
+    }
+
+    [Fact]
+    public void IsEngineeringClaimant_RolesAndLegacyForge_NotHumans()
+    {
+        Assert.True(Forge.Orchestrator.StartupRecovery.IsEngineeringClaimant("forge"));
+        Assert.True(Forge.Orchestrator.StartupRecovery.IsEngineeringClaimant("coredev"));
+        Assert.True(Forge.Orchestrator.StartupRecovery.IsEngineeringClaimant("clientdev"));
+        Assert.False(Forge.Orchestrator.StartupRecovery.IsEngineeringClaimant("human"));
+        Assert.False(Forge.Orchestrator.StartupRecovery.IsEngineeringClaimant("operator"));
     }
 
     [Fact]

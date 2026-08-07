@@ -65,7 +65,8 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null,
-        Forge.Core.Workflow.WorkflowResolver? workflow = null) => new(
+        Forge.Core.Workflow.WorkflowResolver? workflow = null,
+        Forge.Core.AgentRunStore? runs = null) => new(
         gh,
         worktrees: new AgentTools.GitWorktreeService(
             new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -77,7 +78,8 @@ public class PRWatcherReworkTests : IDisposable
         logger: NullLogger<PRWatcher>.Instance,
         gates: gates,
         lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
-        workflow: workflow);
+        workflow: workflow,
+        runs: runs);
 
     private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
     {
@@ -764,5 +766,198 @@ public class PRWatcherReworkTests : IDisposable
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
         Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task ReviewerError_ThirdRound_MarksTransientBlockForAutoResume()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
+        {
+            ["reviewSha"] = "abc123",
+            ["reviewVerdict"] = "Error",
+            ["reviewRound"] = PRWatcher.MaxReworkAttempts.ToString(),
+        });
+
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Blocked, after.Status);
+        Assert.Equal(PRWatcher.BlockedKindReviewerUnavailable, after.GetMetadata("blockedKind"));
+    }
+
+    [Fact]
+    public async Task CircuitBreakerBlock_CarriesNoAutoResumeMarker()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
+        {
+            ["reviewSha"] = "abc123",
+            ["reviewVerdict"] = "RequestChanges",
+            ["reworkAttempts"] = PRWatcher.MaxReworkAttempts.ToString(),
+        });
+
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None, reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Blocked, after.Status);
+        Assert.Null(after.GetMetadata("blockedKind"));
+    }
+
+    [Fact]
+    public async Task ConflictStrike_Deferred_WhenAnotherSyncInFlight()
+    {
+        // Conflict-sync mutex: while another task's sync round is
+        // claimed, the strike does not fire — the task waits instead
+        // of racing a moving main.
+        await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: "task", Title: "other sync",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 99,
+                ["reworkReason"] = "PR conflicts with the base branch",
+            }));
+        var all = await _issues.ListAsync(new Forge.Core.IssueFilter());
+        var other = all.First(t => t.Title == "other sync");
+        await _issues.TransitionAsync(other.Id, IssueStatus.InProgress, null);
+
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync();
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => false);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task ConflictStrike_NotDeferred_WhenOtherSyncClaimIsOrphaned()
+    {
+        // Live 2026-08-01: task-18/20/364 were all InProgress with the
+        // conflict reason but their sync runs had died on restart —
+        // dead claims held the mutex and the whole merge pipeline
+        // deadlocked. Only a claim with an ACTIVE run may hold it.
+        await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: "task", Title: "orphaned sync",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 99,
+                ["reworkReason"] = "PR conflicts with the base branch",
+            }));
+        var all = await _issues.ListAsync(new Forge.Core.IssueFilter());
+        var other = all.First(t => t.Title == "orphaned sync");
+        await _issues.TransitionAsync(other.Id, IssueStatus.InProgress, null);
+        var runs = new Forge.Core.AgentRunStore(_issues.Db);   // no active runs
+
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync();
+        var outcome = await NewWatcher(gh, runs: runs).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => false);
+
+        // The strike fires (rework round queued) instead of deferring.
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("1", after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task ConflictStrike_Deferred_WhenOtherSyncHasLiveRun()
+    {
+        await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: "task", Title: "live sync",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 99,
+                ["reworkReason"] = "PR conflicts with the base branch",
+            }));
+        var all = await _issues.ListAsync(new Forge.Core.IssueFilter());
+        var other = all.First(t => t.Title == "live sync");
+        await _issues.TransitionAsync(other.Id, IssueStatus.InProgress, null);
+        var runs = new Forge.Core.AgentRunStore(_issues.Db);
+        await runs.StartAsync("run-live", other.Id, "CoreDev", "m", CancellationToken.None);
+
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync();
+        var outcome = await NewWatcher(gh, runs: runs).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => false);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task MergeableBlocked_Resumes_WhenGatePasses()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
+        {
+            ["reviewSha"] = "abc123",
+            ["reviewVerdict"] = "Approve",
+        });
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "circuit breaker");
+
+        var resumed = await NewWatcher(gh).TryResumeMergeableBlockedAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+            headShaOverride: _ => "abc123", mergeableOverride: _ => true);
+
+        Assert.NotNull(resumed);
+        Assert.Equal(IssueStatus.InProgress, resumed!.Status);
+        Assert.Equal("1", resumed.GetMetadata("autoResumeAttempts"));
+        Assert.NotNull(resumed.GetMetadata("prOpenedAt"));
+    }
+
+    [Fact]
+    public async Task MergeableBlocked_StaysBlocked_WithoutApproval()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
+        {
+            ["reviewSha"] = "abc123",
+            ["reviewVerdict"] = "RequestChanges",
+        });
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "circuit breaker");
+
+        var resumed = await NewWatcher(gh).TryResumeMergeableBlockedAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+            headShaOverride: _ => "abc123", mergeableOverride: _ => true,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>());
+
+        Assert.Null(resumed);
+        Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task MergeableBlocked_StaysBlocked_WhenConflicting()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync(watchMeta: new Dictionary<string, object>
+        {
+            ["reviewSha"] = "abc123",
+            ["reviewVerdict"] = "Approve",
+        });
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "circuit breaker");
+
+        var resumed = await NewWatcher(gh).TryResumeMergeableBlockedAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+            headShaOverride: _ => "abc123", mergeableOverride: _ => false);
+
+        Assert.Null(resumed);
     }
 }

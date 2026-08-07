@@ -244,6 +244,34 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateAsync_Reuse_AbortsInProgressMergeFromKilledRound()
+    {        // Live 2026-08-01 (task-18/364): a conflict-sync round killed
+        // mid-merge leaves MERGE_HEAD + unmerged paths; the reuse
+        // path's checkout -B then fails, MAF swallows the throw, and
+        // every rework dispatch phantom-completes at checkpoint
+        // Claimed. Reuse must abort the dead merge first.
+        var taskId = "t-killed-merge";
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        var worktreePath = await _service.CreateAsync(taskId, "main");
+
+        // Build a conflicting branch and start a merge that conflicts.
+        File.WriteAllText(Path.Combine(_workDir, "README.md"), "# main change");
+        RunGit(_workDir, "add -A");
+        RunGit(_workDir, "commit -q -m main-change");
+        File.WriteAllText(Path.Combine(worktreePath, "README.md"), "# branch change");
+        RunGit(worktreePath, "add -A");
+        RunGit(worktreePath, "commit -q -m branch-change");
+        Assert.NotEqual(0, RunGit(worktreePath, "merge main"));
+        Assert.Equal(0, RunGitForResult(worktreePath, "rev-parse -q --verify MERGE_HEAD").ExitCode);
+
+        var reused = await _service.CreateAsync(taskId, "main", branchOverride: $"agent/{taskId}");
+
+        Assert.Equal(worktreePath, reused);
+        Assert.NotEqual(0, RunGitForResult(worktreePath, "rev-parse -q --verify MERGE_HEAD").ExitCode);
+        Assert.Equal(0, RunGitForResult(worktreePath, "diff --quiet").ExitCode);
+    }
+
+    [Fact]
     public async Task RemoveAsync_DeletesSyncBaseRef_WhenPresent()
     {
         var taskId = "t-sync-cleanup";
@@ -445,5 +473,23 @@ public class GitWorktreeServiceTests : IDisposable
         var stderr = await p.StandardError.ReadToEndAsync();
         await p.WaitForExitAsync();
         return stdout.Trim();
+    }
+
+    [Fact]
+    public async Task IsAncestorAsync_DetectsDivergence()
+    {
+        // The rework divergence guard's probe (2026-08-01 task-377):
+        // a branch reset onto main does NOT contain the PR head.
+        var taskId = "t-ancestor";
+        Directory.CreateDirectory(Path.Combine(_workDir, ".wt"));
+        var worktreePath = await _service.CreateAsync(taskId, "main");
+
+        // Diverge: local branch gets a commit main lacks.
+        File.WriteAllText(Path.Combine(worktreePath, "a.txt"), "branch work");
+        RunGit(worktreePath, "add -A");
+        RunGit(worktreePath, "commit -q -m branch-work");
+
+        Assert.True(await _service.IsAncestorAsync(worktreePath, "main", "HEAD"));
+        Assert.False(await _service.IsAncestorAsync(worktreePath, "HEAD", "main"));
     }
 }

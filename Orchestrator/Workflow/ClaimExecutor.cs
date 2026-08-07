@@ -1,4 +1,4 @@
-﻿using Microsoft.Agents.AI.Workflows;
+using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.Logging;
 using Forge.Core;
 
@@ -19,7 +19,7 @@ public sealed class ClaimExecutor : FunctionExecutor<IssueRecord, ClaimedIssue>
     public ClaimExecutor(IIssueStore issues, ILogger<ClaimExecutor> logger)
         : base(
             "claim",
-            (input, ctx, ct) => HandleAsync(input, issues, logger, ct),
+            ExecutorFaultGuard.Wrap<IssueRecord, ClaimedIssue>("claim", logger, (input, ctx, ct) => HandleAsync(input, issues, logger, ct)),
             null,
             new[] { typeof(IssueRecord) },
             new[] { typeof(ClaimedIssue) })
@@ -53,14 +53,21 @@ public sealed class ClaimExecutor : FunctionExecutor<IssueRecord, ClaimedIssue>
     {
         // Pre-claim path: the orchestrator already claimed the
         // issue. Pass through; no re-claim, no AlreadyClaimed.
-        if (input.Status == IssueStatus.InProgress && input.Assignee == "forge")
+        // Any non-null assignee counts (2026-08-01: the claim
+        // identity is the ROLE name — coredev/clientdev/... — not
+        // the legacy literal "forge"; assignee now means "held by
+        // a live run", and this IS the live run).
+        if (input.Status == IssueStatus.InProgress && input.Assignee is not null)
         {
             var preClaimedBranch = input.GetMetadata("branch") ?? $"agent/{input.Id}";
             return new ClaimedIssue(input, ClaimResult.Ok, null, preClaimedBranch);
         }
 
-        // Standalone path: do the claim ourselves.
-        var claimed = await issues.ClaimAsync(input.Id, "forge", ct);
+        // Standalone path: do the claim ourselves. The assignee is
+        // the owning ROLE (board legibility: "coredev" says who
+        // holds the card; "forge" said nothing — operator 2026-08-01).
+        var role = Forge.Agents.RoleAgentRegistry.FromTaskType(input.Type).ToString().ToLowerInvariant();
+        var claimed = await issues.ClaimAsync(input.Id, role, ct);
         if (claimed is null)
         {
             logger.LogDebug("Issue {Id} already claimed elsewhere", input.Id);

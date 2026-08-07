@@ -1,4 +1,4 @@
-﻿using Microsoft.Agents.AI.Workflows;
+using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.Logging;
 using Forge.Agents;
 using Forge.Core;
@@ -42,7 +42,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         Core.TaskStateMachine? lifecycle = null)
         : base(
             "run-agent",
-            (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle),
+            ExecutorFaultGuard.Wrap<WorktreeReady, AgentCompleted>("run-agent", logger, (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle)),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -99,9 +99,20 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         if (!string.IsNullOrWhiteSpace(reworkContext))
         {
             var round = issue.GetMetadata("reworkAttempts") ?? "1";
+            // Lead-in matches the bounce kind (operator rule
+            // 2026-07-31: a failed build returns to context to be
+            // fixed — the prompt must say so honestly; there may be
+            // no PR at all on a pre-push bounce).
+            var bounceReason = issue.GetMetadata("reworkReason") ?? "";
+            var leadIn = bounceReason.StartsWith("pre-push", StringComparison.OrdinalIgnoreCase)
+                ? "Your previous attempt FAILED the pre-push build/test verification — nothing was pushed."
+                : bounceReason.StartsWith("no diff", StringComparison.OrdinalIgnoreCase)
+                    || bounceReason.StartsWith("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase)
+                ? "Your previous attempt produced no changes and was rejected."
+                : "Your previous attempt produced a PR that did NOT pass review/CI. ";
             prompt += $"\n\n## Rework required (round {round})\n" +
-                $"Your previous attempt produced a PR that did NOT pass review/CI. " +
-                $"Fix the following on the SAME branch (do not restructure unrelated work):\n\n{reworkContext}";
+                leadIn +
+                $" Fix the following on the SAME branch (do not restructure unrelated work):\n\n{reworkContext}";
         }
         // Resume honesty: a rework round resumes the dev's PERSISTED
         // session — the agent remembers file contents from the last
@@ -149,6 +160,14 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["projectId"] = projectId ?? string.Empty,
                 ["planFastPath"] = planFastPath ? "true" : "false",
             };
+            // Dispatch correlation id (v30): stamped on the issue by
+            // OrchestratorAgent at claim; the runner writes it onto
+            // the agent_run row so journal + run + task all join on
+            // one id in a postmortem.
+            if (issue.GetMetadata("dispatchId") is { Length: > 0 } dispatchId)
+            {
+                context["dispatchId"] = dispatchId;
+            }
             // Sprint flow: when the issue belongs to the ACTIVE
             // sprint, the runner gets the sprint id (drives the
             // `sprint/{id}/` memory recall), the sprint goal, and a

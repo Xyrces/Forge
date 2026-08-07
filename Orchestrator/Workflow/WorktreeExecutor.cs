@@ -1,4 +1,4 @@
-﻿using Microsoft.Agents.AI.Workflows;
+using Microsoft.Agents.AI.Workflows;
 using Microsoft.Extensions.Logging;
 using Forge.AgentTools;
 using Forge.Core;
@@ -39,7 +39,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         ILogger<WorktreeExecutor> logger)
         : base(
             "worktree",
-            (input, ctx, ct) => HandleAsync(input, issues, worktrees, defaultBranch, logger, ct),
+            ExecutorFaultGuard.Wrap<ClaimedIssue, WorktreeReady>("worktree", logger, (input, ctx, ct) => HandleAsync(input, issues, worktrees, defaultBranch, logger, ct)),
             null,
             new[] { typeof(ClaimedIssue) },
             new[] { typeof(WorktreeReady) })
