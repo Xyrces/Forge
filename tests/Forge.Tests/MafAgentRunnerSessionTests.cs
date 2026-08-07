@@ -23,7 +23,7 @@ public class MafAgentRunnerSessionTests : IDisposable
 
     public MafAgentRunnerSessionTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-mss-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("mss");
         Directory.CreateDirectory(_workDir);
         _schema = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));

@@ -28,8 +28,8 @@ public class IssuesJsonlEndpointTests : IDisposable
 
     public IssuesJsonlEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-jsonl-api-{Guid.NewGuid():N}.db");
-        _jsonlPath = Path.Combine(Path.GetTempPath(), $"ph-jsonl-api-{Guid.NewGuid():N}.jsonl");
+        _dbPath = TempRoot.Instance.NewDbPath("jsonl-api");
+        _jsonlPath = Path.Combine(TempRoot.Instance.NewDirectory("jsonl-api"), "issues.jsonl");
         _issues = new IssueStore(_dbPath);
         File.WriteAllText(_jsonlPath, "{\"id\":\"task-1\"}\n{\"id\":\"task-2\"}\n");
 

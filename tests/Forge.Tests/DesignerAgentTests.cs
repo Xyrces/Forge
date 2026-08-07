@@ -44,7 +44,7 @@ public class DesignerAgentTests : IDisposable
     public DesignerAgentTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-designer-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("designer");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));

@@ -34,7 +34,7 @@ public class ArtistSchedulerTests : IDisposable
     public ArtistSchedulerTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-ascheduler-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("ascheduler");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

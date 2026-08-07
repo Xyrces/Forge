@@ -24,7 +24,7 @@ public class StageGatesTests : IDisposable
 
     public StageGatesTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-gates-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("gates");
         Directory.CreateDirectory(_workDir);
         var bootstrap = new IssueStore(Path.Combine(_workDir, "memory.db"));
         bootstrap.Dispose();
@@ -71,7 +71,7 @@ public class GateEndpointTests : IAsyncLifetime
 
     public GateEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-gateep-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("gateep");
         Directory.CreateDirectory(_workDir);
     }
 

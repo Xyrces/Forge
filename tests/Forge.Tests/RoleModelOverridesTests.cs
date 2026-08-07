@@ -17,7 +17,7 @@ public class RoleModelOverridesTests : IDisposable
 
     public RoleModelOverridesTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-overrides-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("overrides");
         Directory.CreateDirectory(_workDir);
         var bootstrap = new IssueStore(Path.Combine(_workDir, "memory.db"));
         bootstrap.Dispose();

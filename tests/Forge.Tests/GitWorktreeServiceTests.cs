@@ -14,7 +14,7 @@ public class GitWorktreeServiceTests : IDisposable
 
     public GitWorktreeServiceTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-gw-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("gw");
         _bareDir = _workDir + "-bare.git";
         Directory.CreateDirectory(_workDir);
         _service = new GitWorktreeService(

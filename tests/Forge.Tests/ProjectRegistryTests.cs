@@ -14,7 +14,7 @@ public class ProjectRegistryLoaderTests : IDisposable
 
     public ProjectRegistryLoaderTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-reg-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("reg");
         _issues = new IssueStore(_dbPath);
         _store = new ProjectStore(_issues);
     }
@@ -247,7 +247,7 @@ public class ProjectStoreRolesTests : IDisposable
 
     public ProjectStoreRolesTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-roles-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("roles");
         _issues = new IssueStore(_dbPath);
         _store = new ProjectStore(_issues);
     }
@@ -455,7 +455,7 @@ public class RoleTerritoryResolutionTests
             ["coredev"] = new(new[] { "PortHorizon.Core/", "PortHorizon.Tests/", "PortHorizon.Benchmarks/", "docs/", ".github/" }, AllowsRootFiles: true),
         };
         var (prefixes, rootFiles) = Agents.RoleAgentRegistry.ResolveTerritory(roleDef, territories);
-        var worktree = Path.Combine(Path.GetTempPath(), $"ph-terr-{Guid.NewGuid():N}");
+        var worktree = TempRoot.Instance.NewDirectory("terr");
         Directory.CreateDirectory(Path.Combine(worktree, "PortHorizon.Tests", "Systems"));
         File.WriteAllText(Path.Combine(worktree, "PortHorizon.Tests", "Systems", "MaterialReservationSystemTests.cs"), "// test");
         try

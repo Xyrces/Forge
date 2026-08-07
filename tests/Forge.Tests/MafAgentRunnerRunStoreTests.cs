@@ -41,7 +41,7 @@ public class MafAgentRunnerRunStoreTests : IDisposable
 
     public MafAgentRunnerRunStoreTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-mrs-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("mrs");
         Directory.CreateDirectory(_workDir);
         _schema = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _runs = new AgentRunStore(Path.Combine(_workDir, "issues.db"));

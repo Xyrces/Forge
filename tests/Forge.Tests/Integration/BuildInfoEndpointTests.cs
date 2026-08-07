@@ -19,7 +19,7 @@ public class BuildInfoEndpointTests : IDisposable
 
     public BuildInfoEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-buildinfo-ep-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("buildinfo-ep");
         Directory.CreateDirectory(_workDir);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions

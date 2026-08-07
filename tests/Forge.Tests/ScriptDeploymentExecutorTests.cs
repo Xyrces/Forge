@@ -11,7 +11,7 @@ public class ScriptDeploymentExecutorTests : IDisposable
 
     public ScriptDeploymentExecutorTests()
     {
-        _root = Path.Combine(Path.GetTempPath(), $"ph-script-deploy-{Guid.NewGuid():N}");
+        _root = TempRoot.Instance.NewDirectory("script-deploy");
         Directory.CreateDirectory(_root);
     }
 

@@ -35,7 +35,7 @@ public class ArtistAgentTests : IDisposable
     public ArtistAgentTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-artist-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("artist");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _specs = new SpecStore(_issues);

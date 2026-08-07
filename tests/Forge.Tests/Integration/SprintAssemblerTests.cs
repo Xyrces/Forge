@@ -31,7 +31,7 @@ public class SprintAssemblerTests : IDisposable
         // sqlite -wal/-shm companions must be cleaned too — 44k
         // leaked ph-*.db-wal files once filled /tmp (22G) and made
         // the whole suite fail with 'disk I/O error'.
-        var workDir = Path.Combine(Path.GetTempPath(), $"ph-sprint-asm-{Guid.NewGuid():N}");
+        var workDir = TempRoot.Instance.NewDirectory("sprint-asm");
         Directory.CreateDirectory(workDir);
         _dbPath = Path.Combine(workDir, "issues.db");
         _workDir = workDir;

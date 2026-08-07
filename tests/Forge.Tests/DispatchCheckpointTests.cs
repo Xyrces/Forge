@@ -16,7 +16,7 @@ public class DispatchCheckpointTests : IDisposable
 
     public DispatchCheckpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-checkpoint-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("checkpoint");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _reports = new RecoveryReportStore(Path.Combine(_workDir, "issues.db"));

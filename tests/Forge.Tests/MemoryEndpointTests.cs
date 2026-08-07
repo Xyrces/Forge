@@ -27,7 +27,7 @@ public class MemoryEndpointTests : IDisposable
 
     public MemoryEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-mem-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("mem-api");
         _ = new IssueStore(_dbPath);
         _memory = new MemoryStore(_dbPath);
 

@@ -16,7 +16,7 @@ public class TaskStateMachineTests : IDisposable
 
     public TaskStateMachineTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-lifecycle-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("lifecycle");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
     }

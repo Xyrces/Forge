@@ -30,7 +30,7 @@ public class MetaEndpointsTests : IDisposable
 
     public MetaEndpointsTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-meta-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("meta");
         Directory.CreateDirectory(_workDir);
 
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions

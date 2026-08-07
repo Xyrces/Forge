@@ -26,7 +26,7 @@ public class CodebaseGraphRebuildEndpointTests : IDisposable
 
     public CodebaseGraphRebuildEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-cbg-rebuild-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("cbg-rebuild");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

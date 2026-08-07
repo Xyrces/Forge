@@ -11,7 +11,7 @@ public class IntakeStoreTests : IDisposable
 
     public IntakeStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-intake-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("intake");
         _issues = new IssueStore(_dbPath);
         _intake = new IntakeStore(_issues);
     }

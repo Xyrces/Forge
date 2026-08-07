@@ -11,7 +11,7 @@ public class AgentStoreTests : IDisposable
 
     public AgentStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-agents-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("agents");
         _issues = new IssueStore(_dbPath);
         _agents = new AgentStore(_issues);
     }

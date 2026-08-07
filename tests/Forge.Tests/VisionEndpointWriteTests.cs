@@ -28,7 +28,7 @@ public class VisionEndpointWriteTests : IAsyncLifetime
 
     public VisionEndpointWriteTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-visionw-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("visionw");
         Directory.CreateDirectory(_workDir);
     }
 

@@ -31,7 +31,7 @@ public class WorkflowEndpointTests : IDisposable
 
     public WorkflowEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"forge-wf-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("wf-api");
         _ = new IssueStore(_dbPath);
         _memory = new MemoryStore(_dbPath);
 

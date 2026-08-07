@@ -132,7 +132,7 @@ public class Phase0Tests
             config:         new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-no-agents-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("no-agents"));
 
         var result = await runner.RunAsync(AgentType.QA, "do thing", sessionId: null, ct: default);
 

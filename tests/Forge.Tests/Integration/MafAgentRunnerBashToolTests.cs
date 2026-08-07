@@ -20,7 +20,7 @@ public class MafAgentRunnerBashToolTests : IDisposable
 
     public MafAgentRunnerBashToolTests()
     {
-        _worktree = Path.Combine(Path.GetTempPath(), $"ph-mw-bash-{Guid.NewGuid():N}");
+        _worktree = TempRoot.Instance.NewDirectory("mw-bash");
         Directory.CreateDirectory(_worktree);
         _marker = $"marker-{Guid.NewGuid():N}";
         File.WriteAllText(Path.Combine(_worktree, "PROBE.txt"), _marker);
@@ -95,7 +95,7 @@ public class MafAgentRunnerBashToolTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-bash-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("bash-md"));
 
         var result = await runner.RunAsync(
             AgentType.CoreDev,
@@ -128,7 +128,7 @@ public class MafAgentRunnerBashToolTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-bash-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("bash-md"));
 
         // No context => no worktreePath => no BashTool registered.
         var result = await runner.RunAsync(AgentType.CoreDev, "do thing", sessionId: null, ct: default);

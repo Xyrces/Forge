@@ -28,7 +28,7 @@ public class RunGateCatalogEndpointTests : IDisposable
 
     public RunGateCatalogEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-gate-cat-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("gate-cat");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         // Bootstrap the schema so memory table exists

@@ -24,7 +24,7 @@ public class SpecActionsEndpointTests : IDisposable
 
     public SpecActionsEndpointTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-spec-actions-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("spec-actions");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

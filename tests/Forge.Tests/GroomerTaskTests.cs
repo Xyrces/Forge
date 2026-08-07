@@ -26,7 +26,7 @@ public class GroomerTaskTests : IDisposable
 
     public GroomerTaskTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-groomt-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("groomt");
         Directory.CreateDirectory(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
         _specs = new SpecStore(_issues);

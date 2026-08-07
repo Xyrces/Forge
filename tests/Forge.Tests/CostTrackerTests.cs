@@ -33,7 +33,7 @@ public class CostTrackerTests : IDisposable
     public CostTrackerTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-cost-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("cost");
         Directory.CreateDirectory(_workDir);
         _tracker = new CostTracker();
     }
@@ -207,7 +207,7 @@ public class HeadroomChatClientFactoryTests : IDisposable
 
     public HeadroomChatClientFactoryTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-headroom-factory-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("headroom-factory");
         Directory.CreateDirectory(_workDir);
         _factory = new OpenAICompatibleChatClientFactory();
     }

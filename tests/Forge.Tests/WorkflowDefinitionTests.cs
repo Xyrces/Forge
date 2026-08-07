@@ -15,7 +15,7 @@ public sealed class WorkflowDefinitionTests : IDisposable
 
     public WorkflowDefinitionTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), "forge-wf-tests-" + Guid.NewGuid().ToString("N"));
+        _workDir = TempRoot.Instance.NewDirectory("wf-tests");
         Directory.CreateDirectory(_workDir);
     }
 

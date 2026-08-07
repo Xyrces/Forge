@@ -30,7 +30,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
 
     public EngineeringDispatchWorkflowTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-wf-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("wf");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
@@ -82,7 +82,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
             roles: new RoleAgentRegistry(),
             logger: NullLogger<MafAgentRunner>.Instance,
             skills: null,
-            rolePromptsRoot: Path.Combine(Path.GetTempPath(), $"ph-wf-md-{Guid.NewGuid():N}"));
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("wf-md"));
     }
 
     private sealed class TestScriptingFactory : IChatClientFactory

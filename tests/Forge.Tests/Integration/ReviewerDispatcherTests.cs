@@ -21,7 +21,7 @@ public class ReviewerDispatcherTests : IDisposable
 
     public ReviewerDispatcherTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-reviewer-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("reviewer");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

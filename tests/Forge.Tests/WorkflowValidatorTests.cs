@@ -15,7 +15,7 @@ public sealed class WorkflowValidatorTests : IDisposable
 
     public WorkflowValidatorTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), "forge-wfv-" + Guid.NewGuid().ToString("N"));
+        _workDir = TempRoot.Instance.NewDirectory("wfv");
         Directory.CreateDirectory(_workDir);
     }
 

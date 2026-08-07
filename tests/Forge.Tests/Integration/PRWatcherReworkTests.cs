@@ -22,7 +22,7 @@ public class PRWatcherReworkTests : IDisposable
 
     public PRWatcherReworkTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-rework-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("rework");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

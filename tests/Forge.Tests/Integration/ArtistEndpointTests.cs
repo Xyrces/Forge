@@ -45,7 +45,7 @@ public class ArtistEndpointTests : IDisposable
     public ArtistEndpointTests(ITestOutputHelper output)
     {
         _out = output;
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-aendpoints-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("aendpoints");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _ = new IssueStore(_dbPath);

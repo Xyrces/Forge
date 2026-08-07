@@ -13,7 +13,7 @@ public class ArtOutputStoreTests : IDisposable
 
     public ArtOutputStoreTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-art-store-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("art-store");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         // IssueStore owns the v10 migration (art_output + artist_run

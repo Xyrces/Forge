@@ -50,7 +50,7 @@ public class SqliteSkillSourceTests : IDisposable
 
     public SqliteSkillSourceTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-skills-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("skills");
         _issues = new IssueStore(_dbPath);
         _skills = new SkillStore(_issues);
         _roles = new RoleAgentRegistry();

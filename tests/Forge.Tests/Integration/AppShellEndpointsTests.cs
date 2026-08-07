@@ -27,7 +27,7 @@ public class AppShellEndpointsTests : IDisposable
 
     public AppShellEndpointsTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-appshell-ep-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("appshell-ep");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

@@ -15,7 +15,7 @@ public class RolePromptRootTests : IDisposable
 
     public RolePromptRootTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-rpr-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("rpr");
         Directory.CreateDirectory(_workDir);
     }
 

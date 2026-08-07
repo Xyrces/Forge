@@ -22,7 +22,7 @@ public class GroomerAgentTests : IDisposable
 
     public GroomerAgentTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-groomer-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("groomer");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
     }
@@ -212,7 +212,7 @@ public class GroomerRoutingTests : IDisposable
 
     public GroomerRoutingTests()
     {
-        _dir = Path.Combine(Path.GetTempPath(), $"ph-groomroute-{Guid.NewGuid():N}");
+        _dir = TempRoot.Instance.NewDirectory("groomroute");
         Directory.CreateDirectory(_dir);
         _defaultStore = new IssueStore(Path.Combine(_dir, "default.db"));
         _projectStore = new IssueStore(Path.Combine(_dir, "proj.db"));
@@ -309,7 +309,7 @@ public class SprintAssemblerGuardTests : IDisposable
 
     public SprintAssemblerGuardTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-guard-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("guard");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
     }

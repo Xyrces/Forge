@@ -32,7 +32,7 @@ public class IntakeSseStreamTests : IDisposable
 
     public IntakeSseStreamTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-sse-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("sse");
         _issues = new IssueStore(_dbPath);
         _intakeStore = new IntakeStore(_issues);
         _specs = new SpecStore(_issues);

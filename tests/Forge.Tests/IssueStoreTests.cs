@@ -10,7 +10,7 @@ public class IssueStoreTests : IDisposable
 
     public IssueStoreTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-issues-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("issues");
         _store = new IssueStore(_dbPath);
     }
 

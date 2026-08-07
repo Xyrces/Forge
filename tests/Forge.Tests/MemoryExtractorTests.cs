@@ -36,8 +36,7 @@ public class MemoryExtractorTests : IDisposable
 
     public MemoryExtractorTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(),
-            "forge-memextractor-" + Guid.NewGuid().ToString("N"));
+        _workDir = TempRoot.Instance.NewDirectory("memextractor");
         Directory.CreateDirectory(_workDir);
         // Force the v13 migration by constructing an IssueStore
         // against the same DB. The MemoryStore doesn't own

@@ -24,7 +24,7 @@ public class DesignHygieneCheckerTests : IDisposable
 
     public DesignHygieneCheckerTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-hygiene-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("hygiene");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
         _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
@@ -408,7 +408,7 @@ public class DesignHygieneCheckerTests : IDisposable
         // hygiene-failed because the graph was built from the PRIMARY
         // (forge) workspace. The checker must resolve the graph root
         // per spec project.
-        var primaryRoot = Path.Combine(Path.GetTempPath(), $"ph-hygiene-primary-{Guid.NewGuid():N}");
+        var primaryRoot = TempRoot.Instance.NewDirectory("hygiene-primary");
         Directory.CreateDirectory(primaryRoot);
         InitRepo(primaryRoot);   // git repo, but no PortHorizon.Core project
         try

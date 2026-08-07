@@ -36,7 +36,7 @@ public class SpecDashboardTests : IDisposable
 
     private SpecDashboardTests(GroomerAgentFactory? groomerFactory)
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-spec-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("spec-api");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
         _groomerFactory = groomerFactory;
@@ -339,7 +339,7 @@ public class SpecGroomerEndpointTests : IDisposable
 
     public SpecGroomerEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(), $"ph-spec-groom-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("spec-groom");
         _issues = new IssueStore(_dbPath);
         _specs = new SpecStore(_issues);
         _events = new InMemoryDashboardEventBus();

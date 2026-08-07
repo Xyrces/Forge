@@ -11,14 +11,18 @@
     <RootNamespace>Forge</RootNamespace>
   </PropertyGroup>
 
+  <!--
+    The project file lives in Forge.Core/ but the backend source files
+    remain at the repository root. Include all root .cs files except the
+    test, e2e-harness, and Blazor UI projects that have their own csproj.
+    Also exclude the project directory itself (so SDK default Compile
+    items own sources placed under Forge.Core/) and any stale root obj/
+    or bin/ directories left behind by builds before the project move.
+  -->
   <ItemGroup>
-    <Compile Remove="tests/**/*.cs" />
-    <Compile Remove="tools/**/*.cs" />
-    <Compile Remove="Forge.UI\**\*.cs" />
-    <None Remove="tests/**" />
-    <None Remove="tools/**" />
-    <None Remove="Forge.UI\**" />
-    <EmbeddedResource Remove="tests/**" />
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\**\*.cs;..\obj\**\*.cs;..\bin\**\*.cs" />
+    <None Remove="..\tests\**;..\tools\**;..\Forge.UI\**" />
+    <EmbeddedResource Remove="..\tests\**" />
   </ItemGroup>
 
   <!--
@@ -41,11 +45,11 @@
     next to Forge.Core.dll.
   -->
   <ItemGroup>
-    <Content Include="Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Content Include="..\Forge.UI\wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)" />
     <!-- Built-in MAF role prompts: copied next to the app so any
          project without its own agents/ dir still gets real role
          instructions (see Agents/RolePromptRoot.cs). -->
-    <Content Include="agents\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="agents\%(Filename)%(Extension)" />
+    <Content Include="..\agents\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="agents\%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>
@@ -64,7 +68,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="Forge.UI\Forge.UI.csproj" />
+    <ProjectReference Include="..\Forge.UI\Forge.UI.csproj" />
   </ItemGroup>
 
   <ItemGroup>

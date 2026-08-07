@@ -28,7 +28,7 @@ public class TaskEndpointsTests : IDisposable
 
     public TaskEndpointsTests()
     {
-        _workDir = Path.Combine(Path.GetTempPath(), $"ph-task-ep-{Guid.NewGuid():N}");
+        _workDir = TempRoot.Instance.NewDirectory("task-ep");
         Directory.CreateDirectory(_workDir);
         _dbPath = Path.Combine(_workDir, "issues.db");
         _issues = new IssueStore(_dbPath);

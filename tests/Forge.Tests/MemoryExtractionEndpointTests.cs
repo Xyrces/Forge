@@ -28,8 +28,7 @@ public class MemoryExtractionEndpointTests : IDisposable
 
     public MemoryExtractionEndpointTests()
     {
-        _dbPath = Path.Combine(Path.GetTempPath(),
-            $"ph-memext-api-{Guid.NewGuid():N}.db");
+        _dbPath = TempRoot.Instance.NewDbPath("memext-api");
         // Force the v13 migration by constructing an IssueStore
         // against the same DB. MemoryExtractionStore doesn't own
         // migrations, so we trigger them externally.
