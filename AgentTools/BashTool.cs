@@ -86,11 +86,16 @@ public sealed class BashTool
         // build/test commands pass ungated so the agent can ground
         // its plan in the actual repo.
         if (_mutationsAllowed is not null && !_mutationsAllowed()
-            && ShellMutationClassifier.IsMutating(command))
+            && ShellMutationClassifier.IsMutating(command, out var refusalReason))
         {
             _logger?.LogInformation("BashTool: refused mutating command pre-plan-approval: {Cmd}", command);
-            return _mutationRefusalMessage
-                ?? "exit=-1\nstdout:\nstderr: REFUSED — no approved plan yet. Explore the repo (read-only commands are fine), then call submit_plan with your structured plan (goal / files / approach / test / done). Mutating commands unlock after approval.";
+            // Name the reason — an unexplained refusal makes the agent
+            // conclude ALL commands are blocked (observed live
+            // 2026-08-06, task-382 run) and waste plan revisions.
+            var why = refusalReason is null ? "" : $" (classified as: {refusalReason})";
+            return _mutationRefusalMessage is null
+                ? $"exit=-1\nstdout:\nstderr: REFUSED — no approved plan yet{why}. Explore the repo (read-only commands are fine), then call submit_plan with your structured plan (goal / files / approach / test / done). Mutating commands unlock after approval."
+                : _mutationRefusalMessage + why;
         }
 
         var cwd = string.IsNullOrWhiteSpace(workingDirectory) ? _workingDirectory : workingDirectory;

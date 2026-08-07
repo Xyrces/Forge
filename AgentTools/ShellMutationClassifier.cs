@@ -14,20 +14,38 @@ namespace Forge.AgentTools;
 /// </summary>
 public static partial class ShellMutationClassifier
 {
-    public static bool IsMutating(string command)
+    public static bool IsMutating(string command) => IsMutating(command, out _);
+
+    public static bool IsMutating(string command, out string? reason)
     {
+        reason = null;
+        // Silencer idioms are NOT writes: `2>/dev/null`, `>/dev/null`,
+        // `2>&1`, `&>/dev/null` discard or merge streams — they never
+        // create files. Scrub them BEFORE the redirect test below,
+        // whose `[^>|]>` otherwise matches the `2>` fd prefix and
+        // refuses the most common read-only exploration idiom in
+        // existence (observed live 2026-08-06: task-382's run got
+        // `ls -la .forge/ 2>/dev/null` refused, concluded "the system
+        // is blocking even read-only commands", and burned both plan
+        // revisions exploring blind).
+        var scrubbed = SilencerRegex().Replace(command, " ");
         // Redirection into a file (>, >>, tee) — heredoc writes and
         // output overwrites are the agent's edit mechanism.
-        if (RedirectionRegex().IsMatch(command)) return true;
+        if (RedirectionRegex().IsMatch(scrubbed)) { reason = "writes a file (>, >>, or tee)"; return true; }
         // Git mutations (state-changing subcommands only — fetch,
         // status, log, diff, show, branch listing stay open).
-        if (GitMutationRegex().IsMatch(command)) return true;
+        if (GitMutationRegex().IsMatch(command)) { reason = "state-changing git subcommand"; return true; }
         // Classic filesystem mutators.
-        if (FsMutationRegex().IsMatch(command)) return true;
+        if (FsMutationRegex().IsMatch(command)) { reason = "filesystem mutator (rm/mv/cp/mkdir/...)"; return true; }
         // In-place editors and interpreters writing files.
-        if (InPlaceEditRegex().IsMatch(command)) return true;
+        if (InPlaceEditRegex().IsMatch(command)) { reason = "in-place edit (sed -i / perl -i / script write)"; return true; }
         return false;
     }
+
+    /// <summary>fd-dup and /dev/null discards: `2>/dev/null`,
+    /// `2>&1`, `&>/dev/null`, `>/dev/null 2>&1`, etc.</summary>
+    [GeneratedRegex(@"\d*\s*&?>{1,2}\s*(/dev/null|&\d)", RegexOptions.None, matchTimeoutMilliseconds: 250)]
+    private static partial Regex SilencerRegex();
 
     /// <summary>`>` / `>>` outside quotes (approximate), or tee.</summary>
     [GeneratedRegex(@"(>>|[^>|]>(?![>=])|\btee\b)", RegexOptions.None, matchTimeoutMilliseconds: 250)]

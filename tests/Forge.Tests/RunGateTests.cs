@@ -510,9 +510,30 @@ Builds.
     [InlineData("grep -rn foo Core/", false)]
     [InlineData("cat file.cs", false)]
     [InlineData("ls -la", false)]
+    // Silencer idioms are read-only (observed live 2026-08-06:
+    // task-382's run had `ls -la .forge/ 2>/dev/null` refused as
+    // "mutating" — the fd-redirect prefix matched the raw `>` rule).
+    [InlineData("ls -la .forge/ 2>/dev/null", false)]
+    [InlineData("ls -la docs/ 2>/dev/null; cat status.json 2>/dev/null", false)]
+    [InlineData("cat file.cs 2>&1 | grep foo", false)]
+    [InlineData("dotnet test 2>&1 | tail -5", false)]
+    [InlineData("grep -rn foo Core/ &>/dev/null", false)]
+    [InlineData("echo hi > /dev/null", false)]
+    // …but real writes still classify even with silencers attached.
+    [InlineData("echo hi > out.txt 2>/dev/null", true)]
+    [InlineData("cat > file.cs <<'EOF' 2>&1", true)]
     public void Classifier_DetectsMutations(string command, bool expected)
     {
         Assert.Equal(expected, ShellMutationClassifier.IsMutating(command));
+    }
+
+    [Fact]
+    public void Classifier_RefusalCarriesReason()
+    {
+        Assert.True(ShellMutationClassifier.IsMutating("echo hi > out.txt", out var reason));
+        Assert.Equal("writes a file (>, >>, or tee)", reason);
+        Assert.False(ShellMutationClassifier.IsMutating("ls", out var clean));
+        Assert.Null(clean);
     }
 
     [Fact]
