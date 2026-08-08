@@ -64,6 +64,18 @@ public sealed record AgentOptions
     /// <c>docs/headroom.md</c> for the operator guide.
     /// </summary>
     public HeadroomOptions Headroom { get; set; } = new();
+    /// <summary>
+    /// Internal messaging transport selection. <c>messaging.transport</c>
+    /// = inmemory (default) or servicebus (reserved — lands when the
+    /// Azure Service Bus transport ships in Talaria).
+    /// </summary>
+    public MessagingOptions Messaging { get; set; } = new();
+}
+
+/// <summary>Messaging transport config. See <see cref="AgentOptions.Messaging"/>.</summary>
+public sealed record MessagingOptions
+{
+    public string Transport { get; set; } = "inmemory";
 }
 
 /// <summary>
