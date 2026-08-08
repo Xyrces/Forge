@@ -248,6 +248,7 @@ public static class ProjectsEndpoints
         PutRolesRequest? body,
         IProjectStore store,
         SlotTable slots,
+        Core.Messaging.IEventPublisher eventPublisher,
         CancellationToken ct)
     {
         if (body?.Roles is null && body?.Territory is null && body?.Verify is null)
@@ -276,6 +277,17 @@ public static class ProjectsEndpoints
             {
                 slots.Configure(id, r, Configuration.DefaultProjectRoles.MaxFor(roles, r));
             }
+
+            // Caps apply live, but the event-driven dispatch loop must
+            // be told: kick it so freed capacity is exploited now
+            // instead of at the next backstop tick.
+            var changedAt = DateTimeOffset.UtcNow;
+            await eventPublisher.PublishAsync(new Core.Messaging.ProjectRolesChanged
+            {
+                MessageId = Core.Messaging.ProjectRolesChanged.IdFor(id, changedAt),
+                ProjectId = id,
+                ChangedAt = changedAt,
+            }, ct);
         }
 
         if (body.Territory is not null)

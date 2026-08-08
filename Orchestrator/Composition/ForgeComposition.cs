@@ -432,6 +432,10 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.GroomRequestedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.GroomRequestedConsumer>());
+        services.AddSingleton(sp => new Consumers.ProjectRolesChangedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.ProjectRolesChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.ProjectRolesChangedConsumer>());
         services.AddSingleton(sp => new Consumers.PrOpenedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             watchSweeps, sp.GetRequiredService<ILogger<Consumers.PrOpenedConsumer>>()));

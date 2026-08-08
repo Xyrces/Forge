@@ -243,7 +243,7 @@ public sealed class SprintAssembler
                 // a member, or an operator P1/blocker flag). Unrelated
                 // groomed ad-hoc work gets its own solo sprint at
                 // assembly instead.
-                await InjectAdHocAsync(active, issues, sprints, ct);
+                await InjectAdHocAsync(active, projectId, issues, sprints, ct);
                 await WriteBuildStateAsync(issues, new SprintBuildState(
                     Phase: "running",
                     Reason: $"Sprint '{active.Name}' in progress — {terminal}/{total} tasks terminal",
@@ -607,7 +607,7 @@ public sealed class SprintAssembler
     /// Injection never completes, replaces, or reorders the sprint.
     /// </summary>
     private async Task InjectAdHocAsync(
-        SprintRecord active, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
+        SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
     {
         var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
@@ -630,6 +630,21 @@ public sealed class SprintAssembler
                 active.Id, task.Id, task.Title, reason);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
                 task.Id, $"Injected into active sprint '{active.Name}' — {reason}"));
+            // Membership writes publish nothing on their own — kick
+            // dispatch so the injection is claimed now, not at the
+            // backstop.
+            if (_eventPublisher is not null)
+            {
+                var kickedAt = DateTimeOffset.UtcNow;
+                await _eventPublisher.PublishAsync(new Core.Messaging.TaskEnqueued
+                {
+                    MessageId = Core.Messaging.TaskEnqueued.IdFor(projectId, task.Id, kickedAt),
+                    ProjectId = projectId,
+                    TaskId = task.Id,
+                    TaskType = task.Type,
+                    EnqueuedAt = kickedAt,
+                }, ct);
+            }
         }
     }
 

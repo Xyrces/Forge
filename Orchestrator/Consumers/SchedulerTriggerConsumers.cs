@@ -148,3 +148,29 @@ public sealed class GroomRequestedConsumer : EventConsumer<GroomRequested>
         return Task.CompletedTask;
     }
 }
+
+/// <summary>
+/// ProjectRolesChanged → kick the dispatch loop. Role caps apply live
+/// to the SlotTable; without this kick the loop would sit parked on
+/// its backstop while new capacity idles (observed live 2026-08-08:
+/// coredev raised to 4 mid-run, claimable sprint members waited 15m).
+/// </summary>
+public sealed class ProjectRolesChangedConsumer : EventConsumer<ProjectRolesChanged>
+{
+    private readonly SchedulerWakeups _wakeups;
+
+    public ProjectRolesChangedConsumer(
+        ITransport transport,
+        SchedulerWakeups wakeups,
+        ILogger<ProjectRolesChangedConsumer> logger)
+        : base(transport, logger)
+    {
+        _wakeups = wakeups;
+    }
+
+    protected override Task HandleAsync(ProjectRolesChanged evt, CancellationToken ct)
+    {
+        _wakeups.Dispatch.Signal();
+        return Task.CompletedTask;
+    }
+}
