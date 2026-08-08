@@ -92,7 +92,6 @@ public static class ForgeComposition
         services.AddSingleton(sp => new Consumers.TaskTransitionedWakeupConsumer(
             sp.GetRequiredService<ITransport>(), dispatchWakeup,
             sp.GetRequiredService<ILogger<Consumers.TaskTransitionedWakeupConsumer>>()));
-
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
             events: eventPublisher);
@@ -368,37 +367,22 @@ public static class ForgeComposition
                         timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
                         workflow: workflowResolver,
                         verifyCommands: bundle.Project.VerifyCommands,
-                        // Event-driven review trigger: the reviewer
-                        // starts on the pushed head while CI runs — the
-                        // watch sweep stays the backstop.
+                        // Message-driven review trigger: publish
+                        // PrOpened — the PrOpenedConsumer launches the
+                        // background review on the pushed head while CI
+                        // runs; the 15m sweep tick is the backstop.
                         onPrOpened: (task, ct) =>
                         {
-                            _ = Task.Run(async () =>
+                            if (!int.TryParse(task.GetMetadata("prNumber"), out var prNumber))
+                                return Task.CompletedTask;
+                            return eventPublisher.PublishAsync(new Core.Messaging.PrOpened
                             {
-                                try
-                                {
-                                    var resolver = new Core.Workflow.WorkflowResolver(memoryStore);
-                                    if (!Core.Workflow.WorkflowExtensions.IsStepEnabled(
-                                            await resolver.ResolveAsync(CancellationToken.None), "review")) return;
-                                    var reviewer = new Forge.Reviewer.ReviewerDispatcher(
-                                        bundle.IssueStore, bundle.GitHub, agentRunner,
-                                        loggerFactory.CreateLogger<Forge.Reviewer.ReviewerDispatcher>(),
-                                        lifecycle: lifecycle,
-                                        events: eventBus,
-                                        projectId: bundle.Project.Id);
-                                    var outcome = await reviewer.ReviewOnceAsync(task, CancellationToken.None);
-                                    if (outcome is not null && outcome.Error is null)
-                                    {
-                                        log.LogInformation("PR-open review trigger: verdict {Verdict} for task {Id} (PR head {Sha})",
-                                            outcome.Verdict, task.Id, outcome.HeadSha);
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    log.LogWarning(ex, "PR-open review trigger failed for task {Id}; the watch sweep is the backstop", task.Id);
-                                }
-                            });
-                            return Task.CompletedTask;
+                                MessageId = Core.Messaging.PrOpened.IdFor(task.Id, prNumber, task.GetMetadata("branchSha")),
+                                ProjectId = bundle.Project.Id,
+                                TaskId = task.Id,
+                                PrNumber = prNumber,
+                                Branch = task.GetMetadata("branch"),
+                            }, ct);
                         });
                     await workflow.RunAsync(issue, ct);
                 },
@@ -412,6 +396,27 @@ public static class ForgeComposition
             secrets: secretStore, gates: stageGates, lifecycle: lifecycle,
             eventPublisher: eventPublisher);
         services.AddSingleton(dispatchBundleFactory);
+
+        // Watch pipeline: the sweep runs on SweepTick(watch) messages
+        // (15m backstop); PrOpened / ReviewVerdictRecorded /
+        // MergeReady transitions drive the immediate fast paths.
+        var watchSweeps = new WatchSweepService(
+            agentRunner, llmConfig, roleModelOverrides, modelRateLimits,
+            lifecycle, workflowResolver, eventBus, loggerFactory,
+            loggerFactory.CreateLogger<WatchSweepService>());
+        services.AddSingleton(watchSweeps);
+        services.AddSingleton(sp => new Consumers.WatchSweepTickConsumer(
+            sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
+            watchSweeps, sp.GetRequiredService<ILogger<Consumers.WatchSweepTickConsumer>>()));
+        services.AddSingleton(sp => new Consumers.PrOpenedConsumer(
+            sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
+            watchSweeps, sp.GetRequiredService<ILogger<Consumers.PrOpenedConsumer>>()));
+        services.AddSingleton(sp => new Consumers.ReviewVerdictRecordedConsumer(
+            sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
+            sp.GetRequiredService<ILogger<Consumers.ReviewVerdictRecordedConsumer>>()));
+        services.AddSingleton(sp => new Consumers.MergeReadyPollConsumer(
+            sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
+            sp.GetRequiredService<ILogger<Consumers.MergeReadyPollConsumer>>()));
 
         GitHubService? GitHubForProject(string projectId)
         {

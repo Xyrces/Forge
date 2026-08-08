@@ -277,7 +277,8 @@ public sealed class DashboardHost : IAsyncDisposable
                 _issues, _gitHub, _reviewerRunner,
                 _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
                     ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
-                lifecycle: _lifecycle);
+                lifecycle: _lifecycle,
+                eventPublisher: _eventPublisher);
             builder.Services.AddSingleton(d);
             reviewerDispatcherForBuild = d;
         }

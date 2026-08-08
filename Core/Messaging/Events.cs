@@ -40,8 +40,8 @@ public sealed record PrOpened : IForgeEvent
     public string? Branch { get; init; }
     public DateTimeOffset OpenedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(string taskId, int prNumber)
-        => $"pr-opened:{taskId}:{prNumber}";
+    public static string IdFor(string taskId, int prNumber, string? headSha = null)
+        => $"pr-opened:{taskId}:{prNumber}:{headSha ?? "none"}";
 }
 
 public sealed record ReviewVerdictRecorded : IForgeEvent

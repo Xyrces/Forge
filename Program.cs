@@ -1203,6 +1203,10 @@ Console.Error.WriteLine(ex.ToString());
                 {
                     provider.GetRequiredService<Orchestrator.Consumers.TaskEnqueuedWakeupConsumer>(),
                     provider.GetRequiredService<Orchestrator.Consumers.TaskTransitionedWakeupConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.WatchSweepTickConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.PrOpenedConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.ReviewVerdictRecordedConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.MergeReadyPollConsumer>(),
                 };
                 foreach (var consumer in eventConsumers)
                     await consumer.StartAsync(shutdownCts.Token);

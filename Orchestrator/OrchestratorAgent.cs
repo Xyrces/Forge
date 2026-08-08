@@ -28,9 +28,6 @@ public sealed class OrchestratorAgent : IAgent
     // GitHub rate-limit cooldown for the PR-watch path. When Octokit
     // reports RateLimitExceeded, watch issues are skipped until this
     // time so the loop doesn't hammer the API every dispatch cycle.
-    private DateTime _githubRateLimitedUntil = DateTime.MinValue;
-    private static readonly TimeSpan GitHubRateLimitCooldown = TimeSpan.FromMinutes(10);
-
     /// <summary>Backoff after a failed dispatch cycle (transient infra
     /// outage). Long enough to let DNS/SQL recover, short enough that
     /// the queue resumes promptly.</summary>
@@ -42,8 +39,6 @@ public sealed class OrchestratorAgent : IAgent
     // stay Pending) and vaporized the 5000-req/hr GitHub quota. Now
     // watches are polled in ONE sequential sweep every WatchSweepInterval:
     // 3 calls per watch per sweep (2 watches -> ~24 calls/hr).
-    private DateTime _nextWatchSweepUtc = DateTime.MinValue;
-    private static readonly TimeSpan WatchSweepInterval = TimeSpan.FromMinutes(15);
     // LLM 429 cooldowns for the engineering dispatch path, keyed by
     // (provider, model) — quotas live at that boundary, so a 429 from
     // minimax must not freeze tasks that would run on a different
@@ -209,46 +204,10 @@ public sealed class OrchestratorAgent : IAgent
                 // stories + a watch starved 4 feature tasks).
                 var allReady = await bundle.IssueStore.ReadyAsync(0, sprintId: null, cancellationToken);
 
-                // Watched tasks sweep by STATE, not by a watch row
-                // (watch issues were retired 2026-07-29 — the task
-                // carries prNumber + the lifecycle states, so a
-                // separate subscription row was pure duplication).
-                // Any live task with a PR number is watched, regardless
-                // of sprint state. Blocked tasks with a PR join the
-                // sweep too — RunWatchSweepAsync resumes the resumable
-                // ones (transient reviewer-unavailable marker, or the
-                // merge gate now passing after an external fix) and
-                // leaves the rest operator-decision (auto-nudge on
-                // unblock).
-                // Legacy pr-watch rows still in the queue are closed
-                // here (their tasks are picked up by the same sweep —
-                // the metadata lives on the task).
-                var watchedTasks = (await bundle.IssueStore.ListAsync(new IssueFilter(), cancellationToken))
-                    .Where(t => !AgentTaskTypes.IsContainer(t.Type)
-                        && t.Type != AgentTaskTypes.PrWatch
-                        && (t.Status is IssueStatus.Pending or IssueStatus.InProgress
-                            || (t.Status == IssueStatus.Blocked && t.GetMetadata("prNumber") is not null))
-                        && t.GetMetadata("prNumber") is not null)
-                    .ToList();
-                var legacyWatches = allReady.Where(i => i.Type == AgentTaskTypes.PrWatch).ToList();
-                foreach (var legacy in legacyWatches)
-                {
-                    await bundle.IssueStore.TransitionAsync(legacy.Id, IssueStatus.Closed,
-                        "superseded: PR watching is driven by the watched task's own state (prNumber metadata) — no watch row needed",
-                        ct: cancellationToken);
-                    _logger.LogInformation("Closed legacy watch {Id} (superseded by state-driven watching)", legacy.Id);
-                }
-                if (watchedTasks.Count > 0 && DateTime.UtcNow < _githubRateLimitedUntil)
-                {
-                    _logger.LogDebug("Dispatch cycle: skipping {N} watched tasks — GitHub rate-limit cooldown until {Until:HH:mm:ss}",
-                        watchedTasks.Count, _githubRateLimitedUntil);
-                    watchedTasks = new List<IssueRecord>();
-                }
-                if (watchedTasks.Count > 0 && DateTime.UtcNow >= _nextWatchSweepUtc)
-                {
-                    _nextWatchSweepUtc = DateTime.UtcNow + WatchSweepInterval;
-                    await RunWatchSweepAsync(watchedTasks, bundle, cancellationToken);
-                }
+                // The PR watch sweep no longer runs in the dispatch
+                // cycle: it is message-driven (SweepTick(watch) backstop
+                // + PrOpened / ReviewVerdictRecorded / MergeReady fast
+                // paths) via WatchSweepService + the watch consumers.
 
                 // Sprint flow gate: ALL engineering work happens inside
                 // a sprint. No active sprint => the SprintAssembler
@@ -433,216 +392,6 @@ public sealed class OrchestratorAgent : IAgent
         return false;
     }
 
-    /// <summary>
-    /// One sequential poll over every Pending watch issue — a single
-    /// GitHub burst per <see cref="WatchSweepInterval"/> instead of
-    /// unbounded parallel poll loops. Each watch first gets its
-    /// reviewer pass (ReviewerDispatcher records the verdict in the
-    /// watch metadata), then the merge/rework decision
-    /// (PRWatcher.PollWatchedTaskAsync). A 429 aborts the sweep early
-    /// and arms the cooldown. Watch issues stay Pending between
-    /// sweeps (by design: the watch IS a long-lived subscription).
-    /// </summary>
-    /// <summary>Maximum auto-resume rounds for a transiently-blocked
-    /// watch before the task falls back to operator-decision (the
-    /// blockedKind marker is cleared so the sweep stops picking it
-    /// up).</summary>
-    private const int MaxAutoResumeAttempts = Forge.Reviewer.PRWatcher.MaxAutoResumeAttempts;
-
-    /// <summary>True for a Blocked task whose block is transient
-    /// (reviewer model unavailable at block time) — eligible for the
-    /// sweep's auto-resume nudge once the model recovers.</summary>
-    private static bool IsAutoResumableBlock(IssueRecord task) =>
-        task.Status == IssueStatus.Blocked
-        && string.Equals(task.GetMetadata("blockedKind"),
-            Forge.Reviewer.PRWatcher.BlockedKindReviewerUnavailable, StringComparison.Ordinal);
-
-    /// <summary>
-    /// Resume a transiently-blocked watched task: reviewer model back
-    /// =&gt; clear the stale review bookkeeping (the old Error verdict
-    /// and consumed rounds are meaningless against the current head),
-    /// transition Blocked -&gt; InProgress, and hand the task back to
-    /// the sweep. Returns null when the task should stay blocked this
-    /// cycle (reviewer model still cooling, or resume budget
-    /// exhausted — in which case the marker is cleared so the block
-    /// becomes operator-decision).
-    /// </summary>
-    private async Task<IssueRecord?> TryResumeBlockedWatchAsync(
-        IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
-    {
-        var mk = ResolveModelKey("review", bundle.Project.Id);
-        var cooling = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
-        if (cooling is not null)
-        {
-            _logger.LogDebug(
-                "Watch (task {Id}): auto-resume deferred — reviewer model {Provider}/{Model} cooling until {Until:HH:mm:ss}",
-                task.Id, mk.Provider, mk.Model, cooling.Value);
-            return null;
-        }
-
-        var attempts = int.TryParse(task.GetMetadata("autoResumeAttempts"), out var a) ? a : 0;
-        if (attempts >= MaxAutoResumeAttempts)
-        {
-            _logger.LogWarning(
-                "Watch (task {Id}): auto-resume budget ({Max}) exhausted — clearing the transient marker; operator review required",
-                task.Id, MaxAutoResumeAttempts);
-            await bundle.IssueStore.TransitionAsync(task.Id, IssueStatus.Blocked,
-                "auto-resume budget exhausted — operator review required",
-                new Dictionary<string, object> { ["blockedKind"] = null! }, ct: cancellationToken);
-            return null;
-        }
-
-        var metadata = new Dictionary<string, object>
-        {
-            ["blockedKind"] = null!,
-            ["reviewVerdict"] = null!,
-            ["reviewSha"] = null!,
-            ["reviewNotes"] = null!,
-            ["reviewRound"] = null!,
-            ["lastError"] = null!,
-            ["lastErrorAt"] = null!,
-            ["autoResumeAttempts"] = (attempts + 1).ToString(),
-            // The resume is a nudge — restart the stale window or an
-            // hours-old PR trips the pr-stale guard on the first poll
-            // after resume (same failure shape as the requeue path).
-            ["prOpenedAt"] = DateTime.UtcNow.ToString("O"),
-        };
-        var resumed = await bundle.IssueStore.TransitionAsync(task.Id, IssueStatus.InProgress,
-            $"auto-resumed (round {attempts + 1}/{MaxAutoResumeAttempts}): reviewer model available again — re-reviewing the PR head",
-            metadata, ct: cancellationToken);
-        await ReportLifecycleAsync(resumed, Core.TaskEvent.WatchResumed, bundle, cancellationToken);
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-            task.Id, $"Watch auto-resumed (round {attempts + 1}/{MaxAutoResumeAttempts}): reviewer model available again"));
-        _logger.LogInformation(
-            "Watch (task {Id}): auto-resumed from transient reviewer-unavailable block (round {N}/{Max}, project={Project})",
-            task.Id, attempts + 1, MaxAutoResumeAttempts, bundle.Project.Id);
-        return resumed;
-    }
-
-    /// <summary>Reviews launched off-loop, keyed
-    /// project/task. A review that outlives
-    /// <see cref="ReviewRelaunchAfter"/> without landing a verdict
-    /// (crashed silently, process restarted mid-review) becomes
-    /// eligible for relaunch — the dispatcher's own
-    /// ReviewRunTimeout is the inner bound.</summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _reviewsInFlight = new();
-    private static readonly TimeSpan ReviewRelaunchAfter = TimeSpan.FromMinutes(15);
-
-    /// <summary>Launch decision, separated for tests: skip when a
-    /// review is in flight (in-memory) or the task's reviewStartedAt
-    /// marker is fresh (covers pre-restart reviews).</summary>
-    internal bool ShouldLaunchReview(IssueRecord task, string projectId)
-    {
-        var key = projectId + "/" + task.Id;
-        if (_reviewsInFlight.TryGetValue(key, out var inFlight) && !inFlight.IsCompleted)
-        {
-            return false;
-        }
-        if (DateTime.TryParse(task.GetMetadata("reviewStartedAt"), out var started)
-            && DateTime.UtcNow - started.ToUniversalTime() < ReviewRelaunchAfter)
-        {
-            return false;
-        }
-        return true;
-    }
-
-    /// <summary>
-    /// Launch the reviewer for a watched task in the background.
-    /// The review records its own verdict metadata; the sweep never
-    /// awaits it.
-    /// </summary>
-    private void TryLaunchBackgroundReview(IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
-    {
-        var key = bundle.Project.Id + "/" + task.Id;
-        if (!ShouldLaunchReview(task, bundle.Project.Id))
-        {
-            return;
-        }
-
-        var reviewer = new Forge.Reviewer.ReviewerDispatcher(
-            bundle.IssueStore, bundle.GitHub, _runner,
-            _loggerFactory?.CreateLogger<Forge.Reviewer.ReviewerDispatcher>()
-                ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<Forge.Reviewer.ReviewerDispatcher>.Instance,
-            lifecycle: _lifecycle,
-            events: _events,
-            projectId: bundle.Project.Id);
-        var run = reviewer.ReviewOnceAsync(task, cancellationToken);
-        _reviewsInFlight[key] = run;
-        _ = run.ContinueWith(t =>
-        {
-            _reviewsInFlight.TryRemove(key, out _);
-            if (t.IsFaulted)
-            {
-                _logger.LogError(t.Exception, "background review for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
-            }
-        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
-    }
-
-    private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchedTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
-    {
-        _logger.LogInformation("Watch sweep: polling {N} watched task(s) (project={Project})",
-            watchedTasks.Count, bundle.Project.Id);
-        foreach (var watched in watchedTasks)
-        {
-            if (cancellationToken.IsCancellationRequested) return;
-            try
-            {
-                // Blocked watch recovery (unblock nudge): transient
-                // reviewer-unavailable blocks resume when the model is
-                // back; ANY other Blocked task gets the mergeable gate
-                // check — if the blockage cleared externally (operator
-                // resolved the conflict, CI went green, approval
-                // landed), the watch resumes and merges without an
-                // operator roundtrip. Everything else stays
-                // operator-decision.
-                var polled = watched;
-                if (watched.Status == IssueStatus.Blocked)
-                {
-                    IssueRecord? resumed = IsAutoResumableBlock(watched)
-                        ? await TryResumeBlockedWatchAsync(watched, bundle, cancellationToken)
-                        : await bundle.PrWatcher.TryResumeMergeableBlockedAsync(watched, cancellationToken);
-                    if (resumed is null) continue;
-                    polled = resumed;
-                }
-                // Review first (verdict metadata on the task), then
-                // decide — but OFF THE LOOP: an agentic review (tools,
-                // pr_diff paging, several round-trips) takes minutes,
-                // and awaiting it here would stall dispatch + all
-                // other watches (the pre-tools design ran the whole
-                // review synchronously in the sweep). The review runs
-                // in the background and records its verdict in the
-                // task metadata; the NEXT sweep's poll merges on it.
-                // Review step disabled in the workflow definition
-                // (pass 4): no reviewer-agent runs — merges require a
-                // formal review at the current head.
-                var fresh = polled;
-                var reviewEnabled = _workflow is null
-                    || (await _workflow.ResolveAsync(cancellationToken)).IsStepEnabled("review");
-                if (reviewEnabled)
-                {
-                    TryLaunchBackgroundReview(polled, bundle, cancellationToken);
-                }
-                var poll = await bundle.PrWatcher.PollWatchedTaskAsync(fresh, cancellationToken);
-                _logger.LogDebug("Watch (task {Id}): {Outcome}", watched.Id, poll);
-            }
-            catch (Octokit.RateLimitExceededException)
-            {
-                _githubRateLimitedUntil = DateTime.UtcNow + GitHubRateLimitCooldown;
-                _logger.LogWarning("Watch sweep: GitHub rate limit exceeded; backing off for {Cooldown} (project={Project})",
-                    GitHubRateLimitCooldown, bundle.Project.Id);
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Watched task {Id} crashed (project={Project})", watched.Id, bundle.Project.Id);
-            }
-            // Courtesy delay: GitHub's secondary rate limit dislikes
-            // rapid-fire request bursts even well under the quota.
-            try { await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken); }
-            catch (OperationCanceledException) { return; }
-        }
-    }
 
     public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
