@@ -87,6 +87,7 @@ Copy `appsettings.example.json` to `appsettings.json` and fill in (gitignored). 
   "db":        { "provider": "sqlite" },  // or "sqlserver" + db.connectionString (Azure SQL)
   "spawner":   { "maxConcurrentSessions": 4, "pollIntervalSeconds": 3, "staleMinutes": 30 },
   "orchestrator": { "execution": "InProcess" },  // or "Durable" + dtsConnectionString
+  "messaging":  { "transport": "inmemory" },     // internal event bus (Talaria); "servicebus" reserved
   "dashboard": { "enabled": true, "port": 4097, "hostname": "127.0.0.1" }
 }
 ```
@@ -163,13 +164,13 @@ The API surface includes `/api/state`, `/api/tasks/*`, `/api/sprints/*` (incl. p
 ## How a task flows
 
 1. **Intake.** New work enters as an epic via the Intake agent (operator chat at `/intake`) or as an ad-hoc task (CLI / dashboard / agent-filed follow-up).
-2. **Grooming.** The pipeline schedulers (designer → groomer, 5-min ticks) refine specs into stories/tasks. Ad-hoc tasks must be marked `groomed=true` by the ScheduledGroomer before they are sprint-eligible.
-3. **Sprint.** ALL engineering work happens inside a sprint. The `SprintAssembler` (5-min tick) completes the Active sprint when its tasks are terminal and assembles + activates the next from eligible Pending tasks. There is deliberately no UI button to create sprints.
+2. **Grooming.** The pipeline schedulers (designer → groomer) refine specs into stories/tasks, kicked by spec/follow-up events with a 15-min backstop tick. Ad-hoc tasks must be marked `groomed=true` by the ScheduledGroomer before they are sprint-eligible.
+3. **Sprint.** ALL engineering work happens inside a sprint. The `SprintAssembler` (kicked by task/sprint events, 15-min backstop) completes the Active sprint when its tasks are terminal and assembles + activates the next from eligible Pending tasks. There is deliberately no UI button to create sprints.
 4. **Dispatch.** The orchestrator claims a ready sprint task (`IssueStore.ClaimAsync` is atomic), acquires a per-(project, role) slot from `SlotTable`, and hands it to the 5-stage MAF workflow: **Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch**.
 5. **Plan gate.** Before mutating, CoreDev/ClientDev runs must `submit_plan`; the bash tool refuses classified-mutating commands until deterministic gates (schema, territory) and the LLM plan-critic approve.
 6. **Run.** `MafAgentRunner` builds the prompt (role instructions + memory recall + sprint context + task), injects per-project secrets as env vars (by reference — values never enter LLM context), and runs the MAF agent loop with the bash tool.
 7. **PR.** The orchestrator commits, pushes `agent/<id>`, and opens the PR. Agents never open PRs themselves.
-8. **Watch.** No separate watch row: the task IS the watch. The sweep (every 15 min) polls every live task with a `prNumber`. Merge requires green check runs AND an approval (formal review or reviewer-agent verdict) at the current head SHA. CI failure or changes-requested requeues the task for a rework round on the same branch/PR — circuit breaker at 3 attempts, then the task goes Blocked/Failed for the operator.
+8. **Watch.** No separate watch row: the task IS the watch. `PrOpened` launches the review immediately, a recorded verdict triggers the merge attempt now, and the sweep (every 15 min, `SweepTick(watch)`) polls every live task with a `prNumber` as the backstop. Merge requires green check runs AND an approval (formal review or reviewer-agent verdict) at the current head SHA. CI failure or changes-requested requeues the task for a rework round on the same branch/PR — circuit breaker at 3 attempts, then the task goes Blocked/Failed for the operator.
 9. **Merge.** On green CI + approval (and with the `merge` stage gate released), the watcher merges, deletes the branch, removes the worktree, and marks the task Completed. Externally-merged PRs are detected too.
 10. **Restart safety.** `StartupRecovery` runs at every startup, classifies every `InProgress + assignee=forge` issue by its `dispatch_checkpoint`, and replays unfinished side-effects (commit / push / PR open). Use `--recover` to dry-run. Opt-in P4 Stage B persists workflow state in a Durable Task Scheduler sidecar (`orchestrator.execution=Durable`). See `docs/p4-restart-safety.md`.
 
@@ -224,7 +225,9 @@ Structured single-line console logs (`journalctl -u forge -f` under systemd). Pe
 
 The dispatch path is a MAF `WorkflowBuilder` graph in `Orchestrator/Workflow/EngineeringDispatchWorkflow.cs` — five typed `FunctionExecutor<TIn, TOut>` stages (Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch). `OrchestratorAgent` claims the task and hands it to an `IWorkflowDispatcher`: InProcess (default) or Durable (DTS sidecar). The editable workflow definition (`/flow?mode=edit`) controls wiring and policy — gates, auto-merge, rework limits, step toggles — resolved per evaluation without restart; the task state transition table stays code-owned.
 
-Module boundaries are non-negotiable: `Core/` has no I/O beyond the state DB, `Agents/` adds LLM + tools, `Orchestrator/` glues git + GitHub, `Dashboard/` + `Forge.UI/` render state. See `AGENTS.md` for the full rule layer and `docs/system-flow.md` for the narrative.
+Module boundaries are non-negotiable: `Core/` has no I/O beyond the state DB, `Agents/` adds LLM + tools, `Orchestrator/` glues git + GitHub, `Messaging/` owns the internal event bus, `Dashboard/` + `Forge.UI/` render state. See `AGENTS.md` for the full rule layer and `docs/system-flow.md` for the narrative.
+
+**Internal messaging (Talaria).** Stores publish pure-record hint events after mutations commit (`Core/Messaging/` seam — no Talaria reference in Core); `Messaging/` maps them onto Talaria topics over the in-memory transport (Azure Service Bus reserved behind `messaging.transport`). Consumers in `Orchestrator/Consumers/` — one per topic — kick the dispatch loop and the scheduler loops via coalescing wakeup signals; the watch sweep and all scheduler loops keep a 15-minute backstop tick (`SweepTickPublisher`). Messages are hints, never truth: handlers re-read DB/GitHub and are idempotent, so a crash loses nothing the next backstop can't re-derive. GitHub remains the only polled external system.
 
 ## Documentation
 

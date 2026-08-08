@@ -198,6 +198,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
     private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
+    private readonly Messaging.IEventPublisher _events;
+    private readonly string _projectId;
 
     public string DbPath => _dbPath;
 
@@ -205,8 +207,14 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     /// SecretStore, …) hang off the same logical database via this.</summary>
     public IDbConnectionFactory Db => _db;
 
-    public IssueStore(string dbPath)
-        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)))
+    /// <summary>Event seam + owning project for sibling stores
+    /// (SprintStore / SpecStore / FollowUpDraftStore publish through the
+    /// anchor store so per-project wiring happens in exactly one place).</summary>
+    internal Messaging.IEventPublisher Events => _events;
+    internal string ProjectId => _projectId;
+
+    public IssueStore(string dbPath, string? projectId = null, Messaging.IEventPublisher? events = null)
+        : this(ForgeDb.Sqlite(BuildSqliteConnectionString(dbPath)), projectId, events)
     {
         _dbPath = dbPath;
     }
@@ -223,10 +231,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }.ToString();
     }
 
-    public IssueStore(IDbConnectionFactory db)
+    public IssueStore(IDbConnectionFactory db, string? projectId = null, Messaging.IEventPublisher? events = null)
     {
         _db = db;
         _dbPath = "";
+        _events = events ?? Messaging.NullEventPublisher.Instance;
+        _projectId = projectId ?? "default";
         InitializeSchema();
     }
 
@@ -1800,6 +1810,17 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         await InsertEventAsync(conn, tx, id, "created", spec.Description, ct);
         await tx.CommitAsync(ct);
+        // Publish AFTER the mutation commits. The event is a hint —
+        // consumers re-read the store; publish failures are swallowed
+        // by the publisher (never break a DB mutation over a hint).
+        await _events.PublishAsync(new Messaging.TaskEnqueued
+        {
+            MessageId = Messaging.TaskEnqueued.IdFor(_projectId, id, now),
+            ProjectId = _projectId,
+            TaskId = id,
+            TaskType = spec.Type,
+            EnqueuedAt = now,
+        }, ct);
         return new IssueRecord(id, shortIdStr, spec.Type, spec.Title, spec.Description,
             IssueStatus.Pending, spec.Priority, spec.Assignee, now, now, null, metadataJson);
     }
@@ -1991,7 +2012,66 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         await InsertEventAsync(conn, null, id, "status_change",
             $"{current.Status}->{to}{(error is null ? "" : $" err={error}")}", ct);
+        await PublishLifecycleTransitionAsync(current, metadataJson, ct);
         return (await GetAsync(id, ct))!;
+    }
+
+    /// <summary>
+    /// Publish <see cref="Messaging.TaskTransitioned"/> when the
+    /// lifecycle (state, stateEnteredAt) metadata pair changed as part
+    /// of a mutation. Every metadata writer — the TaskStateMachine,
+    /// watch/review/dispatch metadata updates — funnels through
+    /// TransitionAsync, so this is the single choke point. Publish
+    /// happens AFTER the UPDATE commits; failures are swallowed by the
+    /// publisher (a hint never breaks a DB mutation).
+    /// </summary>
+    private async Task PublishLifecycleTransitionAsync(
+        IssueRecord before, string mergedMetadataJson, CancellationToken ct)
+    {
+        var (toState, toEnteredAt) = ParseLifecycleStamp(mergedMetadataJson);
+        if (toState is null) return;
+        var (fromState, fromEnteredAt) = ParseLifecycleStamp(before.MetadataJson);
+        if (fromState == toState && fromEnteredAt == toEnteredAt) return;
+
+        var now = DateTimeOffset.UtcNow;
+        await _events.PublishAsync(new Messaging.TaskTransitioned
+        {
+            MessageId = Messaging.TaskTransitioned.IdFor(_projectId, before.Id, toState.Value, toEnteredAt ?? now),
+            ProjectId = _projectId,
+            TaskId = before.Id,
+            FromState = fromState ?? TaskLifecycleState.Pending,
+            ToState = toState.Value,
+            StateEnteredAt = toEnteredAt ?? now,
+        }, ct);
+    }
+
+    private static (TaskLifecycleState? State, DateTimeOffset? EnteredAt) ParseLifecycleStamp(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return (null, null);
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return (null, null);
+            TaskLifecycleState? state = null;
+            DateTimeOffset? enteredAt = null;
+            if (doc.RootElement.TryGetProperty("state", out var s)
+                && s.ValueKind == System.Text.Json.JsonValueKind.String
+                && Enum.TryParse<TaskLifecycleState>(s.GetString(), out var parsed))
+            {
+                state = parsed;
+            }
+            if (doc.RootElement.TryGetProperty("stateEnteredAt", out var e)
+                && e.ValueKind == System.Text.Json.JsonValueKind.String
+                && DateTimeOffset.TryParse(e.GetString(), out var ts))
+            {
+                enteredAt = ts;
+            }
+            return (state, enteredAt);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return (null, null);
+        }
     }
 
     public async Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default)

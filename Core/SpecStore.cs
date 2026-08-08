@@ -439,6 +439,21 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         cmd.AddParam("@id", id);
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         if (rows == 0) throw new InvalidOperationException($"Spec {id} not found");
+        // Publish AFTER the mutation commits; the publisher swallows
+        // failures (a hint never breaks a DB mutation).
+        if (current.Status != status)
+        {
+            var changedAt = new DateTimeOffset(now, TimeSpan.Zero);
+            await _issues.Events.PublishAsync(new Messaging.SpecStatusChanged
+            {
+                MessageId = Messaging.SpecStatusChanged.IdFor(_issues.ProjectId, id, status.ToString(), changedAt),
+                ProjectId = _issues.ProjectId,
+                SpecId = id,
+                FromStatus = current.Status.ToString(),
+                ToStatus = status.ToString(),
+                ChangedAt = changedAt,
+            }, ct);
+        }
         return (await GetAsync(id, ct))!;
     }
 

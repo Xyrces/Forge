@@ -38,6 +38,7 @@ public sealed class ReviewerDispatcher
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly IDashboardEventBus? _events;
     private readonly string? _projectId;
+    private readonly Forge.Core.Messaging.IEventPublisher? _eventPublisher;
 
     /// <summary>Hard cap on one reviewer LLM call. Must be bounded
     /// (see the call site: a hung call must not freeze the loop
@@ -59,7 +60,8 @@ public sealed class ReviewerDispatcher
         ILogger<ReviewerDispatcher> logger,
         Forge.Core.TaskStateMachine? lifecycle = null,
         IDashboardEventBus? events = null,
-        string? projectId = null)
+        string? projectId = null,
+        Forge.Core.Messaging.IEventPublisher? eventPublisher = null)
     {
         _issues = issues;
         _gitHub = gitHub;
@@ -68,6 +70,7 @@ public sealed class ReviewerDispatcher
         _lifecycle = lifecycle;
         _events = events;
         _projectId = projectId;
+        _eventPublisher = eventPublisher;
     }
 
     public sealed record ReviewOutcome(
@@ -326,6 +329,24 @@ public sealed class ReviewerDispatcher
 
         _logger.LogInformation("PR #{Pr}: reviewer verdict {Verdict} (round {Round}, sha {Sha})",
             prNumber, verdict, round, headSha[..Math.Min(7, headSha.Length)]);
+
+        // Message-driven watch pipeline: the verdict landing kicks an
+        // immediate merge/rework decision (consumer polls this one PR)
+        // instead of waiting out the sweep interval. Hint only — the
+        // publisher swallows failures; the 15m sweep is the backstop.
+        if (_eventPublisher is not null)
+        {
+            await _eventPublisher.PublishAsync(new Forge.Core.Messaging.ReviewVerdictRecorded
+            {
+                MessageId = Forge.Core.Messaging.ReviewVerdictRecorded.IdFor(_projectId ?? "default", task.Id, prNumber, headSha, round),
+                ProjectId = _projectId ?? "default",
+                TaskId = task.Id,
+                PrNumber = prNumber,
+                Verdict = verdict.ToString(),
+                ReviewSha = headSha,
+                ReviewRound = round,
+            }, cancellationToken);
+        }
 
         // Phase 2 shadow authority: report the verdict to the
         // lifecycle machine (best-effort; never breaks a review).

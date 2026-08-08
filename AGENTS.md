@@ -22,9 +22,10 @@ Do **not** edit a role's system prompt thinking you are editing a kilo agent. Th
 
 Lifted from `CONTRIBUTING.md` § "Boundaries":
 
-- `Core/` has no I/O beyond the state database (SQLite or Azure SQL, via the `Core/Db` provider seam). No HTTP, no GitHub, no LLM. Stores take a connection factory (or a SQLite path) via the constructor; they don't read env vars or config.
+- `Core/` has no I/O beyond the state database (SQLite or Azure SQL, via the `Core/Db` provider seam). No HTTP, no GitHub, no LLM. Stores take a connection factory (or a SQLite path) via the constructor; they don't read env vars or config. **Event seam (2026-08-08):** `Core/Messaging/` holds the pure-record event contracts + `IEventPublisher` (`NullEventPublisher` default, no Talaria reference in Core). Stores publish AFTER a mutation commits — publication cannot be skipped by a forgetful caller, and publish failures are swallowed by the publisher (a hint never breaks a DB mutation).
 - `Agents/` depends on `Core/`, `Configuration/`, `Dashboard/`. Publishes `DashboardEvent`. Does not read `appsettings.json` directly.
 - `Orchestrator/` depends on `Agents/` + `Core/`. Glues stores + agent + git + GitHub.
+- `Messaging/` depends on `Core/` + the Talaria packages (`Talaria.Core`, `Talaria.Transports.InMemory` — GitHub Packages, see `nuget.config`). Hosts `TalariaEventPublisher`, the `EventConsumer<T>` BackgroundService base, `SweepTickPublisher` (15m backstop), and the transport factory (`messaging.transport=inmemory` default; `servicebus` reserved).
 - `Dashboard/` depends on `Core/` + `Configuration/`. Reads stores; publishes/subscribes events via `IDashboardEventBus`.
 - `Reviewer/` is empty today — reserved for future designer/artist roles.
 
@@ -46,6 +47,9 @@ If a class needs to read `IOptions<X>` AND write `IssueStore` AND make HTTP call
 - **Branch protection on the default branch (operator rule, 2026-08-07).** ALL work on this repo — including interactive Kilo/agent sessions — must happen on a feature branch and land via a pull request. Never commit or push directly to the protected default branch; cut a branch first, then open a PR.
 
 ## Agent-specific rules (the ones an LLM agent most often gets wrong)
+
+- **Internal coordination is message-driven (2026-08-08, Talaria).** Stores publish hint events after mutations; `Orchestrator/Consumers/` (one consumer PER TOPIC — the in-memory transport is competing-consumer, two consumers on one topic steal each other's messages) fan out to `WakeupSignal`s that kick the dispatch loop and the groomer/designer/artist/assembler loops; the watch sweep runs on `SweepTick(watch)` with `PrOpened`/`ReviewVerdictRecorded`/MergeReady fast paths. Messages are HINTS, not truth: every handler re-reads DB/GitHub state and is idempotent. The 15-minute backstops (SweepTickPublisher + per-loop backstop waits) re-derive everything if hints are lost; GitHub remains the only polled external system. LLM/GitHub cooldown timers stay internal — never bus messages.
+- **Composition root is DI.** `Orchestrator/Composition/ForgeComposition.cs` builds the whole runtime graph in a `ServiceCollection` (stores as singletons, schedulers/consumers started by `Program.RunOrchestratorAsync`); `DashboardHost` is factory-registered so its separate WebApplication container gets the SAME transport + `IEventPublisher` instances. New runtime services register there — no hand-wired ctor chains in Program.cs.
 
 - **Engineer agents must not open a PR.** The orchestrator's `OrchestratorAgent.DispatchSingleTaskAsync` opens the PR via `GitHubService.CreatePullRequestAsync`. The agent pushes the branch and stops. This is asserted in `BuildPrompt` (`OrchestratorAgent.cs:314`).
 - **Task lifecycle is a state machine** (`Core/TaskState.cs` + `Core/TaskStateMachine.cs`). Watcher/dispatch/reviewer report OBSERVED events; the machine validates against the transition table and records `state`/`stateEnteredAt`/`reworkForSha`/`parkedForSha` on the task. Readers (guards, projector, dashboard) consume the machine record — never invent ad-hoc state flags (the reworkInFlightSha/parkedOnMainCiSha era ended 2026-07-26). `state.writeAuthority=true`: illegal transitions log errors + `stateViolation` metadata (never thrown). New cross-state behavior = new table entry, not a new flag.
