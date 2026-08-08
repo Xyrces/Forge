@@ -13,6 +13,9 @@ concurrency:
 
 permissions:
   contents: read
+  # GITHUB_TOKEN authenticates the github-xyrces NuGet source
+  # (Talaria packages) during restore.
+  packages: read
 
 jobs:
   build:
@@ -38,6 +41,12 @@ jobs:
             ${{ runner.os }}-nuget-
 
       - name: Restore
+        # nuget.config's github-xyrces source expands these env vars
+        # for its credentials; the workflow token can read packages
+        # owned by this account.
+        env:
+          GITHUB_PACKAGES_USER: ${{ github.actor }}
+          GITHUB_PACKAGES_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: dotnet restore Forge.sln
 
       # The .sln includes the e2e-harness project, so this builds
