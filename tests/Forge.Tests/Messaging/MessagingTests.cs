@@ -131,6 +131,7 @@ public sealed class EventContractTests
         Assert.Equal(Topics.SprintStatusChanged, Topics.For<SprintStatusChanged>());
         Assert.Equal(Topics.FollowUpFiled, Topics.For<FollowUpFiled>());
         Assert.Equal(Topics.GroomRequested, Topics.For<GroomRequested>());
+        Assert.Equal(Topics.ProjectRolesChanged, Topics.For<ProjectRolesChanged>());
         Assert.Equal(Topics.SweepTick, Topics.For<SweepTick>());
     }
 }

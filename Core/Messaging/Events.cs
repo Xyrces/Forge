@@ -113,6 +113,21 @@ public sealed record GroomRequested : IForgeEvent
         => $"groom:{projectId}:{specId ?? "-"}:{taskId ?? "-"}:{requestedAt:O}";
 }
 
+/// <summary>
+/// Operator changed a project's role caps (PUT /api/projects/{id}/roles
+/// applies them live to the SlotTable). The dispatch loop must wake NOW
+/// to exploit freed capacity — no store mutation fires otherwise.
+/// </summary>
+public sealed record ProjectRolesChanged : IForgeEvent
+{
+    public required string MessageId { get; init; }
+    public required string ProjectId { get; init; }
+    public DateTimeOffset ChangedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    public static string IdFor(string projectId, DateTimeOffset changedAt)
+        => $"roles-changed:{projectId}:{changedAt:O}";
+}
+
 /// <summary>Which scheduler a <see cref="SweepTick"/> backstop is for.</summary>
 public enum SweepKind
 {
