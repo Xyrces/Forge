@@ -110,13 +110,11 @@ public sealed class MemoryStore : IAsyncDisposable
         if (body is null)
             throw new ArgumentNullException(nameof(body));
 
-        // LIKE match: the key column is unique, so a "playbook/repo"
-        // lookup returns either zero or one row. We do an exact match
-        // by quoting the value so '%' characters in the key don't
-        // act as wildcards.
-        var existing = await RecallAsync(keyPrefix: null, ct);
-        var hit = existing.FirstOrDefault(m =>
-            string.Equals(m.Key, key, StringComparison.Ordinal));
+        // Exact-key probe — a full-table RecallAsync here read 72MB
+        // PER SEED at boot once the forge memory table grew
+        // (observed live 2026-08-08: SkillBootstrap timed out and
+        // StopHost took the service down).
+        var hit = await GetAsync(key, ct);
         if (hit is not null)
         {
             return hit;
@@ -125,23 +123,79 @@ public sealed class MemoryStore : IAsyncDisposable
     }
 
     /// <summary>
-    /// Read all non-expired memories. If <paramref name="keyPrefix"/>
-    /// is null, returns everything; otherwise filters by LIKE prefix.
+    /// Exact-key single-row read. SeedIfMissingAsync used to do a
+    /// full RecallAsync(null) per seed — a 72MB table read PER SKILL
+    /// at boot (observed live 2026-08-08: boot timed out in
+    /// SkillBootstrap on the Basic-tier Azure DB, service down).
     /// </summary>
-    public async Task<IReadOnlyList<MemoryRecord>> RecallAsync(
-        string? keyPrefix = null, CancellationToken ct = default)
+    public async Task<MemoryRecord?> GetAsync(string key, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
             SELECT id, ts, [key], body, ttl_days
             FROM {T("memory")}
-            WHERE (@prefix IS NULL OR [key] LIKE @prefixPattern)
-            ORDER BY ts ASC
+            WHERE [key] = @key
             """;
+        cmd.AddParam("@key", key);
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        var now = DateTime.UtcNow;
+        while (await rd.ReadAsync(ct))
+        {
+            var ttl = rd.IsDBNull(4) ? (int?)null : rd.GetInt32(4);
+            var createdAt = ParseDate(rd.GetString(1));
+            var expiresAt = ttl is null ? (DateTime?)null : createdAt.AddDays(ttl.Value);
+            if (expiresAt is { } exp && exp <= now) continue;
+            return new MemoryRecord(
+                Id: rd.GetInt64(0),
+                Key: rd.GetString(2),
+                Body: rd.GetString(3),
+                CreatedAt: createdAt,
+                TtlDays: ttl,
+                ExpiresAt: expiresAt);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Read all non-expired memories. If <paramref name="keyPrefix"/>
+    /// is null, returns everything; otherwise filters by LIKE prefix.
+    /// </summary>
+    public async Task<IReadOnlyList<MemoryRecord>> RecallAsync(
+        string? keyPrefix = null, CancellationToken ct = default)
+        => await RecallAsync(keyPrefix, excludePrefixes: null, ct);
+
+    /// <summary>
+    /// Recall with prefix EXCLUSIONS at the SQL level. The prompt
+    /// memory block excludes machine-state keys (session/ blobs are
+    /// hundreds of KB each — 71.6MB across 284 rows on 2026-08-08);
+    /// reading them just to filter them out in C# strangled the
+    /// Basic-tier DB and exhausted the connection pool under
+    /// concurrent runs.
+    /// </summary>
+    public async Task<IReadOnlyList<MemoryRecord>> RecallAsync(
+        string? keyPrefix, IReadOnlyList<string>? excludePrefixes, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        var sql = new StringBuilder($"""
+            SELECT id, ts, [key], body, ttl_days
+            FROM {T("memory")}
+            WHERE (@prefix IS NULL OR [key] LIKE @prefixPattern)
+            """);
         cmd.AddParam("@prefix", (object?)keyPrefix ?? DBNull.Value);
         cmd.AddParam("@prefixPattern",
             keyPrefix is null ? (object)DBNull.Value : keyPrefix + "%");
+        if (excludePrefixes is not null)
+        {
+            for (var i = 0; i < excludePrefixes.Count; i++)
+            {
+                sql.Append($"\n  AND [key] NOT LIKE @ex{i}");
+                cmd.AddParam($"@ex{i}", excludePrefixes[i] + "%");
+            }
+        }
+        sql.Append("\nORDER BY ts ASC");
+        cmd.CommandText = sql.ToString();
         var list = new List<MemoryRecord>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         var now = DateTime.UtcNow;
