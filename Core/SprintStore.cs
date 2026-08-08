@@ -71,7 +71,26 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
+        await PublishStatusChangedAsync(id, fromStatus: null, spec.Status, now, ct);
         return new SprintRecord(id, name, spec.Goal, spec.StartDate, spec.EndDate, spec.Status, now, now);
+    }
+
+    /// <summary>Publish AFTER the mutation commits; the publisher
+    /// swallows failures (a hint never breaks a DB mutation).</summary>
+    private async Task PublishStatusChangedAsync(
+        string sprintId, SprintStatus? fromStatus, SprintStatus toStatus, DateTime changedAt, CancellationToken ct)
+    {
+        if (fromStatus == toStatus) return;
+        var now = new DateTimeOffset(changedAt, TimeSpan.Zero);
+        await _issues.Events.PublishAsync(new Messaging.SprintStatusChanged
+        {
+            MessageId = Messaging.SprintStatusChanged.IdFor(sprintId, toStatus.ToString(), now),
+            ProjectId = _issues.ProjectId,
+            SprintId = sprintId,
+            FromStatus = fromStatus?.ToString() ?? "(new)",
+            ToStatus = toStatus.ToString(),
+            ChangedAt = now,
+        }, ct);
     }
 
     private async Task<int> NextNumberAsync(System.Data.Common.DbConnection conn, System.Data.Common.DbTransaction tx, CancellationToken ct)
@@ -150,6 +169,7 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
         }
+        await PublishStatusChangedAsync(id, existing.Status, merged.Status, now, ct);
         return merged with { UpdatedAt = now };
     }
 
@@ -164,6 +184,8 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
 
     public async Task<SprintRecord> SetActiveAsync(string id, CancellationToken ct = default)
     {
+        var existing = await GetAsync(id, ct);
+        var now = DateTime.UtcNow;
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
         await DeactivateOthersAsync(conn, tx, id, ct);
@@ -171,11 +193,12 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         {
             cmd.Transaction = tx;
             cmd.CommandText = $"""UPDATE {T("sprint")} SET status='Active', updated_at=@now WHERE id=@id""";
-            cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
+        await PublishStatusChangedAsync(id, existing?.Status, SprintStatus.Active, now, ct);
         return (await GetAsync(id, ct))!;
     }
 

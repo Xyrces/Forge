@@ -67,6 +67,8 @@
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.7.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.0" />
     <PackageReference Include="Octokit" Version="13.0.1" />
+    <PackageReference Include="Talaria.Core" Version="0.1.1-alpha.0.9" />
+    <PackageReference Include="Talaria.Transports.InMemory" Version="0.1.1-alpha.0.9" />
   </ItemGroup>
 
   <ItemGroup>
