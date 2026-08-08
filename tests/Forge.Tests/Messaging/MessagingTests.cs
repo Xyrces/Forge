@@ -100,6 +100,27 @@ public sealed class EventContractTests
     }
 
     [Fact]
+    public void DeterministicIds_AreProjectQualified()
+    {
+        // Task ids, follow-up rowids and PR numbers are per-project
+        // sequences; without the project qualifier the transport's
+        // idempotency dedupe would drop the second project's event as
+        // a duplicate on the shared topic.
+        Assert.NotEqual(
+            PrOpened.IdFor("proj-a", "task-1", 42, "abc"),
+            PrOpened.IdFor("proj-b", "task-1", 42, "abc"));
+        Assert.NotEqual(
+            ReviewVerdictRecorded.IdFor("proj-a", "task-1", 42, "abc", 1),
+            ReviewVerdictRecorded.IdFor("proj-b", "task-1", 42, "abc", 1));
+        Assert.NotEqual(
+            FollowUpFiled.IdFor("proj-a", 7),
+            FollowUpFiled.IdFor("proj-b", 7));
+        Assert.Equal(
+            PrOpened.IdFor("proj-a", "task-1", 42),
+            PrOpened.IdFor("proj-a", "task-1", 42));
+    }
+
+    [Fact]
     public void Topics_MapEveryContract()
     {
         Assert.Equal(Topics.TaskEnqueued, Topics.For<TaskEnqueued>());
@@ -187,7 +208,25 @@ public sealed class EventConsumerTests
         Func<TaskEnqueued, Task> handle) : EventConsumer<TaskEnqueued>(transport, NullLogger<TestConsumer>.Instance)
     {
         protected override string Topic => "test.consumer";
+        protected override TimeSpan InitialBackoff => TimeSpan.FromMilliseconds(50);
         protected override Task HandleAsync(TaskEnqueued evt, CancellationToken ct) => handle(evt);
+    }
+
+    /// <summary>Fails CreateConsumerAsync a fixed number of times, then
+    /// delegates to the real in-memory transport (transient bus fault).</summary>
+    private sealed class FlakyTransport(InMemoryTransport inner, int failuresBeforeSuccess) : ITransport
+    {
+        private int _failures = failuresBeforeSuccess;
+        public string Name => "Flaky";
+        public Task<IConsumer<T>> CreateConsumerAsync<T>(string topic, ConsumerOptions options, CancellationToken ct = default)
+            => Interlocked.Decrement(ref _failures) >= 0
+                ? throw new InvalidOperationException("transient bus fault")
+                : inner.CreateConsumerAsync<T>(topic, options, ct);
+        public Task<IProducer<T>> CreateProducerAsync<T>(string topic, ProducerOptions options, CancellationToken ct = default)
+            => inner.CreateProducerAsync<T>(topic, options, ct);
+        public Task<ITransactionalSession> BeginTransactionAsync(
+            string? consumerGroup = null, TransactionOffsetSource? offsetSource = null, CancellationToken ct = default)
+            => inner.BeginTransactionAsync(consumerGroup, offsetSource, ct);
     }
 
     private static async Task ProduceAsync(InMemoryTransport transport, string topic, TaskEnqueued evt)
@@ -252,6 +291,32 @@ public sealed class EventConsumerTests
         }, cts.Token);
         Assert.Single(dlq);
         Assert.Equal("task-2", dlq[0].Payload.TaskId);
+        await consumer.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task TransportFault_RestartsConsumer_AndRecovers()
+    {
+        // Supervision (PR #90 review): a fault OUTSIDE the per-message
+        // handler must not silently kill the topic — the consumer
+        // restarts with backoff and picks the stream back up.
+        var inner = new InMemoryTransport();
+        var transport = new FlakyTransport(inner, failuresBeforeSuccess: 1);
+        var handled = new TaskCompletionSource<TaskEnqueued>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var consumer = new TestConsumer(transport, evt =>
+        {
+            handled.TrySetResult(evt);
+            return Task.CompletedTask;
+        });
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await consumer.StartAsync(cts.Token);
+
+        var evt = new TaskEnqueued { MessageId = "enqueued:task-3:x", ProjectId = "proj", TaskId = "task-3" };
+        await ProduceAsync(inner, "test.consumer", evt);
+
+        var got = await handled.Task.WaitAsync(cts.Token);
+        Assert.Equal("task-3", got.TaskId);
+        await WaitForAsync(() => Task.FromResult(consumer.LastHandledAtUtc is not null), cts.Token);
         await consumer.StopAsync(CancellationToken.None);
     }
 

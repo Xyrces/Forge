@@ -5,6 +5,9 @@ namespace Forge.Core.Messaging;
 /// Messages are HINTS, not truth: every consumer re-reads DB state and
 /// is idempotent. MessageId is deterministic (natural key + occurrence
 /// anchor) so transport-level idempotency dedupes double-publication.
+/// Natural keys are ALWAYS project-qualified: task ids, follow-up rowids
+/// and PR numbers are per-project sequences and collide across projects
+/// on the shared topic.
 /// </summary>
 public sealed record TaskEnqueued : IForgeEvent
 {
@@ -40,8 +43,8 @@ public sealed record PrOpened : IForgeEvent
     public string? Branch { get; init; }
     public DateTimeOffset OpenedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(string taskId, int prNumber, string? headSha = null)
-        => $"pr-opened:{taskId}:{prNumber}:{headSha ?? "none"}";
+    public static string IdFor(string projectId, string taskId, int prNumber, string? headSha = null)
+        => $"pr-opened:{projectId}:{taskId}:{prNumber}:{headSha ?? "none"}";
 }
 
 public sealed record ReviewVerdictRecorded : IForgeEvent
@@ -55,8 +58,8 @@ public sealed record ReviewVerdictRecorded : IForgeEvent
     public int ReviewRound { get; init; }
     public DateTimeOffset RecordedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(string taskId, int prNumber, string? reviewSha, int reviewRound)
-        => $"review-verdict:{taskId}:{prNumber}:{reviewSha ?? "none"}:{reviewRound}";
+    public static string IdFor(string projectId, string taskId, int prNumber, string? reviewSha, int reviewRound)
+        => $"review-verdict:{projectId}:{taskId}:{prNumber}:{reviewSha ?? "none"}:{reviewRound}";
 }
 
 public sealed record SpecStatusChanged : IForgeEvent
@@ -94,8 +97,8 @@ public sealed record FollowUpFiled : IForgeEvent
     public string? Title { get; init; }
     public DateTimeOffset FiledAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(long followUpId)
-        => $"followup:{followUpId}";
+    public static string IdFor(string projectId, long followUpId)
+        => $"followup:{projectId}:{followUpId}";
 }
 
 public sealed record GroomRequested : IForgeEvent

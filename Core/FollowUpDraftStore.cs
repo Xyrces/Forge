@@ -71,7 +71,7 @@ public sealed class FollowUpDraftStore
         // failures (a hint never breaks a DB mutation).
         await _issues.Events.PublishAsync(new Messaging.FollowUpFiled
         {
-            MessageId = Messaging.FollowUpFiled.IdFor(id),
+            MessageId = Messaging.FollowUpFiled.IdFor(_issues.ProjectId, id),
             ProjectId = _issues.ProjectId,
             FollowUpId = id,
             FollowUpOfTaskId = draft.SourceIssueId,

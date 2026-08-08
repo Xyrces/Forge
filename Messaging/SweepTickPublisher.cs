@@ -31,35 +31,47 @@ public sealed class SweepTickPublisher : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // One round immediately at startup: the pre-messaging dispatch
+        // loop swept watches on its FIRST cycle, and in-flight work
+        // (merge-ready PRs, pending verdicts) produces no fresh hints
+        // after a restart — waiting a full interval for the first tick
+        // regresses takeover by up to 15 minutes.
+        await PublishTicksAsync(stoppingToken);
+
         using var timer = new PeriodicTimer(Interval);
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
-            var tickAt = DateTimeOffset.UtcNow;
-            IReadOnlyList<string> projects;
-            try
-            {
-                projects = await _projectIds(stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "SweepTick: project enumeration failed; skipping tick");
-                continue;
-            }
-
-            foreach (var projectId in projects)
-            {
-                foreach (var kind in Enum.GetValues<SweepKind>())
-                {
-                    await _publisher.PublishAsync(new SweepTick
-                    {
-                        MessageId = Core.Messaging.SweepTick.IdFor(kind, projectId, tickAt),
-                        ProjectId = projectId,
-                        Kind = kind,
-                        TickAt = tickAt,
-                    }, stoppingToken);
-                }
-            }
-            _logger.LogInformation("SweepTick published for {Count} project(s) at {TickAt:O}", projects.Count, tickAt);
+            await PublishTicksAsync(stoppingToken);
         }
+    }
+
+    private async Task PublishTicksAsync(CancellationToken ct)
+    {
+        var tickAt = DateTimeOffset.UtcNow;
+        IReadOnlyList<string> projects;
+        try
+        {
+            projects = await _projectIds(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SweepTick: project enumeration failed; skipping tick");
+            return;
+        }
+
+        foreach (var projectId in projects)
+        {
+            foreach (var kind in Enum.GetValues<SweepKind>())
+            {
+                await _publisher.PublishAsync(new SweepTick
+                {
+                    MessageId = Core.Messaging.SweepTick.IdFor(kind, projectId, tickAt),
+                    ProjectId = projectId,
+                    Kind = kind,
+                    TickAt = tickAt,
+                }, ct);
+            }
+        }
+        _logger.LogInformation("SweepTick published for {Count} project(s) at {TickAt:O}", projects.Count, tickAt);
     }
 }

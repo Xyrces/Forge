@@ -338,7 +338,7 @@ public sealed class ReviewerDispatcher
         {
             await _eventPublisher.PublishAsync(new Forge.Core.Messaging.ReviewVerdictRecorded
             {
-                MessageId = Forge.Core.Messaging.ReviewVerdictRecorded.IdFor(task.Id, prNumber, headSha, round),
+                MessageId = Forge.Core.Messaging.ReviewVerdictRecorded.IdFor(_projectId ?? "default", task.Id, prNumber, headSha, round),
                 ProjectId = _projectId ?? "default",
                 TaskId = task.Id,
                 PrNumber = prNumber,

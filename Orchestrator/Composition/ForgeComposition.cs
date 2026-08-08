@@ -377,7 +377,7 @@ public static class ForgeComposition
                                 return Task.CompletedTask;
                             return eventPublisher.PublishAsync(new Core.Messaging.PrOpened
                             {
-                                MessageId = Core.Messaging.PrOpened.IdFor(task.Id, prNumber, task.GetMetadata("branchSha")),
+                                MessageId = Core.Messaging.PrOpened.IdFor(bundle.Project.Id, task.Id, prNumber, task.GetMetadata("branchSha")),
                                 ProjectId = bundle.Project.Id,
                                 TaskId = task.Id,
                                 PrNumber = prNumber,
