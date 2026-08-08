@@ -75,7 +75,10 @@ public sealed class SpecStatusChangedConsumer : EventConsumer<SpecStatusChanged>
 
 /// <summary>
 /// SprintStatusChanged → kick the assembler (a completed sprint means
-/// the next one assembles now, not at the backstop).
+/// the next one assembles now, not at the backstop) AND the dispatch
+/// loop (a newly ACTIVE sprint makes its tasks claimable — observed in
+/// the e2e smoke: enqueue kicked dispatch + assembler simultaneously,
+/// dispatch saw "no active sprint" and parked until the backstop).
 /// </summary>
 public sealed class SprintStatusChangedConsumer : EventConsumer<SprintStatusChanged>
 {
@@ -93,6 +96,7 @@ public sealed class SprintStatusChangedConsumer : EventConsumer<SprintStatusChan
     protected override Task HandleAsync(SprintStatusChanged evt, CancellationToken ct)
     {
         _wakeups.Assemble.Signal();
+        _wakeups.Dispatch.Signal();
         return Task.CompletedTask;
     }
 }

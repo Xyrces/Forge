@@ -667,7 +667,8 @@ public static class ForgeComposition
             interval: TimeSpan.FromMinutes(15),
             gates: stageGates,
             followUpTriage: followUpTriage,
-            wakeup: wakeups.Assemble));
+            wakeup: wakeups.Assemble,
+            eventPublisher: eventPublisher));
 
         return services.BuildServiceProvider();
     }
