@@ -82,6 +82,17 @@ public static class ForgeComposition
             async c => (await projectStore.ListAsync(c)).Select(p => p.Id).ToArray(),
             sp.GetRequiredService<ILogger<SweepTickPublisher>>()));
 
+        // Dispatch-loop wakeup: message consumers signal the loop on
+        // enqueue/transition events (run-finished signals internally).
+        var dispatchWakeup = new DispatchWakeupSignal();
+        services.AddSingleton(dispatchWakeup);
+        services.AddSingleton(sp => new Consumers.TaskEnqueuedWakeupConsumer(
+            sp.GetRequiredService<ITransport>(), dispatchWakeup,
+            sp.GetRequiredService<ILogger<Consumers.TaskEnqueuedWakeupConsumer>>()));
+        services.AddSingleton(sp => new Consumers.TaskTransitionedWakeupConsumer(
+            sp.GetRequiredService<ITransport>(), dispatchWakeup,
+            sp.GetRequiredService<ILogger<Consumers.TaskTransitionedWakeupConsumer>>()));
+
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
             events: eventPublisher);
@@ -430,7 +441,8 @@ public static class ForgeComposition
             slots: slots,
             modelCooldowns: modelRateLimits,
             lifecycle: lifecycle,
-            workflow: workflowResolver);
+            workflow: workflowResolver,
+            wakeup: dispatchWakeup);
         orchestrator.BindOptions(options);
         orchestrator.ModelOverrides = roleModelOverrides;
         services.AddSingleton(orchestrator);

@@ -1195,10 +1195,17 @@ Console.Error.WriteLine(ex.ToString());
                 // cancels itself when shutdownCts fires.
                 _ = provider.GetRequiredService<IssuesJsonlMirror>().StartAsync(shutdownCts.Token);
 
-                // Messaging: 15m backstop tick publisher. Event
-                // consumers registered by the messaging wiring start
-                // alongside it.
+                // Messaging: 15m backstop tick publisher + event
+                // consumers. BackgroundService.StartAsync links the
+                // loop to shutdownCts; faults Nack + log (never swallow).
                 await provider.GetRequiredService<Messaging.SweepTickPublisher>().StartAsync(shutdownCts.Token);
+                var eventConsumers = new Microsoft.Extensions.Hosting.BackgroundService[]
+                {
+                    provider.GetRequiredService<Orchestrator.Consumers.TaskEnqueuedWakeupConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.TaskTransitionedWakeupConsumer>(),
+                };
+                foreach (var consumer in eventConsumers)
+                    await consumer.StartAsync(shutdownCts.Token);
 
                 // Schedulers (fire-and-forget; they cancel on shutdown).
                 _ = provider.GetRequiredService<Orchestrator.ScheduledGroomer>().RunAsync(shutdownCts.Token);

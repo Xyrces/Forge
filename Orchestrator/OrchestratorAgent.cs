@@ -53,6 +53,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly ModelRateLimitTracker _modelCooldowns;
     private readonly Core.TaskStateMachine? _lifecycle;
     private readonly Core.Workflow.WorkflowResolver? _workflow;
+    private readonly DispatchWakeupSignal? _wakeup;
     private Agents.LlmConfig? _llmConfig;
     private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
     // In-flight dev dispatches. The cycle fire-and-forgets runs via
@@ -84,7 +85,8 @@ public sealed class OrchestratorAgent : IAgent
         Slots.SlotTable? slots = null,
         ModelRateLimitTracker? modelCooldowns = null,
         Core.TaskStateMachine? lifecycle = null,
-        Core.Workflow.WorkflowResolver? workflow = null)
+        Core.Workflow.WorkflowResolver? workflow = null,
+        DispatchWakeupSignal? wakeup = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -99,6 +101,7 @@ public sealed class OrchestratorAgent : IAgent
         _modelCooldowns = modelCooldowns ?? new ModelRateLimitTracker();
         _lifecycle = lifecycle;
         _workflow = workflow;
+        _wakeup = wakeup;
         _maxRetryCount = 1;
     }
 
@@ -135,7 +138,7 @@ public sealed class OrchestratorAgent : IAgent
                 }
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(_spawnerOptions.PollIntervalSeconds), cancellationToken);
+                    await WaitForNextCycleAsync(cancellationToken);
                 }
                 catch (OperationCanceledException) { break; }
             }
@@ -145,6 +148,36 @@ public sealed class OrchestratorAgent : IAgent
         {
             Status = AgentStatus.Error;
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Inter-cycle wait. With a <see cref="DispatchWakeupSignal"/> wired
+    /// (production), the loop sleeps until a message consumer signals
+    /// (TaskEnqueued / TaskTransitioned) or a finishing run frees a role
+    /// slot; the 15-minute backstop re-derives everything if hints are
+    /// lost (crash, machine suspend). Without a signal (tests, legacy
+    /// construction) it falls back to the configured poll interval.
+    /// </summary>
+    internal static readonly TimeSpan DispatchBackstopInterval = TimeSpan.FromMinutes(15);
+
+    private async Task WaitForNextCycleAsync(CancellationToken cancellationToken)
+    {
+        if (_wakeup is null)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(_spawnerOptions.PollIntervalSeconds), cancellationToken);
+            return;
+        }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(DispatchBackstopInterval);
+        try
+        {
+            await _wakeup.WaitAsync(timeout.Token);
+            _logger.LogDebug("Dispatch loop woke on event signal");
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Dispatch loop woke on {Minutes}m backstop tick", DispatchBackstopInterval.TotalMinutes);
         }
     }
 
@@ -301,7 +334,15 @@ public sealed class OrchestratorAgent : IAgent
                             {
                                 _logger.LogError(ex, "Dispatch for {Id} faulted", dev.Id);
                             }
-                            finally { _inFlight.TryRemove(dev.Id, out _); }
+                            finally
+                            {
+                                _inFlight.TryRemove(dev.Id, out _);
+                                // Run finished, slot freed — wake the
+                                // loop immediately so queued work that
+                                // was waiting on this role's pool
+                                // dispatches without a backstop delay.
+                                _wakeup?.Signal();
+                            }
                         }
                     }, cancellationToken);
                 }
