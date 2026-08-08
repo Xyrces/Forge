@@ -19,7 +19,7 @@ public sealed class SweepTickConsumer : WatchConsumerBase<SweepTick>
 
     public SweepTickConsumer(
         ITransport transport,
-        ProjectDispatchBundleFactory bundleFactory,
+        IProjectDispatchBundleFactory bundleFactory,
         Core.IProjectStore projectStore,
         SchedulerWakeups wakeups,
         WatchSweepService sweeps,

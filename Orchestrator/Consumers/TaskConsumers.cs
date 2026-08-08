@@ -45,7 +45,7 @@ public sealed class TaskTransitionedConsumer : WatchConsumerBase<TaskTransitione
     public TaskTransitionedConsumer(
         ITransport transport,
         SchedulerWakeups wakeups,
-        ProjectDispatchBundleFactory bundleFactory,
+        IProjectDispatchBundleFactory bundleFactory,
         Core.IProjectStore projectStore,
         ILogger<TaskTransitionedConsumer> logger)
         : base(transport, bundleFactory, projectStore, logger)

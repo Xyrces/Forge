@@ -11,12 +11,12 @@ namespace Forge.Orchestrator.Consumers;
 /// </summary>
 public abstract class WatchConsumerBase<T> : EventConsumer<T> where T : IForgeEvent
 {
-    private readonly ProjectDispatchBundleFactory _bundleFactory;
+    private readonly IProjectDispatchBundleFactory _bundleFactory;
     private readonly Core.IProjectStore _projectStore;
 
     protected WatchConsumerBase(
         ITransport transport,
-        ProjectDispatchBundleFactory bundleFactory,
+        IProjectDispatchBundleFactory bundleFactory,
         Core.IProjectStore projectStore,
         ILogger logger)
         : base(transport, logger)
@@ -68,7 +68,7 @@ public sealed class PrOpenedConsumer : WatchConsumerBase<PrOpened>
 
     public PrOpenedConsumer(
         ITransport transport,
-        ProjectDispatchBundleFactory bundleFactory,
+        IProjectDispatchBundleFactory bundleFactory,
         Core.IProjectStore projectStore,
         WatchSweepService sweeps,
         ILogger<PrOpenedConsumer> logger)
@@ -102,7 +102,7 @@ public sealed class ReviewVerdictRecordedConsumer : WatchConsumerBase<ReviewVerd
 
     public ReviewVerdictRecordedConsumer(
         ITransport transport,
-        ProjectDispatchBundleFactory bundleFactory,
+        IProjectDispatchBundleFactory bundleFactory,
         Core.IProjectStore projectStore,
         ILogger<ReviewVerdictRecordedConsumer> logger)
         : base(transport, bundleFactory, projectStore, logger)
