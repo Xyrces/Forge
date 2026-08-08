@@ -215,10 +215,29 @@ public sealed class ScheduledGroomer
         var totalUngroomed = ungroomedAll.Count;
         var ungroomed = ungroomedAll.Take(MaxTaskGroomsPerTick).ToList();
 
+        // Proof-of-life (operator 2026-08-08): the awaiting-groom
+        // phase showed a bare "N awaiting grooming" with no evidence
+        // the groomer was alive — after a laptop suspend the panel
+        // looked identical for hours. The sweep writes its status to
+        // the project's memory store; the assembler embeds it in the
+        // build-state snapshot. Best-effort, never gates grooming.
+        await WriteStatusAsync(issues, new GroomerStatus(
+            LastTickAt: DateTime.UtcNow,
+            CurrentlyGrooming: null,
+            LastGroomAt: null, LastGroomTaskId: null, LastOutcome: null,
+            PendingAdHoc: totalUngroomed,
+            Note: totalUngroomed == 0 ? "idle — nothing ungroomed" : null), ct);
+
         var processed = 0;
         foreach (var task in ungroomed)
         {
             processed++;
+            await WriteStatusAsync(issues, new GroomerStatus(
+                LastTickAt: DateTime.UtcNow,
+                CurrentlyGrooming: task.Id,
+                LastGroomAt: null, LastGroomTaskId: null, LastOutcome: null,
+                PendingAdHoc: Math.Max(0, totalUngroomed - processed + 1),
+                Note: null), ct);
             string? outcome;
             try
             {
@@ -243,6 +262,40 @@ public sealed class ScheduledGroomer
                     ["outcome"] = outcome ?? "no-decision",
                     ["remaining"] = Math.Max(0, totalUngroomed - processed),
                 }));
+            await WriteStatusAsync(issues, new GroomerStatus(
+                LastTickAt: DateTime.UtcNow,
+                CurrentlyGrooming: null,
+                LastGroomAt: DateTime.UtcNow, LastGroomTaskId: task.Id, LastOutcome: outcome ?? "no-decision",
+                PendingAdHoc: Math.Max(0, totalUngroomed - processed),
+                Note: outcome == "failed" ? $"groom failed for {task.Id}" : null), ct);
+        }
+    }
+
+    /// <summary>Proof-of-life record embedded in the build-state
+    /// snapshot's awaiting-groom phase.</summary>
+    internal sealed record GroomerStatus(
+        DateTime LastTickAt,
+        string? CurrentlyGrooming,
+        DateTime? LastGroomAt,
+        string? LastGroomTaskId,
+        string? LastOutcome,
+        int PendingAdHoc,
+        string? Note);
+
+    private static readonly System.Text.Json.JsonSerializerOptions StatusJson = new(System.Text.Json.JsonSerializerDefaults.Web);
+
+    private async Task WriteStatusAsync(IIssueStore issues, GroomerStatus status, CancellationToken ct)
+    {
+        try
+        {
+            if (issues is not Core.IssueStore concrete) return;
+            var mem = new Core.MemoryStore(concrete.Db);
+            await mem.RememberAsync(Core.SprintBuildStateKeys.GroomerStatusKey,
+                System.Text.Json.JsonSerializer.Serialize(status, StatusJson), ttlDays: null, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "ScheduledGroomer: status write failed (observability only)");
         }
     }
 

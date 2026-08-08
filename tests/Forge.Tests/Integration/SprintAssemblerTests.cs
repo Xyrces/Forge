@@ -805,6 +805,51 @@ public class SprintAssemblerTests : IDisposable
         Assert.Single(state.EligibleGroups);
     }
 
+
+    [Fact]
+    public async Task BuildState_AwaitingGroom_EmbedsGroomerProofOfLife()
+    {
+        // Operator 2026-08-08: "awaiting groom" was a bare claim —
+        // the snapshot now carries the groomer's status record so
+        // the panel can show working / idle / silent.
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        foreach (var id in aTasks)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+        var fup = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "ungroomed follow-up",
+            Metadata: new Dictionary<string, object> { ["followUpOf"] = aTasks[0] }));
+
+        // The groomer's status record, as ScheduledGroomer writes it.
+        var mem = new MemoryStore(_issues.Db);
+        var status = new Forge.Orchestrator.ScheduledGroomer.GroomerStatus(
+            LastTickAt: DateTime.UtcNow,
+            CurrentlyGrooming: null,
+            LastGroomAt: DateTime.UtcNow,
+            LastGroomTaskId: "task-999",
+            LastOutcome: "groomed",
+            PendingAdHoc: 1,
+            Note: null);
+        await mem.RememberAsync(Core.SprintBuildStateKeys.GroomerStatusKey,
+            System.Text.Json.JsonSerializer.Serialize(status,
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)),
+            ttlDays: null);
+
+        await Tick();
+
+        var state = await ReadBuildStateAsync();
+        Assert.NotNull(state);
+        Assert.Equal("awaiting-groom", state!.Phase);
+        Assert.NotNull(state.Groomer);
+        var g = state.Groomer!;
+        Assert.Equal("task-999", g.LastGroomTaskId);
+        Assert.Equal("groomed", g.LastOutcome);
+        Assert.Equal(1, g.PendingAdHoc);
+        Assert.Single(state.PendingGroom);
+    }
+
     [Fact]
     public async Task BuildState_Materialization_PublishesEvent_AndSnapshotShowsGroomWait()
     {

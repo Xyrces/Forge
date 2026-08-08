@@ -95,6 +95,42 @@
                     <div class="meta-text" style="padding:2px 0">Completed: @_build.CompletedSprintName</div>
                 }
                 <div class="meta-text" style="padding:2px 0">@_build.Reason</div>
+                @* Proof-of-life (operator 2026-08-08): the phase alone
+                   was a claim with no evidence — show the groomer's
+                   last action and the assembler heartbeat's age so a
+                   frozen/suspended process is visible, not silent. *@
+                @if (_build.Groomer is { } gs)
+                {
+                    <div class="meta-text" style="padding:2px 0">
+                        @if (gs.CurrentlyGrooming is not null)
+                        {
+                            <span class="pill pill--inprogress">grooming @gs.CurrentlyGrooming now</span>
+                        }
+                        else if (gs.LastGroomAt is not null)
+                        {
+                            <span>groomer: last groom <span class="mono">@gs.LastGroomTaskId</span> (@gs.LastOutcome) @AgoText(gs.LastGroomAt.Value) ago</span>
+                        }
+                        else
+                        {
+                            <span>groomer: @(gs.Note ?? "no grooms yet this boot")</span>
+                        }
+                        @if (gs.PendingAdHoc > 0)
+                        {
+                            <span class="pill pill--pending" style="margin-left:6px">@gs.PendingAdHoc ad-hoc left</span>
+                        }
+                        @if ((DateTime.UtcNow - gs.LastTickAt).TotalMinutes > 10)
+                        {
+                            <span class="pill pill--warn" style="margin-left:6px">groomer silent @AgoText(gs.LastTickAt) — machine asleep?</span>
+                        }
+                    </div>
+                }
+                <div class="meta-text" style="padding:2px 0">
+                    assembler heartbeat @AgoText(_build.UpdatedAt) ago
+                    @if ((DateTime.UtcNow - _build.UpdatedAt).TotalMinutes > 10)
+                    {
+                        <span class="pill pill--warn" style="margin-left:6px">stale &gt;10m — orchestrator frozen?</span>
+                    }
+                </div>
                 @if (_build.PendingGroom.Count > 0)
                 {
                     <div class="page-subtitle" style="margin:8px 0 4px">In grooming (@_build.PendingGroom.Count):</div>
@@ -394,8 +430,17 @@
 
     private sealed record PendingGroomVm(string Id, string Title);
     private sealed record BuildGroupVm(string Key, string Name, int TaskCount, int MinPriority);
-    private sealed record BuildVm(string Phase, string Reason, string? CompletedSprintName, List<PendingGroomVm> PendingGroom, List<BuildGroupVm> Groups);
+    private sealed record GroomerVm(DateTime LastTickAt, string? CurrentlyGrooming, DateTime? LastGroomAt, string? LastGroomTaskId, string? LastOutcome, int PendingAdHoc, string? Note);
+    private sealed record BuildVm(string Phase, string Reason, string? CompletedSprintName, List<PendingGroomVm> PendingGroom, List<BuildGroupVm> Groups, DateTime UpdatedAt, GroomerVm? Groomer);
     private BuildVm? _build;
+
+    private static string AgoText(DateTime utc)
+    {
+        var age = DateTime.UtcNow - utc;
+        return age.TotalMinutes >= 60 ? $"{(int)age.TotalHours}h{age.Minutes:D2}m"
+            : age.TotalMinutes >= 1 ? $"{(int)age.TotalMinutes}m"
+            : $"{(int)age.TotalSeconds}s";
+    }
 
     private static string BuildPhaseLabel(string phase) => phase switch
     {
@@ -431,11 +476,23 @@
                     g.GetProperty("taskCount").GetInt32(),
                     g.GetProperty("minPriority").GetInt32())).ToList()
                 : new List<BuildGroupVm>();
+            var groomer = doc.TryGetProperty("groomer", out var gr) && gr.ValueKind == JsonValueKind.Object
+                ? new GroomerVm(
+                    gr.TryGetProperty("lastTickAt", out var lt) ? lt.GetDateTime() : DateTime.UtcNow,
+                    gr.TryGetProperty("currentlyGrooming", out var cg) && cg.ValueKind == JsonValueKind.String ? cg.GetString() : null,
+                    gr.TryGetProperty("lastGroomAt", out var lg) && lg.ValueKind == JsonValueKind.String ? lg.GetDateTime() : null,
+                    gr.TryGetProperty("lastGroomTaskId", out var lgt) && lgt.ValueKind == JsonValueKind.String ? lgt.GetString() : null,
+                    gr.TryGetProperty("lastOutcome", out var lo) && lo.ValueKind == JsonValueKind.String ? lo.GetString() : null,
+                    gr.TryGetProperty("pendingAdHoc", out var pa) ? pa.GetInt32() : 0,
+                    gr.TryGetProperty("note", out var nt) && nt.ValueKind == JsonValueKind.String ? nt.GetString() : null)
+                : null;
             _build = new BuildVm(
                 phaseEl.GetString() ?? "unknown",
                 doc.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "",
                 doc.TryGetProperty("completedSprintName", out var cs) && cs.ValueKind == JsonValueKind.String ? cs.GetString() : null,
-                pending, groups);
+                pending, groups,
+                doc.TryGetProperty("updatedAt", out var ua) ? ua.GetDateTime() : DateTime.UtcNow,
+                groomer);
         }
         catch { _build = null; }
     }
