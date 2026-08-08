@@ -39,7 +39,6 @@ public sealed class DesignerScheduler
     private readonly TimeSpan _interval;
     private readonly Core.StageGates? _gates;
     private readonly Core.Workflow.WorkflowResolver? _workflow;
-    private readonly WakeupSignal? _wakeup;
 
     public DesignerScheduler(
         ISpecStore specs,
@@ -49,11 +48,9 @@ public sealed class DesignerScheduler
         ILogger<DesignerScheduler> logger,
         TimeSpan? interval = null,
         Core.StageGates? gates = null,
-        Core.Workflow.WorkflowResolver? workflow = null,
-        WakeupSignal? wakeup = null)
+        Core.Workflow.WorkflowResolver? workflow = null)
     {
         _workflow = workflow;
-        _wakeup = wakeup;
         _specs = specs;
         _designerFactory = designerFactory;
         _runs = runs;
@@ -74,51 +71,18 @@ public sealed class DesignerScheduler
         }
         catch (OperationCanceledException) { return; }
 
-        // Message-driven: trigger events kick via the wakeup signal;
-        // the backstop interval re-derives everything if hints are
-        // lost. The 5m PeriodicTimer is gone.
-        while (!ct.IsCancellationRequested)
+        using var timer = new PeriodicTimer(_interval);
+        try
         {
-            try
+            do
             {
                 await TickAsync(ct);
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Designer tick failed; continuing");
-            }
-            if (!await WaitForNextTickAsync(ct)) break;
-        }
-    }
-
-    /// <summary>Wait for a trigger-event kick or the backstop interval.
-    /// Returns false on shutdown. Without a signal wired (tests) falls
-    /// back to the plain interval delay.</summary>
-    private async Task<bool> WaitForNextTickAsync(CancellationToken ct)
-    {
-        if (_wakeup is null)
-        {
-            try
-            {
-                await Task.Delay(_interval, ct);
-                return true;
-            }
-            catch (OperationCanceledException) { return false; }
-        }
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(_interval);
-        try
-        {
-            await _wakeup.WaitAsync(timeout.Token);
-            return true;
+            while (await timer.WaitForNextTickAsync(ct));
         }
         catch (OperationCanceledException)
         {
-            return !ct.IsCancellationRequested;
+            // Normal shutdown.
         }
     }
 

@@ -66,18 +66,7 @@ public sealed class FollowUpDraftStore
         Add("@blocks", draft.BlocksIssueId); Add("$blocks", draft.BlocksIssueId);
         var now = DateTime.UtcNow.ToString(IssueStore.DateFormat);
         Add("@now", now); Add("$now", now);
-        var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
-        // Publish AFTER the mutation commits; the publisher swallows
-        // failures (a hint never breaks a DB mutation).
-        await _issues.Events.PublishAsync(new Messaging.FollowUpFiled
-        {
-            MessageId = Messaging.FollowUpFiled.IdFor(id),
-            ProjectId = _issues.ProjectId,
-            FollowUpId = id,
-            FollowUpOfTaskId = draft.SourceIssueId,
-            Title = draft.Title,
-        }, ct);
-        return id;
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
     }
 
     /// <summary>All unconsumed drafts, oldest first (materialization

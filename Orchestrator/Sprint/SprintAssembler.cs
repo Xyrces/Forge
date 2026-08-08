@@ -62,9 +62,7 @@ public sealed class SprintAssembler
         ILogger<SprintAssembler> logger,
         TimeSpan? interval = null,
         StageGates? gates = null,
-        Core.IFollowUpTriage? followUpTriage = null,
-        WakeupSignal? wakeup = null,
-        Core.Messaging.IEventPublisher? eventPublisher = null)
+        Core.IFollowUpTriage? followUpTriage = null)
     {
         _projects = projects;
         _events = events;
@@ -72,13 +70,9 @@ public sealed class SprintAssembler
         _interval = interval ?? TimeSpan.FromMinutes(5);
         _gates = gates;
         _followUpTriage = followUpTriage;
-        _wakeup = wakeup;
-        _eventPublisher = eventPublisher;
     }
 
     private readonly Core.IFollowUpTriage? _followUpTriage;
-    private readonly WakeupSignal? _wakeup;
-    private readonly Core.Messaging.IEventPublisher? _eventPublisher;
 
     public TimeSpan Interval => _interval;
 
@@ -152,51 +146,18 @@ public sealed class SprintAssembler
         try { await Task.Delay(TimeSpan.FromSeconds(20), ct); }
         catch (OperationCanceledException) { return; }
 
-        // Message-driven: trigger events kick via the wakeup signal;
-        // the backstop interval re-derives everything if hints are
-        // lost. The 5m PeriodicTimer is gone.
-        while (!ct.IsCancellationRequested)
+        using var timer = new PeriodicTimer(_interval);
+        try
         {
-            try
+            do
             {
                 await TickAsync(ct);
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Assembler tick failed; continuing");
-            }
-            if (!await WaitForNextTickAsync(ct)) break;
-        }
-    }
-
-    /// <summary>Wait for a trigger-event kick or the backstop interval.
-    /// Returns false on shutdown. Without a signal wired (tests) falls
-    /// back to the plain interval delay.</summary>
-    private async Task<bool> WaitForNextTickAsync(CancellationToken ct)
-    {
-        if (_wakeup is null)
-        {
-            try
-            {
-                await Task.Delay(_interval, ct);
-                return true;
-            }
-            catch (OperationCanceledException) { return false; }
-        }
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(_interval);
-        try
-        {
-            await _wakeup.WaitAsync(timeout.Token);
-            return true;
+            while (await timer.WaitForNextTickAsync(ct));
         }
         catch (OperationCanceledException)
         {
-            return !ct.IsCancellationRequested;
+            // Normal shutdown.
         }
     }
 
@@ -882,26 +843,6 @@ public sealed class SprintAssembler
         foreach (var id in toLink)
         {
             await sprints.AddIssueAsync(sprint.Id, id, ct);
-        }
-
-        // Re-publish the activation hint AFTER membership links commit:
-        // the store-level CreateAsync(Active) publish races the linking
-        // writes, so a dispatch loop woken by it can see an active
-        // sprint with an empty member list and park with no further
-        // hint coming (observed in the e2e smoke). Hints are cheap and
-        // idempotent — this second one is the reliable kick.
-        if (_eventPublisher is not null)
-        {
-            var activatedAt = DateTimeOffset.UtcNow;
-            await _eventPublisher.PublishAsync(new Core.Messaging.SprintStatusChanged
-            {
-                MessageId = Core.Messaging.SprintStatusChanged.IdFor(sprint.Id, "Active:linked", activatedAt),
-                ProjectId = projectId,
-                SprintId = sprint.Id,
-                FromStatus = "(new)",
-                ToStatus = "Active",
-                ChangedAt = activatedAt,
-            }, ct);
         }
 
         _logger.LogInformation(

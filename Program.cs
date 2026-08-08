@@ -18,6 +18,18 @@ namespace Forge;
 
 public static class Program
 {
+    // Held references for fire-and-forget background services so
+    // the GC doesn't reap them mid-run. The orchestrator uses
+    // top-level statements so we can't keep these as local async
+    // fields; these statics are the simplest pattern.
+    private static Agents.ProductRefinementQueue? _productRefinementQueue;
+    private static Orchestrator.ScheduledGroomer? _scheduledGroomer;
+    private static Orchestrator.DesignerScheduler? _scheduledDesigner;
+    private static Orchestrator.ArtistScheduler? _scheduledArtist;
+    private static Orchestrator.Sprint.SprintAssembler? _sprintAssembler;
+    private static Orchestrator.StartupRecovery? _startupRecovery;
+    private static IssuesJsonlMirror? _issuesJsonlMirror;
+
     public static async Task<int> Main(string[] args)
     {
         var mode = ParseMode(args);
@@ -274,7 +286,7 @@ if (mode == CliMode.DashboardOnly)
     /// instance is handed to the orchestrator (dispatch enforcement)
     /// and the dashboard (live meters + role-cap edits).
     /// </summary>
-    internal static Orchestrator.Slots.SlotTable BuildSlotTable(IReadOnlyList<ProjectOptions> projects)
+    private static Orchestrator.Slots.SlotTable BuildSlotTable(IReadOnlyList<ProjectOptions> projects)
     {
         var slots = new Orchestrator.Slots.SlotTable();
         foreach (var p in projects)
@@ -294,7 +306,7 @@ if (mode == CliMode.DashboardOnly)
     /// finalised project list (with Root rewritten to the bootstrap
     /// directory) + a per-project DB path map. Idempotent.
     /// </summary>
-    internal static (IReadOnlyList<ProjectOptions> Projects,
+    private static (IReadOnlyList<ProjectOptions> Projects,
                     Dictionary<string, string> IssuesDbByProject,
                     string DataRoot,
                      Core.ProjectStore ProjectStore,
@@ -498,7 +510,7 @@ if (mode == CliMode.DashboardOnly)
     /// shared database, schema-per-project (proj_&lt;id&gt;) — the first
     /// IssueStore construction against a schema creates it and all tables.
     /// </summary>
-    internal static Core.Db.IDbConnectionFactory FactoryFor(DbOptions db, string projectId, string sqlitePath)
+    private static Core.Db.IDbConnectionFactory FactoryFor(DbOptions db, string projectId, string sqlitePath)
         => Core.Db.ForgeDb.ForProject(db.IsSqlServer, db.ConnectionString, projectId, sqlitePath);
 
     private static async Task<int> RunDashboardOnlyAsync(
@@ -629,7 +641,7 @@ Console.Error.WriteLine(ex.ToString());
     /// The full orchestrator boots in the second branch;
     /// --recover exits as soon as the sweep is done.
     /// </summary>
-    internal static GitHubService BuildGitHubService(Configuration.GitHubOptions options, ILogger<GitHubService> logger)
+    private static GitHubService BuildGitHubService(Configuration.GitHubOptions options, ILogger<GitHubService> logger)
     {
         if (string.Equals(options.Mode, "Local", StringComparison.OrdinalIgnoreCase))
         {
@@ -1000,7 +1012,7 @@ Console.Error.WriteLine(ex.ToString());
     /// projects and substitute it. Key rotation via the UI takes
     /// effect on restart. Values are never logged.
     /// </summary>
-    internal static async Task<LlmConfig> ResolveProviderApiKeysAsync(
+    private static async Task<LlmConfig> ResolveProviderApiKeysAsync(
         LlmConfig config,
         IReadOnlyList<ProjectOptions> projects,
         SecretStore secretStore,
@@ -1046,7 +1058,7 @@ Console.Error.WriteLine(ex.ToString());
     /// the in-process <see cref="StubbedChatClientFactory"/>; everything else
     /// uses the OpenAI-compatible factory.
     /// </summary>
-    internal static (IChatClientFactory factory, CostTracker? costTracker) SelectChatClientFactory(
+    private static (IChatClientFactory factory, CostTracker? costTracker) SelectChatClientFactory(
         LlmConfig llmConfig, LlmOptions options, HeadroomOptions headroom)
     {
         var hasRealKey = llmConfig.Providers.Any(p => !string.IsNullOrEmpty(p.ApiKey));
@@ -1086,176 +1098,750 @@ Console.Error.WriteLine(ex.ToString());
     }
 
 
-    /// <summary>
-    /// Orchestrator runtime entrypoint. The entire object graph
-    /// (stores, factories, schedulers, OrchestratorAgent, messaging)
-    /// is composed in <see cref="Forge.Orchestrator.Composition.ForgeComposition"/>;
-    /// this method only drives lifecycle: start the dashboard, replay
-    /// recovery, start the background loops, then block on the dispatch
-    /// loop until shutdown.
-    /// </summary>
     private static async Task<int> RunOrchestratorAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger,
         CancellationToken externalStop = default)
     {
-        ServiceProvider provider;
-        try
-        {
-            provider = await Forge.Orchestrator.Composition.ForgeComposition.BuildAsync(
-                options, loggerFactory, externalStop);
-        }
-        catch (Forge.Orchestrator.Composition.NoProjectsRegisteredException)
+        var (knownProjects, orchDbByProject, orchDataRoot, projectStore, cloner, secretStore) = BuildProjectBootstrap(options, loggerFactory);
+        if (knownProjects.Count == 0)
         {
             logger.LogWarning(
                 "No projects registered. To register one, run with `--dashboard-only` and use the Projects page (or POST /api/projects), then restart the orchestrator. The v1 dispatch loop is single-project; runtime hot-add of dispatch targets is a follow-up — see AGENTS.md.");
             return 1;
         }
+        var primary = knownProjects[0];
 
-        await using (provider)
+        // Project registry factory: lazily builds per-project IssueStore
+        // bundles AND serves as the project-id → clone-root lookup for
+        // per-project role prompts / skills / groomer grounding.
+        // Constructed early so the agent runner + factories below can
+        // take the lookup. Live mode: KnownProjects re-reads the store,
+        // so runtime project adds resolve without a restart.
+        var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
+            (pid, path) => FactoryFor(options.Db, pid, path));
+        string? ProjectRootLookup(string projectId) =>
+            projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
+                ?.Root;
+        IReadOnlyDictionary<string, Core.RoleTerritory>? ProjectTerritoryLookup(string projectId) =>
+            projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
+                ?.Territories;
+        var primaryDb = orchDbByProject[primary.Id];
+        var primaryStateDir = Path.GetDirectoryName(primaryDb)!;
+        var stateStore = new StateStore(primaryStateDir);
+        var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
+        var issues = new IssueStore(primaryFactory);
+        var registryIssues = new IssueStore(
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDb));
+        var agents = new AgentStore(registryIssues);
+        var skills = new SkillStore(registryIssues);
+        var sprints = new SprintStore(issues);
+        var messageBus = new AgentMessageBus();
+        var worktrees = new GitWorktreeService(
+            new WorkspaceOptions
+            {
+                Root = primary.Root,
+                WorktreeRoot = options.Workspace.WorktreeRoot,
+                DefaultBranch = options.Workspace.DefaultBranch,
+            },
+            loggerFactory.CreateLogger<GitWorktreeService>(),
+            githubToken: options.GitHub?.Token);
+        var gitHub = BuildGitHubService(options.GitHub ?? new Forge.Configuration.GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
+        var roleRegistry = new RoleAgentRegistry();
+        var agentsStore = new Core.AgentStore(registryIssues);
+        var skillsStore = new Core.SkillStore(registryIssues);
+        var skillSource = new SqliteSkillSource(skillsStore, roleRegistry);
+        // Seed the skill catalog: pipeline-behavior skills per role
+        // (Forge-owned, seed-if-absent — operator edits win) + EVERY
+        // registered project's .kilo/skills imported as repo-owned,
+        // project-scoped rows (repo is the source of truth — SKILL.md
+        // edits propagate on startup; removed files remove rows).
+        await Agents.SkillSeeder.SeedAsync(
+            skillsStore,
+            knownProjects
+                .Select(p => new Agents.SkillSeeder.ProjectSkillSource(
+                    p.Id, Path.Combine(p.Root, ".kilo", "skills")))
+                .ToList(),
+            loggerFactory.CreateLogger("Forge.SkillSeeder"),
+            CancellationToken.None);
+        // The memory table lives in IssueStore's schema (v7). On SQLite
+        // it lives in a separate memory.db file, so construct an
+        // IssueStore against it once at startup to run the schema (and
+        // any future migrations) before MemoryStore touches it.
+        // MemoryStore itself does not own migrations. On SQL Server the
+        // memory table lives in the same per-project schema — no
+        // separate bootstrap needed.
+        var memoryDbPath = Path.Combine(primaryStateDir, "memory.db");
+        MemoryStore memoryStore;
+        if (options.Db.IsSqlServer)
         {
-            // externalStop is the host's stoppingToken when running
-            // under systemd (default(CancellationToken) — never cancels
-            // on its own — for every other invocation). Linking it
-            // means a stop request tears the orchestrator down through
-            // the exact same path as Ctrl+C.
-            using var shutdownCts = CancellationTokenSource.CreateLinkedTokenSource(externalStop);
-            Console.CancelKeyPress += (_, e) =>
-            {
-                logger.LogWarning("SIGINT received; cancelling...");
-                e.Cancel = true;
-                shutdownCts.Cancel();
-            };
-            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-            {
-                logger.LogWarning("Process exit; cancelling");
-                try { shutdownCts.Cancel(); } catch { }
-            };
+            memoryStore = new MemoryStore(primaryFactory);
+        }
+        else
+        {
+            _ = new Core.IssueStore(memoryDbPath);
+            memoryStore = new MemoryStore(memoryDbPath);
+        }
+        // Agent run registry + transcripts (schema v20 table on the
+        // primary project's issues.db): who ran what, when, and the
+        // full conversation for the run-detail view.
+        var agentRunStore = new Core.AgentRunStore(primaryFactory);
+        // Optional operator review gates at the major automatic
+        // transitions (design / groom / sprint / merge). v1: backed
+        // by the primary project's memory store.
+        var stageGates = new Core.StageGates(memoryStore, new Core.Workflow.WorkflowResolver(memoryStore));
 
-            var dashboard = provider.GetRequiredService<DashboardHost>();
-            try
+        // Phase 4: JSONL mirror of the issue store. Background service
+        // rewrites the file every 5s so it's safe to tail -f.
+        var issuesJsonlPath = Path.Combine(primaryStateDir, "issues.jsonl");
+        var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
+            loggerFactory.CreateLogger<IssuesJsonlMirror>());
+
+            // P3.5: issue_groomer_run store. Shares the issues DB
+            // (the v8 migration is applied at IssueStore's ctor).
+            // The groomer_runs table has a foreign key on issue.id,
+            // so the runs must live in the same DB as the issue rows.
+            var groomerRunsDb = primaryFactory;
+            var groomerRuns = new Core.IssueGroomerRunStore(groomerRunsDb);
+            // P2.a: design_artifact + designer_run share the issues.db
+            // (the v9 migration created both tables). The IssueStore
+            // ctor already ran the migration.
+            var designArtifacts = new Core.DesignArtifactStore(groomerRunsDb);
+            var designerRuns = new Core.DesignerRunStore(groomerRunsDb);
+            // P2.b: art_output + artist_run share the issues.db (the
+            // v10 migration created both tables).
+            var artOutputs = new Core.ArtOutputStore(groomerRunsDb);
+            var artistRuns = new Core.ArtistRunStore(groomerRunsDb);
+            // P4 Stage A: recovery_report table (lives in issues.db
+            // alongside the other v10/v11 tables; created in the
+            // IssueStore schema migration).
+            var recoveryReports = new Core.RecoveryReportStore(groomerRunsDb);
+
+        // P0.5: vision.md import. Build the VisionStore (loads the
+        // configured file on startup), inject it into memory as the
+        // 'vision/master' key, and pass it to the dashboard so the
+        // Vision tab can surface it.
+        var vision = new VisionStore(primary.Root, options.Vision.Path);
+        // Role prompts resolve per-project (<root>/agents) with a
+        // fallback to the built-in defaults shipped next to the app,
+        // so a project whose repo has no agents/ dir still gets the
+        // real role instructions instead of the degraded fallback.
+        var rolePromptsRoot = Agents.RolePromptRoot.Resolve(primary.Root);
+        logger.LogInformation("Role prompts root: {RolePromptsRoot}", rolePromptsRoot);
+        var visionSnapshot = vision.Reload();
+        if (visionSnapshot.Exists)
+        {
+            logger.LogInformation("Vision loaded from {Path} ({Len} chars)",
+                visionSnapshot.Path, visionSnapshot.Content.Length);
+            // Inject into memory so every agent prompt includes the
+            // vision. The memory block goes through the normal
+            // MemoryStore path; no special casing in the agent.
+            await memoryStore.RememberAsync("vision/master", visionSnapshot.Content, ttlDays: null, CancellationToken.None);
+        }
+        else
+        {
+            logger.LogWarning("Vision file not found at {Path}; dashboard Vision tab will be empty", visionSnapshot.Path);
+        }
+
+        // Bootstrap the operator-maintained playbook reference
+        // (Xyrces/godot-ecs-gamedev-playbook) into the memory layer
+        // so every agent prompt can see the repo URL + a per-role
+        // skill list. Idempotent: SeedIfMissingAsync skips writes
+        // when the key already exists, so operator edits survive
+        // orchestrator restarts.
+        var skillBootstrap = new Agents.SkillBootstrap(
+            memoryStore, loggerFactory.CreateLogger<Agents.SkillBootstrap>());
+        await skillBootstrap.SeedAsync();
+        var llmConfig = await ResolveProviderApiKeysAsync(
+            LlmConfigAdapter.FromOptions(options.Llm), knownProjects, secretStore,
+            loggerFactory.CreateLogger("Forge.Bootstrap"));
+        var (chatClientFactory, costTracker) = SelectChatClientFactory(llmConfig, options.Llm, options.Headroom);
+
+        // Live per-role model overrides (Agents page): DB-backed,
+        // consulted per run by the chat client factory + the run
+        // registry's model label. Snapshot rehydrates from the store.
+        var roleModelOverrides = new Agents.RoleModelOverrides(memoryStore);
+        await roleModelOverrides.LoadAsync(CancellationToken.None);
+        // ONE shared 429 tracker for the whole process: a 429 from
+        // ANY subsystem (dev run, groomer, designer, reviewer sweep)
+        // cools that model for ALL of them, and every factory-built
+        // client fails fast during cooldown + runs under the
+        // per-provider concurrency permit.
+        var modelRateLimits = new Core.ModelRateLimitTracker();
+        Agents.ProviderApiKeyResolver? providerKeyResolver = null;
+        if (chatClientFactory is Agents.OpenAICompatibleChatClientFactory openAiFactory)
+        {
+            openAiFactory.Overrides = roleModelOverrides;
+            openAiFactory.RateLimits = modelRateLimits;
+            openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
+            openAiFactory.OverloadRetryCount = options.Llm.OverloadRetryCount;
+
+            // Live provider keys: a Secrets-page rotation takes effect
+            // on the next run — no restart (restarts kill in-flight
+            // runs). Boot-time ResolveProviderApiKeysAsync stays for
+            // fail-fast startup + the model catalog.
+            var keyResolver = new Agents.ProviderApiKeyResolver(
+                secretStore,
+                async ct => (await projectStore.ListAsync(ct)).Select(p => p.Id).ToArray(),
+                loggerFactory.CreateLogger<Agents.ProviderApiKeyResolver>());
+            openAiFactory.KeyResolver = keyResolver;
+            providerKeyResolver = keyResolver;
+            var providerNames = llmConfig.Providers.Select(p => p.Name).ToArray();
+            await keyResolver.RefreshAsync(providerNames, CancellationToken.None);
+            _ = Task.Run(async () =>
             {
-                logger.LogInformation("Starting dashboard");
-                await dashboard.StartAsync(shutdownCts.Token);
-
-                // P4 Stage A — StartupRecovery. Runs ONCE before the
-                // dispatch loop starts. Multi-project: one recovery
-                // context per NON-primary project (the primary is the
-                // recovery service's own construction context).
-                var boot = provider.GetRequiredService<Forge.Orchestrator.Composition.ForgeProjectBootstrap>();
-                var primary = boot.Projects[0];
-                var startupRecovery = provider.GetRequiredService<Orchestrator.StartupRecovery>();
-                var dispatchBundleFactory = provider.GetRequiredService<Orchestrator.ProjectDispatchBundleFactory>();
-                var recoveryContexts = boot.Projects
-                    .Where(p => !string.Equals(p.Id, primary.Id, StringComparison.OrdinalIgnoreCase))
-                    .Select(p =>
-                    {
-                        var b = dispatchBundleFactory.Build(p);
-                        return new Orchestrator.StartupRecovery.ProjectRecoveryContext(
-                            p.Id, b.IssueStore, b.Worktrees,
-                            new Orchestrator.GitHubRecoveryAdapter(b.GitHub),
-                            p.DefaultBranch);
-                    })
-                    .ToList();
-                await startupRecovery.RunAsync(extraProjects: recoveryContexts, ct: shutdownCts.Token);
-
-                // P4 Stage B — bring the workflow dispatcher host up.
-                // For InProcess this is a no-op. For Durable this
-                // starts the DTS worker.
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
                 try
                 {
-                    await provider.GetRequiredService<Orchestrator.IWorkflowDispatcher>()
-                        .EnsureReadyAsync(shutdownCts.Token);
+                    while (await timer.WaitForNextTickAsync(externalStop))
+                        await keyResolver.RefreshAsync(providerNames, externalStop);
                 }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Workflow dispatcher EnsureReadyAsync failed; dispatch may fail at call time.");
-                }
+                catch (OperationCanceledException) { }
+            });
+        }
 
-                // Live provider-key refresh (Secrets-page rotation
-                // without restart). Initial refresh happened during
-                // composition; this is the 30s loop.
-                var keyResolver = provider.GetService<Agents.ProviderApiKeyResolver>();
-                if (keyResolver is not null)
+        // P5.5: auto-extract project memory from the model
+        // response after each PR is opened. Audit log lives in
+        // the same memory.db; the v13 migration in IssueStore
+        // covers the table.
+        var extractionStore = new Orchestrator.MemoryExtractionStore(groomerRunsDb);
+        var sprintProposalAudit = new Orchestrator.SprintProposalAuditStore(groomerRunsDb);
+        var scorer = new Agents.DeterministicScorer();
+        var sprintPropose = new Orchestrator.SprintProposeService(issues, sprints, scorer, sprintProposalAudit);
+        var memoryExtractor = new Orchestrator.MemoryExtractor(
+            chatClientFactory, llmConfig, memoryStore,
+            loggerFactory.CreateLogger<Orchestrator.MemoryExtractor>(),
+            sprints: sprints);
+        // Late-binding holder for specStore. Created before
+        // MafAgentRunner ctor, populated after specStore is
+        // constructed (the runner builds its tool list per call,
+        // so a forward-reference is enough).
+        var specStoreRef = new Core.SpecStoreHolder();
+        MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
+        var agentRunner = new MafAgentRunner(
+            chatClientFactory, llmConfig, roleRegistry,
+            loggerFactory.CreateLogger<MafAgentRunner>(),
+            skills: skillSource,
+            rolePromptsRoot: rolePromptsRoot,
+            projectRootLookup: ProjectRootLookup,
+            projectTerritoryLookup: ProjectTerritoryLookup,
+            verifyCommandsLookup: id => projectFactory.KnownProjects
+                .FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))
+                ?.VerifyCommands,
+            memory: memoryStore,
+            handoffs: recoveryReports is null ? null : new Core.ContextHandoffStore(groomerRunsDb),
+            designArtifacts: () => designArtifacts,
+            specs: () => specStoreRef.Value,
+            artOutputs: () => artOutputs,
+            secrets: secretStore,
+            issues: issues,
+            runs: agentRunStore,
+            // Per-project run registry: the run row lands in the
+            // OWNING project's schema (operator rule 2026-07-30).
+            // Unknown/unattributed runs keep the legacy primary store.
+            runsByProject: pid => pid is null
+                ? agentRunStore
+                : projectFactory.Find(pid) is { } runCtx
+                    ? new Core.AgentRunStore(((Core.IssueStore)runCtx.Issues).Db)
+                    : agentRunStore,
+            // file_followup rows belong to the RUN's project store —
+            // the primary store stranded PH follow-ups in the forge
+            // backlog (operator report 2026-07-31).
+            issueStoreLookup: pid => pid is null
+                ? null
+                : projectFactory.Find(pid)?.Issues,
+            modelOverrides: roleModelOverrides,
+            gates: options.Gates);
+        var eventBus = new InMemoryDashboardEventBus();
+        var lifecycle = new Core.TaskStateMachine(
+            options.State.WriteAuthority,
+            loggerFactory.CreateLogger<Core.TaskStateMachine>());
+        // P4 Stage B — pick the workflow runtime based on
+// appsettings.json. The InProcess dispatcher (default) is a
+// thin lambda over the existing EngineeringDispatchWorkflow +
+// InProcessExecution; the Durable dispatcher registers the
+// same workflow with Microsoft.Agents.AI.DurableTask so the
+// DTS sidecar persists workflow state across orchestrator
+// crashes. The switch is controlled by Orchestrator:Execution
+// in appsettings.json. See deploy/docker-compose.yml for the
+// DTS emulator sidecar that powers Durable mode in dev.
+        IWorkflowDispatcher dispatcher;
+        if (string.Equals(options.Orchestrator.Execution, "Durable", StringComparison.OrdinalIgnoreCase))
+        {
+            // Build the workflow ONCE (the executors are stateless;
+            // they read singletons from DI at construction). The
+            // Durable runtime expects a Workflow instance, not a
+            // factory, so we share it across all orchestrations.
+            var workflow = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
+                issues, agentRunner, worktrees, gitHub, roleRegistry, options.Workspace,
+                eventBus, agent => messageBus.Drain(agent),
+                designArtifacts, artOutputs,
+                memoryExtractor, extractionStore,
+                loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
+                projectId: primary.Id,
+                timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
+                lifecycle: lifecycle,
+                workflow: new Core.Workflow.WorkflowResolver(memoryStore),
+                verifyCommands: primary.VerifyCommands)
+                .Build();
+            var services = new ServiceCollection()
+                .AddSingleton(workflow)
+                .BuildServiceProvider();
+            dispatcher = new Orchestrator.DurableDispatcher(
+                options.Orchestrator,
+                workflow,
+                loggerFactory.CreateLogger<Orchestrator.DurableDispatcher>(),
+                buildHost: () => Orchestrator.DurableDispatcher.BuildHost(
+                    services, workflow, options.Orchestrator));
+        }
+        else
+        {
+            // InProcessDispatcher (default): runs the same
+            // workflow via InProcessExecution. P4 Stage A's
+            // StartupRecovery handles crash safety.
+            dispatcher = new Orchestrator.InProcessDispatcher(
+                async (issue, bundle, ct) =>
                 {
-                    var providerNames = provider.GetRequiredService<Agents.LlmConfig>()
-                        .Providers.Select(p => p.Name).ToArray();
-                    _ = Task.Run(async () =>
-                    {
-                        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
-                        try
+                    // Per-project workflow: the bundle carries the
+                    // dispatch project's stores (issues, worktrees,
+                    // GitHub, artifact stores) so non-primary
+                    // projects dispatch against their own repo.
+                    // WorkspaceOptions only feeds DefaultBranch.
+                    var workflow = new Orchestrator.Workflow.EngineeringDispatchWorkflow(
+                        bundle.IssueStore, agentRunner, bundle.Worktrees, bundle.GitHub, roleRegistry,
+                        new WorkspaceOptions { DefaultBranch = bundle.Project.DefaultBranch },
+                        eventBus, agent => messageBus.Drain(agent),
+                        bundle.DesignArtifacts, bundle.ArtOutputs,
+                        memoryExtractor, extractionStore,
+                        loggerFactory.CreateLogger<Orchestrator.Workflow.EngineeringDispatchWorkflow>(),
+                        projectId: bundle.Project.Id,
+                        loggerFactory: loggerFactory,
+                        sprints: bundle.Sprints,
+                        timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
+                        workflow: new Core.Workflow.WorkflowResolver(memoryStore),
+                        verifyCommands: bundle.Project.VerifyCommands,
+                        // Event-driven review trigger (pause/resume
+                        // architecture): the reviewer starts on the
+                        // pushed head while CI runs — verdict and CI
+                        // arrive together. Fire-and-forget (the dev's
+                        // role slot must release at push); the watch
+                        // sweep stays the backstop.
+                        onPrOpened: (task, ct) =>
                         {
-                            while (await timer.WaitForNextTickAsync(shutdownCts.Token))
-                                await keyResolver.RefreshAsync(providerNames, shutdownCts.Token);
-                        }
-                        catch (OperationCanceledException) { }
-                    });
-                }
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    var resolver = new Core.Workflow.WorkflowResolver(memoryStore);
+                                    if (!Core.Workflow.WorkflowExtensions.IsStepEnabled(
+                                            await resolver.ResolveAsync(CancellationToken.None), "review")) return;
+                                    var reviewer = new Forge.Reviewer.ReviewerDispatcher(
+                                        bundle.IssueStore, bundle.GitHub, agentRunner,
+                                        loggerFactory.CreateLogger<Forge.Reviewer.ReviewerDispatcher>(),
+                                        lifecycle: lifecycle,
+                                        events: eventBus,
+                                        projectId: bundle.Project.Id);
+                                    var outcome = await reviewer.ReviewOnceAsync(task, CancellationToken.None);
+                                    if (outcome is not null && outcome.Error is null)
+                                    {
+                                        logger.LogInformation("PR-open review trigger: verdict {Verdict} for task {Id} (PR head {Sha})",
+                                            outcome.Verdict, task.Id, outcome.HeadSha);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogWarning(ex, "PR-open review trigger failed for task {Id}; the watch sweep is the backstop", task.Id);
+                                }
+                            });
+                            return Task.CompletedTask;
+                        });
+                    await workflow.RunAsync(issue, ct);
+                },
+                loggerFactory.CreateLogger<Orchestrator.InProcessDispatcher>());
+        }
 
-                // JSONL mirror is a fire-and-forget background task; it
-                // cancels itself when shutdownCts fires.
-                _ = provider.GetRequiredService<IssuesJsonlMirror>().StartAsync(shutdownCts.Token);
+        var dispatchBundleFactory = new ProjectDispatchBundleFactory(
+            options, orchDataRoot, projectStore, cloner,
+            agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
+            secrets: secretStore, gates: stageGates, lifecycle: lifecycle);
 
-                // Messaging: 15m backstop tick publisher + event
-                // consumers. BackgroundService.StartAsync links the
-                // loop to shutdownCts; faults Nack + log (never swallow).
-                await provider.GetRequiredService<Messaging.SweepTickPublisher>().StartAsync(shutdownCts.Token);
-                var eventConsumers = new Microsoft.Extensions.Hosting.BackgroundService[]
-                {
-                    provider.GetRequiredService<Orchestrator.Consumers.TaskEnqueuedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.TaskTransitionedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.SweepTickConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.SpecStatusChangedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.SprintStatusChangedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.FollowUpFiledConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.GroomRequestedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.PrOpenedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.ReviewVerdictRecordedConsumer>(),
-                };
-                foreach (var consumer in eventConsumers)
-                    await consumer.StartAsync(shutdownCts.Token);
-
-                // Schedulers (fire-and-forget; they cancel on shutdown).
-                _ = provider.GetRequiredService<Orchestrator.ScheduledGroomer>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.ScheduledWatchdog>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.DesignerScheduler>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.ArtistScheduler>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.Sprint.SprintAssembler>().RunAsync(shutdownCts.Token);
-
-                // Self-starting queue: resolving it guarantees the
-                // singleton was constructed (its ctor subscribes the
-                // worker).
-                _ = provider.GetRequiredService<Agents.ProductRefinementQueue>();
-
-                logger.LogInformation("Orchestrator starting");
-                await provider.GetRequiredService<OrchestratorAgent>().ExecuteAsync(shutdownCts.Token);
-                return 0;
-            }
-            catch (OperationCanceledException)
+        // Per-project GitHubService resolver for endpoint-level PR
+        // actions (operator close-obsolete, 2026-08-01): builds the
+        // same service the dispatch bundle would (per-project token +
+        // owner/repo), without standing up the whole bundle cache.
+        // Empty string resolves the primary project.
+        GitHubService? GitHubForProject(string projectId)
+        {
+            try
             {
-                logger.LogInformation("Orchestrator stopped");
-                return 0;
+                var project = string.IsNullOrEmpty(projectId)
+                    ? knownProjects.FirstOrDefault()
+                    : knownProjects.FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.Ordinal));
+                return project is null ? null : dispatchBundleFactory.Build(project).GitHub;
             }
             catch (Exception ex)
             {
-                logger.LogCritical(ex, "Orchestrator crashed");
-                try { await dashboard.StopAsync(); } catch { }
-                // Die for real: a logged crash that leaves the process
-                // alive is a zombie systemd never restarts (observed
-                // live 2026-07-30).
-                Environment.Exit(1);
-                return 1;
+                logger.LogWarning(ex, "GitHubForProject({ProjectId}): resolution failed", projectId);
+                return null;
             }
-            finally
-            {
-                try { await dashboard.StopAsync(); } catch { }
-                try
+        }
+
+        // Pre-size the shared per-(project, role) concurrency slot
+        // table BEFORE the orchestrator: its dispatch loop acquires a
+        // role slot per task run (per-role parallelism), and the
+        // dashboard exposes the same table's live meters.
+        var slots = BuildSlotTable(knownProjects);
+        var orchestrator = new OrchestratorAgent(
+            projectStore,
+            dispatchBundleFactory,
+            agentRunner, roleRegistry,
+            messageBus, dispatcher, eventBus,
+            loggerFactory.CreateLogger<OrchestratorAgent>(),
+            loggerFactory: loggerFactory,
+            slots: slots,
+            modelCooldowns: modelRateLimits,
+            lifecycle: lifecycle,
+            workflow: new Core.Workflow.WorkflowResolver(memoryStore));
+        orchestrator.BindOptions(options);
+        orchestrator.ModelOverrides = roleModelOverrides;
+        var intakeStore = new Core.IntakeStore(issues);
+        var specStore = new Core.SpecStore(issues, designArtifacts: designArtifacts);
+        // Planning lane spec rows are PER-PROJECT workload data
+        // (operator rule 2026-07-31): writers (intake/product/
+        // designer/artist/groomer) and the schedulers route through a
+        // project-aware facade — the plain primary store stranded
+        // porthorizon's specs in the forge schema, invisible to the
+        // PH lens. Dashboard endpoints keep the PLAIN store; their
+        // ?project= lens resolves ctx.Specs directly.
+        var routingSpecStore = new Core.ProjectRoutingSpecStore(
+            specStore,
+            findByProject: pid => projectFactory.Find(pid)?.Specs,
+            allProjectStores: () => projectFactory.KnownProjects
+                .Select(proj => projectFactory.Find(proj.Id)?.Specs)
+                .Where(st => st is not null)
+                .Cast<Core.ISpecStore>()
+                .ToList());
+        specStoreRef.Set(routingSpecStore);  // P5 — wire the spec store to the late-binding holder
+        var intakeRegistry = new IntakeAgentRegistry(projectId =>
+            new IntakeAgent(
+                projectId,
+                intakeStore,
+                // Epics (and every other issue the intake agent
+                // creates) belong to the SESSION'S project store —
+                // the primary store would put them in the wrong
+                // sprint lane (routing incident 2026-07-29).
+                projectFactory.Find(projectId)?.Issues ?? issues,
+                projectFactory.Find(projectId)?.Sprints ?? sprints,
+                chatClientFactory,
+                llmConfig,
+                roleRegistry,
+                eventBus,
+                loggerFactory.CreateLogger<IntakeAgent>(),
+                skills: skillSource,
+                rolePromptsRoot: rolePromptsRoot,
+                specs: specStoreRef.Value));
+        var specExtractionReader = new Core.SpecExtractionReader(issues);
+        var codebaseGraphCache = new Codebase.CodebaseGraphCacheStore(issues);
+        var codebaseGraphBuilder = new Codebase.DotnetCodebaseGraphBuilder();
+        var projectContextSource = new Core.FilesystemProjectContextSource(
+            issues, agents, routingSpecStore, skills, primary.Root);
+        var productAgentFactory = new Agents.ProductAgentFactory(
+            routingSpecStore, issues, projectContextSource, chatClientFactory, llmConfig,
+            roleRegistry, eventBus, skillSource, loggerFactory,
+            rolePromptsRoot);
+        var productRefinementQueue = new Agents.ProductRefinementQueue(
+            productAgentFactory, routingSpecStore, eventBus,
+            loggerFactory.CreateLogger<Agents.ProductRefinementQueue>());
+        // Hold a reference: the queue self-starts in its ctor; if it
+        // goes out of scope the GC reaps the worker Task and the
+        // event subscription dies.
+        _productRefinementQueue = productRefinementQueue;
+        var groomerFactory = new Agents.GroomerAgentFactory(
+            issues, routingSpecStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
+            memory: memoryStore, projectRoot: primary.Root,
+            projectRootLookup: ProjectRootLookup,
+            issueStoreLookup: id => projectFactory.Find(id)?.Issues);
+        // P2.a: Designer pipeline. The hygiene checker is shared
+        // between the manual endpoint, the scheduled run, and the
+        // agent's first step. The factory builds fresh DesignerAgent
+        // instances per run.
+        var designHygiene = new Orchestrator.DesignHygieneChecker(
+            routingSpecStore, codebaseGraphCache, codebaseGraphBuilder, primary.Root,
+            projectRootLookup: ProjectRootLookup);
+        var designerAgentFactory = new Orchestrator.DesignerAgentFactory(
+            routingSpecStore, designArtifacts, designerRuns, memoryStore, designHygiene,
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,
+            rolePromptsRoot);
+        // P2.b: Meshy client + Artist pipeline. The Meshy client
+        // uses a plain SocketsHttpHandler in production; the
+        // injection seam (HttpMessageHandler) lets tests stub the
+        // upstream API.
+        var meshyOptions = Microsoft.Extensions.Options.Options.Create(new Meshy.MeshyOptions
+        {
+            ApiKey = options.Llm.MeshyApiKey,
+            BaseUrl = options.Llm.MeshyBaseUrl,
+            PollIntervalSeconds = options.Llm.MeshyPollIntervalSeconds,
+            MaxWaitSeconds = options.Llm.MeshyMaxWaitSeconds,
+            MaxConcurrentJobs = options.Llm.MeshyMaxConcurrentJobs,
+        });
+        var meshy = new Meshy.MeshyClient(
+            new SocketsHttpHandler(),
+            meshyOptions,
+            loggerFactory.CreateLogger<Meshy.MeshyClient>(),
+            artOutputRoot: primary.Id == "default"
+                ? Path.Combine(primary.Root, ".portHorizon", "art-output")
+                : ForgesystemPaths.ArtOutputDir(orchDataRoot, primary.Id));
+        var artistAgentFactory = new Orchestrator.ArtistAgentFactory(
+            routingSpecStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+        // P4 Stage A — StartupRecovery service. Constructed BEFORE
+        // the dashboard so the dashboard can expose recovery
+        // endpoints (POST /api/recovery/run + dry-run + reports).
+        // RunAsync is called later, after the dashboard starts.
+        // Uses the primary project's dispatch bundle for git/GitHub
+        // so recovery honors per-project credentials (github_token
+        // secret) instead of the global startup services.
+        var primaryBundle = dispatchBundleFactory.Build(primary);
+        var startupRecovery = new Orchestrator.StartupRecovery(
+            issues, recoveryReports!, primaryBundle.Worktrees,
+            new Orchestrator.GitHubRecoveryAdapter(primaryBundle.GitHub),
+            eventBus,
+            loggerFactory.CreateLogger<Orchestrator.StartupRecovery>(),
+            lifecycle: lifecycle);
+        _startupRecovery = startupRecovery;  // held against GC reaping
+
+        // v1 multi-project: build the registry from configuration
+        // (back-compat shim to a single "default" project when only
+        // workspace.root is set) and lazily construct per-project
+        // IssueStore bundles. The per-(project, role) SlotTable was
+        // created above (BuildSlotTable) and is shared with the
+        // orchestrator's dispatch loop. (Constructed earlier, right
+        // after the registry bootstrap — the agent runner and the
+        // planning-lane factories take it as the project-root lookup.)
+        if (knownProjects.Count > 0)
+        {
+            logger.LogInformation(
+                "Multi-project registry: {Count} project(s) [{Ids}]; slot caps configured per role.",
+                knownProjects.Count,
+                string.Join(",", knownProjects.Select(p => $"{p.Id}={p.Name}")));
+        }
+
+        var dashboard = new DashboardHost(
+            options.Dashboard, options.Headroom, issues, agents, skills, sprints, messageBus, eventBus,
+            loggerFactory.CreateLogger<DashboardHost>(),
+            intakeStore: intakeStore,
+            intakeRegistry: intakeRegistry,
+            specs: specStore,
+            groomerFactory: groomerFactory,
+            memory: memoryStore,
+            extractions: extractionStore,
+            sprintProposalAudit: sprintProposalAudit,
+            sprintPropose: sprintPropose,
+            issuesJsonlPath: issuesJsonlPath,
+            vision: vision,
+            groomerRuns: groomerRuns,
+            designerFactory: designerAgentFactory,
+            designerRuns: designerRuns,
+            designArtifacts: designArtifacts,
+            artistFactory: artistAgentFactory,
+            artistRuns: artistRuns,
+            artOutputs: artOutputs,
+            meshy: meshy,
+            recoveryReports: recoveryReports,
+            startupRecovery: startupRecovery,
+            costTracker: costTracker,
+            extractor: specExtractionReader,
+            codebaseBuilder: codebaseGraphBuilder,
+            codebaseCache: codebaseGraphCache,
+            projectFactory: projectFactory,
+            slots: slots,
+            gitHub: gitHub,
+            reviewerRunner: agentRunner,
+            loggerFactory: loggerFactory,
+            projectStore: projectStore,
+            projectCloner: cloner,
+            githubOptions: options.GitHub,
+            secretStore: secretStore,
+            agentRuns: agentRunStore,
+            llmConfig: llmConfig,
+            roleModelOverrides: roleModelOverrides,
+            gateOptions: options.Gates,
+            lifecycle: lifecycle,
+            modelRateLimits: modelRateLimits,
+            gitHubForProject: GitHubForProject,
+            providerApiKeys: providerKeyResolver);
+
+        // externalStop is the Windows Service host's stoppingToken when
+        // running under the SCM (default(CancellationToken) -- never
+        // cancels on its own -- for every other invocation). Linking it
+        // means an SCM stop request tears the orchestrator down through
+        // the exact same path as Ctrl+C.
+        using var shutdownCts = CancellationTokenSource.CreateLinkedTokenSource(externalStop);
+        Console.CancelKeyPress += (_, e) =>
+        {
+            logger.LogWarning("SIGINT received; cancelling...");
+            e.Cancel = true;
+            shutdownCts.Cancel();
+        };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            logger.LogWarning("Process exit; cancelling");
+            try { shutdownCts.Cancel(); } catch { }
+        };
+
+try
+        {
+            logger.LogInformation("Starting dashboard");
+            await dashboard.StartAsync(shutdownCts.Token);
+
+            // P4 Stage A — StartupRecovery. Runs ONCE before the
+            // dispatch loop starts. Inspects every InProgress +
+            // assignee=forge issue, replays the cheap side-effects
+            // (commit, push, PR open) when the LLM has already
+            // finished but the previous run crashed, and writes
+            // one recovery_report row. By default we run recovery
+            // every startup; --check (existing pre-flight) skips
+            // the dispatch loop entirely and --recover runs
+            // recovery with no side effects and exits 0.
+            //
+            // The startupRecovery service was constructed BEFORE
+            // the dashboard so the dashboard's endpoints can
+            // expose it. Run the recovery pass now (before the
+            // dispatch loop starts) so any in-flight issues from
+            // a previous crash are replayed before the new
+            // dispatch cycle begins.
+            // Multi-project: one recovery context per NON-primary
+            // project (the primary is the recovery service's own
+            // construction context). Without this a restart strands a
+            // second project's InProgress tasks forever (observed live
+            // 2026-07-29: porthorizon task-5/6 claimed pre-restart,
+            // recovery scanned only the primary store — scanned=0).
+            var recoveryContexts = knownProjects
+                .Where(p => !string.Equals(p.Id, primary.Id, StringComparison.OrdinalIgnoreCase))
+                .Select(p =>
                 {
-                    var stateStore = provider.GetRequiredService<StateStore>();
-                    var s = await stateStore.LoadStateAsync();
-                    await stateStore.SaveStateAsync(s);
-                }
-                catch { }
+                    var b = dispatchBundleFactory.Build(p);
+                    return new Orchestrator.StartupRecovery.ProjectRecoveryContext(
+                        p.Id, b.IssueStore, b.Worktrees,
+                        new Orchestrator.GitHubRecoveryAdapter(b.GitHub),
+                        p.DefaultBranch);
+                })
+                .ToList();
+            await startupRecovery.RunAsync(extraProjects: recoveryContexts, ct: shutdownCts.Token);
+
+            // P4 Stage B — bring the workflow dispatcher host up.
+            // For InProcess this is a no-op. For Durable this
+            // starts the DTS worker (which connects to the DTS
+            // sidecar). Failures here are visible in the log;
+            // dispatch falls back to errors per-call.
+            try
+            {
+                await dispatcher.EnsureReadyAsync(shutdownCts.Token);
             }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Workflow dispatcher EnsureReadyAsync failed; dispatch may fail at call time.");
+            }
+
+            // JSONL mirror is a fire-and-forget background task; it
+            // cancels itself when shutdownCts fires.
+            _ = jsonlMirror.StartAsync(shutdownCts.Token);
+            _issuesJsonlMirror = jsonlMirror;
+
+            // P3.5: scheduled Groomer wakes up every 5 minutes and
+            // grooms any Approved specs that haven't been groomed
+            // recently (or whose last groom failed). Fire-and-forget.
+            var scheduledGroomer = new Orchestrator.ScheduledGroomer(
+                routingSpecStore, groomerFactory, groomerRuns, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.ScheduledGroomer>(),
+                interval: TimeSpan.FromMinutes(5),
+                issues: issues, sprints: sprints, gates: stageGates,
+                projectContexts: projectFactory);
+            _ = scheduledGroomer.RunAsync(shutdownCts.Token);
+            _scheduledGroomer = scheduledGroomer;
+
+            // Watchdog (operator-approved v1, 2026-07-31): scans every
+            // project for structural stalls (blocked-member stalls,
+            // stuck sprints, starvation, dead watches, groomer wedge,
+            // operator residue) and surfaces deduped findings on the
+            // Now attention feed. Alert-only.
+            var scheduledWatchdog = new Orchestrator.ScheduledWatchdog(
+                projectFactory, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.ScheduledWatchdog>(),
+                lifecycle);
+            _ = scheduledWatchdog.RunAsync(shutdownCts.Token);
+
+            // P2.a: scheduled Designer wakes up every 5 minutes and
+            // designs any ReadyForDesign specs that haven't been
+            // designed recently (or whose last design failed).
+            // Fire-and-forget.
+            var scheduledDesigner = new Orchestrator.DesignerScheduler(
+                routingSpecStore, designerAgentFactory, designerRuns, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.DesignerScheduler>(),
+                interval: TimeSpan.FromMinutes(5),
+                gates: stageGates,
+                workflow: new Core.Workflow.WorkflowResolver(memoryStore));
+            _ = scheduledDesigner.RunAsync(shutdownCts.Token);
+            _scheduledDesigner = scheduledDesigner;
+
+            // P2.b: scheduled Artist wakes up every 5 minutes and
+            // produces art for any Designed specs that haven't been
+            // arted recently (or whose last art run failed).
+            // Fire-and-forget.
+            var scheduledArtist = new Orchestrator.ArtistScheduler(
+                routingSpecStore, artistAgentFactory, artistRuns, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.ArtistScheduler>(),
+                interval: TimeSpan.FromMinutes(5));
+            _ = scheduledArtist.RunAsync(shutdownCts.Token);
+            _scheduledArtist = scheduledArtist;
+
+            // Sprint flow: the assembler wakes up every 5 minutes per
+            // project, completes the Active sprint when all its tasks
+            // are terminal, and assembles + activates the next one
+            // from eligible (groomed or ad-hoc) Pending tasks. ALL
+            // engineering work happens inside a sprint — dispatch is
+            // gated on an active sprint in OrchestratorAgent.
+            var sprintAssembler = new Orchestrator.Sprint.SprintAssembler(
+                projectFactory, eventBus,
+                loggerFactory.CreateLogger<Orchestrator.Sprint.SprintAssembler>(),
+                interval: TimeSpan.FromMinutes(5),
+                gates: stageGates,
+                followUpTriage: new Agents.FollowUpTriageAgent(
+                    chatClientFactory, llmConfig,
+                    loggerFactory.CreateLogger<Agents.FollowUpTriageAgent>()));
+            _ = sprintAssembler.RunAsync(shutdownCts.Token);
+            _sprintAssembler = sprintAssembler;
+
+            logger.LogInformation("Orchestrator starting");
+            await orchestrator.ExecuteAsync(shutdownCts.Token);
+            return 0;
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogInformation("Orchestrator stopped");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(ex, "Orchestrator crashed");
+            try { await dashboard.StopAsync(); } catch { }
+            // Die for real: a logged crash that leaves the process
+            // alive is a zombie systemd never restarts (observed live
+            // 2026-07-30 — host shut down at 03:08, process lingered
+            // for hours, dashboard dead, systemd blind).
+            Environment.Exit(1);
+            return 1;
+        }
+        finally
+        {
+            try { await dashboard.StopAsync(); } catch { }
+            try
+            {
+                var s = await stateStore.LoadStateAsync();
+                await stateStore.SaveStateAsync(s);
+            }
+            catch { }
         }
     }
 }

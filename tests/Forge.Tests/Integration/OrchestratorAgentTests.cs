@@ -136,18 +136,6 @@ public sealed class OrchestratorAgentTests : IDisposable
         try { Directory.Delete(_dataRoot, recursive: true); } catch { }
     }
 
-    private Forge.Orchestrator.WatchSweepService BuildSweepService(IAgentRunner runner)
-        => new Forge.Orchestrator.WatchSweepService(
-            runner,
-            llmConfig: null,
-            modelOverrides: null,
-            new Core.ModelRateLimitTracker(),
-            lifecycle: null,
-            workflow: null,
-            _events,
-            NullLoggerFactory.Instance,
-            NullLogger<Forge.Orchestrator.WatchSweepService>.Instance);
-
     private OrchestratorAgent BuildOrchestrator(IAgentRunner runner)
         => new OrchestratorAgent(
             _projectStore,
@@ -622,23 +610,23 @@ public sealed class OrchestratorAgentTests : IDisposable
         // launches — a fresh reviewStartedAt marker (review running,
         // possibly started pre-restart) or an in-memory in-flight
         // entry both suppress relaunch.
-        var sweeps = BuildSweepService(new ScriptedRunner("APPROVE"));
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
         var task = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "t", Description: "x"));
 
         // No marker, nothing in flight → launch.
-        Assert.True(sweeps.ShouldLaunchReview(task, "test"));
+        Assert.True(orch.ShouldLaunchReview(task, "test"));
 
         // Fresh marker → skip.
         await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null,
             new Dictionary<string, object> { ["reviewStartedAt"] = DateTime.UtcNow.ToString("O") });
         task = (await _issues.GetAsync(task.Id))!;
-        Assert.False(sweeps.ShouldLaunchReview(task, "test"));
+        Assert.False(orch.ShouldLaunchReview(task, "test"));
 
         // Stale marker (crashed/restarted mid-review) → relaunch.
         await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null,
             new Dictionary<string, object> { ["reviewStartedAt"] = DateTime.UtcNow.AddMinutes(-30).ToString("O") });
         task = (await _issues.GetAsync(task.Id))!;
-        Assert.True(sweeps.ShouldLaunchReview(task, "test"));
+        Assert.True(orch.ShouldLaunchReview(task, "test"));
     }
 
     private async Task<IssueRecord> SeedBlockedWatchAsync(Dictionary<string, object> metadata)
@@ -656,9 +644,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         // model was unavailable (blockedKind=reviewer-unavailable) is
         // resumed by the sweep once the model is back — status back to
         // InProgress, stale review bookkeeping cleared, marker removed.
-        var sweeps = BuildSweepService(new ScriptedRunner("APPROVE"));
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        BindMaf(orch);
         var task = await SeedBlockedWatchAsync(new Dictionary<string, object>
         {
             ["blockedKind"] = Forge.Reviewer.PRWatcher.BlockedKindReviewerUnavailable,
@@ -668,7 +657,16 @@ public sealed class OrchestratorAgentTests : IDisposable
         });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await sweeps.SweepProjectAsync(_bundle, cts.Token);
+        var loop = orch.ExecuteAsync(cts.Token);
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            var t = await _issues.GetAsync(task.Id);
+            return t!.Status == IssueStatus.InProgress && t.GetMetadata("blockedKind") is null;
+        }, TimeSpan.FromSeconds(15));
+
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(IssueStatus.InProgress, after.Status);
         Assert.Equal("1", after.GetMetadata("autoResumeAttempts"));
@@ -680,9 +678,10 @@ public sealed class OrchestratorAgentTests : IDisposable
     {
         // Operator-decision blocks (no blockedKind marker) must NOT be
         // auto-resumed — the sweep leaves them alone.
-        var sweeps = BuildSweepService(new ScriptedRunner("APPROVE"));
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        BindMaf(orch);
         var task = await SeedBlockedWatchAsync(new Dictionary<string, object>
         {
             ["reworkAttempts"] = "3",
@@ -690,7 +689,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await sweeps.SweepProjectAsync(_bundle, cts.Token);
+        var loop = orch.ExecuteAsync(cts.Token);
+        await Task.Delay(4000);
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(IssueStatus.Blocked, after.Status);
         Assert.Null(after.GetMetadata("autoResumeAttempts"));
@@ -699,9 +701,10 @@ public sealed class OrchestratorAgentTests : IDisposable
     [Fact]
     public async Task WatchSweep_AutoResumeBudgetExhausted_ClearsMarkerAndStaysBlocked()
     {
-        var sweeps = BuildSweepService(new ScriptedRunner("APPROVE"));
+        var orch = BuildOrchestrator(new ScriptedRunner("APPROVE"));
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        BindMaf(orch);
         var task = await SeedBlockedWatchAsync(new Dictionary<string, object>
         {
             ["blockedKind"] = Forge.Reviewer.PRWatcher.BlockedKindReviewerUnavailable,
@@ -709,7 +712,15 @@ public sealed class OrchestratorAgentTests : IDisposable
         });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await sweeps.SweepProjectAsync(_bundle, cts.Token);
+        var loop = orch.ExecuteAsync(cts.Token);
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            return (await _issues.GetAsync(task.Id))!.GetMetadata("blockedKind") is null;
+        }, TimeSpan.FromSeconds(15));
+
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(IssueStatus.Blocked, after.Status);
         Assert.Null(after.GetMetadata("blockedKind"));
