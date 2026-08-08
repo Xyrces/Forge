@@ -359,6 +359,109 @@ public class SprintAssemblerTests : IDisposable
         Assert.Empty(await drafts.ListUnconsumedAsync());
     }
 
+    // ---- Themed packing (operator rule 2026-08-08): exactly one
+    // kind of sprint. Follow-up work clusters by its followUpOf ROOT
+    // and packs into ONE themed sprint — never a solo sprint per
+    // follow-up. Only truly rootless ad-hoc tasks stay solo. ----
+
+    [Fact]
+    public async Task FollowUpTheme_PacksChainIntoOneSprint()
+    {
+        var root = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "MaterialReservation locking"));
+        await _issues.TransitionAsync(root.Id, IssueStatus.Completed, null);
+        var fu1 = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "follow-up one", Priority: 3,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+        var fu2 = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "follow-up two", Priority: 2,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+        // Nested: follow-up of a follow-up resolves to the same root.
+        var fu3 = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "nested follow-up", Priority: 4,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = fu1.Id }));
+
+        await Tick();
+
+        var active = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Sprint 1: MaterialReservation locking", active.Name);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(fu1.Id, members);
+        Assert.Contains(fu2.Id, members);
+        Assert.Contains(fu3.Id, members);
+        Assert.Single(await _sprints.ListAsync(activeOnly: false));
+    }
+
+    [Fact]
+    public async Task FollowUpTheme_SplitsAtCap_RemainderAssemblesNext()
+    {
+        var root = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "big theme"));
+        var ids = new List<string>();
+        for (var i = 0; i < SprintAssembler.MaxThemeTasks + 2; i++)
+        {
+            var fu = await _issues.CreateAsync(new NewIssue(
+                Type: "task", Title: $"follow-up {i}", Priority: 3,
+                Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+            ids.Add(fu.Id);
+        }
+
+        await Tick();
+
+        var first = (await _sprints.GetActiveAsync())!;
+        var members = await _sprints.GetIssueIdsAsync(first.Id);
+        Assert.Equal(SprintAssembler.MaxThemeTasks, members.Count);
+
+        // Drain the first sprint → the remainder packs the next one.
+        foreach (var id in members)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+        await Tick();
+        var second = (await _sprints.GetActiveAsync())!;
+        Assert.NotEqual(first.Id, second.Id);
+        Assert.Equal(2, (await _sprints.GetIssueIdsAsync(second.Id)).Count);
+    }
+
+    [Fact]
+    public async Task FollowUpTheme_PriorityPicksTheMostImportantTheme()
+    {
+        var lowRoot = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "polish theme"));
+        var hotRoot = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "critical theme"));
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "polish follow-up", Priority: 4,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = lowRoot.Id }));
+        var hot = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "critical follow-up", Priority: 1,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = hotRoot.Id }));
+
+        await Tick();
+
+        var active = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Sprint 1: critical theme", active.Name);
+        Assert.Contains(hot.Id, await _sprints.GetIssueIdsAsync(active.Id));
+    }
+
+    [Fact]
+    public async Task FollowUpTheme_MixedWithRootlessAdHoc_RootlessStaysSolo()
+    {
+        var root = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "themed work"));
+        var fu = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "themed follow-up", Priority: 3,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+        var rootless = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "operator one-off", Priority: 2,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+
+        await Tick();
+
+        // Rootless P2 outranks the themed P3 and assembles solo; the
+        // themed follow-up is NOT swept into the one-off's sprint.
+        var active = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Sprint 1: operator one-off", active.Name);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(rootless.Id, members);
+        Assert.DoesNotContain(fu.Id, members);
+    }
+
     [Fact]
     public async Task Assembly_WaitsForFollowUpGrooming()
     {

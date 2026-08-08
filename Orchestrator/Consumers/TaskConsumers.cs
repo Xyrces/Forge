@@ -6,9 +6,14 @@ using Talaria.Core.Abstractions;
 namespace Forge.Orchestrator.Consumers;
 
 /// <summary>
-/// TaskEnqueued → kick the dispatch loop (new work may be claimable)
-/// and the sprint assembler (ad-hoc work may need ingest). Kicks only
-/// — the loops re-read DB truth.
+/// TaskEnqueued → kick the dispatch loop (new work may be claimable),
+/// the sprint assembler (ad-hoc work may need ingest), AND the groomer
+/// (a freshly created parentless task — e.g. a materialized sprint
+/// follow-up — is born ungroomed; observed live 2026-08-08: sprint
+/// assembly stalled 15m in awaiting-groom because materialization
+/// published nothing the groomer listens to). Kicks only — the loops
+/// re-read DB truth. No spin risk: a groom tick that finds no
+/// ungroomed ad-hoc work publishes nothing.
 /// </summary>
 public sealed class TaskEnqueuedConsumer : EventConsumer<TaskEnqueued>
 {
@@ -27,6 +32,7 @@ public sealed class TaskEnqueuedConsumer : EventConsumer<TaskEnqueued>
     {
         _wakeups.Dispatch.Signal();
         _wakeups.Assemble.Signal();
+        _wakeups.Groom.Signal();
         return Task.CompletedTask;
     }
 }

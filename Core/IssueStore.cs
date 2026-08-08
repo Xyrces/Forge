@@ -121,6 +121,14 @@ public interface IIssueStore
     Task<IReadOnlyList<IssueRecord>> ReadyAsync(int limit, string? sprintId, CancellationToken ct = default);
     Task<IssueRecord?> ClaimAsync(string id, string assignee, CancellationToken ct = default);
     Task<IssueRecord> TransitionAsync(string id, IssueStatus to, string? error, IDictionary<string, object>? metadata = null, CancellationToken ct = default);
+    /// <summary>
+    /// Update the priority column (1-5, lower = more important). Used
+    /// by the groomer, which re-assesses a follow-up's priority against
+    /// the whole open-work backlog at groom time (operator rule
+    /// 2026-08-08: follow-ups must be prioritized in the scope of the
+    /// rest of the work so sprints build the most important things).
+    /// </summary>
+    Task SetPriorityAsync(string id, int priority, CancellationToken ct = default);
     Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default);
     Task<IssueEventRecord> AddEventAsync(string id, string kind, string? detail = null, CancellationToken ct = default);
 
@@ -2025,6 +2033,20 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     /// happens AFTER the UPDATE commits; failures are swallowed by the
     /// publisher (a hint never breaks a DB mutation).
     /// </summary>
+    public async Task SetPriorityAsync(string id, int priority, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = $"UPDATE {T("issue")} SET priority=@p, updated_at=@now WHERE id=@id";
+            cmd.AddParam("@p", Math.Clamp(priority, 1, 5));
+            cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+            cmd.AddParam("@id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await InsertEventAsync(conn, null, id, "priority_change", $"priority={Math.Clamp(priority, 1, 5)}", ct);
+    }
+
     private async Task PublishLifecycleTransitionAsync(
         IssueRecord before, string mergedMetadataJson, CancellationToken ct)
     {
