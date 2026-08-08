@@ -975,6 +975,46 @@ Console.Error.WriteLine(ex.ToString());
             }
         }
 
+        // NuGet feed probe: the Talaria packages restore from the
+        // github-xyrces source, which requires GITHUB_PACKAGES_USER /
+        // GITHUB_PACKAGES_PAT (read:packages) at restore time — the
+        // self-deploy publish inherits THIS process's environment, so
+        // a missing credential stalls the cutover at dotnet restore.
+        {
+            var pkgUser = Environment.GetEnvironmentVariable("GITHUB_PACKAGES_USER");
+            var pkgPat = Environment.GetEnvironmentVariable("GITHUB_PACKAGES_PAT");
+            if (string.IsNullOrEmpty(pkgUser) || string.IsNullOrEmpty(pkgPat))
+            {
+                failures.Add("GITHUB_PACKAGES_USER / GITHUB_PACKAGES_PAT not set in this environment — Talaria restore (github-xyrces feed) will fail, incl. the self-deploy publish");
+            }
+            else
+            {
+                try
+                {
+                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                    var req = new HttpRequestMessage(HttpMethod.Get,
+                        "https://nuget.pkg.github.com/Xyrces/download/talaria.core/index.json");
+                    req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                        "Basic", Convert.ToBase64String(
+                            System.Text.Encoding.ASCII.GetBytes($"{pkgUser}:{pkgPat}")));
+                    req.Headers.UserAgent.ParseAdd("Forge-Check");
+                    var resp = await http.SendAsync(req);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine("  [ok] github-xyrces NuGet feed reachable (Talaria packages)");
+                    }
+                    else
+                    {
+                        failures.Add($"github-xyrces NuGet feed returned HTTP {(int)resp.StatusCode} — GITHUB_PACKAGES_PAT needs read:packages on Xyrces");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failures.Add($"github-xyrces NuGet feed unreachable: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
         Console.WriteLine();
         if (failures.Count == 0)
         {
