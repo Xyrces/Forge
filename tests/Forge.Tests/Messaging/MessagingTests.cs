@@ -173,7 +173,8 @@ public sealed class TalariaEventPublisherTests
             => throw new InvalidOperationException("bus is down");
         public Task<IProducer<T>> CreateProducerAsync<T>(string topic, ProducerOptions options, CancellationToken ct = default)
             => throw new InvalidOperationException("bus is down");
-        public Task<ITransactionalSession> BeginTransactionAsync(CancellationToken ct = default)
+        public Task<ITransactionalSession> BeginTransactionAsync(
+            string? consumerGroup = null, TransactionOffsetSource? offsetSource = null, CancellationToken ct = default)
             => throw new InvalidOperationException("bus is down");
     }
 }
