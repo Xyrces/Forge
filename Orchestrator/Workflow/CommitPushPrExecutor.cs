@@ -287,6 +287,20 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 return new PrOpened(input, PrResult.NoDiff, 0, null);
             }
             logger.LogInformation("CommitPushPr({Id}): verification passed", issue.Id);
+            if (verification.FlakyPasses is { Count: > 0 } flakyPasses)
+            {
+                // Audit trail: the gate passed via the flaky-test
+                // quarantine. The note rides the PR body / dashboard
+                // so the operator sees which tests are poisoning
+                // full-suite runs.
+                foreach (var note in flakyPasses)
+                {
+                    logger.LogWarning("CommitPushPr({Id}): flaky quarantine — {Note}", issue.Id, note);
+                    events.Publish(new DashboardEvent(
+                        DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                        issue.Id, $"Verification passed with flaky-test quarantine: {Truncate(note, 300)}"));
+                }
+            }
         }
 
         // Rework divergence guard (2026-08-01): on a rework round

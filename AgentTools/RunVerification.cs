@@ -13,7 +13,11 @@ namespace Forge.AgentTools;
 /// </summary>
 public static class RunVerification
 {
-    public sealed record Result(bool Ok, IReadOnlyList<string> Failures);
+    public sealed record Result(bool Ok, IReadOnlyList<string> Failures, IReadOnlyList<string>? FlakyPasses = null);
+
+    /// <summary>Cap on isolated re-runs: a real breakage fails dozens of
+    /// tests; flakiness is a handful. Also bounds the --filter length.</summary>
+    internal const int MaxFlakyRetryTests = 20;
 
     /// <summary>Per-command timeout. Porthorizon's full xUnit suite is
     /// ~30s, Forge's ~45s; 15 minutes leaves headroom for cold restores.</summary>
@@ -27,6 +31,7 @@ public static class RunVerification
         TimeSpan? timeout = null)
     {
         var failures = new List<string>();
+        var flakyPasses = new List<string>();
         foreach (var command in commands)
         {
             var (exitCode, output, timedOut) = await RunCommandAsync(workDir, command, timeout ?? DefaultTimeout, ct);
@@ -38,6 +43,39 @@ public static class RunVerification
             }
             if (exitCode != 0)
             {
+                // Flaky-test self-heal (observed live 2026-08-08:
+                // porthorizon task-601 stalled Failed/StalledRework
+                // because the known-flaky MaterialReservationSystemTests
+                // died under the full suite — a failure the task's diff
+                // could not cause and no rework round could fix; the
+                // bounce feedback actively misinstructs the agent).
+                // A test that passes in isolation failed via full-suite
+                // interference, not via the diff — quarantine it and let
+                // the gate pass. Still failing in isolation = real
+                // failure, bounce as before.
+                if (IsDotnetTestCommand(command)
+                    && ExtractFailedTests(output) is { Count: > 0 } failedTests
+                    && failedTests.Count <= MaxFlakyRetryTests)
+                {
+                    var filter = string.Join("|", failedTests.Select(t => "FullyQualifiedName=" + t));
+                    var retryCommand = command + " --filter \"" + filter + "\"";
+                    logger.LogWarning(
+                        "Verification({Dir}): '{Command}' failed with {Count} test failure(s) — re-running in isolation before bouncing (flaky-test quarantine)",
+                        workDir, command, failedTests.Count);
+                    var (retryExit, _, retryTimedOut) = await RunCommandAsync(
+                        workDir, retryCommand, timeout ?? DefaultTimeout, ct);
+                    if (!retryTimedOut && retryExit == 0)
+                    {
+                        flakyPasses.Add(
+                            $"`{command}`: {failedTests.Count} test(s) failed under the full suite but PASSED in isolation (quarantined as flaky — not caused by this diff): {string.Join(", ", failedTests)}");
+                        logger.LogWarning(
+                            "Verification({Dir}): {Count} failed test(s) passed in isolation — quarantined as flaky, gate passes: {Tests}",
+                            workDir, failedTests.Count, string.Join(", ", failedTests));
+                        continue;
+                    }
+                    logger.LogWarning(
+                        "Verification({Dir}): isolated re-run still failing — real failure, not flake", workDir);
+                }
                 var tail = Tail(output, 1500);
                 failures.Add($"`{command}` exited {exitCode}:\n{tail}");
                 logger.LogWarning("Verification({Dir}): '{Command}' exited {Code}", workDir, command, exitCode);
@@ -47,8 +85,46 @@ public static class RunVerification
                 logger.LogInformation("Verification({Dir}): '{Command}' passed", workDir, command);
             }
         }
-        return new Result(failures.Count == 0, failures);
+        return new Result(failures.Count == 0, failures, flakyPasses.Count > 0 ? flakyPasses : null);
     }
+
+    private static bool IsDotnetTestCommand(string command)
+    {
+        // The retry command appends `--filter …`, which lands on the
+        // LAST segment of a compound command — so that's the segment
+        // that must be the dotnet test invocation (env-prefix forms
+        // like `export PATH=…; dotnet test …` qualify).
+        var last = command.Split(';')[^1].TrimStart();
+        return last.StartsWith("dotnet test", StringComparison.Ordinal)
+            && !last.Contains("--filter", StringComparison.Ordinal);
+    }
+
+    /// <summary>Parse fully-qualified failed test names from `dotnet test`
+    /// output: xUnit console lines (`Namespace.Class.Test [FAIL]`,
+    /// optionally `[xUnit.net …]`-prefixed) and VSTest summary lines
+    /// (` Failed Namespace.Class.Test …`).</summary>
+    internal static List<string> ExtractFailedTests(string output)
+    {
+        var names = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in output.Split('\n'))
+        {
+            var match = XunitFailLine.Match(line);
+            if (!match.Success) match = VsTestFailLine.Match(line);
+            if (!match.Success) continue;
+            var name = match.Groups["name"].Value;
+            if (seen.Add(name)) names.Add(name);
+        }
+        return names;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex XunitFailLine = new(
+        @"^\s*(?:\[xUnit\.net[^\]]*\]\s+)?(?<name>[A-Za-z_][\w.]*)\s+\[FAIL\]",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly System.Text.RegularExpressions.Regex VsTestFailLine = new(
+        @"^\s+Failed\s+(?<name>[A-Za-z_][\w.]*)\s*(\[|\(|$)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private static async Task<(int ExitCode, string Output, bool TimedOut)> RunCommandAsync(
         string workDir, string command, TimeSpan timeout, CancellationToken ct)
