@@ -1201,12 +1201,15 @@ Console.Error.WriteLine(ex.ToString());
                 await provider.GetRequiredService<Messaging.SweepTickPublisher>().StartAsync(shutdownCts.Token);
                 var eventConsumers = new Microsoft.Extensions.Hosting.BackgroundService[]
                 {
-                    provider.GetRequiredService<Orchestrator.Consumers.TaskEnqueuedWakeupConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.TaskTransitionedWakeupConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.WatchSweepTickConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.TaskEnqueuedConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.TaskTransitionedConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.SweepTickConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.SpecStatusChangedConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.SprintStatusChangedConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.FollowUpFiledConsumer>(),
+                    provider.GetRequiredService<Orchestrator.Consumers.GroomRequestedConsumer>(),
                     provider.GetRequiredService<Orchestrator.Consumers.PrOpenedConsumer>(),
                     provider.GetRequiredService<Orchestrator.Consumers.ReviewVerdictRecordedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.MergeReadyPollConsumer>(),
                 };
                 foreach (var consumer in eventConsumers)
                     await consumer.StartAsync(shutdownCts.Token);

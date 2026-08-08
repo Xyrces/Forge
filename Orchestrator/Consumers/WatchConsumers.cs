@@ -57,36 +57,6 @@ public abstract class WatchConsumerBase<T> : EventConsumer<T> where T : IForgeEv
 }
 
 /// <summary>
-/// SweepTick(watch) → run the full sequential watch sweep for the
-/// project (the 15m backstop; GitHub is the truth).
-/// </summary>
-public sealed class WatchSweepTickConsumer : WatchConsumerBase<SweepTick>
-{
-    private readonly WatchSweepService _sweeps;
-    private readonly ILogger<WatchSweepTickConsumer> _logger;
-
-    public WatchSweepTickConsumer(
-        ITransport transport,
-        ProjectDispatchBundleFactory bundleFactory,
-        Core.IProjectStore projectStore,
-        WatchSweepService sweeps,
-        ILogger<WatchSweepTickConsumer> logger)
-        : base(transport, bundleFactory, projectStore, logger)
-    {
-        _sweeps = sweeps;
-        _logger = logger;
-    }
-
-    protected override async Task HandleAsync(SweepTick evt, CancellationToken ct)
-    {
-        if (evt.Kind != SweepKind.Watch) return;
-        var bundle = await BundleForAsync(evt.ProjectId, _logger, ct);
-        if (bundle is null) return;
-        await _sweeps.SweepProjectAsync(bundle, ct);
-    }
-}
-
-/// <summary>
 /// PrOpened → launch the background review immediately (the reviewer
 /// starts on the pushed head while CI runs; the sweep is the backstop).
 /// The handler only kicks — the review runs off-loop.
@@ -158,39 +128,3 @@ public sealed class ReviewVerdictRecordedConsumer : WatchConsumerBase<ReviewVerd
     }
 }
 
-/// <summary>
-/// TaskTransitioned→MergeReady → immediate GitHub poll of that PR only
-/// (CI-green determination is GitHub truth; don't wait for the sweep).
-/// </summary>
-public sealed class MergeReadyPollConsumer : WatchConsumerBase<TaskTransitioned>
-{
-    private readonly ILogger<MergeReadyPollConsumer> _logger;
-
-    public MergeReadyPollConsumer(
-        ITransport transport,
-        ProjectDispatchBundleFactory bundleFactory,
-        Core.IProjectStore projectStore,
-        ILogger<MergeReadyPollConsumer> logger)
-        : base(transport, bundleFactory, projectStore, logger)
-    {
-        _logger = logger;
-    }
-
-    protected override async Task HandleAsync(TaskTransitioned evt, CancellationToken ct)
-    {
-        if (evt.ToState != Core.TaskLifecycleState.MergeReady) return;
-        var bundle = await BundleForAsync(evt.ProjectId, _logger, ct);
-        if (bundle is null) return;
-        var task = await bundle.IssueStore.GetAsync(evt.TaskId, ct);
-        if (task is null || task.GetMetadata("prNumber") is null) return;
-        try
-        {
-            var outcome = await bundle.PrWatcher.PollWatchedTaskAsync(task, ct);
-            _logger.LogInformation("MergeReady-driven poll for {TaskId}: {Outcome}", evt.TaskId, outcome);
-        }
-        catch (Octokit.RateLimitExceededException)
-        {
-            _logger.LogWarning("MergeReady-driven poll for {TaskId} hit the GitHub rate limit — sweep backstop covers", evt.TaskId);
-        }
-    }
-}

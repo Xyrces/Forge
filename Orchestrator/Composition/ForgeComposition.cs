@@ -84,14 +84,14 @@ public static class ForgeComposition
 
         // Dispatch-loop wakeup: message consumers signal the loop on
         // enqueue/transition events (run-finished signals internally).
-        var dispatchWakeup = new DispatchWakeupSignal();
-        services.AddSingleton(dispatchWakeup);
-        services.AddSingleton(sp => new Consumers.TaskEnqueuedWakeupConsumer(
-            sp.GetRequiredService<ITransport>(), dispatchWakeup,
-            sp.GetRequiredService<ILogger<Consumers.TaskEnqueuedWakeupConsumer>>()));
-        services.AddSingleton(sp => new Consumers.TaskTransitionedWakeupConsumer(
-            sp.GetRequiredService<ITransport>(), dispatchWakeup,
-            sp.GetRequiredService<ILogger<Consumers.TaskTransitionedWakeupConsumer>>()));
+        // Event-driven loop wakeups: one signal per loop, shared with
+        // the message consumers (competing-consumer transport — ONE
+        // consumer per topic fans out to every interested loop).
+        var wakeups = Consumers.SchedulerWakeups.Create();
+        services.AddSingleton(wakeups);
+        services.AddSingleton(sp => new Consumers.TaskEnqueuedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.TaskEnqueuedConsumer>>()));
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
             events: eventPublisher);
@@ -397,26 +397,40 @@ public static class ForgeComposition
             eventPublisher: eventPublisher);
         services.AddSingleton(dispatchBundleFactory);
 
-        // Watch pipeline: the sweep runs on SweepTick(watch) messages
-        // (15m backstop); PrOpened / ReviewVerdictRecorded /
+        // Watch pipeline + scheduler triggers: ONE consumer per topic
+        // (the in-memory transport is competing-consumer) fanning out
+        // to every interested loop. The watch sweep runs on
+        // SweepTick(watch); PrOpened / ReviewVerdictRecorded /
         // MergeReady transitions drive the immediate fast paths.
         var watchSweeps = new WatchSweepService(
             agentRunner, llmConfig, roleModelOverrides, modelRateLimits,
             lifecycle, workflowResolver, eventBus, loggerFactory,
             loggerFactory.CreateLogger<WatchSweepService>());
         services.AddSingleton(watchSweeps);
-        services.AddSingleton(sp => new Consumers.WatchSweepTickConsumer(
+        services.AddSingleton(sp => new Consumers.TaskTransitionedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups, dispatchBundleFactory, projectStore,
+            sp.GetRequiredService<ILogger<Consumers.TaskTransitionedConsumer>>()));
+        services.AddSingleton(sp => new Consumers.SweepTickConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
-            watchSweeps, sp.GetRequiredService<ILogger<Consumers.WatchSweepTickConsumer>>()));
+            wakeups, watchSweeps, sp.GetRequiredService<ILogger<Consumers.SweepTickConsumer>>()));
+        services.AddSingleton(sp => new Consumers.SpecStatusChangedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.SpecStatusChangedConsumer>>()));
+        services.AddSingleton(sp => new Consumers.SprintStatusChangedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.SprintStatusChangedConsumer>>()));
+        services.AddSingleton(sp => new Consumers.FollowUpFiledConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.FollowUpFiledConsumer>>()));
+        services.AddSingleton(sp => new Consumers.GroomRequestedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.GroomRequestedConsumer>>()));
         services.AddSingleton(sp => new Consumers.PrOpenedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             watchSweeps, sp.GetRequiredService<ILogger<Consumers.PrOpenedConsumer>>()));
         services.AddSingleton(sp => new Consumers.ReviewVerdictRecordedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             sp.GetRequiredService<ILogger<Consumers.ReviewVerdictRecordedConsumer>>()));
-        services.AddSingleton(sp => new Consumers.MergeReadyPollConsumer(
-            sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
-            sp.GetRequiredService<ILogger<Consumers.MergeReadyPollConsumer>>()));
 
         GitHubService? GitHubForProject(string projectId)
         {
@@ -447,7 +461,7 @@ public static class ForgeComposition
             modelCooldowns: modelRateLimits,
             lifecycle: lifecycle,
             workflow: workflowResolver,
-            wakeup: dispatchWakeup);
+            wakeup: wakeups.Dispatch);
         orchestrator.BindOptions(options);
         orchestrator.ModelOverrides = roleModelOverrides;
         services.AddSingleton(orchestrator);
@@ -616,8 +630,10 @@ public static class ForgeComposition
             eventPublisher: sp.GetRequiredService<IEventPublisher>(),
             transport: sp.GetRequiredService<ITransport>()));
 
-        // Schedulers: constructed here, started by the runtime with the
-        // shutdown token (RunOrchestratorAsync).
+        // Schedulers: trigger events kick via the wakeup signals; the
+        // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is
+        // gone — events drive the fast path). Constructed here, started
+        // by the runtime with the shutdown token (RunOrchestratorAsync).
         var followUpTriage = new FollowUpTriageAgent(
             chatClientFactory, llmConfig,
             loggerFactory.CreateLogger<FollowUpTriageAgent>());
@@ -625,9 +641,10 @@ public static class ForgeComposition
         services.AddSingleton(new ScheduledGroomer(
             routingSpecStore, groomerFactory, groomerRuns, eventBus,
             loggerFactory.CreateLogger<ScheduledGroomer>(),
-            interval: TimeSpan.FromMinutes(5),
+            interval: TimeSpan.FromMinutes(15),
             issues: issues, sprints: sprints, gates: stageGates,
-            projectContexts: projectFactory));
+            projectContexts: projectFactory,
+            wakeup: wakeups.Groom));
         services.AddSingleton(new ScheduledWatchdog(
             projectFactory, eventBus,
             loggerFactory.CreateLogger<ScheduledWatchdog>(),
@@ -635,19 +652,22 @@ public static class ForgeComposition
         services.AddSingleton(new DesignerScheduler(
             routingSpecStore, designerAgentFactory, designerRuns, eventBus,
             loggerFactory.CreateLogger<DesignerScheduler>(),
-            interval: TimeSpan.FromMinutes(5),
+            interval: TimeSpan.FromMinutes(15),
             gates: stageGates,
-            workflow: workflowResolver));
+            workflow: workflowResolver,
+            wakeup: wakeups.Design));
         services.AddSingleton(new ArtistScheduler(
             routingSpecStore, artistAgentFactory, artistRuns, eventBus,
             loggerFactory.CreateLogger<ArtistScheduler>(),
-            interval: TimeSpan.FromMinutes(5)));
+            interval: TimeSpan.FromMinutes(15),
+            wakeup: wakeups.Artist));
         services.AddSingleton(new Orchestrator.Sprint.SprintAssembler(
             projectFactory, eventBus,
             loggerFactory.CreateLogger<Orchestrator.Sprint.SprintAssembler>(),
-            interval: TimeSpan.FromMinutes(5),
+            interval: TimeSpan.FromMinutes(15),
             gates: stageGates,
-            followUpTriage: followUpTriage));
+            followUpTriage: followUpTriage,
+            wakeup: wakeups.Assemble));
 
         return services.BuildServiceProvider();
     }

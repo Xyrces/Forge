@@ -3,14 +3,13 @@ using System.Threading.Channels;
 namespace Forge.Orchestrator;
 
 /// <summary>
-/// Event-signaled wakeup for the dispatch loop. Producers (message
-/// consumers reacting to TaskEnqueued / TaskTransitioned, and the
-/// dispatch loop itself when a run finishes and frees a role slot)
-/// signal; the loop races one wait against its 15-minute backstop.
-/// Capacity 1 + DropWrite: a pending wakeup is a wakeup, duplicates
-/// carry no information.
+/// Coalescing wakeup for event-driven loops (dispatch, schedulers).
+/// Message consumers signal (kicks only — the loop does the work in
+/// its own RunAsync); the loop races one wait against its backstop
+/// interval. Capacity 1 + DropWrite: a pending wakeup is a wakeup,
+/// duplicates carry no information.
 /// </summary>
-public sealed class DispatchWakeupSignal
+public sealed class WakeupSignal
 {
     private readonly Channel<byte> _channel = Channel.CreateBounded<byte>(
         new BoundedChannelOptions(1)

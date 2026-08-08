@@ -62,7 +62,8 @@ public sealed class SprintAssembler
         ILogger<SprintAssembler> logger,
         TimeSpan? interval = null,
         StageGates? gates = null,
-        Core.IFollowUpTriage? followUpTriage = null)
+        Core.IFollowUpTriage? followUpTriage = null,
+        WakeupSignal? wakeup = null)
     {
         _projects = projects;
         _events = events;
@@ -70,9 +71,11 @@ public sealed class SprintAssembler
         _interval = interval ?? TimeSpan.FromMinutes(5);
         _gates = gates;
         _followUpTriage = followUpTriage;
+        _wakeup = wakeup;
     }
 
     private readonly Core.IFollowUpTriage? _followUpTriage;
+    private readonly WakeupSignal? _wakeup;
 
     public TimeSpan Interval => _interval;
 
@@ -146,18 +149,51 @@ public sealed class SprintAssembler
         try { await Task.Delay(TimeSpan.FromSeconds(20), ct); }
         catch (OperationCanceledException) { return; }
 
-        using var timer = new PeriodicTimer(_interval);
-        try
+        // Message-driven: trigger events kick via the wakeup signal;
+        // the backstop interval re-derives everything if hints are
+        // lost. The 5m PeriodicTimer is gone.
+        while (!ct.IsCancellationRequested)
         {
-            do
+            try
             {
                 await TickAsync(ct);
             }
-            while (await timer.WaitForNextTickAsync(ct));
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Assembler tick failed; continuing");
+            }
+            if (!await WaitForNextTickAsync(ct)) break;
+        }
+    }
+
+    /// <summary>Wait for a trigger-event kick or the backstop interval.
+    /// Returns false on shutdown. Without a signal wired (tests) falls
+    /// back to the plain interval delay.</summary>
+    private async Task<bool> WaitForNextTickAsync(CancellationToken ct)
+    {
+        if (_wakeup is null)
+        {
+            try
+            {
+                await Task.Delay(_interval, ct);
+                return true;
+            }
+            catch (OperationCanceledException) { return false; }
+        }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(_interval);
+        try
+        {
+            await _wakeup.WaitAsync(timeout.Token);
+            return true;
         }
         catch (OperationCanceledException)
         {
-            // Normal shutdown.
+            return !ct.IsCancellationRequested;
         }
     }
 

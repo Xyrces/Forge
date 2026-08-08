@@ -48,7 +48,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly ModelRateLimitTracker _modelCooldowns;
     private readonly Core.TaskStateMachine? _lifecycle;
     private readonly Core.Workflow.WorkflowResolver? _workflow;
-    private readonly DispatchWakeupSignal? _wakeup;
+    private readonly WakeupSignal? _wakeup;
     private Agents.LlmConfig? _llmConfig;
     private static readonly TimeSpan LlmRateLimitCooldown = TimeSpan.FromMinutes(3);
     // In-flight dev dispatches. The cycle fire-and-forgets runs via
@@ -81,7 +81,7 @@ public sealed class OrchestratorAgent : IAgent
         ModelRateLimitTracker? modelCooldowns = null,
         Core.TaskStateMachine? lifecycle = null,
         Core.Workflow.WorkflowResolver? workflow = null,
-        DispatchWakeupSignal? wakeup = null)
+        WakeupSignal? wakeup = null)
     {
         _projectStore = projectStore;
         _bundleFactory = bundleFactory;
@@ -147,7 +147,7 @@ public sealed class OrchestratorAgent : IAgent
     }
 
     /// <summary>
-    /// Inter-cycle wait. With a <see cref="DispatchWakeupSignal"/> wired
+    /// Inter-cycle wait. With a <see cref="WakeupSignal"/> wired
     /// (production), the loop sleeps until a message consumer signals
     /// (TaskEnqueued / TaskTransitioned) or a finishing run frees a role
     /// slot; the 15-minute backstop re-derives everything if hints are
