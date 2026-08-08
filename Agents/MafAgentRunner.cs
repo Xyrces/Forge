@@ -1079,7 +1079,12 @@ public async Task<AgentRunResult> RunAsync(
         IReadOnlyList<MemoryRecord> memories;
         try
         {
-            memories = await _memory!.RecallAsync(keyPrefix: null, ct);
+            // Exclusions applied in SQL: session/ blobs are hundreds
+            // of KB each (71.6MB across 284 rows on 2026-08-08) and
+            // are filtered out below anyway — reading them per run
+            // strangled the Basic-tier DB under concurrency.
+            memories = await _memory!.RecallAsync(keyPrefix: null,
+                excludePrefixes: new[] { "sprint/", "session/" }, ct);
         }
         catch (Exception ex)
         {
@@ -1221,7 +1226,13 @@ public async Task<AgentRunResult> RunAsync(
         {
             if (sessionKey is null || _memory is null) return null;
             var json = await agent.SerializeSessionAsync(session, cancellationToken: ct);
-            await _memory.RememberAsync(sessionKey, json.GetRawText(), ttlDays: null, CancellationToken.None);
+            // TTL: a session is useful only while its task is live
+            // (rework rounds, reviewer re-review). Sessions for
+            // terminal tasks are dead weight — 284 orphaned blobs
+            // accumulated to 71.6MB by 2026-08-08 and nearly took
+            // the service down. 14 days covers even the slowest
+            // rework loop.
+            await _memory.RememberAsync(sessionKey, json.GetRawText(), ttlDays: 14, CancellationToken.None);
             return sessionKey;
         }
         catch (Exception ex)
