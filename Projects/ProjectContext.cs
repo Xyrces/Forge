@@ -90,6 +90,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     private readonly IReadOnlyDictionary<string, string> _issuesDbByProject;
     private readonly string _dataRoot;
     private readonly Func<string, string, Core.Db.IDbConnectionFactory>? _dbResolver;
+    private readonly Core.Messaging.IEventPublisher? _events;
     private readonly ConcurrentDictionary<string, ProjectContext> _cache = new();
     private bool _disposed;
 
@@ -97,8 +98,9 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     public ProjectContextFactory(
         IReadOnlyList<ProjectOptions> projects,
         IReadOnlyDictionary<string, string>? issuesDbByProject = null,
-        Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null)
-        : this(projects, store: null, dataRoot: null, issuesDbByProject, dbResolver)
+        Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
+        Core.Messaging.IEventPublisher? events = null)
+        : this(projects, store: null, dataRoot: null, issuesDbByProject, dbResolver, events)
     {
     }
 
@@ -107,8 +109,9 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         IProjectStore store,
         string dataRoot,
         IReadOnlyDictionary<string, string>? issuesDbByProject = null,
-        Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null)
-        : this(projects: null, store: store, dataRoot: dataRoot, issuesDbByProject, dbResolver)
+        Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
+        Core.Messaging.IEventPublisher? events = null)
+        : this(projects: null, store: store, dataRoot: dataRoot, issuesDbByProject, dbResolver, events)
     {
     }
 
@@ -117,7 +120,8 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         IProjectStore? store,
         string? dataRoot,
         IReadOnlyDictionary<string, string>? issuesDbByProject,
-        Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null)
+        Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
+        Core.Messaging.IEventPublisher? events = null)
     {
         if (projects is null && store is null)
             throw new ArgumentException("Either projects (static) or store (live) must be supplied.");
@@ -127,6 +131,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         _issuesDbByProject = issuesDbByProject
             ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         _dbResolver = dbResolver;
+        _events = events;
     }
 
     public IReadOnlyList<ProjectOptions> KnownProjects
@@ -178,8 +183,8 @@ public sealed class ProjectContextFactory : IAsyncDisposable
             : ProjectStateDirs.IssuesDbFor(opts, _dataRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var store = _dbResolver is not null
-            ? new IssueStore(_dbResolver(projectId, dbPath))
-            : new IssueStore(dbPath);
+            ? new IssueStore(_dbResolver(projectId, dbPath), projectId, _events)
+            : new IssueStore(dbPath, projectId, _events);
         var ctx2 = new ProjectContext(opts, store);
         return _cache.GetOrAdd(projectId, ctx2);
     }

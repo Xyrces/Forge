@@ -14,6 +14,7 @@ public static class Topics
     public const string PrOpened = "forge.pr-opened";
     public const string ReviewVerdictRecorded = "forge.review-verdict";
     public const string SpecStatusChanged = "forge.spec-status-changed";
+    public const string SprintStatusChanged = "forge.sprint-status-changed";
     public const string FollowUpFiled = "forge.followup-filed";
     public const string GroomRequested = "forge.groom-requested";
     public const string SweepTick = "forge.sweep-tick";
@@ -25,6 +26,7 @@ public static class Topics
         nameof(Core.Messaging.PrOpened) => PrOpened,
         nameof(Core.Messaging.ReviewVerdictRecorded) => ReviewVerdictRecorded,
         nameof(Core.Messaging.SpecStatusChanged) => SpecStatusChanged,
+        nameof(Core.Messaging.SprintStatusChanged) => SprintStatusChanged,
         nameof(Core.Messaging.FollowUpFiled) => FollowUpFiled,
         nameof(Core.Messaging.GroomRequested) => GroomRequested,
         nameof(Core.Messaging.SweepTick) => SweepTick,

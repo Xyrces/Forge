@@ -106,6 +106,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
     private readonly ISecretStore? _secrets;
     private readonly StageGates? _gates;
     private readonly Core.TaskStateMachine? _lifecycle;
+    private readonly Core.Messaging.IEventPublisher? _eventPublisher;
 
     public ProjectDispatchBundleFactory(
         AgentOptions options,
@@ -120,7 +121,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         ILoggerFactory loggerFactory,
         ISecretStore? secrets = null,
         StageGates? gates = null,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Core.Messaging.IEventPublisher? eventPublisher = null)
     {
         _options = options;
         _dataRoot = dataRoot;
@@ -135,6 +137,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         _secrets = secrets;
         _gates = gates;
         _lifecycle = lifecycle;
+        _eventPublisher = eventPublisher;
     }
 
     /// <summary>
@@ -221,7 +224,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         var dbPath = ForgesystemPaths.IssuesDb(_dataRoot, project.Id);
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var issueStore = new IssueStore(
-            Core.Db.ForgeDb.ForProject(_options.Db.IsSqlServer, _options.Db.ConnectionString, project.Id, dbPath));
+            Core.Db.ForgeDb.ForProject(_options.Db.IsSqlServer, _options.Db.ConnectionString, project.Id, dbPath),
+            project.Id, _eventPublisher);
         var agents = new AgentStore(issueStore);
         var sprints = new SprintStore(issueStore);
         // Sibling stores share the project's connection factory (same

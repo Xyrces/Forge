@@ -67,8 +67,24 @@ public static class ForgeComposition
         services.AddSingleton(secretStore);
         services.AddSingleton<ISecretStore>(secretStore);
 
+        // Messaging: one transport + one publisher for the process,
+        // created eagerly so EVERY store built below (primary and
+        // per-project via the factories) publishes through them.
+        // DashboardHost's factory registration resolves these same
+        // instances (shared in-memory channels).
+        var transport = ForgeMessagingExtensions.CreateTransport(options.Messaging.Transport);
+        services.AddSingleton(transport);
+        var eventPublisher = new TalariaEventPublisher(
+            transport, loggerFactory.CreateLogger<TalariaEventPublisher>());
+        services.AddSingleton<IEventPublisher>(eventPublisher);
+        services.AddSingleton(sp => new SweepTickPublisher(
+            sp.GetRequiredService<IEventPublisher>(),
+            async c => (await projectStore.ListAsync(c)).Select(p => p.Id).ToArray(),
+            sp.GetRequiredService<ILogger<SweepTickPublisher>>()));
+
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
-            (pid, path) => Program.FactoryFor(options.Db, pid, path));
+            (pid, path) => Program.FactoryFor(options.Db, pid, path),
+            events: eventPublisher);
         services.AddSingleton(projectFactory);
         string? ProjectRootLookup(string projectId) =>
             projectFactory.KnownProjects
@@ -85,7 +101,7 @@ public static class ForgeComposition
         services.AddSingleton(stateStore);
         var primaryFactory = Program.FactoryFor(options.Db, primary.Id, primaryDb);
         services.AddSingleton(primaryFactory);
-        var issues = new IssueStore(primaryFactory);
+        var issues = new IssueStore(primaryFactory, primary.Id, eventPublisher);
         services.AddSingleton(issues);
         services.AddSingleton<IIssueStore>(issues);
         var registryIssues = new IssueStore(
@@ -294,15 +310,6 @@ public static class ForgeComposition
             loggerFactory.CreateLogger<TaskStateMachine>());
         services.AddSingleton(lifecycle);
 
-        // Messaging: one transport + one publisher for the process.
-        // Registered BEFORE DashboardHost's factory below so the
-        // dashboard container gets the same instances passed through.
-        services.AddForgeMessaging(options.Messaging.Transport);
-        services.AddSingleton(sp => new SweepTickPublisher(
-            sp.GetRequiredService<IEventPublisher>(),
-            async c => (await projectStore.ListAsync(c)).Select(p => p.Id).ToArray(),
-            sp.GetRequiredService<ILogger<SweepTickPublisher>>()));
-
         // P4 Stage B — pick the workflow runtime based on appsettings.json.
         IWorkflowDispatcher dispatcher;
         if (string.Equals(options.Orchestrator.Execution, "Durable", StringComparison.OrdinalIgnoreCase))
@@ -391,7 +398,8 @@ public static class ForgeComposition
         var dispatchBundleFactory = new ProjectDispatchBundleFactory(
             options, orchDataRoot, projectStore, cloner,
             agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
-            secrets: secretStore, gates: stageGates, lifecycle: lifecycle);
+            secrets: secretStore, gates: stageGates, lifecycle: lifecycle,
+            eventPublisher: eventPublisher);
         services.AddSingleton(dispatchBundleFactory);
 
         GitHubService? GitHubForProject(string projectId)

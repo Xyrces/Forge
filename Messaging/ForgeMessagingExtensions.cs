@@ -23,7 +23,7 @@ public static class ForgeMessagingExtensions
         return services;
     }
 
-    private static ITransport CreateTransport(string? kind)
+    internal static ITransport CreateTransport(string? kind)
     {
         return kind switch
         {

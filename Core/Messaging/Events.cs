@@ -72,6 +72,19 @@ public sealed record SpecStatusChanged : IForgeEvent
         => $"spec-status:{specId}:{toStatus}:{changedAt:O}";
 }
 
+public sealed record SprintStatusChanged : IForgeEvent
+{
+    public required string MessageId { get; init; }
+    public required string ProjectId { get; init; }
+    public required string SprintId { get; init; }
+    public required string FromStatus { get; init; }
+    public required string ToStatus { get; init; }
+    public DateTimeOffset ChangedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    public static string IdFor(string sprintId, string toStatus, DateTimeOffset changedAt)
+        => $"sprint-status:{sprintId}:{toStatus}:{changedAt:O}";
+}
+
 public sealed record FollowUpFiled : IForgeEvent
 {
     public required string MessageId { get; init; }
