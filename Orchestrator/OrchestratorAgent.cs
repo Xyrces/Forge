@@ -41,9 +41,12 @@ public sealed class OrchestratorAgent : IAgent
     // loops multiplied unboundedly (watches are never claimed, so they
     // stay Pending) and vaporized the 5000-req/hr GitHub quota. Now
     // watches are polled in ONE sequential sweep every WatchSweepInterval:
-    // 3 calls per watch per sweep (2 watches -> ~24 calls/hr).
+    // 5 minutes (was 15 until 2026-08-08 — the solo-sprint firehose made
+    // the 15-minute cadence the MergeReady bottleneck: a PR whose
+    // CI+approval landed at T merged at T+15min+queue; at ~30 watches
+    // the 5-minute sweep costs ~1k calls/hr of the 5k/hr budget).
     private DateTime _nextWatchSweepUtc = DateTime.MinValue;
-    private static readonly TimeSpan WatchSweepInterval = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan WatchSweepInterval = TimeSpan.FromMinutes(5);
     // LLM 429 cooldowns for the engineering dispatch path, keyed by
     // (provider, model) — quotas live at that boundary, so a 429 from
     // minimax must not freeze tasks that would run on a different
@@ -533,16 +536,36 @@ public sealed class OrchestratorAgent : IAgent
             if (t.IsFaulted)
             {
                 _logger.LogError(t.Exception, "background review for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
+                return;
             }
+            // The verdict is recorded in the task metadata — pull the
+            // next sweep forward so a green PR merges within a
+            // dispatch cycle instead of waiting out the sweep timer
+            // (operator 2026-08-08: MergeReady dwell). CI flips can't
+            // be event-driven, but verdicts are OUR event.
+            _nextWatchSweepUtc = DateTime.MinValue;
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
     }
 
+    /// <summary>
+    /// Sweep ordering: MergeReady first — a merge that only needs the
+    /// API call must never queue behind twenty slow review polls of
+    /// younger PRs (operator 2026-08-08: MergeReady dwell). Within a
+    /// class, oldest-first (FIFO).
+    /// </summary>
+    internal static List<IssueRecord> OrderWatchesForSweep(IReadOnlyList<IssueRecord> watches)
+        => watches
+            .OrderByDescending(w => string.Equals(w.GetMetadata("state"), "MergeReady", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(w => w.UpdatedAt)
+            .ToList();
+
     private async Task RunWatchSweepAsync(IReadOnlyList<IssueRecord> watchedTasks, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
+        var ordered = OrderWatchesForSweep(watchedTasks);
         _logger.LogInformation("Watch sweep: polling {N} watched task(s) (project={Project})",
-            watchedTasks.Count, bundle.Project.Id);
-        foreach (var watched in watchedTasks)
+            ordered.Count, bundle.Project.Id);
+        foreach (var watched in ordered)
         {
             if (cancellationToken.IsCancellationRequested) return;
             try
