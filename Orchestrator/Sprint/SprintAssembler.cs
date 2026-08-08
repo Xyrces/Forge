@@ -100,7 +100,11 @@ public sealed class SprintAssembler
         string? ActiveSprintId,
         string? ActiveSprintName,
         int ActiveTotal,
-        int ActiveTerminal);
+        int ActiveTerminal,
+        // Groomer proof-of-life (operator 2026-08-08) — embedded in
+        // the awaiting-groom phase so "N awaiting grooming" carries
+        // evidence the groomer is working / idle / silent.
+        ScheduledGroomer.GroomerStatus? Groomer = null);
 
     private static readonly JsonSerializerOptions BuildStateJson = new(JsonSerializerDefaults.Web);
 
@@ -131,6 +135,23 @@ public sealed class SprintAssembler
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "SprintAssembler: build-state snapshot read failed (observability only)");
+            return null;
+        }
+    }
+
+    private async Task<ScheduledGroomer.GroomerStatus?> ReadGroomerStatusAsync(IIssueStore issues, CancellationToken ct)
+    {
+        try
+        {
+            if (issues is not Core.IssueStore concrete) return null;
+            var mem = new Core.MemoryStore(concrete.Db);
+            var hit = await mem.GetAsync(Core.SprintBuildStateKeys.GroomerStatusKey, ct);
+            return hit is null ? null
+                : JsonSerializer.Deserialize<ScheduledGroomer.GroomerStatus>(hit.Body, BuildStateJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "SprintAssembler: groomer-status read failed (observability only)");
             return null;
         }
     }
@@ -308,7 +329,8 @@ public sealed class SprintAssembler
                 CompletedSprintId: completedSprintId, CompletedSprintName: completedSprintName,
                 PendingGroom: pendingItems,
                 EligibleGroups: waitingGroups,
-                ActiveSprintId: null, ActiveSprintName: null, ActiveTotal: 0, ActiveTerminal: 0), ct);
+                ActiveSprintId: null, ActiveSprintName: null, ActiveTotal: 0, ActiveTerminal: 0,
+                Groomer: await ReadGroomerStatusAsync(issues, ct)), ct);
             return;
         }
 

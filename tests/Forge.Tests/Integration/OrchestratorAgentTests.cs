@@ -850,4 +850,31 @@ public sealed class OrchestratorAgentTests : IDisposable
         public StubBundleFactory(ProjectDispatchBundle bundle) { _bundle = bundle; }
         public ProjectDispatchBundle Build(ProjectOptions project) => _bundle;
     }
+
+    [Fact]
+    public async Task OrderWatchesForSweep_MergeReadyFirst_ThenFifo()
+    {
+        // Operator 2026-08-08: a merge that only needs the API call
+        // must not queue behind slow review polls of younger PRs.
+        static IssueRecord Watch(string id, string? state, DateTime updated)
+            => new(Id: id, ShortId: id, Type: "task", Title: id, Description: null,
+                Status: IssueStatus.InProgress, Priority: 2, Assignee: null,
+                CreatedAt: updated, UpdatedAt: updated, ClosedAt: null,
+                MetadataJson: state is null ? "{}" : $"{{\"state\":\"{state}\"}}");
+
+        var t0 = DateTime.UtcNow.AddHours(-2);
+        var watches = new List<IssueRecord>
+        {
+            Watch("task-a", "PROpen", t0),
+            Watch("task-b", "MergeReady", t0.AddMinutes(30)),
+            Watch("task-c", "PROpen", t0.AddMinutes(-30)),
+            Watch("task-d", "MergeReady", t0.AddMinutes(10)),
+            Watch("task-e", "ParkedInfra", t0.AddMinutes(5)),
+        };
+
+        var ordered = Forge.Orchestrator.OrchestratorAgent.OrderWatchesForSweep(watches);
+
+        Assert.Equal(new[] { "task-d", "task-b", "task-c", "task-a", "task-e" },
+            ordered.Select(w => w.Id).ToArray());
+    }
 }

@@ -12,4 +12,14 @@ namespace Forge.Core;
 public static class SprintBuildStateKeys
 {
     public const string BuildStateKey = "sprint/build";
+
+    /// <summary>
+    /// Groomer proof-of-life (operator 2026-08-08: "reported states
+    /// with no real proof or feedback"). The ScheduledGroomer writes
+    /// a status record to the project's memory store each ad-hoc
+    /// sweep; the assembler's awaiting-groom snapshot embeds it so
+    /// the panel can distinguish groomer-working / groomer-idle /
+    /// groomer-silent (machine suspend, rate limit, error).
+    /// </summary>
+    public const string GroomerStatusKey = "groomer/status";
 }
