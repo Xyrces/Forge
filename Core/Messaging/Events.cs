@@ -17,8 +17,8 @@ public sealed record TaskEnqueued : IForgeEvent
     public string? TaskType { get; init; }
     public DateTimeOffset EnqueuedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(string taskId, DateTimeOffset enqueuedAt)
-        => $"enqueued:{taskId}:{enqueuedAt:O}";
+    public static string IdFor(string projectId, string taskId, DateTimeOffset enqueuedAt)
+        => $"enqueued:{projectId}:{taskId}:{enqueuedAt:O}";
 }
 
 public sealed record TaskTransitioned : IForgeEvent
@@ -30,8 +30,8 @@ public sealed record TaskTransitioned : IForgeEvent
     public required TaskLifecycleState ToState { get; init; }
     public DateTimeOffset StateEnteredAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(string taskId, TaskLifecycleState toState, DateTimeOffset stateEnteredAt)
-        => $"transition:{taskId}:{toState}:{stateEnteredAt:O}";
+    public static string IdFor(string projectId, string taskId, TaskLifecycleState toState, DateTimeOffset stateEnteredAt)
+        => $"transition:{projectId}:{taskId}:{toState}:{stateEnteredAt:O}";
 }
 
 public sealed record PrOpened : IForgeEvent
@@ -71,8 +71,8 @@ public sealed record SpecStatusChanged : IForgeEvent
     public required string ToStatus { get; init; }
     public DateTimeOffset ChangedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(string specId, string toStatus, DateTimeOffset changedAt)
-        => $"spec-status:{specId}:{toStatus}:{changedAt:O}";
+    public static string IdFor(string projectId, string specId, string toStatus, DateTimeOffset changedAt)
+        => $"spec-status:{projectId}:{specId}:{toStatus}:{changedAt:O}";
 }
 
 public sealed record SprintStatusChanged : IForgeEvent
@@ -84,8 +84,8 @@ public sealed record SprintStatusChanged : IForgeEvent
     public required string ToStatus { get; init; }
     public DateTimeOffset ChangedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    public static string IdFor(string sprintId, string toStatus, DateTimeOffset changedAt)
-        => $"sprint-status:{sprintId}:{toStatus}:{changedAt:O}";
+    public static string IdFor(string projectId, string sprintId, string toStatus, DateTimeOffset changedAt)
+        => $"sprint-status:{projectId}:{sprintId}:{toStatus}:{changedAt:O}";
 }
 
 public sealed record FollowUpFiled : IForgeEvent

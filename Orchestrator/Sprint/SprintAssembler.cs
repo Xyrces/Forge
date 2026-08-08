@@ -895,7 +895,7 @@ public sealed class SprintAssembler
             var activatedAt = DateTimeOffset.UtcNow;
             await _eventPublisher.PublishAsync(new Core.Messaging.SprintStatusChanged
             {
-                MessageId = Core.Messaging.SprintStatusChanged.IdFor(sprint.Id, "Active:linked", activatedAt),
+                MessageId = Core.Messaging.SprintStatusChanged.IdFor(projectId, sprint.Id, "Active:linked", activatedAt),
                 ProjectId = projectId,
                 SprintId = sprint.Id,
                 FromStatus = "(new)",

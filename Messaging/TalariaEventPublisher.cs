@@ -33,6 +33,11 @@ public sealed class TalariaEventPublisher : IEventPublisher, IAsyncDisposable
             var headers = new MessageHeaders { MessageId = evt.MessageId };
             await producer.ProduceAsync(evt, headers, partitionKey: evt.ProjectId, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown — not a hint-loss warning; let cancellation propagate.
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Event publish failed (hint lost; backstop tick will re-derive): {EventType} {MessageId}",

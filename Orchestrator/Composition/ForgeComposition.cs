@@ -92,6 +92,7 @@ public static class ForgeComposition
         services.AddSingleton(sp => new Consumers.TaskEnqueuedConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.TaskEnqueuedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TaskEnqueuedConsumer>());
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
             events: eventPublisher);
@@ -410,27 +411,35 @@ public static class ForgeComposition
         services.AddSingleton(sp => new Consumers.TaskTransitionedConsumer(
             sp.GetRequiredService<ITransport>(), wakeups, dispatchBundleFactory, projectStore,
             sp.GetRequiredService<ILogger<Consumers.TaskTransitionedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TaskTransitionedConsumer>());
         services.AddSingleton(sp => new Consumers.SweepTickConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             wakeups, watchSweeps, sp.GetRequiredService<ILogger<Consumers.SweepTickConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SweepTickConsumer>());
         services.AddSingleton(sp => new Consumers.SpecStatusChangedConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.SpecStatusChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SpecStatusChangedConsumer>());
         services.AddSingleton(sp => new Consumers.SprintStatusChangedConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.SprintStatusChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintStatusChangedConsumer>());
         services.AddSingleton(sp => new Consumers.FollowUpFiledConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.FollowUpFiledConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.FollowUpFiledConsumer>());
         services.AddSingleton(sp => new Consumers.GroomRequestedConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.GroomRequestedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.GroomRequestedConsumer>());
         services.AddSingleton(sp => new Consumers.PrOpenedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             watchSweeps, sp.GetRequiredService<ILogger<Consumers.PrOpenedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.PrOpenedConsumer>());
         services.AddSingleton(sp => new Consumers.ReviewVerdictRecordedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             sp.GetRequiredService<ILogger<Consumers.ReviewVerdictRecordedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.ReviewVerdictRecordedConsumer>());
 
         GitHubService? GitHubForProject(string projectId)
         {

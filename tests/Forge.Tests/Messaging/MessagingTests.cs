@@ -92,11 +92,11 @@ public sealed class EventContractTests
     public void DeterministicIds_AreStable()
     {
         var at = new DateTimeOffset(2026, 8, 8, 12, 0, 0, TimeSpan.Zero);
-        Assert.Equal(TaskEnqueued.IdFor("task-1", at), TaskEnqueued.IdFor("task-1", at));
-        Assert.NotEqual(TaskEnqueued.IdFor("task-1", at), TaskEnqueued.IdFor("task-2", at));
+        Assert.Equal(TaskEnqueued.IdFor("proj", "task-1", at), TaskEnqueued.IdFor("proj", "task-1", at));
+        Assert.NotEqual(TaskEnqueued.IdFor("proj", "task-1", at), TaskEnqueued.IdFor("proj", "task-2", at));
         Assert.Equal(
-            TaskTransitioned.IdFor("task-1", TaskLifecycleState.MergeReady, at),
-            TaskTransitioned.IdFor("task-1", TaskLifecycleState.MergeReady, at));
+            TaskTransitioned.IdFor("proj", "task-1", TaskLifecycleState.MergeReady, at),
+            TaskTransitioned.IdFor("proj", "task-1", TaskLifecycleState.MergeReady, at));
     }
 
     [Fact]
@@ -146,7 +146,7 @@ public sealed class TalariaEventPublisherTests
         var at = DateTimeOffset.UtcNow;
         var evt = new TaskEnqueued
         {
-            MessageId = TaskEnqueued.IdFor("task-9", at),
+            MessageId = TaskEnqueued.IdFor("proj", "task-9", at),
             ProjectId = "proj", TaskId = "task-9", TaskType = "dev", EnqueuedAt = at,
         };
 
@@ -373,7 +373,7 @@ public sealed class StorePublishTests : IDisposable
         Assert.Equal(issue.Id, evt.TaskId);
         Assert.Equal("dev", evt.TaskType);
         Assert.Equal("proj", evt.ProjectId);
-        Assert.Equal(TaskEnqueued.IdFor(issue.Id, evt.EnqueuedAt), evt.MessageId);
+        Assert.Equal(TaskEnqueued.IdFor("proj", issue.Id, evt.EnqueuedAt), evt.MessageId);
     }
 
     [Fact]
@@ -392,7 +392,7 @@ public sealed class StorePublishTests : IDisposable
         Assert.Equal(issue.Id, evt.TaskId);
         Assert.Equal(TaskLifecycleState.Pending, evt.FromState);
         Assert.Equal(TaskLifecycleState.Dispatching, evt.ToState);
-        Assert.Equal(TaskTransitioned.IdFor(issue.Id, TaskLifecycleState.Dispatching, evt.StateEnteredAt), evt.MessageId);
+        Assert.Equal(TaskTransitioned.IdFor("proj", issue.Id, TaskLifecycleState.Dispatching, evt.StateEnteredAt), evt.MessageId);
     }
 
     [Fact]

@@ -1815,7 +1815,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // by the publisher (never break a DB mutation over a hint).
         await _events.PublishAsync(new Messaging.TaskEnqueued
         {
-            MessageId = Messaging.TaskEnqueued.IdFor(id, now),
+            MessageId = Messaging.TaskEnqueued.IdFor(_projectId, id, now),
             ProjectId = _projectId,
             TaskId = id,
             TaskType = spec.Type,
@@ -2036,7 +2036,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         var now = DateTimeOffset.UtcNow;
         await _events.PublishAsync(new Messaging.TaskTransitioned
         {
-            MessageId = Messaging.TaskTransitioned.IdFor(before.Id, toState.Value, toEnteredAt ?? now),
+            MessageId = Messaging.TaskTransitioned.IdFor(_projectId, before.Id, toState.Value, toEnteredAt ?? now),
             ProjectId = _projectId,
             TaskId = before.Id,
             FromState = fromState ?? TaskLifecycleState.Pending,

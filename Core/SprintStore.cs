@@ -84,7 +84,7 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         var now = new DateTimeOffset(changedAt, TimeSpan.Zero);
         await _issues.Events.PublishAsync(new Messaging.SprintStatusChanged
         {
-            MessageId = Messaging.SprintStatusChanged.IdFor(sprintId, toStatus.ToString(), now),
+            MessageId = Messaging.SprintStatusChanged.IdFor(_issues.ProjectId, sprintId, toStatus.ToString(), now),
             ProjectId = _issues.ProjectId,
             SprintId = sprintId,
             FromStatus = fromStatus?.ToString() ?? "(new)",

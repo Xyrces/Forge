@@ -401,6 +401,23 @@ public sealed class GroomerAgent
         meta["groomNote"] = note;
         meta["groomRunId"] = _runId;
         await _issues.TransitionAsync(issueId, cur.Status, error: null, metadata: meta, ct: ct);
+        // groomed=true is a metadata-only write, so the store's
+        // lifecycle choke point publishes nothing — and the assembler /
+        // dispatch fast path would wait for the 15m backstop. This is
+        // an operator "unstick it now" lever: kick explicitly (hint
+        // only; consumers re-read the store).
+        if (_issues is IssueStore anchor)
+        {
+            var kickedAt = DateTimeOffset.UtcNow;
+            await anchor.Events.PublishAsync(new Core.Messaging.TaskEnqueued
+            {
+                MessageId = Core.Messaging.TaskEnqueued.IdFor(anchor.ProjectId, issueId, kickedAt),
+                ProjectId = anchor.ProjectId,
+                TaskId = issueId,
+                TaskType = cur.Type,
+                EnqueuedAt = kickedAt,
+            }, ct);
+        }
         _logger.LogInformation("Task {Id} groomed (approved): {Note}", issueId, note);
         return "approved";
     }

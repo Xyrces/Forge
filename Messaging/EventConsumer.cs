@@ -6,6 +6,15 @@ using Talaria.Core.Abstractions;
 namespace Forge.Messaging;
 
 /// <summary>
+/// Marker for DI registration: the composition root registers every
+/// consumer as <see cref="IEventConsumerService"/> in addition to its
+/// concrete type, and Program starts <c>GetServices&lt;IEventConsumerService&gt;()</c>
+/// — a consumer omitted from a manual start list is impossible by
+/// construction.
+/// </summary>
+public interface IEventConsumerService : IHostedService { }
+
+/// <summary>
 /// BackgroundService base for event consumers: consume → handle → Commit.
 /// Handler faults Nack (redelivery / DLQ routing) and are logged, never
 /// swallowed — MAF InProcessExecution-style silent fault swallowing is
@@ -18,7 +27,7 @@ namespace Forge.Messaging;
 /// a dead consumer must never silently take its topic's fast path (and,
 /// for <c>SweepTick</c>, every 15-minute backstop) down with it.
 /// </summary>
-public abstract class EventConsumer<T> : BackgroundService where T : IForgeEvent
+public abstract class EventConsumer<T> : BackgroundService, IEventConsumerService where T : IForgeEvent
 {
     private static readonly TimeSpan MaxRestartBackoff = TimeSpan.FromMinutes(2);
 

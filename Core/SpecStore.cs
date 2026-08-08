@@ -446,7 +446,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             var changedAt = new DateTimeOffset(now, TimeSpan.Zero);
             await _issues.Events.PublishAsync(new Messaging.SpecStatusChanged
             {
-                MessageId = Messaging.SpecStatusChanged.IdFor(id, status.ToString(), changedAt),
+                MessageId = Messaging.SpecStatusChanged.IdFor(_issues.ProjectId, id, status.ToString(), changedAt),
                 ProjectId = _issues.ProjectId,
                 SpecId = id,
                 FromStatus = current.Status.ToString(),

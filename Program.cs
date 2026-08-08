@@ -1201,19 +1201,10 @@ Console.Error.WriteLine(ex.ToString());
                 // (never swallow). Publisher starts LAST so its
                 // immediate startup tick lands on live consumers
                 // instead of relying on transport backlog retention.
-                var eventConsumers = new Microsoft.Extensions.Hosting.BackgroundService[]
-                {
-                    provider.GetRequiredService<Orchestrator.Consumers.TaskEnqueuedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.TaskTransitionedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.SweepTickConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.SpecStatusChangedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.SprintStatusChangedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.FollowUpFiledConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.GroomRequestedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.PrOpenedConsumer>(),
-                    provider.GetRequiredService<Orchestrator.Consumers.ReviewVerdictRecordedConsumer>(),
-                };
-                foreach (var consumer in eventConsumers)
+                // Consumers resolve via the IEventConsumerService
+                // marker — the composition root registers every
+                // consumer under it, so an omitted start is impossible.
+                foreach (var consumer in provider.GetServices<Messaging.IEventConsumerService>())
                     await consumer.StartAsync(shutdownCts.Token);
                 await provider.GetRequiredService<Messaging.SweepTickPublisher>().StartAsync(shutdownCts.Token);
 
