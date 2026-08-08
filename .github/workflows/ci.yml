@@ -42,11 +42,13 @@ jobs:
 
       - name: Restore
         # nuget.config's github-xyrces source expands these env vars
-        # for its credentials; the workflow token can read packages
-        # owned by this account.
+        # for its credentials. The Talaria packages are PRIVATE and
+        # linked to the Talaria repo, so the workflow's GITHUB_TOKEN
+        # gets 403 there — PACKAGES_PAT (read:packages) is the
+        # cross-repo read credential.
         env:
           GITHUB_PACKAGES_USER: ${{ github.actor }}
-          GITHUB_PACKAGES_PAT: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PACKAGES_PAT: ${{ secrets.PACKAGES_PAT }}
         run: dotnet restore Forge.sln
 
       # The .sln includes the e2e-harness project, so this builds
