@@ -39,7 +39,6 @@ public sealed class ScheduledGroomer
     private readonly ISprintStore? _sprints;
     private readonly StageGates? _gates;
     private readonly Projects.ProjectContextFactory? _projectContexts;
-    private readonly WakeupSignal? _wakeup;
 
     /// <summary>Max ad-hoc tasks groomed per tick (LLM cost bound).</summary>
     internal const int MaxTaskGroomsPerTick = 3;
@@ -58,8 +57,7 @@ public sealed class ScheduledGroomer
         // registered project's store (each groomed against its own
         // queue) instead of only the primary store. Spec-driven
         // grooming routes via the factory regardless.
-        Projects.ProjectContextFactory? projectContexts = null,
-        WakeupSignal? wakeup = null)
+        Projects.ProjectContextFactory? projectContexts = null)
     {
         _specs = specs;
         _groomerFactory = groomerFactory;
@@ -71,7 +69,6 @@ public sealed class ScheduledGroomer
         _sprints = sprints;
         _gates = gates;
         _projectContexts = projectContexts;
-        _wakeup = wakeup;
     }
 
     public TimeSpan Interval => _interval;
@@ -85,51 +82,18 @@ public sealed class ScheduledGroomer
         }
         catch (OperationCanceledException) { return; }
 
-        // Message-driven: trigger events kick via the wakeup signal;
-        // the backstop interval re-derives everything if hints are
-        // lost. The 5m PeriodicTimer is gone.
-        while (!ct.IsCancellationRequested)
+        using var timer = new PeriodicTimer(_interval);
+        try
         {
-            try
+            do
             {
                 await TickAsync(ct);
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Groomer tick failed; continuing");
-            }
-            if (!await WaitForNextTickAsync(ct)) break;
-        }
-    }
-
-    /// <summary>Wait for a trigger-event kick or the backstop interval.
-    /// Returns false on shutdown. Without a signal wired (tests) falls
-    /// back to the plain interval delay.</summary>
-    private async Task<bool> WaitForNextTickAsync(CancellationToken ct)
-    {
-        if (_wakeup is null)
-        {
-            try
-            {
-                await Task.Delay(_interval, ct);
-                return true;
-            }
-            catch (OperationCanceledException) { return false; }
-        }
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(_interval);
-        try
-        {
-            await _wakeup.WaitAsync(timeout.Token);
-            return true;
+            while (await timer.WaitForNextTickAsync(ct));
         }
         catch (OperationCanceledException)
         {
-            return !ct.IsCancellationRequested;
+            // Normal shutdown.
         }
     }
 
