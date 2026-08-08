@@ -1,5 +1,4 @@
 using Forge.Core.Messaging;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Talaria.Core.Abstractions;
 using Talaria.Transports.InMemory;
@@ -17,18 +16,15 @@ namespace Forge.Messaging;
 /// </summary>
 public static class ForgeMessagingExtensions
 {
-    public const string TransportConfigKey = "messaging.transport";
-
-    public static IServiceCollection AddForgeMessaging(this IServiceCollection services, IConfiguration config)
+    public static IServiceCollection AddForgeMessaging(this IServiceCollection services, string? transportKind)
     {
-        services.AddSingleton<ITransport>(_ => CreateTransport(config));
+        services.AddSingleton<ITransport>(_ => CreateTransport(transportKind));
         services.AddSingleton<IEventPublisher, TalariaEventPublisher>();
         return services;
     }
 
-    private static ITransport CreateTransport(IConfiguration config)
+    private static ITransport CreateTransport(string? kind)
     {
-        var kind = config[TransportConfigKey];
         return kind switch
         {
             null or "" or "inmemory" => new InMemoryTransport(),

@@ -66,6 +66,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
     private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
+    private readonly Forge.Core.Messaging.IEventPublisher? _eventPublisher;
+    private readonly Talaria.Core.Abstractions.ITransport? _transport;
     private readonly GitHubOptions? _githubOptions;
     private readonly GateOptions? _gateOptions;
     private readonly ILogger<DashboardHost> _logger;
@@ -122,7 +124,9 @@ public sealed class DashboardHost : IAsyncDisposable
         Forge.Core.TaskStateMachine? lifecycle = null,
         Forge.Core.ModelRateLimitTracker? modelRateLimits = null,
         Func<string, GitHubService?>? gitHubForProject = null,
-        Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null)
+        Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null,
+        Forge.Core.Messaging.IEventPublisher? eventPublisher = null,
+        Talaria.Core.Abstractions.ITransport? transport = null)
     {
         _options = options;
         _headroom = headroom;
@@ -174,6 +178,8 @@ public sealed class DashboardHost : IAsyncDisposable
         _modelRateLimits = modelRateLimits;
         _gitHubForProject = gitHubForProject;
         _providerApiKeys = providerApiKeys;
+        _eventPublisher = eventPublisher;
+        _transport = transport;
     }
 
     public string BaseUrl => ResolveBaseUrl();
@@ -234,6 +240,11 @@ public sealed class DashboardHost : IAsyncDisposable
         if (_projectStore is not null) builder.Services.AddSingleton(_projectStore);
         if (_projectCloner is not null) builder.Services.AddSingleton(_projectCloner);
         if (_githubOptions is not null) builder.Services.AddSingleton(_githubOptions);
+        // Messaging pass-through: the SAME transport + publisher
+        // instances the orchestrator process uses (shared in-memory
+        // channels), so dashboard endpoints can publish hints.
+        if (_eventPublisher is not null) builder.Services.AddSingleton(_eventPublisher);
+        if (_transport is not null) builder.Services.AddSingleton(_transport);
 
         // Secrets: Microsoft.AspNetCore.DataProtection. The provider
         // is shared with the orchestrator process (same master key
