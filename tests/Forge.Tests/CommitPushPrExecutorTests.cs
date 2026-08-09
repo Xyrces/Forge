@@ -390,6 +390,51 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task PushSuccess_ClearsConflictSyncReason()
+    {
+        // 2026-08-09 deadlock: a completed conflict-sync round kept
+        // reworkReason="PR conflicts with the base branch"; the
+        // watcher's conflict mutex (InProgress + conflict reason +
+        // any active run — including its own background review run)
+        // then held against the OTHER conflicting task, and two such
+        // tasks deferred behind each other forever (task-447/453).
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+        var wtPath = worktree.WorktreePath!;
+        Run("git", "config user.email test@test", wtPath);
+        Run("git", "config user.name Test", wtPath);
+        File.WriteAllText(Path.Combine(wtPath, "New.cs"), "class New {}");
+        Run("git", "add -A", wtPath);
+        Run("git", "commit -q -m agent-work", wtPath);
+        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, null,
+            new Dictionary<string, object>
+            {
+                ["reworkReason"] = "PR conflicts with the base branch",
+                ["reworkContext"] = "merge main and resolve",
+            });
+
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "did the work", null);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CommitPushPrExecutor.HandleAsync(
+                agent, _issues, _worktrees, new StubGitHub(), _events,
+                new NoOpMemoryExtractor(),
+                new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+                NullLogger<CommitPushPrExecutor>.Instance, null,
+                verifyCommands: Array.Empty<string>(), ct: default).AsTask());
+
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Null(after!.GetMetadata("reworkReason"));
+        Assert.Null(after.GetMetadata("reworkContext"));
+    }
+
+    [Fact]
     public async Task NoDiff_BounceSeedsReworkContext()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));

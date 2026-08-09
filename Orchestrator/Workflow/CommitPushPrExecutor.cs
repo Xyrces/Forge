@@ -373,21 +373,24 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
 
         // Push success = progress: reset the no-progress counter and
-        // drop any pre-push bounce context so later rounds don't
-        // render stale "rework required" guidance (operator rule
+        // drop the COMPLETED round's rework context — every reason is
+        // written fresh at requeue time by the watcher, so anything
+        // left here is stale guidance for later rounds (operator rule
         // 2026-07-31: rounds must be meaningful, budgets honest).
-        var successClear = new Dictionary<string, object> { ["noProgressAttempts"] = null! };
-        // Re-read: the executor's input record was materialized at
-        // claim time and misses metadata seeded since (bounce
-        // context lands between claim and push).
-        var seededReason = (await issues.GetAsync(issue.Id, ct))?.GetMetadata("reworkReason") ?? "";
-        if (seededReason.StartsWith("pre-push", StringComparison.OrdinalIgnoreCase)
-            || seededReason.StartsWith("no diff", StringComparison.OrdinalIgnoreCase)
-            || seededReason.StartsWith("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase))
+        // CRITICAL: this must clear conflict-sync reasons too
+        // ("PR conflicts with the base branch") — a completed sync
+        // round that keeps its reason satisfies the watcher's
+        // conflict mutex (InProgress + conflict reason + any active
+        // run, including its own background REVIEW run) and two such
+        // tasks defer behind each other forever (observed live
+        // 2026-08-09: task-447/task-453 deadlocked the merge pipeline
+        // for 30+ minutes until the watchdog reaped both claims).
+        var successClear = new Dictionary<string, object>
         {
-            successClear["reworkReason"] = null!;
-            successClear["reworkContext"] = null!;
-        }
+            ["noProgressAttempts"] = null!,
+            ["reworkReason"] = null!,
+            ["reworkContext"] = null!,
+        };
         await issues.TransitionAsync(issue.Id, IssueStatus.InProgress, error: null, metadata: successClear, ct: ct);
         var headSha = await worktrees.GetHeadShaAsync(worktreePath, ct);
         logger.LogInformation("CommitPushPr({Id}): got head sha {Sha}", issue.Id, headSha);
