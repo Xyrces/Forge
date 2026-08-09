@@ -338,6 +338,17 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .hint { font-size: 11px; color: var(--on-surface-variant); }
 .hint code { background: var(--surface-2); padding: 1px 6px; border-radius: 3px; color: var(--on-surface); }
 
+/* Add Project form: PAT guidance + registration-time secrets editor */
+.add-project-pathelp { font-size: 12px; color: var(--on-surface-variant); display: flex; flex-direction: column; gap: 4px; }
+.add-project-pathelp a { color: var(--primary); }
+.add-project-pathelp small { line-height: 1.5; }
+.add-project-pathelp code { background: var(--surface-2); padding: 1px 6px; border-radius: 3px; color: var(--on-surface); }
+.add-project-secrets { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.add-project-secrets > span { font-size: 12px; color: var(--on-surface-variant); }
+.add-project-secret-row { display: flex; gap: 8px; width: 100%; }
+.add-project-secret-row input[type="text"] { flex: 0 0 240px; }
+.add-project-secret-row input[type="password"] { flex: 1; }
+
 /* =========================================================================
    Cards
    ------------------------------------------------------------------------- */

@@ -102,6 +102,8 @@ public static class ProjectsEndpoints
             return Results.BadRequest(new { error = "id and repoUrl are required" });
         if (!IsValidId(body.Id))
             return Results.BadRequest(new { error = "id must match [a-z0-9][a-z0-9_-]* (lowercase, 1-32 chars)" });
+        if (ValidateSecrets(body.Secrets) is { } secretError)
+            return Results.BadRequest(new { error = secretError });
 
         var logger = loggerFactory.CreateLogger("Projects.Add");
 
@@ -121,6 +123,18 @@ public static class ProjectsEndpoints
             await secrets.UpsertAsync(new NewSecret(
                 body.Id, SecretKinds.GitHubToken,
                 System.Text.Encoding.UTF8.GetBytes(body.GitToken)), ct);
+        }
+
+        // Any other secrets entered at registration (LLM keys, Meshy,
+        // custom FORGE_SECRET_* kinds) — same encrypted store, stored
+        // before the clone so nothing downstream misses them.
+        if (body.Secrets is not null)
+        {
+            foreach (var (kind, value) in body.Secrets)
+            {
+                await secrets.UpsertAsync(new NewSecret(
+                    body.Id, kind, System.Text.Encoding.UTF8.GetBytes(value)), ct);
+            }
         }
 
         // Default-branch resolution, in order: (1) git token, (2) the
@@ -232,6 +246,29 @@ public static class ProjectsEndpoints
         id.Length >= 1 && id.Length <= 32 &&
         id.All(c => char.IsAsciiLetterOrDigit(c) || c == '_' || c == '-') &&
         char.IsAsciiLetterOrDigit(id[0]);
+
+    /// <summary>Registration-time secrets validation (same rules as
+    /// SecretsEndpoints: kind becomes a FORGE_SECRET_&lt;KIND&gt; env-var
+    /// suffix). Returns an error message or null when valid.</summary>
+    internal static string? ValidateSecrets(Dictionary<string, string>? secrets)
+    {
+        if (secrets is null) return null;
+        if (secrets.Count > 20) return "at most 20 secrets";
+        foreach (var (kind, value) in secrets)
+        {
+            if (string.IsNullOrWhiteSpace(kind) || kind.Length > 64
+                || !kind.All(c => char.IsAsciiLetterLower(c) || char.IsAsciiDigit(c) || c == '_' || c == '-')
+                || !char.IsAsciiLetterOrDigit(kind[0]))
+            {
+                return $"secret kind '{kind}' must match [a-z0-9][a-z0-9_-]* (1-64 chars)";
+            }
+            if (string.Equals(kind, SecretKinds.GitHubToken, StringComparison.Ordinal))
+                return $"'{SecretKinds.GitHubToken}' has its own Git token field";
+            if (string.IsNullOrEmpty(value)) return $"secret '{kind}' has an empty value";
+            if (value.Length > 8192) return $"secret '{kind}' value too long (>8KB)";
+        }
+        return null;
+    }
 
     private static IResult PatchSlotAsync(
         string id, string role, SlotTable slots,
@@ -353,7 +390,8 @@ public static class ProjectsEndpoints
         string Name,
         string RepoUrl,
         string? DefaultBranch,
-        string? GitToken = null);
+        string? GitToken = null,
+        Dictionary<string, string>? Secrets = null);
 
     public sealed record PatchSlotRequest(int Max);
 

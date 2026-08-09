@@ -75,6 +75,19 @@
                         <span>Git token <small>(stored encrypted; never shown again)</small></span>
                         <input type="password" placeholder="github_pat_… (blank = use existing token)" @bind="_gitToken" autocomplete="off" maxlength="256" />
                     </label>
+                    <div class="form-grid__full add-project-pathelp">
+                        <a href="@FineGrainedPatUrl" target="_blank" rel="noopener noreferrer">Create a fine-grained token on GitHub (recommended — permissions pre-filled)</a>
+                        &nbsp;·&nbsp;
+                        <a href="@ClassicPatUrl" target="_blank" rel="noopener noreferrer">classic token</a>
+                        <small>
+                            Required access: <strong>Contents</strong> read+write (clone/push),
+                            <strong>Pull requests</strong> read+write (open/manage PRs),
+                            <strong>Issues</strong> read+write (review comments),
+                            <strong>Checks</strong> read (CI status). Metadata read is granted automatically.
+                            Classic tokens: the <code>repo</code> scope covers all of it.
+                            Grant the token access to the repository you pick below.
+                        </small>
+                    </div>
                     <div class="form-grid__full">
                         <button type="button" class="btn" @onclick="FetchReposAsync" disabled="@_fetchingRepos">
                             @(_fetchingRepos ? "Fetching repositories…" : "Fetch repositories")
@@ -119,6 +132,25 @@
                             }
                         </datalist>
                     </label>
+                    <div class="form-grid__full add-project-secrets">
+                        <span>Project secrets <small>(optional — stored encrypted, like the Secrets page; editable there later)</small></span>
+                        @foreach (var row in _secrets)
+                        {
+                            <div class="add-project-secret-row" @key="row">
+                                <input type="text" placeholder="kind (e.g. kimi_api_key)" list="add-project-secret-kinds"
+                                       @bind="row.Kind" maxlength="64" autocomplete="off"
+                                       pattern="[a-z0-9][a-z0-9_-]*" />
+                                <input type="password" placeholder="value" @bind="row.Value" maxlength="8192" autocomplete="off" />
+                                <button type="button" class="btn btn--link" @onclick="@(() => _secrets.Remove(row))">remove</button>
+                            </div>
+                        }
+                        <datalist id="add-project-secret-kinds">
+                            <option value="kimi_api_key"></option>
+                            <option value="kilo_gateway_api_key"></option>
+                            <option value="meshy_api_key"></option>
+                        </datalist>
+                        <button type="button" class="btn" @onclick="@(() => _secrets.Add(new SecretRow()))">Add secret</button>
+                    </div>
                     <div class="form-grid__actions">
                         <button type="submit" class="btn btn--primary" disabled="@ProjectsStore.Value.Submitting">
                             @(ProjectsStore.Value.Submitting ? "Registering…" : "Register")
@@ -188,6 +220,21 @@
     private string? _repoFetchError;
     private IReadOnlyList<RepoLookupRow>? _repos;
     private IReadOnlyList<string> _branches = Array.Empty<string>();
+    private readonly List<SecretRow> _secrets = new();
+
+    private string PatDescription =>
+        $"Forge orchestrator access for {_model.RepoUrl} — clone/push, PRs, CI checks";
+
+    private string FineGrainedPatUrl =>
+        "https://github.com/settings/personal-access-tokens/new"
+        + "?name=" + Uri.EscapeDataString(
+            string.IsNullOrWhiteSpace(_model.Id) ? "forge-project" : $"forge-{_model.Id.Trim()}")
+        + "&description=" + Uri.EscapeDataString(PatDescription)
+        + "&contents=write&pull_requests=write&issues=write&checks=read";
+
+    private string ClassicPatUrl =>
+        "https://github.com/settings/tokens/new?scopes=repo&description="
+        + Uri.EscapeDataString(PatDescription);
 
     protected override void OnInitialized()
     {
@@ -210,6 +257,7 @@
             _repos = null;
             _repoFetchError = null;
             _branches = Array.Empty<string>();
+            _secrets.Clear();
             Dispatch.Dispatch(new ProjectsActions.AddProjectDismissErrorAction());
         }
     }
@@ -276,13 +324,19 @@
         {
             return;
         }
+        var secrets = _secrets
+            .Where(r => !string.IsNullOrWhiteSpace(r.Kind) && !string.IsNullOrEmpty(r.Value))
+            .GroupBy(r => r.Kind.Trim(), StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Last().Value, StringComparer.Ordinal);
         Dispatch.Dispatch(new ProjectsActions.AddProjectAction(
             _model.Id.Trim(),
             _model.Name.Trim(),
             _model.RepoUrl.Trim(),
             string.IsNullOrWhiteSpace(_model.DefaultBranch) ? null : _model.DefaultBranch.Trim(),
-            string.IsNullOrWhiteSpace(_gitToken) ? null : _gitToken.Trim()));
+            string.IsNullOrWhiteSpace(_gitToken) ? null : _gitToken.Trim(),
+            secrets.Count > 0 ? secrets : null));
         _gitToken = string.Empty;
+        _secrets.Clear();
         await Task.CompletedTask;
     }
 
@@ -297,5 +351,11 @@
         public string Name { get; set; } = string.Empty;
         public string RepoUrl { get; set; } = string.Empty;
         public string DefaultBranch { get; set; } = string.Empty;
+    }
+
+    private sealed class SecretRow
+    {
+        public string Kind { get; set; } = string.Empty;
+        public string Value { get; set; } = string.Empty;
     }
 }
