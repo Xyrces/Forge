@@ -247,6 +247,7 @@ public static class ForgeComposition
             openAiFactory.RateLimits = modelRateLimits;
             openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
             openAiFactory.OverloadRetryCount = options.Llm.OverloadRetryCount;
+            openAiFactory.MinRequestInterval = TimeSpan.FromMilliseconds(options.Llm.MinRequestIntervalMs);
 
             // Live provider keys: a Secrets-page rotation takes effect
             // on the next run — no restart. The 30s refresh loop is

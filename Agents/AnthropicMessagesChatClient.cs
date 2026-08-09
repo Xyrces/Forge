@@ -83,13 +83,20 @@ public sealed class AnthropicMessagesChatClient : IChatClient
             // RateLimitAwareChatClient / IsLlmAuthFailure classify it.
             if ((int)resp.StatusCode == 429)
             {
-                // Typed 429: carry Retry-After + the overload-vs-quota
-                // classification up to RateLimitAwareChatClient — Kimi
-                // documents Retry-After on overload responses, and the
-                // flat default cooldown is wrong in both directions.
+                // Typed 429: carry Retry-After, the overload-vs-quota
+                // classification, the provider's application code
+                // (MiniMax 2056/2062 = account-level Token Plan
+                // throttle) and its request id (support correlation)
+                // up to RateLimitAwareChatClient — Kimi documents
+                // Retry-After on overload responses, and the flat
+                // default cooldown is wrong in both directions.
+                var kind = LlmRateLimitException.Classify(raw);
+                var code = LlmRateLimitException.ExtractErrorCode(raw);
+                var requestId = LlmRateLimitException.ExtractRequestId(raw);
                 throw new LlmRateLimitException(
-                    $"HTTP 429 rate limit: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]",
-                    ParseRetryAfter(resp), LlmRateLimitException.Classify(detail));
+                    $"HTTP 429 rate limit ({kind}{(code is not null ? $", provider code {code}" : "")}): {detail} " +
+                    $"[uri={resp.RequestMessage?.RequestUri} request_id={requestId ?? "n/a"} body={raw[..Math.Min(300, raw.Length)]}]",
+                    ParseRetryAfter(resp), kind, code, requestId);
             }
             throw new HttpRequestException(
                 $"HTTP {(int)resp.StatusCode}: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]");
