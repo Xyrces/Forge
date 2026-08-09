@@ -219,6 +219,7 @@ public class ProductRefinementQueueTests : IDisposable
             {
                 ["epicId"] = issue.Id,
                 ["sessionId"] = "session-x",
+                ["projectId"] = "P",
             }));
 
         // Wait for the worker to process. The agent emits
@@ -234,6 +235,48 @@ public class ProductRefinementQueueTests : IDisposable
         var history = _events.GetHistorySnapshot();
         Assert.Contains(history, e => e.Kind == "product.run.started");
         Assert.Contains(history, e => e.Kind == "product.run.completed");
+    }
+
+    [Fact]
+    public async Task Queue_EventWithoutProjectId_IsSkipped()
+    {
+        // 2026-08-09: issue ids are per-store sequences — a fan-out
+        // spec lookup by parent_issue_id refined the WRONG project's
+        // spec (talaria's epic-2 → porthorizon's Epic-B spec). Events
+        // without a project id (pre-fix history replays) must be
+        // skipped, never guessed.
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "T", Description: "x"));
+        await _specs.CreateAsync(new NewSpec(
+            ProjectId: "P", Title: "T", Body: "draft",
+            ParentIssueId: issue.Id));
+
+        var projectContext = new InMemoryProjectContextSource(
+            new ProjectContext("P", "", Array.Empty<CodeSnippet>(),
+                Array.Empty<IssueRecord>(), Array.Empty<SpecRecord>(),
+                Array.Empty<SkillRecord>()));
+        var scripted = new ScriptedChatClient();
+        scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Done.")));
+        var agentFactory = new ProductAgentFactory(
+            _specs, _issues, projectContext, new ScriptingChatClientFactory(scripted),
+            new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
+            new RoleAgentRegistry(), _events, null,
+            NullLoggerFactory.Instance, rolePromptsRoot: "");
+
+        await using var queue = new ProductRefinementQueue(
+            agentFactory, _specs, _events,
+            NullLogger<ProductRefinementQueue>.Instance);
+
+        _events.Publish(new DashboardEvent(
+            DateTime.UtcNow, "intake.epic.accepted", "session-x", "epic accepted",
+            new Dictionary<string, object?>
+            {
+                ["epicId"] = issue.Id,
+                ["sessionId"] = "session-x",
+            }));
+
+        await Task.Delay(400);
+
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), e => e.Kind == "product.run.started");
     }
 }
 

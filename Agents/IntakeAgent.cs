@@ -293,7 +293,14 @@ public sealed class IntakeAgent
         SpecRecord? specForEpic = null;
         if (_specs is not null)
         {
-            var existing = await _specs.ListAsync(projectId: null, status: null, ct);
+            // Project-SCOPED probe: issue ids are per-store sequences
+            // (every project has an epic-2), so a fan-out lookup by
+            // parent_issue_id can match ANOTHER project's spec and
+            // silently skip creating this one (observed live
+            // 2026-08-09: talaria's accepted epic-2 found porthorizon's
+            // Epic-B spec via the collision and no talaria spec was
+            // ever created — the project never entered the pipeline).
+            var existing = await _specs.ListAsync(projectId: _projectId, status: null, ct);
             specForEpic = existing.FirstOrDefault(s => s.ParentIssueId == issue.Id);
             if (specForEpic is null)
             {
@@ -331,6 +338,12 @@ public sealed class IntakeAgent
             {
                 ["sessionId"] = sessionId,
                 ["epicId"] = issue.Id,
+                // Issue ids are per-store sequences — the refinement
+                // queue MUST scope its spec lookup by project or an
+                // epic-N collision routes it to another project's spec
+                // (observed live 2026-08-09: talaria epic-2 → refined
+                // porthorizon's Epic-B spec).
+                ["projectId"] = _projectId,
                 ["sprintId"] = activeSprint?.Id,
             }));
 

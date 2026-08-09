@@ -152,6 +152,76 @@ public class IntakeAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task AcceptProposedEpic_CrossStoreIdCollision_StillCreatesSpec()
+    {
+        // 2026-08-09 live bug: issue ids are per-store sequences, so
+        // talaria's epic-2 collided with porthorizon's epic-2. The
+        // accept path's dedupe probe fanned out across ALL stores by
+        // parent_issue_id, matched porthorizon's spec, and SKIPPED
+        // creating talaria's spec — the project never entered the
+        // pipeline. The probe must be scoped to the session's project.
+        var otherDb = TempRoot.Instance.NewDbPath("intake-other");
+        var otherIssues = new IssueStore(otherDb);
+        try
+        {
+            var otherEpic = await otherIssues.CreateAsync(new NewIssue(Type: "epic", Title: "other project epic"));
+            var otherSpecs = new SpecStore(otherIssues);
+            await otherSpecs.CreateAsync(new NewSpec(
+                ProjectId: "porthorizon", Title: "other project spec",
+                Body: "body", Author: "test", ParentIssueId: otherEpic.Id));
+
+            var mySpecs = new SpecStore(_issues);
+            var routing = new ProjectRoutingSpecStore(
+                mySpecs,
+                findByProject: pid => pid == "talaria" ? mySpecs : pid == "porthorizon" ? otherSpecs : null,
+                allProjectStores: () => new ISpecStore[] { mySpecs, otherSpecs });
+
+            // The accepted epic's id must equal the other store's spec
+            // parent for the collision to bite: both stores mint
+            // epic-1 as their first row.
+            Assert.Equal("epic-1", otherEpic.Id);
+            var scripted = new ToolCallingChatClient(
+                functionCalls: new[]
+                {
+                    new FunctionCallContent("call_1", "create_epic",
+                        new Dictionary<string, object?>
+                        {
+                            ["title"] = "talaria launch hardening",
+                            ["description"] = "scrub + license",
+                            ["priority"] = 2,
+                        }),
+                },
+                followUpText: "Proposed.");
+            var agent = new IntakeAgent("talaria", _intake, _issues, _sprints,
+                new ScriptingFactory(scripted),
+                new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
+                new RoleAgentRegistry(), _events, NullLogger<IntakeAgent>.Instance,
+                specs: routing);
+
+            var session = await agent.StartSessionAsync("launch", default);
+            var updated = await agent.SendUserMessageAsync(session.Id, "harden the repo", default);
+            var assistantMsg = updated.Messages.First(m => m.Role == IntakeMessageRole.Assistant);
+            Assert.Equal("epic-1", assistantMsg.ProposedEpicId); // same id as the other store's spec parent
+
+            await agent.AcceptProposedEpicAsync(session.Id, assistantMsg.Id, default);
+
+            var mine = await mySpecs.ListAsync(null, null, default);
+            Assert.Contains(mine, s => s.ParentIssueId == "epic-1" && s.ProjectId == "talaria");
+
+            // The accept event carries the project so the refinement
+            // queue can scope its own lookup the same way.
+            var accepted = _events.GetHistorySnapshot()
+                .Last(e => e.Kind == "intake.epic.accepted");
+            Assert.Equal("talaria", accepted.Data?["projectId"]?.ToString());
+        }
+        finally
+        {
+            try { otherIssues.Dispose(); } catch { }
+            try { File.Delete(otherDb); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task AcceptProposedEpic_BindsToActiveSprint()
     {
         // Set up: active sprint + scripted tool call.
