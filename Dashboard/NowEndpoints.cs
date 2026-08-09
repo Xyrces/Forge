@@ -35,6 +35,7 @@ public static class NowEndpoints
             // item carries its projectId. ?projectId= scopes to one
             // project (same response shape, one entry per list).
             var targets = new List<(string? ProjectId, IIssueStore Issues, ISprintStore Sprints, AgentRunStore? Runs)>();
+            var degradedProjects = new List<(string Id, string Error)>();
             if (projectId is not null && projectContexts is not null)
             {
                 var pctx = projectContexts.Find(projectId);
@@ -46,7 +47,19 @@ public static class NowEndpoints
             {
                 foreach (var p in projectContexts.KnownProjects)
                 {
-                    var pctx = projectContexts.Find(p.Id);
+                    // A project whose store is still initializing (or
+                    // whose init failed — e.g. DDL timeout under Azure
+                    // SQL pressure) must degrade to an attention item,
+                    // never 500 the whole unified view (observed live
+                    // 2026-08-09: one new project's init failure
+                    // blanked the dashboard).
+                    Forge.Projects.ProjectContext? pctx;
+                    try { pctx = projectContexts.Find(p.Id); }
+                    catch (Exception ex)
+                    {
+                        degradedProjects.Add((p.Id, ex.Message));
+                        continue;
+                    }
                     if (pctx is not null)
                     {
                         targets.Add((p.Id, pctx.Issues, pctx.Sprints,
@@ -182,6 +195,18 @@ public static class NowEndpoints
                     var projectLast = all.Max(i => i.UpdatedAt);
                     lastActivity = lastActivity is null || projectLast > lastActivity ? projectLast : lastActivity;
                 }
+            }
+
+            foreach (var (degId, degError) in degradedProjects)
+            {
+                attention.Add((0, (object)new
+                {
+                    severity = "fail", kind = "project-init",
+                    title = $"project {degId}: state store failed to initialize",
+                    detail = degError.Length > 300 ? degError[..300] : degError,
+                    issueId = (string?)null, projectId = degId,
+                    link = "/projects",
+                }));
             }
 
             return Results.Json(new

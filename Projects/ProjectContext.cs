@@ -171,6 +171,18 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         }
     }
 
+    // Per-project construction gates: first Find for a NEW project
+    // builds its IssueStore inline, which on SQL Server runs the full
+    // fresh-create DDL chain (~26 tables + indexes) — under Azure SQL
+    // pressure that takes tens of seconds. Without a gate, every
+    // concurrent caller (dashboard /api/now, dispatch loop, watch
+    // sweep, groomer) constructs its own store against the SAME
+    // schema; the Sch-M lock contention times them all out at 30s,
+    // nothing caches, and the next request re-stampedes (observed
+    // live 2026-08-09 after registering the talaria project: the
+    // dashboard went dark). One construction per project, ever.
+    private readonly ConcurrentDictionary<string, object> _findGates = new(StringComparer.OrdinalIgnoreCase);
+
     public ProjectContext? Find(string projectId)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(ProjectContextFactory));
@@ -178,15 +190,20 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         var opts = KnownProjects.FirstOrDefault(p =>
             string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase));
         if (opts is null) return null;
-        var dbPath = _issuesDbByProject.TryGetValue(projectId, out var assigned)
-            ? assigned
-            : ProjectStateDirs.IssuesDbFor(opts, _dataRoot);
-        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        var store = _dbResolver is not null
-            ? new IssueStore(_dbResolver(projectId, dbPath), projectId, _events)
-            : new IssueStore(dbPath, projectId, _events);
-        var ctx2 = new ProjectContext(opts, store);
-        return _cache.GetOrAdd(projectId, ctx2);
+        var gate = _findGates.GetOrAdd(projectId, _ => new object());
+        lock (gate)
+        {
+            if (_cache.TryGetValue(projectId, out ctx)) return ctx;
+            var dbPath = _issuesDbByProject.TryGetValue(projectId, out var assigned)
+                ? assigned
+                : ProjectStateDirs.IssuesDbFor(opts, _dataRoot);
+            Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+            var store = _dbResolver is not null
+                ? new IssueStore(_dbResolver(projectId, dbPath), projectId, _events)
+                : new IssueStore(dbPath, projectId, _events);
+            var ctx2 = new ProjectContext(opts, store);
+            return _cache.GetOrAdd(projectId, ctx2);
+        }
     }
 
     public async ValueTask DisposeAsync()

@@ -997,12 +997,25 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         var d = (SqlServerDialect)_db.Dialect;
         var q = d.Qualifier;
         using var conn = _db.Open();
-        using (var ensure = conn.CreateCommand())
+        // Fresh-create runs ~26 tables + indexes of DDL; under Azure
+        // SQL DTU pressure a single batch can exceed the 30s default
+        // (observed live 2026-08-09: a new project's store init timed
+        // out mid-DDL and, with no single-flight in
+        // ProjectContextFactory.Find, every caller stampeded the same
+        // schema and 500'd the dashboard). DDL batches get a generous
+        // timeout; the guards keep reruns idempotent.
+        DbCommand Ddl()
+        {
+            var c = conn.CreateCommand();
+            c.CommandTimeout = 180;
+            return c;
+        }
+        using (var ensure = Ddl())
         {
             ensure.CommandText = $"IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = '{q}') EXEC('CREATE SCHEMA [{q}]');";
             ensure.ExecuteNonQuery();
         }
-        using var cmd = conn.CreateCommand();
+        using var cmd = Ddl();
         // Profile split (SQL Server): the Core schema gets only
         // registry/global tables (project, secret, agent, skill) — a
         // registry anchor never carries agent_run & co; a Workload
@@ -1484,7 +1497,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // v27+: followup_draft — follow-ups tracked during a sprint,
         // materialized at completion (operator model 2026-07-31).
         {
-            using var cmdDraft = conn.CreateCommand();
+            using var cmdDraft = Ddl();
             cmdDraft.CommandText = $$"""
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'followup_draft')
             CREATE TABLE {{d.Table("followup_draft")}} (
@@ -1508,7 +1521,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // v28+: watchdog_finding — the watchdog scanner's deduped
         // findings (alert-only v1).
         {
-            using var cmdWatch = conn.CreateCommand();
+            using var cmdWatch = Ddl();
             cmdWatch.CommandText = $$"""
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'watchdog_finding')
             CREATE TABLE {{d.Table("watchdog_finding")}} (
@@ -1534,7 +1547,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // step is stamped; schema_version keeps full history and
         // --check reads MAX(version).
         var applied = 0;
-        using (var ver = conn.CreateCommand())
+        using (var ver = Ddl())
         {
             ver.CommandText = $"SELECT COALESCE(MAX(version), 0) FROM {d.Table("schema_version")}";
             applied = Convert.ToInt32(ver.ExecuteScalar());
