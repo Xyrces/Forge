@@ -21,6 +21,19 @@ public static class SecretKinds
     /// <summary>Kimi.com (Moonshot) direct API key — the kimi LLM
     /// provider for quality roles (reviewer/critic/groomer).</summary>
     public const string KimiApiKey = "kimi_api_key";
+    /// <summary>MiniMax provider key (Token Plan subscription).</summary>
+    public const string MinimaxApiKey = "minimax_api_key";
+
+    /// <summary>The provider-key convention — the SAME mapping
+    /// ProviderApiKeyResolver uses at runtime: provider name lowercased,
+    /// dashes to underscores, + "_api_key" (kilo-gateway →
+    /// kilo_gateway_api_key). The Secrets page derives its known-kinds
+    /// panel from the configured providers via this helper, so every
+    /// configured provider's key shows set/unset state (2026-08-09:
+    /// minimax_api_key was stored and live-resolving but invisible in
+    /// the UI — the whitelist was a hardcoded 4-kind list).</summary>
+    public static string ForProvider(string providerName)
+        => providerName.ToLowerInvariant().Replace('-', '_') + "_api_key";
 }
 
 public sealed record SecretRecord(

@@ -263,6 +263,9 @@ public sealed class DashboardHost : IAsyncDisposable
             // resolve correctly.
             builder.Services.AddSingleton<Forge.Core.ISecretStore>(_secretStore);
         }
+        // The Secrets page derives its known-kinds panel from the
+        // configured LLM providers (SecretKinds.ForProvider).
+        if (_llmConfig is not null) builder.Services.AddSingleton(_llmConfig);
 
         // 2026-07-18 (Phase 2.11.f + bug-1-review): the Reviewer
         // dispatcher needs to be in the DI service collection

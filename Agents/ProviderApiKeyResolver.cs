@@ -56,7 +56,7 @@ public sealed class ProviderApiKeyResolver
 
         foreach (var provider in providerNames)
         {
-            var kind = provider.ToLowerInvariant().Replace('-', '_') + "_api_key";
+            var kind = SecretKinds.ForProvider(provider);
             string? found = null;
             foreach (var projectId in projects)
             {
