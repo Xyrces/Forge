@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -59,6 +60,11 @@ public sealed class IntakeAgent
     private readonly ILogger<IntakeAgent> _logger;
     private readonly string _rolePromptsRoot;
     private readonly string _defaultModel;
+    private readonly Func<string, string?>? _projectRootLookup;
+    private readonly Core.MemoryStore? _memory;
+    private string? _repoBriefCache;
+    private DateTime _repoBriefBuiltAt = DateTime.MinValue;
+    private static readonly TimeSpan RepoBriefTtl = TimeSpan.FromMinutes(10);
 
     public IntakeAgent(
         string projectId,
@@ -73,7 +79,9 @@ public sealed class IntakeAgent
         ISpecStore? specs = null,
         ISkillSource? skills = null,
         string rolePromptsRoot = "agents",
-        string defaultModel = "minimax-m2")
+        string defaultModel = "minimax-m2",
+        Func<string, string?>? projectRootLookup = null,
+        Core.MemoryStore? memory = null)
     {
         _projectId = projectId;
         _intakeStore = intakeStore;
@@ -88,6 +96,8 @@ public sealed class IntakeAgent
         _skills = skills;
         _rolePromptsRoot = rolePromptsRoot;
         _defaultModel = defaultModel;
+        _projectRootLookup = projectRootLookup;
+        _memory = memory;
     }
 
     public string ProjectId => _projectId;
@@ -183,7 +193,7 @@ public sealed class IntakeAgent
 
         var agent = new ChatClientAgent(
             chatClient,
-            instructions: BuildIntakeInstructions(),
+            instructions: await BuildIntakeInstructionsAsync(ct),
             name: "intake",
             description: $"Intake agent for project {_projectId}",
             tools: tools);
@@ -450,7 +460,7 @@ public sealed class IntakeAgent
         return body.TrimEnd() + "\n\n" + fullSection;
     }
 
-    private string BuildIntakeInstructions()
+    private async Task<string> BuildIntakeInstructionsAsync(CancellationToken ct)
     {
         var roleInstructions = LoadRoleInstructions("intake");
         var projectLine = $"You are the Intake agent for project '{_projectId}'.";
@@ -469,8 +479,76 @@ public sealed class IntakeAgent
             describe an epic, capture the title + description in the tool
             call and confirm the proposal in your reply.
 
+            Do NOT ask the operator about facts the project brief below
+            already answers (tech stack, layout, existing modules). Read
+            it first; ask only about intent and scope.
+
+            ## Project grounding
+
+            {await BuildGroundingAsync(ct)}
+
             {roleInstructions}
             """;
+    }
+
+    /// <summary>
+    /// What the project IS: the operator's vision memory (when one
+    /// exists) + a brief built from the local clone (stack, layout,
+    /// README). Same vision keys as the groomer
+    /// (vision/&lt;projectId&gt;, fallback vision/master). Missing
+    /// pieces degrade to explicit markers, never silence — a new
+    /// project with no clone yet must not hallucinate a stack
+    /// (observed live 2026-08-09: the talaria intake asked the
+    /// operator what the tech stack was).
+    /// </summary>
+    private async Task<string> BuildGroundingAsync(CancellationToken ct)
+    {
+        var sb = new StringBuilder();
+        string? vision = null;
+        if (_memory is not null)
+        {
+            try
+            {
+                vision = (await _memory.RecallAsync($"vision/{_projectId}", ct)).FirstOrDefault()?.Body;
+                if (string.IsNullOrWhiteSpace(vision))
+                    vision = (await _memory.RecallAsync("vision/master", ct)).FirstOrDefault()?.Body;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Intake: vision recall failed for {ProjectId}; continuing without", _projectId);
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(vision))
+        {
+            sb.AppendLine("### Project vision");
+            sb.AppendLine(vision.Length > 4000 ? vision[..4000] + "\n...[truncated]..." : vision);
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("### Project brief (from the local clone)");
+        sb.AppendLine(RepoBrief());
+        return sb.ToString();
+    }
+
+    private string RepoBrief()
+    {
+        if (_repoBriefCache is not null
+            && DateTime.UtcNow - _repoBriefBuiltAt < RepoBriefTtl)
+        {
+            return _repoBriefCache;
+        }
+        string? root = null;
+        if (_projectRootLookup is not null)
+        {
+            try { root = _projectRootLookup(_projectId); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Intake: project root lookup failed for {ProjectId}", _projectId);
+            }
+        }
+        _repoBriefCache = ProjectRepoBrief.Build(root);
+        _repoBriefBuiltAt = DateTime.UtcNow;
+        return _repoBriefCache;
     }
 
     private string LoadRoleInstructions(string agentName)

@@ -515,7 +515,12 @@ public static class ForgeComposition
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
                 rolePromptsRoot: rolePromptsRoot,
-                specs: specStoreRef.Value));
+                specs: specStoreRef.Value,
+                // Repo grounding (2026-08-09): without the clone brief
+                // + vision the intake asks the operator about the tech
+                // stack — facts the codebase already answers.
+                projectRootLookup: ProjectRootLookup,
+                memory: memoryStore));
         services.AddSingleton(intakeRegistry);
 
         var specExtractionReader = new SpecExtractionReader(issues);
