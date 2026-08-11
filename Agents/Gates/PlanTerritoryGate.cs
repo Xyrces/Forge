@@ -37,7 +37,7 @@ public sealed partial class PlanTerritoryGate : IRunGate
             }
             if (!isNew && !File.Exists(Path.Combine(ctx.WorktreePath, path)))
             {
-                problems.Add($"{path} does not exist in the worktree — if you intend to create it, mark it \"(new)\"");
+                problems.Add($"{path} does not exist in the worktree — if you intend to create it, mark it \"(new)\" (or start the line with Create/Add)");
             }
         }
         if (problems.Count > 0)
@@ -56,6 +56,28 @@ public sealed partial class PlanTerritoryGate : IRunGate
             if (path.StartsWith(prefix, StringComparison.Ordinal)) return true;
         }
         return ctx.TerritoryAllowsRootFiles && !path.Contains('/');
+    }
+
+    /// <summary>
+    /// A Files-section line marks intentional creation when it carries
+    /// a parenthetical marker — (new), (new file), (create…), (add…) —
+    /// or starts with a creation verb (Create/Add/New …). The literal
+    /// "(new)"-only rule burned plan revisions on phrasing instead of
+    /// substance (observed live 2026-08-11: talaria task-12 rejected
+    /// 3x for listing 8 files-to-create without the exact marker).
+    /// </summary>
+    internal static bool IsCreationLine(string line)
+    {
+        if (line.Contains("(new", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("(creat", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("(add", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        var t = line.TrimStart('-', '*', '+', ' ', '`');
+        return t.StartsWith("create ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("add ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("new ", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Extract candidate repo-relative file paths from the
@@ -100,7 +122,7 @@ public sealed partial class PlanTerritoryGate : IRunGate
                 if (p.StartsWith("./", StringComparison.Ordinal)) p = p[2..];
                 p = p.TrimStart('/');
                 if (p.Length == 0 || p.StartsWith("bin/") || p.StartsWith("obj/")) continue;
-                var isNew = line.Contains("(new)", StringComparison.OrdinalIgnoreCase);
+                var isNew = IsCreationLine(line);
                 rawPaths.Add((p, isNew));
             }
         }

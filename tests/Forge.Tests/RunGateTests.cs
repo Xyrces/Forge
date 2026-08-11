@@ -185,6 +185,35 @@ public class RunGateTests : IDisposable
     }
 
     [Fact]
+    public async Task TerritoryGate_CreationPhrasings_Accepted()
+    {
+        // 2026-08-11 (talaria task-12): the agent listed 8 files to
+        // CREATE but only some carried the literal "(new)" marker —
+        // 3 revisions burned on marker phrasing. Accept the natural
+        // variants: (new file), (create…), (add…), and verb-prefixed
+        // lines (Create/Add/New).
+        var plan = """
+            ## Goal
+            Bootstrap community files.
+            ## Files
+            - `tests/Talaria.Ci.Tests/Talaria.Ci.Tests.csproj` (new file)
+            - `CONTRIBUTING.md` (create)
+            - `SECURITY.md` (added)
+            - Create `CHANGELOG.md` from the release notes
+            - Add `.github/PULL_REQUEST_TEMPLATE.md`
+            ## Approach
+            Write them.
+            ## Test
+            Review.
+            ## Done
+            Files exist.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "tests/", ".github/" }, allowRoot: true, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
     public async Task TerritoryGate_NoTerritoryConstraint_Approves()
     {
         var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(FullPlan));
