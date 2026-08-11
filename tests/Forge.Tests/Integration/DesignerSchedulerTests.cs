@@ -265,11 +265,13 @@ public class DesignerSchedulerTests : IDisposable
         Assert.Equal(DesignerRunStatus.LlmFailed, firstRuns[0].Status);
 
         // The scheduler should re-run on the next tick because the
-        // last run failed.
+        // last run failed — the test overrides the production cooldown
+        // (2026-08-11: hygiene-spiral guard disables instant retry).
         var successFactory = NewDesignerFactory(new DesignerSuccessScript(spec.Id));
         var scheduler2 = new DesignerScheduler(_specs, successFactory, _designerRuns, _events,
             NullLogger<DesignerScheduler>.Instance,
             interval: TimeSpan.FromMinutes(5));
+        scheduler2.FailedRetryCooldown = TimeSpan.Zero;
         await scheduler2.TickAsync(default);
 
         var after = (await _specs.GetAsync(spec.Id))!;

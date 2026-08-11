@@ -164,18 +164,19 @@ public sealed class DesignerScheduler
         }
     }
 
-    /// <summary>
-    /// Heuristic: design a spec at most every <c>Interval</c>, or
-    /// immediately if the last run failed. The recent-run lookup is
-    /// <c>SELECT ts, status FROM designer_run WHERE spec_id = $id
-    /// ORDER BY ts DESC LIMIT 1</c>.
-    /// </summary>
+    /// <summary>Minimum interval between ticks for a spec whose
+    /// last designer run failed (hygiene or LLM). Without a cooldown
+    /// a failing spec re-runs every tick in a tight spiral (observed
+    /// live 2026-08-11: spec-2d762c2a 5 runs in 2s).</summary>
+    internal TimeSpan FailedRetryCooldown { get; set; } = TimeSpan.FromMinutes(5);
+
     private async Task<bool> ShouldDesignAsync(SpecRecord spec, CancellationToken ct)
     {
         var recent = await _runs.ListAsync(specId: spec.Id, limit: 1, ct);
         if (recent.Count == 0) return true;
         var last = recent[0];
-        if (last.Status is DesignerRunStatus.HygieneFailed or DesignerRunStatus.LlmFailed) return true;
+        if (last.Status is DesignerRunStatus.HygieneFailed or DesignerRunStatus.LlmFailed)
+            return DateTime.UtcNow - last.Ts >= FailedRetryCooldown;
         return DateTime.UtcNow - last.Ts >= _interval;
     }
 

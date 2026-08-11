@@ -255,6 +255,7 @@ public class ArtistSchedulerTests : IDisposable
         var scheduler2 = new ArtistScheduler(_specs, successFactory, _artistRuns, _events,
             NullLogger<ArtistScheduler>.Instance,
             interval: TimeSpan.FromMinutes(5));
+        scheduler2.FailedRetryCooldown = TimeSpan.Zero;
         await scheduler2.TickAsync(default);
 
         var after = (await _specs.GetAsync(spec.Id))!;
