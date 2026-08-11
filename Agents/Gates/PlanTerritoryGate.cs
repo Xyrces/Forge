@@ -37,6 +37,20 @@ public sealed partial class PlanTerritoryGate : IRunGate
             }
             if (!isNew && !File.Exists(Path.Combine(ctx.WorktreePath, path)))
             {
+                // A missing file inside a MISSING directory tree is an
+                // intentional new scaffold (new test project, new docs
+                // set) — not a hallucinated edit. The existence check's
+                // anti-hallucination value is catching typos against
+                // EXISTING areas (task-196's RunGate.cs sat in an
+                // existing dir). Observed live 2026-08-11: talaria
+                // task-12 burned 3 runs x 3 revisions because its
+                // brand-new tests/Talaria.Ci.Tests/ tree didn't exist.
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir)
+                    && !Directory.Exists(Path.Combine(ctx.WorktreePath, dir)))
+                {
+                    continue;
+                }
                 problems.Add($"{path} does not exist in the worktree — if you intend to create it, mark it \"(new)\" (or start the line with Create/Add)");
             }
         }

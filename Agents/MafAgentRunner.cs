@@ -462,12 +462,12 @@ public async Task<AgentRunResult> RunAsync(
             // machinery takes it from there.
             if (gateState?.PlanFailed == true)
             {
-                await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
+                await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), context, ct);
                 throw new InvalidOperationException(
                     $"Plan rejected after {Gates.RunGateState.MaxRevisions} revisions: " +
                     (gateState.Verdicts.LastOrDefault().Feedback ?? "no feedback"));
             }
-            await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), ct);
+            await PersistGateRecordAsync(gateState, ResolveContextString(context, "issueId"), context, ct);
 
             // In-session pre-push verification: engineering runs verify
             // their work BEFORE completing — failures feed back to the
@@ -793,13 +793,27 @@ public async Task<AgentRunResult> RunAsync(
     /// metadata (best-effort, never breaks a run). The TaskDetail
     /// page renders it.</summary>
     private async Task PersistGateRecordAsync(
-        Gates.RunGateState? gateState, string? issueId, CancellationToken ct)
+        Gates.RunGateState? gateState, string? issueId,
+        IReadOnlyDictionary<string, object>? context, CancellationToken ct)
     {
         if (gateState is null || issueId is null || _issues is null) return;
         if (gateState.Verdicts.Count == 0) return;
         try
         {
-            var task = await _issues.GetAsync(issueId, ct);
+            // The audit row is workload data for the OWNING project's
+            // store (same rule as the follow-up tool, 2026-07-31).
+            // Using the construction-time primary store silently
+            // dropped every non-primary project's plan-gate audit
+            // (observed 2026-08-11: task-12/task-652 rejections left
+            // no planGate metadata — the rejected plan was invisible
+            // to the operator).
+            var store = (_issueStoreLookup is not null
+                    && context is not null
+                    && context.TryGetValue("projectId", out var pidObj)
+                    && pidObj is string pid
+                    ? _issueStoreLookup(pid)
+                    : null) ?? _issues;
+            var task = await store.GetAsync(issueId, ct);
             if (task is null) return;
             var record = new
             {
@@ -810,7 +824,7 @@ public async Task<AgentRunResult> RunAsync(
                 plan = gateState.PlanText is { Length: > 3000 } p ? p[..3000] : gateState.PlanText,
                 verdicts = gateState.Verdicts.Select(v => new { gate = v.Gate, outcome = v.Outcome.ToString(), feedback = v.Feedback.Length > 500 ? v.Feedback[..500] : v.Feedback }).ToList(),
             };
-            await _issues.TransitionAsync(issueId, task.Status, error: null,
+            await store.TransitionAsync(issueId, task.Status, error: null,
                 metadata: new Dictionary<string, object>
                 {
                     ["planGate"] = System.Text.Json.JsonSerializer.Serialize(record),

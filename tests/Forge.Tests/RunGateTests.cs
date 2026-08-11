@@ -214,6 +214,35 @@ public class RunGateTests : IDisposable
     }
 
     [Fact]
+    public async Task TerritoryGate_MissingFileInMissingTree_IsScaffoldNotHallucination()
+    {
+        // 2026-08-11 (talaria task-12): a brand-new test project tree
+        // (tests/Talaria.Ci.Tests/ doesn't exist yet) must not trip
+        // the existence check — new scaffolds are the common case for
+        // young repos. A missing file in an EXISTING directory is
+        // still flagged (typo/hallucination).
+        Directory.CreateDirectory(Path.Combine(_workDir, "tests"));
+        var plan = """
+            ## Goal
+            Bootstrap CI tests.
+            ## Files
+            - `tests/Talaria.Ci.Tests/Talaria.Ci.Tests.csproj`
+            - `tests/ExistingButMissing.cs`
+            ## Approach
+            Scaffold the project; edit the existing suite.
+            ## Test
+            dotnet test.
+            ## Done
+            Green.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "tests/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Revise, v.Outcome);
+        Assert.Contains("tests/ExistingButMissing.cs", v.Feedback);
+        Assert.DoesNotContain("Talaria.Ci.Tests.csproj", v.Feedback);
+    }
+
+    [Fact]
     public async Task TerritoryGate_NoTerritoryConstraint_Approves()
     {
         var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(FullPlan));
@@ -255,6 +284,11 @@ public class RunGateTests : IDisposable
     [Fact]
     public async Task TerritoryGate_NonexistentFile_Revises_UnlessMarkedNew()
     {
+        // The parent directory EXISTS: a missing file here is a
+        // suspected hallucinated edit, not a new scaffold (the
+        // missing-tree case is approved — see
+        // TerritoryGate_MissingFileInMissingTree_IsScaffoldNotHallucination).
+        Directory.CreateDirectory(Path.Combine(_workDir, "Forge.UI", "Components"));
         var plan = """
             ## Goal
             Add a component.
