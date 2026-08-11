@@ -377,8 +377,12 @@ public sealed class SprintAssembler
 
     /// <summary>
     /// Completion progress: every linked non-container issue counts;
-    /// stories linked for progress display don't gate completion; an
-    /// empty sprint (defensive) is complete.
+    /// stories linked for progress display don't gate completion.
+    /// Failed blocks completion — operator rule 2026-07-25: don't
+    /// auto-clear Failed; the operator must investigate or
+    /// requeue. Sprint 5 of talaria dropped a Failed task onto the
+    /// floor in 2026-08-11 because Failed was counted as terminal
+    /// — Failed must stay open and keep the sprint active.
     /// </summary>
     private static async Task<(bool Complete, int Total, int Terminal)> CompletionProgressAsync(
         SprintRecord sprint, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
@@ -395,12 +399,21 @@ public sealed class SprintAssembler
                 continue;
             }
             total++;
-            if (issue.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed)
+            // Failed does NOT count as terminal: the operator must
+            // investigate or requeue (rule 2026-07-25; Sprint 5 of
+            // talaria dropped a Failed task onto the floor in
+            // 2026-08-11). Completed | Closed are the only true
+            // finishes.
+            if (issue.Status is IssueStatus.Completed or IssueStatus.Closed)
             {
                 terminal++;
             }
         }
-        return (terminal == total, total, terminal);
+        // Empty sprint (no non-container tasks, e.g. only stories
+        // linked) is complete — defensive, so an empty Active doesn't
+        // block assembly forever. A sprint with tasks is NOT complete
+        // until all of them are Completed/Closed.
+        return (total == 0 || terminal == total, total, terminal);
     }
 
     /// <summary>

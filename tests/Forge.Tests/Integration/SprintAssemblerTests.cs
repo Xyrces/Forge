@@ -250,6 +250,36 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task FailedTask_DoesNotCompleteSprint()
+    {
+        // 2026-08-11 talaria Sprint 5: a Failed task was counted as
+        // terminal and the sprint auto-completed, dropping the
+        // unfinished work onto the floor. Failed must NOT count as
+        // terminal — the operator must requeue or close it (rule
+        // 2026-07-25).
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
+        await Tick();
+        var first = await _sprints.GetActiveAsync();
+        Assert.NotNull(first);
+
+        // Complete one, fail the other.
+        await _issues.TransitionAsync(aTasks[0], IssueStatus.Completed, null);
+        await _issues.TransitionAsync(aTasks[1], IssueStatus.Failed, null);
+        await Tick();
+
+        // Sprint must STILL be Active — Failed keeps it open.
+        Assert.Equal(SprintStatus.Active, (await _sprints.GetAsync(first!.Id))!.Status);
+        // No new sprint assembled — the Failed task is still pending resolution.
+        var active = await _sprints.GetActiveAsync();
+        Assert.Equal(first.Id, active!.Id);
+
+        // Close the Failed task → sprint now completes.
+        await _issues.TransitionAsync(aTasks[1], IssueStatus.Closed, null);
+        await Tick();
+        Assert.Equal(SprintStatus.Completed, (await _sprints.GetAsync(first.Id))!.Status);
+    }
+
+    [Fact]
     public async Task CompletesSprint_WhenMembersTerminal_ThenAssemblesNext()
     {
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
@@ -747,24 +777,32 @@ public class SprintAssemblerTests : IDisposable
     public async Task RequeuedTask_FromCompletedSprint_IsReassembled()
     {
         // Operator requeue flow (observed live 2026-07-24, task-158):
-        // a task fails, its sprint completes (all members terminal),
-        // the operator requeues it to Pending. Completed-sprint
-        // membership must NOT strand it — it is definitionally
-        // requeued work, not history to protect from resurrection
-        // (terminal tasks are already excluded by the Pending filter).
-        // Spec-chain variant: reassembly goes through group assembly.
+        // a task fails, the operator closes it, the sprint completes,
+        // then requeues it to Pending. Completed-sprint membership
+        // must NOT strand it — requeued work is a new sprint, not
+        // history to protect from resurrection. 2026-08-11 update:
+        // Failed no longer counts as terminal (a sprint with Failed
+        // stays active — operator rule 2026-07-25: don't auto-clear
+        // Failed), so the operator closes the Failed task first, the
+        // sprint completes, then requeue reassembles.
         var (_, _, taskIds) = await SeedGroomedSpecAsync("requeue work", 1);
         var taskId = taskIds[0];
         await Tick();
         var first = await _sprints.GetActiveAsync();
         Assert.NotNull(first);
 
-        // Fail the task; the sprint completes (all terminal).
+        // Fail the task; the sprint STAYS active (Failed blocks
+        // completion).
         await _issues.TransitionAsync(taskId, IssueStatus.Failed, "boom");
+        await Tick();
+        Assert.NotNull(await _sprints.GetActiveAsync());
+
+        // Operator closes the Failed task → sprint now completes.
+        await _issues.TransitionAsync(taskId, IssueStatus.Closed, "operator close");
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync());
 
-        // Operator requeue: Failed -> Pending. Next tick must assemble
+        // Operator requeue: Closed -> Pending. Next tick assembles
         // a NEW sprint containing it (previously: stranded forever).
         await _issues.TransitionAsync(taskId, IssueStatus.Pending, "operator requeue");
         await Tick();
