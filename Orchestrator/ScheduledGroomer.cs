@@ -154,7 +154,7 @@ public sealed class ScheduledGroomer
             // → 83 stories / 147 tasks / 28 PRs for one spec).
             // Intentional re-decomposition goes through the manual
             // endpoint with ?force=true.
-            var all = await _specs.ListAsync(projectId: null, status: null, ct);
+            var all = await _specs.ListForPipelineSweepAsync(status: null, ct);
             candidates = all.Where(s => s.Status is SpecStatus.Designed
                 or SpecStatus.AssetReady
                 or SpecStatus.Approved).ToList();

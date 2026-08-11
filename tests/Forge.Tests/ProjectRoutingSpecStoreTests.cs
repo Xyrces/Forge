@@ -5,9 +5,11 @@ namespace Forge.Tests;
 
 /// <summary>
 /// ProjectRoutingSpecStore: writes route by NewSpec.ProjectId,
-/// id-addressed ops probe + cache the owner, unscoped reads fan out.
-/// (Operator rule 2026-07-31 — the primary-only writers stranded
-/// porthorizon's specs in the forge schema.)
+/// id-addressed ops probe + cache the owner (spec ids are random
+/// hex — safe cross-store keys), scoped reads hit the owning store,
+/// UNSCOPED reads throw (2026-08-09 isolation rule — the explicit
+/// ListAcrossProjectsAsync fan-out is for pipeline schedulers and
+/// the unified admin view only).
 /// </summary>
 public class ProjectRoutingSpecStoreTests : IDisposable
 {
@@ -77,12 +79,35 @@ public class ProjectRoutingSpecStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task List_NoProject_FansOut()
+    public async Task List_NoProject_Throws_IsolationBoundary()
+    {
+        // Operator rule 2026-08-09: schema-per-project IS the
+        // isolation boundary — an unscoped list on the routing store
+        // is a programming error (the 2026-08-09 epic-2 collision
+        // came from exactly this), not a quiet fan-out.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _routing.ListAsync(null, status: null));
+    }
+
+    [Fact]
+    public async Task ListAcrossProjects_ExplicitFanOut_Merges()
     {
         await _primary.CreateAsync(Spec("forge", "a"));
         await _ph.CreateAsync(Spec("porthorizon", "b"));
-        var all = await _routing.ListAsync(null, status: null);
+        var all = await _routing.ListAcrossProjectsAsync(status: null);
         Assert.Equal(2, all.Count);
+    }
+
+    [Fact]
+    public async Task ListForPipelineSweep_RoutesToExplicitFanOut()
+    {
+        await _primary.CreateAsync(Spec("forge", "a"));
+        await _ph.CreateAsync(Spec("porthorizon", "b"));
+        var all = await _routing.ListForPipelineSweepAsync(status: null, CancellationToken.None);
+        Assert.Equal(2, all.Count);
+        // Plain per-project store: just the store's own rows.
+        var phOnly = await _ph.ListForPipelineSweepAsync(status: null, CancellationToken.None);
+        Assert.Single(phOnly);
     }
 
     [Fact]

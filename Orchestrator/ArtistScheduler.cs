@@ -120,7 +120,7 @@ public sealed class ArtistScheduler
         IReadOnlyList<SpecRecord> candidates;
         try
         {
-            candidates = await _specs.ListAsync(projectId: null, status: SpecStatus.Designed, ct);
+            candidates = await _specs.ListForPipelineSweepAsync(SpecStatus.Designed, ct);
         }
         catch (Exception ex)
         {

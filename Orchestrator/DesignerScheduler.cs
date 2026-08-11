@@ -142,7 +142,7 @@ public sealed class DesignerScheduler
         IReadOnlyList<SpecRecord> candidates;
         try
         {
-            candidates = await _specs.ListAsync(projectId: null, status: SpecStatus.ReadyForDesign, ct);
+            candidates = await _specs.ListForPipelineSweepAsync(SpecStatus.ReadyForDesign, ct);
         }
         catch (Exception ex)
         {
