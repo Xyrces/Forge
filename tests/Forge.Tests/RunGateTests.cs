@@ -136,6 +136,55 @@ public class RunGateTests : IDisposable
     }
 
     [Fact]
+    public async Task TerritoryGate_DotPrefixedPaths_NotMangled()
+    {
+        // Observed live 2026-08-11 (talaria task-12): the plan named
+        // `.github/workflows/ci.yml` — legitimately inside coredev's
+        // `.github/` territory — but the extractor's TrimStart('.', '/')
+        // stripped the leading dot, producing `github/workflows/ci.yml`
+        // which failed the territory check. Both revisions burned on a
+        // phantom violation.
+        var plan = """
+            ## Goal
+            Add CI.
+            ## Files
+            - `.github/workflows/ci.yml` (new)
+            - `.kilo/skills/x/SKILL.md` (new)
+            ## Approach
+            Add the workflow.
+            ## Test
+            CI runs.
+            ## Done
+            Green.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { ".github/", ".kilo/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_DotSlashPrefix_StillNormalized()
+    {
+        // `./tests/Foo.cs` must normalize to `tests/Foo.cs` (the
+        // original TrimStart('.', '/') behavior for the "./" case).
+        var plan = """
+            ## Goal
+            Add a test.
+            ## Files
+            - `./tests/Foo.cs` (new)
+            ## Approach
+            Add it.
+            ## Test
+            Run it.
+            ## Done
+            Green.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "tests/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
     public async Task TerritoryGate_NoTerritoryConstraint_Approves()
     {
         var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(FullPlan));

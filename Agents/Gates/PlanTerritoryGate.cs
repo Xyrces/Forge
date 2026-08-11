@@ -90,7 +90,15 @@ public sealed partial class PlanTerritoryGate : IRunGate
                 if (m.Index > 0 && line[m.Index - 1] == '*') continue;
                 var p = m.Value.Trim('`', '\'', '"', ' ', ',', ';', '(', ')');
                 if (p.StartsWith("http", StringComparison.OrdinalIgnoreCase)) continue;
-                p = p.TrimStart('.', '/');
+                // Normalize "./path" → "path" and strip leading slashes,
+                // but NEVER strip a bare leading dot: dot-prefixed repo
+                // paths (.github/, .kilo/) are legitimate territory
+                // prefixes, and TrimStart('.') mangles them into
+                // "github/..." which then fails the territory check
+                // (observed live 2026-08-11: talaria task-12 burned both
+                // plan revisions on phantom territory violations).
+                if (p.StartsWith("./", StringComparison.Ordinal)) p = p[2..];
+                p = p.TrimStart('/');
                 if (p.Length == 0 || p.StartsWith("bin/") || p.StartsWith("obj/")) continue;
                 var isNew = line.Contains("(new)", StringComparison.OrdinalIgnoreCase);
                 rawPaths.Add((p, isNew));
