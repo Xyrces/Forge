@@ -89,7 +89,7 @@ public class IntakeAgentStreamingTests : IDisposable
     }
 
     [Fact]
-    public async Task SendUserMessage_AskQuestionsTool_AttachesQuestionsToAssistantMessage()
+    public async Task SendUserMessage_AskQuestionTool_AttachesQuestionsToAssistantMessage()
     {
         var client = new QuestionCallingClient();
         var agent = NewAgent(client);
@@ -99,9 +99,10 @@ public class IntakeAgentStreamingTests : IDisposable
 
         var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
         Assert.NotNull(assistant.Questions);
-        var q = Assert.Single(assistant.Questions!);
-        Assert.Equal("Which scope?", q.Question);
-        Assert.Equal(new[] { "Transport only", "Transport + outbox" }, q.Options);
+        Assert.Equal(2, assistant.Questions!.Count);
+        Assert.Equal("Which scope?", assistant.Questions[0].Question);
+        Assert.Equal(new[] { "Transport only", "Transport + outbox" }, assistant.Questions[0].Options);
+        Assert.Equal("Anything else to pin down?", assistant.Questions[1].Question);
         // The tool announced itself over the live channel.
         Assert.Contains(_events, e => e.Kind == DashboardEventKind.IntakeRunTool);
     }
@@ -121,9 +122,9 @@ public class IntakeAgentStreamingTests : IDisposable
         Assert.Equal(2, q.Options.Count);
     }
 
-    /// <summary>Calls ask_questions once (structured questions), then
-    /// returns an empty-text follow-up — exercising the placeholder
-    /// content for tool-only replies.</summary>
+    /// <summary>Calls ask_question once per question (the flat-args
+    /// shape), then returns an empty-text follow-up — exercising the
+    /// placeholder content for tool-only replies.</summary>
     private sealed class QuestionCallingClient : IChatClient
     {
         private int _callIndex;
@@ -139,18 +140,21 @@ public class IntakeAgentStreamingTests : IDisposable
             await Task.Yield();
             if (_callIndex++ == 0)
             {
-                var args = System.Text.Json.JsonSerializer.SerializeToElement(new
-                {
-                    questions = new[]
-                    {
-                        new { question = "Which scope?", options = new[] { "Transport only", "Transport + outbox" } },
-                    },
-                });
                 yield return new ChatResponseUpdate(ChatRole.Assistant,
                     new AIContent[]
                     {
-                        new FunctionCallContent("call_1", "ask_questions",
-                            new Dictionary<string, object?> { ["questions"] = args.GetProperty("questions") }),
+                        new FunctionCallContent("call_1", "ask_question",
+                            new Dictionary<string, object?>
+                            {
+                                ["question"] = "Which scope?",
+                                ["options"] = System.Text.Json.JsonSerializer.SerializeToElement(
+                                    new[] { "Transport only", "Transport + outbox" }),
+                            }),
+                        new FunctionCallContent("call_2", "ask_question",
+                            new Dictionary<string, object?>
+                            {
+                                ["question"] = "Anything else to pin down?",
+                            }),
                     });
                 yield break;
             }

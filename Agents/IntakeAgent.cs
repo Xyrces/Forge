@@ -166,28 +166,30 @@ public sealed class IntakeAgent
         // operator has to answer by retyping. When a model never calls
         // the tool, the fallback parser below lifts text questions into
         // the same shape.
+        // NOTE: deliberately ONE question per call with flat args — a
+        // nested IntakeQuestionSpec[] parameter failed to bind on the
+        // live kimi intake (2026-08-12: model retried with a stripped
+        // call and the questions landed with zero options).
         var pendingQuestions = new List<IntakeQuestion>();
         var askQuestionsTool = AIFunctionFactory.Create(
-            ([Description("The clarifying questions to ask, in order.")] IntakeQuestionSpec[] questions) =>
+            ([Description("The full clarifying question to ask the operator.")] string question,
+             [Description("2-5 short clickable options. ALWAYS include when the question is a choice (yes/no, this-or-that); omit only for genuinely free-form answers.")] string[]? options = null) =>
             {
-                foreach (var q in questions ?? Array.Empty<IntakeQuestionSpec>())
-                {
-                    if (string.IsNullOrWhiteSpace(q.Question)) continue;
-                    var options = (q.Options ?? Array.Empty<string>())
-                        .Where(o => !string.IsNullOrWhiteSpace(o))
-                        .Take(6).ToArray();
-                    pendingQuestions.Add(new IntakeQuestion(q.Question.Trim(), options));
-                    if (pendingQuestions.Count >= 8) break;
-                }
+                if (string.IsNullOrWhiteSpace(question))
+                    return Task.FromResult("question_required");
+                if (pendingQuestions.Count >= 8)
+                    return Task.FromResult("question_limit_reached");
+                var opts = (options ?? Array.Empty<string>())
+                    .Where(o => !string.IsNullOrWhiteSpace(o))
+                    .Take(6).ToArray();
+                pendingQuestions.Add(new IntakeQuestion(question.Trim(), opts));
                 return Task.FromResult("ok");
             },
-            name: "ask_questions",
-            description: "Ask the operator clarifying questions as structured cards with " +
-                         "clickable options. ALWAYS use this instead of writing numbered " +
-                         "questions as text when you need answers to proceed. Give each " +
-                         "question 2-5 short options when sensible defaults exist; omit " +
-                         "options for free-form answers. The operator can always type a " +
-                         "custom reply instead.");
+            name: "ask_question",
+            description: "Ask the operator ONE clarifying question as a structured card with " +
+                         "clickable options. Call once per question. ALWAYS use this instead of " +
+                         "writing numbered questions as text when you need answers to proceed. " +
+                         "The operator can always type a custom reply instead.");
 
         // Phase 2a tools: touches + add_dependency. Both require
         // SpecStore. We expose them as AIFunctions only when a
@@ -580,10 +582,11 @@ public sealed class IntakeAgent
             call and confirm the proposal in your reply.
 
             When you need answers from the operator, call
-            `ask_questions(questions)` — the dashboard renders them as
-            clickable cards. Keep a SHORT text summary in your reply too
-            (one line per question at most); never dump a long numbered
-            question list as text when the tool covers it.
+            `ask_question(question, options)` once per question — the
+            dashboard renders them as clickable cards. Keep a SHORT text
+            summary in your reply too (one line per question at most);
+            never dump a long numbered question list as text when the
+            tool covers it.
 
             Do NOT ask the operator about facts the project brief below
             already answers (tech stack, layout, existing modules). Read
@@ -713,12 +716,6 @@ public sealed class IntakeAgent
         return sb.ToString();
     }
 }
-
-/// <summary>Wire shape for the ask_questions tool — the model
-/// produces this; the agent converts to <see cref="IntakeQuestion"/>.</summary>
-public sealed record IntakeQuestionSpec(
-    [property: Description("The full question text.")] string Question,
-    [property: Description("2-5 short clickable options; omit for a free-form answer.")] string[]? Options = null);
 
 /// <summary>
 /// Registry of <see cref="IntakeAgent"/> instances, one per project.

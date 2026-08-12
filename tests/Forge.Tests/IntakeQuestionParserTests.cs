@@ -1,7 +1,36 @@
 using Forge.Agents;
+using Forge.Core;
 using Xunit;
 
 namespace Forge.Tests;
+
+public class IntakeQuestionSynthesisTests
+{
+    [Theory]
+    [InlineData("Is **topics + subscriptions only** the right v1 scope?")]
+    [InlineData("Should we plan around Testcontainers?")]
+    [InlineData("Confirm this follows the existing target matrix?")]
+    [InlineData("Do you want queues too?")]
+    public void WithYesNoDefault_YesNoShapedEmptyOptions_GetsYesNo(string question)
+    {
+        var q = new IntakeQuestion(question, Array.Empty<string>()).WithYesNoDefault();
+        Assert.Equal(new[] { "Yes", "No" }, q.Options);
+    }
+
+    [Fact]
+    public void WithYesNoDefault_ExistingOptions_Untouched()
+    {
+        var q = new IntakeQuestion("Is this right?", new[] { "A", "B" }).WithYesNoDefault();
+        Assert.Equal(new[] { "A", "B" }, q.Options);
+    }
+
+    [Fact]
+    public void WithYesNoDefault_OpenEndedQuestion_StaysFreeForm()
+    {
+        var q = new IntakeQuestion("What should the package be named?", Array.Empty<string>()).WithYesNoDefault();
+        Assert.Empty(q.Options);
+    }
+}
 
 public class IntakeQuestionParserTests
 {

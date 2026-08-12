@@ -25,7 +25,31 @@ public enum IntakeMessageRole
 /// reply text as a fallback for models that ignore the tool. Rendered
 /// as a clickable card on the intake page (2026-08-12).
 /// </summary>
-public sealed record IntakeQuestion(string Question, IReadOnlyList<string> Options);
+public sealed record IntakeQuestion(string Question, IReadOnlyList<string> Options)
+{
+    /// <summary>
+    /// Presentation helper: an options-less question that reads as
+    /// yes/no ("Is X acceptable?", "Should we …?", "Confirm …?")
+    /// gets Yes/No chips so the card always has something clickable
+    /// (observed live 2026-08-12: a model captured questions without
+    /// options and the card degraded to "type your answer"). Applied
+    /// at READ time so already-persisted messages benefit too.
+    /// </summary>
+    public IntakeQuestion WithYesNoDefault()
+    {
+        if (Options.Count > 0) return this;
+        var t = Question.TrimStart('*', '#', ' ', '`');
+        var yesNo = t.StartsWith("Is ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Are ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Should ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Do ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Does ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Can ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Confirm ", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Would ", StringComparison.OrdinalIgnoreCase);
+        return yesNo ? this with { Options = new[] { "Yes", "No" } } : this;
+    }
+}
 
 public sealed record IntakeMessageRecord(
     long Id,
