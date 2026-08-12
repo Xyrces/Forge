@@ -138,12 +138,20 @@ public sealed class GroomerAgent
             - Each task title comes from a spec acceptance criterion.
             - Don't go over 1-3 stories, 1-3 tasks each. The tools
               enforce these caps and return limit errors.
+            - WIRE PHYSICAL PREREQUISITES with `add_dependency`: when
+              task B edits a project/file/module that task A creates,
+              or needs infrastructure A lands first, call
+              add_dependency(blocker_id: A, blocked_id: B) so B stays
+              out of the dispatch queue until A merges. Example: the
+              task creating a new csproj blocks every task writing
+              classes into it. Don't serialize soft preferences —
+              disjoint files run in parallel.
             - When done, call `set_spec_status` with "Groomed".
 
             Use the `create_story` tool for each story and
             `create_task` for each task. You may call them in any
-            order. After all stories + tasks are created, call
-            `set_spec_status`.
+            order. After all stories + tasks are created, wire any
+            blocks edges, then call `set_spec_status`.
 
             {grounding}
             """;
@@ -176,7 +184,23 @@ public sealed class GroomerAgent
             description: "Move the spec to a new status. Use 'Groomed' " +
                          "after all stories + tasks are created.");
 
-        var tools = new List<AITool> { createStoryTool, createTaskTool, setStatusTool };
+        // Physical-prerequisite wiring: without blocks edges the whole
+        // decomposed sprint dispatches in parallel and dependents start
+        // before their scaffold merges (observed live 2026-08-12:
+        // talaria Sprint 7 — the new-project task ran concurrently
+        // with the tasks writing classes into that project).
+        var addDependencyTool = AIFunctionFactory.Create(
+            ([Description("The task that must merge FIRST (the prerequisite).")] string blockerId,
+             [Description("The task that cannot start until the blocker merges.")] string blockedId,
+             [Description("One-line reason (what the blocker provides).")] string? rationale = null) =>
+                AddTaskDependencyAsync(blockerId, blockedId, rationale, ct),
+            name: "add_dependency",
+            description: "Declare that a task CANNOT START until another task merges " +
+                         "(a physical prerequisite: it creates the project/file/infrastructure " +
+                         "the other task edits). Not for soft ordering — disjoint work stays " +
+                         "parallel. Returns 'ok' or an error string.");
+
+        var tools = new List<AITool> { createStoryTool, createTaskTool, addDependencyTool, setStatusTool };
         var agent = new ChatClientAgent(
             chatClient,
             instructions: systemPrompt,
@@ -274,6 +298,29 @@ public sealed class GroomerAgent
                 : $"status={refreshed.Status}";
         }
         catch (InvalidOperationException ex)
+        {
+            return $"error: {ex.Message}";
+        }
+    }
+
+    /// <summary>Wire a blocks edge between two tasks of the spec being
+    /// groomed. LLM-consumable errors; the store upsert is idempotent
+    /// so retries are safe.</summary>
+    private async Task<string> AddTaskDependencyAsync(
+        string blockerId, string blockedId, string? rationale, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(blockerId) || string.IsNullOrWhiteSpace(blockedId))
+            return "error: blocker_id and blocked_id are required";
+        try
+        {
+            await _issues.AddDependencyAsync(blockerId, blockedId, IssueDepKind.Blocks, ct);
+            return "ok";
+        }
+        catch (InvalidOperationException ex)
+        {
+            return $"error: {ex.Message}";
+        }
+        catch (ArgumentException ex)
         {
             return $"error: {ex.Message}";
         }
