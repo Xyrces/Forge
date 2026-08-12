@@ -312,6 +312,31 @@ public class RunGateTests : IDisposable
     }
 
     [Fact]
+    public async Task TerritoryGate_BareFilenameExistingElsewhere_SuggestsFullPath()
+    {
+        // Live 2026-08-12 (talaria task-26): the plan listed the csproj
+        // bare; it exists at src/… — the feedback should say where,
+        // not just "mark it (new)".
+        Directory.CreateDirectory(Path.Combine(_workDir, "src", "Talaria.Transports.AzureServiceBus"));
+        File.WriteAllText(Path.Combine(_workDir, "src", "Talaria.Transports.AzureServiceBus", "Talaria.Transports.AzureServiceBus.csproj"), "<Project />");
+        var plan = """
+            ## Goal
+            Add the sample.
+            ## Files
+            - `Talaria.Transports.AzureServiceBus.csproj` — reference the sample
+            ## Approach
+            Add it.
+            ## Test
+            Build.
+            ## Done
+            Builds.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(plan, territory: new[] { "src/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Revise, v.Outcome);
+        Assert.Contains("did you mean src/Talaria.Transports.AzureServiceBus/Talaria.Transports.AzureServiceBus.csproj", v.Feedback);
+    }
+
+    [Fact]
     public async Task TerritoryGate_RootFile_OnlyWhenAllowed()
     {
         File.WriteAllText(Path.Combine(_workDir, "Program.cs"), "// root");

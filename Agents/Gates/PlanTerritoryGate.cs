@@ -34,7 +34,8 @@ public sealed partial class PlanTerritoryGate : IRunGate
             if (territoryEnforced && !InTerritory(path, ctx))
             {
                 problems.Add($"{path} is outside {ctx.RoleName}'s territory " +
-                    $"({string.Join(", ", ctx.TerritoryPrefixes)}{(ctx.TerritoryAllowsRootFiles ? ", repo-root files" : "")})");
+                    $"({string.Join(", ", ctx.TerritoryPrefixes)}{(ctx.TerritoryAllowsRootFiles ? ", repo-root files" : "")})" +
+                    $"{SuggestExistingPath(ctx.WorktreePath, path)}");
                 continue;
             }
             if (!isNew && !File.Exists(Path.Combine(ctx.WorktreePath, path)))
@@ -53,7 +54,7 @@ public sealed partial class PlanTerritoryGate : IRunGate
                 {
                     continue;
                 }
-                problems.Add($"{path} does not exist in the worktree — if you intend to create it, mark it \"(new)\" (or start the line with Create/Add)");
+                problems.Add($"{path} does not exist in the worktree — if you intend to create it, mark it \"(new)\" (or start the line with Create/Add){SuggestExistingPath(ctx.WorktreePath, path)}");
             }
         }
         if (problems.Count > 0)
@@ -72,6 +73,49 @@ public sealed partial class PlanTerritoryGate : IRunGate
             if (path.StartsWith(prefix, StringComparison.Ordinal)) return true;
         }
         return ctx.TerritoryAllowsRootFiles && !path.Contains('/');
+    }
+
+    /// <summary>
+    /// When a bare filename fails existence, look for it elsewhere in
+    /// the worktree and suggest the real repo-relative path — "did you
+    /// mean src/X/Y.csproj?" turns a two-revision stall into a one-line
+    /// fix (observed live 2026-08-12: talaria task-26 burned both
+    /// revisions listing the csproj bare instead of at src/…). Returns
+    /// "" when there is nothing useful to suggest.
+    /// </summary>
+    internal static string SuggestExistingPath(string worktree, string path)
+    {
+        if (path.Contains('/')) return "";          // full path: nothing to suggest
+        if (!Directory.Exists(worktree)) return "";
+        try
+        {
+            var matches = new List<string>(3);
+            FindByName(worktree, worktree, path, matches);
+            return matches.Count == 0 ? "" : $" — did you mean {string.Join(" or ", matches)}?";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return "";   // suggestion is best-effort; never fail the gate over it
+        }
+    }
+
+    private static readonly string[] SkippedDirs = { ".git", "bin", "obj", "node_modules", ".forge" };
+
+    private static void FindByName(string root, string dir, string fileName, List<string> matches)
+    {
+        if (matches.Count >= 3) return;
+        foreach (var file in Directory.EnumerateFiles(dir, fileName))
+        {
+            matches.Add(Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/'));
+            if (matches.Count >= 3) return;
+        }
+        foreach (var sub in Directory.EnumerateDirectories(dir))
+        {
+            var name = Path.GetFileName(sub);
+            if (SkippedDirs.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
+            FindByName(root, sub, fileName, matches);
+            if (matches.Count >= 3) return;
+        }
     }
 
     /// <summary>
