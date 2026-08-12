@@ -18,6 +18,19 @@
     <script src="_framework/blazor.web.js"></script>
     <script src="app.js"></script>
     <script src="events.js"></script>
+    <script src="intake.js"></script>
+    <script type="module">
+        // Mermaid for the intake canvas. ESM from CDN; on failure
+        // window.forgeMermaid stays undefined and intake.js falls back
+        // to rendering the diagram source.
+        try {
+            const mermaid = (await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')).default;
+            mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+            window.forgeMermaid = mermaid;
+        } catch (err) {
+            console.warn('forge: mermaid failed to load', err);
+        }
+    </script>
     <script src="_content/Fluxor.Blazor.Web.ReduxDevTools/reduxDevTools.js"></script>
 </body>
 </html>

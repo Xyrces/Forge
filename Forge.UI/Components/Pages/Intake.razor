@@ -1,7 +1,9 @@
 @page "/intake"
 @inject HttpClient Http
+@inject IHttpClientFactory HttpFactory
+@inject IJSRuntime JS
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
-@implements IDisposable
+@implements IAsyncDisposable
 
 <PageTitle>Intake</PageTitle>
 <div class="page">
@@ -44,7 +46,7 @@
             }
         </aside>
 
-        <section class="intake-thread">
+        <section class="intake-thread" id="intake-thread-scroll">
             @if (_activeSessionId is null)
             {
                 <div class="page-subtitle">Pick a session on the left, or start a new one.</div>
@@ -59,7 +61,7 @@
                 {
                     <div class="chat-msg chat-msg--@m.Role.ToLowerInvariant()">
                         <div class="chat-msg__role mono">@m.Role</div>
-                        <div class="chat-msg__body">@m.Content</div>
+                        <div class="chat-msg__body md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
                         @if (m.ProposedEpicId is not null)
                         {
                             <div class="chat-msg__card">
@@ -79,22 +81,84 @@
                         }
                     </div>
                 }
+                @if (_liveActive)
+                {
+                    <div class="chat-msg chat-msg--assistant chat-msg--live">
+                        <div class="chat-msg__role mono">assistant · live</div>
+                        @if (_liveTools.Count > 0)
+                        {
+                            <div class="chat-msg__tools">
+                                @foreach (var t in _liveTools)
+                                {
+                                    <span class="pill pill--primary">⚙ @t</span>
+                                }
+                            </div>
+                        }
+                        @if (_liveText.Length == 0)
+                        {
+                            <div class="typing-dots" aria-label="assistant is thinking"><span></span><span></span><span></span></div>
+                        }
+                        else
+                        {
+                            <div class="chat-msg__body md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(_liveText))</div>
+                        }
+                    </div>
+                }
                 <div class="intake-input">
                     <input class="intake-input__field" @bind="_draft" placeholder="Type your message..."
                            @onkeydown="@(async e => { if (e.Key == "Enter" && !_sending) await SendMessage(); })" />
-                    <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">Send</button>
+                    <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">
+                        @(_sending ? "Sending…" : "Send")
+                    </button>
                 </div>
             }
         </section>
 
         <aside class="intake-context">
             <div class="intake-context__tabs">
-                <button class="chip @(_activeTab == "spec" ? "chip--active" : "")" @onclick='() => SelectTab("spec")'>Spec Draft</button>
-                <button class="chip @(_activeTab == "arch" ? "chip--active" : "")" @onclick='() => SelectTab("arch")'>Architecture</button>
-                <button class="chip @(_activeTab == "memory" ? "chip--active" : "")" @onclick='() => SelectTab("memory")'>Memory</button>
+                <button class="chip @(_activeTab == "canvas" ? "chip--active" : "")" @onclick='() => SelectTab("canvas")'>Canvas</button>
+                <button class="chip @(_activeTab == "spec" ? "chip--active" : "")" @onclick='() => SelectTab("spec")'>Spec Drafts</button>
             </div>
             <div class="intake-context__body">
-                @if (_activeTab == "spec")
+                @if (_activeTab == "canvas")
+                {
+                    @if (_activeSessionId is null)
+                    {
+                        <p class="page-subtitle">Pick a session to see its canvas.</p>
+                    }
+                    else
+                    {
+                        <div class="canvas-section">
+                            <div class="canvas-section__title">Discussion map</div>
+                            @if (CanvasMapSource is null)
+                            {
+                                <p class="page-subtitle">Proposed epics and their specs map out here as the discussion produces them.</p>
+                            }
+                            else
+                            {
+                                <div class="mermaid-target" id="mmd-map"></div>
+                            }
+                        </div>
+                        <div class="canvas-section">
+                            <div class="canvas-section__title">Diagrams from the discussion</div>
+                            @if (_diagrams.Count == 0)
+                            {
+                                <p class="page-subtitle">When the intake agent sketches a structure (mermaid diagram) it lands here.</p>
+                            }
+                            else
+                            {
+                                @foreach (var d in _diagrams)
+                                {
+                                    <div class="canvas-diagram">
+                                        <div class="canvas-diagram__meta mono">@d.Caption</div>
+                                        <div class="mermaid-target" id="@d.ElementId"></div>
+                                    </div>
+                                }
+                            }
+                        </div>
+                    }
+                }
+                else
                 {
                     @if (_activeSessionId is null)
                     {
@@ -112,8 +176,8 @@
                     {
                         @foreach (var spec in _sessionSpecs)
                         {
-                            <div class="card" style="margin-bottom:10px">
-                                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                            <div class="card intake-spec-card">
+                                <div class="intake-spec-card__head">
                                     <strong>@spec.Title</strong>
                                     <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Status</span>
                                 </div>
@@ -122,62 +186,6 @@
                                 {
                                     <pre class="intake-spec-body">@Truncate(spec.Body, 800)</pre>
                                 }
-                            </div>
-                        }
-                    }
-                }
-                else if (_activeTab == "arch")
-                {
-                    <div style="display:flex;gap:8px;margin-bottom:10px">
-                        <button class="btn" @onclick="RebuildGraph" disabled="@_graphLoading">
-                            @(_graphLoading ? "Building…" : "Refresh Graph")
-                        </button>
-                    </div>
-                    @if (_graphError is not null)
-                    {
-                        <div class="banner banner--error"><span>@_graphError</span></div>
-                    }
-                    @if (_graph is not null)
-                    {
-                        <p class="page-subtitle">
-                            @_graph.FileCount files · @_graph.ImportCount imports · @_graph.ProjectEdgeCount project edges<br />
-                            sha @_graph.RepoSha[..Math.Min(8, _graph.RepoSha.Length)] · built @_graph.BuiltAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
-                        </p>
-                        @if (_graph.Files.Count > 0)
-                        {
-                            <div class="intake-module-list">
-                                @foreach (var mod in _graph.Files.GroupBy(f => f.Module).OrderByDescending(g => g.Count()).Take(20))
-                                {
-                                    <div class="intake-module">
-                                        <span class="mono">@(string.IsNullOrEmpty(mod.Key) || mod.Key == "<root>" ? "(root)" : mod.Key)</span>
-                                        <span class="page-subtitle">@mod.Count() files</span>
-                                    </div>
-                                }
-                            </div>
-                        }
-                    }
-                    else if (!_graphLoading && _graphError is null)
-                    {
-                        <p class="page-subtitle">Load the codebase graph for the current project.</p>
-                    }
-                }
-                else
-                {
-                    @if (_memory is null)
-                    {
-                        <p class="page-subtitle">Loading…</p>
-                    }
-                    else if (_memory.Count == 0)
-                    {
-                        <p class="page-subtitle">No memory entries yet.</p>
-                    }
-                    else
-                    {
-                        @foreach (var m in _memory.Take(30))
-                        {
-                            <div class="intake-memory-row">
-                                <span class="mono">@m.Key</span>
-                                <span class="page-subtitle">@Truncate(m.Body, 120)</span>
                             </div>
                         }
                     }
@@ -196,30 +204,129 @@
     private bool _accepting;
     private readonly HashSet<long> _acceptedEpicIds = new();
     private string? _actionError;
-    private string _activeTab = "spec";
+    private string _activeTab = "canvas";
     private List<SessionSpecDto>? _sessionSpecs;
-    private GraphDto? _graph;
-    private bool _graphLoading;
-    private string? _graphError;
-    private List<MemoryDto>? _memory;
+
+    // Live-run state: fed by the intake SSE channel (intake.run.delta /
+    // .tool / .completed) while the server streams the LLM response.
+    private bool _liveActive;
+    private string _liveText = "";
+    private readonly List<string> _liveTools = new();
+
+    // Canvas diagrams extracted from assistant messages (```mermaid
+    // fences), newest first. ElementIds are stable per message so the
+    // JS renderer's dataset memo skips unchanged diagrams.
+    private readonly List<CanvasDiagram> _diagrams = new();
+    private bool _mermaidDirty;
+    private string? _canvasMapSource;
+    private string? CanvasMapSource => _canvasMapSource;
+
+    private DotNetObjectReference<Intake>? _selfRef;
+    private bool _streamSubscribed;
 
     public sealed record SessionDto(string Id, string ProjectId, string Title, DateTime CreatedAt, DateTime UpdatedAt, List<MessageDto>? Messages);
     public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle);
     public sealed record SessionSpecDto(string Id, string ProjectId, string Title, string Status, int CurrentVersion, string? Body);
-    public sealed record GraphDto(string RepoRoot, string RepoSha, DateTime BuiltAt, int FileCount, int ImportCount, int ProjectEdgeCount, List<GraphFileDto> Files);
-    public sealed record GraphFileDto(string Path, string Module, string Language);
-    public sealed record MemoryDto(string Key, string Body, DateTime UpdatedAt);
+
+    private sealed record CanvasDiagram(string ElementId, string Source, string Caption);
 
     private void SelectTab(string tab)
     {
         _activeTab = tab;
-        _ = tab switch
+        if (tab == "spec") _ = LoadSessionSpecs();
+        if (tab == "canvas") _mermaidDirty = true;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        ShellStore.StateChanged += OnShellChanged;
+        await ReloadSessions();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_streamSubscribed)
         {
-            "spec" => LoadSessionSpecs(),
-            "arch" => LoadGraph(forceRebuild: false),
-            "memory" => LoadMemory(),
-            _ => Task.CompletedTask,
-        };
+            _streamSubscribed = true;
+            _selfRef = DotNetObjectReference.Create(this);
+            try { await JS.InvokeVoidAsync("forge.intakeStream.subscribe", _selfRef); }
+            catch (InvalidOperationException) { /* prerender */ }
+        }
+        if (_mermaidDirty)
+        {
+            _mermaidDirty = false;
+            try
+            {
+                await JS.InvokeVoidAsync("forge.intakeMermaid.renderInto", "mmd-map", _canvasMapSource ?? "");
+                foreach (var d in _diagrams)
+                {
+                    await JS.InvokeVoidAsync("forge.intakeMermaid.renderInto", d.ElementId, d.Source);
+                }
+            }
+            catch (InvalidOperationException) { /* prerender: no JS runtime yet */ }
+            catch (JSException) { /* mermaid render failure is non-fatal; js falls back to source */ }
+        }
+    }
+
+    /// <summary>Intake SSE events arrive with the full event JSON
+    /// (see intake.js). Drives the live assistant bubble.</summary>
+    [JSInvokable]
+    public async Task OnIntakeEvent(string kind, string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var sessionId = root.TryGetProperty("taskId", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.String
+                ? t.GetString() : null;
+            if (sessionId is null || sessionId != _activeSessionId) return;
+
+            switch (kind)
+            {
+                case "intake-run-started":
+                    _liveActive = true;
+                    _liveText = "";
+                    _liveTools.Clear();
+                    break;
+                case "intake-run-delta":
+                    if (root.TryGetProperty("data", out var dd)
+                        && dd.TryGetProperty("delta", out var delta))
+                    {
+                        _liveText += delta.GetString();
+                    }
+                    _liveActive = true;
+                    break;
+                case "intake-run-tool":
+                    if (root.TryGetProperty("data", out var dt)
+                        && dt.TryGetProperty("tool", out var tool)
+                        && tool.GetString() is { } toolName)
+                    {
+                        _liveTools.Add(toolName);
+                    }
+                    break;
+                case "intake-run-completed":
+                    _liveActive = false;
+                    _liveText = "";
+                    _liveTools.Clear();
+                    await ReloadActive();
+                    break;
+                case "intake-run-failed":
+                    _liveActive = false;
+                    _liveText = "";
+                    _liveTools.Clear();
+                    _actionError = root.TryGetProperty("detail", out var dtl)
+                        ? $"Intake run failed: {dtl.GetString()}"
+                        : "Intake run failed.";
+                    await ReloadActive();
+                    break;
+            }
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception)
+        {
+            // A malformed event must not break the circuit — the next
+            // completed/failed event reloads authoritative state anyway.
+        }
     }
 
     private async Task LoadSessionSpecs()
@@ -230,82 +337,12 @@
             _sessionSpecs = await Http.GetFromJsonAsync<List<SessionSpecDto>>($"/api/intake/sessions/{_activeSessionId}/specs");
         }
         catch { _sessionSpecs = new(); }
-        StateHasChanged();
-    }
-
-    private async Task<string?> CurrentProjectRoot()
-    {
-        try
-        {
-            var id = ShellStore.Value.CurrentProjectId;
-            if (id is null) return null;
-            var projects = await Http.GetFromJsonAsync<List<ProjectRootDto>>("/api/projects/");
-            return projects?.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))?.Root;
-        }
-        catch { return null; }
-    }
-
-    private async Task LoadGraph(bool forceRebuild)
-    {
-        _graphLoading = true;
-        _graphError = null;
-        StateHasChanged();
-        try
-        {
-            var root = await CurrentProjectRoot();
-            if (string.IsNullOrWhiteSpace(root))
-            {
-                _graphError = "Current project's local path is unknown — cannot build the codebase graph.";
-                return;
-            }
-            var url = forceRebuild
-                ? $"/api/codebase-graph/rebuild?repoRoot={Uri.EscapeDataString(root)}"
-                : $"/api/codebase-graph?repoRoot={Uri.EscapeDataString(root)}";
-            if (forceRebuild)
-            {
-                var resp = await Http.PostAsync(url, null);
-                if (!resp.IsSuccessStatusCode)
-                {
-                    _graphError = $"Graph build failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
-                    return;
-                }
-                _graph = await Http.GetFromJsonAsync<GraphDto>($"/api/codebase-graph?repoRoot={Uri.EscapeDataString(root)}");
-            }
-            else
-            {
-                _graph = await Http.GetFromJsonAsync<GraphDto>(url);
-            }
-        }
-        catch (Exception ex) { _graphError = ex.Message; }
-        finally
-        {
-            _graphLoading = false;
-            StateHasChanged();
-        }
-    }
-
-    private async Task LoadMemory()
-    {
-        try
-        {
-            // Memory is a single global store with project-PREFIXED
-            // keys (vision/<projectId> etc.) — no store lens.
-            _memory = await Http.GetFromJsonAsync<List<MemoryDto>>("/api/memory");
-        }
-        catch { _memory = new(); }
+        RebuildCanvas();
         StateHasChanged();
     }
 
     private static string Truncate(string s, int max) =>
         string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max] + "…";
-
-    public sealed record ProjectRootDto(string Id, string Root);
-
-    protected override async Task OnInitializedAsync()
-    {
-        ShellStore.StateChanged += OnShellChanged;
-        await ReloadSessions();
-    }
 
     private string? _loadedProject;
 
@@ -340,11 +377,22 @@
     {
         _activeSessionId = id;
         _sessionSpecs = null;
+        _liveActive = false;
+        _liveText = "";
+        _liveTools.Clear();
+        await ReloadActive();
+    }
+
+    private async Task ReloadActive()
+    {
+        if (_activeSessionId is null) return;
         try
         {
-            var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{id}");
+            var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{_activeSessionId}");
             _messages = resp?.Messages?.ToList() ?? new();
+            SyncAcceptedFromSystemMessages();
             if (_activeTab == "spec") await LoadSessionSpecs();
+            else RebuildCanvas();
         }
         catch { _messages = new(); }
         StateHasChanged();
@@ -398,6 +446,7 @@
                 _acceptedEpicIds.Add(messageId);
                 _actionError = null;
                 await LoadSessionSpecs();
+                await ReloadActive();
             }
             else
             {
@@ -412,20 +461,150 @@
     {
         if (_activeSessionId is null || string.IsNullOrWhiteSpace(_draft)) return;
         _sending = true;
+        // Optimistic: the operator's message appears immediately and
+        // the live bubble shows "thinking" — the POST only returns
+        // after the whole LLM round, and the SSE channel drives the
+        // in-flight UI in the meantime.
+        var text = _draft;
+        _messages ??= new();
+        _messages.Add(new MessageDto(-DateTime.UtcNow.Ticks, "User", text, DateTime.Now, null, null));
+        _draft = "";
+        _liveActive = true;
+        _liveText = "";
+        _liveTools.Clear();
+        StateHasChanged();
         try
         {
-            await Http.PostAsJsonAsync($"/api/intake/sessions/{_activeSessionId}/messages", new { text = _draft });
-            _draft = "";
-            await SetActive(_activeSessionId);
+            var http = HttpFactory.CreateClient("ForgeApiLongPoll");
+            var resp = await http.PostAsJsonAsync($"/api/intake/sessions/{_activeSessionId}/messages", new { text });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _actionError = $"Send failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+            }
         }
-        catch { }
-        finally { _sending = false; }
+        catch (Exception ex) { _actionError = $"Send failed: {ex.Message}"; }
+        finally
+        {
+            _sending = false;
+            // Safety net: if the completed event was missed (stream
+            // reconnect mid-run), reload authoritative state here.
+            if (_liveActive) { _liveActive = false; _liveText = ""; _liveTools.Clear(); }
+            await ReloadActive();
+        }
     }
 
-    private Task RebuildGraph() => LoadGraph(forceRebuild: true);
+    /// <summary>Accepted epics are recorded server-side as system
+    /// messages ("Operator accepted epic …"); derive the local set so
+    /// a reload keeps the Accepted pill + canvas coloring.</summary>
+    private void SyncAcceptedFromSystemMessages()
+    {
+        if (_messages is null) return;
+        var acceptedIds = _messages
+            .Where(m => m.Role.Equals("System", StringComparison.OrdinalIgnoreCase)
+                && m.Content.StartsWith("Operator accepted epic ", StringComparison.Ordinal))
+            .Select(m => m.Content["Operator accepted epic ".Length..].Split(':', ' ')[0])
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in _messages)
+        {
+            if (m.ProposedEpicId is not null && acceptedIds.Contains(m.ProposedEpicId))
+                _acceptedEpicIds.Add(m.Id);
+        }
+    }
 
-    public void Dispose()
+    /// <summary>Rebuild the canvas: the auto discussion map (epics →
+    /// specs) + the mermaid diagrams the assistant drew in replies.</summary>
+    private void RebuildCanvas()
+    {
+        _diagrams.Clear();
+        if (_messages is not null)
+        {
+            foreach (var m in _messages.OrderByDescending(m => m.Id))
+            {
+                if (!m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase)) continue;
+                var idx = 0;
+                foreach (var src in ExtractMermaidBlocks(m.Content))
+                {
+                    _diagrams.Add(new CanvasDiagram(
+                        $"mmd-msg-{m.Id}-{idx++}",
+                        src,
+                        $"reply · {m.Timestamp:MM-dd HH:mm}"));
+                }
+            }
+        }
+        _canvasMapSource = BuildDiscussionMap();
+        _mermaidDirty = true;
+    }
+
+    private string? BuildDiscussionMap()
+    {
+        if (_messages is null) return null;
+        var epics = _messages
+            .Where(m => m.ProposedEpicId is not null)
+            .GroupBy(m => m.ProposedEpicId!)
+            .Select(g => g.First())
+            .ToList();
+        if (epics.Count == 0) return null;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("flowchart TD");
+        var specNodes = 0;
+        for (var i = 0; i < epics.Count; i++)
+        {
+            var accepted = _acceptedEpicIds.Contains(epics[i].Id);
+            var label = MermaidLabel($"{epics[i].ProposedEpicId} — {epics[i].ProposedEpicTitle}");
+            sb.AppendLine($"  e{i}[\"{label}\"]:::{(accepted ? "accepted" : "proposed")}");
+        }
+        if (_sessionSpecs is not null)
+        {
+            foreach (var spec in _sessionSpecs)
+            {
+                var label = MermaidLabel($"{spec.Id} · v{spec.CurrentVersion} · {spec.Status}");
+                sb.AppendLine($"  s{specNodes}[\"{label}\"]:::spec");
+                // Link epic→spec when the titles line up (specs are
+                // created from the epic title at accept time).
+                var parentIdx = epics.FindIndex(e =>
+                    string.Equals(e.ProposedEpicTitle, spec.Title, StringComparison.OrdinalIgnoreCase));
+                if (parentIdx >= 0) sb.AppendLine($"  e{parentIdx} --> s{specNodes}");
+                specNodes++;
+            }
+        }
+        sb.AppendLine("  classDef proposed fill:#1D2230,stroke:#7C9CFF,color:#E6E8EE");
+        sb.AppendLine("  classDef accepted fill:#16302a,stroke:#7DDFC1,color:#E6E8EE");
+        sb.AppendLine("  classDef spec fill:#2a2416,stroke:#F2B55A,color:#E6E8EE");
+        return sb.ToString();
+    }
+
+    private static string MermaidLabel(string s) =>
+        Truncate(s.Replace('"', '\''), 60);
+
+    private static IEnumerable<string> ExtractMermaidBlocks(string content)
+    {
+        const string fence = "```mermaid";
+        var pos = 0;
+        while (true)
+        {
+            var start = content.IndexOf(fence, pos, StringComparison.OrdinalIgnoreCase);
+            if (start < 0) yield break;
+            var bodyStart = content.IndexOf('\n', start);
+            if (bodyStart < 0) yield break;
+            var end = content.IndexOf("```", bodyStart, StringComparison.Ordinal);
+            if (end < 0) yield break;
+            var block = content[(bodyStart + 1)..end].Trim();
+            if (block.Length > 0) yield return block;
+            pos = end + 3;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
     {
         ShellStore.StateChanged -= OnShellChanged;
+        if (_streamSubscribed)
+        {
+            _streamSubscribed = false;
+            try { await JS.InvokeVoidAsync("forge.intakeStream.unsubscribe"); }
+            catch (JSDisconnectedException) { /* circuit already gone */ }
+            catch (InvalidOperationException) { /* prerender */ }
+        }
+        _selfRef?.Dispose();
     }
 }

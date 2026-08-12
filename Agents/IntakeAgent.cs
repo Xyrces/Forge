@@ -207,10 +207,56 @@ public sealed class IntakeAgent
         string? proposedEpicTitle = null;
         try
         {
-            var response = await agent.RunAsync(history, cancellationToken: ct);
-            assistantText = string.Concat(response.Messages
-                .Where(m => m.Role == ChatRole.Assistant)
-                .Select(m => m.Text));
+            // Stream the run: every text delta is published to the
+            // dashboard bus so the intake page renders a live bubble
+            // instead of a dead spinner (operator request 2026-08-12:
+            // "no feedback as to what is happening in the background
+            // as the llm call is being made"). Function calls surface
+            // as tool events so the operator sees "calling create_epic"
+            // in place. DelegatingChatClient wrappers forward
+            // GetStreamingResponseAsync; if a provider can't stream,
+            // fall back to the buffered call.
+            var sb = new StringBuilder();
+            var announcedTools = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                await foreach (var update in agent.RunStreamingAsync(history, cancellationToken: ct))
+                {
+                    foreach (var content in update.Contents)
+                    {
+                        if (content is FunctionCallContent call
+                            && announcedTools.Add(call.Name))
+                        {
+                            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.IntakeRunTool,
+                                sessionId, call.Name, new Dictionary<string, object?>
+                                {
+                                    ["sessionId"] = sessionId,
+                                    ["tool"] = call.Name,
+                                }));
+                        }
+                    }
+                    var delta = update.Text;
+                    if (!string.IsNullOrEmpty(delta))
+                    {
+                        sb.Append(delta);
+                        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.IntakeRunDelta,
+                            sessionId, null, new Dictionary<string, object?>
+                            {
+                                ["sessionId"] = sessionId,
+                                ["delta"] = delta,
+                            }));
+                    }
+                }
+                assistantText = sb.ToString();
+            }
+            catch (NotSupportedException)
+            {
+                // Provider doesn't do streaming — one buffered call.
+                var response = await agent.RunAsync(history, cancellationToken: ct);
+                assistantText = string.Concat(response.Messages
+                    .Where(m => m.Role == ChatRole.Assistant)
+                    .Select(m => m.Text));
+            }
         }
         catch (Exception ex)
         {
@@ -495,6 +541,25 @@ public sealed class IntakeAgent
             Do NOT ask the operator about facts the project brief below
             already answers (tech stack, layout, existing modules). Read
             it first; ask only about intent and scope.
+
+            ## Visual canvas
+
+            The operator watches a visual canvas beside this chat. When
+            the discussion turns to structure — modules, flows, data
+            flow, component relationships, user journeys — include ONE
+            small mermaid diagram in your reply as a fenced block:
+
+            ```mermaid
+            flowchart LR
+              A[Short label] --> B[Short label]
+            ```
+
+            Rules: flowchart or sequenceDiagram only; at most ~12 nodes;
+            short labels in brackets; no raw HTML, no images, no
+            click/link directives. UPDATE the diagram as the design
+            evolves (emit the revised diagram in a later reply) instead
+            of piling up near-duplicates. Skip the diagram for small
+            talk and clarifying questions.
 
             ## Project grounding
 

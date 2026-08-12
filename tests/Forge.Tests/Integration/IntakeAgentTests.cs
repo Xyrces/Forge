@@ -367,8 +367,14 @@ public class IntakeAgentTests : IDisposable
             IEnumerable<ChatMessage> messages, ChatOptions? options = null,
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            // The intake agent streams now (2026-08-12): the double
+            // streams the same content the buffered path returns,
+            // like every real provider.
             await Task.Yield();
-            yield break;
+            Seen.AddRange(messages);
+            InstructionsSeen.Add(options?.Instructions);
+            foreach (var msg in _response.Messages)
+                yield return new ChatResponseUpdate(msg.Role, msg.Contents.ToList());
         }
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
         public void Dispose() { }
@@ -400,8 +406,18 @@ public class IntakeAgentTests : IDisposable
             IEnumerable<ChatMessage> messages, ChatOptions? options = null,
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            // Stream the same sequence the buffered path returns:
+            // function call first, follow-up text after the
+            // middleware feeds the result back.
             await Task.Yield();
-            yield break;
+            if (_callIndex == 0 && _functionCalls.Length > 0)
+            {
+                _callIndex++;
+                var call = _functionCalls[0];
+                yield return new ChatResponseUpdate(ChatRole.Assistant, new[] { (AIContent)call });
+                yield break;
+            }
+            yield return new ChatResponseUpdate(ChatRole.Assistant, _followUpText);
         }
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
         public void Dispose() { }
