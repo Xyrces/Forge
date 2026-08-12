@@ -62,8 +62,12 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 FinalKillSignal=SIGKILL
 
-# Auto-restart on crash, but not on a clean stop.
-Restart=on-failure
+# Restart on crash AND on clean-but-unintentional exit (a stray
+# SIGTERM to the process — observed 2026-08-12 — produces a status-0
+# exit that on-failure would not restart, leaving the orchestrator
+# silently dead for hours). An explicit `systemctl stop` still
+# suppresses the restart.
+Restart=always
 RestartSec=5s
 
 # Environment passthrough. ASPNETCORE_URLS binds the dashboard.
