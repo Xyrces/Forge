@@ -162,34 +162,48 @@ public sealed class IntakeAgent
 
         // Structured clarifying questions (operator request 2026-08-12):
         // the tool captures the questions so the dashboard renders them
-        // as clickable option cards instead of a numbered list the
-        // operator has to answer by retyping. When a model never calls
-        // the tool, the fallback parser below lifts text questions into
-        // the same shape.
-        // NOTE: deliberately ONE question per call with flat args — a
-        // nested IntakeQuestionSpec[] parameter failed to bind on the
-        // live kimi intake (2026-08-12: model retried with a stripped
-        // call and the questions landed with zero options).
+        // as a clickable form instead of a numbered list the operator
+        // has to answer by retyping. When a model never calls the tool,
+        // the fallback parser below lifts text questions into the same
+        // shape.
+        // NOTE: deliberately flat scalar args — a nested
+        // array-of-objects parameter failed to bind on the live kimi
+        // intake (2026-08-12: model retried with a stripped call and
+        // the questions landed with zero options). Option descriptions
+        // are em-dash encoded in the option string itself.
         var pendingQuestions = new List<IntakeQuestion>();
         var askQuestionsTool = AIFunctionFactory.Create(
-            ([Description("The full clarifying question to ask the operator.")] string question,
-             [Description("2-5 short clickable options. ALWAYS include when the question is a choice (yes/no, this-or-that); omit only for genuinely free-form answers.")] string[]? options = null) =>
+            ([Description("Short label for the question, max 30 chars, e.g. 'Transport scope'.")] string header,
+             [Description("The full question text.")] string question,
+             [Description("2-5 options, each shaped 'Label — optional description'. Include for any choice-shaped question (yes/no, this-or-that, pick-list); omit only for genuinely free-form answers. Put the recommended option FIRST, prefixed '(Recommended)'.")] string[]? options = null,
+             [Description("true when the operator may pick several options.")] bool multiple = false) =>
             {
+                if (string.IsNullOrWhiteSpace(header))
+                    return Task.FromResult("error: header is required (short label, max 30 chars)");
+                if (header.Length > 30)
+                    return Task.FromResult($"error: header exceeds 30 chars (got {header.Length})");
                 if (string.IsNullOrWhiteSpace(question))
-                    return Task.FromResult("question_required");
+                    return Task.FromResult("error: question is required");
+                if (question.Length > 240)
+                    return Task.FromResult($"error: question exceeds 240 chars (got {question.Length})");
+                if (options is { Length: 1 })
+                    return Task.FromResult("error: options must be 2-5 entries shaped 'Label — description', or omit options entirely for a free-text answer");
+                if (options is { Length: > 5 })
+                    return Task.FromResult("error: options exceed maximum of 5");
                 if (pendingQuestions.Count >= 8)
-                    return Task.FromResult("question_limit_reached");
+                    return Task.FromResult("error: question limit reached (8) — ask the rest in a later turn");
                 var opts = (options ?? Array.Empty<string>())
                     .Where(o => !string.IsNullOrWhiteSpace(o))
-                    .Take(6).ToArray();
-                pendingQuestions.Add(new IntakeQuestion(question.Trim(), opts));
+                    .ToArray();
+                pendingQuestions.Add(new IntakeQuestion(question.Trim(), opts, header.Trim(), multiple));
                 return Task.FromResult("ok");
             },
             name: "ask_question",
             description: "Ask the operator ONE clarifying question as a structured card with " +
                          "clickable options. Call once per question. ALWAYS use this instead of " +
                          "writing numbered questions as text when you need answers to proceed. " +
-                         "The operator can always type a custom reply instead.");
+                         "The operator can pick options, multi-select when multiple=true, or " +
+                         "answer any question free-form via its 'Other' input.");
 
         // Phase 2a tools: touches + add_dependency. Both require
         // SpecStore. We expose them as AIFunctions only when a
@@ -582,11 +596,14 @@ public sealed class IntakeAgent
             call and confirm the proposal in your reply.
 
             When you need answers from the operator, call
-            `ask_question(question, options)` once per question — the
-            dashboard renders them as clickable cards. Keep a SHORT text
-            summary in your reply too (one line per question at most);
-            never dump a long numbered question list as text when the
-            tool covers it.
+            `ask_question(header, question, options, multiple)` once per
+            question — the dashboard renders them as a clickable form.
+            Keep a SHORT text summary in your reply too (one line per
+            question at most); never dump a long numbered question list
+            as text when the tool covers it. Options are 2-5 strings
+            shaped 'Label — description'; put the recommended option
+            FIRST, prefixed '(Recommended)'. Omit options only for
+            genuinely free-form answers.
 
             Do NOT ask the operator about facts the project brief below
             already answers (tech stack, layout, existing modules). Read

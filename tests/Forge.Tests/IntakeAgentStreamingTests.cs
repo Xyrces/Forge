@@ -101,8 +101,12 @@ public class IntakeAgentStreamingTests : IDisposable
         Assert.NotNull(assistant.Questions);
         Assert.Equal(2, assistant.Questions!.Count);
         Assert.Equal("Which scope?", assistant.Questions[0].Question);
+        Assert.Equal("Transport scope", assistant.Questions[0].Header);
+        Assert.False(assistant.Questions[0].Multiple);
         Assert.Equal(new[] { "Transport only", "Transport + outbox" }, assistant.Questions[0].Options);
         Assert.Equal("Anything else to pin down?", assistant.Questions[1].Question);
+        Assert.True(assistant.Questions[1].Multiple);
+        Assert.Empty(assistant.Questions[1].Options);
         // The tool announced itself over the live channel.
         Assert.Contains(_events, e => e.Kind == DashboardEventKind.IntakeRunTool);
     }
@@ -146,6 +150,7 @@ public class IntakeAgentStreamingTests : IDisposable
                         new FunctionCallContent("call_1", "ask_question",
                             new Dictionary<string, object?>
                             {
+                                ["header"] = "Transport scope",
                                 ["question"] = "Which scope?",
                                 ["options"] = System.Text.Json.JsonSerializer.SerializeToElement(
                                     new[] { "Transport only", "Transport + outbox" }),
@@ -153,7 +158,9 @@ public class IntakeAgentStreamingTests : IDisposable
                         new FunctionCallContent("call_2", "ask_question",
                             new Dictionary<string, object?>
                             {
+                                ["header"] = "Extras",
                                 ["question"] = "Anything else to pin down?",
+                                ["multiple"] = true,
                             }),
                     });
                 yield break;

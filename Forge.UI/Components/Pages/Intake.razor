@@ -90,26 +90,65 @@
                                         var q = qs[qi];
                                         var qKey = $"{m.Id}:{qi}";
                                         <div class="question-card__q">
+                                            <div class="question-card__qhead">
+                                                <span class="question-card__header mono">@(q.Header ?? $"Question {qi + 1}")</span>
+                                                @if (q.Multiple)
+                                                {
+                                                    <span class="question-card__multi mono">select all that apply</span>
+                                                }
+                                            </div>
                                             <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
                                             @if (q.Options.Count > 0)
                                             {
                                                 <div class="question-card__options">
                                                     @foreach (var opt in q.Options)
                                                     {
-                                                        <button class="chip @(_answers.TryGetValue(qKey, out var sel) && sel == opt ? "chip--active" : "")"
-                                                                @onclick="@(() => ToggleAnswer(qKey, opt))">@opt</button>
+                                                        var (label, desc, recommended) = SplitOption(opt);
+                                                        var selected = _answers.TryGetValue(qKey, out var sel) && sel.Contains(label);
+                                                        <button class="option-row @(q.Multiple ? "option-row--multi" : "option-row--single") @(selected ? "option-row--selected" : "")"
+                                                                @onclick="@(() => ToggleAnswer(qKey, label, q.Multiple))">
+                                                            <span class="option-row__mark"></span>
+                                                            <span class="option-row__body">
+                                                                <span class="option-row__label">
+                                                                    @label
+                                                                    @if (recommended)
+                                                                    {
+                                                                        <span class="pill pill--primary">Recommended</span>
+                                                                    }
+                                                                </span>
+                                                                @if (desc is not null)
+                                                                {
+                                                                    <span class="option-row__desc">@desc</span>
+                                                                }
+                                                            </span>
+                                                        </button>
+                                                    }
+                                                    @if (_otherOpen.Contains(qKey))
+                                                    {
+                                                        <input class="option-row__other-input" placeholder="Your answer…"
+                                                               value="@GetOther(qKey)"
+                                                               @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="option-row option-row--other" @onclick="@(() => _otherOpen.Add(qKey))">
+                                                            <span class="option-row__mark"></span>
+                                                            <span class="option-row__body"><span class="option-row__label">Other…</span></span>
+                                                        </button>
                                                     }
                                                 </div>
                                             }
                                             else
                                             {
-                                                <div class="page-subtitle">Free-form — answer below in the input.</div>
+                                                <input class="option-row__other-input" placeholder="Your answer…"
+                                                       value="@GetOther(qKey)"
+                                                       @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
                                             }
                                         </div>
                                     }
                                     <div class="question-card__actions">
-                                        <button class="btn btn--primary" @onclick="@(() => SendAnswers(m, qs))" disabled="@(!HasAnswers(m, qs) || _sending)">
-                                            @(_sending ? "Sending…" : "Send answers")
+                                        <button class="btn btn--primary" @onclick="@(() => SendAnswers(m, qs))" disabled="@(AnsweredCount(m, qs) == 0 || _sending)">
+                                            @(_sending ? "Sending…" : $"Send answers ({AnsweredCount(m, qs)}/{qs.Count})")
                                         </button>
                                         <button class="btn btn--link" @onclick="@(() => DismissQuestionCard(m))">Answer in text instead</button>
                                     </div>
@@ -120,6 +159,9 @@
                                 <div class="question-card question-card--done">
                                     @foreach (var q in qs)
                                     {
+                                        <div class="question-card__qhead">
+                                            <span class="question-card__header mono">@(q.Header ?? "Question")</span>
+                                        </div>
                                         <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
                                     }
                                 </div>
@@ -272,7 +314,7 @@
 
     public sealed record SessionDto(string Id, string ProjectId, string Title, DateTime CreatedAt, DateTime UpdatedAt, List<MessageDto>? Messages);
     public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle, List<QuestionDto>? Questions = null);
-    public sealed record QuestionDto(string Question, List<string>? Options)
+    public sealed record QuestionDto(string? Header, string Question, bool Multiple, List<string>? Options)
     {
         public List<string> Options { get; } = Options ?? new();
     }
@@ -281,9 +323,33 @@
     private sealed record CanvasDiagram(string ElementId, string Source, string Caption);
 
     // Question-card answer state: "messageId:questionIndex" → chosen
-    // option. Dismissed cards stop rendering interactively.
-    private readonly Dictionary<string, string> _answers = new();
+    // option labels (multi-select aware) plus per-question "Other"
+    // free text. Dismissed cards stop rendering interactively.
+    private readonly Dictionary<string, List<string>> _answers = new();
+    private readonly Dictionary<string, string> _otherText = new();
+    private readonly HashSet<string> _otherOpen = new();
     private readonly HashSet<long> _dismissedQuestionCards = new();
+
+    /// <summary>Split an em-dash encoded option ("Label — description")
+    /// into its parts; a leading "(Recommended)" becomes a badge.</summary>
+    private static (string Label, string? Description, bool Recommended) SplitOption(string option)
+    {
+        var s = option.Trim();
+        var recommended = s.StartsWith("(Recommended)", StringComparison.OrdinalIgnoreCase);
+        if (recommended) s = s["(Recommended)".Length..].TrimStart(' ', '—', '-');
+        var dash = s.IndexOf(" — ", StringComparison.Ordinal);
+        return dash < 0
+            ? (s, null, recommended)
+            : (s[..dash].Trim(), s[(dash + 3)..].Trim(), recommended);
+    }
+
+    private string? GetOther(string key) => _otherText.TryGetValue(key, out var v) ? v : null;
+
+    private void SetOther(string key, string? value)
+    {
+        if (string.IsNullOrEmpty(value)) _otherText.Remove(key);
+        else _otherText[key] = value;
+    }
 
     private bool IsQuestionCardActive(int messageIndex)
     {
@@ -299,21 +365,36 @@
         return true;
     }
 
-    private void ToggleAnswer(string key, string option)
+    private void ToggleAnswer(string key, string label, bool multiple)
     {
-        if (_answers.TryGetValue(key, out var cur) && cur == option)
-            _answers.Remove(key);
-        else
-            _answers[key] = option;
+        if (!_answers.TryGetValue(key, out var cur))
+        {
+            _answers[key] = new List<string> { label };
+            return;
+        }
+        if (cur.Contains(label))
+        {
+            cur.Remove(label);
+            if (cur.Count == 0) _answers.Remove(key);
+            return;
+        }
+        if (multiple) cur.Add(label);
+        else { cur.Clear(); cur.Add(label); }
     }
 
-    private bool HasAnswers(MessageDto m, IReadOnlyList<QuestionDto> qs)
+    private int AnsweredCount(MessageDto m, IReadOnlyList<QuestionDto> qs)
     {
+        var n = 0;
         for (var qi = 0; qi < qs.Count; qi++)
         {
-            if (_answers.ContainsKey($"{m.Id}:{qi}")) return true;
+            var key = $"{m.Id}:{qi}";
+            if ((_answers.TryGetValue(key, out var sel) && sel.Count > 0)
+                || (_otherText.TryGetValue(key, out var t) && !string.IsNullOrWhiteSpace(t)))
+            {
+                n++;
+            }
         }
-        return false;
+        return n;
     }
 
     private void DismissQuestionCard(MessageDto m) => _dismissedQuestionCards.Add(m.Id);
@@ -321,18 +402,24 @@
     private async Task SendAnswers(MessageDto m, IReadOnlyList<QuestionDto> qs)
     {
         var lines = new List<string> { "Answers to your questions:" };
+        var unanswered = new List<int>();
         for (var qi = 0; qi < qs.Count; qi++)
         {
-            if (!_answers.TryGetValue($"{m.Id}:{qi}", out var answer)) continue;
-            var question = qs[qi].Question.Replace("**", "").Trim();
-            lines.Add($"{qi + 1}. {Truncate(question, 100)} → {answer}");
+            var key = $"{m.Id}:{qi}";
+            var label = qs[qi].Header
+                ?? Truncate(qs[qi].Question.Replace("**", "").Trim(), 60);
+            var parts = new List<string>();
+            if (_answers.TryGetValue(key, out var sel)) parts.AddRange(sel);
+            if (_otherText.TryGetValue(key, out var t) && !string.IsNullOrWhiteSpace(t))
+                parts.Add($"Other: {t.Trim()}");
+            if (parts.Count == 0) { unanswered.Add(qi + 1); continue; }
+            lines.Add($"{qi + 1}. {label} → {string.Join(", ", parts)}");
         }
         if (lines.Count == 1) return;
         // Unanswered questions stay open — say so explicitly so the
         // agent doesn't assume silence = answered.
-        var answeredCount = lines.Count - 1;
-        if (answeredCount < qs.Count)
-            lines.Add($"(questions {string.Join(", ", Enumerable.Range(1, qs.Count).Where(n => !_answers.ContainsKey($"{m.Id}:{n - 1}")))} still open)");
+        if (unanswered.Count > 0)
+            lines.Add($"(questions {string.Join(", ", unanswered)} still open)");
         await PostUserMessage(string.Join("\n", lines));
     }
 

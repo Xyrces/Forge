@@ -4,38 +4,10 @@ using Xunit;
 
 namespace Forge.Tests;
 
-public class IntakeQuestionSynthesisTests
-{
-    [Theory]
-    [InlineData("Is **topics + subscriptions only** the right v1 scope?")]
-    [InlineData("Should we plan around Testcontainers?")]
-    [InlineData("Confirm this follows the existing target matrix?")]
-    [InlineData("Do you want queues too?")]
-    public void WithYesNoDefault_YesNoShapedEmptyOptions_GetsYesNo(string question)
-    {
-        var q = new IntakeQuestion(question, Array.Empty<string>()).WithYesNoDefault();
-        Assert.Equal(new[] { "Yes", "No" }, q.Options);
-    }
-
-    [Fact]
-    public void WithYesNoDefault_ExistingOptions_Untouched()
-    {
-        var q = new IntakeQuestion("Is this right?", new[] { "A", "B" }).WithYesNoDefault();
-        Assert.Equal(new[] { "A", "B" }, q.Options);
-    }
-
-    [Fact]
-    public void WithYesNoDefault_OpenEndedQuestion_StaysFreeForm()
-    {
-        var q = new IntakeQuestion("What should the package be named?", Array.Empty<string>()).WithYesNoDefault();
-        Assert.Empty(q.Options);
-    }
-}
-
 public class IntakeQuestionParserTests
 {
     [Fact]
-    public void Parse_NumberedQuestions_WithSubBulletOptions()
+    public void Parse_NumberedQuestions_HeadersOptionsAndMultiple()
     {
         // Shape observed live 2026-08-12 (talaria intake): numbered
         // bold-led questions, one with indented option bullets.
@@ -56,8 +28,14 @@ public class IntakeQuestionParserTests
         var qs = IntakeQuestionParser.Parse(text);
 
         Assert.Equal(3, qs.Count);
-        Assert.Contains("Transport scope", qs[0].Question);
-        Assert.Empty(qs[0].Options);
+
+        Assert.Equal("Transport scope", qs[0].Header);
+        Assert.False(qs[0].Multiple);
+
+        Assert.Equal("Multi-targeting", qs[1].Header);
+
+        Assert.Equal("Feature parity", qs[2].Header);
+        Assert.True(qs[2].Multiple); // "Which of the existing …"
         Assert.Equal(new[]
         {
             "At-least-once with offset-style commit",
@@ -83,6 +61,7 @@ public class IntakeQuestionParserTests
 
         Assert.Equal(2, qs.Count);
         Assert.Equal("Which provider should own this?", qs[0].Question);
+        Assert.Null(qs[0].Header);
     }
 
     [Fact]
@@ -101,5 +80,49 @@ public class IntakeQuestionParserTests
         Assert.Single(qs[0].Options);
         Assert.Equal("Is this actually the next question?", qs[1].Question);
         Assert.Equal(new[] { "never reached" }, qs[1].Options);
+    }
+
+    [Fact]
+    public void Parse_OrBranchQuestion_ExtractsBothChoices()
+    {
+        // The exact question from the live talaria session that
+        // degraded to a bare Yes/No under the old synthesis.
+        var qs = IntakeQuestionParser.Parse(
+            "1. Is **topics + subscriptions only** (no queues) the right v1 scope, or do you also want point-to-point queues?");
+
+        var q = Assert.Single(qs);
+        Assert.Equal("topics + subscriptions only", q.Header);
+        Assert.Equal(
+            new[] { "Yes — topics + subscriptions only", "Also: Point-to-point queues" },
+            q.Options);
+    }
+
+    [Fact]
+    public void Parse_OrBranchWithoutHeader_UsesAsDescribed()
+    {
+        var qs = IntakeQuestionParser.Parse("1. Should we keep the current layout, or move it under a subfolder?");
+
+        var q = Assert.Single(qs);
+        Assert.Null(q.Header);
+        Assert.Equal(new[] { "Yes — as described", "Also: Move it under a subfolder" }, q.Options);
+    }
+
+    [Fact]
+    public void Parse_PlainYesNo_GetsYesNo()
+    {
+        var qs = IntakeQuestionParser.Parse("1. Is the emulator for CI acceptable?");
+
+        var q = Assert.Single(qs);
+        Assert.Equal(new[] { "Yes", "No" }, q.Options);
+    }
+
+    [Fact]
+    public void Parse_OpenQuestion_StaysFreeForm()
+    {
+        var qs = IntakeQuestionParser.Parse("1. What should the package be named?");
+
+        var q = Assert.Single(qs);
+        Assert.Empty(q.Options);
+        Assert.False(q.Multiple);
     }
 }

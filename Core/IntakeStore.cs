@@ -25,31 +25,23 @@ public enum IntakeMessageRole
 /// reply text as a fallback for models that ignore the tool. Rendered
 /// as a clickable card on the intake page (2026-08-12).
 /// </summary>
-public sealed record IntakeQuestion(string Question, IReadOnlyList<string> Options)
-{
-    /// <summary>
-    /// Presentation helper: an options-less question that reads as
-    /// yes/no ("Is X acceptable?", "Should we …?", "Confirm …?")
-    /// gets Yes/No chips so the card always has something clickable
-    /// (observed live 2026-08-12: a model captured questions without
-    /// options and the card degraded to "type your answer"). Applied
-    /// at READ time so already-persisted messages benefit too.
-    /// </summary>
-    public IntakeQuestion WithYesNoDefault()
-    {
-        if (Options.Count > 0) return this;
-        var t = Question.TrimStart('*', '#', ' ', '`');
-        var yesNo = t.StartsWith("Is ", StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("Are ", StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("Should ", StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("Do ", StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("Does ", StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("Can ", StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("Confirm ", StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("Would ", StringComparison.OrdinalIgnoreCase);
-        return yesNo ? this with { Options = new[] { "Yes", "No" } } : this;
-    }
-}
+/// <summary>
+/// A structured clarifying question attached to an assistant intake
+/// message — captured from the ask_question tool, or parsed from the
+/// reply text as a fallback for models that ignore the tool. Rendered
+/// as a clickable card on the intake page (2026-08-12).
+///
+/// <see cref="Header"/> is the short chip label ("Transport scope");
+/// null on pre-form-era rows. <see cref="Options"/> strings are
+/// em-dash encoded: "Label — optional description". Empty options =
+/// free-text question (the card renders an inline input, honestly —
+/// no synthesized choices).
+/// </summary>
+public sealed record IntakeQuestion(
+    string Question,
+    IReadOnlyList<string> Options,
+    string? Header = null,
+    bool Multiple = false);
 
 public sealed record IntakeMessageRecord(
     long Id,
@@ -293,7 +285,9 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             ? null
             : JsonSerializer.Serialize(questions.Select(q => new
             {
+                header = q.Header,
                 question = q.Question,
+                multiple = q.Multiple,
                 options = q.Options,
             }));
 
@@ -309,7 +303,9 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             var raw = JsonSerializer.Deserialize<List<QuestionDto>>(json, QuestionJsonOptions);
             return raw?.Select(q => new IntakeQuestion(
                 q.Question ?? "",
-                (IReadOnlyList<string>)(q.Options ?? new List<string>()))).ToList();
+                (IReadOnlyList<string>)(q.Options ?? new List<string>()),
+                q.Header,
+                q.Multiple)).ToList();
         }
         catch (JsonException)
         {
@@ -319,7 +315,9 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
 
     private sealed class QuestionDto
     {
+        public string? Header { get; set; }
         public string? Question { get; set; }
+        public bool Multiple { get; set; }
         public List<string>? Options { get; set; }
     }
 
