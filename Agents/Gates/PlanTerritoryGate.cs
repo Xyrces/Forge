@@ -21,15 +21,17 @@ public sealed partial class PlanTerritoryGate : IRunGate
 
     public Task<RunGateVerdict> EvaluateAsync(RunGateContext ctx)
     {
-        if (ctx.TerritoryPrefixes.Count == 0 && !ctx.TerritoryAllowsRootFiles)
-        {
-            return Task.FromResult(RunGateVerdict.Approved);   // role has no territory constraint
-        }
+        // Territory is enforced only when the project configured it
+        // (roles_json $territory — ResolveTerritory no longer falls
+        // back to the Forge-shaped registry list). The existence
+        // check runs ALWAYS: it catches hallucinated edits against
+        // existing areas regardless of territory config.
+        var territoryEnforced = ctx.TerritoryPrefixes.Count > 0 || ctx.TerritoryAllowsRootFiles;
         var problems = new List<string>();
         foreach (var raw in ExtractPaths(ctx.Plan))
         {
             var (path, isNew) = raw;
-            if (!InTerritory(path, ctx))
+            if (territoryEnforced && !InTerritory(path, ctx))
             {
                 problems.Add($"{path} is outside {ctx.RoleName}'s territory " +
                     $"({string.Join(", ", ctx.TerritoryPrefixes)}{(ctx.TerritoryAllowsRootFiles ? ", repo-root files" : "")})");
