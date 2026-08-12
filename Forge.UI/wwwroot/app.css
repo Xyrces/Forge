@@ -650,6 +650,7 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .chat-msg__card { margin-top: 8px; padding: 8px; background: var(--surface); border: 1px solid var(--primary); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 8px; }
 .chat-msg__card-header { font-family: var(--font-mono); font-size: 11px; color: var(--primary); text-transform: uppercase; letter-spacing: 0.04em; }
 .chat-msg__card-title { font-size: 14px; font-weight: 500; }
+.chat-msg__card-hint { font-size: 12px; color: var(--on-surface-variant); line-height: 1.4; }
 
 .intake-input { display: flex; gap: 8px; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--outline); }
 .intake-input__field { flex: 1; }

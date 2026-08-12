@@ -63,23 +63,6 @@
                     <div class="chat-msg chat-msg--@m.Role.ToLowerInvariant()">
                         <div class="chat-msg__role mono">@m.Role</div>
                         <div class="chat-msg__body md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
-                        @if (m.ProposedEpicId is not null)
-                        {
-                            <div class="chat-msg__card">
-                                <div class="chat-msg__card-header">Proposed Epic</div>
-                                <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
-                                @if (_acceptedEpicIds.Contains(m.Id))
-                                {
-                                    <span class="pill pill--primary">Accepted</span>
-                                }
-                                else
-                                {
-                                    <button class="btn btn--primary" @onclick="@(() => AcceptEpic(m.Id))" disabled="@_accepting">
-                                        @(_accepting ? "Accepting…" : "Accept Epic")
-                                    </button>
-                                }
-                            </div>
-                        }
                         @if (m.Questions is { Count: > 0 } qs)
                         {
                             @if (IsQuestionCardActive(i))
@@ -166,6 +149,34 @@
                                     }
                                 </div>
                             }
+                        }
+                        @* The epic card renders on the ASSISTANT message only — the system
+                           "Proposed epic: …" line is the audit trail, not a second accept
+                           button (both carry the link so the button has a target). *@
+                        @if (m.ProposedEpicId is not null && m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase))
+                        {
+                            <div class="chat-msg__card">
+                                <div class="chat-msg__card-header">Proposed Epic</div>
+                                <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
+                                <div class="chat-msg__card-hint">
+                                    Accepting puts the epic on the board: a spec draft is created and
+                                    product refinement picks it up. No code is dispatched.
+                                    @if (m.Questions is { Count: > 0 } && IsQuestionCardActive(i))
+                                    {
+                                        <span>Answering the questions above refines the proposal — or accept it as-is now.</span>
+                                    }
+                                </div>
+                                @if (_acceptedEpicIds.Contains(m.Id))
+                                {
+                                    <span class="pill pill--primary">Accepted</span>
+                                }
+                                else
+                                {
+                                    <button class="btn btn--primary" @onclick="@(() => AcceptEpic(m.Id))" disabled="@_accepting">
+                                        @(_accepting ? "Accepting…" : "Accept Epic")
+                                    </button>
+                                }
+                            </div>
                         }
                     </div>
                 }

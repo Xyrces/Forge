@@ -595,6 +595,14 @@ public sealed class IntakeAgent
             describe an epic, capture the title + description in the tool
             call and confirm the proposal in your reply.
 
+            Sequence matters: when you have clarifying questions, call
+            `ask_question` and STOP — never call `create_epic` in the
+            same reply. The epic proposal belongs in a LATER turn, once
+            the operator's answers are in, so the title/description
+            reflect the discussed scope. Proposing before the answers
+            are in presents the operator an Accept button for a spec
+            you already know is incomplete.
+
             When you need answers from the operator, call
             `ask_question(header, question, options, multiple)` once per
             question — the dashboard renders them as a clickable form.
