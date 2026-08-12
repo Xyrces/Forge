@@ -126,7 +126,8 @@ public static class IntakeEndpoints
         content = m.Content,
         timestamp = m.Timestamp,
         proposedEpicId = m.ProposedEpicId,
-        proposedEpicTitle = m.ProposedEpicTitle
+        proposedEpicTitle = m.ProposedEpicTitle,
+        questions = m.Questions?.Select(q => new { question = q.Question, options = q.Options }).ToArray(),
     };
 
     private static object ToIssueView(IssueRecord t) => new

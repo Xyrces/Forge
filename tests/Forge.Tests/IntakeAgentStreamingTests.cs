@@ -88,6 +88,79 @@ public class IntakeAgentStreamingTests : IDisposable
         Assert.Equal("buffered reply", assistant.Content);
     }
 
+    [Fact]
+    public async Task SendUserMessage_AskQuestionsTool_AttachesQuestionsToAssistantMessage()
+    {
+        var client = new QuestionCallingClient();
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        var updated = await agent.SendUserMessageAsync(session.Id, "add a transport", default);
+
+        var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
+        Assert.NotNull(assistant.Questions);
+        var q = Assert.Single(assistant.Questions!);
+        Assert.Equal("Which scope?", q.Question);
+        Assert.Equal(new[] { "Transport only", "Transport + outbox" }, q.Options);
+        // The tool announced itself over the live channel.
+        Assert.Contains(_events, e => e.Kind == DashboardEventKind.IntakeRunTool);
+    }
+
+    [Fact]
+    public async Task SendUserMessage_TextQuestions_WithoutTool_FallsBackToParsing()
+    {
+        var client = new ChunkedStreamingClient("Before I propose:\n\n1. **Scope** — Transport only or also the outbox?\n   - Transport only\n   - Transport + outbox\n");
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        var updated = await agent.SendUserMessageAsync(session.Id, "hi", default);
+
+        var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
+        var q = Assert.Single(assistant.Questions!);
+        Assert.Contains("Scope", q.Question);
+        Assert.Equal(2, q.Options.Count);
+    }
+
+    /// <summary>Calls ask_questions once (structured questions), then
+    /// returns an empty-text follow-up — exercising the placeholder
+    /// content for tool-only replies.</summary>
+    private sealed class QuestionCallingClient : IChatClient
+    {
+        private int _callIndex;
+
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("streaming only");
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            if (_callIndex++ == 0)
+            {
+                var args = System.Text.Json.JsonSerializer.SerializeToElement(new
+                {
+                    questions = new[]
+                    {
+                        new { question = "Which scope?", options = new[] { "Transport only", "Transport + outbox" } },
+                    },
+                });
+                yield return new ChatResponseUpdate(ChatRole.Assistant,
+                    new AIContent[]
+                    {
+                        new FunctionCallContent("call_1", "ask_questions",
+                            new Dictionary<string, object?> { ["questions"] = args.GetProperty("questions") }),
+                    });
+                yield break;
+            }
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "");
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
     private sealed class FixedFactory : IChatClientFactory
     {
         private readonly IChatClient _client;

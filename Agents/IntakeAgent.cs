@@ -160,11 +160,40 @@ public sealed class IntakeAgent
                          "large enough to be a multi-task epic (vs. a single dev task). " +
                          "Returns the new epic's issue id.");
 
+        // Structured clarifying questions (operator request 2026-08-12):
+        // the tool captures the questions so the dashboard renders them
+        // as clickable option cards instead of a numbered list the
+        // operator has to answer by retyping. When a model never calls
+        // the tool, the fallback parser below lifts text questions into
+        // the same shape.
+        var pendingQuestions = new List<IntakeQuestion>();
+        var askQuestionsTool = AIFunctionFactory.Create(
+            ([Description("The clarifying questions to ask, in order.")] IntakeQuestionSpec[] questions) =>
+            {
+                foreach (var q in questions ?? Array.Empty<IntakeQuestionSpec>())
+                {
+                    if (string.IsNullOrWhiteSpace(q.Question)) continue;
+                    var options = (q.Options ?? Array.Empty<string>())
+                        .Where(o => !string.IsNullOrWhiteSpace(o))
+                        .Take(6).ToArray();
+                    pendingQuestions.Add(new IntakeQuestion(q.Question.Trim(), options));
+                    if (pendingQuestions.Count >= 8) break;
+                }
+                return Task.FromResult("ok");
+            },
+            name: "ask_questions",
+            description: "Ask the operator clarifying questions as structured cards with " +
+                         "clickable options. ALWAYS use this instead of writing numbered " +
+                         "questions as text when you need answers to proceed. Give each " +
+                         "question 2-5 short options when sensible defaults exist; omit " +
+                         "options for free-form answers. The operator can always type a " +
+                         "custom reply instead.");
+
         // Phase 2a tools: touches + add_dependency. Both require
         // SpecStore. We expose them as AIFunctions only when a
         // SpecStore was injected; otherwise the agent is told (via
         // its instructions) that these tools are unavailable.
-        var tools = new List<AITool> { createEpicTool };
+        var tools = new List<AITool> { createEpicTool, askQuestionsTool };
         if (_specs is not null)
         {
             var activeSpecIdRef = sessionId;
@@ -282,11 +311,23 @@ public sealed class IntakeAgent
         proposedEpicId = lastProposal?.ProposedEpicId;
         proposedEpicTitle = lastProposal?.ProposedEpicTitle;
 
+        // Structured questions: prefer the ask_questions tool capture;
+        // fall back to parsing numbered/bulleted questions out of the
+        // reply text for models that ignore the tool.
+        IReadOnlyList<IntakeQuestion>? questions = pendingQuestions.Count > 0
+            ? pendingQuestions
+            : IntakeQuestionParser.Parse(assistantText) is { Count: > 0 } parsed
+                ? parsed
+                : null;
+        if (string.IsNullOrWhiteSpace(assistantText) && questions is { Count: > 0 })
+            assistantText = "A few questions before I proceed:";
+
         // Append the assistant response (linked to the proposed epic if any).
         var assistantMsg = await _intakeStore.AppendMessageAsync(sessionId,
             new NewIntakeMessage(IntakeMessageRole.Assistant, assistantText,
                 ProposedEpicId: proposedEpicId,
-                ProposedEpicTitle: proposedEpicTitle), ct);
+                ProposedEpicTitle: proposedEpicTitle,
+                Questions: questions), ct);
 
         _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.IntakeRunCompleted,
             sessionId, $"textLength={assistantText.Length}",
@@ -538,6 +579,12 @@ public sealed class IntakeAgent
             describe an epic, capture the title + description in the tool
             call and confirm the proposal in your reply.
 
+            When you need answers from the operator, call
+            `ask_questions(questions)` — the dashboard renders them as
+            clickable cards. Keep a SHORT text summary in your reply too
+            (one line per question at most); never dump a long numbered
+            question list as text when the tool covers it.
+
             Do NOT ask the operator about facts the project brief below
             already answers (tech stack, layout, existing modules). Read
             it first; ask only about intent and scope.
@@ -666,6 +713,12 @@ public sealed class IntakeAgent
         return sb.ToString();
     }
 }
+
+/// <summary>Wire shape for the ask_questions tool — the model
+/// produces this; the agent converts to <see cref="IntakeQuestion"/>.</summary>
+public sealed record IntakeQuestionSpec(
+    [property: Description("The full question text.")] string Question,
+    [property: Description("2-5 short clickable options; omit for a free-form answer.")] string[]? Options = null);
 
 /// <summary>
 /// Registry of <see cref="IntakeAgent"/> instances, one per project.

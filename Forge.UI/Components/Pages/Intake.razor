@@ -57,8 +57,9 @@
             }
             else
             {
-                @foreach (var m in _messages)
+                @for (var i = 0; i < _messages.Count; i++)
                 {
+                    var m = _messages[i];
                     <div class="chat-msg chat-msg--@m.Role.ToLowerInvariant()">
                         <div class="chat-msg__role mono">@m.Role</div>
                         <div class="chat-msg__body md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
@@ -78,6 +79,51 @@
                                     </button>
                                 }
                             </div>
+                        }
+                        @if (m.Questions is { Count: > 0 } qs)
+                        {
+                            @if (IsQuestionCardActive(i))
+                            {
+                                <div class="question-card">
+                                    @for (var qi = 0; qi < qs.Count; qi++)
+                                    {
+                                        var q = qs[qi];
+                                        var qKey = $"{m.Id}:{qi}";
+                                        <div class="question-card__q">
+                                            <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
+                                            @if (q.Options.Count > 0)
+                                            {
+                                                <div class="question-card__options">
+                                                    @foreach (var opt in q.Options)
+                                                    {
+                                                        <button class="chip @(_answers.TryGetValue(qKey, out var sel) && sel == opt ? "chip--active" : "")"
+                                                                @onclick="@(() => ToggleAnswer(qKey, opt))">@opt</button>
+                                                    }
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <div class="page-subtitle">Free-form — answer below in the input.</div>
+                                            }
+                                        </div>
+                                    }
+                                    <div class="question-card__actions">
+                                        <button class="btn btn--primary" @onclick="@(() => SendAnswers(m, qs))" disabled="@(!HasAnswers(m, qs) || _sending)">
+                                            @(_sending ? "Sending…" : "Send answers")
+                                        </button>
+                                        <button class="btn btn--link" @onclick="@(() => DismissQuestionCard(m))">Answer in text instead</button>
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="question-card question-card--done">
+                                    @foreach (var q in qs)
+                                    {
+                                        <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
+                                    }
+                                </div>
+                            }
                         }
                     </div>
                 }
@@ -225,10 +271,70 @@
     private bool _streamSubscribed;
 
     public sealed record SessionDto(string Id, string ProjectId, string Title, DateTime CreatedAt, DateTime UpdatedAt, List<MessageDto>? Messages);
-    public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle);
+    public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle, List<QuestionDto>? Questions = null);
+    public sealed record QuestionDto(string Question, List<string>? Options)
+    {
+        public List<string> Options { get; } = Options ?? new();
+    }
     public sealed record SessionSpecDto(string Id, string ProjectId, string Title, string Status, int CurrentVersion, string? Body);
 
     private sealed record CanvasDiagram(string ElementId, string Source, string Caption);
+
+    // Question-card answer state: "messageId:questionIndex" → chosen
+    // option. Dismissed cards stop rendering interactively.
+    private readonly Dictionary<string, string> _answers = new();
+    private readonly HashSet<long> _dismissedQuestionCards = new();
+
+    private bool IsQuestionCardActive(int messageIndex)
+    {
+        if (_messages is null) return false;
+        var m = _messages[messageIndex];
+        if (m.Id < 0 || _dismissedQuestionCards.Contains(m.Id)) return false;
+        // Only the LATEST unanswered card is interactive: a user
+        // message after it (typed or composed) means it was answered.
+        for (var i = messageIndex + 1; i < _messages.Count; i++)
+        {
+            if (_messages[i].Role.Equals("User", StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        return true;
+    }
+
+    private void ToggleAnswer(string key, string option)
+    {
+        if (_answers.TryGetValue(key, out var cur) && cur == option)
+            _answers.Remove(key);
+        else
+            _answers[key] = option;
+    }
+
+    private bool HasAnswers(MessageDto m, IReadOnlyList<QuestionDto> qs)
+    {
+        for (var qi = 0; qi < qs.Count; qi++)
+        {
+            if (_answers.ContainsKey($"{m.Id}:{qi}")) return true;
+        }
+        return false;
+    }
+
+    private void DismissQuestionCard(MessageDto m) => _dismissedQuestionCards.Add(m.Id);
+
+    private async Task SendAnswers(MessageDto m, IReadOnlyList<QuestionDto> qs)
+    {
+        var lines = new List<string> { "Answers to your questions:" };
+        for (var qi = 0; qi < qs.Count; qi++)
+        {
+            if (!_answers.TryGetValue($"{m.Id}:{qi}", out var answer)) continue;
+            var question = qs[qi].Question.Replace("**", "").Trim();
+            lines.Add($"{qi + 1}. {Truncate(question, 100)} → {answer}");
+        }
+        if (lines.Count == 1) return;
+        // Unanswered questions stay open — say so explicitly so the
+        // agent doesn't assume silence = answered.
+        var answeredCount = lines.Count - 1;
+        if (answeredCount < qs.Count)
+            lines.Add($"(questions {string.Join(", ", Enumerable.Range(1, qs.Count).Where(n => !_answers.ContainsKey($"{m.Id}:{n - 1}")))} still open)");
+        await PostUserMessage(string.Join("\n", lines));
+    }
 
     private void SelectTab(string tab)
     {
@@ -460,15 +566,21 @@
     private async Task SendMessage()
     {
         if (_activeSessionId is null || string.IsNullOrWhiteSpace(_draft)) return;
+        var text = _draft;
+        _draft = "";
+        await PostUserMessage(text);
+    }
+
+    private async Task PostUserMessage(string text)
+    {
+        if (_activeSessionId is null || string.IsNullOrWhiteSpace(text)) return;
         _sending = true;
         // Optimistic: the operator's message appears immediately and
         // the live bubble shows "thinking" — the POST only returns
         // after the whole LLM round, and the SSE channel drives the
         // in-flight UI in the meantime.
-        var text = _draft;
         _messages ??= new();
         _messages.Add(new MessageDto(-DateTime.UtcNow.Ticks, "User", text, DateTime.Now, null, null));
-        _draft = "";
         _liveActive = true;
         _liveText = "";
         _liveTools.Clear();

@@ -112,6 +112,37 @@ public class IntakeStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task AppendMessageAsync_Questions_RoundTrip()
+    {
+        var s = await _intake.CreateAsync("p", "t", default);
+        await _intake.AppendMessageAsync(s.Id,
+            new NewIntakeMessage(IntakeMessageRole.Assistant, "Q?", Questions: new[]
+            {
+                new IntakeQuestion("Which transport?", new[] { "Kafka", "Azure Service Bus" }),
+                new IntakeQuestion("Free-form question?", Array.Empty<string>()),
+            }), default);
+
+        var loaded = await _intake.GetAsync(s.Id, default);
+        var msg = loaded!.Messages.Single();
+        Assert.NotNull(msg.Questions);
+        Assert.Equal(2, msg.Questions!.Count);
+        Assert.Equal("Which transport?", msg.Questions[0].Question);
+        Assert.Equal(new[] { "Kafka", "Azure Service Bus" }, msg.Questions[0].Options);
+        Assert.Empty(msg.Questions[1].Options);
+    }
+
+    [Fact]
+    public async Task AppendMessageAsync_NoQuestions_NullRoundTrip()
+    {
+        var s = await _intake.CreateAsync("p", "t", default);
+        await _intake.AppendMessageAsync(s.Id,
+            new NewIntakeMessage(IntakeMessageRole.Assistant, "plain"), default);
+
+        var loaded = await _intake.GetAsync(s.Id, default);
+        Assert.Null(loaded!.Messages.Single().Questions);
+    }
+
+    [Fact]
     public async Task AppendMessageAsync_EmptyContent_Throws()
     {
         var s = await _intake.CreateAsync("p", "t", default);

@@ -201,7 +201,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 31;
+    public const int CurrentSchemaVersion = 32;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -969,6 +969,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // proxies existed).
         ApplyV31AgentRunTokens(conn);
 
+        // v32 (post-init): intake_message.questions_json — structured
+        // clarifying questions attached to an assistant message
+        // (ask_questions tool or parsed from the reply text), rendered
+        // as clickable cards on the intake page (2026-08-12).
+        ApplyV32IntakeMessageQuestions(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -1222,7 +1228,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 content              NVARCHAR(MAX) NOT NULL,
                 ts                   NVARCHAR(64)  NOT NULL,
                 proposed_epic_id     NVARCHAR(128) NULL,
-                proposed_epic_title  NVARCHAR(MAX) NULL
+                proposed_epic_title  NVARCHAR(MAX) NULL,
+                questions_json       NVARCHAR(MAX) NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_intake_message_session' AND object_id = OBJECT_ID('{{d.Table("intake_message")}}'))
                 CREATE INDEX ix_intake_message_session ON {{d.Table("intake_message")}}(session_id, id);
@@ -1683,6 +1690,17 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE agent_run ADD COLUMN dispatch_id TEXT;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV32IntakeMessageQuestions(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('intake_message') WHERE name = 'questions_json' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE intake_message ADD COLUMN questions_json TEXT;";
         alter.ExecuteNonQuery();
     }
 
