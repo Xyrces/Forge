@@ -129,6 +129,13 @@ public interface IIssueStore
     /// rest of the work so sprints build the most important things).
     /// </summary>
     Task SetPriorityAsync(string id, int priority, CancellationToken ct = default);
+    /// <summary>
+    /// Update title + description in place. Used by intake dedupe: a
+    /// re-proposed epic refines the session's existing (unaccepted)
+    /// proposal instead of spawning a duplicate row (observed live
+    /// 2026-08-12: one turn fired create_epic 3× → epic-5/6/7 dupes).
+    /// </summary>
+    Task UpdateSummaryAsync(string id, string title, string? description, CancellationToken ct = default);
     Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default);
     Task<IssueEventRecord> AddEventAsync(string id, string kind, string? detail = null, CancellationToken ct = default);
 
@@ -2076,6 +2083,23 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await InsertEventAsync(conn, null, id, "priority_change", $"priority={Math.Clamp(priority, 1, 5)}", ct);
+    }
+
+    public async Task UpdateSummaryAsync(string id, string title, string? description, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ArgumentException("title is required", nameof(title));
+        await using var conn = await _db.OpenAsync(ct);
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = $"UPDATE {T("issue")} SET title=@title, description=@desc, updated_at=@now WHERE id=@id";
+            cmd.AddParam("@title", title);
+            cmd.AddParam("@desc", (object?)description ?? DBNull.Value);
+            cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+            cmd.AddParam("@id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await InsertEventAsync(conn, null, id, "revised", title, ct);
     }
 
     private async Task PublishLifecycleTransitionAsync(

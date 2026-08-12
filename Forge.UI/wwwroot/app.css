@@ -638,7 +638,10 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .intake-session { display: block; width: 100%; text-align: left; padding: 8px 10px; border-radius: var(--radius-md); border: 1px solid transparent; background: transparent; color: var(--on-surface); cursor: pointer; margin-bottom: 4px; }
 .intake-session:hover { background: var(--surface-1); }
 .intake-session--active { background: var(--surface-2); border-color: var(--primary); }
-.intake-session__title { font-size: 13px; font-weight: 500; }
+.intake-session__title { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.intake-session__badge { font-size: 11px; line-height: 1; }
+.intake-session__badge--accepted { color: var(--success); }
+.intake-session__badge--pending { color: var(--warn); }
 .intake-session__meta { font-size: 11px; color: var(--on-surface-variant); margin-top: 2px; }
 
 .intake-thread { background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-lg); padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
@@ -689,6 +692,9 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .mermaid-fallback { font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; color: var(--on-surface-variant); margin: 0; }
 .intake-spec-card { margin-bottom: 10px; }
 .intake-spec-card__head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.proposal-card { background: var(--surface-1); border: 1px solid var(--primary); border-radius: var(--radius-md); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.proposal-card__title { font-size: 14px; font-weight: 600; color: var(--on-surface); }
+.proposal-card__state { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .question-card { margin-top: 8px; padding: 10px; background: var(--surface-1); border: 1px solid var(--primary); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 14px; }
 .question-card--done { border-color: var(--outline); opacity: 0.75; gap: 6px; }
 .question-card__q { display: flex; flex-direction: column; gap: 6px; }

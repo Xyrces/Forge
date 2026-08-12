@@ -456,6 +456,48 @@ public sealed class IntakeAgent
     private async Task<string> CreateEpicAsync(
         string sessionId, string title, string description, int? priority, CancellationToken ct)
     {
+        // One ACTIVE proposal per session: re-proposing while the
+        // session's latest proposal is still unaccepted REFINES that
+        // epic in place — the model re-calls create_epic freely (retry
+        // loops, per-turn re-proposals), and without this collapse each
+        // call spawned a duplicate epic row (observed live 2026-08-12:
+        // one talaria turn created epic-5/6/7 with identical titles;
+        // two of the five ASB epics were then accepted → duplicate
+        // specs in the pipeline). Only an ACCEPTED proposal closes the
+        // session's proposal slot and lets a genuinely new epic in.
+        var session = await _intakeStore.GetAsync(sessionId, ct);
+        var lastProposalId = session?.Messages
+            .Where(m => m.ProposedEpicId is not null)
+            .OrderByDescending(m => m.Id)
+            .FirstOrDefault()?.ProposedEpicId;
+        if (lastProposalId is not null)
+        {
+            var accepted = session!.Messages.Any(m =>
+                m.Role == IntakeMessageRole.System
+                && m.Content.StartsWith($"Operator accepted epic {lastProposalId}:", StringComparison.Ordinal));
+            if (!accepted)
+            {
+                var existing = await _issues.GetAsync(lastProposalId, ct);
+                if (existing is not null)
+                {
+                    await _issues.UpdateSummaryAsync(existing.Id, title, description, ct);
+                    if (priority is not null)
+                        await _issues.SetPriorityAsync(existing.Id, priority.Value, ct);
+                    await _intakeStore.AppendMessageAsync(sessionId,
+                        new NewIntakeMessage(IntakeMessageRole.System,
+                            $"Updated epic proposal: {existing.Id} - {title}",
+                            ProposedEpicId: existing.Id, ProposedEpicTitle: title), ct);
+                    _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed",
+                        sessionId, $"epic={existing.Id} (revised)", new Dictionary<string, object?>
+                        {
+                            ["sessionId"] = sessionId,
+                            ["epicId"] = existing.Id,
+                        }));
+                    return existing.Id;
+                }
+            }
+        }
+
         var issue = await _issues.CreateAsync(new NewIssue(
             Type: "epic",
             Title: title,

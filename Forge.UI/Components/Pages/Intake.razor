@@ -39,7 +39,18 @@
                 {
                     <button class="intake-session @(s.Id == _activeSessionId ? "intake-session--active" : "")"
                             @onclick="@(() => SetActive(s.Id))">
-                        <div class="intake-session__title">@s.Title</div>
+                        <div class="intake-session__title">
+                            @s.Title
+                            @switch (SessionProposalState(s))
+                            {
+                                case "accepted":
+                                    <span class="intake-session__badge intake-session__badge--accepted" title="Epic accepted — session complete">✓</span>
+                                    break;
+                                case "pending":
+                                    <span class="intake-session__badge intake-session__badge--pending" title="Epic proposed — awaiting your review">●</span>
+                                    break;
+                            }
+                        </div>
                         <div class="intake-session__meta mono">@s.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</div>
                     </button>
                 }
@@ -150,31 +161,21 @@
                                 </div>
                             }
                         }
-                        @* The epic card renders on the ASSISTANT message only — the system
-                           "Proposed epic: …" line is the audit trail, not a second accept
-                           button (both carry the link so the button has a target). *@
+                        @* Epic proposals render as slim audit cards in the thread; the
+                           Accept ACTION lives in the sidebar's Proposal panel so the
+                           session's completion state is always visible. *@
                         @if (m.ProposedEpicId is not null && m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase))
                         {
                             <div class="chat-msg__card">
                                 <div class="chat-msg__card-header">Proposed Epic</div>
                                 <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
-                                <div class="chat-msg__card-hint">
-                                    Accepting puts the epic on the board: a spec draft is created and
-                                    product refinement picks it up. No code is dispatched.
-                                    @if (m.Questions is { Count: > 0 } && IsQuestionCardActive(i))
-                                    {
-                                        <span>Answering the questions above refines the proposal — or accept it as-is now.</span>
-                                    }
-                                </div>
-                                @if (_acceptedEpicIds.Contains(m.Id))
+                                @if (IsEpicAccepted(m.ProposedEpicId))
                                 {
                                     <span class="pill pill--primary">Accepted</span>
                                 }
                                 else
                                 {
-                                    <button class="btn btn--primary" @onclick="@(() => AcceptEpic(m.Id))" disabled="@_accepting">
-                                        @(_accepting ? "Accepting…" : "Accept Epic")
-                                    </button>
+                                    <span class="chat-msg__card-hint">Awaiting review — accept in the sidebar →</span>
                                 }
                             </div>
                         }
@@ -227,6 +228,43 @@
                     }
                     else
                     {
+                        @if (LatestProposal is not null)
+                        {
+                            var proposal = LatestProposal;
+                            <div class="canvas-section">
+                                <div class="canvas-section__title">Proposal</div>
+                                <div class="proposal-card">
+                                    <div class="proposal-card__title">@proposal.ProposedEpicTitle</div>
+                                    <div class="mono page-subtitle">@proposal.ProposedEpicId</div>
+                                    @if (IsEpicAccepted(proposal.ProposedEpicId!))
+                                    {
+                                        <div class="proposal-card__state">
+                                            <span class="pill pill--primary">Accepted</span>
+                                            @{ var spec = SpecForProposal(proposal); }
+                                            @if (spec is not null)
+                                            {
+                                                <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Id · @spec.Status</span>
+                                            }
+                                        </div>
+                                        <div class="chat-msg__card-hint">
+                                            On the board — a spec draft was created and product refinement picks it up. No code is dispatched by accepting.
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="proposal-card__state">
+                                            <span class="pill">Awaiting review</span>
+                                        </div>
+                                        <div class="chat-msg__card-hint">
+                                            Accepting puts the epic on the board: a spec draft is created and product refinement picks it up. No code is dispatched.
+                                        </div>
+                                        <button class="btn btn--primary" @onclick="@(() => AcceptEpic(proposal.Id))" disabled="@_accepting">
+                                            @(_accepting ? "Accepting…" : "Accept Epic")
+                                        </button>
+                                    }
+                                </div>
+                            </div>
+                        }
                         <div class="canvas-section">
                             <div class="canvas-section__title">Discussion map</div>
                             @if (CanvasMapSource is null)
@@ -301,7 +339,6 @@
     private string _draft = "";
     private bool _sending;
     private bool _accepting;
-    private readonly HashSet<long> _acceptedEpicIds = new();
     private string? _actionError;
     private string _activeTab = "canvas";
     private List<SessionSpecDto>? _sessionSpecs;
@@ -409,6 +446,44 @@
     }
 
     private void DismissQuestionCard(MessageDto m) => _dismissedQuestionCards.Add(m.Id);
+
+    /// <summary>The session's latest epic proposal (the ACCEPT action
+    /// lives in the sidebar; the thread shows an audit card only).</summary>
+    private MessageDto? LatestProposal => _messages?
+        .Where(m => m.ProposedEpicId is not null && m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(m => m.Id)
+        .FirstOrDefault();
+
+    /// <summary>An epic counts as accepted when the session carries the
+    /// "Operator accepted epic {id}:" system message — survives reloads,
+    /// unlike the local per-message id set.</summary>
+    private bool IsEpicAccepted(string epicId)
+    {
+        if (_messages is null) return false;
+        return _messages.Any(m =>
+            m.Role.Equals("System", StringComparison.OrdinalIgnoreCase)
+            && m.Content.StartsWith($"Operator accepted epic {epicId}:", StringComparison.Ordinal));
+    }
+
+    private SessionSpecDto? SpecForProposal(MessageDto proposal)
+        => _sessionSpecs?.FirstOrDefault(s =>
+            string.Equals(s.Title, proposal.ProposedEpicTitle, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Session-list badge: 'accepted' when any proposal was
+    /// accepted (session complete), 'pending' when a proposal awaits
+    /// review, null otherwise. Session DTOs carry their messages, so
+    /// this is computed client-side.</summary>
+    private static string? SessionProposalState(SessionDto s)
+    {
+        if (s.Messages is null) return null;
+        var proposedIds = s.Messages.Where(m => m.ProposedEpicId is not null)
+            .Select(m => m.ProposedEpicId!).Distinct().ToList();
+        if (proposedIds.Count == 0) return null;
+        var accepted = s.Messages.Any(m =>
+            m.Role.Equals("System", StringComparison.OrdinalIgnoreCase)
+            && m.Content.StartsWith("Operator accepted epic ", StringComparison.Ordinal));
+        return accepted ? "accepted" : "pending";
+    }
 
     private async Task SendAnswers(MessageDto m, IReadOnlyList<QuestionDto> qs)
     {
@@ -594,9 +669,9 @@
         {
             var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{_activeSessionId}");
             _messages = resp?.Messages?.ToList() ?? new();
-            SyncAcceptedFromSystemMessages();
-            if (_activeTab == "spec") await LoadSessionSpecs();
-            else RebuildCanvas();
+            // Specs feed both the Spec Drafts tab and the canvas (map +
+            // proposal panel's spec pill) — always load.
+            await LoadSessionSpecs();
         }
         catch { _messages = new(); }
         StateHasChanged();
@@ -647,9 +722,10 @@
                 $"/api/intake/sessions/{_activeSessionId}/accept-epic/{messageId}", null);
             if (resp.IsSuccessStatusCode)
             {
-                _acceptedEpicIds.Add(messageId);
                 _actionError = null;
-                await LoadSessionSpecs();
+                // The accept appends an "Operator accepted epic …" system
+                // message server-side; reloading flips the sidebar panel
+                // + thread card to the Accepted state via IsEpicAccepted.
                 await ReloadActive();
             }
             else
@@ -703,24 +779,6 @@
         }
     }
 
-    /// <summary>Accepted epics are recorded server-side as system
-    /// messages ("Operator accepted epic …"); derive the local set so
-    /// a reload keeps the Accepted pill + canvas coloring.</summary>
-    private void SyncAcceptedFromSystemMessages()
-    {
-        if (_messages is null) return;
-        var acceptedIds = _messages
-            .Where(m => m.Role.Equals("System", StringComparison.OrdinalIgnoreCase)
-                && m.Content.StartsWith("Operator accepted epic ", StringComparison.Ordinal))
-            .Select(m => m.Content["Operator accepted epic ".Length..].Split(':', ' ')[0])
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var m in _messages)
-        {
-            if (m.ProposedEpicId is not null && acceptedIds.Contains(m.ProposedEpicId))
-                _acceptedEpicIds.Add(m.Id);
-        }
-    }
-
     /// <summary>Rebuild the canvas: the auto discussion map (epics →
     /// specs) + the mermaid diagrams the assistant drew in replies.</summary>
     private void RebuildCanvas()
@@ -760,7 +818,7 @@
         var specNodes = 0;
         for (var i = 0; i < epics.Count; i++)
         {
-            var accepted = _acceptedEpicIds.Contains(epics[i].Id);
+            var accepted = IsEpicAccepted(epics[i].ProposedEpicId!);
             var label = MermaidLabel($"{epics[i].ProposedEpicId} — {epics[i].ProposedEpicTitle}");
             sb.AppendLine($"  e{i}[\"{label}\"]:::{(accepted ? "accepted" : "proposed")}");
         }

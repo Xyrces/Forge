@@ -126,6 +126,92 @@ public class IntakeAgentStreamingTests : IDisposable
         Assert.Equal(2, q.Options.Count);
     }
 
+    [Fact]
+    public async Task SendUserMessage_SecondCreateEpic_RefinesExistingProposal_InsteadOfDuplicating()
+    {
+        // Live incident 2026-08-12: one turn fired create_epic 3× and
+        // three identical epics (epic-5/6/7) landed in the backlog.
+        var client = new TurnScriptedClient()
+            .Turn(FunctionCall("create_epic", "call_1",
+                ("title", "ASB transport"), ("description", "first draft"), ("priority", 2)),
+                  FunctionCall("create_epic", "call_2",
+                ("title", "ASB transport (refined)"), ("description", "refined draft"), ("priority", 2)))
+            .Turn(Text("proposed"));
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        var updated = await agent.SendUserMessageAsync(session.Id, "add asb", default);
+
+        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
+        var epic = Assert.Single(epics);
+        Assert.Equal("ASB transport (refined)", epic.Title);
+        Assert.Equal("refined draft", epic.Description);
+        Assert.Contains(updated.Messages, m =>
+            m.Role == IntakeMessageRole.System && m.Content.StartsWith($"Updated epic proposal: {epic.Id} - "));
+        var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
+        Assert.Equal(epic.Id, assistant.ProposedEpicId);
+    }
+
+    [Fact]
+    public async Task SendUserMessage_CreateEpicAfterAccept_StartsNewProposalSlot()
+    {
+        var client = new TurnScriptedClient()
+            .Turn(FunctionCall("create_epic", "call_1",
+                ("title", "First epic"), ("description", "d1"), ("priority", 2)))
+            .Turn(Text("proposed"))
+            .Turn(FunctionCall("create_epic", "call_2",
+                ("title", "Second epic"), ("description", "d2"), ("priority", 2)))
+            .Turn(Text("proposed again"));
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        var first = await agent.SendUserMessageAsync(session.Id, "first", default);
+        var firstEpicId = first.Messages.Last(m => m.Role == IntakeMessageRole.Assistant).ProposedEpicId!;
+        await agent.AcceptProposedEpicAsync(session.Id,
+            first.Messages.Last(m => m.Role == IntakeMessageRole.Assistant).Id, default);
+
+        var second = await agent.SendUserMessageAsync(session.Id, "second", default);
+
+        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
+        Assert.Equal(2, epics.Count);
+        var secondEpicId = second.Messages.Last(m => m.Role == IntakeMessageRole.Assistant).ProposedEpicId!;
+        Assert.NotEqual(firstEpicId, secondEpicId);
+    }
+
+    private static AIContent FunctionCall(string name, string callId, params (string Key, object Value)[] args)
+        => new FunctionCallContent(callId, name, args.ToDictionary(a => a.Key, a => (object?)a.Value));
+
+    private static AIContent Text(string text) => new TextContent(text);
+
+    /// <summary>One queued turn per model round-trip; each turn yields
+    /// its content items as a single streaming update.</summary>
+    private sealed class TurnScriptedClient : IChatClient
+    {
+        private readonly Queue<AIContent[]> _turns = new();
+
+        public TurnScriptedClient Turn(params AIContent[] contents)
+        {
+            _turns.Enqueue(contents);
+            return this;
+        }
+
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("streaming only");
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            if (_turns.TryDequeue(out var contents) && contents.Length > 0)
+                yield return new ChatResponseUpdate(ChatRole.Assistant, contents);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
     /// <summary>Calls ask_question once per question (the flat-args
     /// shape), then returns an empty-text follow-up — exercising the
     /// placeholder content for tool-only replies.</summary>
