@@ -103,7 +103,8 @@ public sealed class PRWatcher
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
         Func<PullRequest, string>? headShaOverride = null,
-        Func<PullRequest, bool?>? mergeableOverride = null)
+        Func<PullRequest, bool?>? mergeableOverride = null,
+        Func<PullRequest, int>? changedFilesOverride = null)
     {
         var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
@@ -130,6 +131,35 @@ public sealed class PRWatcher
             _logger.LogInformation(
                 "Watched task {TaskId} is {Status} — nothing to watch",
                 task.Id, freshTask.Status);
+            return WatchPollOutcome.Merged;
+        }
+
+        // Failed tasks stay in the sweep for ONE purpose: detecting an
+        // external merge that landed AFTER the breaker tripped
+        // (observed live 2026-08-13: porthorizon task-408's PR #940
+        // merged post-failure; the task row sat Failed forever because
+        // the sweep's discovery skipped Failed). No CI/review/rework
+        // machinery on a Failed task — the breaker is the operator's
+        // signal; only an operator requeue revives the work. Must run
+        // BEFORE the stale-window check (a long-dead Failed task would
+        // otherwise trip stale and never merge-check).
+        if (freshTask.Status == IssueStatus.Failed)
+        {
+            var prFailed = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+            if (!prFailed.Merged)
+            {
+                return WatchPollOutcome.Pending;
+            }
+            _logger.LogInformation(
+                "PR #{PrNumber} merged externally after task {TaskId} failed; marking completed",
+                prNumber, taskId);
+            await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
+            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+            await _issues.TransitionAsync(taskId, IssueStatus.Completed,
+                "PR merged externally after the breaker tripped", ct: cancellationToken);
+            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
+                taskId, $"PR #{prNumber} merged externally after failure; task completed"));
             return WatchPollOutcome.Merged;
         }
 
@@ -162,6 +192,32 @@ public sealed class PRWatcher
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally; task completed"));
+            return WatchPollOutcome.Merged;
+        }
+
+        // Empty-diff guard: the branch carries NOTHING its base doesn't
+        // already have — the objective landed on main via other work
+        // (observed live 2026-08-13: porthorizon task-393's branch was
+        // tree-identical to main after sibling tasks 666/512/599/408
+        // delivered it — the reviewer correctly kept requesting
+        // changes on an empty PR, rework rounds CANNOT fix "already
+        // done", and the sprint stuck behind the breaker trip). Merge
+        // is meaningless and rework unfixable: close the PR, complete
+        // the task as superseded.
+        var changedFiles = changedFilesOverride?.Invoke(pr) ?? pr.ChangedFiles;
+        if (changedFiles == 0)
+        {
+            _logger.LogInformation(
+                "PR #{PrNumber} (task {TaskId}) has an empty diff against its base — the objective is already on main; closing as superseded",
+                prNumber, taskId);
+            await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
+            await _gitHub.ClosePullRequestAsync(prNumber, cancellationToken);
+            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+            await _issues.TransitionAsync(taskId, IssueStatus.Completed,
+                "superseded: PR diff is empty — the objective is already on main via other work", ct: cancellationToken);
+            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                taskId, $"PR #{prNumber} closed as superseded (empty diff); task completed"));
             return WatchPollOutcome.Merged;
         }
         // P4 e2e-harness seam: tests can return the SHA

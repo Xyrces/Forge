@@ -45,8 +45,27 @@ public class PRWatcherReworkTests : IDisposable
         public int MergeCalls;
         public List<PullRequestReview> Reviews = new();
         public FakeGitHub() : base("o", "r", null) { }
+        public int CloseCalls;
+        public int DeleteCalls;
+        public bool Merged;
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
-            => Task.FromResult(new PullRequest(number));
+        {
+            var pr = new PullRequest(number);
+            // Octokit's PR model has private setters and ChangedFiles
+            // defaults to 0 — which the empty-diff supersede guard
+            // treats as "nothing to land". Normal watch tests model a
+            // PR WITH content; the empty-diff test overrides to 0.
+            typeof(PullRequest).GetProperty(nameof(PullRequest.ChangedFiles))!
+                .SetValue(pr, 1);
+            if (Merged)
+                typeof(PullRequest).GetProperty(nameof(PullRequest.MergedAt))!.SetValue(pr, DateTimeOffset.UtcNow);
+            return Task.FromResult(pr);
+        }
+        public override Task<PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+        {
+            CloseCalls++;
+            return Task.FromResult(new PullRequest(prNumber));
+        }
         public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
             => Task.FromResult(sha == "main-head-sha" ? BaseCi : Ci);
         public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default)
@@ -61,7 +80,10 @@ public class PRWatcherReworkTests : IDisposable
             return Task.FromResult(MergeResult);
         }
         public override Task<bool> DeleteBranchAsync(string branch, CancellationToken cancellationToken = default)
-            => Task.FromResult(true);
+        {
+            DeleteCalls++;
+            return Task.FromResult(true);
+        }
     }
 
     private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null,
@@ -572,6 +594,70 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Contains("retrigger", taskAfter.GetMetadata("reworkContext"));
         Assert.Equal("ReworkQueued", taskAfter.GetMetadata("state"));
         Assert.Equal("abc123", taskAfter.GetMetadata("reworkForSha"));
+    }
+
+    [Fact]
+    public async Task FailedTask_ExternallyMergedPr_CompletesTheTask()
+    {
+        // Live 2026-08-13 (porthorizon task-408): the PR merged after
+        // the breaker tripped; the Failed task was invisible to the
+        // sweep and never resolved. Failed tasks must still be
+        // merge-checked — and must NOT be reworked or re-reviewed.
+        var gh = new FakeGitHub { Merged = true };
+        var task = await SeedAsync();
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "breaker tripped", ct: CancellationToken.None);
+        var fresh = (await _issues.GetAsync(task.Id))!;
+
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(fresh, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Completed, after.Status);
+        Assert.Equal(1, gh.DeleteCalls);
+    }
+
+    [Fact]
+    public async Task FailedTask_UnmergedPr_NoReworkNoReview()
+    {
+        var gh = new FakeGitHub { Merged = false, Ci = CommitState.Failure };
+        var task = await SeedAsync();
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "breaker tripped", ct: CancellationToken.None);
+        var fresh = (await _issues.GetAsync(task.Id))!;
+
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(fresh, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Failed, after.Status);          // untouched
+        Assert.Null(after.GetMetadata("reworkAttempts"));        // no rework fired
+    }
+
+    [Fact]
+    public async Task EmptyDiff_SupersedesInsteadOfReworking()
+    {
+        // Live 2026-08-13 (porthorizon task-393): the branch was
+        // tree-identical to main — the objective had already landed
+        // via sibling tasks. The reviewer kept requesting changes on
+        // an empty PR and three rework rounds burned against a
+        // problem no push can fix. The watcher must close the PR and
+        // complete the task as superseded.
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync();
+
+        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
+            headShaOverride: _ => "abc123",
+            changedFilesOverride: _ => 0);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
+        Assert.Equal(1, gh.CloseCalls);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Completed, after.Status);
     }
 
     [Fact]
