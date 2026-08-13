@@ -669,6 +669,28 @@ public sealed class PRWatcher
         catch (ArgumentException) { /* unset on test fakes — treat as open */ }
         var sha = headShaOverride?.Invoke(pr) ?? pr.Head.Sha;
         var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
+
+        // Empty-diff supersedes a Blocked watch too: the task can never
+        // become approvable (there is nothing to land), so the
+        // resume gate below would hold it forever (observed live
+        // 2026-08-13: porthorizon task-393 parked Blocked/Failed with
+        // PR #939 open and tree-identical to main).
+        if (pr.ChangedFiles == 0)
+        {
+            _logger.LogInformation(
+                "Blocked task {Id}: PR #{PrNumber} has an empty diff — closing as superseded",
+                task.Id, prNumber);
+            await ReportLifecycleAsync(task, Forge.Core.TaskEvent.ExternallyMerged, cancellationToken);
+            await _gitHub.ClosePullRequestAsync(prNumber, cancellationToken);
+            var branch = task.GetMetadata("branch") ?? $"agent/{task.Id}";
+            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
+            await _issues.TransitionAsync(task.Id, IssueStatus.Completed,
+                "superseded: PR diff is empty — the objective is already on main via other work", ct: cancellationToken);
+            await TryRemoveWorktreeAsync(task.GetMetadata("worktreePath"), cancellationToken);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                task.Id, $"PR #{prNumber} closed as superseded (empty diff); task completed"));
+            return await _issues.GetAsync(task.Id, cancellationToken);
+        }
         if (mergeable != true) return null;
 
         CommitState ci;
