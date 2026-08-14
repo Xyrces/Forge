@@ -108,7 +108,7 @@ public class IntakeAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task SendUserMessage_AgentCallsCreateEpic_WritesEpicAndPersistsLink()
+    public async Task SendUserMessage_AgentCallsCreateEpic_WritesDraftAndPersistsLink()
     {
         // Scripted: agent calls create_epic on the first turn, returns a
         // final text on the second.
@@ -129,17 +129,24 @@ public class IntakeAgentTests : IDisposable
         var session = await agent.StartSessionAsync("Auth epic", default);
         var updated = await agent.SendUserMessageAsync(session.Id, "I want to refactor auth", default);
 
-        // The agent run produced: user, system (proposed epic), assistant.
-        // The assistant message carries the proposed epic id.
+        // The run produced: user, system (draft proposal), assistant.
+        // The assistant message carries the proposal TITLE — the draft
+        // has no epic id (operator rule 2026-08-14: no issue row until
+        // the operator accepts).
         var assistantMsg = updated.Messages.First(m => m.Role == IntakeMessageRole.Assistant);
-        Assert.NotNull(assistantMsg.ProposedEpicId);
-        Assert.StartsWith("epic-", assistantMsg.ProposedEpicId!);
+        Assert.Null(assistantMsg.ProposedEpicId);
         Assert.Equal("Refactor the auth flow", assistantMsg.ProposedEpicTitle);
 
-        // The issue was actually created in the store.
-        var issue = await _issues.GetAsync(assistantMsg.ProposedEpicId!, default);
-        Assert.NotNull(issue);
-        Assert.Equal("epic", issue!.Type);
+        // The draft carries the full payload; the issue store is EMPTY.
+        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
+        Assert.Equal("Refactor the auth flow", draft.ProposedEpicTitle);
+        Assert.Equal("Migrate to the new claims API and remove the legacy session table.", draft.ProposedEpicDescription);
+        Assert.Equal(3, draft.ProposedEpicPriority);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+
+        // Accepting the draft creates the issue from the payload.
+        var issue = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
+        Assert.Equal("epic", issue.Type);
         Assert.Equal("Refactor the auth flow", issue.Title);
         Assert.Equal("intake", issue.Assignee);
         Assert.Equal(3, issue.Priority);
@@ -148,6 +155,7 @@ public class IntakeAgentTests : IDisposable
         var snapshot = _events.GetHistorySnapshot();
         Assert.Contains(snapshot, e => e.Kind == "intake.run.started");
         Assert.Contains(snapshot, e => e.Kind == "intake.epic.proposed");
+        Assert.Contains(snapshot, e => e.Kind == "intake.epic.accepted");
         Assert.Contains(snapshot, e => e.Kind == "intake.run.completed");
     }
 
@@ -200,10 +208,13 @@ public class IntakeAgentTests : IDisposable
 
             var session = await agent.StartSessionAsync("launch", default);
             var updated = await agent.SendUserMessageAsync(session.Id, "harden the repo", default);
-            var assistantMsg = updated.Messages.First(m => m.Role == IntakeMessageRole.Assistant);
-            Assert.Equal("epic-1", assistantMsg.ProposedEpicId); // same id as the other store's spec parent
+            var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
 
-            await agent.AcceptProposedEpicAsync(session.Id, assistantMsg.Id, default);
+            // Accept creates THIS store's first issue row (epic-1) —
+            // the same id as the other store's spec parent, which is
+            // exactly the collision the scoped probe must survive.
+            var acceptedEpic = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
+            Assert.Equal("epic-1", acceptedEpic.Id);
 
             var mine = await mySpecs.ListAsync(null, null, default);
             Assert.Contains(mine, s => s.ParentIssueId == "epic-1" && s.ProjectId == "talaria");
@@ -246,11 +257,11 @@ public class IntakeAgentTests : IDisposable
 
         var session = await agent.StartSessionAsync("Settings", default);
         var updated = await agent.SendUserMessageAsync(session.Id, "settings tab", default);
-        var assistantMsg = updated.Messages.First(m => m.Role == IntakeMessageRole.Assistant);
+        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
 
-        // Accept.
-        var accepted = await agent.AcceptProposedEpicAsync(session.Id, assistantMsg.Id, default);
-        Assert.Equal(assistantMsg.ProposedEpicId, accepted.Id);
+        // Accept — creates the epic row and binds it to the sprint.
+        var accepted = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
+        Assert.Equal("Add a settings tab", accepted.Title);
 
         // The sprint now contains the epic.
         var ids = await _sprints.GetIssueIdsAsync(sprint.Id, default);
@@ -289,10 +300,10 @@ public class IntakeAgentTests : IDisposable
 
         var session = await agent.StartSessionAsync(null, default);
         var updated = await agent.SendUserMessageAsync(session.Id, "sweep docs", default);
-        var assistantMsg = updated.Messages.First(m => m.Role == IntakeMessageRole.Assistant);
+        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
 
-        var accepted = await agent.AcceptProposedEpicAsync(session.Id, assistantMsg.Id, default);
-        Assert.Equal(assistantMsg.ProposedEpicId, accepted.Id);
+        var accepted = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
+        Assert.Equal("Doc sweep", accepted.Title);
 
         var refreshed = await _intake.GetAsync(session.Id, default);
         Assert.Contains(refreshed!.Messages, m =>

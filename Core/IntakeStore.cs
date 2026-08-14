@@ -51,7 +51,9 @@ public sealed record IntakeMessageRecord(
     DateTime Timestamp,
     string? ProposedEpicId = null,
     string? ProposedEpicTitle = null,
-    IReadOnlyList<IntakeQuestion>? Questions = null);
+    IReadOnlyList<IntakeQuestion>? Questions = null,
+    string? ProposedEpicDescription = null,
+    int? ProposedEpicPriority = null);
 
 public sealed record IntakeSessionRecord(
     string Id,
@@ -66,7 +68,9 @@ public sealed record NewIntakeMessage(
     string Content,
     string? ProposedEpicId = null,
     string? ProposedEpicTitle = null,
-    IReadOnlyList<IntakeQuestion>? Questions = null);
+    IReadOnlyList<IntakeQuestion>? Questions = null,
+    string? ProposedEpicDescription = null,
+    int? ProposedEpicPriority = null);
 
 public interface IIntakeStore
 {
@@ -188,14 +192,14 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             cmd.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
                 ? $"""
                     INSERT INTO {T("intake_message")}
-                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json)
+                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json, proposed_epic_description, proposed_epic_priority)
                     OUTPUT INSERTED.id
-                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle, @questions);
+                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle, @questions, @epicDesc, @epicPriority);
                     """
                 : """
                     INSERT INTO intake_message
-                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json)
-                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle, @questions);
+                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json, proposed_epic_description, proposed_epic_priority)
+                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle, @questions, @epicDesc, @epicPriority);
                     SELECT last_insert_rowid();
                     """;
             cmd.AddParam("@sid", sessionId);
@@ -205,6 +209,8 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             cmd.AddParam("@epicId", (object?)message.ProposedEpicId ?? DBNull.Value);
             cmd.AddParam("@epicTitle", (object?)message.ProposedEpicTitle ?? DBNull.Value);
             cmd.AddParam("@questions", (object?)SerializeQuestions(message.Questions) ?? DBNull.Value);
+            cmd.AddParam("@epicDesc", (object?)message.ProposedEpicDescription ?? DBNull.Value);
+            cmd.AddParam("@epicPriority", (object?)message.ProposedEpicPriority ?? DBNull.Value);
             id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
         }
 
@@ -217,7 +223,8 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
         }
 
         return new IntakeMessageRecord(id, sessionId, message.Role, message.Content, now,
-            message.ProposedEpicId, message.ProposedEpicTitle, message.Questions);
+            message.ProposedEpicId, message.ProposedEpicTitle, message.Questions,
+            message.ProposedEpicDescription, message.ProposedEpicPriority);
     }
 
     public async Task SetMessagesAsync(string sessionId, IReadOnlyList<NewIntakeMessage> messages, CancellationToken ct = default)
@@ -239,8 +246,8 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             ins.Transaction = tx;
             ins.CommandText = $"""
                 INSERT INTO {T("intake_message")}
-                (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json)
-                VALUES (@sid, @role, @content, @now, @epicId, @epicTitle, @questions)
+                (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json, proposed_epic_description, proposed_epic_priority)
+                VALUES (@sid, @role, @content, @now, @epicId, @epicTitle, @questions, @epicDesc, @epicPriority)
                 """;
             ins.AddParam("@sid", sessionId);
             ins.AddParam("@role", m.Role.ToString());
@@ -249,6 +256,8 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             ins.AddParam("@epicId", (object?)m.ProposedEpicId ?? DBNull.Value);
             ins.AddParam("@epicTitle", (object?)m.ProposedEpicTitle ?? DBNull.Value);
             ins.AddParam("@questions", (object?)SerializeQuestions(m.Questions) ?? DBNull.Value);
+            ins.AddParam("@epicDesc", (object?)m.ProposedEpicDescription ?? DBNull.Value);
+            ins.AddParam("@epicPriority", (object?)m.ProposedEpicPriority ?? DBNull.Value);
             await ins.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -260,7 +269,7 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
         var list = new List<IntakeMessageRecord>();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
-            SELECT id, session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json
+            SELECT id, session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json, proposed_epic_description, proposed_epic_priority
             FROM {T("intake_message")} WHERE session_id = @sid ORDER BY id
             """;
         cmd.AddParam("@sid", sessionId);
@@ -275,7 +284,9 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
                 Timestamp: IssueStore.ParseTime(rd.GetString(4)),
                 ProposedEpicId: rd.IsDBNull(5) ? null : rd.GetString(5),
                 ProposedEpicTitle: rd.IsDBNull(6) ? null : rd.GetString(6),
-                Questions: rd.IsDBNull(7) ? null : DeserializeQuestions(rd.GetString(7))));
+                Questions: rd.IsDBNull(7) ? null : DeserializeQuestions(rd.GetString(7)),
+                ProposedEpicDescription: rd.IsDBNull(8) ? null : rd.GetString(8),
+                ProposedEpicPriority: rd.IsDBNull(9) ? null : rd.GetInt32(9)));
         }
         return list;
     }

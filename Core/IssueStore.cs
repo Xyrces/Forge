@@ -208,7 +208,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 32;
+    public const int CurrentSchemaVersion = 34;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -982,6 +982,15 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // as clickable cards on the intake page (2026-08-12).
         ApplyV32IntakeMessageQuestions(conn);
 
+        // v34 (post-init): intake_message.proposed_epic_description +
+        // proposed_epic_priority — the full draft payload so a proposal
+        // can live as a session-scoped draft WITHOUT an issue row
+        // (operator rule 2026-08-14: "we should not be creating the
+        // epics until they are accepted"). v33 exists only in the SQL
+        // Server chain (M033 == SQLite v32 questions_json) — numbering
+        // reconverges at 34.
+        ApplyV34IntakeMessageProposalPayload(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -1236,7 +1245,9 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 ts                   NVARCHAR(64)  NOT NULL,
                 proposed_epic_id     NVARCHAR(128) NULL,
                 proposed_epic_title  NVARCHAR(MAX) NULL,
-                questions_json       NVARCHAR(MAX) NULL
+                questions_json       NVARCHAR(MAX) NULL,
+                proposed_epic_description NVARCHAR(MAX) NULL,
+                proposed_epic_priority INT NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_intake_message_session' AND object_id = OBJECT_ID('{{d.Table("intake_message")}}'))
                 CREATE INDEX ix_intake_message_session ON {{d.Table("intake_message")}}(session_id, id);
@@ -1708,6 +1719,19 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE intake_message ADD COLUMN questions_json TEXT;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV34IntakeMessageProposalPayload(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('intake_message') WHERE name = 'proposed_epic_description' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText =
+            "ALTER TABLE intake_message ADD COLUMN proposed_epic_description TEXT;" +
+            "ALTER TABLE intake_message ADD COLUMN proposed_epic_priority INTEGER;";
         alter.ExecuteNonQuery();
     }
 
