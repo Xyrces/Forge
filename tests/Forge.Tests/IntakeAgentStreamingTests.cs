@@ -162,6 +162,32 @@ public class IntakeAgentStreamingTests : IDisposable
     }
 
     [Fact]
+    public async Task SendUserMessage_NonConsecutiveDuplicateTitle_RefinesMatchingProposal()
+    {
+        // Live incident 2026-08-14: after creating children 3-5 the
+        // model re-fired child 2's create_epic; the latest-proposal
+        // check missed it and a duplicate epic row landed. The match
+        // scans every unaccepted proposal by title.
+        var client = new TurnScriptedClient()
+            .Turn(FunctionCall("create_epic", "call_1",
+                ("title", "P1-1: Fix the harness"), ("description", "child 1"), ("priority", 1)),
+                  FunctionCall("create_epic", "call_2",
+                ("title", "P1-2: Guard the consumer"), ("description", "child 2"), ("priority", 1)),
+                  FunctionCall("create_epic", "call_3",
+                ("title", "P1-1: Fix the harness"), ("description", "child 1 refined"), ("priority", 1)))
+            .Turn(Text("done"));
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        await agent.SendUserMessageAsync(session.Id, "go", default);
+
+        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
+        Assert.Equal(2, epics.Count);
+        var first = epics.Single(e => e.Title == "P1-1: Fix the harness");
+        Assert.Equal("child 1 refined", first.Description);
+    }
+
+    [Fact]
     public async Task SendUserMessage_DistinctTitles_OneTurn_CreatesSeparateEpics()
     {
         // Live incident 2026-08-14: a parent + children turn collapsed

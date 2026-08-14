@@ -486,22 +486,28 @@ public sealed class IntakeAgent
         // unaccepted — a parent + children turn must be able to create
         // them all (observed live 2026-08-14: the collapse rewrote
         // epic-8 four times and the five children were never created).
-        // Only an ACCEPTED proposal closes the session's proposal
-        // slot either way.
+        // Only an ACCEPTED proposal closes its slot either way. The
+        // match scans ALL of the session's unaccepted proposals, not
+        // just the latest — a non-consecutive re-call (observed live
+        // 2026-08-14: the model re-fired child 2's create_epic after
+        // creating children 3-5, producing duplicate epic-15) refines
+        // the matching proposal wherever it sits in the session.
         var session = await _intakeStore.GetAsync(sessionId, ct);
-        var lastProposalId = session?.Messages
-            .Where(m => m.ProposedEpicId is not null)
-            .OrderByDescending(m => m.Id)
-            .FirstOrDefault()?.ProposedEpicId;
-        if (lastProposalId is not null)
+        if (session is not null)
         {
-            var accepted = session!.Messages.Any(m =>
-                m.Role == IntakeMessageRole.System
-                && m.Content.StartsWith($"Operator accepted epic {lastProposalId}:", StringComparison.Ordinal));
-            if (!accepted)
+            var candidateIds = session.Messages
+                .Where(m => m.ProposedEpicId is not null)
+                .OrderByDescending(m => m.Id)
+                .Select(m => m.ProposedEpicId!)
+                .Distinct();
+            foreach (var candidateId in candidateIds)
             {
-                var existing = await _issues.GetAsync(lastProposalId, ct);
-                if (existing is not null && IsSameProposal(existing.Title, title))
+                var accepted = session.Messages.Any(m =>
+                    m.Role == IntakeMessageRole.System
+                    && m.Content.StartsWith($"Operator accepted epic {candidateId}:", StringComparison.Ordinal));
+                if (accepted) continue;
+                var existing = await _issues.GetAsync(candidateId, ct);
+                if (existing is null || !IsSameProposal(existing.Title, title)) continue;
                 {
                     await _issues.UpdateSummaryAsync(existing.Id, title, description, ct);
                     if (priority is not null)
