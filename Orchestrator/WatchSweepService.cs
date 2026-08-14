@@ -140,8 +140,13 @@ public sealed class WatchSweepService
                 // event (or the next sweep's poll) merges on it.
                 // Failed tasks skip: they're in the sweep ONLY for
                 // external-merge detection (breaker-tripped work waits
-                // on the operator, not on more reviews).
-                if (polled.Status is not IssueStatus.Failed)
+                // on the operator, not on more reviews). Completed/
+                // Closed skip too — the Blocked-resume path can return
+                // a task whose PR was just closed as superseded, and
+                // reviewing that burns a run for nothing (observed
+                // live 2026-08-13: review launched for the closed
+                // task-393 seconds after its supersede).
+                if (polled.Status is not (IssueStatus.Failed or IssueStatus.Completed or IssueStatus.Closed))
                     await TryLaunchBackgroundReviewAsync(polled, bundle, cancellationToken);
                 var poll = await bundle.PrWatcher.PollWatchedTaskAsync(polled, cancellationToken);
                 _logger.LogDebug("Watch (task {Id}): {Outcome}", watched.Id, poll);
