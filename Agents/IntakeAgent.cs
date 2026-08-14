@@ -475,15 +475,19 @@ public sealed class IntakeAgent
     private async Task<string> CreateEpicAsync(
         string sessionId, string title, string description, int? priority, CancellationToken ct)
     {
-        // One ACTIVE proposal per session: re-proposing while the
-        // session's latest proposal is still unaccepted REFINES that
-        // epic in place — the model re-calls create_epic freely (retry
-        // loops, per-turn re-proposals), and without this collapse each
-        // call spawned a duplicate epic row (observed live 2026-08-12:
-        // one talaria turn created epic-5/6/7 with identical titles;
-        // two of the five ASB epics were then accepted → duplicate
-        // specs in the pipeline). Only an ACCEPTED proposal closes the
-        // session's proposal slot and lets a genuinely new epic in.
+        // One ACTIVE proposal per TITLE: re-proposing the SAME epic
+        // (retry loops, per-turn re-proposals, "(refined)" suffixes)
+        // refines that epic in place — without a collapse each call
+        // spawned a duplicate epic row (observed live 2026-08-12: one
+        // talaria turn created epic-5/6/7 with identical titles; two
+        // of the five ASB epics were then accepted → duplicate specs
+        // in the pipeline). A clearly DIFFERENT title is a genuinely
+        // new epic, even while an earlier proposal is still
+        // unaccepted — a parent + children turn must be able to create
+        // them all (observed live 2026-08-14: the collapse rewrote
+        // epic-8 four times and the five children were never created).
+        // Only an ACCEPTED proposal closes the session's proposal
+        // slot either way.
         var session = await _intakeStore.GetAsync(sessionId, ct);
         var lastProposalId = session?.Messages
             .Where(m => m.ProposedEpicId is not null)
@@ -497,7 +501,7 @@ public sealed class IntakeAgent
             if (!accepted)
             {
                 var existing = await _issues.GetAsync(lastProposalId, ct);
-                if (existing is not null)
+                if (existing is not null && IsSameProposal(existing.Title, title))
                 {
                     await _issues.UpdateSummaryAsync(existing.Id, title, description, ct);
                     if (priority is not null)
@@ -540,6 +544,30 @@ public sealed class IntakeAgent
             }));
 
         return issue.Id;
+    }
+
+    /// <summary>Title similarity for the refine-vs-create decision:
+    /// normalized (case/punctuation/parenthesized-qualifiers stripped)
+    /// titles count as the same proposal when equal or one contains
+    /// the other as a prefix — "ASB transport" vs
+    /// "ASB transport (refined)" refine, "Parent epic" vs
+    /// "P1-1: Fix the test harness" create.</summary>
+    private static bool IsSameProposal(string existingTitle, string newTitle)
+    {
+        var a = NormalizeProposalTitle(existingTitle);
+        var b = NormalizeProposalTitle(newTitle);
+        if (a.Length == 0 || b.Length == 0) return true;
+        return a == b
+            || a.StartsWith(b, StringComparison.Ordinal)
+            || b.StartsWith(a, StringComparison.Ordinal);
+    }
+
+    private static string NormalizeProposalTitle(string title)
+    {
+        var noParens = System.Text.RegularExpressions.Regex.Replace(title, @"\([^)]*\)", " ");
+        var lowered = noParens.ToLowerInvariant();
+        var chars = lowered.Select(c => char.IsLetterOrDigit(c) ? c : ' ').ToArray();
+        return System.Text.RegularExpressions.Regex.Replace(new string(chars), @"\s+", " ").Trim();
     }
 
     /// <summary>

@@ -162,6 +162,34 @@ public class IntakeAgentStreamingTests : IDisposable
     }
 
     [Fact]
+    public async Task SendUserMessage_DistinctTitles_OneTurn_CreatesSeparateEpics()
+    {
+        // Live incident 2026-08-14: a parent + children turn collapsed
+        // into ONE epic — the refine-in-place guard (added for the
+        // identical-titles duplicate storm) rewrote epic-8 four times
+        // and the five children were never created. Refinement is
+        // title-scoped: clearly different titles are new epics.
+        var client = new TurnScriptedClient()
+            .Turn(FunctionCall("create_epic", "call_1",
+                ("title", "Transport reliability bundle"), ("description", "parent"), ("priority", 2)),
+                  FunctionCall("create_epic", "call_2",
+                ("title", "P1-1: Fix the contract test harness"), ("description", "child 1"), ("priority", 1)),
+                  FunctionCall("create_epic", "call_3",
+                ("title", "P1-2: Guard ConsumeAsync re-enumeration"), ("description", "child 2"), ("priority", 1)))
+            .Turn(Text("created the parent and both children"));
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        await agent.SendUserMessageAsync(session.Id, "go ahead", default);
+
+        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
+        Assert.Equal(3, epics.Count);
+        Assert.Contains(epics, e => e.Title == "Transport reliability bundle");
+        Assert.Contains(epics, e => e.Title == "P1-1: Fix the contract test harness");
+        Assert.Contains(epics, e => e.Title == "P1-2: Guard ConsumeAsync re-enumeration");
+    }
+
+    [Fact]
     public async Task SendUserMessage_SecondCreateEpic_RefinesExistingProposal_InsteadOfDuplicating()
     {
         // Live incident 2026-08-12: one turn fired create_epic 3× and
