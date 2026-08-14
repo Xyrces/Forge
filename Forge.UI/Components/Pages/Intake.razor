@@ -228,41 +228,58 @@
                     }
                     else
                     {
-                        @if (LatestProposal is not null)
+                        @if (Proposals.Count > 0)
                         {
-                            var proposal = LatestProposal;
                             <div class="canvas-section">
-                                <div class="canvas-section__title">Proposal</div>
-                                <div class="proposal-card">
-                                    <div class="proposal-card__title">@proposal.ProposedEpicTitle</div>
-                                    <div class="mono page-subtitle">@proposal.ProposedEpicId</div>
-                                    @if (IsEpicAccepted(proposal.ProposedEpicId!))
-                                    {
-                                        <div class="proposal-card__state">
-                                            <span class="pill pill--primary">Accepted</span>
-                                            @{ var spec = SpecForProposal(proposal); }
-                                            @if (spec is not null)
-                                            {
-                                                <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Id · @spec.Status</span>
-                                            }
-                                        </div>
-                                        <div class="chat-msg__card-hint">
-                                            On the board — a spec draft was created and product refinement picks it up. No code is dispatched by accepting.
-                                        </div>
-                                    }
-                                    else
-                                    {
-                                        <div class="proposal-card__state">
-                                            <span class="pill">Awaiting review</span>
-                                        </div>
-                                        <div class="chat-msg__card-hint">
-                                            Accepting puts the epic on the board: a spec draft is created and product refinement picks it up. No code is dispatched.
-                                        </div>
-                                        <button class="btn btn--primary" @onclick="@(() => AcceptEpic(proposal.Id))" disabled="@_accepting">
-                                            @(_accepting ? "Accepting…" : "Accept Epic")
-                                        </button>
-                                    }
-                                </div>
+                                <div class="canvas-section__title">Proposals (@Proposals.Count)</div>
+                                @* Every proposed epic gets its own card — a multi-epic
+                                   turn carries proposals on SYSTEM messages (one per
+                                   create_epic call), so the previous single-card
+                                   LatestProposal panel only ever offered the LAST one
+                                   (live 2026-08-14: the accept button targeted a closed
+                                   duplicate while the six real proposals were invisible). *@
+                                @foreach (var proposal in Proposals)
+                                {
+                                    <div class="proposal-card">
+                                        <div class="proposal-card__title">@proposal.ProposedEpicTitle</div>
+                                        <div class="mono page-subtitle">@proposal.ProposedEpicId</div>
+                                        @if (IsEpicAccepted(proposal.ProposedEpicId!))
+                                        {
+                                            <div class="proposal-card__state">
+                                                <span class="pill pill--primary">Accepted</span>
+                                                @{ var spec = SpecForProposal(proposal); }
+                                                @if (spec is not null)
+                                                {
+                                                    <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Id · @spec.Status</span>
+                                                }
+                                            </div>
+                                            <div class="chat-msg__card-hint">
+                                                On the board — a spec draft was created and product refinement picks it up. No code is dispatched by accepting.
+                                            </div>
+                                        }
+                                        else if (IsEpicClosed(proposal.ProposedEpicId!))
+                                        {
+                                            <div class="proposal-card__state">
+                                                <span class="pill">Closed</span>
+                                            </div>
+                                            <div class="chat-msg__card-hint">
+                                                This proposal was closed (superseded or reset) — nothing to accept.
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="proposal-card__state">
+                                                <span class="pill">Awaiting review</span>
+                                            </div>
+                                            <div class="chat-msg__card-hint">
+                                                Accepting puts the epic on the board: a spec draft is created and product refinement picks it up. No code is dispatched.
+                                            </div>
+                                            <button class="btn btn--primary" @onclick="@(() => AcceptEpic(proposal.Id))" disabled="@_accepting">
+                                                @(_accepting ? "Accepting…" : "Accept Epic")
+                                            </button>
+                                        }
+                                    </div>
+                                }
                             </div>
                         }
                         <div class="canvas-section">
@@ -362,6 +379,10 @@
 
     public sealed record SessionDto(string Id, string ProjectId, string Title, DateTime CreatedAt, DateTime UpdatedAt, List<MessageDto>? Messages);
     public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle, List<QuestionDto>? Questions = null);
+    /// <summary>Minimal task view for proposal status (closed epics
+    /// must not offer Accept). The full task DTO lives on the Tasks
+    /// page; only the status is read here.</summary>
+    public sealed record TaskDto(string Id, string Status);
     public sealed record QuestionDto(string? Header, string Question, bool Multiple, List<string>? Options)
     {
         public List<string> Options { get; } = Options ?? new();
@@ -447,12 +468,17 @@
 
     private void DismissQuestionCard(MessageDto m) => _dismissedQuestionCards.Add(m.Id);
 
-    /// <summary>The session's latest epic proposal (the ACCEPT action
-    /// lives in the sidebar; the thread shows an audit card only).</summary>
-    private MessageDto? LatestProposal => _messages?
-        .Where(m => m.ProposedEpicId is not null && m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase))
-        .OrderByDescending(m => m.Id)
-        .FirstOrDefault();
+    /// <summary>Every distinct epic proposal in the session, latest
+    /// carrier message per epic (refinement updates the title), oldest
+    /// first. Proposals arrive on SYSTEM messages in multi-epic turns,
+    /// so this must not filter to Assistant. The ACCEPT action lives in
+    /// the sidebar; the thread shows an audit card only.</summary>
+    private List<MessageDto> Proposals => _messages?
+        .Where(m => m.ProposedEpicId is not null)
+        .GroupBy(m => m.ProposedEpicId!)
+        .Select(g => g.OrderByDescending(m => m.Id).First())
+        .OrderBy(m => m.Id)
+        .ToList() ?? new();
 
     /// <summary>An epic counts as accepted when the session carries the
     /// "Operator accepted epic {id}:" system message — survives reloads,
@@ -464,6 +490,16 @@
             m.Role.Equals("System", StringComparison.OrdinalIgnoreCase)
             && m.Content.StartsWith($"Operator accepted epic {epicId}:", StringComparison.Ordinal));
     }
+
+    /// <summary>Issue status per proposed epic id (loaded with the
+    /// session) — a Closed/reset proposal must not offer an Accept
+    /// button (live 2026-08-14: closed duplicate epic-15 showed
+    /// "Awaiting review").</summary>
+    private readonly Dictionary<string, string> _epicStatuses = new(StringComparer.OrdinalIgnoreCase);
+
+    private bool IsEpicClosed(string epicId)
+        => _epicStatuses.TryGetValue(epicId, out var s)
+            && s.Equals("Closed", StringComparison.OrdinalIgnoreCase);
 
     private SessionSpecDto? SpecForProposal(MessageDto proposal)
         => _sessionSpecs?.FirstOrDefault(s =>
@@ -672,9 +708,25 @@
             // Specs feed both the Spec Drafts tab and the canvas (map +
             // proposal panel's spec pill) — always load.
             await LoadSessionSpecs();
+            await LoadEpicStatuses(resp?.ProjectId);
         }
         catch { _messages = new(); }
         StateHasChanged();
+    }
+
+    private async Task LoadEpicStatuses(string? projectId)
+    {
+        if (projectId is null) return;
+        foreach (var p in Proposals)
+        {
+            try
+            {
+                var issue = await Http.GetFromJsonAsync<TaskDto>(
+                    $"/api/tasks/{p.ProposedEpicId}?projectId={projectId}");
+                if (issue is not null) _epicStatuses[p.ProposedEpicId!] = issue.Status;
+            }
+            catch { /* status unknown — proposal renders as awaiting review */ }
+        }
     }
 
     private async Task StartNewSession()
