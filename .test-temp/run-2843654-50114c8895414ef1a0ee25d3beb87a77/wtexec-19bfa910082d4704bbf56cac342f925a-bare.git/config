@@ -1,0 +1,6 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+[remote "origin"]
+	url = /home/jtn5016/Documents/forge/.test-temp/run-2843654-50114c8895414ef1a0ee25d3beb87a77/wtexec-19bfa910082d4704bbf56cac342f925a

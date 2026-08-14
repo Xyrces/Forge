@@ -973,7 +973,8 @@ public sealed class PRWatcher
         IssueRecord task,
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
-        Func<PullRequest, string>? headShaOverride = null)
+        Func<PullRequest, string>? headShaOverride = null,
+        Func<PullRequest, int>? changedFilesOverride = null)
     {
         var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out _))
@@ -985,7 +986,7 @@ public sealed class PRWatcher
         while (!cancellationToken.IsCancellationRequested)
         {
             var outcome = await PollWatchedTaskAsync(
-                task, cancellationToken, reviewsOverride, headShaOverride);
+                task, cancellationToken, reviewsOverride, headShaOverride, changedFilesOverride: changedFilesOverride);
             switch (outcome)
             {
                 case WatchPollOutcome.Merged:
