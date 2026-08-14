@@ -142,10 +142,14 @@ public class IntakeAgentStreamingTests : IDisposable
 
         var updated = await agent.SendUserMessageAsync(session.Id, "go ahead", default);
 
-        var epic = Assert.Single(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+        // The proposal is a session draft — NO issue row exists until
+        // the operator accepts (operator rule 2026-08-14).
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
+        Assert.Equal("ASB transport", draft.ProposedEpicTitle);
         var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
-        Assert.Equal($"Proposed {epic.Id} — review the draft and accept when ready.", assistant.Content);
-        Assert.Equal(epic.Id, assistant.ProposedEpicId);
+        Assert.Equal("Proposed \"ASB transport\" — review the draft and accept when ready.", assistant.Content);
+        Assert.Equal("ASB transport", assistant.ProposedEpicTitle);
     }
 
     [Fact]
@@ -162,12 +166,49 @@ public class IntakeAgentStreamingTests : IDisposable
     }
 
     [Fact]
+    public async Task Accept_DraftProposal_CreatesEpicRow_Idempotent()
+    {
+        // Operator rule 2026-08-14: the epic row + board presence are
+        // created AT ACCEPT, from the draft payload — not at proposal.
+        var client = new TurnScriptedClient()
+            .Turn(FunctionCall("create_epic", "call_1",
+                ("title", "ASB transport"), ("description", "first draft"), ("priority", 1)))
+            .Turn(Text("proposed"));
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        var proposed = await agent.SendUserMessageAsync(session.Id, "add asb", default);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+
+        var draftMsg = proposed.Messages.Single(m => m.ProposedEpicDescription is not null);
+        var issue = await agent.AcceptProposedEpicAsync(session.Id, draftMsg.Id, default);
+
+        Assert.Equal("epic", issue.Type);
+        Assert.Equal("ASB transport", issue.Title);
+        Assert.Equal("first draft", issue.Description);
+        Assert.Equal(1, issue.Priority);
+
+        // The accept message carries the epic id + the source proposal
+        // reference (the idempotence key); a second accept returns the
+        // same epic instead of creating a duplicate.
+        var after = await agent.GetSessionAsync(session.Id, default);
+        Assert.Contains(after!.Messages, m =>
+            m.Role == IntakeMessageRole.System
+            && m.ProposedEpicId == issue.Id
+            && m.Content.Contains($"Operator accepted epic {issue.Id}:")
+            && m.Content.Contains($"(proposal message #{draftMsg.Id})"));
+        var again = await agent.AcceptProposedEpicAsync(session.Id, draftMsg.Id, default);
+        Assert.Equal(issue.Id, again.Id);
+        Assert.Single(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+    }
+
+    [Fact]
     public async Task SendUserMessage_NonConsecutiveDuplicateTitle_RefinesMatchingProposal()
     {
         // Live incident 2026-08-14: after creating children 3-5 the
         // model re-fired child 2's create_epic; the latest-proposal
         // check missed it and a duplicate epic row landed. The match
-        // scans every unaccepted proposal by title.
+        // scans every unaccepted draft by title and supersedes it.
         var client = new TurnScriptedClient()
             .Turn(FunctionCall("create_epic", "call_1",
                 ("title", "P1-1: Fix the harness"), ("description", "child 1"), ("priority", 1)),
@@ -179,22 +220,24 @@ public class IntakeAgentStreamingTests : IDisposable
         var agent = NewAgent(client);
         var session = await agent.StartSessionAsync("t", default);
 
-        await agent.SendUserMessageAsync(session.Id, "go", default);
+        var updated = await agent.SendUserMessageAsync(session.Id, "go", default);
 
-        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
-        Assert.Equal(2, epics.Count);
-        var first = epics.Single(e => e.Title == "P1-1: Fix the harness");
-        Assert.Equal("child 1 refined", first.Description);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+        var drafts = updated.Messages.Where(m => m.ProposedEpicDescription is not null).ToList();
+        Assert.Equal(3, drafts.Count);
+        var p11 = drafts.Where(d => d.ProposedEpicTitle == "P1-1: Fix the harness").ToList();
+        Assert.Equal(2, p11.Count); // original + superseding refinement
+        Assert.Equal("child 1 refined", p11.MaxBy(d => d.Id)!.ProposedEpicDescription);
     }
 
     [Fact]
-    public async Task SendUserMessage_DistinctTitles_OneTurn_CreatesSeparateEpics()
+    public async Task SendUserMessage_DistinctTitles_OneTurn_CreatesSeparateDrafts()
     {
         // Live incident 2026-08-14: a parent + children turn collapsed
         // into ONE epic — the refine-in-place guard (added for the
         // identical-titles duplicate storm) rewrote epic-8 four times
         // and the five children were never created. Refinement is
-        // title-scoped: clearly different titles are new epics.
+        // title-scoped: clearly different titles are new drafts.
         var client = new TurnScriptedClient()
             .Turn(FunctionCall("create_epic", "call_1",
                 ("title", "Transport reliability bundle"), ("description", "parent"), ("priority", 2)),
@@ -206,13 +249,14 @@ public class IntakeAgentStreamingTests : IDisposable
         var agent = NewAgent(client);
         var session = await agent.StartSessionAsync("t", default);
 
-        await agent.SendUserMessageAsync(session.Id, "go ahead", default);
+        var updated = await agent.SendUserMessageAsync(session.Id, "go ahead", default);
 
-        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
-        Assert.Equal(3, epics.Count);
-        Assert.Contains(epics, e => e.Title == "Transport reliability bundle");
-        Assert.Contains(epics, e => e.Title == "P1-1: Fix the contract test harness");
-        Assert.Contains(epics, e => e.Title == "P1-2: Guard ConsumeAsync re-enumeration");
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+        var drafts = updated.Messages.Where(m => m.ProposedEpicDescription is not null).ToList();
+        Assert.Equal(3, drafts.Count);
+        Assert.Contains(drafts, d => d.ProposedEpicTitle == "Transport reliability bundle");
+        Assert.Contains(drafts, d => d.ProposedEpicTitle == "P1-1: Fix the contract test harness");
+        Assert.Contains(drafts, d => d.ProposedEpicTitle == "P1-2: Guard ConsumeAsync re-enumeration");
     }
 
     [Fact]
@@ -220,6 +264,8 @@ public class IntakeAgentStreamingTests : IDisposable
     {
         // Live incident 2026-08-12: one turn fired create_epic 3× and
         // three identical epics (epic-5/6/7) landed in the backlog.
+        // Same-title re-calls supersede the draft; nothing hits the
+        // issue store before accept.
         var client = new TurnScriptedClient()
             .Turn(FunctionCall("create_epic", "call_1",
                 ("title", "ASB transport"), ("description", "first draft"), ("priority", 2)),
@@ -231,14 +277,21 @@ public class IntakeAgentStreamingTests : IDisposable
 
         var updated = await agent.SendUserMessageAsync(session.Id, "add asb", default);
 
-        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
-        var epic = Assert.Single(epics);
-        Assert.Equal("ASB transport (refined)", epic.Title);
-        Assert.Equal("refined draft", epic.Description);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+        var drafts = updated.Messages.Where(m => m.ProposedEpicDescription is not null).ToList();
+        Assert.Equal(2, drafts.Count); // original + superseding refinement
+        var latest = drafts.MaxBy(d => d.Id)!;
+        Assert.Equal("ASB transport (refined)", latest.ProposedEpicTitle);
+        Assert.Equal("refined draft", latest.ProposedEpicDescription);
         Assert.Contains(updated.Messages, m =>
-            m.Role == IntakeMessageRole.System && m.Content.StartsWith($"Updated epic proposal: {epic.Id} - "));
+            m.Role == IntakeMessageRole.System && m.Content == "Updated epic proposal: ASB transport (refined)");
         var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
-        Assert.Equal(epic.Id, assistant.ProposedEpicId);
+        Assert.Equal("ASB transport (refined)", assistant.ProposedEpicTitle);
+
+        // Accepting the latest draft creates ONE epic with the refined content.
+        var issue = await agent.AcceptProposedEpicAsync(session.Id, latest.Id, default);
+        Assert.Equal("ASB transport (refined)", issue.Title);
+        Assert.Equal("refined draft", issue.Description);
     }
 
     [Fact]
@@ -255,16 +308,20 @@ public class IntakeAgentStreamingTests : IDisposable
         var session = await agent.StartSessionAsync("t", default);
 
         var first = await agent.SendUserMessageAsync(session.Id, "first", default);
-        var firstEpicId = first.Messages.Last(m => m.Role == IntakeMessageRole.Assistant).ProposedEpicId!;
-        await agent.AcceptProposedEpicAsync(session.Id,
-            first.Messages.Last(m => m.Role == IntakeMessageRole.Assistant).Id, default);
+        var firstDraft = first.Messages.Single(m => m.ProposedEpicDescription is not null);
+        var firstEpic = await agent.AcceptProposedEpicAsync(session.Id, firstDraft.Id, default);
 
         var second = await agent.SendUserMessageAsync(session.Id, "second", default);
+        var secondDraft = second.Messages
+            .Where(m => m.ProposedEpicDescription is not null)
+            .MaxBy(m => m.Id)!;
+        var secondEpic = await agent.AcceptProposedEpicAsync(session.Id, secondDraft.Id, default);
 
         var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
         Assert.Equal(2, epics.Count);
-        var secondEpicId = second.Messages.Last(m => m.Role == IntakeMessageRole.Assistant).ProposedEpicId!;
-        Assert.NotEqual(firstEpicId, secondEpicId);
+        Assert.NotEqual(firstEpic.Id, secondEpic.Id);
+        Assert.Equal("First epic", firstEpic.Title);
+        Assert.Equal("Second epic", secondEpic.Title);
     }
 
     private static AIContent FunctionCall(string name, string callId, params (string Key, object Value)[] args)

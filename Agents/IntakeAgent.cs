@@ -158,7 +158,10 @@ public sealed class IntakeAgent
             description: "Propose a new epic for the operator to review. " +
                          "Use this when the operator's input describes a piece of work " +
                          "large enough to be a multi-task epic (vs. a single dev task). " +
-                         "Returns the new epic's issue id.");
+                         "The proposal is a DRAFT that lives in this conversation only — " +
+                         "no issue is created and nothing appears on the project board " +
+                         "until the operator accepts the proposal. Returns a draft " +
+                         "reference (the proposal's message id), not an issue id.");
 
         // Structured clarifying questions (operator request 2026-08-12):
         // the tool captures the questions so the dashboard renders them
@@ -314,14 +317,14 @@ public sealed class IntakeAgent
         }
 
         // If the agent called create_epic during the run, the tool
-        // already wrote the issue and a system message linking to it.
-        // Find the most recent message (any role) that carries a
-        // proposedEpicId; the assistant message we are about to append
-        // adopts that link so the dashboard's Accept button can target
-        // it via the assistant message id.
+        // already wrote the DRAFT proposal message(s) (no issue row —
+        // rows are created at accept time). Find the most recent
+        // message carrying a proposal; the assistant message we are
+        // about to append adopts that title so the thread audit card
+        // can target it.
         var refreshed = await _intakeStore.GetAsync(sessionId, ct) ?? session;
         var lastProposal = refreshed.Messages
-            .Where(m => m.ProposedEpicId is not null)
+            .Where(m => m.ProposedEpicTitle is not null)
             .OrderByDescending(m => m.Id)
             .FirstOrDefault();
         proposedEpicId = lastProposal?.ProposedEpicId;
@@ -346,8 +349,8 @@ public sealed class IntakeAgent
             // 500'd and the operator lost the turn).
             if (questions is { Count: > 0 })
                 assistantText = "A few questions before I proceed:";
-            else if (proposedEpicId is not null)
-                assistantText = $"Proposed {proposedEpicId} — review the draft and accept when ready.";
+            else if (proposedEpicTitle is not null)
+                assistantText = $"Proposed \"{proposedEpicTitle}\" — review the draft and accept when ready.";
             else
             {
                 _logger.LogWarning(
@@ -381,13 +384,18 @@ public sealed class IntakeAgent
     /// <summary>
     /// Mark a proposed epic as accepted by the operator. This:
     /// <list type="bullet">
-    ///   <item>Transitions the issue from Pending -> keeps it Pending
-    ///   (epics stay in the backlog until groomed; the operator's
-    ///   "accept" means "I want this on the board" not "start working
-    ///   on it now").</item>
+    ///   <item>CREATES the epic issue from the draft's payload —
+    ///   proposals are session-scoped drafts with no board row
+    ///   (operator rule 2026-08-14); accept is the moment the work
+    ///   becomes real. Epics stay in the backlog until groomed; the
+    ///   operator's "accept" means "I want this on the board" not
+    ///   "start working on it now".</item>
+    ///   <item>Creates the spec the product -> designer pipeline
+    ///   refines.</item>
     ///   <item>Adds the issue to the active sprint (if any).</item>
     ///   <item>Appends a system message to the intake session noting
-    ///   the acceptance.</item>
+    ///   the acceptance (carrying the new epic id + the source
+    ///   proposal's message id, which makes accept idempotent).</item>
     /// </list>
     /// </summary>
     public async Task<IssueRecord> AcceptProposedEpicAsync(
@@ -397,12 +405,43 @@ public sealed class IntakeAgent
             ?? throw new InvalidOperationException($"Intake session {sessionId} not found");
         var msg = session.Messages.FirstOrDefault(m => m.Id == messageId)
             ?? throw new InvalidOperationException($"Message {messageId} not found in session {sessionId}");
-        if (msg.ProposedEpicId is null)
+
+        // Idempotent re-accept: the accept message names its source
+        // proposal; a second click returns the already-created epic.
+        var priorAccept = session.Messages.FirstOrDefault(m =>
+            m.Role == IntakeMessageRole.System
+            && m.ProposedEpicId is not null
+            && m.Content.Contains($"(proposal message #{messageId})", StringComparison.Ordinal));
+        if (priorAccept?.ProposedEpicId is { } existingEpicId)
+        {
+            return await _issues.GetAsync(existingEpicId, ct)
+                ?? throw new InvalidOperationException(
+                    $"Proposal message {messageId} was already accepted as {existingEpicId}, but that epic no longer exists");
+        }
+
+        // Pre-redesign proposals (2026-08-14 and earlier) carry a real
+        // epic id — the row was created at proposal time. Accepting one
+        // keeps that row (no duplicate create).
+        IssueRecord issue;
+        if (msg.ProposedEpicDescription is not null)
+        {
+            issue = await _issues.CreateAsync(new NewIssue(
+                Type: "epic",
+                Title: msg.ProposedEpicTitle ?? "Untitled epic",
+                Description: msg.ProposedEpicDescription,
+                Priority: msg.ProposedEpicPriority ?? 2,
+                Assignee: "intake"), ct);
+        }
+        else if (msg.ProposedEpicId is not null)
+        {
+            issue = await _issues.GetAsync(msg.ProposedEpicId, ct)
+                ?? throw new InvalidOperationException($"Proposed epic {msg.ProposedEpicId} no longer exists");
+        }
+        else
+        {
             throw new InvalidOperationException(
                 $"Message {messageId} did not propose an epic; nothing to accept.");
-
-        var issue = await _issues.GetAsync(msg.ProposedEpicId, ct)
-            ?? throw new InvalidOperationException($"Proposed epic {msg.ProposedEpicId} no longer exists");
+        }
 
         // P2.a wiring: create a spec for the accepted epic so the
         // product -> designer pipeline has something to refine.
@@ -447,13 +486,16 @@ public sealed class IntakeAgent
         }
 
         // Append a system message to the session so the audit trail is
-        // visible in the chat thread.
+        // visible in the chat thread. It carries the new epic id AND
+        // the source proposal's message id — the idempotence key for
+        // re-accepts and the UI's accepted-state marker for the draft.
         var sprintNote = activeSprint is null
             ? "no active sprint"
             : $"added to sprint {activeSprint.Id} ({activeSprint.Name})";
         await _intakeStore.AppendMessageAsync(sessionId,
             new NewIntakeMessage(IntakeMessageRole.System,
-                $"Operator accepted epic {issue.Id}: {issue.Title}; {sprintNote}."), ct);
+                $"Operator accepted epic {issue.Id}: {issue.Title}; {sprintNote}. (proposal message #{messageId})",
+                ProposedEpicId: issue.Id, ProposedEpicTitle: issue.Title), ct);
 
         _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.accepted",
             sessionId, $"epic={issue.Id}", new Dictionary<string, object?>
@@ -475,81 +517,74 @@ public sealed class IntakeAgent
     private async Task<string> CreateEpicAsync(
         string sessionId, string title, string description, int? priority, CancellationToken ct)
     {
-        // One ACTIVE proposal per TITLE: re-proposing the SAME epic
-        // (retry loops, per-turn re-proposals, "(refined)" suffixes)
-        // refines that epic in place — without a collapse each call
-        // spawned a duplicate epic row (observed live 2026-08-12: one
-        // talaria turn created epic-5/6/7 with identical titles; two
-        // of the five ASB epics were then accepted → duplicate specs
-        // in the pipeline). A clearly DIFFERENT title is a genuinely
-        // new epic, even while an earlier proposal is still
-        // unaccepted — a parent + children turn must be able to create
-        // them all (observed live 2026-08-14: the collapse rewrote
-        // epic-8 four times and the five children were never created).
-        // Only an ACCEPTED proposal closes its slot either way. The
-        // match scans ALL of the session's unaccepted proposals, not
-        // just the latest — a non-consecutive re-call (observed live
-        // 2026-08-14: the model re-fired child 2's create_epic after
-        // creating children 3-5, producing duplicate epic-15) refines
-        // the matching proposal wherever it sits in the session.
+        // Proposals are SESSION-SCOPED DRAFTS: no issue row is created
+        // here — operator rule 2026-08-14 ("we should not be creating
+        // the epics until they are accepted; they look like real work
+        // already"). The draft's full payload (title + description +
+        // priority) rides the message (schema v34); the epic row +
+        // spec are created from it at accept time.
+        //
+        // Refine-vs-new is title-scoped (normalized equality or prefix
+        // containment): re-proposing the SAME epic (retry loops,
+        // "(refined)" suffixes, non-consecutive re-calls) supersedes
+        // the matching draft instead of stacking duplicates; a clearly
+        // DIFFERENT title is a genuinely new proposal, even in the
+        // same turn — a parent + children turn must list them all.
+        // (History: 2026-08-12 identical-title storms spawned duplicate
+        // rows; 2026-08-14 the blanket collapse rewrote one row 4× and
+        // lost the children.) An ACCEPTED title's slot is closed — the
+        // same title again is a fresh draft.
         var session = await _intakeStore.GetAsync(sessionId, ct);
         if (session is not null)
         {
-            var candidateIds = session.Messages
-                .Where(m => m.ProposedEpicId is not null)
-                .OrderByDescending(m => m.Id)
-                .Select(m => m.ProposedEpicId!)
-                .Distinct();
-            foreach (var candidateId in candidateIds)
+            var drafts = session.Messages
+                .Where(m => m.ProposedEpicDescription is not null)
+                .OrderByDescending(m => m.Id);
+            foreach (var draft in drafts)
             {
-                var accepted = session.Messages.Any(m =>
+                if (!IsSameProposal(draft.ProposedEpicTitle!, title)) continue;
+                var alreadyAccepted = session.Messages.Any(m =>
                     m.Role == IntakeMessageRole.System
-                    && m.Content.StartsWith($"Operator accepted epic {candidateId}:", StringComparison.Ordinal));
-                if (accepted) continue;
-                var existing = await _issues.GetAsync(candidateId, ct);
-                if (existing is null || !IsSameProposal(existing.Title, title)) continue;
+                    && m.Content.Contains($"(proposal message #{draft.Id})", StringComparison.Ordinal));
+                if (alreadyAccepted) break; // accepted slots are closed — fall through to a fresh draft
+                if (string.Equals(draft.ProposedEpicDescription, description, StringComparison.Ordinal)
+                    && draft.ProposedEpicPriority == priority)
                 {
-                    await _issues.UpdateSummaryAsync(existing.Id, title, description, ct);
-                    if (priority is not null)
-                        await _issues.SetPriorityAsync(existing.Id, priority.Value, ct);
-                    await _intakeStore.AppendMessageAsync(sessionId,
-                        new NewIntakeMessage(IntakeMessageRole.System,
-                            $"Updated epic proposal: {existing.Id} - {title}",
-                            ProposedEpicId: existing.Id, ProposedEpicTitle: title), ct);
-                    _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed",
-                        sessionId, $"epic={existing.Id} (revised)", new Dictionary<string, object?>
-                        {
-                            ["sessionId"] = sessionId,
-                            ["epicId"] = existing.Id,
-                        }));
-                    return existing.Id;
+                    // Identical re-call (retry loop): no-op, point at
+                    // the existing draft instead of flooding the thread.
+                    return $"draft-{draft.Id} (already proposed)";
                 }
+                var revised = await _intakeStore.AppendMessageAsync(sessionId,
+                    new NewIntakeMessage(IntakeMessageRole.System,
+                        $"Updated epic proposal: {title}",
+                        ProposedEpicTitle: title,
+                        ProposedEpicDescription: description,
+                        ProposedEpicPriority: priority), ct);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed",
+                    sessionId, $"draft-{revised.Id} (revised)", new Dictionary<string, object?>
+                    {
+                        ["sessionId"] = sessionId,
+                        ["messageId"] = revised.Id,
+                    }));
+                return $"draft-{revised.Id}";
             }
         }
 
-        var issue = await _issues.CreateAsync(new NewIssue(
-            Type: "epic",
-            Title: title,
-            Description: description,
-            Priority: priority ?? 2,
-            Assignee: "intake"), ct);
-
-        // Append a system message that links the proposed epic id+title
-        // to the next assistant message. The runner reads
-        // `LastAssistant.ProposedEpicId` after the run and threads it
-        // into the assistant's stored record.
-        await _intakeStore.AppendMessageAsync(sessionId,
+        var msg = await _intakeStore.AppendMessageAsync(sessionId,
             new NewIntakeMessage(IntakeMessageRole.System,
-                $"Proposed epic: {issue.Id} - {issue.Title}", ProposedEpicId: issue.Id, ProposedEpicTitle: title), ct);
+                $"Proposed epic: {title}",
+                ProposedEpicTitle: title,
+                ProposedEpicDescription: description,
+                ProposedEpicPriority: priority), ct);
 
         _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed",
-            sessionId, $"epic={issue.Id}", new Dictionary<string, object?>
+            sessionId, $"draft-{msg.Id}", new Dictionary<string, object?>
             {
                 ["sessionId"] = sessionId,
-                ["epicId"] = issue.Id,
+                ["messageId"] = msg.Id,
             }));
 
-        return issue.Id;
+        return $"draft-{msg.Id}";
     }
 
     /// <summary>Title similarity for the refine-vs-create decision:

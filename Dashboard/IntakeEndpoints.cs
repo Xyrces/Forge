@@ -127,6 +127,7 @@ public static class IntakeEndpoints
         timestamp = m.Timestamp,
         proposedEpicId = m.ProposedEpicId,
         proposedEpicTitle = m.ProposedEpicTitle,
+        proposedEpicDescription = m.ProposedEpicDescription,
         questions = m.Questions?.Select(q => new
         {
             header = q.Header,

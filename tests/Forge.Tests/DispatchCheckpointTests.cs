@@ -54,7 +54,10 @@ public class DispatchCheckpointTests : IDisposable
 // current-context) (SQL Server chain: M032).
 // v32 = intake_message.questions_json — structured clarifying
 // questions on assistant intake messages (SQL Server chain: M033).
-        Assert.Equal(32, IssueStore.CurrentSchemaVersion);
+// v34 = intake_message.proposed_epic_description + _priority —
+// session-scoped draft proposals, epic row created at accept time
+// (SQL Server chain: M034; v33 was the SQL Server-only skew slot).
+        Assert.Equal(34, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]
