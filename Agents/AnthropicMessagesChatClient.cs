@@ -14,8 +14,9 @@ namespace Forge.Agents;
 /// client 401s on chat there ("PAID_MODEL_AUTH_REQUIRED").
 ///
 /// Scope: text + tool use round-trips, non-streaming. Streaming is
-/// surfaced as a single buffered chunk (M.E.AI's function-invoking
-/// pipeline only needs <see cref="GetResponseAsync(IEnumerable{ChatMessage}, ChatOptions?, CancellationToken)"/>).
+/// surfaced as a single buffered chunk carrying the FULL contents —
+/// text alone would drop tool_use blocks from the function-invoking
+/// pipeline (the intake agent streams through it).
 /// </summary>
 public sealed class AnthropicMessagesChatClient : IChatClient
 {
@@ -108,8 +109,22 @@ public sealed class AnthropicMessagesChatClient : IChatClient
         IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        // Buffered "streaming": one update carrying the FULL response
+        // contents. Yielding only response.Text silently drops tool_use
+        // blocks — FunctionInvokingChatClient then never sees the
+        // FunctionCallContent and never invokes the tool (live
+        // 2026-08-14: the kimi intake said "creating the epic" while
+        // its create_epic call vanished, and a tool-use-only reply
+        // surfaced as an EMPTY assistant message that crashed
+        // IntakeStore.AppendMessageAsync with "content is required").
         var response = await GetResponseAsync(messages, options, cancellationToken);
-        yield return new ChatResponseUpdate(ChatRole.Assistant, response.Text);
+        yield return new ChatResponseUpdate(
+            ChatRole.Assistant,
+            response.Messages.SelectMany(m => m.Contents).ToList())
+        {
+            FinishReason = response.FinishReason,
+            ResponseId = response.ResponseId,
+        };
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) =>

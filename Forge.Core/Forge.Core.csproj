@@ -18,11 +18,13 @@
     Also exclude the project directory itself (so SDK default Compile
     items own sources placed under Forge.Core/), any stale root obj/
     or bin/ directories left behind by builds before the project move,
-    and the gitignored .portHorizon/ state directory (e2e clones and
-    agent worktrees under it contain their own .cs files).
+    and the gitignored .portHorizon/ + .forge/ state directories (e2e
+    clones and agent worktrees under them are full repo copies whose
+    .cs files would otherwise be compiled twice — live build break
+    2026-08-14 with .forge/worktrees/task-681 present).
   -->
   <ItemGroup>
-    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\**\*.cs;..\obj\**\*.cs;..\bin\**\*.cs;..\.portHorizon\**\*.cs" />
+    <Compile Include="..\**\*.cs" Exclude="..\tests\**\*.cs;..\tools\**\*.cs;..\Forge.UI\**\*.cs;..\Forge.Core\**\*.cs;..\obj\**\*.cs;..\bin\**\*.cs;..\.portHorizon\**\*.cs;..\.forge\**\*.cs" />
     <None Remove="..\tests\**;..\tools\**;..\Forge.UI\**" />
     <EmbeddedResource Remove="..\tests\**" />
   </ItemGroup>

@@ -335,8 +335,27 @@ public sealed class IntakeAgent
             : IntakeQuestionParser.Parse(assistantText) is { Count: > 0 } parsed
                 ? parsed
                 : null;
-        if (string.IsNullOrWhiteSpace(assistantText) && questions is { Count: > 0 })
-            assistantText = "A few questions before I proceed:";
+        if (string.IsNullOrWhiteSpace(assistantText))
+        {
+            // Tool-only replies have no text to persist; give the
+            // assistant message a placeholder shaped by what the run
+            // DID. A run with no text, no questions and no proposal
+            // is a degenerate model response — persist a visible
+            // fallback instead of throwing "content is required" out
+            // of AppendMessageAsync (live 2026-08-14: the endpoint
+            // 500'd and the operator lost the turn).
+            if (questions is { Count: > 0 })
+                assistantText = "A few questions before I proceed:";
+            else if (proposedEpicId is not null)
+                assistantText = $"Proposed {proposedEpicId} — review the draft and accept when ready.";
+            else
+            {
+                _logger.LogWarning(
+                    "Intake run for session {Session} produced no text, no tool calls and no questions",
+                    sessionId);
+                assistantText = "(The model returned an empty reply — please retry.)";
+            }
+        }
 
         // Append the assistant response (linked to the proposed epic if any).
         var assistantMsg = await _intakeStore.AppendMessageAsync(sessionId,

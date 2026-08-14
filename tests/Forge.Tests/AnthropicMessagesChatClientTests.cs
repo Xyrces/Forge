@@ -260,4 +260,37 @@ public class AnthropicMessagesChatClientTests
         using var doc = JsonDocument.Parse(handler.LastBody!);
         Assert.False(doc.RootElement.TryGetProperty("thinking", out _));
     }
+
+    [Fact]
+    public async Task Streaming_ToolUseBlocks_SurviveToFunctionInvokingPipeline()
+    {
+        // Live incident 2026-08-14: the buffered streaming path yielded
+        // ONLY response.Text, dropping FunctionCallContent — the
+        // UseFunctionInvocation middleware never saw the tool call, so
+        // a tool-use-only reply surfaced as an EMPTY assistant message
+        // (crashing intake's AppendMessageAsync) and create_epic never
+        // ran while the model narrated "creating the epic".
+        var calls = 0;
+        var (client, _) = NewClient(_ => Json(HttpStatusCode.OK, calls++ == 0
+            ? """{"id":"m7","content":[{"type":"tool_use","id":"call_1","name":"echo","input":{"text":"ping"}}],"stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":2}}"""
+            : """{"id":"m8","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":1}}"""));
+
+        var invoked = 0;
+        var tool = AIFunctionFactory.Create((string text) => { invoked++; return "echo:" + text; },
+            name: "echo", description: "echo back");
+        var pipelined = new ChatClientBuilder(client).UseFunctionInvocation().Build();
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var u in pipelined.GetStreamingResponseAsync(
+            new[] { new ChatMessage(ChatRole.User, "say ping") },
+            new ChatOptions { Tools = [tool] }))
+        {
+            updates.Add(u);
+        }
+
+        Assert.Equal(1, invoked);
+        Assert.Equal(2, calls);
+        Assert.Equal("pong", string.Concat(updates.Select(u => u.Text)));
+        Assert.Contains(updates, u => u.Contents.OfType<FunctionCallContent>().Any());
+    }
 }

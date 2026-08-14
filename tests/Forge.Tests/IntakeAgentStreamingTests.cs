@@ -127,6 +127,41 @@ public class IntakeAgentStreamingTests : IDisposable
     }
 
     [Fact]
+    public async Task SendUserMessage_ToolOnlyEpicTurn_PersistsProposalPlaceholder_NotCrash()
+    {
+        // Live incident 2026-08-14: the model answered "go ahead" with
+        // a create_epic call and NO text; the empty assistantText hit
+        // IntakeStore.AppendMessageAsync's content guard and the
+        // endpoint 500'd. The proposal placeholder keeps the turn.
+        var client = new TurnScriptedClient()
+            .Turn(FunctionCall("create_epic", "call_1",
+                ("title", "ASB transport"), ("description", "first draft"), ("priority", 2)))
+            .Turn(); // empty follow-up: no text after the tool result
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        var updated = await agent.SendUserMessageAsync(session.Id, "go ahead", default);
+
+        var epic = Assert.Single(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+        var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
+        Assert.Equal($"Proposed {epic.Id} — review the draft and accept when ready.", assistant.Content);
+        Assert.Equal(epic.Id, assistant.ProposedEpicId);
+    }
+
+    [Fact]
+    public async Task SendUserMessage_EmptyReply_PersistsRetryFallback_NotCrash()
+    {
+        var client = new TurnScriptedClient().Turn(); // model returned nothing at all
+        var agent = NewAgent(client);
+        var session = await agent.StartSessionAsync("t", default);
+
+        var updated = await agent.SendUserMessageAsync(session.Id, "hi", default);
+
+        var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
+        Assert.Equal("(The model returned an empty reply — please retry.)", assistant.Content);
+    }
+
+    [Fact]
     public async Task SendUserMessage_SecondCreateEpic_RefinesExistingProposal_InsteadOfDuplicating()
     {
         // Live incident 2026-08-12: one turn fired create_epic 3× and
