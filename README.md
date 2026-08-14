@@ -2,7 +2,7 @@
 
 A long-lived .NET 10 orchestrator that drives AI coding agents against any registered git project. Forge owns the task queue, sprint assembly, git worktrees, the GitHub PR lifecycle, and the review-gated merge — **the model owns the code.**
 
-Forge is project-agnostic. Projects live in a DB-backed registry (the `project` table) and are added through the dashboard or the API — there is no hardcoded target repo in the codebase. Forge's first deployment target was the [Xyrces/PortHorizon](https://github.com/Xyrces/PortHorizon) Godot-ECS game repo, and Forge now also builds itself: the `forge` project is registered like any other and its tasks dispatch against this repo.
+Forge is project-agnostic. Projects live in a DB-backed registry (the `project` table) and are added through the dashboard or the API — there is no hardcoded target repo in the codebase. Forge now builds itself: the `forge` project is registered like any other and its tasks dispatch against this repo.
 
 The runtime uses the [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) 1.12.0 with [`Microsoft.Agents.AI.Workflows`](https://www.nuget.org/packages/Microsoft.Agents.AI.Workflows) for the dispatch pipeline. LLM inference goes through configurable OpenAI-compatible or Anthropic-protocol providers (kilo gateway, MiniMax direct, Kimi, …) with per-role provider/model assignments and per-project overrides.
 
