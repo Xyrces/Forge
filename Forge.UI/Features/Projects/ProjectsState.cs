@@ -37,7 +37,8 @@ public sealed record ProjectsSlotRow(string ProjectId, string Role, int InFlight
 public sealed record SecretMetadataDto(string Kind, bool Set, DateTime? CreatedAt, DateTime? UpdatedAt, bool Known = false);
 public sealed record SetSecretRequestBody(string Kind, string Value);
 
-public sealed record AddProjectRequestBody(string Id, string Name, string RepoUrl, string? DefaultBranch, string? GitToken = null);
+public sealed record AddProjectRequestBody(string Id, string Name, string RepoUrl, string? DefaultBranch, string? GitToken = null,
+    Dictionary<string, string>? Secrets = null);
 public sealed record AddProjectResponseBody(ProjectRecord Project, object? ClonedInfo, string? Warning);
 public sealed record ProjectRecord(
     string Id, string Name, string RepoUrl, string DefaultBranch,
@@ -55,7 +56,8 @@ public static class ProjectsActions
     public sealed record ProjectsLoadFailedAction(string Error);
 
     public sealed record AddProjectAction(
-        string Id, string Name, string RepoUrl, string? DefaultBranch, string? GitToken);
+        string Id, string Name, string RepoUrl, string? DefaultBranch, string? GitToken,
+        Dictionary<string, string>? Secrets = null);
     public sealed record AddProjectSubmittingAction();
     public sealed record AddProjectSucceededAction(string Id);
     public sealed record AddProjectFailedAction(string Error);

@@ -417,8 +417,12 @@ public class RoleTerritoryResolutionTests
     }
 
     [Fact]
-    public void NoProjectEntry_FallsBackToRegistryDefault()
+    public void NoProjectEntry_IsUnconstrained()
     {
+        // Contract change 2026-08-12: the registry's built-in
+        // territories are Forge-repo-shaped prompt prose, never a gate
+        // fallback — an unconfigured project must not have a foreign
+        // layout imposed (talaria task-19/20 rejections).
         var roleDef = Registry.ForType(AgentType.CoreDev);
         var territories = new Dictionary<string, RoleTerritory>
         {
@@ -427,19 +431,19 @@ public class RoleTerritoryResolutionTests
 
         var (prefixes, rootFiles) = Agents.RoleAgentRegistry.ResolveTerritory(roleDef, territories);
 
-        Assert.Equal(roleDef.TerritoryPrefixes, prefixes);
-        Assert.Equal(roleDef.TerritoryAllowsRootFiles, rootFiles);
+        Assert.Empty(prefixes);
+        Assert.False(rootFiles);
     }
 
     [Fact]
-    public void NullProjectTerritories_FallsBackToRegistryDefault()
+    public void NullProjectTerritories_IsUnconstrained()
     {
         var roleDef = Registry.ForType(AgentType.ClientDev);
 
         var (prefixes, rootFiles) = Agents.RoleAgentRegistry.ResolveTerritory(roleDef, null);
 
-        Assert.Equal(roleDef.TerritoryPrefixes, prefixes);
-        Assert.Equal(roleDef.TerritoryAllowsRootFiles, rootFiles);
+        Assert.Empty(prefixes);
+        Assert.False(rootFiles);
     }
 
     [Fact]

@@ -268,13 +268,20 @@ public class TaskStateMachineTests : IDisposable
             }
             else if (from == TaskLifecycleState.Failed)
             {
-                // Failed: exactly two ways out — the operator requeue
-                // or the operator's close-obsolete.
+                // Failed: three ways out — the operator requeue, the
+                // operator's close-obsolete, and an EXTERNAL MERGE
+                // (2026-08-13, deliberate contract change: the work
+                // landed on main after the breaker tripped — porthorizon
+                // task-408's PR #940 — and leaving the row Failed while
+                // the code ships serves nobody; a merge is outside
+                // ground truth, not a resurrection). Automation still
+                // cannot REOPEN or revive a Failed task.
                 var exits = events.Where(evt => ProbeTo(evt, from)).ToList();
-                Assert.True(exits.Count == 2
+                Assert.True(exits.Count == 3
                         && exits.Contains(TaskEvent.OperatorRequeue)
-                        && exits.Contains(TaskEvent.OperatorClosed),
-                    $"{from} must exit only via OperatorRequeue or OperatorClosed, has [{string.Join(",", exits)}]");
+                        && exits.Contains(TaskEvent.OperatorClosed)
+                        && exits.Contains(TaskEvent.ExternallyMerged),
+                    $"{from} must exit only via OperatorRequeue, OperatorClosed, or ExternallyMerged, has [{string.Join(",", exits)}]");
             }
             else
             {

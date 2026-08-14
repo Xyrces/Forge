@@ -136,6 +136,113 @@ public class RunGateTests : IDisposable
     }
 
     [Fact]
+    public async Task TerritoryGate_DotPrefixedPaths_NotMangled()
+    {
+        // Observed live 2026-08-11 (talaria task-12): the plan named
+        // `.github/workflows/ci.yml` — legitimately inside coredev's
+        // `.github/` territory — but the extractor's TrimStart('.', '/')
+        // stripped the leading dot, producing `github/workflows/ci.yml`
+        // which failed the territory check. Both revisions burned on a
+        // phantom violation.
+        var plan = """
+            ## Goal
+            Add CI.
+            ## Files
+            - `.github/workflows/ci.yml` (new)
+            - `.kilo/skills/x/SKILL.md` (new)
+            ## Approach
+            Add the workflow.
+            ## Test
+            CI runs.
+            ## Done
+            Green.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { ".github/", ".kilo/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_DotSlashPrefix_StillNormalized()
+    {
+        // `./tests/Foo.cs` must normalize to `tests/Foo.cs` (the
+        // original TrimStart('.', '/') behavior for the "./" case).
+        var plan = """
+            ## Goal
+            Add a test.
+            ## Files
+            - `./tests/Foo.cs` (new)
+            ## Approach
+            Add it.
+            ## Test
+            Run it.
+            ## Done
+            Green.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "tests/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_CreationPhrasings_Accepted()
+    {
+        // 2026-08-11 (talaria task-12): the agent listed 8 files to
+        // CREATE but only some carried the literal "(new)" marker —
+        // 3 revisions burned on marker phrasing. Accept the natural
+        // variants: (new file), (create…), (add…), and verb-prefixed
+        // lines (Create/Add/New).
+        var plan = """
+            ## Goal
+            Bootstrap community files.
+            ## Files
+            - `tests/Talaria.Ci.Tests/Talaria.Ci.Tests.csproj` (new file)
+            - `CONTRIBUTING.md` (create)
+            - `SECURITY.md` (added)
+            - Create `CHANGELOG.md` from the release notes
+            - Add `.github/PULL_REQUEST_TEMPLATE.md`
+            ## Approach
+            Write them.
+            ## Test
+            Review.
+            ## Done
+            Files exist.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "tests/", ".github/" }, allowRoot: true, worktree: _workDir));
+        Assert.Equal(GateOutcome.Approve, v.Outcome);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_MissingFileInMissingTree_IsScaffoldNotHallucination()
+    {
+        // 2026-08-11 (talaria task-12): a brand-new test project tree
+        // (tests/Talaria.Ci.Tests/ doesn't exist yet) must not trip
+        // the existence check — new scaffolds are the common case for
+        // young repos. A missing file in an EXISTING directory is
+        // still flagged (typo/hallucination).
+        Directory.CreateDirectory(Path.Combine(_workDir, "tests"));
+        var plan = """
+            ## Goal
+            Bootstrap CI tests.
+            ## Files
+            - `tests/Talaria.Ci.Tests/Talaria.Ci.Tests.csproj`
+            - `tests/ExistingButMissing.cs`
+            ## Approach
+            Scaffold the project; edit the existing suite.
+            ## Test
+            dotnet test.
+            ## Done
+            Green.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(
+            Ctx(plan, territory: new[] { "tests/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Revise, v.Outcome);
+        Assert.Contains("tests/ExistingButMissing.cs", v.Feedback);
+        Assert.DoesNotContain("Talaria.Ci.Tests.csproj", v.Feedback);
+    }
+
+    [Fact]
     public async Task TerritoryGate_NoTerritoryConstraint_Approves()
     {
         var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(FullPlan));
@@ -177,6 +284,11 @@ public class RunGateTests : IDisposable
     [Fact]
     public async Task TerritoryGate_NonexistentFile_Revises_UnlessMarkedNew()
     {
+        // The parent directory EXISTS: a missing file here is a
+        // suspected hallucinated edit, not a new scaffold (the
+        // missing-tree case is approved — see
+        // TerritoryGate_MissingFileInMissingTree_IsScaffoldNotHallucination).
+        Directory.CreateDirectory(Path.Combine(_workDir, "Forge.UI", "Components"));
         var plan = """
             ## Goal
             Add a component.
@@ -197,6 +309,31 @@ public class RunGateTests : IDisposable
         var markedNew = plan.Replace("`Forge.UI/Components/NewWidget.razor`", "`Forge.UI/Components/NewWidget.razor` (new)");
         var approve = await new PlanTerritoryGate().EvaluateAsync(Ctx(markedNew, territory: territory, worktree: _workDir));
         Assert.Equal(GateOutcome.Approve, approve.Outcome);
+    }
+
+    [Fact]
+    public async Task TerritoryGate_BareFilenameExistingElsewhere_SuggestsFullPath()
+    {
+        // Live 2026-08-12 (talaria task-26): the plan listed the csproj
+        // bare; it exists at src/… — the feedback should say where,
+        // not just "mark it (new)".
+        Directory.CreateDirectory(Path.Combine(_workDir, "src", "Talaria.Transports.AzureServiceBus"));
+        File.WriteAllText(Path.Combine(_workDir, "src", "Talaria.Transports.AzureServiceBus", "Talaria.Transports.AzureServiceBus.csproj"), "<Project />");
+        var plan = """
+            ## Goal
+            Add the sample.
+            ## Files
+            - `Talaria.Transports.AzureServiceBus.csproj` — reference the sample
+            ## Approach
+            Add it.
+            ## Test
+            Build.
+            ## Done
+            Builds.
+            """;
+        var v = await new PlanTerritoryGate().EvaluateAsync(Ctx(plan, territory: new[] { "src/" }, worktree: _workDir));
+        Assert.Equal(GateOutcome.Revise, v.Outcome);
+        Assert.Contains("did you mean src/Talaria.Transports.AzureServiceBus/Talaria.Transports.AzureServiceBus.csproj", v.Feedback);
     }
 
     [Fact]

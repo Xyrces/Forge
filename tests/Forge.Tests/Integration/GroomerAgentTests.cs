@@ -81,6 +81,56 @@ public class GroomerAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task GroomAsync_AddDependency_WiresBlocksEdge_AndDispatchGatesOnIt()
+    {
+        // The groomer must wire physical prerequisites (observed live
+        // 2026-08-12: talaria Sprint 7 ran the new-project scaffold
+        // concurrently with the tasks writing into it). The dispatch
+        // queue then holds the dependent until the blocker completes.
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "P", Title: "T",
+            Body: """
+                ## Acceptance criteria
+                - [ ] scaffold
+                - [ ] implementation
+                """));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+        var blocker = await _issues.CreateAsync(new NewIssue("task", "scaffold project", null, 2, null));
+        var dependent = await _issues.CreateAsync(new NewIssue("task", "implement into it", null, 2, null));
+
+        var fcs = new[]
+        {
+            new FunctionCallContent("c1", "add_dependency",
+                new Dictionary<string, object?>
+                {
+                    ["blockerId"] = blocker.Id,
+                    ["blockedId"] = dependent.Id,
+                    ["rationale"] = "creates the project the dependent edits",
+                }),
+            new FunctionCallContent("c2", "set_spec_status",
+                new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        };
+        var agent = BuildAgent(new MultiToolCallingChatClient(fcs, "Done."));
+        await agent.GroomAsync(spec.Id, default);
+
+        // (No create_story was scripted, so GroomAsync returns null —
+        // the dependency wiring is the assertion target.)
+        Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(spec.Id))!.Status);
+        var deps = await _issues.DependenciesAsync(dependent.Id);
+        Assert.Contains(deps, d => d.BlockerId == blocker.Id && d.Kind == IssueDepKind.Blocks);
+
+        // Dispatch gate: the dependent is NOT ready while the blocker
+        // is open, and becomes ready once it completes.
+        var ready = await _issues.ReadyAsync(10, default);
+        Assert.DoesNotContain(ready, r => r.Id == dependent.Id);
+        Assert.Contains(ready, r => r.Id == blocker.Id);
+
+        await _issues.TransitionAsync(blocker.Id, IssueStatus.Completed, null, ct: default);
+        ready = await _issues.ReadyAsync(10, default);
+        Assert.Contains(ready, r => r.Id == dependent.Id);
+    }
+
+    [Fact]
     public async Task GroomAsync_NotApproved_ReturnsNull()
     {
         var spec = await _specs.CreateAsync(new NewSpec(

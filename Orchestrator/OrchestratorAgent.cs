@@ -361,6 +361,15 @@ public sealed class OrchestratorAgent : IAgent
         return false;
     }
 
+    private static Agents.LlmRateLimitException? FindRateLimitException(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is Agents.LlmRateLimitException rl) return rl;
+        }
+        return null;
+    }
+
     // Provider auth failure cooldown: much longer than the 429 one —
     // a lapsed key needs the operator, and each probe re-extends it.
     private static readonly TimeSpan LlmAuthFailureCooldown = TimeSpan.FromMinutes(15);
@@ -478,9 +487,20 @@ public sealed class OrchestratorAgent : IAgent
                 if (IsLlmRateLimited(ex))
                 {
                     var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
+                    // Max-semantics: never shortens a longer
+                    // escalating cooldown the client layer recorded
+                    // (the 2026-08-08 herd bug flattened them to 3m).
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
-                    _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
-                        preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    var effective = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
+                    var rl = FindRateLimitException(ex);
+                    _logger.LogWarning(
+                        "Issue {Id}: LLM rate limit (429{Kind}{Code}) on {Provider}/{Model}; re-queued, dispatch cooling until {Until:HH:mm:ss} UTC{ReqId}",
+                        preClaimed.Id,
+                        rl is not null ? $" {rl.Kind}" : "",
+                        rl?.ErrorCode is not null ? $" code {rl.ErrorCode}" : "",
+                        mk.Provider, mk.Model,
+                        effective ?? DateTime.UtcNow + LlmRateLimitCooldown,
+                        rl?.RequestId is not null ? $" request_id={rl.RequestId}" : "");
                     await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
                     return new Result(false, "llm-rate-limited");
                 }
@@ -546,8 +566,15 @@ public sealed class OrchestratorAgent : IAgent
                 {
                     var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
-                    _logger.LogWarning("Issue {Id}: LLM rate limit (429) on {Provider}/{Model}; re-queued, dispatch on that model cooling down for {Cooldown}",
-                        preClaimed.Id, mk.Provider, mk.Model, LlmRateLimitCooldown);
+                    var effective = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
+                    var kind = Agents.LlmRateLimitException.Classify(lastError);
+                    var code = Agents.LlmRateLimitException.ExtractErrorCode(lastError);
+                    _logger.LogWarning(
+                        "Issue {Id}: LLM rate limit (429 {Kind}{Code}) on {Provider}/{Model}; re-queued, dispatch cooling until {Until:HH:mm:ss} UTC",
+                        preClaimed.Id, kind,
+                        code is not null ? $" code {code}" : "",
+                        mk.Provider, mk.Model,
+                        effective ?? DateTime.UtcNow + LlmRateLimitCooldown);
                     await SafeTransitionAsync(preClaimed.Id, IssueStatus.Pending, "llm-429", bundle, cancellationToken);
                     return new Result(false, "llm-rate-limited");
                 }

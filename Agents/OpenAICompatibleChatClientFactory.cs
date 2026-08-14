@@ -101,7 +101,16 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// before a cooldown is recorded. Default 3; 0 disables.</summary>
     public int OverloadRetryCount { get; set; } = 3;
 
+    /// <summary>Minimum interval between admitted requests PER
+    /// PROVIDER (reserve-ahead pacing). Anti-herd: slots resuming
+    /// after a shared cooldown leave spaced by this interval instead
+    /// of in the same millisecond (MiniMax Token Plan dynamic
+    /// throttling punishes the burst shape). Default 500ms;
+    /// <see cref="TimeSpan.Zero"/> disables.</summary>
+    public TimeSpan MinRequestInterval { get; set; } = TimeSpan.FromMilliseconds(500);
+
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _permits = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ProviderPacer> _pacers = new(StringComparer.OrdinalIgnoreCase);
 
     public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null)
     {
@@ -225,9 +234,12 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
         if (RateLimits is null && MaxConcurrentRequests <= 0) return inner;
         var permit = _permits.GetOrAdd(provider.Name,
             _ => new SemaphoreSlim(Math.Max(1, MaxConcurrentRequests)));
+        var pacer = MinRequestInterval > TimeSpan.Zero
+            ? _pacers.GetOrAdd(provider.Name, _ => new ProviderPacer(MinRequestInterval))
+            : null;
         return new RateLimitAwareChatClient(inner, provider.Name, model,
             RateLimits ?? new Core.ModelRateLimitTracker(), permit,
-            provider.SharedQuota, OverloadRetryCount);
+            provider.SharedQuota, OverloadRetryCount, pacer: pacer);
     }
 
     private static IChatClient Build(ProviderConfig provider, string model, int? thinkingBudgetTokens = null)

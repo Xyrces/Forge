@@ -138,12 +138,20 @@ public sealed class GroomerAgent
             - Each task title comes from a spec acceptance criterion.
             - Don't go over 1-3 stories, 1-3 tasks each. The tools
               enforce these caps and return limit errors.
+            - WIRE PHYSICAL PREREQUISITES with `add_dependency`: when
+              task B edits a project/file/module that task A creates,
+              or needs infrastructure A lands first, call
+              add_dependency(blocker_id: A, blocked_id: B) so B stays
+              out of the dispatch queue until A merges. Example: the
+              task creating a new csproj blocks every task writing
+              classes into it. Don't serialize soft preferences —
+              disjoint files run in parallel.
             - When done, call `set_spec_status` with "Groomed".
 
             Use the `create_story` tool for each story and
             `create_task` for each task. You may call them in any
-            order. After all stories + tasks are created, call
-            `set_spec_status`.
+            order. After all stories + tasks are created, wire any
+            blocks edges, then call `set_spec_status`.
 
             {grounding}
             """;
@@ -176,7 +184,23 @@ public sealed class GroomerAgent
             description: "Move the spec to a new status. Use 'Groomed' " +
                          "after all stories + tasks are created.");
 
-        var tools = new List<AITool> { createStoryTool, createTaskTool, setStatusTool };
+        // Physical-prerequisite wiring: without blocks edges the whole
+        // decomposed sprint dispatches in parallel and dependents start
+        // before their scaffold merges (observed live 2026-08-12:
+        // talaria Sprint 7 — the new-project task ran concurrently
+        // with the tasks writing classes into that project).
+        var addDependencyTool = AIFunctionFactory.Create(
+            ([Description("The task that must merge FIRST (the prerequisite).")] string blockerId,
+             [Description("The task that cannot start until the blocker merges.")] string blockedId,
+             [Description("One-line reason (what the blocker provides).")] string? rationale = null) =>
+                AddTaskDependencyAsync(blockerId, blockedId, rationale, ct),
+            name: "add_dependency",
+            description: "Declare that a task CANNOT START until another task merges " +
+                         "(a physical prerequisite: it creates the project/file/infrastructure " +
+                         "the other task edits). Not for soft ordering — disjoint work stays " +
+                         "parallel. Returns 'ok' or an error string.");
+
+        var tools = new List<AITool> { createStoryTool, createTaskTool, addDependencyTool, setStatusTool };
         var agent = new ChatClientAgent(
             chatClient,
             instructions: systemPrompt,
@@ -279,6 +303,29 @@ public sealed class GroomerAgent
         }
     }
 
+    /// <summary>Wire a blocks edge between two tasks of the spec being
+    /// groomed. LLM-consumable errors; the store upsert is idempotent
+    /// so retries are safe.</summary>
+    private async Task<string> AddTaskDependencyAsync(
+        string blockerId, string blockedId, string? rationale, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(blockerId) || string.IsNullOrWhiteSpace(blockedId))
+            return "error: blocker_id and blocked_id are required";
+        try
+        {
+            await _issues.AddDependencyAsync(blockerId, blockedId, IssueDepKind.Blocks, ct);
+            return "ok";
+        }
+        catch (InvalidOperationException ex)
+        {
+            return $"error: {ex.Message}";
+        }
+        catch (ArgumentException ex)
+        {
+            return $"error: {ex.Message}";
+        }
+    }
+
     /// <summary>
     /// Technical grooming for a single ad-hoc task (operator-enqueued
     /// or agent-filed follow-up). The sprint assembler refuses
@@ -310,10 +357,11 @@ public sealed class GroomerAgent
         var runProjectId = _projectId;
 
         var approveTool = AIFunctionFactory.Create(
-            ([Description("One sentence: why this task serves the vision and how it fits current state.")] string note) =>
-                ApproveTaskAsync(issue.Id, note, ct),
+            ([Description("One sentence: why this task serves the vision and how it fits current state.")] string note,
+             [Description("Priority 1-5 (1 = most important) RELATIVE to the open work below: where does this task rank among what is already planned? Do not default to the middle — most follow-ups are polish and belong at 3-5; only sprint-blocking or operator-urgent work earns 1.")] int priority) =>
+                ApproveTaskAsync(issue.Id, note, priority, ct),
             name: "approve_task",
-            description: "Mark the task groomed (eligible for sprint ingest).");
+            description: "Mark the task groomed (eligible for sprint ingest) and set its priority relative to the rest of the open work.");
         var closeTool = AIFunctionFactory.Create(
             ([Description("Why the task is being closed: obsolete, duplicate of existing work, or outside the vision.")] string reason) =>
                 CloseTaskAsync(issue.Id, reason, ct),
@@ -331,9 +379,15 @@ public sealed class GroomerAgent
             2. PLAN AGAINST CURRENT STATE: is the work already planned or
                done (see the open-work digest + repo shape below)? If it
                duplicates existing work or is obsolete, call close_task.
-            3. Otherwise call approve_task with a one-sentence note
+            3. PRIORITIZE IN SCOPE: rank the task against ALL the open
+               work below (each line shows its current priority). Sprint
+               assembly builds the highest-priority theme first, so the
+               priority you set decides when this work ships. Use the
+               full 1-5 range — an undifferentiated pile of 3s makes
+               assembly order arbitrary.
+            4. Otherwise call approve_task with a one-sentence note
                recording why it belongs and any sizing/approach guidance
-               for the engineering agent.
+               for the engineering agent, plus the priority from step 3.
 
             Call exactly one tool, then stop.
 
@@ -390,11 +444,16 @@ public sealed class GroomerAgent
         }
     }
 
-    private async Task<string> ApproveTaskAsync(string issueId, string note, CancellationToken ct)
+    private async Task<string> ApproveTaskAsync(string issueId, string note, int priority, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(note)) return "note_required";
         var cur = await _issues.GetAsync(issueId, ct);
         if (cur is null) return "issue_not_found";
+        var clamped = Math.Clamp(priority, 1, 5);
+        if (cur.Priority != clamped)
+        {
+            await _issues.SetPriorityAsync(issueId, clamped, ct);
+        }
         var meta = ReadMetadata(cur);
         meta["groomed"] = "true";
         meta["groomedAt"] = DateTime.UtcNow.ToString("O");
@@ -418,7 +477,7 @@ public sealed class GroomerAgent
                 EnqueuedAt = kickedAt,
             }, ct);
         }
-        _logger.LogInformation("Task {Id} groomed (approved): {Note}", issueId, note);
+        _logger.LogInformation("Task {Id} groomed (approved, P{Priority}): {Note}", issueId, clamped, note);
         return "approved";
     }
 
@@ -432,6 +491,23 @@ public sealed class GroomerAgent
         meta["groomCloseReason"] = reason;
         meta["groomRunId"] = _runId;
         await _issues.TransitionAsync(issueId, IssueStatus.Closed, error: null, metadata: meta, ct: ct);
+        // A plain status transition publishes nothing (the store's
+        // choke point fires on the lifecycle state pair only), so an
+        // all-CLOSED follow-up batch would leave the assembler parked
+        // in awaiting-groom until the backstop. Same explicit-kick
+        // pattern as ApproveTaskAsync — hint only.
+        if (_issues is IssueStore closeAnchor)
+        {
+            var kickedAt = DateTimeOffset.UtcNow;
+            await closeAnchor.Events.PublishAsync(new Core.Messaging.TaskEnqueued
+            {
+                MessageId = Core.Messaging.TaskEnqueued.IdFor(closeAnchor.ProjectId, issueId, kickedAt),
+                ProjectId = closeAnchor.ProjectId,
+                TaskId = issueId,
+                TaskType = cur.Type,
+                EnqueuedAt = kickedAt,
+            }, ct);
+        }
         _logger.LogInformation("Task {Id} closed by grooming: {Reason}", issueId, reason);
         return "closed";
     }
@@ -480,7 +556,7 @@ public sealed class GroomerAgent
         {
             foreach (var i in open.Take(60))
             {
-                sb.AppendLine($"- {i.Id} [{i.Type}/{i.Status}] {i.Title}");
+                sb.AppendLine($"- {i.Id} [P{i.Priority} {i.Type}/{i.Status}] {i.Title}");
             }
             if (open.Count > 60) sb.AppendLine($"- ...and {open.Count - 60} more");
         }

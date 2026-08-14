@@ -242,8 +242,11 @@ public sealed class DashboardHost : IAsyncDisposable
         if (_githubOptions is not null) builder.Services.AddSingleton(_githubOptions);
         // Messaging pass-through: the SAME transport + publisher
         // instances the orchestrator process uses (shared in-memory
-        // channels), so dashboard endpoints can publish hints.
-        if (_eventPublisher is not null) builder.Services.AddSingleton(_eventPublisher);
+        // channels), so dashboard endpoints can publish hints. The
+        // Null fallback keeps endpoint handler injection uniform on
+        // hosts without messaging (e.g. --dashboard-only).
+        builder.Services.AddSingleton<Forge.Core.Messaging.IEventPublisher>(
+            _eventPublisher ?? Forge.Core.Messaging.NullEventPublisher.Instance);
         if (_transport is not null) builder.Services.AddSingleton(_transport);
 
         // Secrets: Microsoft.AspNetCore.DataProtection. The provider
@@ -260,6 +263,9 @@ public sealed class DashboardHost : IAsyncDisposable
             // resolve correctly.
             builder.Services.AddSingleton<Forge.Core.ISecretStore>(_secretStore);
         }
+        // The Secrets page derives its known-kinds panel from the
+        // configured LLM providers (SecretKinds.ForProvider).
+        if (_llmConfig is not null) builder.Services.AddSingleton(_llmConfig);
 
         // 2026-07-18 (Phase 2.11.f + bug-1-review): the Reviewer
         // dispatcher needs to be in the DI service collection

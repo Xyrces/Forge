@@ -61,13 +61,27 @@ public sealed class ProductRefinementQueue : IAsyncDisposable
                 if (ev.Data is null) continue;
                 if (!ev.Data.TryGetValue("epicId", out var epicIdObj) || epicIdObj is null) continue;
                 var epicId = epicIdObj.ToString();
+                // Issue ids are per-store sequences: the spec lookup
+                // MUST be scoped to the accepting project (carried on
+                // the event since 2026-08-09) or an epic-N collision
+                // refines another project's spec (observed live:
+                // talaria's accepted epic-2 resolved to porthorizon's
+                // Epic-B spec). Events without a project id (pre-fix
+                // history replays) are skipped, never guessed.
+                if (!ev.Data.TryGetValue("projectId", out var projectIdObj) || projectIdObj is null)
+                {
+                    _logger.LogWarning(
+                        "ProductRefinementQueue: intake.epic.accepted for {Epic} carries no projectId; skipping (pre-2026-08-09 event shape)", epicId);
+                    continue;
+                }
+                var projectId = projectIdObj.ToString();
                 try
                 {
-                    // Look up the spec for this epic; the operator clicked
-                    // Accept on an issue, IntakeAgent creates a spec
+                    // Look up the spec for this epic WITHIN the
+                    // accepting project's store; IntakeAgent creates it
                     // with parent_issue_id = epicId. We need the spec
                     // id AND the project id to call the agent.
-                    var specs = await _specs.ListAsync(projectId: null, status: null, ct);
+                    var specs = await _specs.ListAsync(projectId: projectId, status: null, ct);
                     var spec = specs.FirstOrDefault(s => s.ParentIssueId == epicId);
                     if (spec is null)
                     {

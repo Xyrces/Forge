@@ -48,6 +48,12 @@ public static class DashboardEventKind
     public const string IntakeRunStarted = "intake.run.started";
     public const string IntakeRunFailed = "intake.run.failed";
     public const string IntakeRunCompleted = "intake.run.completed";
+    // Intake live-feedback (2026-08-12): the chat page renders a live
+    // assistant bubble from these. Delta carries Data["delta"] (text
+    // chunk); Tool carries Data["tool"] (function name) when the agent
+    // invokes create_epic/touches/add_dependency mid-run.
+    public const string IntakeRunDelta = "intake.run.delta";
+    public const string IntakeRunTool = "intake.run.tool";
     // Sprint flow: emitted by SprintAssembler when a sprint's member
     // tasks all reach terminal states (sprint.completed) and when the
     // next sprint is assembled + activated (sprint.started).

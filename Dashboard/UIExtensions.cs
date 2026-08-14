@@ -50,6 +50,14 @@ public static class UIExtensions
         // address as the typed clients.
         services.AddHttpClient("ForgeApi", c => c.BaseAddress = localBaseAddress);
         services.AddScoped(sp => sp.GetRequiredService<IHttpClientFactory>().CreateClient("ForgeApi"));
+        // Long-timeout client for calls that hold an LLM round-trip
+        // (intake send-message): the server honors RequestAborted, so
+        // the default 100s timeout would CANCEL a slow run mid-flight.
+        services.AddHttpClient("ForgeApiLongPoll", c =>
+        {
+            c.BaseAddress = localBaseAddress;
+            c.Timeout = TimeSpan.FromMinutes(10);
+        });
         // Server-push board updates (SSE /api/events → components).
         services.AddScoped<Forge.Dashboard.Services.DashboardEventStream>();
         return services;

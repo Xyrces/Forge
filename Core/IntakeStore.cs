@@ -19,6 +19,30 @@ public enum IntakeMessageRole
 /// "Accept" button flips the linked issue's state and binds it to the
 /// active sprint.
 /// </summary>
+/// <summary>
+/// A structured clarifying question attached to an assistant intake
+/// message — captured from the ask_questions tool, or parsed from the
+/// reply text as a fallback for models that ignore the tool. Rendered
+/// as a clickable card on the intake page (2026-08-12).
+/// </summary>
+/// <summary>
+/// A structured clarifying question attached to an assistant intake
+/// message — captured from the ask_question tool, or parsed from the
+/// reply text as a fallback for models that ignore the tool. Rendered
+/// as a clickable card on the intake page (2026-08-12).
+///
+/// <see cref="Header"/> is the short chip label ("Transport scope");
+/// null on pre-form-era rows. <see cref="Options"/> strings are
+/// em-dash encoded: "Label — optional description". Empty options =
+/// free-text question (the card renders an inline input, honestly —
+/// no synthesized choices).
+/// </summary>
+public sealed record IntakeQuestion(
+    string Question,
+    IReadOnlyList<string> Options,
+    string? Header = null,
+    bool Multiple = false);
+
 public sealed record IntakeMessageRecord(
     long Id,
     string SessionId,
@@ -26,7 +50,8 @@ public sealed record IntakeMessageRecord(
     string Content,
     DateTime Timestamp,
     string? ProposedEpicId = null,
-    string? ProposedEpicTitle = null);
+    string? ProposedEpicTitle = null,
+    IReadOnlyList<IntakeQuestion>? Questions = null);
 
 public sealed record IntakeSessionRecord(
     string Id,
@@ -40,7 +65,8 @@ public sealed record NewIntakeMessage(
     IntakeMessageRole Role,
     string Content,
     string? ProposedEpicId = null,
-    string? ProposedEpicTitle = null);
+    string? ProposedEpicTitle = null,
+    IReadOnlyList<IntakeQuestion>? Questions = null);
 
 public interface IIntakeStore
 {
@@ -162,14 +188,14 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             cmd.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
                 ? $"""
                     INSERT INTO {T("intake_message")}
-                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title)
+                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json)
                     OUTPUT INSERTED.id
-                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle);
+                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle, @questions);
                     """
                 : """
                     INSERT INTO intake_message
-                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title)
-                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle);
+                    (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json)
+                    VALUES (@sid, @role, @content, @ts, @epicId, @epicTitle, @questions);
                     SELECT last_insert_rowid();
                     """;
             cmd.AddParam("@sid", sessionId);
@@ -178,6 +204,7 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             cmd.AddParam("@ts", IssueStore.DateFormatTime(now));
             cmd.AddParam("@epicId", (object?)message.ProposedEpicId ?? DBNull.Value);
             cmd.AddParam("@epicTitle", (object?)message.ProposedEpicTitle ?? DBNull.Value);
+            cmd.AddParam("@questions", (object?)SerializeQuestions(message.Questions) ?? DBNull.Value);
             id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
         }
 
@@ -190,7 +217,7 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
         }
 
         return new IntakeMessageRecord(id, sessionId, message.Role, message.Content, now,
-            message.ProposedEpicId, message.ProposedEpicTitle);
+            message.ProposedEpicId, message.ProposedEpicTitle, message.Questions);
     }
 
     public async Task SetMessagesAsync(string sessionId, IReadOnlyList<NewIntakeMessage> messages, CancellationToken ct = default)
@@ -212,8 +239,8 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             ins.Transaction = tx;
             ins.CommandText = $"""
                 INSERT INTO {T("intake_message")}
-                (session_id, role, content, ts, proposed_epic_id, proposed_epic_title)
-                VALUES (@sid, @role, @content, @now, @epicId, @epicTitle)
+                (session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json)
+                VALUES (@sid, @role, @content, @now, @epicId, @epicTitle, @questions)
                 """;
             ins.AddParam("@sid", sessionId);
             ins.AddParam("@role", m.Role.ToString());
@@ -221,6 +248,7 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
             ins.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
             ins.AddParam("@epicId", (object?)m.ProposedEpicId ?? DBNull.Value);
             ins.AddParam("@epicTitle", (object?)m.ProposedEpicTitle ?? DBNull.Value);
+            ins.AddParam("@questions", (object?)SerializeQuestions(m.Questions) ?? DBNull.Value);
             await ins.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -232,7 +260,7 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
         var list = new List<IntakeMessageRecord>();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
-            SELECT id, session_id, role, content, ts, proposed_epic_id, proposed_epic_title
+            SELECT id, session_id, role, content, ts, proposed_epic_id, proposed_epic_title, questions_json
             FROM {T("intake_message")} WHERE session_id = @sid ORDER BY id
             """;
         cmd.AddParam("@sid", sessionId);
@@ -246,9 +274,51 @@ public sealed class IntakeStore : IIntakeStore, IAsyncDisposable
                 Content: rd.GetString(3),
                 Timestamp: IssueStore.ParseTime(rd.GetString(4)),
                 ProposedEpicId: rd.IsDBNull(5) ? null : rd.GetString(5),
-                ProposedEpicTitle: rd.IsDBNull(6) ? null : rd.GetString(6)));
+                ProposedEpicTitle: rd.IsDBNull(6) ? null : rd.GetString(6),
+                Questions: rd.IsDBNull(7) ? null : DeserializeQuestions(rd.GetString(7))));
         }
         return list;
+    }
+
+    internal static string? SerializeQuestions(IReadOnlyList<IntakeQuestion>? questions)
+        => questions is null || questions.Count == 0
+            ? null
+            : JsonSerializer.Serialize(questions.Select(q => new
+            {
+                header = q.Header,
+                question = q.Question,
+                multiple = q.Multiple,
+                options = q.Options,
+            }));
+
+    private static readonly JsonSerializerOptions QuestionJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
+    private static IReadOnlyList<IntakeQuestion>? DeserializeQuestions(string json)
+    {
+        try
+        {
+            var raw = JsonSerializer.Deserialize<List<QuestionDto>>(json, QuestionJsonOptions);
+            return raw?.Select(q => new IntakeQuestion(
+                q.Question ?? "",
+                (IReadOnlyList<string>)(q.Options ?? new List<string>()),
+                q.Header,
+                q.Multiple)).ToList();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed class QuestionDto
+    {
+        public string? Header { get; set; }
+        public string? Question { get; set; }
+        public bool Multiple { get; set; }
+        public List<string>? Options { get; set; }
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

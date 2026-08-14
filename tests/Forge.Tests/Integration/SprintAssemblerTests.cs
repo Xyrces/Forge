@@ -250,6 +250,36 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task FailedTask_DoesNotCompleteSprint()
+    {
+        // 2026-08-11 talaria Sprint 5: a Failed task was counted as
+        // terminal and the sprint auto-completed, dropping the
+        // unfinished work onto the floor. Failed must NOT count as
+        // terminal — the operator must requeue or close it (rule
+        // 2026-07-25).
+        var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
+        await Tick();
+        var first = await _sprints.GetActiveAsync();
+        Assert.NotNull(first);
+
+        // Complete one, fail the other.
+        await _issues.TransitionAsync(aTasks[0], IssueStatus.Completed, null);
+        await _issues.TransitionAsync(aTasks[1], IssueStatus.Failed, null);
+        await Tick();
+
+        // Sprint must STILL be Active — Failed keeps it open.
+        Assert.Equal(SprintStatus.Active, (await _sprints.GetAsync(first!.Id))!.Status);
+        // No new sprint assembled — the Failed task is still pending resolution.
+        var active = await _sprints.GetActiveAsync();
+        Assert.Equal(first.Id, active!.Id);
+
+        // Close the Failed task → sprint now completes.
+        await _issues.TransitionAsync(aTasks[1], IssueStatus.Closed, null);
+        await Tick();
+        Assert.Equal(SprintStatus.Completed, (await _sprints.GetAsync(first.Id))!.Status);
+    }
+
+    [Fact]
     public async Task CompletesSprint_WhenMembersTerminal_ThenAssemblesNext()
     {
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
@@ -357,6 +387,109 @@ public class SprintAssemblerTests : IDisposable
         Assert.Equal(aTasks[0], task.GetMetadata("followUpOf"));
         Assert.Equal(IssueStatus.Pending, task.Status);
         Assert.Empty(await drafts.ListUnconsumedAsync());
+    }
+
+    // ---- Themed packing (operator rule 2026-08-08): exactly one
+    // kind of sprint. Follow-up work clusters by its followUpOf ROOT
+    // and packs into ONE themed sprint — never a solo sprint per
+    // follow-up. Only truly rootless ad-hoc tasks stay solo. ----
+
+    [Fact]
+    public async Task FollowUpTheme_PacksChainIntoOneSprint()
+    {
+        var root = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "MaterialReservation locking"));
+        await _issues.TransitionAsync(root.Id, IssueStatus.Completed, null);
+        var fu1 = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "follow-up one", Priority: 3,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+        var fu2 = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "follow-up two", Priority: 2,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+        // Nested: follow-up of a follow-up resolves to the same root.
+        var fu3 = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "nested follow-up", Priority: 4,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = fu1.Id }));
+
+        await Tick();
+
+        var active = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Sprint 1: MaterialReservation locking", active.Name);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(fu1.Id, members);
+        Assert.Contains(fu2.Id, members);
+        Assert.Contains(fu3.Id, members);
+        Assert.Single(await _sprints.ListAsync(activeOnly: false));
+    }
+
+    [Fact]
+    public async Task FollowUpTheme_SplitsAtCap_RemainderAssemblesNext()
+    {
+        var root = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "big theme"));
+        var ids = new List<string>();
+        for (var i = 0; i < SprintAssembler.MaxThemeTasks + 2; i++)
+        {
+            var fu = await _issues.CreateAsync(new NewIssue(
+                Type: "task", Title: $"follow-up {i}", Priority: 3,
+                Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+            ids.Add(fu.Id);
+        }
+
+        await Tick();
+
+        var first = (await _sprints.GetActiveAsync())!;
+        var members = await _sprints.GetIssueIdsAsync(first.Id);
+        Assert.Equal(SprintAssembler.MaxThemeTasks, members.Count);
+
+        // Drain the first sprint → the remainder packs the next one.
+        foreach (var id in members)
+        {
+            await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        }
+        await Tick();
+        var second = (await _sprints.GetActiveAsync())!;
+        Assert.NotEqual(first.Id, second.Id);
+        Assert.Equal(2, (await _sprints.GetIssueIdsAsync(second.Id)).Count);
+    }
+
+    [Fact]
+    public async Task FollowUpTheme_PriorityPicksTheMostImportantTheme()
+    {
+        var lowRoot = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "polish theme"));
+        var hotRoot = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "critical theme"));
+        await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "polish follow-up", Priority: 4,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = lowRoot.Id }));
+        var hot = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "critical follow-up", Priority: 1,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = hotRoot.Id }));
+
+        await Tick();
+
+        var active = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Sprint 1: critical theme", active.Name);
+        Assert.Contains(hot.Id, await _sprints.GetIssueIdsAsync(active.Id));
+    }
+
+    [Fact]
+    public async Task FollowUpTheme_MixedWithRootlessAdHoc_RootlessStaysSolo()
+    {
+        var root = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "themed work"));
+        var fu = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "themed follow-up", Priority: 3,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true", ["followUpOf"] = root.Id }));
+        var rootless = await _issues.CreateAsync(new NewIssue(
+            Type: "task", Title: "operator one-off", Priority: 2,
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+
+        await Tick();
+
+        // Rootless P2 outranks the themed P3 and assembles solo; the
+        // themed follow-up is NOT swept into the one-off's sprint.
+        var active = (await _sprints.GetActiveAsync())!;
+        Assert.Equal("Sprint 1: operator one-off", active.Name);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(rootless.Id, members);
+        Assert.DoesNotContain(fu.Id, members);
     }
 
     [Fact]
@@ -644,24 +777,32 @@ public class SprintAssemblerTests : IDisposable
     public async Task RequeuedTask_FromCompletedSprint_IsReassembled()
     {
         // Operator requeue flow (observed live 2026-07-24, task-158):
-        // a task fails, its sprint completes (all members terminal),
-        // the operator requeues it to Pending. Completed-sprint
-        // membership must NOT strand it — it is definitionally
-        // requeued work, not history to protect from resurrection
-        // (terminal tasks are already excluded by the Pending filter).
-        // Spec-chain variant: reassembly goes through group assembly.
+        // a task fails, the operator closes it, the sprint completes,
+        // then requeues it to Pending. Completed-sprint membership
+        // must NOT strand it — requeued work is a new sprint, not
+        // history to protect from resurrection. 2026-08-11 update:
+        // Failed no longer counts as terminal (a sprint with Failed
+        // stays active — operator rule 2026-07-25: don't auto-clear
+        // Failed), so the operator closes the Failed task first, the
+        // sprint completes, then requeue reassembles.
         var (_, _, taskIds) = await SeedGroomedSpecAsync("requeue work", 1);
         var taskId = taskIds[0];
         await Tick();
         var first = await _sprints.GetActiveAsync();
         Assert.NotNull(first);
 
-        // Fail the task; the sprint completes (all terminal).
+        // Fail the task; the sprint STAYS active (Failed blocks
+        // completion).
         await _issues.TransitionAsync(taskId, IssueStatus.Failed, "boom");
+        await Tick();
+        Assert.NotNull(await _sprints.GetActiveAsync());
+
+        // Operator closes the Failed task → sprint now completes.
+        await _issues.TransitionAsync(taskId, IssueStatus.Closed, "operator close");
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync());
 
-        // Operator requeue: Failed -> Pending. Next tick must assemble
+        // Operator requeue: Closed -> Pending. Next tick assembles
         // a NEW sprint containing it (previously: stranded forever).
         await _issues.TransitionAsync(taskId, IssueStatus.Pending, "operator requeue");
         await Tick();

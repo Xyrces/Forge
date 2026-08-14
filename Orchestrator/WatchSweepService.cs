@@ -83,7 +83,14 @@ public sealed class WatchSweepService
         return all.Where(t => !AgentTaskTypes.IsContainer(t.Type)
                 && t.Type != AgentTaskTypes.PrWatch
                 && (t.Status is IssueStatus.Pending or IssueStatus.InProgress
-                    || (t.Status == IssueStatus.Blocked && t.GetMetadata("prNumber") is not null))
+                    || (t.Status == IssueStatus.Blocked && t.GetMetadata("prNumber") is not null)
+                    // Failed-with-PR stays in the sweep for EXTERNAL-
+                    // MERGE detection only (the poll short-circuits
+                    // before CI/review/rework) — observed live
+                    // 2026-08-13: porthorizon task-408's PR #940 merged
+                    // after the breaker tripped; the Failed task was
+                    // invisible to the sweep and never resolved.
+                    || (t.Status == IssueStatus.Failed && t.GetMetadata("prNumber") is not null))
                 && t.GetMetadata("prNumber") is not null)
             .ToList();
     }
@@ -131,7 +138,16 @@ public sealed class WatchSweepService
                 // awaiting it here would stall the sweep. The review
                 // records its verdict in task metadata; the verdict
                 // event (or the next sweep's poll) merges on it.
-                await TryLaunchBackgroundReviewAsync(polled, bundle, cancellationToken);
+                // Failed tasks skip: they're in the sweep ONLY for
+                // external-merge detection (breaker-tripped work waits
+                // on the operator, not on more reviews). Completed/
+                // Closed skip too — the Blocked-resume path can return
+                // a task whose PR was just closed as superseded, and
+                // reviewing that burns a run for nothing (observed
+                // live 2026-08-13: review launched for the closed
+                // task-393 seconds after its supersede).
+                if (polled.Status is not (IssueStatus.Failed or IssueStatus.Completed or IssueStatus.Closed))
+                    await TryLaunchBackgroundReviewAsync(polled, bundle, cancellationToken);
                 var poll = await bundle.PrWatcher.PollWatchedTaskAsync(polled, cancellationToken);
                 _logger.LogDebug("Watch (task {Id}): {Outcome}", watched.Id, poll);
             }

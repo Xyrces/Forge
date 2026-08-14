@@ -52,7 +52,9 @@ public class DispatchCheckpointTests : IDisposable
 // chain: M031).
 // v31 = agent_run token observability (input/output/cache-read/
 // current-context) (SQL Server chain: M032).
-        Assert.Equal(31, IssueStore.CurrentSchemaVersion);
+// v32 = intake_message.questions_json — structured clarifying
+// questions on assistant intake messages (SQL Server chain: M033).
+        Assert.Equal(32, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

@@ -157,7 +157,16 @@ public sealed class TaskStateMachine
         Add(TaskEvent.BreakerTripped, TaskLifecycleState.Failed, working);
         Add(TaskEvent.Merged, TaskLifecycleState.Merged,
             TaskLifecycleState.MergeReady, TaskLifecycleState.PROpen);
-        Add(TaskEvent.ExternallyMerged, TaskLifecycleState.Merged, working);
+        // ExternallyMerged additionally legal from Failed: the merge
+        // can land AFTER the breaker parked the task, and the watch's
+        // merge-detection + empty-diff supersede paths resolve those
+        // rows (observed live 2026-08-13: "task-393 is Failed, event
+        // ExternallyMerged has no table entry" — the store completed,
+        // the record stalled). NOT from BlockedOperator: an operator
+        // hold is the operator's call — automation must not resolve it
+        // (the invariant test pins this).
+        Add(TaskEvent.ExternallyMerged, TaskLifecycleState.Merged,
+            working.Append(TaskLifecycleState.Failed).ToArray());
         Add(TaskEvent.OperatorRequeue, TaskLifecycleState.Pending,
             TaskLifecycleState.Failed, TaskLifecycleState.BlockedOperator,
             // Operator requeues land on DB-Failed/Blocked tasks, but

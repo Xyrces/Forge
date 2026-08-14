@@ -1,7 +1,9 @@
 @page "/intake"
 @inject HttpClient Http
+@inject IHttpClientFactory HttpFactory
+@inject IJSRuntime JS
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
-@implements IDisposable
+@implements IAsyncDisposable
 
 <PageTitle>Intake</PageTitle>
 <div class="page">
@@ -37,14 +39,25 @@
                 {
                     <button class="intake-session @(s.Id == _activeSessionId ? "intake-session--active" : "")"
                             @onclick="@(() => SetActive(s.Id))">
-                        <div class="intake-session__title">@s.Title</div>
+                        <div class="intake-session__title">
+                            @s.Title
+                            @switch (SessionProposalState(s))
+                            {
+                                case "accepted":
+                                    <span class="intake-session__badge intake-session__badge--accepted" title="Epic accepted — session complete">✓</span>
+                                    break;
+                                case "pending":
+                                    <span class="intake-session__badge intake-session__badge--pending" title="Epic proposed — awaiting your review">●</span>
+                                    break;
+                            }
+                        </div>
                         <div class="intake-session__meta mono">@s.UpdatedAt.ToString("yyyy-MM-dd HH:mm")</div>
                     </button>
                 }
             }
         </aside>
 
-        <section class="intake-thread">
+        <section class="intake-thread" id="intake-thread-scroll">
             @if (_activeSessionId is null)
             {
                 <div class="page-subtitle">Pick a session on the left, or start a new one.</div>
@@ -55,46 +68,234 @@
             }
             else
             {
-                @foreach (var m in _messages)
+                @for (var i = 0; i < _messages.Count; i++)
                 {
+                    var m = _messages[i];
                     <div class="chat-msg chat-msg--@m.Role.ToLowerInvariant()">
                         <div class="chat-msg__role mono">@m.Role</div>
-                        <div class="chat-msg__body">@m.Content</div>
-                        @if (m.ProposedEpicId is not null)
+                        <div class="chat-msg__body md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
+                        @if (m.Questions is { Count: > 0 } qs)
+                        {
+                            @if (IsQuestionCardActive(i))
+                            {
+                                <div class="question-card">
+                                    @for (var qi = 0; qi < qs.Count; qi++)
+                                    {
+                                        var q = qs[qi];
+                                        var qKey = $"{m.Id}:{qi}";
+                                        <div class="question-card__q">
+                                            <div class="question-card__qhead">
+                                                <span class="question-card__header mono">@(q.Header ?? $"Question {qi + 1}")</span>
+                                                @if (q.Multiple)
+                                                {
+                                                    <span class="question-card__multi mono">select all that apply</span>
+                                                }
+                                            </div>
+                                            <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
+                                            @if (q.Options.Count > 0)
+                                            {
+                                                <div class="question-card__options">
+                                                    @foreach (var opt in q.Options)
+                                                    {
+                                                        var (label, desc, recommended) = SplitOption(opt);
+                                                        var selected = _answers.TryGetValue(qKey, out var sel) && sel.Contains(label);
+                                                        <button class="option-row @(q.Multiple ? "option-row--multi" : "option-row--single") @(selected ? "option-row--selected" : "")"
+                                                                @onclick="@(() => ToggleAnswer(qKey, label, q.Multiple))">
+                                                            <span class="option-row__mark"></span>
+                                                            <span class="option-row__body">
+                                                                <span class="option-row__label">
+                                                                    @label
+                                                                    @if (recommended)
+                                                                    {
+                                                                        <span class="pill pill--primary">Recommended</span>
+                                                                    }
+                                                                </span>
+                                                                @if (desc is not null)
+                                                                {
+                                                                    <span class="option-row__desc">@desc</span>
+                                                                }
+                                                            </span>
+                                                        </button>
+                                                    }
+                                                    @if (_otherOpen.Contains(qKey))
+                                                    {
+                                                        <input class="option-row__other-input" placeholder="Your answer…"
+                                                               value="@GetOther(qKey)"
+                                                               @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="option-row option-row--other" @onclick="@(() => _otherOpen.Add(qKey))">
+                                                            <span class="option-row__mark"></span>
+                                                            <span class="option-row__body"><span class="option-row__label">Other…</span></span>
+                                                        </button>
+                                                    }
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <input class="option-row__other-input" placeholder="Your answer…"
+                                                       value="@GetOther(qKey)"
+                                                       @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
+                                            }
+                                        </div>
+                                    }
+                                    <div class="question-card__actions">
+                                        <button class="btn btn--primary" @onclick="@(() => SendAnswers(m, qs))" disabled="@(AnsweredCount(m, qs) == 0 || _sending)">
+                                            @(_sending ? "Sending…" : $"Send answers ({AnsweredCount(m, qs)}/{qs.Count})")
+                                        </button>
+                                        <button class="btn btn--link" @onclick="@(() => DismissQuestionCard(m))">Answer in text instead</button>
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="question-card question-card--done">
+                                    @foreach (var q in qs)
+                                    {
+                                        <div class="question-card__qhead">
+                                            <span class="question-card__header mono">@(q.Header ?? "Question")</span>
+                                        </div>
+                                        <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
+                                    }
+                                </div>
+                            }
+                        }
+                        @* Epic proposals render as slim audit cards in the thread; the
+                           Accept ACTION lives in the sidebar's Proposal panel so the
+                           session's completion state is always visible. *@
+                        @if (m.ProposedEpicId is not null && m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase))
                         {
                             <div class="chat-msg__card">
                                 <div class="chat-msg__card-header">Proposed Epic</div>
                                 <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
-                                @if (_acceptedEpicIds.Contains(m.Id))
+                                @if (IsEpicAccepted(m.ProposedEpicId))
                                 {
                                     <span class="pill pill--primary">Accepted</span>
                                 }
                                 else
                                 {
-                                    <button class="btn btn--primary" @onclick="@(() => AcceptEpic(m.Id))" disabled="@_accepting">
-                                        @(_accepting ? "Accepting…" : "Accept Epic")
-                                    </button>
+                                    <span class="chat-msg__card-hint">Awaiting review — accept in the sidebar →</span>
                                 }
                             </div>
+                        }
+                    </div>
+                }
+                @if (_liveActive)
+                {
+                    <div class="chat-msg chat-msg--assistant chat-msg--live">
+                        <div class="chat-msg__role mono">assistant · live</div>
+                        @if (_liveTools.Count > 0)
+                        {
+                            <div class="chat-msg__tools">
+                                @foreach (var t in _liveTools)
+                                {
+                                    <span class="pill pill--primary">⚙ @t</span>
+                                }
+                            </div>
+                        }
+                        @if (_liveText.Length == 0)
+                        {
+                            <div class="typing-dots" aria-label="assistant is thinking"><span></span><span></span><span></span></div>
+                        }
+                        else
+                        {
+                            <div class="chat-msg__body md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(_liveText))</div>
                         }
                     </div>
                 }
                 <div class="intake-input">
                     <input class="intake-input__field" @bind="_draft" placeholder="Type your message..."
                            @onkeydown="@(async e => { if (e.Key == "Enter" && !_sending) await SendMessage(); })" />
-                    <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">Send</button>
+                    <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">
+                        @(_sending ? "Sending…" : "Send")
+                    </button>
                 </div>
             }
         </section>
 
         <aside class="intake-context">
             <div class="intake-context__tabs">
-                <button class="chip @(_activeTab == "spec" ? "chip--active" : "")" @onclick='() => SelectTab("spec")'>Spec Draft</button>
-                <button class="chip @(_activeTab == "arch" ? "chip--active" : "")" @onclick='() => SelectTab("arch")'>Architecture</button>
-                <button class="chip @(_activeTab == "memory" ? "chip--active" : "")" @onclick='() => SelectTab("memory")'>Memory</button>
+                <button class="chip @(_activeTab == "canvas" ? "chip--active" : "")" @onclick='() => SelectTab("canvas")'>Canvas</button>
+                <button class="chip @(_activeTab == "spec" ? "chip--active" : "")" @onclick='() => SelectTab("spec")'>Spec Drafts</button>
             </div>
             <div class="intake-context__body">
-                @if (_activeTab == "spec")
+                @if (_activeTab == "canvas")
+                {
+                    @if (_activeSessionId is null)
+                    {
+                        <p class="page-subtitle">Pick a session to see its canvas.</p>
+                    }
+                    else
+                    {
+                        @if (LatestProposal is not null)
+                        {
+                            var proposal = LatestProposal;
+                            <div class="canvas-section">
+                                <div class="canvas-section__title">Proposal</div>
+                                <div class="proposal-card">
+                                    <div class="proposal-card__title">@proposal.ProposedEpicTitle</div>
+                                    <div class="mono page-subtitle">@proposal.ProposedEpicId</div>
+                                    @if (IsEpicAccepted(proposal.ProposedEpicId!))
+                                    {
+                                        <div class="proposal-card__state">
+                                            <span class="pill pill--primary">Accepted</span>
+                                            @{ var spec = SpecForProposal(proposal); }
+                                            @if (spec is not null)
+                                            {
+                                                <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Id · @spec.Status</span>
+                                            }
+                                        </div>
+                                        <div class="chat-msg__card-hint">
+                                            On the board — a spec draft was created and product refinement picks it up. No code is dispatched by accepting.
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="proposal-card__state">
+                                            <span class="pill">Awaiting review</span>
+                                        </div>
+                                        <div class="chat-msg__card-hint">
+                                            Accepting puts the epic on the board: a spec draft is created and product refinement picks it up. No code is dispatched.
+                                        </div>
+                                        <button class="btn btn--primary" @onclick="@(() => AcceptEpic(proposal.Id))" disabled="@_accepting">
+                                            @(_accepting ? "Accepting…" : "Accept Epic")
+                                        </button>
+                                    }
+                                </div>
+                            </div>
+                        }
+                        <div class="canvas-section">
+                            <div class="canvas-section__title">Discussion map</div>
+                            @if (CanvasMapSource is null)
+                            {
+                                <p class="page-subtitle">Proposed epics and their specs map out here as the discussion produces them.</p>
+                            }
+                            else
+                            {
+                                <div class="mermaid-target" id="mmd-map"></div>
+                            }
+                        </div>
+                        <div class="canvas-section">
+                            <div class="canvas-section__title">Diagrams from the discussion</div>
+                            @if (_diagrams.Count == 0)
+                            {
+                                <p class="page-subtitle">When the intake agent sketches a structure (mermaid diagram) it lands here.</p>
+                            }
+                            else
+                            {
+                                @foreach (var d in _diagrams)
+                                {
+                                    <div class="canvas-diagram">
+                                        <div class="canvas-diagram__meta mono">@d.Caption</div>
+                                        <div class="mermaid-target" id="@d.ElementId"></div>
+                                    </div>
+                                }
+                            }
+                        </div>
+                    }
+                }
+                else
                 {
                     @if (_activeSessionId is null)
                     {
@@ -112,8 +313,8 @@
                     {
                         @foreach (var spec in _sessionSpecs)
                         {
-                            <div class="card" style="margin-bottom:10px">
-                                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                            <div class="card intake-spec-card">
+                                <div class="intake-spec-card__head">
                                     <strong>@spec.Title</strong>
                                     <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Status</span>
                                 </div>
@@ -122,62 +323,6 @@
                                 {
                                     <pre class="intake-spec-body">@Truncate(spec.Body, 800)</pre>
                                 }
-                            </div>
-                        }
-                    }
-                }
-                else if (_activeTab == "arch")
-                {
-                    <div style="display:flex;gap:8px;margin-bottom:10px">
-                        <button class="btn" @onclick="RebuildGraph" disabled="@_graphLoading">
-                            @(_graphLoading ? "Building…" : "Refresh Graph")
-                        </button>
-                    </div>
-                    @if (_graphError is not null)
-                    {
-                        <div class="banner banner--error"><span>@_graphError</span></div>
-                    }
-                    @if (_graph is not null)
-                    {
-                        <p class="page-subtitle">
-                            @_graph.FileCount files · @_graph.ImportCount imports · @_graph.ProjectEdgeCount project edges<br />
-                            sha @_graph.RepoSha[..Math.Min(8, _graph.RepoSha.Length)] · built @_graph.BuiltAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
-                        </p>
-                        @if (_graph.Files.Count > 0)
-                        {
-                            <div class="intake-module-list">
-                                @foreach (var mod in _graph.Files.GroupBy(f => f.Module).OrderByDescending(g => g.Count()).Take(20))
-                                {
-                                    <div class="intake-module">
-                                        <span class="mono">@(string.IsNullOrEmpty(mod.Key) || mod.Key == "<root>" ? "(root)" : mod.Key)</span>
-                                        <span class="page-subtitle">@mod.Count() files</span>
-                                    </div>
-                                }
-                            </div>
-                        }
-                    }
-                    else if (!_graphLoading && _graphError is null)
-                    {
-                        <p class="page-subtitle">Load the codebase graph for the current project.</p>
-                    }
-                }
-                else
-                {
-                    @if (_memory is null)
-                    {
-                        <p class="page-subtitle">Loading…</p>
-                    }
-                    else if (_memory.Count == 0)
-                    {
-                        <p class="page-subtitle">No memory entries yet.</p>
-                    }
-                    else
-                    {
-                        @foreach (var m in _memory.Take(30))
-                        {
-                            <div class="intake-memory-row">
-                                <span class="mono">@m.Key</span>
-                                <span class="page-subtitle">@Truncate(m.Body, 120)</span>
                             </div>
                         }
                     }
@@ -194,32 +339,273 @@
     private string _draft = "";
     private bool _sending;
     private bool _accepting;
-    private readonly HashSet<long> _acceptedEpicIds = new();
     private string? _actionError;
-    private string _activeTab = "spec";
+    private string _activeTab = "canvas";
     private List<SessionSpecDto>? _sessionSpecs;
-    private GraphDto? _graph;
-    private bool _graphLoading;
-    private string? _graphError;
-    private List<MemoryDto>? _memory;
+
+    // Live-run state: fed by the intake SSE channel (intake.run.delta /
+    // .tool / .completed) while the server streams the LLM response.
+    private bool _liveActive;
+    private string _liveText = "";
+    private readonly List<string> _liveTools = new();
+
+    // Canvas diagrams extracted from assistant messages (```mermaid
+    // fences), newest first. ElementIds are stable per message so the
+    // JS renderer's dataset memo skips unchanged diagrams.
+    private readonly List<CanvasDiagram> _diagrams = new();
+    private bool _mermaidDirty;
+    private string? _canvasMapSource;
+    private string? CanvasMapSource => _canvasMapSource;
+
+    private DotNetObjectReference<Intake>? _selfRef;
+    private bool _streamSubscribed;
 
     public sealed record SessionDto(string Id, string ProjectId, string Title, DateTime CreatedAt, DateTime UpdatedAt, List<MessageDto>? Messages);
-    public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle);
+    public sealed record MessageDto(long Id, string Role, string Content, DateTime Timestamp, string? ProposedEpicId, string? ProposedEpicTitle, List<QuestionDto>? Questions = null);
+    public sealed record QuestionDto(string? Header, string Question, bool Multiple, List<string>? Options)
+    {
+        public List<string> Options { get; } = Options ?? new();
+    }
     public sealed record SessionSpecDto(string Id, string ProjectId, string Title, string Status, int CurrentVersion, string? Body);
-    public sealed record GraphDto(string RepoRoot, string RepoSha, DateTime BuiltAt, int FileCount, int ImportCount, int ProjectEdgeCount, List<GraphFileDto> Files);
-    public sealed record GraphFileDto(string Path, string Module, string Language);
-    public sealed record MemoryDto(string Key, string Body, DateTime UpdatedAt);
+
+    private sealed record CanvasDiagram(string ElementId, string Source, string Caption);
+
+    // Question-card answer state: "messageId:questionIndex" → chosen
+    // option labels (multi-select aware) plus per-question "Other"
+    // free text. Dismissed cards stop rendering interactively.
+    private readonly Dictionary<string, List<string>> _answers = new();
+    private readonly Dictionary<string, string> _otherText = new();
+    private readonly HashSet<string> _otherOpen = new();
+    private readonly HashSet<long> _dismissedQuestionCards = new();
+
+    /// <summary>Split an em-dash encoded option ("Label — description")
+    /// into its parts; a leading "(Recommended)" becomes a badge.</summary>
+    private static (string Label, string? Description, bool Recommended) SplitOption(string option)
+    {
+        var s = option.Trim();
+        var recommended = s.StartsWith("(Recommended)", StringComparison.OrdinalIgnoreCase);
+        if (recommended) s = s["(Recommended)".Length..].TrimStart(' ', '—', '-');
+        var dash = s.IndexOf(" — ", StringComparison.Ordinal);
+        return dash < 0
+            ? (s, null, recommended)
+            : (s[..dash].Trim(), s[(dash + 3)..].Trim(), recommended);
+    }
+
+    private string? GetOther(string key) => _otherText.TryGetValue(key, out var v) ? v : null;
+
+    private void SetOther(string key, string? value)
+    {
+        if (string.IsNullOrEmpty(value)) _otherText.Remove(key);
+        else _otherText[key] = value;
+    }
+
+    private bool IsQuestionCardActive(int messageIndex)
+    {
+        if (_messages is null) return false;
+        var m = _messages[messageIndex];
+        if (m.Id < 0 || _dismissedQuestionCards.Contains(m.Id)) return false;
+        // Only the LATEST unanswered card is interactive: a user
+        // message after it (typed or composed) means it was answered.
+        for (var i = messageIndex + 1; i < _messages.Count; i++)
+        {
+            if (_messages[i].Role.Equals("User", StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        return true;
+    }
+
+    private void ToggleAnswer(string key, string label, bool multiple)
+    {
+        if (!_answers.TryGetValue(key, out var cur))
+        {
+            _answers[key] = new List<string> { label };
+            return;
+        }
+        if (cur.Contains(label))
+        {
+            cur.Remove(label);
+            if (cur.Count == 0) _answers.Remove(key);
+            return;
+        }
+        if (multiple) cur.Add(label);
+        else { cur.Clear(); cur.Add(label); }
+    }
+
+    private int AnsweredCount(MessageDto m, IReadOnlyList<QuestionDto> qs)
+    {
+        var n = 0;
+        for (var qi = 0; qi < qs.Count; qi++)
+        {
+            var key = $"{m.Id}:{qi}";
+            if ((_answers.TryGetValue(key, out var sel) && sel.Count > 0)
+                || (_otherText.TryGetValue(key, out var t) && !string.IsNullOrWhiteSpace(t)))
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private void DismissQuestionCard(MessageDto m) => _dismissedQuestionCards.Add(m.Id);
+
+    /// <summary>The session's latest epic proposal (the ACCEPT action
+    /// lives in the sidebar; the thread shows an audit card only).</summary>
+    private MessageDto? LatestProposal => _messages?
+        .Where(m => m.ProposedEpicId is not null && m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(m => m.Id)
+        .FirstOrDefault();
+
+    /// <summary>An epic counts as accepted when the session carries the
+    /// "Operator accepted epic {id}:" system message — survives reloads,
+    /// unlike the local per-message id set.</summary>
+    private bool IsEpicAccepted(string epicId)
+    {
+        if (_messages is null) return false;
+        return _messages.Any(m =>
+            m.Role.Equals("System", StringComparison.OrdinalIgnoreCase)
+            && m.Content.StartsWith($"Operator accepted epic {epicId}:", StringComparison.Ordinal));
+    }
+
+    private SessionSpecDto? SpecForProposal(MessageDto proposal)
+        => _sessionSpecs?.FirstOrDefault(s =>
+            string.Equals(s.Title, proposal.ProposedEpicTitle, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Session-list badge: 'accepted' when any proposal was
+    /// accepted (session complete), 'pending' when a proposal awaits
+    /// review, null otherwise. Session DTOs carry their messages, so
+    /// this is computed client-side.</summary>
+    private static string? SessionProposalState(SessionDto s)
+    {
+        if (s.Messages is null) return null;
+        var proposedIds = s.Messages.Where(m => m.ProposedEpicId is not null)
+            .Select(m => m.ProposedEpicId!).Distinct().ToList();
+        if (proposedIds.Count == 0) return null;
+        var accepted = s.Messages.Any(m =>
+            m.Role.Equals("System", StringComparison.OrdinalIgnoreCase)
+            && m.Content.StartsWith("Operator accepted epic ", StringComparison.Ordinal));
+        return accepted ? "accepted" : "pending";
+    }
+
+    private async Task SendAnswers(MessageDto m, IReadOnlyList<QuestionDto> qs)
+    {
+        var lines = new List<string> { "Answers to your questions:" };
+        var unanswered = new List<int>();
+        for (var qi = 0; qi < qs.Count; qi++)
+        {
+            var key = $"{m.Id}:{qi}";
+            var label = qs[qi].Header
+                ?? Truncate(qs[qi].Question.Replace("**", "").Trim(), 60);
+            var parts = new List<string>();
+            if (_answers.TryGetValue(key, out var sel)) parts.AddRange(sel);
+            if (_otherText.TryGetValue(key, out var t) && !string.IsNullOrWhiteSpace(t))
+                parts.Add($"Other: {t.Trim()}");
+            if (parts.Count == 0) { unanswered.Add(qi + 1); continue; }
+            lines.Add($"{qi + 1}. {label} → {string.Join(", ", parts)}");
+        }
+        if (lines.Count == 1) return;
+        // Unanswered questions stay open — say so explicitly so the
+        // agent doesn't assume silence = answered.
+        if (unanswered.Count > 0)
+            lines.Add($"(questions {string.Join(", ", unanswered)} still open)");
+        await PostUserMessage(string.Join("\n", lines));
+    }
 
     private void SelectTab(string tab)
     {
         _activeTab = tab;
-        _ = tab switch
+        if (tab == "spec") _ = LoadSessionSpecs();
+        if (tab == "canvas") _mermaidDirty = true;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        ShellStore.StateChanged += OnShellChanged;
+        await ReloadSessions();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_streamSubscribed)
         {
-            "spec" => LoadSessionSpecs(),
-            "arch" => LoadGraph(forceRebuild: false),
-            "memory" => LoadMemory(),
-            _ => Task.CompletedTask,
-        };
+            _streamSubscribed = true;
+            _selfRef = DotNetObjectReference.Create(this);
+            try { await JS.InvokeVoidAsync("forge.intakeStream.subscribe", _selfRef); }
+            catch (InvalidOperationException) { /* prerender */ }
+        }
+        if (_mermaidDirty)
+        {
+            _mermaidDirty = false;
+            try
+            {
+                await JS.InvokeVoidAsync("forge.intakeMermaid.renderInto", "mmd-map", _canvasMapSource ?? "");
+                foreach (var d in _diagrams)
+                {
+                    await JS.InvokeVoidAsync("forge.intakeMermaid.renderInto", d.ElementId, d.Source);
+                }
+            }
+            catch (InvalidOperationException) { /* prerender: no JS runtime yet */ }
+            catch (JSException) { /* mermaid render failure is non-fatal; js falls back to source */ }
+        }
+    }
+
+    /// <summary>Intake SSE events arrive with the full event JSON
+    /// (see intake.js). Drives the live assistant bubble.</summary>
+    [JSInvokable]
+    public async Task OnIntakeEvent(string kind, string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var sessionId = root.TryGetProperty("taskId", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.String
+                ? t.GetString() : null;
+            if (sessionId is null || sessionId != _activeSessionId) return;
+
+            switch (kind)
+            {
+                case "intake-run-started":
+                    _liveActive = true;
+                    _liveText = "";
+                    _liveTools.Clear();
+                    break;
+                case "intake-run-delta":
+                    if (root.TryGetProperty("data", out var dd)
+                        && dd.TryGetProperty("delta", out var delta))
+                    {
+                        _liveText += delta.GetString();
+                    }
+                    _liveActive = true;
+                    break;
+                case "intake-run-tool":
+                    if (root.TryGetProperty("data", out var dt)
+                        && dt.TryGetProperty("tool", out var tool)
+                        && tool.GetString() is { } toolName)
+                    {
+                        _liveTools.Add(toolName);
+                    }
+                    break;
+                case "intake-run-completed":
+                    _liveActive = false;
+                    _liveText = "";
+                    _liveTools.Clear();
+                    await ReloadActive();
+                    break;
+                case "intake-run-failed":
+                    _liveActive = false;
+                    _liveText = "";
+                    _liveTools.Clear();
+                    _actionError = root.TryGetProperty("detail", out var dtl)
+                        ? $"Intake run failed: {dtl.GetString()}"
+                        : "Intake run failed.";
+                    await ReloadActive();
+                    break;
+            }
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception)
+        {
+            // A malformed event must not break the circuit — the next
+            // completed/failed event reloads authoritative state anyway.
+        }
     }
 
     private async Task LoadSessionSpecs()
@@ -230,82 +616,12 @@
             _sessionSpecs = await Http.GetFromJsonAsync<List<SessionSpecDto>>($"/api/intake/sessions/{_activeSessionId}/specs");
         }
         catch { _sessionSpecs = new(); }
-        StateHasChanged();
-    }
-
-    private async Task<string?> CurrentProjectRoot()
-    {
-        try
-        {
-            var id = ShellStore.Value.CurrentProjectId;
-            if (id is null) return null;
-            var projects = await Http.GetFromJsonAsync<List<ProjectRootDto>>("/api/projects/");
-            return projects?.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))?.Root;
-        }
-        catch { return null; }
-    }
-
-    private async Task LoadGraph(bool forceRebuild)
-    {
-        _graphLoading = true;
-        _graphError = null;
-        StateHasChanged();
-        try
-        {
-            var root = await CurrentProjectRoot();
-            if (string.IsNullOrWhiteSpace(root))
-            {
-                _graphError = "Current project's local path is unknown — cannot build the codebase graph.";
-                return;
-            }
-            var url = forceRebuild
-                ? $"/api/codebase-graph/rebuild?repoRoot={Uri.EscapeDataString(root)}"
-                : $"/api/codebase-graph?repoRoot={Uri.EscapeDataString(root)}";
-            if (forceRebuild)
-            {
-                var resp = await Http.PostAsync(url, null);
-                if (!resp.IsSuccessStatusCode)
-                {
-                    _graphError = $"Graph build failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
-                    return;
-                }
-                _graph = await Http.GetFromJsonAsync<GraphDto>($"/api/codebase-graph?repoRoot={Uri.EscapeDataString(root)}");
-            }
-            else
-            {
-                _graph = await Http.GetFromJsonAsync<GraphDto>(url);
-            }
-        }
-        catch (Exception ex) { _graphError = ex.Message; }
-        finally
-        {
-            _graphLoading = false;
-            StateHasChanged();
-        }
-    }
-
-    private async Task LoadMemory()
-    {
-        try
-        {
-            // Memory is a single global store with project-PREFIXED
-            // keys (vision/<projectId> etc.) — no store lens.
-            _memory = await Http.GetFromJsonAsync<List<MemoryDto>>("/api/memory");
-        }
-        catch { _memory = new(); }
+        RebuildCanvas();
         StateHasChanged();
     }
 
     private static string Truncate(string s, int max) =>
         string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max] + "…";
-
-    public sealed record ProjectRootDto(string Id, string Root);
-
-    protected override async Task OnInitializedAsync()
-    {
-        ShellStore.StateChanged += OnShellChanged;
-        await ReloadSessions();
-    }
 
     private string? _loadedProject;
 
@@ -340,11 +656,22 @@
     {
         _activeSessionId = id;
         _sessionSpecs = null;
+        _liveActive = false;
+        _liveText = "";
+        _liveTools.Clear();
+        await ReloadActive();
+    }
+
+    private async Task ReloadActive()
+    {
+        if (_activeSessionId is null) return;
         try
         {
-            var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{id}");
+            var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{_activeSessionId}");
             _messages = resp?.Messages?.ToList() ?? new();
-            if (_activeTab == "spec") await LoadSessionSpecs();
+            // Specs feed both the Spec Drafts tab and the canvas (map +
+            // proposal panel's spec pill) — always load.
+            await LoadSessionSpecs();
         }
         catch { _messages = new(); }
         StateHasChanged();
@@ -395,9 +722,11 @@
                 $"/api/intake/sessions/{_activeSessionId}/accept-epic/{messageId}", null);
             if (resp.IsSuccessStatusCode)
             {
-                _acceptedEpicIds.Add(messageId);
                 _actionError = null;
-                await LoadSessionSpecs();
+                // The accept appends an "Operator accepted epic …" system
+                // message server-side; reloading flips the sidebar panel
+                // + thread card to the Accepted state via IsEpicAccepted.
+                await ReloadActive();
             }
             else
             {
@@ -411,21 +740,139 @@
     private async Task SendMessage()
     {
         if (_activeSessionId is null || string.IsNullOrWhiteSpace(_draft)) return;
-        _sending = true;
-        try
-        {
-            await Http.PostAsJsonAsync($"/api/intake/sessions/{_activeSessionId}/messages", new { text = _draft });
-            _draft = "";
-            await SetActive(_activeSessionId);
-        }
-        catch { }
-        finally { _sending = false; }
+        var text = _draft;
+        _draft = "";
+        await PostUserMessage(text);
     }
 
-    private Task RebuildGraph() => LoadGraph(forceRebuild: true);
+    private async Task PostUserMessage(string text)
+    {
+        if (_activeSessionId is null || string.IsNullOrWhiteSpace(text)) return;
+        _sending = true;
+        // Optimistic: the operator's message appears immediately and
+        // the live bubble shows "thinking" — the POST only returns
+        // after the whole LLM round, and the SSE channel drives the
+        // in-flight UI in the meantime.
+        _messages ??= new();
+        _messages.Add(new MessageDto(-DateTime.UtcNow.Ticks, "User", text, DateTime.Now, null, null));
+        _liveActive = true;
+        _liveText = "";
+        _liveTools.Clear();
+        StateHasChanged();
+        try
+        {
+            var http = HttpFactory.CreateClient("ForgeApiLongPoll");
+            var resp = await http.PostAsJsonAsync($"/api/intake/sessions/{_activeSessionId}/messages", new { text });
+            if (!resp.IsSuccessStatusCode)
+            {
+                _actionError = $"Send failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+            }
+        }
+        catch (Exception ex) { _actionError = $"Send failed: {ex.Message}"; }
+        finally
+        {
+            _sending = false;
+            // Safety net: if the completed event was missed (stream
+            // reconnect mid-run), reload authoritative state here.
+            if (_liveActive) { _liveActive = false; _liveText = ""; _liveTools.Clear(); }
+            await ReloadActive();
+        }
+    }
 
-    public void Dispose()
+    /// <summary>Rebuild the canvas: the auto discussion map (epics →
+    /// specs) + the mermaid diagrams the assistant drew in replies.</summary>
+    private void RebuildCanvas()
+    {
+        _diagrams.Clear();
+        if (_messages is not null)
+        {
+            foreach (var m in _messages.OrderByDescending(m => m.Id))
+            {
+                if (!m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase)) continue;
+                var idx = 0;
+                foreach (var src in ExtractMermaidBlocks(m.Content))
+                {
+                    _diagrams.Add(new CanvasDiagram(
+                        $"mmd-msg-{m.Id}-{idx++}",
+                        src,
+                        $"reply · {m.Timestamp:MM-dd HH:mm}"));
+                }
+            }
+        }
+        _canvasMapSource = BuildDiscussionMap();
+        _mermaidDirty = true;
+    }
+
+    private string? BuildDiscussionMap()
+    {
+        if (_messages is null) return null;
+        var epics = _messages
+            .Where(m => m.ProposedEpicId is not null)
+            .GroupBy(m => m.ProposedEpicId!)
+            .Select(g => g.First())
+            .ToList();
+        if (epics.Count == 0) return null;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("flowchart TD");
+        var specNodes = 0;
+        for (var i = 0; i < epics.Count; i++)
+        {
+            var accepted = IsEpicAccepted(epics[i].ProposedEpicId!);
+            var label = MermaidLabel($"{epics[i].ProposedEpicId} — {epics[i].ProposedEpicTitle}");
+            sb.AppendLine($"  e{i}[\"{label}\"]:::{(accepted ? "accepted" : "proposed")}");
+        }
+        if (_sessionSpecs is not null)
+        {
+            foreach (var spec in _sessionSpecs)
+            {
+                var label = MermaidLabel($"{spec.Id} · v{spec.CurrentVersion} · {spec.Status}");
+                sb.AppendLine($"  s{specNodes}[\"{label}\"]:::spec");
+                // Link epic→spec when the titles line up (specs are
+                // created from the epic title at accept time).
+                var parentIdx = epics.FindIndex(e =>
+                    string.Equals(e.ProposedEpicTitle, spec.Title, StringComparison.OrdinalIgnoreCase));
+                if (parentIdx >= 0) sb.AppendLine($"  e{parentIdx} --> s{specNodes}");
+                specNodes++;
+            }
+        }
+        sb.AppendLine("  classDef proposed fill:#1D2230,stroke:#7C9CFF,color:#E6E8EE");
+        sb.AppendLine("  classDef accepted fill:#16302a,stroke:#7DDFC1,color:#E6E8EE");
+        sb.AppendLine("  classDef spec fill:#2a2416,stroke:#F2B55A,color:#E6E8EE");
+        return sb.ToString();
+    }
+
+    private static string MermaidLabel(string s) =>
+        Truncate(s.Replace('"', '\''), 60);
+
+    private static IEnumerable<string> ExtractMermaidBlocks(string content)
+    {
+        const string fence = "```mermaid";
+        var pos = 0;
+        while (true)
+        {
+            var start = content.IndexOf(fence, pos, StringComparison.OrdinalIgnoreCase);
+            if (start < 0) yield break;
+            var bodyStart = content.IndexOf('\n', start);
+            if (bodyStart < 0) yield break;
+            var end = content.IndexOf("```", bodyStart, StringComparison.Ordinal);
+            if (end < 0) yield break;
+            var block = content[(bodyStart + 1)..end].Trim();
+            if (block.Length > 0) yield return block;
+            pos = end + 3;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
     {
         ShellStore.StateChanged -= OnShellChanged;
+        if (_streamSubscribed)
+        {
+            _streamSubscribed = false;
+            try { await JS.InvokeVoidAsync("forge.intakeStream.unsubscribe"); }
+            catch (JSDisconnectedException) { /* circuit already gone */ }
+            catch (InvalidOperationException) { /* prerender */ }
+        }
+        _selfRef?.Dispose();
     }
 }

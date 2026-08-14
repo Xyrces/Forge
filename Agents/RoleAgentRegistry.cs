@@ -55,10 +55,17 @@ public sealed class RoleAgentRegistry
 
     /// <summary>
     /// Resolve the effective plan-gate territory for a role on a given
-    /// project: the project's roles_json <c>$territory</c> override wins
-    /// wholesale when present; otherwise the built-in registry territory
-    /// (Forge-repo-shaped) applies. A role with no registry territory
-    /// and no override has no constraint (the gate approves).
+    /// project: the project's roles_json <c>$territory</c> config is the
+    /// ONLY source. When the project configures nothing for the role,
+    /// the gate is unconstrained (existence checks still run). The
+    /// registry's built-in territories are Forge-repo-shaped prompt
+    /// prose — applying them as a GATE fallback rejects every plan
+    /// naming a foreign layout (observed live 2026-08-12: talaria's
+    /// src/… plans were rejected as "outside coredev's territory
+    /// (Core/, Agents/, …)"; porthorizon's PortHorizon.*/ layout is
+    /// equally outside). Projects that want hard role separation set
+    /// $territory explicitly; the forge project carries its registry
+    /// values in roles_json.
     /// </summary>
     public static (IReadOnlyList<string> Prefixes, bool AllowsRootFiles) ResolveTerritory(
         RoleAgent roleDef,
@@ -67,7 +74,7 @@ public sealed class RoleAgentRegistry
         if (projectTerritories is not null
             && projectTerritories.TryGetValue(roleDef.AgentName, out var t))
             return (t.Prefixes, t.AllowsRootFiles);
-        return (roleDef.TerritoryPrefixes ?? Array.Empty<string>(), roleDef.TerritoryAllowsRootFiles);
+        return (Array.Empty<string>(), false);
     }
 
     /// <summary>

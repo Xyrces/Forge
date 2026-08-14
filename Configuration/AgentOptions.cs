@@ -287,6 +287,13 @@ public sealed record LlmOptions
     // 0 disables (every overload 429 cools immediately).
     public int OverloadRetryCount { get; set; } = 3;
 
+    // Minimum milliseconds between admitted requests PER PROVIDER
+    // (reserve-ahead pacing). Anti-herd: slots resuming after a
+    // shared cooldown leave spaced instead of in the same millisecond
+    // (MiniMax Token Plan dynamic throttling punishes the burst
+    // shape). 0 disables.
+    public int MinRequestIntervalMs { get; set; } = 500;
+
     // P2.b: Meshy config. The Meshy REST API is a different
     // service from the LLM providers; keep its config
     // top-level under llm.* for ease of operator editing.

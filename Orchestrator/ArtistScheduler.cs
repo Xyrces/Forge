@@ -38,6 +38,11 @@ public sealed class ArtistScheduler
     private readonly TimeSpan _interval;
     private readonly WakeupSignal? _wakeup;
 
+    /// <summary>Minimum interval between ticks for a spec whose last
+    /// artist run failed. Without a cooldown a failing spec re-runs
+    /// every tick in a tight spiral.</summary>
+    internal TimeSpan FailedRetryCooldown { get; set; } = TimeSpan.FromMinutes(5);
+
     public ArtistScheduler(
         ISpecStore specs,
         ArtistAgentFactory artistFactory,
@@ -120,7 +125,7 @@ public sealed class ArtistScheduler
         IReadOnlyList<SpecRecord> candidates;
         try
         {
-            candidates = await _specs.ListAsync(projectId: null, status: SpecStatus.Designed, ct);
+            candidates = await _specs.ListForPipelineSweepAsync(SpecStatus.Designed, ct);
         }
         catch (Exception ex)
         {
@@ -144,16 +149,16 @@ public sealed class ArtistScheduler
 
     /// <summary>
     /// Heuristic: art a spec at most every <c>Interval</c>, or
-    /// immediately if the last run failed. The recent-run lookup
-    /// is <c>SELECT ts, status FROM artist_run WHERE spec_id =
-    /// $id ORDER BY ts DESC LIMIT 1</c>.
+    /// with a cooldown after a failure (the spec body doesn't
+    /// change between ticks — instant retry creates a spiral).
     /// </summary>
     private async Task<bool> ShouldArtAsync(SpecRecord spec, CancellationToken ct)
     {
         var recent = await _runs.ListAsync(specId: spec.Id, limit: 1, ct);
         if (recent.Count == 0) return true;
         var last = recent[0];
-        if (last.Status is ArtistRunStatus.MeshyFailed or ArtistRunStatus.LlmFailed) return true;
+        if (last.Status is ArtistRunStatus.MeshyFailed or ArtistRunStatus.LlmFailed)
+            return DateTime.UtcNow - last.Ts >= FailedRetryCooldown;
         return DateTime.UtcNow - last.Ts >= _interval;
     }
 

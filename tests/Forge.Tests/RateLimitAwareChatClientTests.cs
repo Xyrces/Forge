@@ -16,6 +16,49 @@ public class RateLimitAwareChatClientTests
     private static readonly ChatMessage[] Msgs = { new(ChatRole.User, "go") };
 
     [Fact]
+    public async Task AccountQuota429_RecordsProviderWideEscalatingCooldown_NoInPlaceRetry()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failure = new LlmRateLimitException(
+                "HTTP 429 rate limit: Token Plan rate limit reached (2062)",
+                null, RateLimitKind.AccountQuota, "2062", "req-1"),
+        };
+        var client = new RateLimitAwareChatClient(inner, "minimax", "MiniMax-M3", tracker, new SemaphoreSlim(2));
+
+        await Assert.ThrowsAsync<LlmRateLimitException>(() => client.GetResponseAsync(Msgs));
+
+        Assert.Equal(1, inner.Calls);                       // never retried in place
+        Assert.Equal(1, tracker.AccountStrikes("minimax"));
+        Assert.True(tracker.IsCoolingDown("minimax", "MiniMax-M3"));
+        Assert.True(tracker.IsCoolingDown("minimax", "any-model"));  // account-wide
+        var fast = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync(Msgs));
+        Assert.Contains("account-quota", fast.Message);
+        Assert.Equal(1, inner.Calls);                       // suppressed client-side
+    }
+
+    [Fact]
+    public async Task Pacer_SpacesAdmissions()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient();
+        var pacer = new ProviderPacer(TimeSpan.FromMilliseconds(120));
+        var client = new RateLimitAwareChatClient(inner, "gw", "m", tracker, new SemaphoreSlim(4), pacer: pacer);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Task.WhenAll(
+            client.GetResponseAsync(Msgs),
+            client.GetResponseAsync(Msgs),
+            client.GetResponseAsync(Msgs));
+        sw.Stop();
+
+        Assert.Equal(3, inner.Calls);
+        Assert.True(sw.Elapsed >= TimeSpan.FromMilliseconds(200),
+            $"3 admissions must span >= 2 intervals (120ms each); took {sw.ElapsedMilliseconds}ms");
+    }
+
+    [Fact]
     public async Task CoolingModel_ThrowsBeforeAnyHttpCall()
     {
         var tracker = new ModelRateLimitTracker();

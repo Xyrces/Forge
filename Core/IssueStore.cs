@@ -121,6 +121,21 @@ public interface IIssueStore
     Task<IReadOnlyList<IssueRecord>> ReadyAsync(int limit, string? sprintId, CancellationToken ct = default);
     Task<IssueRecord?> ClaimAsync(string id, string assignee, CancellationToken ct = default);
     Task<IssueRecord> TransitionAsync(string id, IssueStatus to, string? error, IDictionary<string, object>? metadata = null, CancellationToken ct = default);
+    /// <summary>
+    /// Update the priority column (1-5, lower = more important). Used
+    /// by the groomer, which re-assesses a follow-up's priority against
+    /// the whole open-work backlog at groom time (operator rule
+    /// 2026-08-08: follow-ups must be prioritized in the scope of the
+    /// rest of the work so sprints build the most important things).
+    /// </summary>
+    Task SetPriorityAsync(string id, int priority, CancellationToken ct = default);
+    /// <summary>
+    /// Update title + description in place. Used by intake dedupe: a
+    /// re-proposed epic refines the session's existing (unaccepted)
+    /// proposal instead of spawning a duplicate row (observed live
+    /// 2026-08-12: one turn fired create_epic 3× → epic-5/6/7 dupes).
+    /// </summary>
+    Task UpdateSummaryAsync(string id, string title, string? description, CancellationToken ct = default);
     Task<IssueRecord?> GetAsync(string id, CancellationToken ct = default);
     Task<IssueEventRecord> AddEventAsync(string id, string kind, string? detail = null, CancellationToken ct = default);
 
@@ -193,7 +208,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 31;
+    public const int CurrentSchemaVersion = 32;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -961,6 +976,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // proxies existed).
         ApplyV31AgentRunTokens(conn);
 
+        // v32 (post-init): intake_message.questions_json — structured
+        // clarifying questions attached to an assistant message
+        // (ask_questions tool or parsed from the reply text), rendered
+        // as clickable cards on the intake page (2026-08-12).
+        ApplyV32IntakeMessageQuestions(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -989,12 +1010,25 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         var d = (SqlServerDialect)_db.Dialect;
         var q = d.Qualifier;
         using var conn = _db.Open();
-        using (var ensure = conn.CreateCommand())
+        // Fresh-create runs ~26 tables + indexes of DDL; under Azure
+        // SQL DTU pressure a single batch can exceed the 30s default
+        // (observed live 2026-08-09: a new project's store init timed
+        // out mid-DDL and, with no single-flight in
+        // ProjectContextFactory.Find, every caller stampeded the same
+        // schema and 500'd the dashboard). DDL batches get a generous
+        // timeout; the guards keep reruns idempotent.
+        DbCommand Ddl()
+        {
+            var c = conn.CreateCommand();
+            c.CommandTimeout = 180;
+            return c;
+        }
+        using (var ensure = Ddl())
         {
             ensure.CommandText = $"IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = '{q}') EXEC('CREATE SCHEMA [{q}]');";
             ensure.ExecuteNonQuery();
         }
-        using var cmd = conn.CreateCommand();
+        using var cmd = Ddl();
         // Profile split (SQL Server): the Core schema gets only
         // registry/global tables (project, secret, agent, skill) — a
         // registry anchor never carries agent_run & co; a Workload
@@ -1201,7 +1235,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 content              NVARCHAR(MAX) NOT NULL,
                 ts                   NVARCHAR(64)  NOT NULL,
                 proposed_epic_id     NVARCHAR(128) NULL,
-                proposed_epic_title  NVARCHAR(MAX) NULL
+                proposed_epic_title  NVARCHAR(MAX) NULL,
+                questions_json       NVARCHAR(MAX) NULL
             );
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_intake_message_session' AND object_id = OBJECT_ID('{{d.Table("intake_message")}}'))
                 CREATE INDEX ix_intake_message_session ON {{d.Table("intake_message")}}(session_id, id);
@@ -1476,7 +1511,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // v27+: followup_draft — follow-ups tracked during a sprint,
         // materialized at completion (operator model 2026-07-31).
         {
-            using var cmdDraft = conn.CreateCommand();
+            using var cmdDraft = Ddl();
             cmdDraft.CommandText = $$"""
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'followup_draft')
             CREATE TABLE {{d.Table("followup_draft")}} (
@@ -1500,7 +1535,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // v28+: watchdog_finding — the watchdog scanner's deduped
         // findings (alert-only v1).
         {
-            using var cmdWatch = conn.CreateCommand();
+            using var cmdWatch = Ddl();
             cmdWatch.CommandText = $$"""
             IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'watchdog_finding')
             CREATE TABLE {{d.Table("watchdog_finding")}} (
@@ -1526,7 +1561,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // step is stamped; schema_version keeps full history and
         // --check reads MAX(version).
         var applied = 0;
-        using (var ver = conn.CreateCommand())
+        using (var ver = Ddl())
         {
             ver.CommandText = $"SELECT COALESCE(MAX(version), 0) FROM {d.Table("schema_version")}";
             applied = Convert.ToInt32(ver.ExecuteScalar());
@@ -1662,6 +1697,17 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
         using var alter = conn.CreateCommand();
         alter.CommandText = "ALTER TABLE agent_run ADD COLUMN dispatch_id TEXT;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV32IntakeMessageQuestions(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('intake_message') WHERE name = 'questions_json' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE intake_message ADD COLUMN questions_json TEXT;";
         alter.ExecuteNonQuery();
     }
 
@@ -2025,6 +2071,37 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     /// happens AFTER the UPDATE commits; failures are swallowed by the
     /// publisher (a hint never breaks a DB mutation).
     /// </summary>
+    public async Task SetPriorityAsync(string id, int priority, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = $"UPDATE {T("issue")} SET priority=@p, updated_at=@now WHERE id=@id";
+            cmd.AddParam("@p", Math.Clamp(priority, 1, 5));
+            cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+            cmd.AddParam("@id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await InsertEventAsync(conn, null, id, "priority_change", $"priority={Math.Clamp(priority, 1, 5)}", ct);
+    }
+
+    public async Task UpdateSummaryAsync(string id, string title, string? description, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ArgumentException("title is required", nameof(title));
+        await using var conn = await _db.OpenAsync(ct);
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = $"UPDATE {T("issue")} SET title=@title, description=@desc, updated_at=@now WHERE id=@id";
+            cmd.AddParam("@title", title);
+            cmd.AddParam("@desc", (object?)description ?? DBNull.Value);
+            cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+            cmd.AddParam("@id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await InsertEventAsync(conn, null, id, "revised", title, ct);
+    }
+
     private async Task PublishLifecycleTransitionAsync(
         IssueRecord before, string mergedMetadataJson, CancellationToken ct)
     {

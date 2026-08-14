@@ -48,6 +48,47 @@ public class IntakeAgentTests : IDisposable
             NullLogger<IntakeAgent>.Instance);
 
     [Fact]
+    public async Task SendUserMessage_InjectsRepoBrief_IntoInstructions()
+    {
+        // 2026-08-09: the talaria intake asked the operator what the
+        // tech stack was. The instructions must carry the repo brief
+        // so intake asks about intent, not codebase facts.
+        var repoRoot = Path.Combine(Path.GetTempPath(), "intake-repo-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(repoRoot);
+        File.WriteAllText(Path.Combine(repoRoot, "Talaria.slnx"), "<Solution />");
+        File.WriteAllText(Path.Combine(repoRoot, "README.md"), "# Talaria\n\nMessaging primitives.\n");
+        try
+        {
+            var capturing = new CapturingChatClient(
+                new ChatResponse(new ChatMessage(ChatRole.Assistant, "noted")));
+            var agent = new IntakeAgent("talaria", _intake, _issues, _sprints,
+                new ScriptingFactory(capturing),
+                new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
+                new RoleAgentRegistry(),
+                _events,
+                NullLogger<IntakeAgent>.Instance,
+                projectRootLookup: _ => repoRoot);
+
+            var session = await agent.StartSessionAsync("grounding", default);
+            await agent.SendUserMessageAsync(session.Id, "I want a new transport", default);
+
+            var system = capturing.InstructionsSeen
+                .Concat(capturing.Seen
+                    .SelectMany(m => m.Contents.OfType<TextContent>())
+                    .Select(t => t.Text))
+                .FirstOrDefault(t => t is not null && t.Contains("Project brief"));
+            Assert.NotNull(system);
+            Assert.Contains(".NET / C#", system);
+            Assert.Contains("Talaria.slnx", system);
+            Assert.Contains("Do NOT ask the operator about facts the project brief", system);
+        }
+        finally
+        {
+            try { Directory.Delete(repoRoot, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public async Task SendUserMessage_SimpleChat_PersistsBothMessages()
     {
         // Scripted: agent returns "Hello, operator!"
@@ -108,6 +149,76 @@ public class IntakeAgentTests : IDisposable
         Assert.Contains(snapshot, e => e.Kind == "intake.run.started");
         Assert.Contains(snapshot, e => e.Kind == "intake.epic.proposed");
         Assert.Contains(snapshot, e => e.Kind == "intake.run.completed");
+    }
+
+    [Fact]
+    public async Task AcceptProposedEpic_CrossStoreIdCollision_StillCreatesSpec()
+    {
+        // 2026-08-09 live bug: issue ids are per-store sequences, so
+        // talaria's epic-2 collided with porthorizon's epic-2. The
+        // accept path's dedupe probe fanned out across ALL stores by
+        // parent_issue_id, matched porthorizon's spec, and SKIPPED
+        // creating talaria's spec — the project never entered the
+        // pipeline. The probe must be scoped to the session's project.
+        var otherDb = TempRoot.Instance.NewDbPath("intake-other");
+        var otherIssues = new IssueStore(otherDb);
+        try
+        {
+            var otherEpic = await otherIssues.CreateAsync(new NewIssue(Type: "epic", Title: "other project epic"));
+            var otherSpecs = new SpecStore(otherIssues);
+            await otherSpecs.CreateAsync(new NewSpec(
+                ProjectId: "porthorizon", Title: "other project spec",
+                Body: "body", Author: "test", ParentIssueId: otherEpic.Id));
+
+            var mySpecs = new SpecStore(_issues);
+            var routing = new ProjectRoutingSpecStore(
+                mySpecs,
+                findByProject: pid => pid == "talaria" ? mySpecs : pid == "porthorizon" ? otherSpecs : null,
+                allProjectStores: () => new ISpecStore[] { mySpecs, otherSpecs });
+
+            // The accepted epic's id must equal the other store's spec
+            // parent for the collision to bite: both stores mint
+            // epic-1 as their first row.
+            Assert.Equal("epic-1", otherEpic.Id);
+            var scripted = new ToolCallingChatClient(
+                functionCalls: new[]
+                {
+                    new FunctionCallContent("call_1", "create_epic",
+                        new Dictionary<string, object?>
+                        {
+                            ["title"] = "talaria launch hardening",
+                            ["description"] = "scrub + license",
+                            ["priority"] = 2,
+                        }),
+                },
+                followUpText: "Proposed.");
+            var agent = new IntakeAgent("talaria", _intake, _issues, _sprints,
+                new ScriptingFactory(scripted),
+                new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
+                new RoleAgentRegistry(), _events, NullLogger<IntakeAgent>.Instance,
+                specs: routing);
+
+            var session = await agent.StartSessionAsync("launch", default);
+            var updated = await agent.SendUserMessageAsync(session.Id, "harden the repo", default);
+            var assistantMsg = updated.Messages.First(m => m.Role == IntakeMessageRole.Assistant);
+            Assert.Equal("epic-1", assistantMsg.ProposedEpicId); // same id as the other store's spec parent
+
+            await agent.AcceptProposedEpicAsync(session.Id, assistantMsg.Id, default);
+
+            var mine = await mySpecs.ListAsync(null, null, default);
+            Assert.Contains(mine, s => s.ParentIssueId == "epic-1" && s.ProjectId == "talaria");
+
+            // The accept event carries the project so the refinement
+            // queue can scope its own lookup the same way.
+            var accepted = _events.GetHistorySnapshot()
+                .Last(e => e.Kind == "intake.epic.accepted");
+            Assert.Equal("talaria", accepted.Data?["projectId"]?.ToString());
+        }
+        finally
+        {
+            try { otherIssues.Dispose(); } catch { }
+            try { File.Delete(otherDb); } catch { }
+        }
     }
 
     [Fact]
@@ -239,6 +350,36 @@ public class IntakeAgentTests : IDisposable
     /// text response on the second. This is enough to drive one
     /// AIFunction invocation per <c>RunAsync</c>.
     /// </summary>
+    private sealed class CapturingChatClient : IChatClient
+    {
+        private readonly ChatResponse _response;
+        public List<ChatMessage> Seen { get; } = new();
+        public List<string?> InstructionsSeen { get; } = new();
+        public CapturingChatClient(ChatResponse response) { _response = response; }
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            Seen.AddRange(messages);
+            InstructionsSeen.Add(options?.Instructions);
+            return Task.FromResult(_response);
+        }
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            // The intake agent streams now (2026-08-12): the double
+            // streams the same content the buffered path returns,
+            // like every real provider.
+            await Task.Yield();
+            Seen.AddRange(messages);
+            InstructionsSeen.Add(options?.Instructions);
+            foreach (var msg in _response.Messages)
+                yield return new ChatResponseUpdate(msg.Role, msg.Contents.ToList());
+        }
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
     private sealed class ToolCallingChatClient : IChatClient
     {
         private readonly FunctionCallContent[] _functionCalls;
@@ -265,8 +406,18 @@ public class IntakeAgentTests : IDisposable
             IEnumerable<ChatMessage> messages, ChatOptions? options = null,
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            // Stream the same sequence the buffered path returns:
+            // function call first, follow-up text after the
+            // middleware feeds the result back.
             await Task.Yield();
-            yield break;
+            if (_callIndex == 0 && _functionCalls.Length > 0)
+            {
+                _callIndex++;
+                var call = _functionCalls[0];
+                yield return new ChatResponseUpdate(ChatRole.Assistant, new[] { (AIContent)call });
+                yield break;
+            }
+            yield return new ChatResponseUpdate(ChatRole.Assistant, _followUpText);
         }
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
         public void Dispose() { }

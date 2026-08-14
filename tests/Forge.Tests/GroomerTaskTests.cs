@@ -58,7 +58,7 @@ public class GroomerTaskTests : IDisposable
     {
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "one-off"));
         var client = new RecordingToolCallClient(
-            "approve_task", new Dictionary<string, object?> { ["note"] = "serves the vision" });
+            "approve_task", new Dictionary<string, object?> { ["note"] = "serves the vision", ["priority"] = 4 });
 
         var outcome = await NewAgent(client).GroomTaskAsync(task.Id);
 
@@ -68,6 +68,10 @@ public class GroomerTaskTests : IDisposable
         Assert.Equal("true", after.GetMetadata("groomed"));
         Assert.Equal("serves the vision", after.GetMetadata("groomNote"));
         Assert.NotNull(after.GetMetadata("groomRunId"));
+        // The groomer re-prioritizes in the scope of the whole
+        // backlog (operator rule 2026-08-08) — the column updates so
+        // assembly ordering, the board, and injection all see it.
+        Assert.Equal(4, after.Priority);
     }
 
     [Fact]
@@ -96,7 +100,7 @@ public class GroomerTaskTests : IDisposable
         var done = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "d"));
         await _issues.TransitionAsync(done.Id, IssueStatus.Completed, null);
 
-        var client = new RecordingToolCallClient("approve_task", new Dictionary<string, object?> { ["note"] = "x" });
+        var client = new RecordingToolCallClient("approve_task", new Dictionary<string, object?> { ["note"] = "x", ["priority"] = 3 });
         var agent = NewAgent(client);
 
         Assert.Equal("skipped", await agent.GroomTaskAsync(groomed.Id));
@@ -112,7 +116,7 @@ public class GroomerTaskTests : IDisposable
         var other = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "existing open work"));
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "one-off"));
         var client = new RecordingToolCallClient(
-            "approve_task", new Dictionary<string, object?> { ["note"] = "ok" });
+            "approve_task", new Dictionary<string, object?> { ["note"] = "ok", ["priority"] = 3 });
 
         await NewAgent(client).GroomTaskAsync(task.Id);
 
@@ -130,7 +134,7 @@ public class GroomerTaskTests : IDisposable
         // "duplicate of existing work".
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "unique snowflake"));
         var client = new RecordingToolCallClient(
-            "approve_task", new Dictionary<string, object?> { ["note"] = "ok" });
+            "approve_task", new Dictionary<string, object?> { ["note"] = "ok", ["priority"] = 3 });
 
         await NewAgent(client).GroomTaskAsync(task.Id);
 

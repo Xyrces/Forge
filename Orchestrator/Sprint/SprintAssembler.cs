@@ -30,14 +30,17 @@ namespace Forge.Orchestrator.Sprint;
 /// high-level planning.</item>
 /// </list>
 ///
-/// <para>
-/// Assembly is deterministic: eligible tasks are grouped by their
-/// root epic (task → story → spec → epic via parent_issue_id) and
-/// the oldest epic's group becomes the next sprint (name = epic
-/// title, goal = epic description). Parentless tasks fall into an
-/// "Ad-hoc work" group. Stories are linked too (progress display);
-/// completion counts non-container tasks only.
-/// </para>
+    /// <para>
+    /// Assembly is deterministic and THEME-based (operator rule
+    /// 2026-08-08 — there is exactly one kind of sprint): eligible
+    /// tasks group by theme (spec chain → the groomed spec; follow-up
+    /// chain → the followUpOf root ancestor; rootless → ad-hoc) and
+    /// the highest-priority theme (then oldest) becomes the next
+    /// sprint with ALL of that theme's tasks (follow-up themes capped
+    /// at <see cref="MaxThemeTasks"/> per sprint). Only truly rootless
+    /// ad-hoc tasks assemble one-per-sprint. Stories are linked too
+    /// (progress display); completion counts non-container tasks only.
+    /// </para>
 ///
 /// <para>
 /// Plain class (not a BackgroundService), fire-and-forget from
@@ -243,7 +246,7 @@ public sealed class SprintAssembler
                 // a member, or an operator P1/blocker flag). Unrelated
                 // groomed ad-hoc work gets its own solo sprint at
                 // assembly instead.
-                await InjectAdHocAsync(active, issues, sprints, ct);
+                await InjectAdHocAsync(active, projectId, issues, sprints, ct);
                 await WriteBuildStateAsync(issues, new SprintBuildState(
                     Phase: "running",
                     Reason: $"Sprint '{active.Name}' in progress — {terminal}/{total} tasks terminal",
@@ -374,8 +377,12 @@ public sealed class SprintAssembler
 
     /// <summary>
     /// Completion progress: every linked non-container issue counts;
-    /// stories linked for progress display don't gate completion; an
-    /// empty sprint (defensive) is complete.
+    /// stories linked for progress display don't gate completion.
+    /// Failed blocks completion — operator rule 2026-07-25: don't
+    /// auto-clear Failed; the operator must investigate or
+    /// requeue. Sprint 5 of talaria dropped a Failed task onto the
+    /// floor in 2026-08-11 because Failed was counted as terminal
+    /// — Failed must stay open and keep the sprint active.
     /// </summary>
     private static async Task<(bool Complete, int Total, int Terminal)> CompletionProgressAsync(
         SprintRecord sprint, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
@@ -392,12 +399,21 @@ public sealed class SprintAssembler
                 continue;
             }
             total++;
-            if (issue.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed)
+            // Failed does NOT count as terminal: the operator must
+            // investigate or requeue (rule 2026-07-25; Sprint 5 of
+            // talaria dropped a Failed task onto the floor in
+            // 2026-08-11). Completed | Closed are the only true
+            // finishes.
+            if (issue.Status is IssueStatus.Completed or IssueStatus.Closed)
             {
                 terminal++;
             }
         }
-        return (terminal == total, total, terminal);
+        // Empty sprint (no non-container tasks, e.g. only stories
+        // linked) is complete — defensive, so an empty Active doesn't
+        // block assembly forever. A sprint with tasks is NOT complete
+        // until all of them are Completed/Closed.
+        return (total == 0 || terminal == total, total, terminal);
     }
 
     /// <summary>
@@ -419,7 +435,7 @@ public sealed class SprintAssembler
             var order = new List<string>();
             foreach (var task in eligible)
             {
-                var key = ResolveGroupKey(task, byId);
+                var key = ResolveThemeKey(task, byId);
                 if (groups.TryGetValue(key, out var list))
                 {
                     list.Add(task);
@@ -437,9 +453,12 @@ public sealed class SprintAssembler
                 var members = groups[key];
                 // Ad-hoc assembles one SOLO sprint per task named
                 // after the task — show the task that would go first.
+                // Follow-up themes name after the root task's title.
                 var name = key == AdHocGroupName
                     ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
-                    : (await specs.GetAsync(key, ct))?.Title ?? key;
+                    : key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
+                        ? (byId.TryGetValue(key[FollowUpThemePrefix.Length..], out var rootTask) ? rootTask.Title : key)
+                        : (await specs.GetAsync(key, ct))?.Title ?? key;
                 items.Add(new EligibleGroupItem(key, name, members.Count,
                     members.Min(t => t.Priority), members.Min(t => t.CreatedAt)));
             }
@@ -607,7 +626,7 @@ public sealed class SprintAssembler
     /// Injection never completes, replaces, or reorders the sprint.
     /// </summary>
     private async Task InjectAdHocAsync(
-        SprintRecord active, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
+        SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
     {
         var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
@@ -630,6 +649,21 @@ public sealed class SprintAssembler
                 active.Id, task.Id, task.Title, reason);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
                 task.Id, $"Injected into active sprint '{active.Name}' — {reason}"));
+            // Membership writes publish nothing on their own — kick
+            // dispatch so the injection is claimed now, not at the
+            // backstop.
+            if (_eventPublisher is not null)
+            {
+                var kickedAt = DateTimeOffset.UtcNow;
+                await _eventPublisher.PublishAsync(new Core.Messaging.TaskEnqueued
+                {
+                    MessageId = Core.Messaging.TaskEnqueued.IdFor(projectId, task.Id, kickedAt),
+                    ProjectId = projectId,
+                    TaskId = task.Id,
+                    TaskType = task.Type,
+                    EnqueuedAt = kickedAt,
+                }, ct);
+            }
         }
     }
 
@@ -776,16 +810,15 @@ public sealed class SprintAssembler
         if (eligible.Count == 0) return null;
         var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
 
-        // Group by root epic (walk task -> story -> spec -> epic).
-        // The chain crosses tables at the spec (a story's parent is
-        // the spec ID, not an issue row), so the walk returns the
-        // spec id as the group key — one group per groomed spec,
-        // which IS the theme. Parentless tasks get the ad-hoc key.
+        // Group by THEME (operator rule 2026-08-08): spec-chained
+        // tasks under their spec, follow-ups under their followUpOf
+        // root (one sprint per theme — never a solo follow-up
+        // sprint), rootless ad-hoc under the singleton ad-hoc key.
         var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal);
         var groupOrder = new List<string>();
         foreach (var task in eligible)
         {
-            var groupKey = ResolveGroupKey(task, byId);
+            var groupKey = ResolveThemeKey(task, byId);
             if (groups.TryGetValue(groupKey, out var list))
             {
                 list.Add(task);
@@ -814,6 +847,18 @@ public sealed class SprintAssembler
                 return (AdHocGroupName,
                     "Operator-enqueued work not tied to a spec epic.",
                     DateTime.MaxValue);
+            }
+            if (key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
+                && groups.TryGetValue(key, out var cluster) && cluster.Count > 0)
+            {
+                var rootId = key[FollowUpThemePrefix.Length..];
+                var rootTitle = byId.TryGetValue(rootId, out var rootTask) ? rootTask.Title : rootId;
+                var rootDesc = byId.TryGetValue(rootId, out var rootForDesc)
+                    ? rootForDesc.Description : null;
+                return (rootTitle,
+                    rootDesc is { Length: > 500 } rd ? rd[..500]
+                        : rootDesc ?? $"Complete the follow-up work filed from {rootId}: {rootTitle}",
+                    cluster.Min(t => t.CreatedAt));
             }
             var spec = await specs.GetAsync(key, ct);
             var epicDesc = spec?.ParentIssueId is not null
@@ -850,8 +895,10 @@ public sealed class SprintAssembler
         var chosen = groups[chosenKey];
         var (name, goal, _) = described[chosenKey];
 
-        // Ad-hoc assembly is ALWAYS a solo sprint (highest priority
-        // first, then oldest) — never a bundle.
+        // Rootless ad-hoc assembly is ALWAYS a solo sprint (highest
+        // priority first, then oldest) — never a bundle. Follow-up
+        // themes pack up to MaxThemeTasks per sprint (priority, then
+        // oldest); the remainder stays eligible for the next sprint.
         if (chosenKey == AdHocGroupName)
         {
             var single = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First();
@@ -859,6 +906,12 @@ public sealed class SprintAssembler
             name = single.Title;
             goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
                 ?? $"Complete {single.Id}: {single.Title}";
+        }
+        else if (chosenKey.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
+            && chosen.Count > MaxThemeTasks)
+        {
+            chosen = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt)
+                .Take(MaxThemeTasks).ToList();
         }
 
         var start = DateTime.UtcNow;
@@ -939,6 +992,45 @@ public sealed class SprintAssembler
         return AdHocGroupName;
     }
 
+    /// <summary>Prefix for follow-up theme groups (see <see cref="ResolveThemeKey"/>).</summary>
+    public const string FollowUpThemePrefix = "followup:";
+
+    /// <summary>Max tasks packed into one sprint from a single follow-up theme; the remainder stays eligible for the next sprint.</summary>
+    internal const int MaxThemeTasks = 10;
+
+    /// <summary>
+    /// The ASSEMBLY theme key (operator rule 2026-08-08: there is
+    /// exactly one kind of sprint — a themed bundle; follow-up work
+    /// NEVER spawns a solo sprint). Spec-chained tasks group under
+    /// their spec (<see cref="ResolveGroupKey"/>) — a groomed spec IS
+    /// the theme. Parentless tasks with a <c>followUpOf</c> chain group
+    /// under the chain's ROOT ancestor (<c>followup:&lt;rootId&gt;</c>):
+    /// follow-ups filed from the same work are definitionally the same
+    /// theme and pack into ONE sprint together. Only truly rootless
+    /// ad-hoc tasks (operator-enqueued, no chain) keep the singleton
+    /// AdHocGroupName path — they are the genuinely unrelated work the
+    /// old solo-sprint rule (2026-07-27) was written for.
+    /// </summary>
+    internal static string ResolveThemeKey(IssueRecord task, IReadOnlyDictionary<string, IssueRecord> byId)
+    {
+        var specKey = ResolveGroupKey(task, byId);
+        if (specKey != AdHocGroupName) return specKey;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal) { task.Id };
+        string? root = null;
+        var current = task;
+        var hops = 0;
+        while (hops++ < 20 && current.GetMetadata("followUpOf") is { } fu)
+        {
+            var next = fu.Split(',')[0].Trim();
+            if (next.Length == 0 || !seen.Add(next)) break;
+            root = next;
+            if (!byId.TryGetValue(next, out var parent)) break;
+            current = parent;
+        }
+        return root is null ? AdHocGroupName : FollowUpThemePrefix + root;
+    }
+
     /// <summary>
     /// Cross-project guard: a spec group belongs to the project that
     /// OWNS the spec. Tasks physically present in this project's
@@ -960,7 +1052,7 @@ public sealed class SprintAssembler
         var dropped = 0;
         foreach (var key in groupOrder.ToList())
         {
-            if (key == AdHocGroupName) continue;
+            if (key == AdHocGroupName || key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)) continue;
             var groupSpec = await specs.GetAsync(key, ct);
             if (groupSpec is not null
                 && !string.Equals(groupSpec.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))

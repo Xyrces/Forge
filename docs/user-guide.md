@@ -13,7 +13,7 @@ Implementation:  backlog → sprint → dispatch (agent run) → PR → review/C
 
 Four things to internalize:
 
-1. **All engineering work happens inside a sprint.** There is no "just run this task" button — the SprintAssembler (5-min tick) completes the Active sprint when its tasks are terminal and assembles + activates the next one from groomed, eligible work. Sprints are coherent, independently deployable units; unrelated ad-hoc tasks each get their own solo sprint.
+1. **All engineering work happens inside a sprint.** There is no "just run this task" button — the SprintAssembler completes the Active sprint when its tasks are terminal and assembles + activates the next one from groomed, eligible work. Sprints are themed, coherent, independently deployable units: assembly packs all eligible work sharing a theme (a groomed spec, or a follow-up chain's root task) into one sprint, choosing the highest-priority theme first. Only truly unrelated operator-enqueued tasks each get their own solo sprint.
 2. **Nothing enters a sprint ungroomed.** Ad-hoc tasks (operator-enqueued, agent-filed follow-ups) sit in the backlog until the ScheduledGroomer marks them `groomed=true` (or closes them with a reason).
 3. **The task IS the watch.** Once a PR exists, the task row carries `prNumber`/`branch` metadata and the 15-minute sweep drives review, rework, and merge. No manual PR babysitting.
 4. **The operator steers, the system executes.** Your levers: intake, requeues, stage gates, role model overrides, slot caps, and the editable workflow — not hand-merges or hand-pushes.
@@ -30,7 +30,7 @@ Open `/intake` and chat with the Intake agent. Describe the feature; the agent p
 - **CLI:** `dotnet run --project Forge -- --enqueue-task "Title" --task-type ecs --task-desc "..." --branch "agent/thing"`.
 - **API:** `POST /api/state/issues`.
 
-Ad-hoc tasks land in the backlog as ungroomed. The groomer pass verifies them against the project vision and current repo state, then marks them groomed or closes them. Groomed ad-hoc work is either injected into the Active sprint (only when it genuinely belongs there: it follows up a sprint member, blocks a sprint member, is operator-P1, or was requeued by you) or assembled into a solo sprint.
+Ad-hoc tasks land in the backlog as ungroomed. The groomer pass verifies them against the project vision and current repo state, sets their priority relative to the rest of the open work, then marks them groomed or closes them. Groomed ad-hoc work is either injected into the Active sprint (only when it genuinely belongs there: it blocks a sprint member, is operator-P1, or was requeued by you) or assembled into a themed sprint — follow-ups pack with the rest of their chain's work, so related fixes ship together.
 
 ### Agent-filed follow-ups
 

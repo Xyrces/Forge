@@ -17,9 +17,17 @@ namespace Forge.Core;
 /// probing (primary first — legacy rows — then each project store)
 /// and cache the result.</item>
 /// <item>List with a project: that project's store (no column filter
-/// — rows are homed). List without a project: fan out across the
-/// primary + every project store and merge (schedulers poll this
-/// way, so every project's pipeline advances).</item>
+/// — rows are homed). List WITHOUT a project: REJECTED (2026-08-09,
+/// operator rule: schema-per-project IS the isolation boundary —
+/// cross-project reads must be explicit). The only legitimate
+/// cross-project readers are the pipeline schedulers that advance
+/// every project's lane and the unified admin view; they call
+/// <see cref="ListAcrossProjectsAsync"/> by name. A silent fan-out on
+/// the shared interface let business logic match per-store-sequence
+/// ids (epic-N/task-N) across projects (live incident 2026-08-09:
+/// talaria's accepted epic-2 resolved to porthorizon's Epic-B spec —
+/// no talaria spec was ever created, and the refinement queue tried
+/// to transition another project's Groomed spec).</item>
 /// </list>
 /// </summary>
 public sealed class ProjectRoutingSpecStore : ISpecStore
@@ -86,6 +94,23 @@ public sealed class ProjectRoutingSpecStore : ISpecStore
             // must not hide a row from its owning store's list).
             return await StoreFor(projectId).ListAsync(null, status, ct);
         }
+        throw new InvalidOperationException(
+            "Unscoped spec listing is not allowed on the routing store — schema-per-project " +
+            "is the isolation boundary (operator rule 2026-08-09). Scope by project, or call " +
+            "ListAcrossProjectsAsync explicitly (pipeline schedulers / unified admin view only).");
+    }
+
+    /// <summary>
+    /// THE explicit cross-project read: fan out across the primary +
+    /// every project store and merge. Restricted by convention to the
+    /// pipeline schedulers that advance every project's lane
+    /// (groomer/designer/artist sweeps) and the unified admin view.
+    /// Callers must never match the merged rows by per-store-sequence
+    /// ISSUE ids (epic-N, task-N — every project has them); spec ids
+    /// are random hex and safe to key on.
+    /// </summary>
+    public async Task<IReadOnlyList<SpecRecord>> ListAcrossProjectsAsync(SpecStatus? status, CancellationToken ct = default)
+    {
         var stores = new List<ISpecStore> { _primary };
         stores.AddRange(_allProjectStores().Where(s => !ReferenceEquals(s, _primary)));
         var merged = new List<SpecRecord>();
@@ -122,4 +147,24 @@ public sealed class ProjectRoutingSpecStore : ISpecStore
         await owner.DeleteAsync(id, ct);
         _ownerCache.TryRemove(id, out _);
     }
+}
+
+/// <summary>
+/// The ONLY sanctioned cross-project spec read (operator rule
+/// 2026-08-09: schema-per-project is the isolation boundary;
+/// cross-project queries exist for exactly two situations — the
+/// pipeline schedulers that advance every project's lane, and the
+/// unified admin view). On the routing store this calls
+/// <see cref="ProjectRoutingSpecStore.ListAcrossProjectsAsync"/> by
+/// name; on a plain per-project store it is just the store's own
+/// unscoped list. Never match the merged rows by per-store-sequence
+/// issue ids (epic-N/task-N); spec ids are random hex and safe.
+/// </summary>
+public static class SpecStoreRoutingExtensions
+{
+    public static Task<IReadOnlyList<SpecRecord>> ListForPipelineSweepAsync(
+        this ISpecStore specs, SpecStatus? status, CancellationToken ct)
+        => specs is ProjectRoutingSpecStore routing
+            ? routing.ListAcrossProjectsAsync(status, ct)
+            : specs.ListAsync(null, status, ct);
 }

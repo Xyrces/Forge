@@ -4,6 +4,37 @@ using Forge.Core;
 namespace Forge.Agents;
 
 /// <summary>
+/// Minimum-interval admission pacer, one per provider. Callers
+/// RESERVE the next slot (reserve-ahead), so N simultaneous
+/// admissions leave spaced by the interval instead of in the same
+/// millisecond — the anti-herd measure for account-level dynamic
+/// throttling (MiniMax Token Plan tightens on burst shape during
+/// peak traffic; 4 slots resuming after a shared cooldown were
+/// re-tripping it within the same second, 2026-08-08).
+/// </summary>
+internal sealed class ProviderPacer
+{
+    private readonly TimeSpan _minInterval;
+    private readonly object _gate = new();
+    private DateTime _next = DateTime.MinValue;
+
+    public ProviderPacer(TimeSpan minInterval) { _minInterval = minInterval; }
+
+    public Task WaitAsync(CancellationToken ct)
+    {
+        TimeSpan wait;
+        lock (_gate)
+        {
+            var now = DateTime.UtcNow;
+            var start = now < _next ? _next : now;
+            _next = start + _minInterval;
+            wait = start - now;
+        }
+        return wait > TimeSpan.Zero ? Task.Delay(wait, ct) : Task.CompletedTask;
+    }
+}
+
+/// <summary>
 /// The single funnel for LLM pressure policy. Wraps every cached
 /// provider client so EVERY subsystem that talks to a model —
 /// engineering runs, groomer, designer, reviewer sweep, memory
@@ -39,6 +70,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
     private readonly string _model;
     private readonly ModelRateLimitTracker _tracker;
     private readonly SemaphoreSlim _permit;
+    private readonly ProviderPacer? _pacer;
     private readonly bool _sharedQuota;
     private readonly int _overloadRetries;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
@@ -54,7 +86,8 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
         IChatClient inner, string provider, string model,
         ModelRateLimitTracker tracker, SemaphoreSlim permit,
         bool sharedQuota = false, int overloadRetries = 3,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        ProviderPacer? pacer = null)
         : base(inner)
     {
         _provider = provider;
@@ -64,6 +97,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
         _sharedQuota = sharedQuota;
         _overloadRetries = Math.Max(0, overloadRetries);
         _delay = delay ?? Task.Delay;
+        _pacer = pacer;
     }
 
     public override async Task<ChatResponse> GetResponseAsync(
@@ -72,8 +106,10 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
         var coolingUntil = _tracker.CoolingDownUntil(_provider, _model);
         if (coolingUntil is not null)
         {
+            var accountWide = _tracker.ProviderCoolingDownUntil(_provider) == coolingUntil;
             throw new InvalidOperationException(
-                $"429 Too Many Requests: {_provider}/{_model} is in rate limit cooldown " +
+                $"429 Too Many Requests: {_provider}/{_model} is in " +
+                $"{(accountWide ? "account-quota" : "rate limit")} cooldown " +
                 $"until {coolingUntil.Value:HH:mm:ss} UTC (request suppressed client-side)");
         }
 
@@ -86,6 +122,12 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
             {
                 try
                 {
+                    // Pace admissions per provider: a herd of slots
+                    // resuming after a cooldown must not fire their
+                    // first requests in the same second (MiniMax
+                    // Token Plan dynamic throttling punishes exactly
+                    // that burst shape). Retries consume a slot too.
+                    if (_pacer is not null) await _pacer.WaitAsync(cancellationToken);
                     var response = await base.GetResponseAsync(messages, options, cancellationToken);
                     if (overloadRetry > 0)
                     {
@@ -137,6 +179,16 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
                             held = true;
                         }
                         continue;
+                    }
+                    if (kind == RateLimitKind.AccountQuota)
+                    {
+                        // Account budget throttled (MiniMax Token
+                        // Plan 2056/2062): the budget is shared by
+                        // every model + slot on the key, so the
+                        // cooldown is provider-wide, escalating and
+                        // jittered — never retried in place.
+                        _tracker.RecordAccountQuota(_provider, retryAfter);
+                        throw;
                     }
                     if (kind == RateLimitKind.Quota && _sharedQuota)
                         _tracker.RecordProviderRateLimit(_provider, retryAfter);

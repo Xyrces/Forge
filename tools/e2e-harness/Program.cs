@@ -399,11 +399,17 @@ if (useRealLlm)
             eventBus,
             NullLogger<PRWatcher>.Instance);
         // reviewsOverride returns Approved; PRWatcher sees
-        // GreenAndApproved on its first poll.
+        // GreenAndApproved on its first poll. changedFilesOverride:
+        // the fabricated Octokit PullRequest can't carry ChangedFiles
+        // (sealed, init-only — see LocalPrStore.CreatePr), so the
+        // empty-diff supersede guard would read 0 and close EVERY
+        // harness PR as superseded; compute the real count from the
+        // bare remote (broke the closed loop 2026-08-14).
         var watchResult = await prWatcher.ProcessWatchedTaskAsync(
             watchTask, CancellationToken.None,
             reviewsOverride: _ => new[] { Octokit.PullRequestReviewState.Approved },
-            headShaOverride: _ => headSha);
+            headShaOverride: _ => headSha,
+            changedFilesOverride: p => CountChangedFiles(gitHub, p.Number));
         Console.WriteLine($"  PRWatcher.ProcessWatchedTaskAsync exit code = {watchResult}");
 
         // Step 3: verify the closed loop closed. The PR should
@@ -476,8 +482,16 @@ if (useRealLlm)
         return 0;
     }
 
-    private static void WriteScaffold(string clone)
+    private static int CountChangedFiles(Forge.LocalGitHubService gitHub, int prNumber)
     {
+        var info = gitHub.PrStore.PrInfo[prNumber];
+        var output = Git.Capture(
+            $"--git-dir=\"{gitHub.LocalRemotePath}\" diff --name-only {info.BaseBranch}...{info.HeadBranch}",
+            gitHub.LocalRemotePath);
+        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length;
+    }
+
+    private static void WriteScaffold(string clone)    {
         File.WriteAllText(Path.Combine(clone, "MyApp.csproj"), """
             <Project Sdk="Microsoft.NET.Sdk">
               <PropertyGroup>
@@ -682,8 +696,7 @@ internal sealed record HeadroomStats(
 /// Thin wrapper around git CLI for the harness.
 /// </summary>
 internal static class Git
-{
-    public static void Run(string args, string cwd)
+{    public static void Run(string args, string cwd)
     {
         var psi = new ProcessStartInfo
         {

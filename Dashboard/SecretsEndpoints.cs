@@ -40,22 +40,34 @@ public static class SecretsEndpoints
     private static async Task<IResult> ListSecretsAsync(
         string id,
         [FromServices] ISecretStore store,
+        [FromServices] IServiceProvider services,
         CancellationToken ct)
     {
         var secrets = await store.ListAsync(id, ct);
         var byKind = secrets.ToDictionary(s => s.Kind, s => s, StringComparer.OrdinalIgnoreCase);
 
-        // Whitelist of known kinds so the UI's upper panel always
-        // shows the same supported fields (even when unset). Custom
+        // Known kinds: the fixed operational kinds + every CONFIGURED
+        // LLM provider's key (same convention ProviderApiKeyResolver
+        // resolves at runtime), so a configured provider's secret
+        // always shows its set/unset state in the upper panel. Custom
         // kinds the operator stored via POST follow, sorted, so the
         // lower panel can render everything that exists. The DTO
         // carries Known so the UI ships no mirror of this list.
-        var knownKinds = new[] { SecretKinds.GitHubToken, SecretKinds.KiloGatewayApiKey, SecretKinds.MeshyApiKey, SecretKinds.KimiApiKey };
-        var dtos = knownKinds.Select(kind => byKind.TryGetValue(kind, out var row)
+        var knownKinds = new List<string> { SecretKinds.GitHubToken, SecretKinds.MeshyApiKey };
+        if (services.GetService(typeof(Forge.Agents.LlmConfig)) is Forge.Agents.LlmConfig llm)
+        {
+            knownKinds.AddRange(llm.Providers.Select(p => SecretKinds.ForProvider(p.Name)));
+        }
+        else
+        {
+            knownKinds.AddRange(new[] { SecretKinds.KiloGatewayApiKey, SecretKinds.KimiApiKey, SecretKinds.MinimaxApiKey });
+        }
+        var known = knownKinds.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var dtos = known.Select(kind => byKind.TryGetValue(kind, out var row)
             ? new SecretMetadataDto(kind, Set: true, row.CreatedAt, row.UpdatedAt, Known: true)
             : new SecretMetadataDto(kind, Set: false, null, null, Known: true))
             .Concat(byKind.Keys
-                .Where(k => !knownKinds.Contains(k, StringComparer.OrdinalIgnoreCase))
+                .Where(k => !known.Contains(k, StringComparer.OrdinalIgnoreCase))
                 .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
                 .Select(k =>
                 {

@@ -14,8 +14,9 @@ namespace Forge.Agents;
 /// client 401s on chat there ("PAID_MODEL_AUTH_REQUIRED").
 ///
 /// Scope: text + tool use round-trips, non-streaming. Streaming is
-/// surfaced as a single buffered chunk (M.E.AI's function-invoking
-/// pipeline only needs <see cref="GetResponseAsync(IEnumerable{ChatMessage}, ChatOptions?, CancellationToken)"/>).
+/// surfaced as a single buffered chunk carrying the FULL contents —
+/// text alone would drop tool_use blocks from the function-invoking
+/// pipeline (the intake agent streams through it).
 /// </summary>
 public sealed class AnthropicMessagesChatClient : IChatClient
 {
@@ -83,13 +84,20 @@ public sealed class AnthropicMessagesChatClient : IChatClient
             // RateLimitAwareChatClient / IsLlmAuthFailure classify it.
             if ((int)resp.StatusCode == 429)
             {
-                // Typed 429: carry Retry-After + the overload-vs-quota
-                // classification up to RateLimitAwareChatClient — Kimi
-                // documents Retry-After on overload responses, and the
-                // flat default cooldown is wrong in both directions.
+                // Typed 429: carry Retry-After, the overload-vs-quota
+                // classification, the provider's application code
+                // (MiniMax 2056/2062 = account-level Token Plan
+                // throttle) and its request id (support correlation)
+                // up to RateLimitAwareChatClient — Kimi documents
+                // Retry-After on overload responses, and the flat
+                // default cooldown is wrong in both directions.
+                var kind = LlmRateLimitException.Classify(raw);
+                var code = LlmRateLimitException.ExtractErrorCode(raw);
+                var requestId = LlmRateLimitException.ExtractRequestId(raw);
                 throw new LlmRateLimitException(
-                    $"HTTP 429 rate limit: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]",
-                    ParseRetryAfter(resp), LlmRateLimitException.Classify(detail));
+                    $"HTTP 429 rate limit ({kind}{(code is not null ? $", provider code {code}" : "")}): {detail} " +
+                    $"[uri={resp.RequestMessage?.RequestUri} request_id={requestId ?? "n/a"} body={raw[..Math.Min(300, raw.Length)]}]",
+                    ParseRetryAfter(resp), kind, code, requestId);
             }
             throw new HttpRequestException(
                 $"HTTP {(int)resp.StatusCode}: {detail} [uri={resp.RequestMessage?.RequestUri} body={raw[..Math.Min(300, raw.Length)]}]");
@@ -101,8 +109,22 @@ public sealed class AnthropicMessagesChatClient : IChatClient
         IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        // Buffered "streaming": one update carrying the FULL response
+        // contents. Yielding only response.Text silently drops tool_use
+        // blocks — FunctionInvokingChatClient then never sees the
+        // FunctionCallContent and never invokes the tool (live
+        // 2026-08-14: the kimi intake said "creating the epic" while
+        // its create_epic call vanished, and a tool-use-only reply
+        // surfaced as an EMPTY assistant message that crashed
+        // IntakeStore.AppendMessageAsync with "content is required").
         var response = await GetResponseAsync(messages, options, cancellationToken);
-        yield return new ChatResponseUpdate(ChatRole.Assistant, response.Text);
+        yield return new ChatResponseUpdate(
+            ChatRole.Assistant,
+            response.Messages.SelectMany(m => m.Contents).ToList())
+        {
+            FinishReason = response.FinishReason,
+            ResponseId = response.ResponseId,
+        };
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) =>

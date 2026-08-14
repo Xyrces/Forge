@@ -247,6 +247,7 @@ public static class ForgeComposition
             openAiFactory.RateLimits = modelRateLimits;
             openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
             openAiFactory.OverloadRetryCount = options.Llm.OverloadRetryCount;
+            openAiFactory.MinRequestInterval = TimeSpan.FromMilliseconds(options.Llm.MinRequestIntervalMs);
 
             // Live provider keys: a Secrets-page rotation takes effect
             // on the next run — no restart. The 30s refresh loop is
@@ -432,6 +433,10 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.GroomRequestedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.GroomRequestedConsumer>());
+        services.AddSingleton(sp => new Consumers.ProjectRolesChangedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.ProjectRolesChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.ProjectRolesChangedConsumer>());
         services.AddSingleton(sp => new Consumers.PrOpenedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             watchSweeps, sp.GetRequiredService<ILogger<Consumers.PrOpenedConsumer>>()));
@@ -510,7 +515,12 @@ public static class ForgeComposition
                 loggerFactory.CreateLogger<IntakeAgent>(),
                 skills: skillSource,
                 rolePromptsRoot: rolePromptsRoot,
-                specs: specStoreRef.Value));
+                specs: specStoreRef.Value,
+                // Repo grounding (2026-08-09): without the clone brief
+                // + vision the intake asks the operator about the tech
+                // stack — facts the codebase already answers.
+                projectRootLookup: ProjectRootLookup,
+                memory: memoryStore));
         services.AddSingleton(intakeRegistry);
 
         var specExtractionReader = new SpecExtractionReader(issues);
