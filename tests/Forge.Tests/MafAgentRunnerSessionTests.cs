@@ -180,11 +180,37 @@ public class MafAgentRunnerSessionTests : IDisposable
         Assert.DoesNotContain(stored, h => h.Body.Contains("poisoned"));
     }
 
+    [Fact]
+    public async Task PoisonedSession_MinimaxToolPairingPhrasing_DroppedAndRestartedCold()
+    {
+        // Live incident 2026-08-14 (porthorizon task-525): a session
+        // persisted mid-tool-loop 400'd every resume on minimax's
+        // Anthropic endpoint ("tool call result does not follow tool
+        // call (2013)"); requeue replayed the same poisoned blob and
+        // the task burned dispatch cycles until the operator noticed.
+        await _memory.RememberAsync("session/_/task-525x/CoreDev", "{\"poisoned\":true}", ttlDays: null);
+        var client = new PoisonOnceClient(
+            "HTTP 400: invalid params, tool call result does not follow tool call (2013) " +
+            "[uri=https://api.minimax.io/anthropic/v1/messages]");
+        var runner = NewRunner(client);
+        var context = ContextFor("task-525x");
+
+        var result = await runner.RunAsync(AgentType.CoreDev, "the prompt", sessionId: null, context, CancellationToken.None);
+
+        Assert.Equal("done", result.Text);
+        Assert.Equal(2, client.Calls);
+        var stored = await _memory.RecallAsync("session/_/task-525x/CoreDev");
+        Assert.DoesNotContain(stored, h => h.Body.Contains("poisoned"));
+    }
+
     [Theory]
     [InlineData("HTTP 400: an assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'.", true)]
     [InlineData("HTTP 400: Invalid request: Your request exceeded model token limit: max 262144", true)]
     [InlineData("HTTP 400: total message size 35670664 exceeds limit 33554432", true)]
     [InlineData("ClientResultException: HTTP 400 (AI_APICallError: )  invalid params, context window exceeds limit (2013)", true)]
+    [InlineData("HTTP 400: invalid params, tool call result does not follow tool call (2013) [uri=https://api.minimax.io/anthropic/v1/messages]", true)]
+    [InlineData("HTTP 400: messages.5: `tool_use` ids were found without `tool_result` blocks immediately after", true)]
+    [InlineData("HTTP 400: unexpected `tool_use_id` found in `tool_result` block: call_123", true)]
     [InlineData("HTTP 429 Too Many Requests: rate limit reached", false)]
     [InlineData("provider exploded", false)]
     public void IsPoisonedSessionError_Classifies(string message, bool expected)
@@ -345,6 +371,10 @@ public class MafAgentRunnerSessionTests : IDisposable
     /// cold restart going through.</summary>
     private sealed class PoisonOnceClient : IChatClient
     {
+        private readonly string _error;
+        public PoisonOnceClient(string? error = null) => _error = error ??
+            "HTTP 400: an assistant message with 'tool_calls' must be followed by tool messages " +
+            "responding to each 'tool_call_id'. The following tool_call_ids did not have response messages: call_1";
         public int Calls;
         public Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
@@ -352,9 +382,7 @@ public class MafAgentRunnerSessionTests : IDisposable
             Calls++;
             if (Calls == 1)
             {
-                throw new HttpRequestException(
-                    "HTTP 400: an assistant message with 'tool_calls' must be followed by tool messages " +
-                    "responding to each 'tool_call_id'. The following tool_call_ids did not have response messages: call_1");
+                throw new HttpRequestException(_error);
             }
             return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")));
         }

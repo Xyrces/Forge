@@ -703,6 +703,27 @@ public async Task<AgentRunResult> RunAsync(
             {
                 return true;
             }
+            // MiniMax Anthropic-endpoint phrasing (observed live
+            // 2026-08-14: porthorizon task-525, "invalid params, tool
+            // call result does not follow tool call (2013)" — a
+            // persisted session with a dangling tool_use/tool_result
+            // pair 400'd every resume; requeue alone could never
+            // recover because the poisoned blob was replayed each
+            // time). Same failure family as the OpenAI phrasing above.
+            if (e.Message.Contains("tool call result does not follow tool call", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            // Anthropic-native phrasings for the same pairing break:
+            // tool_use ids without tool_result blocks, or a tool_result
+            // with an unknown tool_use_id.
+            if (e.Message.Contains("tool_use", StringComparison.OrdinalIgnoreCase)
+                && e.Message.Contains("tool_result", StringComparison.OrdinalIgnoreCase)
+                && (e.Message.Contains("without", StringComparison.OrdinalIgnoreCase)
+                    || e.Message.Contains("unexpected", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
         }
         return false;
     }
