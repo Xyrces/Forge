@@ -273,16 +273,52 @@ public sealed class GroomerAgent
     {
         if (string.IsNullOrWhiteSpace(title)) return "title_required";
         if (string.IsNullOrWhiteSpace(storyId)) return "story_id_required";
+        // The parent must be a story THIS run created. Models pass bare
+        // numbers ("39" for "story-39") or hallucinated ids; without
+        // validation the task is written with an unresolvable parent —
+        // the spec tree shows the story as taskless, the story never
+        // auto-closes, and the spec strands forever (observed live
+        // 2026-08-09, surfaced 2026-08-17: porthorizon
+        // spec-257a4c26's 9 tasks landed with parent_issue_id="39"
+        // instead of "story-39" and the story sat Pending-but-empty
+        // until the operator noticed sprints had stopped).
+        var normalizedStoryId = ResolveCreatedStoryId(storyId, createdStoryIds);
+        if (normalizedStoryId is null)
+        {
+            return $"unknown_story_id: '{storyId}' was not created by this run. " +
+                $"Valid story ids: {(createdStoryIds.Count == 0 ? "(none yet — call create_story first)" : string.Join(", ", createdStoryIds))}. " +
+                "Pass the exact id returned by create_story.";
+        }
         // Structural cap: 3 tasks per story (same rationale as the
         // story cap).
-        var forStory = taskCountByStory.GetValueOrDefault(storyId, 0);
+        var forStory = taskCountByStory.GetValueOrDefault(normalizedStoryId, 0);
         if (forStory >= 3) return "task_limit_reached_for_story";
         var task = await _issues.CreateAsync(new NewIssue(
             Type: "task", Title: title, Description: description ?? "",
-            ParentId: storyId, Priority: priority ?? 2), ct);
+            ParentId: normalizedStoryId, Priority: priority ?? 2), ct);
         createdTaskIds.Add(task.Id);
-        taskCountByStory[storyId] = forStory + 1;
+        taskCountByStory[normalizedStoryId] = forStory + 1;
         return task.Id;
+    }
+
+    /// <summary>Resolve a model-supplied story reference to a story
+    /// this run created: exact id, or a bare numeric suffix ("39" →
+    /// "story-39"). Null when nothing matches.</summary>
+    private static string? ResolveCreatedStoryId(string storyId, List<string> createdStoryIds)
+    {
+        var exact = createdStoryIds.FirstOrDefault(id =>
+            string.Equals(id, storyId, StringComparison.OrdinalIgnoreCase));
+        if (exact is not null) return exact;
+        var trimmed = storyId.Trim().TrimStart('#');
+        if (trimmed.All(char.IsDigit) && trimmed.Length > 0)
+        {
+            var suffix = "-" + trimmed;
+            var matches = createdStoryIds
+                .Where(id => id.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (matches.Count == 1) return matches[0];
+        }
+        return null;
     }
 
     private async Task<string> SetStatusAsync(

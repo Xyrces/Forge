@@ -129,6 +129,14 @@ public interface IIssueStore
     /// rest of the work so sprints build the most important things).
     /// </summary>
     Task SetPriorityAsync(string id, int priority, CancellationToken ct = default);
+
+    /// <summary>Re-parent an issue (repair path for broken parent
+    /// links — e.g. a groomer that accepted a bare numeric story id
+    /// and wrote parent_issue_id="39" instead of "story-39", observed
+    /// live 2026-08-09 on porthorizon spec-257a4c26). The new parent
+    /// must exist in the same store. Writes a "reparented" event for
+    /// the audit trail.</summary>
+    Task ReparentAsync(string id, string newParentId, CancellationToken ct = default);
     /// <summary>
     /// Update title + description in place. Used by intake dedupe: a
     /// re-proposed epic refines the session's existing (unaccepted)
@@ -2107,6 +2115,27 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await InsertEventAsync(conn, null, id, "priority_change", $"priority={Math.Clamp(priority, 1, 5)}", ct);
+    }
+
+    public async Task ReparentAsync(string id, string newParentId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(newParentId))
+            throw new ArgumentException("newParentId is required", nameof(newParentId));
+        if (string.Equals(id, newParentId, StringComparison.Ordinal))
+            throw new InvalidOperationException("an issue cannot be its own parent");
+        var parent = await GetAsync(newParentId, ct)
+            ?? throw new InvalidOperationException($"parent {newParentId} not found");
+        await using var conn = await _db.OpenAsync(ct);
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = $"UPDATE {T("issue")} SET parent_issue_id=@p, updated_at=@now WHERE id=@id";
+            cmd.AddParam("@p", parent.Id);
+            cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+            cmd.AddParam("@id", id);
+            if (await cmd.ExecuteNonQueryAsync(ct) == 0)
+                throw new InvalidOperationException($"issue {id} not found");
+        }
+        await InsertEventAsync(conn, null, id, "reparented", $"parent={parent.Id}", ct);
     }
 
     public async Task UpdateSummaryAsync(string id, string title, string? description, CancellationToken ct = default)
