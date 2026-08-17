@@ -34,6 +34,29 @@ public class IssueStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Reparent_RewiresParent_AuditsEvent()
+    {
+        // Repair path for the 2026-08-09 groomer corruption (bare
+        // numeric story ids written as parent_issue_id).
+        var story = await _store.CreateAsync(new NewIssue(Type: "story", Title: "the story"));
+        var task = await _store.CreateAsync(new NewIssue(Type: "task", Title: "the task", ParentId: "39"));
+        Assert.Equal("39", (await _store.GetAsync(task.Id))!.ParentIssueId);
+
+        await _store.ReparentAsync(task.Id, story.Id);
+
+        var reloaded = await _store.GetAsync(task.Id);
+        Assert.Equal(story.Id, reloaded!.ParentIssueId);
+    }
+
+    [Fact]
+    public async Task Reparent_UnknownParent_Throws()
+    {
+        var task = await _store.CreateAsync(new NewIssue(Type: "task", Title: "the task"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _store.ReparentAsync(task.Id, "story-999"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _store.ReparentAsync(task.Id, task.Id));
+    }
+
+    [Fact]
     public async Task Create_StoresMetadata()
     {
         var issue = await _store.CreateAsync(new NewIssue(

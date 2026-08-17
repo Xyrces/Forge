@@ -328,6 +328,46 @@ public static class TaskEndpoints
             }
         });
 
+        // Operator reparent (2026-08-17): repair a broken parent link
+        // — the groomer once accepted a bare numeric story id and wrote
+        // parent_issue_id="39" instead of "story-39" (porthorizon
+        // spec-257a4c26: 9 tasks orphaned; the stories looked taskless
+        // and could never auto-close). Goes through IssueStore so the
+        // event audit records the repair.
+        app.MapPost("/api/tasks/{id}/reparent", async (string id, string? projectId, HttpContext ctx, CancellationToken ct) =>
+        {
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx2 = projectContexts.Find(projectId);
+                if (ctx2 is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx2.Issues;
+            }
+            string? newParentId = null;
+            try
+            {
+                using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ct);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("parentIssueId", out var pEl))
+                    newParentId = pEl.GetString();
+            }
+            catch (JsonException) { return Results.BadRequest(new { error = "invalid JSON body" }); }
+            if (string.IsNullOrWhiteSpace(newParentId))
+                return Results.BadRequest(new { error = "parentIssueId required" });
+            try
+            {
+                if (await store.GetAsync(id, ct) is null)
+                    return Results.NotFound(new { error = "task not found", id });
+                await store.ReparentAsync(id, newParentId, ct);
+                logger.LogInformation("POST /api/tasks/{Id}/reparent: parent -> {Parent}", id, newParentId);
+                return Results.Json(new { taskId = id, parentIssueId = newParentId });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
         // Operator strike reset (2026-07-31): the full nudge for a
         // stuck task — clears EVERY strike counter (rework rounds,
         // no-progress rounds, auto-resume budget, review rounds) plus

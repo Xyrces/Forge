@@ -152,6 +152,76 @@ public class GroomerAgentTests : IDisposable
         var result = await agent.GroomAsync("spec-missing", default);
         Assert.Null(result);
     }
+
+    [Fact]
+    public async Task GroomAsync_BareNumericStoryId_NormalizesToCreatedStory()
+    {
+        // Live corruption 2026-08-09 (porthorizon spec-257a4c26,
+        // surfaced 2026-08-17): the model passed storyId "39" and the
+        // task was written with parent_issue_id="39" — the spec tree
+        // showed the story as taskless, the story never auto-closed,
+        // and the spec stranded with sprints never assembling its work.
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "P", Title: "T",
+            Body: """
+                ## Acceptance criteria
+                - [ ] one
+                """));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+
+        // The store mints story-1 for the first story; the model
+        // references it as bare "1".
+        var fcs = new[]
+        {
+            new FunctionCallContent("c1", "create_story",
+                new Dictionary<string, object?> { ["title"] = "Story 1" }),
+            new FunctionCallContent("c2", "create_task",
+                new Dictionary<string, object?>
+                {
+                    ["title"] = "Do the thing",
+                    ["storyId"] = "1",
+                }),
+            new FunctionCallContent("c3", "set_spec_status",
+                new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        };
+        var agent = BuildAgent(new MultiToolCallingChatClient(fcs, "Done."));
+        var result = await agent.GroomAsync(spec.Id, default);
+
+        var storyId = Assert.Single(result!.StoryIds);
+        var tasks = (await _issues.ListAsync(new IssueFilter { Type = "task" }, default)).ToList();
+        var task = Assert.Single(tasks);
+        Assert.Equal(storyId, task.ParentIssueId);
+    }
+
+    [Fact]
+    public async Task GroomAsync_HallucinatedStoryId_Rejected_NoTaskCreated()
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "P", Title: "T",
+            Body: """
+                ## Acceptance criteria
+                - [ ] one
+                """));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+
+        var fcs = new[]
+        {
+            new FunctionCallContent("c1", "create_story",
+                new Dictionary<string, object?> { ["title"] = "Story 1" }),
+            new FunctionCallContent("c2", "create_task",
+                new Dictionary<string, object?>
+                {
+                    ["title"] = "Do the thing",
+                    ["storyId"] = "story-999",
+                }),
+            new FunctionCallContent("c3", "set_spec_status",
+                new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        };
+        var agent = BuildAgent(new MultiToolCallingChatClient(fcs, "Done."));
+        await agent.GroomAsync(spec.Id, default);
+
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Type = "task" }, default));
+    }
 }
 
 public class DeterministicScorerTests
