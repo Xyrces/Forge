@@ -574,11 +574,13 @@ public sealed class SprintAssembler
                 var members = groups[key];
                 // Ad-hoc assembles one SOLO sprint per task named
                 // after the task — show the task that would go first.
-                // Follow-up themes name after the root task's title.
+                // Follow-up themes name after the LEADING MEMBER too
+                // (the chain root is usually merged already — see
+                // DescribeAsync), not the root task's title.
                 var name = key == AdHocGroupName
                     ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
                     : key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                        ? (byId.TryGetValue(key[FollowUpThemePrefix.Length..], out var rootTask) ? rootTask.Title : key)
+                        ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
                         : (await specs.GetAsync(key, ct))?.Title ?? key;
                 items.Add(new EligibleGroupItem(key, name, members.Count,
                     members.Min(t => t.Priority), members.Min(t => t.CreatedAt)));
@@ -974,12 +976,20 @@ public sealed class SprintAssembler
             {
                 var rootId = key[FollowUpThemePrefix.Length..];
                 var rootTitle = byId.TryGetValue(rootId, out var rootTask) ? rootTask.Title : rootId;
-                var rootDesc = byId.TryGetValue(rootId, out var rootForDesc)
-                    ? rootForDesc.Description : null;
-                return (rootTitle,
-                    rootDesc is { Length: > 500 } rd ? rd[..500]
-                        : rootDesc ?? $"Complete the follow-up work filed from {rootId}: {rootTitle}",
-                    cluster.Min(t => t.CreatedAt));
+                // Name after the LEADING MEMBER, not the root: the
+                // root is usually long-merged (the follow-up chain
+                // outlives it), and a sprint named for a task it does
+                // not contain reads as work happening OUTSIDE the
+                // sprint (operator confusion 2026-08-18: Sprint 130
+                // was named 'Fix stale inline comment near
+                // MarkConsumed' — the completed root task-660 — while
+                // its only member was task-705's docs wording fix).
+                // The root stays in the goal for chain context.
+                var ordered = cluster.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).ToList();
+                var memberTitles = string.Join("; ", ordered.Take(3).Select(t => t.Title));
+                var goal = $"Follow-up work filed from {rootId} ({rootTitle}): {memberTitles}" +
+                    (cluster.Count > 3 ? $" (+{cluster.Count - 3} more)" : "");
+                return (ordered[0].Title, goal, cluster.Min(t => t.CreatedAt));
             }
             var spec = await specs.GetAsync(key, ct);
             var epicDesc = spec?.ParentIssueId is not null
