@@ -39,6 +39,7 @@ public class PRWatcherReworkTests : IDisposable
     private sealed class FakeGitHub : GitHubService
     {
         public CommitState Ci = CommitState.Pending;
+        public int CiSignalCount = 1;   // zero models "CI never fired for this head"
         public CommitState BaseCi = CommitState.Success;   // base branch (main) head check state
         public IReadOnlyList<string> FailedChecks = Array.Empty<string>();
         public bool MergeResult = true;
@@ -68,6 +69,8 @@ public class PRWatcherReworkTests : IDisposable
         }
         public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
             => Task.FromResult(sha == "main-head-sha" ? BaseCi : Ci);
+        public override Task<int> GetCiSignalCountAsync(string sha, CancellationToken cancellationToken = default)
+            => Task.FromResult(CiSignalCount);
         public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default)
             => Task.FromResult("main-head-sha");
         public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default)
@@ -145,6 +148,69 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     private static PullRequest Pr(int n) => new(n);
+
+    [Fact]
+    public async Task MissingCi_ThreeZeroSignalPolls_FiresNoStrikeRetrigger()
+    {
+        // Live 2026-08-18 (porthorizon task-651/PR #905): the head
+        // commit had ZERO check runs — GitHub never scheduled the
+        // workflows — so CI read Pending forever: no merge, no
+        // CI-failed rework, just the stale window. Three zero-signal
+        // polls fire a no-strike retrigger round (empty-commit push).
+        var gh = new FakeGitHub { Ci = CommitState.Pending, CiSignalCount = 0 };
+        var task = await SeedAsync();
+        var watcher = NewWatcher(gh);
+
+        for (var poll = 0; poll < 2; poll++)
+        {
+            var early = await watcher.PollWatchedTaskAsync(
+                task, CancellationToken.None, headShaOverride: _ => "abc123");
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, early);
+            Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reworkReason"));
+        }
+
+        var outcome = await watcher.PollWatchedTaskAsync(
+            task, CancellationToken.None, headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Contains("CI never fired", after.GetMetadata("reworkReason"));
+        Assert.Contains("allow-empty", after.GetMetadata("reworkContext"));
+        // No strike: the infra refresh round must not consume the
+        // rework budget.
+        Assert.Equal("0", after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task MissingCi_SignalAppears_CounterResets()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Pending, CiSignalCount = 0 };
+        var task = await SeedAsync();
+        var watcher = NewWatcher(gh);
+
+        for (var poll = 0; poll < 2; poll++)
+        {
+            await watcher.PollWatchedTaskAsync(task, CancellationToken.None, headShaOverride: _ => "abc123");
+        }
+        // Runs appear (CI scheduled late): the counter clears and no
+        // retrigger fires on the next zero-signal poll.
+        gh.CiSignalCount = 1;
+        var withSignal = await watcher.PollWatchedTaskAsync(
+            task, CancellationToken.None, headShaOverride: _ => "abc123");
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, withSignal);
+
+        gh.CiSignalCount = 0;
+        for (var poll = 0; poll < 2; poll++)
+        {
+            var again = await watcher.PollWatchedTaskAsync(
+                task, CancellationToken.None, headShaOverride: _ => "abc123");
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, again);
+        }
+        var third = await watcher.PollWatchedTaskAsync(
+            task, CancellationToken.None, headShaOverride: _ => "abc123");
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, third);
+    }
 
     [Fact]
     public async Task GreenApprovedButConflicting_RoutesToConflictRework_NoMergeAttempt()

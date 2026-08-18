@@ -156,6 +156,22 @@ public class GitHubService
         return response.State.Value;
     }
 
+    /// <summary>How many CI SIGNALS exist for a commit (check runs,
+    /// falling back to legacy statuses). Zero means the CI workflows
+    /// never fired for the commit at all — GitHub occasionally never
+    /// schedules them for a push, and the commit then reads Pending
+    /// forever (observed live 2026-08-18: porthorizon PR #905's head
+    /// had zero check runs; the merge gate could never open and the
+    /// rework loop never fired). The watch uses this to retrigger
+    /// instead of waiting out the stale window.</summary>
+    public virtual async Task<int> GetCiSignalCountAsync(string sha, CancellationToken cancellationToken = default)
+    {
+        var checkRuns = await _client.Check.Run.GetAllForReference(_owner, _repo, sha);
+        if (checkRuns.TotalCount > 0) return checkRuns.TotalCount;
+        var response = await _client.Repository.Status.GetCombined(_owner, _repo, sha);
+        return response.Statuses?.Count ?? 0;
+    }
+
     public virtual async Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
         => await _client.PullRequest.Review.GetAll(_owner, _repo, prNumber);
 
