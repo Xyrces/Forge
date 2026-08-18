@@ -110,6 +110,86 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task AgedFailure_AutoClosed_BySweep_StoryAndEpicFollow()
+    {
+        // Operator direction 2026-08-18 ("fix this permanently"): a
+        // Failed task nobody touched past the aging window is
+        // abandoned work — leaving it Failed holds its story/epic
+        // (and sprint assembly) hostage forever, which is how
+        // porthorizon sat idle 24h+ on 20 ancient failures while the
+        // board read as a busy backlog. The sweep closes it and the
+        // terminal-tree cascade closes its parents in the same tick.
+        var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "test", Title: "s", Body: "b", ParentIssueId: epic.Id));
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "st", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "t", ParentId: story.Id));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, CancellationToken.None);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, CancellationToken.None);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, CancellationToken.None);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
+
+        var sweeping = new SprintAssembler(
+            new ProjectContextFactory(new List<ProjectOptions>()),
+            _events, NullLogger<SprintAssembler>.Instance,
+            failureAgingWindow: TimeSpan.FromMilliseconds(1));
+        await Task.Delay(30); // let the failure age past the tiny window
+        await sweeping.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
+
+        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(story.Id))!.Status);
+        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(epic.Id))!.Status);
+        Assert.Contains(_events.GetHistorySnapshot(), e => e.Kind == "sprint.failure.swept");
+    }
+
+    [Fact]
+    public async Task FreshFailure_Untouched_BuildStateStarved()
+    {
+        // The no-auto-clear rule protects FRESH failures (the operator
+        // is investigating); the build state must NAME the blockage
+        // instead of the flat "no eligible work" — a completed sprint
+        // plus a busy board read as a dead pipeline (2026-08-17/18).
+        var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "test", Title: "s", Body: "b", ParentIssueId: epic.Id));
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "st", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "t", ParentId: story.Id));
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
+
+        var sweeping = new SprintAssembler(
+            new ProjectContextFactory(new List<ProjectOptions>()),
+            _events, NullLogger<SprintAssembler>.Instance,
+            failureAgingWindow: TimeSpan.FromDays(7));
+        await sweeping.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
+
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(story.Id))!.Status);
+
+        var mem = new Forge.Core.MemoryStore(_issues.Db);
+        var hit = (await mem.RecallAsync(SprintAssembler.BuildStateKey)).First();
+        using var doc = System.Text.Json.JsonDocument.Parse(hit.Body);
+        Assert.Equal("starved", doc.RootElement.GetProperty("phase").GetString());
+        Assert.Contains("Failed task", doc.RootElement.GetProperty("reason").GetString());
+        Assert.Contains(doc.RootElement.GetProperty("heldWork").EnumerateArray(),
+            h => h.GetProperty("id").GetString() == task.Id);
+    }
+
+    [Fact]
+    public async Task FailureAging_Disabled_NeverSweeps()
+    {
+        var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "test", Title: "s", Body: "b", ParentIssueId: epic.Id));
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "st", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "t", ParentId: story.Id));
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
+
+        await Task.Delay(30);
+        await Tick(); // the default assembler has NO aging window
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
     public async Task Epic_AutoCloses_WhenTreeTerminal_StaysOpenOtherwise()
     {
         // Epic lifecycle: epics with a fully terminal tree close on

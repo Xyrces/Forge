@@ -265,6 +265,16 @@ public sealed record OrchestratorOptions
     /// </summary>
     public string DtsConnectionString { get; set; } =
         "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None";
+
+    /// <summary>
+    /// Days a task may sit Failed with no operator action before the
+    /// sprint assembler auto-closes it as abandoned (operator
+    /// direction 2026-08-18: "fix this permanently" — a backlog held
+    /// hostage by ancient failures starved sprint assembly silently).
+    /// Fresh failures are never touched (the no-auto-clear rule
+    /// protects active investigation). 0/null disables the sweep.
+    /// </summary>
+    public int? FailureAgingDays { get; set; } = 7;
 }
 
 public sealed record LlmOptions
