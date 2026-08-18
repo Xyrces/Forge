@@ -493,7 +493,10 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
 
         var active = (await _sprints.GetActiveAsync())!;
-        Assert.Equal("Sprint 1: MaterialReservation locking", active.Name);
+        // Named after the LEADING MEMBER (fu2, P2), not the completed
+        // root — the root is usually merged and a root-named sprint
+        // reads as out-of-sprint work (operator confusion 2026-08-18).
+        Assert.Equal("Sprint 1: follow-up two", active.Name);
         var members = await _sprints.GetIssueIdsAsync(active.Id);
         Assert.Contains(fu1.Id, members);
         Assert.Contains(fu2.Id, members);
@@ -546,8 +549,10 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
 
         var active = (await _sprints.GetActiveAsync())!;
-        Assert.Equal("Sprint 1: critical theme", active.Name);
+        Assert.Equal("Sprint 1: critical follow-up", active.Name);
         Assert.Contains(hot.Id, await _sprints.GetIssueIdsAsync(active.Id));
+        Assert.Equal($"Follow-up work filed from {hotRoot.Id} (critical theme): critical follow-up",
+            active.Goal);
     }
 
     [Fact]
