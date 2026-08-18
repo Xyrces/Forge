@@ -113,6 +113,12 @@ public sealed class LocalGitHubService : GitHubService
     public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
         => Task.FromResult(_prStore.GetCommitStatus(sha));
 
+    /// <summary>The local harness always has CI signal (its status
+    /// store is the signal) — never report missing so the watch's
+    /// CI-never-fired retrigger stays out of the closed loop.</summary>
+    public override Task<int> GetCiSignalCountAsync(string sha, CancellationToken cancellationToken = default)
+        => Task.FromResult(1);
+
     public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int prNumber, CancellationToken cancellationToken = default)
         => Task.FromResult<IReadOnlyList<PullRequestReview>>(Array.Empty<PullRequestReview>());
 

@@ -29,6 +29,10 @@ public sealed class PRWatcher
     private readonly ILogger<PRWatcher> _logger;
     private readonly StageGates? _gates;
     private readonly IDashboardEventBus _events;
+    /// <summary>Consecutive zero-CI-signal polls per (task, head sha)
+    /// — in-memory only; a restart just re-arms the 3-poll delay.
+    /// See the CI-never-fired retrigger in PollWatchedTaskAsync.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _ciMissingPolls = new(StringComparer.Ordinal);
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
 
     /// <summary>True when the lifecycle machine is wired — exposed
@@ -257,6 +261,49 @@ public sealed class PRWatcher
         var ciRedOutcome = wf?.GetEdgeSelection("pr", "rework", "rework") ?? "rework";
 
         var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
+        // CI-never-fired detection (live 2026-08-18, porthorizon
+        // task-651/PR #905): a head with ZERO CI signal (no check
+        // runs, no legacy statuses) reads Pending forever — the merge
+        // gate never opens, the CI-failed rework loop never fires,
+        // and the task waits out the stale window. GitHub
+        // occasionally never schedules workflows for a push. Three
+        // consecutive zero-signal polls (the head gets time to
+        // schedule its runs first), then the same sanctioned no-strike
+        // refresh round the base-recovered path uses.
+        if (ci == CommitState.Pending)
+        {
+            var signal = await _gitHub.GetCiSignalCountAsync(sha, cancellationToken);
+            var missingKey = $"{taskId}|{sha}";
+            if (signal == 0)
+            {
+                var missing = _ciMissingPolls.AddOrUpdate(missingKey, 1, (_, n) => n + 1);
+                if (missing >= 3)
+                {
+                    _ciMissingPolls.TryRemove(missingKey, out _);
+                    _logger.LogWarning(
+                        "PR #{PrNumber}: zero CI runs for head {Sha} after {Polls} polls — firing a no-strike retrigger round",
+                        prNumber, sha, missing);
+                    return await ReworkOrTripAsync(
+                        task, worktreePath, sha,
+                        reason: "CI never fired for this head — retrigger",
+                        context: $"GitHub scheduled NO check runs for the head commit after several watch polls — the CI workflows never fired, so the merge gate can never open. Retrigger them: git commit --allow-empty -m \"Retrigger CI\" and push to the SAME branch. Do not change any code.",
+                        terminalStatus: IssueStatus.Failed,
+                        terminalError: "CI-never-fired retrigger rounds exhausted",
+                        terminalOutcome: WatchPollOutcome.CiFailed,
+                        cancellationToken,
+                        countAsStrike: false,
+                        maxStrikes: maxStrikes);
+                }
+            }
+            else
+            {
+                _ciMissingPolls.TryRemove(missingKey, out _);
+            }
+        }
+        else
+        {
+            _ciMissingPolls.TryRemove($"{taskId}|{sha}", out _);
+        }
         // P4 e2e-harness seam: tests can pre-approve reviews
         // without going through Octokit's sealed
         // PullRequestReview ctor. Default = real GitHub call.
