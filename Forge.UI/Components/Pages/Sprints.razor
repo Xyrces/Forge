@@ -84,7 +84,7 @@
            works through them — previously invisible, so a completed
            sprint looked stuck. The assembler snapshots the phase to
            the project store every tick; this panel renders it. *@
-        @if (_build is { Phase: "awaiting-groom" or "held" or "idle" })
+        @if (_build is { Phase: "awaiting-groom" or "held" or "idle" or "starved" })
         {
             <div class="card" style="margin-bottom:14px">
                 <div class="page-subtitle" style="margin-bottom:8px">
@@ -104,6 +104,18 @@
                             <span class="mono">@p.Id</span>
                             <span>@p.Title</span>
                             <span class="pill pill--pending">awaiting groom</span>
+                        </div>
+                    }
+                }
+                @if (_build.HeldWork.Count > 0)
+                {
+                    <div class="page-subtitle" style="margin:8px 0 4px">Holding the backlog (@_build.HeldWork.Count):</div>
+                    @foreach (var h in _build.HeldWork)
+                    {
+                        <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{h.Id}"))">
+                            <span class="mono">@h.Id</span>
+                            <span>@h.Title</span>
+                            <span class="pill pill--failed">failed · @h.AgeDays d</span>
                         </div>
                     }
                 }
@@ -394,7 +406,8 @@
 
     private sealed record PendingGroomVm(string Id, string Title);
     private sealed record BuildGroupVm(string Key, string Name, int TaskCount, int MinPriority);
-    private sealed record BuildVm(string Phase, string Reason, string? CompletedSprintName, List<PendingGroomVm> PendingGroom, List<BuildGroupVm> Groups);
+    private sealed record HeldWorkVm(string Id, string Title, int AgeDays);
+    private sealed record BuildVm(string Phase, string Reason, string? CompletedSprintName, List<PendingGroomVm> PendingGroom, List<BuildGroupVm> Groups, List<HeldWorkVm> HeldWork);
     private BuildVm? _build;
 
     private static string BuildPhaseLabel(string phase) => phase switch
@@ -402,6 +415,7 @@
         "awaiting-groom" => "grooming follow-ups",
         "held" => "held by operator gate",
         "idle" => "nothing eligible in the backlog",
+        "starved" => "blocked by failed work",
         _ => phase,
     };
 
@@ -431,11 +445,17 @@
                     g.GetProperty("taskCount").GetInt32(),
                     g.GetProperty("minPriority").GetInt32())).ToList()
                 : new List<BuildGroupVm>();
+            var held = doc.TryGetProperty("heldWork", out var hw) && hw.ValueKind == JsonValueKind.Array
+                ? hw.EnumerateArray().Select(h => new HeldWorkVm(
+                    h.GetProperty("id").GetString() ?? "",
+                    h.GetProperty("title").GetString() ?? "",
+                    h.TryGetProperty("ageDays", out var ad) ? ad.GetInt32() : 0)).ToList()
+                : new List<HeldWorkVm>();
             _build = new BuildVm(
                 phaseEl.GetString() ?? "unknown",
                 doc.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "",
                 doc.TryGetProperty("completedSprintName", out var cs) && cs.ValueKind == JsonValueKind.String ? cs.GetString() : null,
-                pending, groups);
+                pending, groups, held);
         }
         catch { _build = null; }
     }
