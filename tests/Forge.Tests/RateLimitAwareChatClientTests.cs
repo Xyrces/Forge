@@ -140,6 +140,50 @@ public class RateLimitAwareChatClientTests
     }
 
     [Fact]
+    public async Task Overload529_IsRetriedInPlace_ThenSucceeds()
+    {
+        // Live 2026-08-18 (task-651): minimax's Anthropic endpoint
+        // returns transient engine overload as HTTP 529, which used to
+        // propagate as an ordinary dispatch failure and burn task
+        // attempts during an upstream brown-out.
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failures = new Exception[]
+            {
+                new HttpRequestException("HTTP 529: overloaded_error (529) [uri=https://api.minimax.io/anthropic/v1/messages]"),
+                new HttpRequestException("HTTP 529: overloaded_error (529) [uri=https://api.minimax.io/anthropic/v1/messages]"),
+            },
+        };
+        var client = new RateLimitAwareChatClient(inner, "minimax", "m3", tracker, new SemaphoreSlim(2),
+            delay: (_, _) => Task.CompletedTask);
+
+        var resp = await client.GetResponseAsync(Msgs);
+
+        Assert.Equal("ok", resp.Text);
+        Assert.Equal(3, inner.Calls);
+        Assert.False(tracker.IsCoolingDown("minimax", "m3"));
+    }
+
+    [Fact]
+    public async Task Overload529_RetriesExhausted_RecordsModelCooldown()
+    {
+        var tracker = new ModelRateLimitTracker();
+        var inner = new CountingClient
+        {
+            Failure = new HttpRequestException("HTTP 529: overloaded_error (529) [uri=https://api.minimax.io/anthropic/v1/messages]"),
+        };
+        var client = new RateLimitAwareChatClient(inner, "minimax", "m3", tracker, new SemaphoreSlim(2),
+            overloadRetries: 2, delay: (_, _) => Task.CompletedTask);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetResponseAsync(Msgs));
+
+        Assert.Equal(3, inner.Calls);
+        Assert.NotNull(tracker.CoolingDownUntil("minimax", "m3"));
+        Assert.False(tracker.IsCoolingDown("minimax", "other-model"));
+    }
+
+    [Fact]
     public async Task Overload429_RetriesExhausted_RecordsModelCooldown()
     {
         var tracker = new ModelRateLimitTracker();
