@@ -127,6 +127,11 @@ public sealed class TaskStateMachine
             TaskLifecycleState.AgentRunning, TaskLifecycleState.ReworkRunning,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
             TaskLifecycleState.ReworkQueued);
+        // A ZOMBIE run dying after the watch already merged the task:
+        // the death is real but irrelevant to the terminal record —
+        // no-op, and SafeTransitionAsync's terminal guard keeps the
+        // issue row Completed (task-653, live 2026-08-18).
+        Add(TaskEvent.RunDied, TaskLifecycleState.Merged, TaskLifecycleState.Merged);
         Add(TaskEvent.PrOpened, TaskLifecycleState.PROpen,
             TaskLifecycleState.Dispatching, TaskLifecycleState.PROpen,
             // A rework round's workflow re-uses the open PR — the
@@ -156,7 +161,12 @@ public sealed class TaskStateMachine
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady, TaskLifecycleState.ReworkQueued);
         Add(TaskEvent.BreakerTripped, TaskLifecycleState.Failed, working);
         Add(TaskEvent.Merged, TaskLifecycleState.Merged,
-            TaskLifecycleState.MergeReady, TaskLifecycleState.PROpen);
+            TaskLifecycleState.MergeReady, TaskLifecycleState.PROpen,
+            // Idempotent self-loop: duplicate merge detections and
+            // late merge events on an already-Merged record are legal
+            // no-ops, not violations (the "task-X is Merged, event
+            // Merged has no table entry" noise, live 2026-08-16/17).
+            TaskLifecycleState.Merged);
         // ExternallyMerged additionally legal from Failed: the merge
         // can land AFTER the breaker parked the task, and the watch's
         // merge-detection + empty-diff supersede paths resolve those
@@ -164,9 +174,13 @@ public sealed class TaskStateMachine
         // ExternallyMerged has no table entry" — the store completed,
         // the record stalled). NOT from BlockedOperator: an operator
         // hold is the operator's call — automation must not resolve it
-        // (the invariant test pins this).
+        // (the invariant test pins this). Self-loop included: the
+        // supersede/merge-detect paths are idempotent.
         Add(TaskEvent.ExternallyMerged, TaskLifecycleState.Merged,
-            working.Append(TaskLifecycleState.Failed).ToArray());
+            working.Append(TaskLifecycleState.Failed).Append(TaskLifecycleState.Merged).ToArray());
+        // Late review verdicts on an already-Merged record (the review
+        // lands after the merge won the race) are legal no-ops.
+        Add(TaskEvent.ReviewApproved, TaskLifecycleState.Merged, TaskLifecycleState.Merged);
         Add(TaskEvent.OperatorRequeue, TaskLifecycleState.Pending,
             TaskLifecycleState.Failed, TaskLifecycleState.BlockedOperator,
             // Operator requeues land on DB-Failed/Blocked tasks, but

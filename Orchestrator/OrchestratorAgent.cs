@@ -783,7 +783,26 @@ public sealed class OrchestratorAgent : IAgent
 
     private async Task SafeTransitionAsync(string id, IssueStatus to, string? error, ProjectDispatchBundle bundle, CancellationToken ct)
     {
-        try { await bundle.IssueStore.TransitionAsync(id, to, error, ct: ct); }
+        try
+        {
+            // Terminal rows are immutable to late dispatches: a zombie
+            // run reaped after the watch already closed the loop must
+            // not flip a Completed task back to Failed (observed live
+            // 2026-08-18: task-653 — the watch's empty-diff supersede
+            // completed it at 11:32; the still-running dispatch's
+            // RunDied at 11:45 flipped it to Failed and blocked the
+            // sprint's completion for hours).
+            var current = await bundle.IssueStore.GetAsync(id, ct);
+            if (current?.Status is IssueStatus.Completed or IssueStatus.Closed
+                && to is not (IssueStatus.Completed or IssueStatus.Closed))
+            {
+                _logger.LogWarning(
+                    "Transition {Id} {From} -> {To} refused: terminal rows are immutable to late dispatches",
+                    id, current.Status, to);
+                return;
+            }
+            await bundle.IssueStore.TransitionAsync(id, to, error, ct: ct);
+        }
         catch (Exception ex) { _logger.LogWarning(ex, "Transition failed for {Id}", id); }
     }
 
