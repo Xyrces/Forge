@@ -287,6 +287,15 @@ public static class TaskEndpoints
                     ["reworkAttempts"] = null!,
                     ["reworkReason"] = null!,
                     ["reworkContext"] = null!,
+                    // reworkForSha too: a fossil from an EARLIER round
+                    // can equal the head the rework produces (the round
+                    // pushes its fix AT that sha), and the watch guard
+                    // then swallows every legitimate new rework verdict
+                    // as "already queued for this head" (observed live
+                    // 2026-08-18: task-651's RequestChanges review went
+                    // unanswered — the Aug-09 fossil matched the pushed
+                    // head and only the 35-min stall path saved it).
+                    ["reworkForSha"] = null!,
                     ["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O"),
                 };
                 if (!string.IsNullOrWhiteSpace(guideReason)) meta["reworkReason"] = guideReason;
