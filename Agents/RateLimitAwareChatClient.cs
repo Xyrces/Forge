@@ -227,7 +227,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
                 kind = rl.Kind;
                 return true;
             }
-            if (e is System.ClientModel.ClientResultException cre && cre.Status == 429)
+            if (e is System.ClientModel.ClientResultException cre && (cre.Status == 429 || cre.Status == 529))
             {
                 retryAfter = ParseRetryAfter(cre);
                 kind = LlmRateLimitException.Classify(cre.Message);
@@ -241,6 +241,17 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
                 || msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase)))
         {
             kind = LlmRateLimitException.Classify(msg);
+            return true;
+        }
+        // MiniMax/Anthropic transient engine overload surfaces as
+        // HTTP 529 ("overloaded_error") — same remedy as an
+        // overloaded 429: brief in-place backoff, then cool. Without
+        // this a 529 propagated as an ordinary dispatch failure and
+        // burned task attempts (live 2026-08-18: task-651 lost three
+        // dispatches during an upstream brown-out).
+        if (msg.Contains("529") && msg.Contains("overload", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = RateLimitKind.Overloaded;
             return true;
         }
         return false;
