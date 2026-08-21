@@ -1,6 +1,7 @@
 @page "/vision"
 @inject HttpClient Http
 @inject NavigationManager Nav
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @implements IDisposable
 
 <PageTitle>Vision</PageTitle>
@@ -141,11 +142,20 @@
         await LoadAsync();
     }
 
+    private string ProjectQs
+    {
+        get
+        {
+            var pid = ShellStore.Value.CurrentProjectId;
+            return string.IsNullOrEmpty(pid) ? "" : $"?projectId={Uri.EscapeDataString(pid)}";
+        }
+    }
+
     private async Task LoadAsync()
     {
         try
         {
-            _snapshot = await Http.GetFromJsonAsync<SnapshotDto>("/api/vision");
+            _snapshot = await Http.GetFromJsonAsync<SnapshotDto>("/api/vision" + ProjectQs);
             Parse();
         }
         catch { _snapshot = new(false, "", null, null); }
@@ -157,7 +167,7 @@
         _refreshing = true;
         try
         {
-            await Http.PostAsync("/api/vision/refresh", null);
+            await Http.PostAsync("/api/vision/refresh" + ProjectQs, null);
             await LoadAsync();
         }
         finally { _refreshing = false; }
@@ -182,7 +192,7 @@
         _saveError = null;
         try
         {
-            var resp = await Http.PutAsJsonAsync("/api/vision", new { content = _editContent });
+            var resp = await Http.PutAsJsonAsync("/api/vision" + ProjectQs, new { content = _editContent });
             if (!resp.IsSuccessStatusCode)
             {
                 _saveError = $"save failed: {(int)resp.StatusCode}";
@@ -204,7 +214,7 @@
         _draftError = null;
         try
         {
-            var resp = await Http.PostAsync("/api/vision/draft-request", null);
+            var resp = await Http.PostAsync("/api/vision/draft-request" + ProjectQs, null);
             if (resp.StatusCode == System.Net.HttpStatusCode.Conflict)
             {
                 _draftError = "a vision draft task is already open";
