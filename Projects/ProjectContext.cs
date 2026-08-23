@@ -19,6 +19,7 @@ public sealed class ProjectContext : IAsyncDisposable
     private readonly Lazy<DeploymentStore> _deployments;
     private readonly Lazy<SpecStore> _specs;
     private readonly Lazy<SprintStore> _sprints;
+    private readonly Lazy<FailureTriageStore> _triage;
 
     public ProjectContext(ProjectOptions options, IssueStore issues)
     {
@@ -36,12 +37,15 @@ public sealed class ProjectContext : IAsyncDisposable
         // over the same IssueStore instance.
         _specs = new Lazy<SpecStore>(() => new SpecStore(_issues));
         _sprints = new Lazy<SprintStore>(() => new SprintStore(_issues));
+        // The failure ledger (v35) lives in the same schema too.
+        _triage = new Lazy<FailureTriageStore>(() => new FailureTriageStore(_issues));
     }
 
     public IIssueStore Issues => _issues;
     public DeploymentStore Deployments => _deployments.Value;
     public ISpecStore Specs => _specs.Value;
     public ISprintStore Sprints => _sprints.Value;
+    public FailureTriageStore Triage => _triage.Value;
 
     public async Task<int> CountByStatusAsync(IssueStatus status, CancellationToken ct)
     {

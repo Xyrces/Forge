@@ -216,7 +216,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 34;
+    public const int CurrentSchemaVersion = 35;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -999,6 +999,14 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // reconverges at 34.
         ApplyV34IntakeMessageProposalPayload(conn);
 
+        // v35 (post-init): failure_triage — the failure ledger
+        // (phase 1 observability: what failed, the deterministic
+        // signature/classification, who cleared it, and whether the
+        // redispatch held). escalated_* columns are phase-3
+        // placeholders so the model-escalation work needs no
+        // migration later.
+        ApplyV35FailureTriage(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -1049,7 +1057,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // Profile split (SQL Server): the Core schema gets only
         // registry/global tables (project, secret, agent, skill) — a
         // registry anchor never carries agent_run & co; a Workload
-        // project schema gets only the 26 workload tables. schema_version
+        // project schema gets only the 27 workload tables. schema_version
         // exists in both (per-schema version stamp, read by --check).
         if (_db.Profile == ForgeSchemaProfile.Core)
         {
@@ -1574,6 +1582,34 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             cmdWatch.ExecuteNonQuery();
         }
 
+        // v35+: failure_triage — the failure ledger (phase 1
+        // observability). escalated_* are phase-3 placeholders.
+        {
+            using var cmdTriage = Ddl();
+            cmdTriage.CommandText = $$"""
+            IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '{{q}}' AND t.name = 'failure_triage')
+            CREATE TABLE {{d.Table("failure_triage")}} (
+                id                  INT IDENTITY(1,1) PRIMARY KEY,
+                task_id             NVARCHAR(128) NOT NULL,
+                failed_at           NVARCHAR(40)  NOT NULL,
+                signature           NVARCHAR(64)  NOT NULL,
+                classification      NVARCHAR(64)  NOT NULL,
+                error_excerpt       NVARCHAR(600) NULL,
+                action              NVARCHAR(64)  NULL,
+                actor               NVARCHAR(64)  NULL,
+                acted_at            NVARCHAR(40)  NULL,
+                outcome             NVARCHAR(32)  NULL,
+                escalated_provider  NVARCHAR(64)  NULL,
+                escalated_model     NVARCHAR(128) NULL
+            );
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_failure_triage_task' AND object_id = OBJECT_ID('{{d.Table("failure_triage")}}'))
+                CREATE INDEX ix_failure_triage_task ON {{d.Table("failure_triage")}}(task_id, outcome);
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_failure_triage_signature' AND object_id = OBJECT_ID('{{d.Table("failure_triage")}}'))
+                CREATE INDEX ix_failure_triage_signature ON {{d.Table("failure_triage")}}(signature, failed_at);
+            """;
+            cmdTriage.ExecuteNonQuery();
+        }
+
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the
         // migrations' guards make them no-ops there). Each applied
@@ -1769,6 +1805,33 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             "ALTER TABLE followup_draft ADD COLUMN disposition TEXT;" +
             "ALTER TABLE followup_draft ADD COLUMN disposition_detail TEXT;";
         alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV35FailureTriage(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='failure_triage'";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var create = conn.CreateCommand();
+        create.CommandText =
+            "CREATE TABLE failure_triage (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "task_id TEXT NOT NULL, " +
+            "failed_at TEXT NOT NULL, " +
+            "signature TEXT NOT NULL, " +
+            "classification TEXT NOT NULL, " +
+            "error_excerpt TEXT, " +
+            "action TEXT, " +
+            "actor TEXT, " +
+            "acted_at TEXT, " +
+            "outcome TEXT, " +
+            "escalated_provider TEXT, " +
+            "escalated_model TEXT" +
+            ");" +
+            "CREATE INDEX ix_failure_triage_task ON failure_triage(task_id, outcome);" +
+            "CREATE INDEX ix_failure_triage_signature ON failure_triage(signature, failed_at);";
+        create.ExecuteNonQuery();
     }
 
     private void ApplyV28WatchdogFinding(SqliteConnection conn)
@@ -2091,6 +2154,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         await InsertEventAsync(conn, null, id, "status_change",
             $"{current.Status}->{to}{(error is null ? "" : $" err={error}")}", ct);
         await PublishLifecycleTransitionAsync(current, metadataJson, ct);
+        await PublishFailureSignalAsync(current, to, error, metadataJson, ct);
         return (await GetAsync(id, ct))!;
     }
 
@@ -2175,9 +2239,59 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }, ct);
     }
 
-    private static (TaskLifecycleState? State, DateTimeOffset? EnteredAt) ParseLifecycleStamp(string? metadataJson)
+    /// <summary>
+    /// Publish <see cref="Messaging.TaskFailureSignal"/> (failure-triage
+    /// ledger, phase 1) when this transition crosses a failure-status
+    /// boundary — into Failed/Blocked (open a ledger row), out of
+    /// Failed/Blocked (operator clearance) — or reaches a dispatch-
+    /// success lifecycle state (PROpen or later: resolves a cleared
+    /// row's pending outcome). Same publish-after-commit hint semantics
+    /// as <see cref="PublishLifecycleTransitionAsync"/>; the consumer
+    /// re-reads DB truth and is idempotent.
+    /// </summary>
+    private async Task PublishFailureSignalAsync(
+        IssueRecord before, IssueStatus to, string? error, string mergedMetadataJson, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(metadataJson)) return (null, null);
+        var from = before.Status;
+        Messaging.FailureSignalKind? kind = null;
+        if ((to is IssueStatus.Failed or IssueStatus.Blocked) && from != to)
+        {
+            kind = Messaging.FailureSignalKind.Failure;
+        }
+        else if (from is IssueStatus.Failed or IssueStatus.Blocked
+            && to is IssueStatus.Pending or IssueStatus.InProgress or IssueStatus.Closed)
+        {
+            kind = Messaging.FailureSignalKind.Clearance;
+        }
+        else
+        {
+            var (toState, _) = ParseLifecycleStamp(mergedMetadataJson);
+            var (fromState, _) = ParseLifecycleStamp(before.MetadataJson);
+            if (toState is TaskLifecycleState.PROpen or TaskLifecycleState.MergeReady
+                    or TaskLifecycleState.Merged or TaskLifecycleState.Completed
+                && toState != fromState)
+            {
+                kind = Messaging.FailureSignalKind.SuccessCandidate;
+            }
+        }
+        if (kind is null) return;
+
+        var occurred = DateTimeOffset.UtcNow;
+        await _events.PublishAsync(new Messaging.TaskFailureSignal
+        {
+            MessageId = Messaging.TaskFailureSignal.IdFor(_projectId, before.Id, kind.Value, occurred),
+            ProjectId = _projectId,
+            TaskId = before.Id,
+            Kind = kind.Value,
+            FromStatus = from.ToString(),
+            ToStatus = to.ToString(),
+            ErrorExcerpt = error is { Length: > 300 } ? error[..300] : error,
+            OccurredAt = occurred,
+        }, ct);
+    }
+
+    private static (TaskLifecycleState? State, DateTimeOffset? EnteredAt) ParseLifecycleStamp(string? metadataJson)
+    {        if (string.IsNullOrWhiteSpace(metadataJson)) return (null, null);
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(metadataJson);

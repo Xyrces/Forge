@@ -57,7 +57,9 @@ public class DispatchCheckpointTests : IDisposable
 // v34 = intake_message.proposed_epic_description + _priority —
 // session-scoped draft proposals, epic row created at accept time
 // (SQL Server chain: M034; v33 was the SQL Server-only skew slot).
-        Assert.Equal(34, IssueStore.CurrentSchemaVersion);
+// v35 = failure_triage — the failure ledger (triage phase 1:
+// observability only; SQL Server chain: M035).
+        Assert.Equal(35, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

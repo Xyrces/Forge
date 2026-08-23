@@ -441,6 +441,12 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             watchSweeps, sp.GetRequiredService<ILogger<Consumers.PrOpenedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.PrOpenedConsumer>());
+        // Failure-triage ledger writer: own topic (forge.task-failure-
+        // signal), per-project store resolution via the context factory.
+        services.AddSingleton(sp => new Consumers.FailureTriageConsumer(
+            sp.GetRequiredService<ITransport>(), projectFactory,
+            sp.GetRequiredService<ILogger<Consumers.FailureTriageConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.FailureTriageConsumer>());
         services.AddSingleton(sp => new Consumers.ReviewVerdictRecordedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             sp.GetRequiredService<ILogger<Consumers.ReviewVerdictRecordedConsumer>>()));

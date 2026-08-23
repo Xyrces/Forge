@@ -1,0 +1,18 @@
+@* Compact bar sparkline for summary tiles (Triage page, phase 1). *@
+<span class="sparkline">
+    @foreach (var v in Values)
+    {
+        <i style="height:@HeightFor(v)%"></i>
+    }
+</span>
+
+@code {
+    [Parameter] public IReadOnlyList<int> Values { get; set; } = Array.Empty<int>();
+
+    private int _max = 1;
+
+    protected override void OnParametersSet()
+        => _max = Values.Count > 0 ? Math.Max(1, Values.Max()) : 1;
+
+    private int HeightFor(int v) => v <= 0 ? 8 : Math.Max(12, (int)Math.Round(100.0 * v / _max));
+}

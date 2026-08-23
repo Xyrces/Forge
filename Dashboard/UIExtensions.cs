@@ -14,6 +14,7 @@ using Forge.Dashboard.Features.Art;
 using Forge.Dashboard.Features.Tasks;
 using Forge.Dashboard.Features.Projects;
 using Forge.Dashboard.Features.Deployments;
+using Forge.Dashboard.Features.Triage;
 
 namespace Forge.Dashboard;
 
@@ -43,6 +44,7 @@ public static class UIExtensions
         services.AddHttpClient<Forge.Dashboard.Features.View.ViewClient>(c => c.BaseAddress = localBaseAddress);
         services.AddHttpClient<ProjectsClient>(c => c.BaseAddress = localBaseAddress);
         services.AddHttpClient<DeploymentsClient>(c => c.BaseAddress = localBaseAddress);
+        services.AddHttpClient<TriageClient>(c => c.BaseAddress = localBaseAddress);
         // Plain HttpClient for components that call the API directly
         // (Secrets, Board, Intake, Vision). Without this, @inject
         // HttpClient fails DI resolution and those pages render

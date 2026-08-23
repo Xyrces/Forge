@@ -297,6 +297,9 @@ public static class TaskEndpoints
                     // head and only the 35-min stall path saved it).
                     ["reworkForSha"] = null!,
                     ["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O"),
+                    // Failure-ledger clearance marker: the triage
+                    // consumer records this action on the open row.
+                    ["clearanceAction"] = "operator-requeue",
                 };
                 if (!string.IsNullOrWhiteSpace(guideReason)) meta["reworkReason"] = guideReason;
                 if (!string.IsNullOrWhiteSpace(guideContext)) meta["reworkContext"] = guideContext;
@@ -414,7 +417,8 @@ public static class TaskEndpoints
                     ? "operator closed"
                     : body!.Reason!;
                 await store.TransitionAsync(id, IssueStatus.Closed,
-                    $"operator close: {reason}", ct: ct);
+                    $"operator close: {reason}",
+                    new Dictionary<string, object> { ["clearanceAction"] = "operator-close" }, ct);
                 if (lifecycle is not null)
                 {
                     var closed = await store.GetAsync(id, ct);
@@ -503,7 +507,13 @@ public static class TaskEndpoints
                     ? IssueStatus.Pending
                     : IssueStatus.InProgress;
                 if (to == IssueStatus.Pending)
+                {
                     meta["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O");
+                    // Failure-ledger clearance marker (the InProgress
+                    // case publishes no clearance signal — the task
+                    // never left the failure status boundary here).
+                    meta["clearanceAction"] = "operator-reset-strikes";
+                }
                 await store.TransitionAsync(id, to,
                     $"operator strike reset #{resets} (rework/review/no-progress/auto-resume strikes cleared)",
                     meta, ct);
