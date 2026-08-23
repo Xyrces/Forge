@@ -78,6 +78,18 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         var branch = input.Worktree.Claim.Branch ?? $"agent/{issue.Id}";
         var worktreePath = input.Worktree.WorktreePath!;
 
+        // Operator-park guard: a park (Blocked) can land while the run
+        // is still in flight. The finishing run must not push, open a
+        // PR, or transition the task — the park is the operator's call.
+        var prePush = await issues.GetAsync(issue.Id, ct);
+        if (prePush?.Status is IssueStatus.Blocked or IssueStatus.Closed or IssueStatus.Completed)
+        {
+            logger.LogInformation(
+                "CommitPushPr({Id}): task is {Status} (parked/closed mid-run) — skipping push/PR",
+                issue.Id, prePush!.Status);
+            return new PrOpened(input, PrResult.Skipped, 0, null);
+        }
+
         var commit = await worktrees.CommitAllAsync(
             worktreePath, $"Task({issue.Id}): {issue.Title}", ct);
         // An agent that commits its own work via bash during the run

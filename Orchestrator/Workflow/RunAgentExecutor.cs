@@ -104,7 +104,9 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             // fixed — the prompt must say so honestly; there may be
             // no PR at all on a pre-push bounce).
             var bounceReason = issue.GetMetadata("reworkReason") ?? "";
-            var leadIn = bounceReason.StartsWith("pre-push", StringComparison.OrdinalIgnoreCase)
+            var leadIn = bounceReason.StartsWith("triage", StringComparison.OrdinalIgnoreCase)
+                ? "The failure-triage agent requeued this task with guidance written from the failure evidence."
+                : bounceReason.StartsWith("pre-push", StringComparison.OrdinalIgnoreCase)
                 ? "Your previous attempt FAILED the pre-push build/test verification — nothing was pushed."
                 : bounceReason.StartsWith("no diff", StringComparison.OrdinalIgnoreCase)
                     || bounceReason.StartsWith("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase)

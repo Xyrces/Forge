@@ -19,6 +19,7 @@ public static class Topics
     public const string GroomRequested = "forge.groom-requested";
     public const string ProjectRolesChanged = "forge.project-roles-changed";
     public const string TaskFailureSignal = "forge.task-failure-signal";
+    public const string TriageRequested = "forge.triage-requested";
     public const string SweepTick = "forge.sweep-tick";
 
     public static string For<T>() where T : IForgeEvent => typeof(T).Name switch
@@ -33,6 +34,7 @@ public static class Topics
         nameof(Core.Messaging.GroomRequested) => GroomRequested,
         nameof(Core.Messaging.ProjectRolesChanged) => ProjectRolesChanged,
         nameof(Core.Messaging.TaskFailureSignal) => TaskFailureSignal,
+        nameof(Core.Messaging.TriageRequested) => TriageRequested,
         nameof(Core.Messaging.SweepTick) => SweepTick,
         var name => throw new ArgumentException($"No topic mapped for event type {name}", nameof(T)),
     };

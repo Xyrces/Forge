@@ -166,6 +166,26 @@ public sealed record TaskFailureSignal : IForgeEvent
         => $"failure-signal:{projectId}:{taskId}:{kind}:{occurredAt:O}";
 }
 
+/// <summary>
+/// Triage-agent kick (triage phase 2): published by the FailureTriageConsumer
+/// after opening a ledger row when the project's triage flag is on and the
+/// task is under the daily triage-action cap. Own topic — the in-memory
+/// transport is competing-consumer, so this cannot ride the failure-signal
+/// topic. The TriageConsumer re-reads flag + task + ledger (DB truth) and
+/// re-checks the guardrails before running the agent; the event is only a
+/// hint.
+/// </summary>
+public sealed record TriageRequested : IForgeEvent
+{
+    public required string MessageId { get; init; }
+    public required string ProjectId { get; init; }
+    public required string TaskId { get; init; }
+    public DateTimeOffset OccurredAt { get; init; } = DateTimeOffset.UtcNow;
+
+    public static string IdFor(string projectId, string taskId, DateTimeOffset occurredAt)
+        => $"triage-requested:{projectId}:{taskId}:{occurredAt:O}";
+}
+
 /// <summary>Which scheduler a <see cref="SweepTick"/> backstop is for.</summary>
 public enum SweepKind
 {

@@ -16,13 +16,13 @@ public class RoleCatalogTests
         var roles = RoleAgentRegistry.AllSlotRoles;
 
         // The four engineering roles (incl. qa — missing from the old
-        // hand-maintained filler list) plus all five pipeline roles.
-        Assert.Equal(9, roles.Count);
+        // hand-maintained filler list) plus all six pipeline roles.
+        Assert.Equal(10, roles.Count);
         Assert.Equal(roles.Count, roles.Distinct(StringComparer.Ordinal).Count());
         foreach (var expected in new[]
         {
             "coredev", "clientdev", "qa", "reviewer",
-            "artist", "designer", "groomer", "intake", "orchestrator",
+            "artist", "designer", "groomer", "intake", "orchestrator", "triage",
         })
         {
             Assert.Contains(expected, roles);
@@ -32,10 +32,13 @@ public class RoleCatalogTests
     [Fact]
     public void PipelineCatalog_ModelSemantics_AreExplicit()
     {
-        // Intake is the only pipeline role with its own AgentType —
-        // hence the only one with an independently editable model.
+        // Intake and triage are the only pipeline roles with their own
+        // AgentType — hence independently editable models.
         var intake = Assert.Single(RoleAgentRegistry.Pipeline, p => p.AgentName == "intake");
         Assert.Equal(Core.AgentType.Intake, intake.ModelType);
+        var triage = Assert.Single(RoleAgentRegistry.Pipeline, p => p.AgentName == "triage");
+        Assert.Equal(Core.AgentType.Triage, triage.ModelType);
+        Assert.Null(triage.InheritsModelFrom);
 
         // Designer/groomer/artist borrow coredev's chat client; the
         // UI must SAY that instead of implying separate config.

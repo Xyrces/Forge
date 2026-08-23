@@ -443,10 +443,25 @@ public static class ForgeComposition
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.PrOpenedConsumer>());
         // Failure-triage ledger writer: own topic (forge.task-failure-
         // signal), per-project store resolution via the context factory.
+        // Also the triage trigger: publishes TriageRequested (or parks
+        // deterministically) per the project's triage flag + guardrails.
         services.AddSingleton(sp => new Consumers.FailureTriageConsumer(
             sp.GetRequiredService<ITransport>(), projectFactory,
+            sp.GetRequiredService<Core.Messaging.IEventPublisher>(),
             sp.GetRequiredService<ILogger<Consumers.FailureTriageConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.FailureTriageConsumer>());
+        // Triage agent runner: own topic (forge.triage-requested). The
+        // runner factory binds the agent to the event's project stores —
+        // the routing constraint (no writes outside the owning store) is
+        // structural: the agent only ever sees ctx.Issues/ctx.Triage.
+        services.AddSingleton(sp => new Consumers.TriageConsumer(
+            sp.GetRequiredService<ITransport>(), projectFactory,
+            runnerFactory: ctx => new Agents.TriageAgent(
+                chatClientFactory, llmConfig, ctx.Issues, ctx.Triage, lifecycle,
+                ctx.Options.Id, ctx.Options.Root,
+                loggerFactory.CreateLogger<Agents.TriageAgent>()),
+            sp.GetRequiredService<ILogger<Consumers.TriageConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TriageConsumer>());
         services.AddSingleton(sp => new Consumers.ReviewVerdictRecordedConsumer(
             sp.GetRequiredService<ITransport>(), dispatchBundleFactory, projectStore,
             sp.GetRequiredService<ILogger<Consumers.ReviewVerdictRecordedConsumer>>()));

@@ -2263,6 +2263,18 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         {
             kind = Messaging.FailureSignalKind.Clearance;
         }
+        else if (MetadataStampsClearance(mergedMetadataJson, before.MetadataJson))
+        {
+            // Operator clearance that crosses NO status boundary —
+            // reset-strikes on an InProgress task (phase-1 C4 edge):
+            // the endpoints stamp clearanceAction only for explicit
+            // operator clearances, so a FRESH stamp (the per-gesture
+            // clearanceActionAt nonce changed in this transition) IS
+            // the clearance signal. A stale stamp carried by an
+            // unrelated later transition must not re-signal — a new
+            // open row would get a spurious operator action.
+            kind = Messaging.FailureSignalKind.Clearance;
+        }
         else
         {
             var (toState, _) = ParseLifecycleStamp(mergedMetadataJson);
@@ -2288,6 +2300,42 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             ErrorExcerpt = error is { Length: > 300 } ? error[..300] : error,
             OccurredAt = occurred,
         }, ct);
+    }
+
+    private static bool MetadataStampsClearance(string? mergedMetadataJson, string? beforeMetadataJson)
+    {
+        var (mergedAction, mergedAt) = ClearanceStamp(mergedMetadataJson);
+        if (mergedAction is null || mergedAt is null) return false;
+        var (_, beforeAt) = ClearanceStamp(beforeMetadataJson);
+        // Fresh gesture only: the nonce changed (or first appeared) in
+        // THIS transition. An inherited stamp reads as unchanged.
+        return !string.Equals(mergedAt, beforeAt, StringComparison.Ordinal);
+    }
+
+    private static (string? Action, string? At) ClearanceStamp(string? metadataJson)
+    {
+        if (string.IsNullOrWhiteSpace(metadataJson)) return (null, null);
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(metadataJson);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return (null, null);
+            string? action = null, at = null;
+            if (doc.RootElement.TryGetProperty("clearanceAction", out var a)
+                && a.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                action = a.GetString();
+            }
+            if (doc.RootElement.TryGetProperty("clearanceActionAt", out var t)
+                && t.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                at = t.GetString();
+            }
+            return (string.IsNullOrWhiteSpace(action) ? null : action, at);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return (null, null);
+        }
     }
 
     private static (TaskLifecycleState? State, DateTimeOffset? EnteredAt) ParseLifecycleStamp(string? metadataJson)

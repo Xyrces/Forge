@@ -247,6 +247,7 @@ public static class AgentsEndpoints
         var role = registry.ByAgentName(name);
         if (role is not null) return registry.TypeOf(role);
         if (string.Equals(name, "intake", StringComparison.OrdinalIgnoreCase)) return Core.AgentType.Intake;
+        if (string.Equals(name, "triage", StringComparison.OrdinalIgnoreCase)) return Core.AgentType.Triage;
         return null;
     }
 

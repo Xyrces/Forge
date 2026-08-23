@@ -519,7 +519,7 @@ if (mode == CliMode.DashboardOnly)
         var dashboardOnlyFactory = new ProjectContextFactory(projectStore, dataRoot, dbByProject,
             (pid, path) => FactoryFor(options.Db, pid, path));
         var dashboardOnlySlots = new SlotTable();
-        var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator" };
+        var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator", "triage" };
         foreach (var pp in dashboardOnlyProjects)
             foreach (var rr in _roleFiller)
                 dashboardOnlySlots.Configure(pp.Id, rr, DefaultProjectRoles.MaxFor(pp.Roles, rr));

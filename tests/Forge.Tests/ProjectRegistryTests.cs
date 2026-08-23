@@ -330,6 +330,52 @@ public class ProjectStoreRolesTests : IDisposable
     }
 
     [Fact]
+    public async Task NewProject_TriageDisabledByDefault()
+    {
+        var p = await SeedAsync();
+        Assert.False(p.TriageEnabled);
+    }
+
+    [Fact]
+    public async Task UpdateTriage_RoundTrips_AndPreservesAllBlocks()
+    {
+        await SeedAsync();
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 4 });
+        await _store.UpdateTerritoriesAsync("forge", new Dictionary<string, RoleTerritory>
+        {
+            ["coredev"] = new(new[] { "Core/" }, AllowsRootFiles: false),
+        });
+        await _store.UpdateVerifyCommandsAsync("forge", new[] { "dotnet build -c Release" });
+
+        Assert.True(await _store.UpdateTriageAsync("forge", true));
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.True(p!.TriageEnabled);
+        Assert.Equal(4, p.Roles["coredev"]);
+        Assert.True(p.Territories.ContainsKey("coredev"));
+        Assert.Equal(new[] { "dotnet build -c Release" }, p.VerifyCommands);
+
+        // Toggle back off — the block disappears, siblings survive.
+        Assert.True(await _store.UpdateTriageAsync("forge", false));
+        p = await _store.GetAsync("forge");
+        Assert.False(p!.TriageEnabled);
+        Assert.Equal(4, p.Roles["coredev"]);
+
+        // And the other writers preserve an enabled flag.
+        Assert.True(await _store.UpdateTriageAsync("forge", true));
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["reviewer"] = 2 });
+        p = await _store.GetAsync("forge");
+        Assert.True(p!.TriageEnabled);
+        Assert.Equal(2, p.Roles["reviewer"]);
+    }
+
+    [Fact]
+    public async Task UpdateTriage_UnknownProject_ReturnsFalse()
+    {
+        Assert.False(await _store.UpdateTriageAsync("ghost", true));
+    }
+
+    [Fact]
     public async Task UpdateTerritories_RoundTrips_AndPreservesCaps()
     {
         await SeedAsync();

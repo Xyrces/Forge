@@ -32,7 +32,7 @@ public sealed class FailureTriageConsumerTests : IAsyncLifetime
             new List<ProjectOptions> { new() { Id = "proj", Name = "Proj", Root = Path.GetDirectoryName(_dbPath)! } },
             new Dictionary<string, string> { ["proj"] = _dbPath });
         _consumer = new FailureTriageConsumer(
-            _transport, factory, NullLogger<FailureTriageConsumer>.Instance);
+            _transport, factory, publisher, NullLogger<FailureTriageConsumer>.Instance);
     }
 
     public async Task InitializeAsync() => await _consumer.StartAsync(CancellationToken.None);
@@ -154,6 +154,22 @@ public sealed class FailureTriageConsumerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task FlagOff_Failure_PublishesNoTriageRequested()
+    {
+        // Phase 2, plan §2/§6: the fixture's project has TriageEnabled
+        // unset (off) — failures write ledger rows as in phase 1, but
+        // no TriageRequested event exists. Zero behavior change.
+        var task = await NewTask();
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "HTTP 429 rate limit (quota)");
+        var row = await OpenRow(task.Id);
+        Assert.NotNull(row);
+
+        await Task.Delay(500);
+        var msgs = await _transport.ReadAllFromTopicAsync<TriageRequested>(Topics.TriageRequested);
+        Assert.Empty(msgs);
+    }
+
+    [Fact]
     public async Task OperatorClose_RecordsCloseAction_NullOutcome()
     {
         var task = await NewTask();
@@ -169,5 +185,73 @@ public sealed class FailureTriageConsumerTests : IAsyncLifetime
         var closed = (await _triage.ListAsync()).Single();
         Assert.Null(closed.Outcome);
         Assert.Null(await _triage.GetOpenForTaskAsync(task.Id));
+    }
+
+    [Fact]
+    public async Task InProgressResetStrikes_ActionsOpenRow_ViaMetadataStamp()
+    {
+        // The C4 edge: an InProgress task with an open ledger row (its
+        // clearance hint was lost) gets reset-strikes — no status
+        // boundary crossed, so the choke point signals off the fresh
+        // clearanceAction/clearanceActionAt stamp instead.
+        var task = await NewTask();
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null);
+        await _triage.OpenAsync(task.Id, DateTime.UtcNow, "llm-429-quota", "transient-upstream", "HTTP 429");
+
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, "operator strike reset #1",
+            new Dictionary<string, object>
+            {
+                ["clearanceAction"] = "operator-reset-strikes",
+                ["clearanceActionAt"] = DateTime.UtcNow.ToString("O"),
+            });
+
+        var row = await UntilAsync(() => _triage.GetOpenForTaskAsync(task.Id),
+            r => r is { Action: not null }, "reset-strikes action recorded without boundary crossing");
+        Assert.Equal(FailureTriageActions.OperatorResetStrikes, row.Action);
+        Assert.Equal("operator", row.Actor);
+    }
+
+    [Fact]
+    public async Task StaleClearanceStamp_DoesNotResignal_OnUnrelatedTransitions()
+    {
+        var task = await NewTask();
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null);
+        await _triage.OpenAsync(task.Id, DateTime.UtcNow, "llm-429-quota", "transient-upstream", "HTTP 429");
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, "operator strike reset #1",
+            new Dictionary<string, object>
+            {
+                ["clearanceAction"] = "operator-reset-strikes",
+                ["clearanceActionAt"] = DateTime.UtcNow.ToString("O"),
+            });
+        await UntilAsync(() => _triage.GetOpenForTaskAsync(task.Id),
+            r => r is { Action: not null }, "first reset actioned");
+
+        // The redispatch failed again but the failure hint was lost:
+        // a fresh, un-actioned row exists (opened directly — the
+        // signal path is covered by the other tests).
+        await _triage.OpenAsync(task.Id, DateTime.UtcNow, "llm-429-quota", "transient-upstream", "HTTP 429 again");
+        var fresh = await _triage.GetOpenForTaskAsync(task.Id);
+        Assert.NotNull(fresh);
+        Assert.Null(fresh!.Action);
+
+        // An unrelated non-boundary transition inherits the STALE stamp
+        // (same nonce) — it must NOT record a spurious clearance.
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, "unrelated metadata touch",
+            new Dictionary<string, object> { ["heartbeat"] = DateTime.UtcNow.ToString("O") });
+        await Task.Delay(500);
+        var open = await _triage.GetOpenForTaskAsync(task.Id);
+        Assert.NotNull(open);
+        Assert.Null(open!.Action);
+
+        // A SECOND reset-strikes gesture (fresh nonce, same action
+        // label) still signals — consecutive identical gestures work.
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, "operator strike reset #2",
+            new Dictionary<string, object>
+            {
+                ["clearanceAction"] = "operator-reset-strikes",
+                ["clearanceActionAt"] = DateTime.UtcNow.AddSeconds(1).ToString("O"),
+            });
+        await UntilAsync(() => _triage.GetOpenForTaskAsync(task.Id),
+            r => r is { Action: FailureTriageActions.OperatorResetStrikes }, "second reset actioned");
     }
 }

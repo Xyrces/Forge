@@ -22,7 +22,8 @@ public sealed record ProjectRecord(
     string? LastSyncError,
     IReadOnlyDictionary<string, int>? Roles = null,
     IReadOnlyDictionary<string, RoleTerritory>? Territories = null,
-    IReadOnlyList<string>? VerifyCommands = null)
+    IReadOnlyList<string>? VerifyCommands = null,
+    bool TriageEnabled = false)
 {
     /// <summary>Per-project role-cap overrides (role -&gt; max). Empty = use defaults.</summary>
     public IReadOnlyDictionary<string, int> Roles { get; init; } =
@@ -36,6 +37,11 @@ public sealed record ProjectRecord(
     /// from the <c>$verify</c> roles_json key. Null = auto-detect;
     /// empty = verification disabled.</summary>
     public IReadOnlyList<string>? VerifyCommands { get; init; } = VerifyCommands;
+
+    /// <summary>Failure-triage agent opt-in (the <c>$triage</c>
+    /// roles_json key, phase 2). Off by default — no TriageRequested
+    /// events are published for the project while false.</summary>
+    public bool TriageEnabled { get; init; } = TriageEnabled;
 }
 
 public sealed record NewProject(
@@ -76,6 +82,12 @@ public interface IProjectStore
     /// verification disabled for the project.
     /// </summary>
     Task<bool> UpdateVerifyCommandsAsync(string id, IReadOnlyList<string> commands, CancellationToken ct = default);
+
+    /// <summary>
+    /// Set the failure-triage agent opt-in (the <c>$triage</c> roles_json
+    /// key, phase 2). Caps, territory, and verify are preserved.
+    /// </summary>
+    Task<bool> UpdateTriageAsync(string id, bool enabled, CancellationToken ct = default);
 }
 
 public sealed class ProjectStore : IProjectStore, IAsyncDisposable
@@ -216,7 +228,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(roles);
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
-        var json = SerializeRolesJson(roles, existing.Territories, existing.Verify);
+        var json = SerializeRolesJson(roles, existing.Territories, existing.Verify, existing.TriageEnabled);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
@@ -226,7 +238,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
         if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, territories, existing.Verify);
+        var json = SerializeRolesJson(existing.Roles, territories, existing.Verify, existing.TriageEnabled);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
@@ -236,20 +248,29 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
         if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, existing.Territories, commands);
+        var json = SerializeRolesJson(existing.Roles, existing.Territories, commands, existing.TriageEnabled);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
-    private async Task<(bool Exists, IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories, IReadOnlyList<string>? Verify)> ReadRolesJsonAsync(
+    public async Task<bool> UpdateTriageAsync(string id, bool enabled, CancellationToken ct = default)
+    {
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        var existing = await ReadRolesJsonAsync(conn, id, ct);
+        if (!existing.Exists) return false;
+        var json = SerializeRolesJson(existing.Roles, existing.Territories, existing.Verify, enabled);
+        return await WriteRolesJsonAsync(conn, id, json, ct);
+    }
+
+    private async Task<(bool Exists, IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories, IReadOnlyList<string>? Verify, bool TriageEnabled)> ReadRolesJsonAsync(
         System.Data.Common.DbConnection conn, string id, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""SELECT roles_json FROM {T("project")} WHERE id = @id""";
         cmd.AddParam("@id", id);
         var raw = await cmd.ExecuteScalarAsync(ct);
-        if (raw is null || raw is DBNull) return (false, new Dictionary<string, int>(), new Dictionary<string, RoleTerritory>(), null);
+        if (raw is null || raw is DBNull) return (false, new Dictionary<string, int>(), new Dictionary<string, RoleTerritory>(), null, false);
         var (roles, territories) = ParseRolesJson(raw as string);
-        return (true, roles, territories, ParseVerify(raw as string));
+        return (true, roles, territories, ParseVerify(raw as string), ParseTriage(raw as string));
     }
 
     private async Task<bool> WriteRolesJsonAsync(System.Data.Common.DbConnection conn, string id, string json, CancellationToken ct)
@@ -274,7 +295,8 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         LastSyncError: rd.IsDBNull(8) ? null : rd.GetString(8),
         Roles: ParseRoles(rd.IsDBNull(9) ? null : rd.GetString(9)),
         Territories: ParseTerritories(rd.IsDBNull(9) ? null : rd.GetString(9)),
-        VerifyCommands: ParseVerify(rd.IsDBNull(9) ? null : rd.GetString(9)));
+        VerifyCommands: ParseVerify(rd.IsDBNull(9) ? null : rd.GetString(9)),
+        TriageEnabled: ParseTriage(rd.IsDBNull(9) ? null : rd.GetString(9)));
 
     /// <summary>Reserved roles_json key holding the territory block; keys
     /// starting with '$' are metadata, never role caps.</summary>
@@ -283,6 +305,23 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
     /// <summary>Reserved roles_json key holding the pre-push
     /// verification command list.</summary>
     internal const string VerifyKey = "$verify";
+
+    /// <summary>Reserved roles_json key holding the failure-triage
+    /// opt-in block (<c>{ "enabled": bool }</c>); absent = disabled.</summary>
+    internal const string TriageKey = "$triage";
+
+    private static bool ParseTriage(string? json)
+    {
+        var obj = ParseObject(json);
+        if (obj is null
+            || !obj.TryGetPropertyValue(TriageKey, out var block)
+            || block is not System.Text.Json.Nodes.JsonObject triage)
+            return false;
+        return triage.TryGetPropertyValue("enabled", out var enabled)
+            && enabled is System.Text.Json.Nodes.JsonValue v
+            && v.TryGetValue<bool>(out var b)
+            && b;
+    }
 
     private static IReadOnlyList<string>? ParseVerify(string? json)
     {
@@ -363,7 +402,8 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
     private static string SerializeRolesJson(
         IReadOnlyDictionary<string, int> roles,
         IReadOnlyDictionary<string, RoleTerritory> territories,
-        IReadOnlyList<string>? verifyCommands = null)
+        IReadOnlyList<string>? verifyCommands = null,
+        bool triageEnabled = false)
     {
         var obj = new System.Text.Json.Nodes.JsonObject();
         foreach (var kv in roles)
@@ -389,6 +429,10 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         {
             obj[VerifyKey] = new System.Text.Json.Nodes.JsonArray(
                 verifyCommands.Select(c => (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonValue.Create(c)!).ToArray());
+        }
+        if (triageEnabled)
+        {
+            obj[TriageKey] = new System.Text.Json.Nodes.JsonObject { ["enabled"] = true };
         }
         return obj.ToJsonString();
     }

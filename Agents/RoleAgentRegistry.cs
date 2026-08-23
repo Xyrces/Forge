@@ -158,6 +158,7 @@ public sealed class RoleAgentRegistry
         new PipelineRole("groomer",      "Spec + ad-hoc technical grooming",           null,             "coredev", "/specs"),
         new PipelineRole("intake",       "Operator intake sessions → epics/specs",     AgentType.Intake, null,      "/intake"),
         new PipelineRole("orchestrator", "Dispatch loop — no LLM",                     null,             null,      "/flow"),
+        new PipelineRole("triage",       "Failure triage — bounded auto-remediation",  AgentType.Triage, null,      "/triage"),
     };
 
     /// <summary>

@@ -9,6 +9,25 @@ public static class FailureTriageActions
     public const string OperatorClose = "operator-close";
     public const string OperatorResetStrikes = "operator-reset-strikes";
     public const string AgedSweep = "aged-sweep";
+
+    /// <summary>Phase 2: the triage agent requeued the task with
+    /// guidance written from the failure evidence.</summary>
+    public const string TriageRequeue = "triage-requeue";
+    /// <summary>Phase 2: the triage agent (or the deterministic
+    /// guardrails) parked the task for the operator — judgment calls
+    /// stay human.</summary>
+    public const string TriagePark = "triage-park";
+    /// <summary>Phase 2: the triage agent flagged the failure signature
+    /// as a suspected product bug. Ledger flag only — no issue is
+    /// created (operator constraint).</summary>
+    public const string TriageFlagBug = "triage-flag-bug";
+}
+
+/// <summary>Ledger actors.</summary>
+public static class FailureTriageActors
+{
+    public const string Operator = "operator";
+    public const string Triage = "triage";
 }
 
 /// <summary>Row outcomes: NULL while open; 'pending' once an action is
@@ -154,6 +173,25 @@ public sealed class FailureTriageStore
                 """;
         if (failedSince is not null)
             cmd.AddParam(P("since"), failedSince.Value.ToString(IssueStore.DateFormat));
+        var list = new List<FailureTriageEntry>();
+        await using var rd = await cmd.ExecuteReaderAsync(ct);
+        while (await rd.ReadAsync(ct)) list.Add(Map(rd));
+        return list;
+    }
+
+    /// <summary>Newest-first rows for ONE task — the guardrail
+    /// evaluator's and the per-task dashboard strip's view.</summary>
+    public async Task<IReadOnlyList<FailureTriageEntry>> ListForTaskAsync(
+        string taskId, CancellationToken ct = default)
+    {
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT id, task_id, failed_at, signature, classification, error_excerpt,
+                   action, actor, acted_at, outcome, escalated_provider, escalated_model
+            FROM {T("failure_triage")} WHERE task_id = {P("task")} ORDER BY id DESC
+            """;
+        cmd.AddParam(P("task"), taskId);
         var list = new List<FailureTriageEntry>();
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(Map(rd));

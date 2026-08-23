@@ -463,6 +463,53 @@ public static class TaskEndpoints
             }
         });
 
+        app.MapPost("/api/tasks/{id}/park", async (string id, CloseTaskRequest? body, string? projectId, CancellationToken ct) =>
+        {
+            // Operator park: hold a LIVE task (Blocked) without closing
+            // it — the opposite of close-obsolete. The watch sweep only
+            // polls Pending|InProgress, so a parked task leaves the
+            // review/rework loop until the operator requeues it. An
+            // in-flight run that finishes after the park is swallowed by
+            // the CommitPushPr stale-dispatch guard (never pushes).
+            var store = issues;
+            if (projectId is not null && projectContexts is not null)
+            {
+                var ctx2 = projectContexts.Find(projectId);
+                if (ctx2 is null) return Results.NotFound(new { error = "project not found", projectId });
+                store = ctx2.Issues;
+            }
+            try
+            {
+                var t = await store.GetAsync(id, ct);
+                if (t is null) return Results.NotFound(new { error = "task not found", id });
+                if (t.Status is IssueStatus.Completed or IssueStatus.Closed)
+                    return Results.Conflict(new { error = $"task is already terminal ({t.Status})" });
+                if (t.Status is IssueStatus.Blocked)
+                    return Results.Conflict(new { error = "task is already Blocked" });
+
+                var reason = string.IsNullOrWhiteSpace(body?.Reason)
+                    ? "operator parked"
+                    : body!.Reason!;
+                await store.TransitionAsync(id, IssueStatus.Blocked,
+                    $"operator park: {reason}",
+                    new Dictionary<string, object> { ["blockedKind"] = "operator-park", ["parkReason"] = reason }, ct);
+                if (lifecycle is not null)
+                {
+                    var parked = await store.GetAsync(id, ct);
+                    if (parked is not null)
+                        await lifecycle.ReportAsync(store, parked, Forge.Core.TaskEvent.OperatorBlocked,
+                            watch: null, hasActiveDevRun: false, ct);
+                }
+                logger.LogInformation("POST /api/tasks/{Id}/park: task parked ({Reason})", id, reason);
+                return Results.Json(new { taskId = id, status = "Blocked", reason });
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "POST /api/tasks/{Id}/park failed", id);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+
         app.MapPost("/api/tasks/{id}/reset-strikes", async (string id, string? projectId, HttpContext ctx, CancellationToken ct) =>
         {
             var store = issues;
@@ -506,13 +553,21 @@ public static class TaskEndpoints
                 var to = t.Status is IssueStatus.Failed or IssueStatus.Blocked
                     ? IssueStatus.Pending
                     : IssueStatus.InProgress;
+                // Failure-ledger clearance marker: stamped on BOTH
+                // paths. Failed/Blocked→Pending crosses the status
+                // boundary and publishes from the choke point; the
+                // InProgress case crosses no boundary, so the choke
+                // point keys the clearance signal off this metadata
+                // stamp instead (phase-1 C4 edge — the open ledger row
+                // would otherwise stay un-actioned). clearanceActionAt
+                // is the per-gesture nonce: only a FRESH stamp signals,
+                // so the stamp surviving in metadata can't re-signal on
+                // unrelated later transitions.
+                meta["clearanceAction"] = "operator-reset-strikes";
+                meta["clearanceActionAt"] = DateTime.UtcNow.ToString("O");
                 if (to == IssueStatus.Pending)
                 {
                     meta["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O");
-                    // Failure-ledger clearance marker (the InProgress
-                    // case publishes no clearance signal — the task
-                    // never left the failure status boundary here).
-                    meta["clearanceAction"] = "operator-reset-strikes";
                 }
                 await store.TransitionAsync(id, to,
                     $"operator strike reset #{resets} (rework/review/no-progress/auto-resume strikes cleared)",

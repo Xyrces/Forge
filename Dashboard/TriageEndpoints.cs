@@ -6,9 +6,10 @@ using Forge.Core;
 namespace Forge.Dashboard;
 
 /// <summary>
-/// Failure-triage ledger (phase 1 — observability only):
-///   GET /api/triage/ledger?projectId=              -> summary strip + signature-grouped view
+/// Failure-triage ledger:
+///   GET /api/triage/ledger?projectId=              -> summary strip + signature-grouped view + the project's triage flag
 ///   GET /api/triage/ledger/{signature}?projectId=  -> the group's individual rows
+///   GET /api/triage/task/{taskId}?projectId=       -> one task's rows (TaskDetail strip)
 /// Per-project lens only (no cross-project aggregation — /now stays
 /// as-is). code-bug-suspect is DERIVED here (same signature across ≥3
 /// distinct tasks), never stored.
@@ -43,7 +44,8 @@ public static class TriageEndpoints
     public sealed record TriageLedgerResponse(
         TriageSummaryDto Summary,
         IReadOnlyList<TriageSignatureGroupDto> Groups,
-        TriageHealthDto Health);
+        TriageHealthDto Health,
+        bool TriageEnabled);
 
     public sealed record TriageEntryDto(
         long Id, string TaskId, string? TaskTitle, DateTime FailedAt,
@@ -57,7 +59,7 @@ public static class TriageEndpoints
     {
         app.MapGet("/api/triage/ledger", async (string? projectId, CancellationToken ct) =>
         {
-            var (triage, _) = Resolve(projectId);
+            var (triage, _, enabled) = Resolve(projectId);
             if (triage is null) return Results.NotFound(new { error = "project not found", projectId });
             try
             {
@@ -109,7 +111,7 @@ public static class TriageEndpoints
                     VerificationTimeouts7d: rows7d.Count(r =>
                         r.Classification == "verification" && r.Signature == "verification-timeout"));
 
-                return Results.Json(new TriageLedgerResponse(summary, groups, health));
+                return Results.Json(new TriageLedgerResponse(summary, groups, health, enabled));
             }
             catch (Exception ex)
             {
@@ -120,7 +122,7 @@ public static class TriageEndpoints
 
         app.MapGet("/api/triage/ledger/{signature}", async (string signature, string? projectId, CancellationToken ct) =>
         {
-            var (triage, store) = Resolve(projectId);
+            var (triage, store, _) = Resolve(projectId);
             if (triage is null || store is null) return Results.NotFound(new { error = "project not found", projectId });
             try
             {
@@ -145,17 +147,40 @@ public static class TriageEndpoints
             }
         });
 
-        (FailureTriageStore?, IIssueStore?) Resolve(string? projectId)
+        // Per-task rows — the TaskDetail "triage actions" strip.
+        app.MapGet("/api/triage/task/{taskId}", async (string taskId, string? projectId, CancellationToken ct) =>
+        {
+            var (triage, store, _) = Resolve(projectId);
+            if (triage is null || store is null) return Results.NotFound(new { error = "project not found", projectId });
+            try
+            {
+                var rows = await triage.ListForTaskAsync(taskId, ct);
+                var task = await store.GetAsync(taskId, ct);
+                var entries = rows.Select(r => new TriageEntryDto(
+                    r.Id, r.TaskId, task?.Title, r.FailedAt,
+                    r.ErrorExcerpt, r.Action, r.Actor, r.ActedAt, r.Outcome)).ToList();
+                return Results.Json(entries);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "GET /api/triage/task/{TaskId} failed", taskId);
+                return Results.Problem(detail: ex.Message, statusCode: 500);
+            }
+        });
+
+        (FailureTriageStore?, IIssueStore?, bool) Resolve(string? projectId)
         {
             if (projectId is not null && projectContexts is not null)
             {
                 var ctx = projectContexts.Find(projectId);
-                if (ctx is null) return (null, null);
-                return (ctx.Triage, ctx.Issues);
+                if (ctx is null) return (null, null, false);
+                return (ctx.Triage, ctx.Issues, ctx.Options.TriageEnabled);
             }
+            var primaryEnabled = projectContexts?.KnownProjects
+                .FirstOrDefault()?.TriageEnabled ?? false;
             return issues is IssueStore concrete
-                ? (new FailureTriageStore(concrete), issues)
-                : (null, null);
+                ? (new FailureTriageStore(concrete), issues, primaryEnabled)
+                : (null, null, false);
         }
     }
 
