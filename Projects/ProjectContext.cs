@@ -170,6 +170,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
                     Territories = new Dictionary<string, Core.RoleTerritory>(r.Territories, StringComparer.OrdinalIgnoreCase),
                     VerifyCommands = r.VerifyCommands?.ToList(),
                     TriageEnabled = r.TriageEnabled,
+                    QaEnabled = r.QaEnabled,
                 });
             }
             return list;

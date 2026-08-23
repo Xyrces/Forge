@@ -42,6 +42,10 @@ public sealed class PRWatcher
     internal bool HasLifecycle => _lifecycle is not null;
     private readonly AgentRunStore? _runs;
     private readonly Forge.Core.Workflow.WorkflowResolver? _workflow;
+    /// <summary>Watch-lane QA stage (project $qa flag): the merge gate
+    /// requires qaVerdict=pass at the current head, and a fail verdict
+    /// at the head requeues a rework round with the QA notes.</summary>
+    private readonly bool _qaEnabled;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -55,7 +59,8 @@ public sealed class PRWatcher
         TimeSpan? reworkRoundGrace = null,
         Forge.Core.TaskStateMachine? lifecycle = null,
         AgentRunStore? runs = null,
-        Forge.Core.Workflow.WorkflowResolver? workflow = null)
+        Forge.Core.Workflow.WorkflowResolver? workflow = null,
+        bool qaEnabled = false)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -69,6 +74,7 @@ public sealed class PRWatcher
         _lifecycle = lifecycle;
         _runs = runs;
         _workflow = workflow;
+        _qaEnabled = qaEnabled;
     }
 
     /// <summary>
@@ -341,6 +347,17 @@ public sealed class PRWatcher
         var ciGreen = ci == CommitState.Success;
         var ciFailed = ci is CommitState.Failure or CommitState.Error;
 
+        // Watch-lane QA stage (project $qa flag): same current-head rule
+        // as the review verdict — a QA verdict only counts at the head
+        // it ran against (post evidence push). QA pending at this head
+        // keeps the merge gate closed without striking; a fail at this
+        // head requeues a rework round with the QA notes as context.
+        var qaVerdict = task.GetMetadata("qaVerdict");
+        var qaSha = task.GetMetadata("qaSha");
+        var qaCurrent = string.Equals(qaSha, sha, StringComparison.Ordinal) && !string.IsNullOrEmpty(qaVerdict);
+        var qaPassed = !_qaEnabled || (qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictPass, StringComparison.Ordinal));
+        var qaFailed = _qaEnabled && qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal);
+
         // Rework guard: a rework round was already queued FOR THIS
         // HEAD. The guard reads the MACHINE's record on the task
         // (reworkForSha + stateEnteredAt, written by
@@ -393,7 +410,7 @@ public sealed class PRWatcher
             prNumber, ci, approved, changesRequested, reviewErrored, agentVerdict, agentVerdictSha, sha);
 
         // 1. All gates green -> merge. (External-merge handled above.)
-        if (ciGreen && approved && !changesRequested)
+        if (ciGreen && approved && !changesRequested && qaPassed)
         {
             await ReportAsync(Forge.Core.TaskEvent.CiGreen);
             // Green + approved but CONFLICTING: the base moved after
@@ -562,6 +579,20 @@ public sealed class PRWatcher
                 terminalStatus: IssueStatus.Failed,
                 terminalError: $"CI failed after max rework attempts: {ci}",
                 terminalOutcome: WatchPollOutcome.CiFailed,
+                cancellationToken,
+                maxStrikes: maxStrikes);
+        }
+        if (qaFailed)
+        {
+            await ReportAsync(Forge.Core.TaskEvent.ReviewChangesRequested);
+            var qaNotes = task.GetMetadata("qaNotes");
+            return await ReworkOrTripAsync(
+                task, worktreePath, sha,
+                reason: "QA playthrough failed",
+                context: $"QA failed the playthrough at this head — fix what QA caught:\n{qaNotes}",
+                terminalStatus: IssueStatus.Blocked,
+                terminalError: "QA failed (circuit breaker tripped after max rework attempts)",
+                terminalOutcome: WatchPollOutcome.Blocked,
                 cancellationToken,
                 maxStrikes: maxStrikes);
         }

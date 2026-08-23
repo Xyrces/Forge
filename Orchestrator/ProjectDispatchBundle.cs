@@ -268,7 +268,11 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             // The watcher's "active dev run" guard reads the OWNING
             // project's run registry — run rows are per-project
             // workload data (operator rule 2026-07-30).
-            runs: new Core.AgentRunStore(issueStore.Db));
+            runs: new Core.AgentRunStore(issueStore.Db),
+            // Watch-lane QA stage (project $qa flag): QA playthrough
+            // before review; the merge gate requires qaVerdict=pass at
+            // the head and a fail verdict requeues a rework round.
+            qaEnabled: project.QaEnabled);
 
         return new ProjectDispatchBundle(
             ensured.Project,

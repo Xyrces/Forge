@@ -193,6 +193,27 @@
                             <tr><td>Plan</td><td><pre class="mono" style="white-space:pre-wrap; max-height:220px; overflow:auto">@pg.Plan</pre></td></tr>
                         }
                     }
+                    @if (Meta("qaVerdict") is { Length: > 0 } qaVerdict)
+                    {
+                        <tr>
+                            <td>QA stage</td>
+                            <td>
+                                <span class="pill pill--@(qaVerdict == "pass" ? "success" : qaVerdict == "fail" ? "error" : "warn")">@qaVerdict</span>
+                                @if (Meta("qaRound") is { Length: > 0 } qaRound)
+                                {
+                                    <span class="meta-text"> round @qaRound</span>
+                                }
+                                @if (Meta("qaSha") is { Length: > 0 } qaSha)
+                                {
+                                    <span class="meta-text"> at @(qaSha[..Math.Min(7, qaSha.Length)])</span>
+                                }
+                            </td>
+                        </tr>
+                        @if (Meta("qaNotes") is { Length: > 0 } qaNotes)
+                        {
+                            <tr><td class="meta-text">qa notes</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@qaNotes</pre></td></tr>
+                        }
+                    }
                     @if (Meta("triageAction") is { Length: > 0 } triageAction)
                     {
                         <tr>
