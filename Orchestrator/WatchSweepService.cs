@@ -273,20 +273,25 @@ public sealed class WatchSweepService
         if (!reviewEnabled) return;
 
         var key = bundle.Project.Id + "/" + task.Id;
-        if (!ShouldLaunchReview(task, bundle.Project.Id))
+
+        // Watch-lane QA stage (project $qa flag): QA verifies the head
+        // BEFORE the reviewer. This evaluation must be INDEPENDENT of
+        // review currency — a task whose review verdict is already
+        // current at the head (reviewed while the flag was off/stale)
+        // still owes QA; putting the QA branch behind the review
+        // early-return deadlocks the merge gate (nothing left to ever
+        // launch QA). Launch-then-return: the review waits, and QA
+        // completion relaunches this method so the review follows on a
+        // pass. TryLaunchBackgroundQaAsync no-ops when a run is in
+        // flight; the dispatcher dedupes on the live head sha.
+        if (bundle.Project.QaEnabled && !QaCurrentAtHead(task))
         {
+            TryLaunchBackgroundQaAsync(task, bundle, cancellationToken);
             return;
         }
 
-        // Watch-lane QA stage (project $qa flag): QA verifies the head
-        // BEFORE the reviewer. When QA is due (no current verdict — the
-        // dispatcher dedupes on the head sha inside), launch QA instead;
-        // the reviewer self-skips until qaSha matches the head, and QA
-        // completion relaunches this method so the review follows
-        // immediately on a pass.
-        if (bundle.Project.QaEnabled)
+        if (!ShouldLaunchReview(task, bundle.Project.Id))
         {
-            TryLaunchBackgroundQaAsync(task, bundle, cancellationToken);
             return;
         }
 
@@ -309,6 +314,28 @@ public sealed class WatchSweepService
             }
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
+    }
+
+    /// <summary>QA-due check from task metadata (cheap — no GitHub
+    /// call): QA is current when a verdict stands against the observed
+    /// head. The anchor is <c>watchHeadSha</c> (the live head recorded
+    /// by the watcher poll each pass), falling back to
+    /// <c>branchSha</c> (the last Forge-pushed head) for tasks not yet
+    /// polled. <c>branchSha</c> alone is blind to external pushes and
+    /// the QA evidence push — anchoring to it permanently would
+    /// deadlock the gate on any out-of-band head move. <c>qaSha</c> is
+    /// the post-evidence-push sha, <c>qaForSha</c> the code head
+    /// verified — either matching the anchor counts. A false "not
+    /// current" self-heals: the dispatcher dedupes on the live head and
+    /// its null-outcome continuation launches the review.</summary>
+    private static bool QaCurrentAtHead(IssueRecord task)
+    {
+        var verdict = task.GetMetadata("qaVerdict");
+        if (string.IsNullOrEmpty(verdict)) return false;
+        var head = task.GetMetadata("watchHeadSha") ?? task.GetMetadata("branchSha");
+        if (string.IsNullOrEmpty(head)) return false;
+        return string.Equals(task.GetMetadata("qaSha"), head, StringComparison.Ordinal)
+            || string.Equals(task.GetMetadata("qaForSha"), head, StringComparison.Ordinal);
     }
 
     /// <summary>Launch decision for the QA stage: skip when a QA run is

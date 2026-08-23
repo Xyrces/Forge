@@ -16,6 +16,9 @@ public sealed record ProjectsState
     public bool RolesSaving { get; init; }
     public string? RolesSaveError { get; init; }
     public string? RolesSavedFor { get; init; }
+    public bool FlagSaving { get; init; }
+    public string? FlagSaveError { get; init; }
+    public string? FlagSavedFor { get; init; }
 }
 
 public sealed record ProjectsEndpointRow(
@@ -30,7 +33,9 @@ public sealed record ProjectsEndpointRow(
     int Completed,
     int Failed,
     IReadOnlyList<ProjectsSlotRow> Slots,
-    IReadOnlyDictionary<string, int>? DefaultRoleCaps = null);
+    IReadOnlyDictionary<string, int>? DefaultRoleCaps = null,
+    bool TriageEnabled = false,
+    bool QaEnabled = false);
 
 public sealed record ProjectsSlotRow(string ProjectId, string Role, int InFlight, int Max);
 
@@ -68,6 +73,13 @@ public static class ProjectsActions
     public sealed record UpdateProjectRolesSavingAction();
     public sealed record UpdateProjectRolesSucceededAction(string Id);
     public sealed record UpdateProjectRolesFailedAction(string Error);
+
+    /// <summary>Flip a per-project stage flag ($triage / $qa) via the
+    /// existing PUT /api/projects/{id}/{flag} endpoints.</summary>
+    public sealed record ToggleProjectFlagAction(string Id, string Flag, bool Enabled);
+    public sealed record ToggleProjectFlagSavingAction();
+    public sealed record ToggleProjectFlagSucceededAction(string Id);
+    public sealed record ToggleProjectFlagFailedAction(string Error);
 }
 
 public sealed class ProjectsClient
@@ -107,6 +119,19 @@ public sealed class ProjectsClient
         {
             throw new InvalidOperationException(
                 $"PUT /api/projects/{id}/roles returned {(int)resp.StatusCode}: {raw}");
+        }
+    }
+
+    public async Task SetFlagAsync(string id, string flag, bool enabled, CancellationToken ct)
+    {
+        var resp = await _http.PutAsJsonAsync(
+            $"/api/projects/{Uri.EscapeDataString(id)}/{flag}",
+            new { enabled }, ct);
+        var raw = await resp.Content.ReadAsStringAsync(ct);
+        if (!resp.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"PUT /api/projects/{id}/{flag} returned {(int)resp.StatusCode}: {raw}");
         }
     }
 

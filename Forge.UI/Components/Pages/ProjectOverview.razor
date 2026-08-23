@@ -71,6 +71,53 @@
         </section>
 
         <section class="overview-section">
+            <h2>Stage flags</h2>
+            <p class="page-subtitle page-subtitle--meta">
+                Per-project opt-ins persisted in <code>roles_json</code>; they apply live (no restart).
+                The <a href="/triage">Triage page</a> banner reflects the same state.
+            </p>
+
+            @if (ProjectsStore.Value.FlagSaveError is not null)
+            {
+                <div class="banner banner--error"><span>@ProjectsStore.Value.FlagSaveError</span></div>
+            }
+            @if (ProjectsStore.Value.FlagSavedFor == Id)
+            {
+                <div class="banner banner--ok"><span>Flag updated — live on the next read.</span></div>
+            }
+
+            <table class="data-grid">
+                <thead>
+                    <tr><th>Flag</th><th>State</th><th>Effect</th><th></th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="mono">$triage</td>
+                        <td><span class="pill @(proj.TriageEnabled ? "pill--active" : "pill--pending")">@(proj.TriageEnabled ? "on" : "off")</span></td>
+                        <td>Failure-triage agent acts on the failure ledger (bounded, audited).</td>
+                        <td>
+                            <button class="btn btn--ghost" disabled="@ProjectsStore.Value.FlagSaving"
+                                    @onclick="@(() => ToggleFlag("triage", !proj.TriageEnabled))">
+                                @(proj.TriageEnabled ? "Disable" : "Enable")
+                            </button>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="mono">$qa</td>
+                        <td><span class="pill @(proj.QaEnabled ? "pill--active" : "pill--pending")">@(proj.QaEnabled ? "on" : "off")</span></td>
+                        <td>Watch-lane QA playthrough before review; merge requires qaVerdict=pass at the head.</td>
+                        <td>
+                            <button class="btn btn--ghost" disabled="@ProjectsStore.Value.FlagSaving"
+                                    @onclick="@(() => ToggleFlag("qa", !proj.QaEnabled))">
+                                @(proj.QaEnabled ? "Disable" : "Enable")
+                            </button>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="overview-section">
             <h2>Concurrency slots</h2>
             <p class="page-subtitle page-subtitle--meta">Per-project in-process semaphores. Adjust via <code>PATCH /api/projects/@Id/slots/{role}</code> with body <code>{ "max": N }</code>.</p>
             <div class="slot-grid">
@@ -213,6 +260,9 @@
         var roles = new Dictionary<string, int>(_roleEdits, StringComparer.OrdinalIgnoreCase);
         Dispatch.Dispatch(new ProjectsActions.UpdateProjectRolesAction(Id, roles));
     }
+
+    private void ToggleFlag(string flag, bool enabled)
+        => Dispatch.Dispatch(new ProjectsActions.ToggleProjectFlagAction(Id, flag, enabled));
 
     private void ResetRoleEdits()
     {

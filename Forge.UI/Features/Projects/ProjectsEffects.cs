@@ -48,6 +48,36 @@ public class UpdateProjectRolesEffect : Effect<ProjectsActions.UpdateProjectRole
     }
 }
 
+public class ToggleProjectFlagEffect : Effect<ProjectsActions.ToggleProjectFlagAction>
+{
+    private readonly ProjectsClient _client;
+    public ToggleProjectFlagEffect(ProjectsClient client) { _client = client; }
+
+    public override async Task HandleAsync(
+        ProjectsActions.ToggleProjectFlagAction action,
+        IDispatcher dispatcher)
+    {
+        if (action.Flag is not ("triage" or "qa"))
+        {
+            dispatcher.Dispatch(new ProjectsActions.ToggleProjectFlagFailedAction($"unknown flag '{action.Flag}'"));
+            return;
+        }
+        dispatcher.Dispatch(new ProjectsActions.ToggleProjectFlagSavingAction());
+        try
+        {
+            await _client.SetFlagAsync(action.Id, action.Flag, action.Enabled, CancellationToken.None);
+            dispatcher.Dispatch(new ProjectsActions.ToggleProjectFlagSucceededAction(action.Id));
+            // Reload so the pills + ledger toggle reflect the persisted
+            // (and now refresh-on-read live) flag state.
+            dispatcher.Dispatch(new ProjectsActions.LoadProjectsAction());
+        }
+        catch (Exception ex)
+        {
+            dispatcher.Dispatch(new ProjectsActions.ToggleProjectFlagFailedAction(ex.Message));
+        }
+    }
+}
+
 public class AddProjectEffect : Effect<ProjectsActions.AddProjectAction>
 {
     private readonly ProjectsClient _client;

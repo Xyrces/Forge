@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Forge.Configuration;
 using Forge.Core;
 using Forge.Deploy;
+using Microsoft.Extensions.Logging;
 
 namespace Forge.Projects;
 
@@ -13,7 +14,14 @@ namespace Forge.Projects;
 /// </summary>
 public sealed class ProjectContext : IAsyncDisposable
 {
-    public ProjectOptions Options { get; }
+    /// <summary>Options snapshot. Refreshable in live mode: flag PUTs
+    /// ($triage/$qa/$verify/$territory) update the registry but this
+    /// context is cached for the process lifetime, so
+    /// <see cref="ProjectContextFactory.Find"/> swaps in a fresh
+    /// snapshot on every call. The record swap is atomic enough for
+    /// the read-mostly consumers; a reader holding a long-lived
+    /// reference keeps its snapshot for that operation only.</summary>
+    public ProjectOptions Options { get; private set; }
 
     private readonly IssueStore _issues;
     private readonly Lazy<DeploymentStore> _deployments;
@@ -46,6 +54,11 @@ public sealed class ProjectContext : IAsyncDisposable
     public ISpecStore Specs => _specs.Value;
     public ISprintStore Sprints => _sprints.Value;
     public FailureTriageStore Triage => _triage.Value;
+
+    /// <summary>Swap the options snapshot (live-mode refresh-on-read).
+    /// Never disposes/recreates the context — it owns the shared
+    /// <see cref="IssueStore"/>.</summary>
+    internal void RefreshOptions(ProjectOptions options) => Options = options;
 
     public async Task<int> CountByStatusAsync(IssueStatus status, CancellationToken ct)
     {
@@ -95,6 +108,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     private readonly string _dataRoot;
     private readonly Func<string, string, Core.Db.IDbConnectionFactory>? _dbResolver;
     private readonly Core.Messaging.IEventPublisher? _events;
+    private readonly ILogger _logger;
     private readonly ConcurrentDictionary<string, ProjectContext> _cache = new();
     private bool _disposed;
 
@@ -103,8 +117,9 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         IReadOnlyList<ProjectOptions> projects,
         IReadOnlyDictionary<string, string>? issuesDbByProject = null,
         Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
-        Core.Messaging.IEventPublisher? events = null)
-        : this(projects, store: null, dataRoot: null, issuesDbByProject, dbResolver, events)
+        Core.Messaging.IEventPublisher? events = null,
+        ILogger? logger = null)
+        : this(projects, store: null, dataRoot: null, issuesDbByProject, dbResolver, events, logger)
     {
     }
 
@@ -114,8 +129,9 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         string dataRoot,
         IReadOnlyDictionary<string, string>? issuesDbByProject = null,
         Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
-        Core.Messaging.IEventPublisher? events = null)
-        : this(projects: null, store: store, dataRoot: dataRoot, issuesDbByProject, dbResolver, events)
+        Core.Messaging.IEventPublisher? events = null,
+        ILogger? logger = null)
+        : this(projects: null, store: store, dataRoot: dataRoot, issuesDbByProject, dbResolver, events, logger)
     {
     }
 
@@ -125,7 +141,8 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         string? dataRoot,
         IReadOnlyDictionary<string, string>? issuesDbByProject,
         Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
-        Core.Messaging.IEventPublisher? events = null)
+        Core.Messaging.IEventPublisher? events = null,
+        ILogger? logger = null)
     {
         if (projects is null && store is null)
             throw new ArgumentException("Either projects (static) or store (live) must be supplied.");
@@ -136,7 +153,16 @@ public sealed class ProjectContextFactory : IAsyncDisposable
             ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         _dbResolver = dbResolver;
         _events = events;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
+
+    /// <summary>Root: the clone path recorded at registration
+    /// (local_path), else the canonical clone location
+    /// <c>&lt;dataRoot&gt;/projects/&lt;id&gt;</c> that ProjectBootstrap uses.</summary>
+    private string RootFor(ProjectRecord r) =>
+        !string.IsNullOrWhiteSpace(r.LocalPath)
+            ? r.LocalPath!
+            : ForgesystemPaths.ProjectDir(_dataRoot, r.Id);
 
     public IReadOnlyList<ProjectOptions> KnownProjects
     {
@@ -152,27 +178,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
                 .GetAwaiter().GetResult();
             var list = new List<ProjectOptions>(rows.Count);
             foreach (var r in rows)
-            {
-                // Root: the clone path recorded at registration
-                // (local_path), else the canonical clone location
-                // <dataRoot>/projects/<id> that ProjectBootstrap uses.
-                var root = !string.IsNullOrWhiteSpace(r.LocalPath)
-                    ? r.LocalPath!
-                    : ForgesystemPaths.ProjectDir(_dataRoot, r.Id);
-                list.Add(new ProjectOptions
-                {
-                    Id = r.Id,
-                    Name = r.Name,
-                    RepoUrl = r.RepoUrl,
-                    DefaultBranch = r.DefaultBranch,
-                    Root = root,
-                    Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
-                    Territories = new Dictionary<string, Core.RoleTerritory>(r.Territories, StringComparer.OrdinalIgnoreCase),
-                    VerifyCommands = r.VerifyCommands?.ToList(),
-                    TriageEnabled = r.TriageEnabled,
-                    QaEnabled = r.QaEnabled,
-                });
-            }
+                list.Add(r.ToProjectOptions(RootFor(r)));
             return list;
         }
     }
@@ -192,7 +198,11 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     public ProjectContext? Find(string projectId)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(ProjectContextFactory));
-        if (_cache.TryGetValue(projectId, out var ctx)) return ctx;
+        if (_cache.TryGetValue(projectId, out var ctx))
+        {
+            RefreshCachedOptions(ctx, projectId);
+            return ctx;
+        }
         var opts = KnownProjects.FirstOrDefault(p =>
             string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase));
         if (opts is null) return null;
@@ -209,6 +219,35 @@ public sealed class ProjectContextFactory : IAsyncDisposable
                 : new IssueStore(dbPath, projectId, _events);
             var ctx2 = new ProjectContext(opts, store);
             return _cache.GetOrAdd(projectId, ctx2);
+        }
+    }
+
+    /// <summary>
+    /// Refresh-on-read (live mode only): a cached context's options
+    /// snapshot is from first Find (process boot) — without this swap,
+    /// flag PUTs ($triage/$qa) update the DB but every cached reader
+    /// (triage ledger endpoint, FailureTriageConsumer, TriageConsumer)
+    /// keeps the stale snapshot until restart. Static mode's list is
+    /// fixed, so the refresh is a no-op there. Single-row GetAsync —
+    /// a full-registry KnownProjects read here would N+1 every
+    /// per-project loop and per-event consumer. A refresh failure
+    /// degrades to the stale snapshot: a registry hiccup must not
+    /// hard-fail readers that were previously served from cache.
+    /// </summary>
+    private void RefreshCachedOptions(ProjectContext ctx, string projectId)
+    {
+        if (_staticProjects is not null) return;
+        try
+        {
+            var record = _store!.GetAsync(projectId, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            // Deleted mid-flight (or unknown): keep the cached context.
+            if (record is not null) ctx.RefreshOptions(record.ToProjectOptions(RootFor(record)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "ProjectContextFactory: options refresh failed for {ProjectId} — serving the stale snapshot", projectId);
         }
     }
 

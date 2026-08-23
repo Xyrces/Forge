@@ -76,7 +76,9 @@ public static class ProjectsEndpoints
                 pending, inprogress, completed, failed,
                 slots.Snapshot().Where(m => m.ProjectId == p.Id).ToList(),
                 DefaultRoleCaps: new Dictionary<string, int>(Configuration.DefaultProjectRoles.Default, StringComparer.OrdinalIgnoreCase),
-                Territories: p.Territories));
+                Territories: p.Territories,
+                TriageEnabled: p.TriageEnabled,
+                QaEnabled: p.QaEnabled));
         }
         return Results.Ok(rows);
     }
@@ -94,7 +96,9 @@ public static class ProjectsEndpoints
             ctx.Options.Id, ctx.Options.Name, ctx.Options.RepoUrl, ctx.Options.DefaultBranch, ctx.Options.Root, ctx.Options.Roles,
             pending, inprogress, completed, failed,
             slots.Snapshot().Where(m => m.ProjectId == id).ToList(),
-            Territories: ctx.Options.Territories));
+            Territories: ctx.Options.Territories,
+            TriageEnabled: ctx.Options.TriageEnabled,
+            QaEnabled: ctx.Options.QaEnabled));
     }
 
     private static async Task<IResult> AddProjectAsync(
@@ -423,7 +427,9 @@ public static class ProjectsEndpoints
         int Failed,
         IReadOnlyList<SlotTable.SlotMeter> Slots,
         IReadOnlyDictionary<string, int>? DefaultRoleCaps = null,
-        IReadOnlyDictionary<string, Core.RoleTerritory>? Territories = null);
+        IReadOnlyDictionary<string, Core.RoleTerritory>? Territories = null,
+        bool TriageEnabled = false,
+        bool QaEnabled = false);
 
     public sealed record AddProjectRequest(
         string Id,

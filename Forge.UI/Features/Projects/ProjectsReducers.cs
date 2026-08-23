@@ -48,4 +48,16 @@ public static class ProjectsReducers
     [ReducerMethod]
     public static ProjectsState OnRolesSaveFailed(ProjectsState state, ProjectsActions.UpdateProjectRolesFailedAction action) =>
         state with { RolesSaving = false, RolesSaveError = action.Error, RolesSavedFor = null };
+
+    [ReducerMethod(typeof(ProjectsActions.ToggleProjectFlagSavingAction))]
+    public static ProjectsState OnFlagSaving(ProjectsState state) =>
+        state with { FlagSaving = true, FlagSaveError = null, FlagSavedFor = null };
+
+    [ReducerMethod]
+    public static ProjectsState OnFlagSaved(ProjectsState state, ProjectsActions.ToggleProjectFlagSucceededAction action) =>
+        state with { FlagSaving = false, FlagSaveError = null, FlagSavedFor = action.Id };
+
+    [ReducerMethod]
+    public static ProjectsState OnFlagSaveFailed(ProjectsState state, ProjectsActions.ToggleProjectFlagFailedAction action) =>
+        state with { FlagSaving = false, FlagSaveError = action.Error, FlagSavedFor = null };
 }

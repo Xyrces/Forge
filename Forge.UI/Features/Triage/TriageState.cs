@@ -12,7 +12,6 @@ public sealed record TriageState
     public IReadOnlyList<TriageGroupRow> Groups { get; init; } = Array.Empty<TriageGroupRow>();
     public TriageHealthRow? Health { get; init; }
     public bool TriageEnabled { get; init; }
-    public bool ToggleInFlight { get; init; }
     public string? ExpandedSignature { get; init; }
     public bool DetailLoading { get; init; }
     public IReadOnlyList<TriageEntryRow> DetailRows { get; init; } = Array.Empty<TriageEntryRow>();
@@ -54,10 +53,6 @@ public static class TriageActions
     public sealed record CollapseSignatureAction;
     public sealed record SignatureDetailLoadedAction(string Signature, IReadOnlyList<TriageEntryRow> Rows);
     public sealed record SignatureDetailFailedAction(string Error);
-
-    public sealed record ToggleTriageAction(bool Enabled, string? ProjectId = null);
-    public sealed record TriageToggledAction(bool Enabled);
-    public sealed record TriageToggleFailedAction(string Error);
 }
 
 public sealed class TriageClient
@@ -82,13 +77,6 @@ public sealed class TriageClient
             ? (new TriageSummaryRow(0, 0, 0, 5, 0, Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>()),
                Array.Empty<TriageGroupRow>(), new TriageHealthRow(0, 0, 0), false)
             : (resp.Summary, resp.Groups, resp.Health, resp.TriageEnabled);
-    }
-
-    public async Task<bool> SetTriageEnabledAsync(string projectId, bool enabled, CancellationToken ct)
-    {
-        var resp = await _http.PutAsJsonAsync(
-            $"/api/projects/{Uri.EscapeDataString(projectId)}/triage", new { enabled }, ct);
-        return resp.IsSuccessStatusCode;
     }
 
     public async Task<IReadOnlyList<TriageEntryRow>> GetSignatureRowsAsync(

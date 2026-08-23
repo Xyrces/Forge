@@ -89,3 +89,27 @@ public static class DefaultProjectRoles
         return Default.TryGetValue(role, out var d) ? d : 1;
     }
 }
+
+public static class ProjectRecordOptionsMapping
+{
+    /// <summary>
+    /// The single <see cref="Core.ProjectRecord"/> -&gt; <see cref="ProjectOptions"/>
+    /// mapping, shared by the dashboard-side KnownProjects mapper and the
+    /// watch lane's bundle mapping. A second hand-maintained copy dropping
+    /// newly added roles_json keys ($triage/$qa) caused the 2026-08-23
+    /// stale-flag incident — add new keys HERE, once.
+    /// </summary>
+    public static ProjectOptions ToProjectOptions(this Core.ProjectRecord r, string root) => new()
+    {
+        Id = r.Id,
+        Name = r.Name,
+        RepoUrl = r.RepoUrl,
+        DefaultBranch = r.DefaultBranch,
+        Root = root,
+        Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
+        Territories = new Dictionary<string, Core.RoleTerritory>(r.Territories, StringComparer.OrdinalIgnoreCase),
+        VerifyCommands = r.VerifyCommands?.ToList(),
+        TriageEnabled = r.TriageEnabled,
+        QaEnabled = r.QaEnabled,
+    };
+}

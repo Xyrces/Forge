@@ -1,3 +1,4 @@
+using Forge.Configuration;
 using Forge.Core.Messaging;
 using Forge.Messaging;
 using Microsoft.Extensions.Logging;
@@ -38,15 +39,12 @@ public abstract class WatchConsumerBase<T> : EventConsumer<T> where T : IForgeEv
         }
         try
         {
-            return _bundleFactory.Build(new Configuration.ProjectOptions
-            {
-                Id = record.Id,
-                Name = record.Name,
-                RepoUrl = record.RepoUrl,
-                DefaultBranch = record.DefaultBranch,
-                Root = string.Empty,
-                Roles = new Dictionary<string, int>(record.Roles, StringComparer.Ordinal),
-            });
+            // The shared record→options mapper (Root stays empty here —
+            // the bundle factory re-resolves it via ProjectBootstrap).
+            // A second hand-maintained copy dropping the $triage/$qa/
+            // $territory/$verify keys caused the 2026-08-23 stale-flag
+            // incident: the watch lane saw QaEnabled=false forever.
+            return _bundleFactory.Build(record.ToProjectOptions(root: string.Empty));
         }
         catch (Exception ex)
         {
