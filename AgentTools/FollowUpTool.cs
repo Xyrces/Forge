@@ -46,8 +46,9 @@ public sealed class FollowUpTool
         ([Description("One-line task title stating the follow-up work.")] string title,
          [Description("What you found, where (file:line / PR / command output), and why it matters. Enough context for grooming + a future engineering run that has never seen this conversation.")] string description,
          [Description("Priority 1-5; defaults to 3.")] int? priority = null,
-         [Description("OPTIONAL: an issue id this follow-up BLOCKS — use ONLY when that issue genuinely cannot proceed until this work lands (the discovery blocks in-flight work). Creates a real dependency edge at filing time and adds the follow-up to the blocked work's active sprint immediately. Omit for ordinary deferred findings.")] string? blocksIssueId = null)
-            => FileAsync(title, description, priority, blocksIssueId),
+         [Description("OPTIONAL: an issue id this follow-up BLOCKS — use ONLY when that issue genuinely cannot proceed until this work lands (the discovery blocks in-flight work). Creates a real dependency edge at filing time and adds the follow-up to the blocked work's active sprint immediately. Omit for ordinary deferred findings.")] string? blocksIssueId = null,
+         [Description("Task type — routes dispatch to the right role. 'task' (default) = coredev (Core/sim/tests/docs). 'client' (or 'ui'/'godot') = clientdev (Client/Scripts, scenes, UI). 'qa' (or 'playtest'/'test') = the QA role (playthroughs, evidence). Set it when the work is obviously one of those — a mistyped follow-up dies at the plan-territory gate.")] string? taskType = null)
+            => FileAsync(title, description, priority, blocksIssueId, taskType),
         name: "file_followup",
         description: "Track follow-up work you discovered that is out of scope for your current task " +
                      "(tech debt, a bug elsewhere, a deferred review finding). Tracked findings do " +
@@ -56,10 +57,11 @@ public sealed class FollowUpTool
                      "current task. If the discovery BLOCKS in-flight work, pass blocksIssueId — that " +
                      "creates a real blocking task immediately (the only exception).");
 
-    private async Task<string> FileAsync(string title, string description, int? priority, string? blocksIssueId)
+    private async Task<string> FileAsync(string title, string description, int? priority, string? blocksIssueId, string? taskType)
     {
         if (string.IsNullOrWhiteSpace(title)) return "title_required";
         if (string.IsNullOrWhiteSpace(description)) return "description_required";
+        var type = string.IsNullOrWhiteSpace(taskType) ? "task" : taskType.Trim().ToLowerInvariant();
 
         // Operator model 2026-07-31: deferred findings are TRACKED,
         // not created — no follow-up tasks against unmerged work.
@@ -79,12 +81,13 @@ public sealed class FollowUpTool
                 Priority: Math.Clamp(priority ?? 3, 1, 5),
                 BlocksIssueId: null,
                 CreatedAt: DateTime.UtcNow,
-                ConsumedAt: null));
+                ConsumedAt: null,
+                TaskType: type));
             return $"tracked:draft-{draftId} (reviewed at sprint completion; pass blocksIssueId only for genuine blockers)";
         }
 
         var issue = await _issues.CreateAsync(new NewIssue(
-            Type: "task",
+            Type: type,
             Title: title.Trim(),
             Description: description.Trim(),
             Priority: Math.Clamp(priority ?? 3, 1, 5),

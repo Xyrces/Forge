@@ -200,6 +200,48 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task NoDiff_PlanGateBlocked_NeverCompletesOnNoOpMarker()
+    {
+        // Live 2026-08-23 (porthorizon task-752): a client-scope task
+        // routed to coredev burned its plan-gate revision budget
+        // (territory rejections), produced nothing, and its "the gates
+        // block me" final message hollow-COMPLETED the task. A
+        // plan-gate-blocked run's no-diff is a FAILURE, not a no-op
+        // completion — regardless of NO_CHANGES_NEEDED.
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x",
+            Metadata: new Dictionary<string, object>
+            {
+                ["planGate"] = """{"approved":false,"fastPath":false,"revisions":3,"failed":true,"plan":"…","verdicts":[]}""",
+            }));
+        var claimed = await ClaimExecutor.HandleAsync(
+            issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var agent = new AgentCompleted(worktree, AgentResult.Ok,
+            "The gates block any path to making the edits. NO_CHANGES_NEEDED", null);
+
+        var result = await CommitPushPrExecutor.HandleAsync(
+            agent, _issues, _worktrees, new StubGitHub(), _events,
+            new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger<CommitPushPrExecutor>.Instance, null, default);
+
+        Assert.Equal(PrResult.NoDiff, result.Result);
+        var after = await _issues.GetAsync(issue.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+    }
+
+    [Fact]
+    public void PlanGateBlocked_OnlyOnFailedTrue()
+    {
+        Assert.True(CommitPushPrExecutor.PlanGateBlocked("""{"approved":false,"failed":true,"revisions":3}"""));
+        Assert.False(CommitPushPrExecutor.PlanGateBlocked("""{"approved":true,"fastPath":true}"""));
+        Assert.False(CommitPushPrExecutor.PlanGateBlocked(null));
+        Assert.False(CommitPushPrExecutor.PlanGateBlocked("not json"));
+    }
+
+    [Fact]
     public async Task NoDiff_ExplicitMarker_PolicyRework_RequeuesInsteadOfCompleting()
     {
         // Workflow policy noDiffOutcome=rework (pass 3): the operator

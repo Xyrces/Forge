@@ -216,7 +216,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 35;
+    public const int CurrentSchemaVersion = 36;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1007,6 +1007,14 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // migration later.
         ApplyV35FailureTriage(conn);
 
+        // v36 (post-init): followup_draft.task_type — the follow-up's
+        // type routes the materialized task to the right role
+        // (client work → clientdev, playtest evidence → qa); without
+        // it every follow-up was born type='task' → coredev and
+        // client-scope work died at the plan-territory gate (live:
+        // porthorizon task-752).
+        ApplyV36FollowUpDraftTaskType(conn);
+
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
         // DBs (observed live 2026-07-24: forge DB stamped v19 while
@@ -1550,6 +1558,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 description     NVARCHAR(MAX) NOT NULL,
                 priority        INT NOT NULL DEFAULT 3,
                 blocks_issue_id NVARCHAR(128) NULL,
+                task_type       NVARCHAR(64)  NULL,
                 created_at      NVARCHAR(40) NOT NULL,
                 consumed_at     NVARCHAR(40) NULL
             );
@@ -1804,6 +1813,17 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         alter.CommandText =
             "ALTER TABLE followup_draft ADD COLUMN disposition TEXT;" +
             "ALTER TABLE followup_draft ADD COLUMN disposition_detail TEXT;";
+        alter.ExecuteNonQuery();
+    }
+
+    private void ApplyV36FollowUpDraftTaskType(SqliteConnection conn)
+    {
+        using var probe = conn.CreateCommand();
+        probe.CommandText = "SELECT 1 FROM pragma_table_info('followup_draft') WHERE name = 'task_type' LIMIT 1";
+        if (probe.ExecuteScalar() is not null) return;
+
+        using var alter = conn.CreateCommand();
+        alter.CommandText = "ALTER TABLE followup_draft ADD COLUMN task_type TEXT";
         alter.ExecuteNonQuery();
     }
 

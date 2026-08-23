@@ -105,15 +105,16 @@ public sealed class FailureTriageKickTests : IAsyncLifetime
         await _issues.TransitionAsync(taskId, IssueStatus.InProgress, null);
         await _issues.TransitionAsync(taskId, IssueStatus.Failed, "HTTP 429 rate limit (quota)");
 
-        // The freshly re-failed row parks deterministically…
-        var rows = await UntilAsync(() => _triage.ListForTaskAsync(taskId),
-            rs => rs.Any(r => r.Action == FailureTriageActions.TriagePark
-                && r.Actor == FailureTriageActors.Triage), "deterministic park");
-        var parked = rows.First(r => r.Action == FailureTriageActions.TriagePark);
+        // The freshly re-failed row parks deterministically… (probe the
+        // TASK metadata — the ledger row is written before the metadata
+        // stamp inside the park, so the row alone is a partial read)
+        var parkedTask = await UntilAsync(async () => await _issues.GetAsync(taskId),
+            t => t?.GetMetadata("triageAction") == "parked", "parked metadata stamp");
+        Assert.Contains("daily triage action cap", parkedTask.GetMetadata("triageNote"));
+        var parked = (await _triage.ListForTaskAsync(taskId))
+            .First(r => r.Action == FailureTriageActions.TriagePark);
+        Assert.Equal(FailureTriageActors.Triage, parked.Actor);
         Assert.Null(parked.Outcome);
-        var task = await _issues.GetAsync(taskId);
-        Assert.Equal("parked", task!.GetMetadata("triageAction"));
-        Assert.Contains("daily triage action cap", task.GetMetadata("triageNote"));
 
         // …and NO further TriageRequested follows the at-cap failure:
         // the test-reader group's offset drained at the first read, so
@@ -144,11 +145,11 @@ public sealed class FailureTriageKickTests : IAsyncLifetime
         await _issues.TransitionAsync(taskId, IssueStatus.InProgress, null);
         await _issues.TransitionAsync(taskId, IssueStatus.Failed, "HTTP 429 rate limit (quota)");
 
-        var rows = await UntilAsync(() => _triage.ListForTaskAsync(taskId),
-            rs => rs.Any(r => r.Action == FailureTriageActions.TriagePark), "burn-loop park");
-        var parked = rows.First(r => r.Action == FailureTriageActions.TriagePark);
-        Assert.Equal(FailureTriageActors.Triage, parked.Actor);
-        var task = await _issues.GetAsync(taskId);
-        Assert.Contains("without success", task!.GetMetadata("triageNote"));
+        var burnTask = await UntilAsync(async () => await _issues.GetAsync(taskId),
+            t => t?.GetMetadata("triageAction") == "parked", "burn-loop park stamp");
+        Assert.Contains("without success", burnTask.GetMetadata("triageNote"));
+        var parked2 = (await _triage.ListForTaskAsync(taskId))
+            .First(r => r.Action == FailureTriageActions.TriagePark);
+        Assert.Equal(FailureTriageActors.Triage, parked2.Actor);
     }
 }
