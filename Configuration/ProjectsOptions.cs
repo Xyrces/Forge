@@ -47,6 +47,11 @@ public sealed record ProjectOptions
     // empty = verification disabled.
     public List<string>? VerifyCommands { get; set; }
 
+    // Failure-triage agent opt-in (the "$triage" roles_json key, phase
+    // 2). Off by default; while off, no TriageRequested events are
+    // published for the project and the triage consumer drops hints.
+    public bool TriageEnabled { get; set; }
+
     // P8: optional deployment pipeline config. Null/omitted means the
     // project has no configured deployment action -- it can still be
     // enqueued for build-verification, but "approve" has nothing to
@@ -68,6 +73,7 @@ public static class DefaultProjectRoles
         ["artist"] = 1,
         ["groomer"] = 1,
         ["orchestrator"] = 1,
+        ["triage"] = 1,
     };
 
     public static int MaxFor(Dictionary<string, int> roles, string role)

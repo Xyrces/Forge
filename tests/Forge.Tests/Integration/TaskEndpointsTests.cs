@@ -216,6 +216,40 @@ public class TaskEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Park_InProgress_BlocksWithReason()
+    {
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, default);
+
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/park", new { reason = "missing QA stage" });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.Blocked, after.Status);
+        Assert.Equal("operator-park", after.GetMetadata("blockedKind"));
+        Assert.Equal("missing QA stage", after.GetMetadata("parkReason"));
+    }
+
+    [Fact]
+    public async Task Park_TerminalOrBlocked_Conflicts()
+    {
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom", default);
+        var closed = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "C", Priority: 2), default);
+        await _issues.TransitionAsync(closed.Id, IssueStatus.Closed, "done", default);
+
+        // Failed is parkable (operator hold on a failed task)…
+        var r1 = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/park", new { });
+        Assert.Equal(HttpStatusCode.OK, r1.StatusCode);
+        // …but a second park (now Blocked) and a Closed task conflict.
+        var r2 = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/park", new { });
+        Assert.Equal(HttpStatusCode.Conflict, r2.StatusCode);
+        var r3 = await _client.PostAsJsonAsync($"/api/tasks/{closed.Id}/park", new { });
+        Assert.Equal(HttpStatusCode.Conflict, r3.StatusCode);
+    }
+
+    [Fact]
     public async Task Recover_NoRecoveryService_Returns503()
     {
         var resp = await _client.PostAsync("/api/tasks/T-42/recover", null);

@@ -17,6 +17,7 @@ public enum AgentType
     QA,
     Reviewer,
     Intake,
+    Triage,
 }
 
 public enum AgentStatus

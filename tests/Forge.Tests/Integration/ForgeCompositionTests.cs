@@ -65,10 +65,10 @@ public sealed class ForgeCompositionTests : IDisposable
         Assert.NotNull(provider.GetService<SweepTickPublisher>());
 
         // Every consumer registered under the marker — the set Program
-        // starts. Eleven topics, eleven consumers, one per topic.
+        // starts. Twelve topics, twelve consumers, one per topic.
         var consumers = provider.GetServices<IEventConsumerService>().ToList();
-        Assert.Equal(11, consumers.Count);
-        Assert.Equal(11, consumers.Select(c => c.GetType()).Distinct().Count());
+        Assert.Equal(12, consumers.Count);
+        Assert.Equal(12, consumers.Select(c => c.GetType()).Distinct().Count());
 
         // The heavy factory registrations resolve (DashboardHost's
         // factory lambda touches most of the graph).

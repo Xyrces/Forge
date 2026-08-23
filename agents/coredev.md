@@ -68,7 +68,7 @@ Do not try to evade the gate (e.g. via interpreters writing files) — the gate 
 ## Done means
 
 - Build green, tests green, committed, pushed.
-- Your reply's final message: 2-4 sentences — what changed, which files, test result.
+- Your reply's final message: 2-4 sentences — what changed, which files, test result. This text lands VERBATIM in the PR body's Implementation section: write it as a reviewer-facing summary (what changed + evidence links when the acceptance bar calls for them — e.g. attached PNG screenshots). Never narration ("Let me look at…"), never a transcript of your process.
 
 ## Secrets (by reference — never inline values)
 

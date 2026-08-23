@@ -43,6 +43,10 @@ public static class ProjectsEndpoints
         group.MapPut("/{id}/roles", PutRolesAsync)
              .WithName("PutProjectRoles")
              .WithSummary("Replace the project's persisted role-cap overrides (role -> max) and apply them to the live slot table.");
+
+        group.MapPut("/{id}/triage", PutTriageAsync)
+             .WithName("PutProjectTriage")
+             .WithSummary("Set the failure-triage agent opt-in (the $triage roles_json key). Off = no TriageRequested events for the project.");
         endpoints.MapGet("/api/board", BoardAsync)
                  .WithName("CrossProjectBoard")
                  .WithSummary("Cross-project kanban feed: each row tagged with project_id.");
@@ -367,6 +371,22 @@ public static class ProjectsEndpoints
         Dictionary<string, int>? Roles,
         Dictionary<string, PutTerritoryEntry>? Territory = null,
         List<string>? Verify = null);
+
+    public sealed record PutTriageRequest(bool Enabled);
+
+    private static async Task<IResult> PutTriageAsync(
+        string id,
+        PutTriageRequest? body,
+        IProjectStore store,
+        CancellationToken ct)
+    {
+        if (body is null)
+            return Results.BadRequest(new { error = "body required, e.g. { \"enabled\": true }" });
+        var updated = await store.UpdateTriageAsync(id, body.Enabled, ct);
+        if (!updated) return Results.NotFound(new { error = "project not found", id });
+        var project = await store.GetAsync(id, ct);
+        return Results.Ok(new { projectId = id, triageEnabled = project?.TriageEnabled ?? false });
+    }
 
     public sealed record PutTerritoryEntry(List<string> Prefixes, bool RootFiles = false);
 

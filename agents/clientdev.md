@@ -61,7 +61,7 @@ Before ANY mutating command (file writes, `>` redirection, `git commit/push/merg
 ## Done means
 
 - Build green, committed, pushed.
-- Final message: 2-4 sentences — what changed, which files.
+- Final message: 2-4 sentences — what changed, which files. This text lands VERBATIM in the PR body's Implementation section: write it as a reviewer-facing summary (what changed + evidence links when the acceptance bar calls for them). Never narration ("Let me look at…"), never a transcript of your process.
 
 ## Secrets (by reference — never inline values)
 

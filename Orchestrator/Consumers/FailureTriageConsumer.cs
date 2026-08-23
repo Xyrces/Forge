@@ -1,3 +1,4 @@
+using Forge.Agents;
 using Forge.Core;
 using Forge.Core.Messaging;
 using Forge.Messaging;
@@ -8,14 +9,16 @@ using Talaria.Core.Abstractions;
 namespace Forge.Orchestrator.Consumers;
 
 /// <summary>
-/// Failure-ledger writer (triage phase 1 — observability only). Owns
-/// the forge.task-failure-signal topic (competing-consumer transport:
-/// no other consumer may subscribe here).
+/// Failure-ledger writer. Owns the forge.task-failure-signal topic
+/// (competing-consumer transport: no other consumer may subscribe here).
 ///
 ///   Failure          → open a ledger row (classify via the deterministic
 ///                      <see cref="FailureSignatureClassifier"/>); an
 ///                      already-actioned row closes 'failed-again' and a
-///                      new row opens against the same signature.
+///                      new row opens against the same signature. Then the
+///                      phase-2 trigger: publish TriageRequested when the
+///                      project opted in and the guardrails allow, else
+///                      park deterministically (MaybeKickTriageAsync).
 ///   Clearance        → record the operator's action (requeue / close /
 ///                      reset-strikes, from the task's clearanceAction
 ///                      metadata the endpoints stamp) on the open row.
@@ -29,15 +32,18 @@ namespace Forge.Orchestrator.Consumers;
 public sealed class FailureTriageConsumer : EventConsumer<TaskFailureSignal>
 {
     private readonly ProjectContextFactory _projectContexts;
+    private readonly IEventPublisher _events;
     private readonly ILogger<FailureTriageConsumer> _logger;
 
     public FailureTriageConsumer(
         ITransport transport,
         ProjectContextFactory projectContexts,
+        IEventPublisher events,
         ILogger<FailureTriageConsumer> logger)
         : base(transport, logger)
     {
         _projectContexts = projectContexts;
+        _events = events;
         _logger = logger;
     }
 
@@ -80,6 +86,7 @@ public sealed class FailureTriageConsumer : EventConsumer<TaskFailureSignal>
                 {
                     await triage.OpenAsync(evt.TaskId, DateTime.UtcNow, signature, classification, excerpt, ct);
                 }
+                await MaybeKickTriageAsync(ctx, evt.TaskId, signature, ct);
                 break;
             }
             case FailureSignalKind.Clearance:
@@ -100,6 +107,35 @@ public sealed class FailureTriageConsumer : EventConsumer<TaskFailureSignal>
                 break;
             }
         }
+    }
+
+    /// <summary>Phase-2 trigger (no poller): after opening/refreshing a
+    /// ledger row, kick the triage agent when the project opted in and
+    /// the guardrails allow it. At-cap / burn-loop failures park
+    /// deterministically right here — no LLM, no event. Flag off → no
+    /// TriageRequested, zero behavior change.</summary>
+    private async Task MaybeKickTriageAsync(
+        Forge.Projects.ProjectContext ctx, string taskId, string signature, CancellationToken ct)
+    {
+        if (!ctx.Options.TriageEnabled) return;
+        var history = await ctx.Triage.ListForTaskAsync(taskId, ct);
+        var decision = TriageGuardrails.Evaluate(history, signature, DateTime.UtcNow);
+        if (decision is TriageGuardrails.Decision.Allowed)
+        {
+            var occurred = DateTimeOffset.UtcNow;
+            await _events.PublishAsync(new TriageRequested
+            {
+                MessageId = TriageRequested.IdFor(ctx.Options.Id, taskId, occurred),
+                ProjectId = ctx.Options.Id,
+                TaskId = taskId,
+                OccurredAt = occurred,
+            }, ct);
+            return;
+        }
+        _logger.LogInformation("FailureTriage: guardrail {Decision} for {TaskId} — deterministic park, no triage run",
+            decision, taskId);
+        var tools = new TriageTools(ctx.Issues, ctx.Triage, lifecycle: null, _logger);
+        await tools.ParkForOperatorAsync(taskId, decision.ParkReason(), ct);
     }
 
     private static IReadOnlyDictionary<string, string>? MetadataOf(IssueRecord task)

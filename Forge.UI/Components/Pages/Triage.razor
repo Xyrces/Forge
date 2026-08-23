@@ -92,7 +92,7 @@
                                         <table class="data-grid">
                                             <thead>
                                                 <tr>
-                                                    <th>Task</th><th>Title</th><th>When</th><th>Error</th><th>Action</th><th>Outcome</th>
+                                                    <th>Task</th><th>Title</th><th>When</th><th>Error</th><th>Action</th><th>Actor</th><th>Outcome</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -104,6 +104,7 @@
                                                         <td class="mono">@Ago(row.FailedAt)</td>
                                                         <td class="mono">@row.ErrorExcerpt</td>
                                                         <td>@(row.Action ?? "—")</td>
+                                                        <td>@(row.Actor ?? "—")</td>
                                                         <td>
                                                             @if (row.Outcome is not null)
                                                             {
@@ -173,7 +174,20 @@
             </div>
         </div>
 
-        <div class="banner">Triage agent: off for this project — Phase 1: observability only.</div>
+        @if (TriageStore.Value.TriageEnabled)
+        {
+            <div class="banner banner--ok">
+                Triage agent: ON for this project — bounded actions (requeue-with-guidance / park / flag-bug), ≤2 per task per day, audited on the ledger.
+                <button class="btn btn--ghost" disabled="@TriageStore.Value.ToggleInFlight" @onclick="ToggleTriage">Disable</button>
+            </div>
+        }
+        else
+        {
+            <div class="banner">
+                Triage agent: off for this project — observability only.
+                <button class="btn btn--ghost" disabled="@(TriageStore.Value.ToggleInFlight || _loadedProject is null)" @onclick="ToggleTriage">Enable for this project</button>
+            </div>
+        }
     }
 </div>
 
@@ -209,6 +223,9 @@
         else
             Dispatch.Dispatch(new TriageActions.ExpandSignatureAction(signature, _loadedProject));
     }
+
+    private void ToggleTriage()
+        => Dispatch.Dispatch(new TriageActions.ToggleTriageAction(!TriageStore.Value.TriageEnabled, _loadedProject));
 
     private static string DotTone(string classification) => classification switch
     {

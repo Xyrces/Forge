@@ -97,6 +97,13 @@ public sealed class EventContractTests
     });
 
     [Fact]
+    public void TriageRequested_RoundTrips() => RoundTrips(new TriageRequested
+    {
+        MessageId = "triage-requested:proj:task-1:2026-08-23T00:00:00.0000000+00:00",
+        ProjectId = "proj", TaskId = "task-1",
+    });
+
+    [Fact]
     public void DeterministicIds_AreStable()
     {
         var at = new DateTimeOffset(2026, 8, 8, 12, 0, 0, TimeSpan.Zero);
@@ -141,6 +148,7 @@ public sealed class EventContractTests
         Assert.Equal(Topics.GroomRequested, Topics.For<GroomRequested>());
         Assert.Equal(Topics.ProjectRolesChanged, Topics.For<ProjectRolesChanged>());
         Assert.Equal(Topics.TaskFailureSignal, Topics.For<TaskFailureSignal>());
+        Assert.Equal(Topics.TriageRequested, Topics.For<TriageRequested>());
         Assert.Equal(Topics.SweepTick, Topics.For<SweepTick>());
     }
 }

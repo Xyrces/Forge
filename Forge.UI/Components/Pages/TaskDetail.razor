@@ -193,6 +193,23 @@
                             <tr><td>Plan</td><td><pre class="mono" style="white-space:pre-wrap; max-height:220px; overflow:auto">@pg.Plan</pre></td></tr>
                         }
                     }
+                    @if (Meta("triageAction") is { Length: > 0 } triageAction)
+                    {
+                        <tr>
+                            <td>Triage</td>
+                            <td>
+                                <span class="pill pill--@TriageTone(triageAction)">@triageAction</span>
+                                @if (Meta("triageActionAt") is { Length: > 0 } at)
+                                {
+                                    <span class="meta-text"> @at</span>
+                                }
+                            </td>
+                        </tr>
+                        @if (Meta("triageNote") is { Length: > 0 } triageNote)
+                        {
+                            <tr><td class="meta-text">triage note</td><td><pre class="mono" style="white-space:pre-wrap; max-height:160px; overflow:auto">@triageNote</pre></td></tr>
+                        }
+                    }
                     @if (_sprint is not null)
                     {
                         <tr>
@@ -494,6 +511,14 @@
 
     private string? PrUrl(string prNumber) =>
         _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+
+    private static string TriageTone(string action) => action switch
+    {
+        "requeue" => "success",
+        "parked" => "blocked",
+        "flag-bug" => "warn",
+        _ => "outline",
+    };
 
     private PlanGateVm? PlanGate
     {
