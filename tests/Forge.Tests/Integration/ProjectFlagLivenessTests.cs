@@ -53,9 +53,12 @@ public sealed class ProjectFlagLivenessTests : IDisposable
     private sealed class FakeProjectStore : IProjectStore
     {
         public readonly List<ProjectRecord> Records = new();
+        public bool ThrowOnGet;
         public Task<Core.ProjectRecord> UpsertAsync(Core.NewProject project, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<Core.ProjectRecord?> GetAsync(string id, CancellationToken ct = default)
-            => Task.FromResult(Records.FirstOrDefault(r => r.Id == id));
+            => ThrowOnGet
+                ? Task.FromException<Core.ProjectRecord?>(new InvalidOperationException("registry down"))
+                : Task.FromResult(Records.FirstOrDefault(r => r.Id == id));
         public Task<IReadOnlyList<ProjectRecord>> ListAsync(CancellationToken ct = default)
             => Task.FromResult((IReadOnlyList<ProjectRecord>)Records.ToList());
         public Task<bool> DeleteAsync(string id, CancellationToken ct = default) => throw new NotImplementedException();
@@ -93,6 +96,29 @@ public sealed class ProjectFlagLivenessTests : IDisposable
         var ctx3 = factory.Find("proj");
         Assert.False(ctx3!.Options.TriageEnabled);
         Assert.False(ctx3.Options.QaEnabled);
+    }
+
+    [Fact]
+    public void LiveMode_RefreshFailure_ServesStaleSnapshot()
+    {
+        var store = new FakeProjectStore { Records = { Record("proj") } };
+        var factory = new ProjectContextFactory(store, _dir);
+        _factories.Add(factory);
+
+        var ctx = factory.Find("proj");
+        Assert.NotNull(ctx);
+        Assert.False(ctx!.Options.QaEnabled);
+
+        // Flip the flag, then take the registry down: the refresh must
+        // degrade to the stale snapshot, not hard-fail the reader.
+        store.Records[0] = store.Records[0] with { QaEnabled = true };
+        store.ThrowOnGet = true;
+        var ctx2 = factory.Find("proj");
+        Assert.Same(ctx, ctx2);
+        Assert.False(ctx2!.Options.QaEnabled);
+
+        store.ThrowOnGet = false;
+        Assert.True(factory.Find("proj")!.Options.QaEnabled);
     }
 
     [Fact]
@@ -319,6 +345,35 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
     }
 
     [Fact]
+    public async Task ExternalPush_WatchHeadShaMoved_RelaunchesQa()
+    {
+        // An external push moved the live head (recorded by the watcher
+        // poll as watchHeadSha) past the QA-verified code head. Anchoring
+        // to the observed head — not the frozen branchSha — must re-run
+        // QA instead of deadlocking the gate.
+        var reviewStartedSeed = DateTime.UtcNow.ToString("O");
+        var task = await SeedAsync(new Dictionary<string, object>
+        {
+            ["branchSha"] = CodeHead,
+            ["watchHeadSha"] = "externa1push",
+            ["qaSha"] = EvidenceHead,
+            ["qaForSha"] = CodeHead,
+            ["qaVerdict"] = QaDispatcher.VerdictPass,
+            ["reviewStartedAt"] = reviewStartedSeed,
+        });
+        _gh.HeadSha = "externa1push";
+
+        await _sweep.TryLaunchBackgroundReviewAsync(task, _bundle, CancellationToken.None);
+
+        await WaitForAsync(async () =>
+            (await _issues.GetAsync(task.Id))!.GetMetadata("qaStartedAt") is not null,
+            TimeSpan.FromSeconds(10));
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(reviewStartedSeed, after.GetMetadata("reviewStartedAt"));
+        lock (_runner.Calls) Assert.DoesNotContain(AgentType.Reviewer, _runner.Calls);
+    }
+
+    [Fact]
     public async Task QaCurrentPass_LaunchesReview_QaNotRelaunched()
     {
         // QA passed at the code head and its evidence push moved the PR
@@ -356,5 +411,79 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
         Assert.Null(final.GetMetadata("qaStartedAt"));
         Assert.Equal(verdict, final.GetMetadata("reviewVerdict"));
         lock (_runner.Calls) Assert.Equal(1, _runner.Calls.Count(r => r == AgentType.Reviewer));
+    }
+}
+
+/// <summary>
+/// The watcher poll records the observed live head (watchHeadSha) —
+/// the sweep's QA-due check anchors to it, so external pushes and QA
+/// evidence pushes must move it.
+/// </summary>
+public sealed class WatchHeadShaRecordingTests : IDisposable
+{
+    private const string Head = "1ivehead42";
+
+    private readonly string _workDir;
+    private readonly IssueStore _issues;
+
+    public WatchHeadShaRecordingTests()
+    {
+        _workDir = TempRoot.Instance.NewDirectory("watch-head");
+        Directory.CreateDirectory(_workDir);
+        _issues = new IssueStore(Path.Combine(_workDir, "issues.db"));
+    }
+
+    public void Dispose()
+    {
+        try { _issues.Dispose(); } catch { }
+        try { Directory.Delete(_workDir, recursive: true); } catch { }
+    }
+
+    private sealed class FakeGitHub : GitHubService
+    {
+        public FakeGitHub() : base("o", "r", null) { }
+        public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
+        {
+            var pr = new PullRequest(number);
+            typeof(PullRequest).GetProperty(nameof(PullRequest.ChangedFiles))!
+                .SetValue(pr, 1);
+            return Task.FromResult(pr);
+        }
+        public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
+            => Task.FromResult(CommitState.Pending);
+        public override Task<int> GetCiSignalCountAsync(string sha, CancellationToken cancellationToken = default)
+            => Task.FromResult(1);
+        public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
+            => Task.FromResult((IReadOnlyList<PullRequestReview>)new List<PullRequestReview>());
+    }
+
+    [Fact]
+    public async Task Poll_RecordsObservedLiveHead()
+    {
+        var task = await _issues.CreateAsync(new Core.NewIssue(
+            "task", "implement X",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = "42",
+                ["branch"] = "agent/task-x",
+            }));
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null);
+        var watcher = new PRWatcher(
+            new FakeGitHub(),
+            worktrees: new GitWorktreeService(
+                new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+                NullLogger<GitWorktreeService>.Instance),
+            issues: _issues,
+            pollInterval: TimeSpan.FromSeconds(1),
+            staleAfter: TimeSpan.FromHours(1),
+            events: new InMemoryDashboardEventBus(),
+            logger: NullLogger<PRWatcher>.Instance,
+            lifecycle: new TaskStateMachine(writeAuthority: false, NullLogger.Instance),
+            qaEnabled: false);
+
+        await watcher.PollWatchedTaskAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None, headShaOverride: _ => Head);
+
+        Assert.Equal(Head, (await _issues.GetAsync(task.Id))!.GetMetadata("watchHeadSha"));
     }
 }

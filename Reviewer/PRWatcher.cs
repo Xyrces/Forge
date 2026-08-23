@@ -235,6 +235,19 @@ public sealed class PRWatcher
         // PullRequest.Head (which has a private setter).
         var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
 
+        // Record the observed live head. The sweep's QA-due check
+        // anchors currency to this: branchSha only moves on Forge's
+        // own pushes, so without a poll-recorded head, external pushes
+        // and the QA evidence push are invisible to it (external push
+        // = QA never re-launches, reviewer self-skips, merge gate
+        // holds — silent deadlock). Only written on change — a per-poll
+        // rewrite would churn issue_event.
+        if (!string.Equals(freshTask.GetMetadata("watchHeadSha"), sha, StringComparison.Ordinal))
+        {
+            await _issues.TransitionAsync(freshTask.Id, freshTask.Status, error: null,
+                new Dictionary<string, object> { ["watchHeadSha"] = sha }, cancellationToken);
+        }
+
         // Phase 2 shadow authority: report observed events to the
         // lifecycle machine BEFORE the watcher's own transitions (the
         // machine derives the pre-transition state itself). Awaited —

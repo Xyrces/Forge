@@ -317,20 +317,25 @@ public sealed class WatchSweepService
     }
 
     /// <summary>QA-due check from task metadata (cheap — no GitHub
-    /// call): QA is current when a verdict stands against the last
-    /// pushed code head. <c>qaSha</c> is the post-evidence-push sha,
-    /// <c>qaForSha</c> the code head verified — either matching
-    /// <c>branchSha</c> counts. A false "not current" self-heals: the
-    /// dispatcher dedupes on the live head and its null-outcome
-    /// continuation launches the review.</summary>
+    /// call): QA is current when a verdict stands against the observed
+    /// head. The anchor is <c>watchHeadSha</c> (the live head recorded
+    /// by the watcher poll each pass), falling back to
+    /// <c>branchSha</c> (the last Forge-pushed head) for tasks not yet
+    /// polled. <c>branchSha</c> alone is blind to external pushes and
+    /// the QA evidence push — anchoring to it permanently would
+    /// deadlock the gate on any out-of-band head move. <c>qaSha</c> is
+    /// the post-evidence-push sha, <c>qaForSha</c> the code head
+    /// verified — either matching the anchor counts. A false "not
+    /// current" self-heals: the dispatcher dedupes on the live head and
+    /// its null-outcome continuation launches the review.</summary>
     private static bool QaCurrentAtHead(IssueRecord task)
     {
         var verdict = task.GetMetadata("qaVerdict");
         if (string.IsNullOrEmpty(verdict)) return false;
-        var branchSha = task.GetMetadata("branchSha");
-        if (string.IsNullOrEmpty(branchSha)) return false;
-        return string.Equals(task.GetMetadata("qaSha"), branchSha, StringComparison.Ordinal)
-            || string.Equals(task.GetMetadata("qaForSha"), branchSha, StringComparison.Ordinal);
+        var head = task.GetMetadata("watchHeadSha") ?? task.GetMetadata("branchSha");
+        if (string.IsNullOrEmpty(head)) return false;
+        return string.Equals(task.GetMetadata("qaSha"), head, StringComparison.Ordinal)
+            || string.Equals(task.GetMetadata("qaForSha"), head, StringComparison.Ordinal);
     }
 
     /// <summary>Launch decision for the QA stage: skip when a QA run is
