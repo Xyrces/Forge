@@ -858,13 +858,24 @@ public sealed class IntakeAgent
     /// </summary>
     private static string BuildIntakeDraftBody(IssueRecord issue)
     {
+        // The designer's deterministic hygiene gate (DesignHygieneChecker)
+        // hard-fails specs with no "## Acceptance criteria" section and
+        // with Touches entries that aren't real module ids — "- TBD"
+        // counted as a module named 'TBD' and every intake spec died at
+        // ReadyForDesign (observed live 2026-08-22: all six porthorizon
+        // MVP-tier specs hygiene-failed the designer). Emit a real
+        // (minimal) AC section and leave Touches EMPTY (soft warning
+        // only) — the groomer fills in real modules during grooming.
         var sb = new System.Text.StringBuilder();
         sb.Append("## Summary\n").Append(issue.Title).Append('\n');
         if (!string.IsNullOrWhiteSpace(issue.Description))
         {
             sb.Append("\n## Notes\n").Append(issue.Description).Append('\n');
         }
-        sb.Append("\n## Touches\n- TBD\n");
+        sb.Append("\n## Acceptance criteria\n- [ ] ")
+            .Append(issue.Title)
+            .Append(" — demonstrated end-to-end per the task's acceptance bar.\n");
+        sb.Append("\n## Touches\n");
         sb.Append("\n## Dependencies\n- none\n");
         sb.Append("\n## Out of scope\n- TBD\n");
         sb.Append("\n## Open questions\n- TBD\n");
