@@ -298,6 +298,7 @@ public sealed class QaDispatcher
             Rules:
             - Find the repo's QA/playtest documentation first (docs/, scripts/, README) and run the documented harness. For game projects: actually PLAY the build via its automation interface (e.g. an MCP server) — API-level state reads alone are not playing.
             - Capture RASTER screenshot evidence (PNG/JPG) of the running product at the moments that prove each acceptance criterion, into test-results/qa/<this task id>/ (create it). JSON/SVG/ASCII state dumps are never screenshots.
+            - Capture facilities, in preference order: (1) an in-engine/in-app capture hook if the branch ships one (use it — even when the hook IS the change under review; a working hook is the proof), (2) the repo's documented screenshot tooling, (3) host window-capture of the running product window (grim/scrot/xwd/portal) when a display is available. Build the product first if the runtime needs its assemblies (e.g. dotnet build for a Godot C# client).
             - You may ONLY create files under test-results/. Never edit source, tests, project files, or docs. Do NOT git commit or push — the orchestrator ships your evidence (and refuses anything outside test-results/).
             - If the harness can't run (missing binary, missing docs, broken build), do not fake a result — end with QA_VERDICT: fail and name exactly what's missing.
 
