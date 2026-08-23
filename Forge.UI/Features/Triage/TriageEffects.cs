@@ -38,26 +38,4 @@ public sealed class TriageEffects
             dispatcher.Dispatch(new TriageActions.SignatureDetailFailedAction(ex.Message));
         }
     }
-
-    [EffectMethod]
-    public async Task HandleToggleTriage(TriageActions.ToggleTriageAction action, IDispatcher dispatcher)
-    {
-        if (action.ProjectId is null)
-        {
-            dispatcher.Dispatch(new TriageActions.TriageToggleFailedAction("no project selected"));
-            return;
-        }
-        try
-        {
-            var ok = await _client.SetTriageEnabledAsync(action.ProjectId, action.Enabled, CancellationToken.None);
-            if (ok)
-                dispatcher.Dispatch(new TriageActions.TriageToggledAction(action.Enabled));
-            else
-                dispatcher.Dispatch(new TriageActions.TriageToggleFailedAction("PUT triage flag failed"));
-        }
-        catch (Exception ex)
-        {
-            dispatcher.Dispatch(new TriageActions.TriageToggleFailedAction(ex.Message));
-        }
-    }
 }

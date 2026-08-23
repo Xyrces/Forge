@@ -38,6 +38,10 @@ public abstract class WatchConsumerBase<T> : EventConsumer<T> where T : IForgeEv
         }
         try
         {
+            // Carry the FULL roles_json surface — dropping the
+            // $triage/$qa/$territory/$verify keys here leaves every
+            // watch path (SweepTick, PrOpened, verdict events) seeing
+            // QaEnabled=false even when the registry says otherwise.
             return _bundleFactory.Build(new Configuration.ProjectOptions
             {
                 Id = record.Id,
@@ -46,6 +50,10 @@ public abstract class WatchConsumerBase<T> : EventConsumer<T> where T : IForgeEv
                 DefaultBranch = record.DefaultBranch,
                 Root = string.Empty,
                 Roles = new Dictionary<string, int>(record.Roles, StringComparer.Ordinal),
+                Territories = new Dictionary<string, Core.RoleTerritory>(record.Territories, StringComparer.OrdinalIgnoreCase),
+                VerifyCommands = record.VerifyCommands?.ToList(),
+                TriageEnabled = record.TriageEnabled,
+                QaEnabled = record.QaEnabled,
             });
         }
         catch (Exception ex)

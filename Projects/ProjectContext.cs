@@ -13,7 +13,14 @@ namespace Forge.Projects;
 /// </summary>
 public sealed class ProjectContext : IAsyncDisposable
 {
-    public ProjectOptions Options { get; }
+    /// <summary>Options snapshot. Refreshable in live mode: flag PUTs
+    /// ($triage/$qa/$verify/$territory) update the registry but this
+    /// context is cached for the process lifetime, so
+    /// <see cref="ProjectContextFactory.Find"/> swaps in a fresh
+    /// snapshot on every call. The record swap is atomic enough for
+    /// the read-mostly consumers; a reader holding a long-lived
+    /// reference keeps its snapshot for that operation only.</summary>
+    public ProjectOptions Options { get; private set; }
 
     private readonly IssueStore _issues;
     private readonly Lazy<DeploymentStore> _deployments;
@@ -46,6 +53,11 @@ public sealed class ProjectContext : IAsyncDisposable
     public ISpecStore Specs => _specs.Value;
     public ISprintStore Sprints => _sprints.Value;
     public FailureTriageStore Triage => _triage.Value;
+
+    /// <summary>Swap the options snapshot (live-mode refresh-on-read).
+    /// Never disposes/recreates the context — it owns the shared
+    /// <see cref="IssueStore"/>.</summary>
+    internal void RefreshOptions(ProjectOptions options) => Options = options;
 
     public async Task<int> CountByStatusAsync(IssueStatus status, CancellationToken ct)
     {
@@ -192,7 +204,11 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     public ProjectContext? Find(string projectId)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(ProjectContextFactory));
-        if (_cache.TryGetValue(projectId, out var ctx)) return ctx;
+        if (_cache.TryGetValue(projectId, out var ctx))
+        {
+            RefreshCachedOptions(ctx, projectId);
+            return ctx;
+        }
         var opts = KnownProjects.FirstOrDefault(p =>
             string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase));
         if (opts is null) return null;
@@ -210,6 +226,23 @@ public sealed class ProjectContextFactory : IAsyncDisposable
             var ctx2 = new ProjectContext(opts, store);
             return _cache.GetOrAdd(projectId, ctx2);
         }
+    }
+
+    /// <summary>
+    /// Refresh-on-read (live mode only): a cached context's options
+    /// snapshot is from first Find (process boot) — without this swap,
+    /// flag PUTs ($triage/$qa) update the DB but every cached reader
+    /// (triage ledger endpoint, FailureTriageConsumer, TriageConsumer)
+    /// keeps the stale snapshot until restart. Static mode's list is
+    /// fixed, so the refresh is a no-op there. Costs one registry
+    /// SELECT per Find — KnownProjects already pays that per call.
+    /// </summary>
+    private void RefreshCachedOptions(ProjectContext ctx, string projectId)
+    {
+        if (_staticProjects is not null) return;
+        var fresh = KnownProjects.FirstOrDefault(p =>
+            string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase));
+        if (fresh is not null) ctx.RefreshOptions(fresh);
     }
 
     public async ValueTask DisposeAsync()

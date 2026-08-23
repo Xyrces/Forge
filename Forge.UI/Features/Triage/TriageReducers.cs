@@ -33,16 +33,4 @@ public static class TriageReducers
     [ReducerMethod]
     public static TriageState OnSignatureDetailFailed(TriageState state, TriageActions.SignatureDetailFailedAction action)
         => state with { DetailLoading = false, Error = action.Error };
-
-    [ReducerMethod]
-    public static TriageState OnToggleTriage(TriageState state, TriageActions.ToggleTriageAction _)
-        => state with { ToggleInFlight = true, Error = null };
-
-    [ReducerMethod]
-    public static TriageState OnTriageToggled(TriageState state, TriageActions.TriageToggledAction action)
-        => state with { ToggleInFlight = false, TriageEnabled = action.Enabled };
-
-    [ReducerMethod]
-    public static TriageState OnTriageToggleFailed(TriageState state, TriageActions.TriageToggleFailedAction action)
-        => state with { ToggleInFlight = false, Error = action.Error };
 }
