@@ -59,7 +59,11 @@ public class DispatchCheckpointTests : IDisposable
 // (SQL Server chain: M034; v33 was the SQL Server-only skew slot).
 // v35 = failure_triage — the failure ledger (triage phase 1:
 // observability only; SQL Server chain: M035).
-        Assert.Equal(35, IssueStore.CurrentSchemaVersion);
+// v36 = followup_draft.task_type — the follow-up's type routes the
+// materialized task to the right role (live 2026-08-23: porthorizon
+// task-752, a client task born type='task', hollow-closed at the
+// plan-territory gate; SQL Server chain: M036).
+        Assert.Equal(36, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

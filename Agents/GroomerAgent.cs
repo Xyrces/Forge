@@ -171,8 +171,9 @@ public sealed class GroomerAgent
             ([Description("Title of the task (1 line, mirrors an acceptance criterion).")] string title,
              [Description("Story id this task belongs to.")] string storyId,
              [Description("Optional 1-paragraph description.")] string? description = null,
-             [Description("Priority 1-5; defaults to 2.")] int? priority = null) =>
-                CreateTaskAsync(specId, storyId, title, description, priority, createdStoryIds, createdTaskIds, taskCountByStory, ct),
+             [Description("Priority 1-5; defaults to 2.")] int? priority = null,
+             [Description("Task type — routes dispatch to the right role. 'task' (default) = coredev (Core/sim/tests/docs). 'client' (or 'ui'/'godot') = clientdev (Client/Scripts, scenes, UI work). 'qa' (or 'playtest'/'test') = the QA role (playthroughs, evidence capture). Set it when the work is obviously one of those — a mistyped task dies at the plan-territory gate.")] string? taskType = null) =>
+                CreateTaskAsync(specId, storyId, title, description, priority, taskType, createdStoryIds, createdTaskIds, taskCountByStory, ct),
             name: "create_task",
             description: "Create a task issue linked to the story AND the spec. " +
                          "Returns the new task's issue id.");
@@ -267,7 +268,7 @@ public sealed class GroomerAgent
     }
 
     private async Task<string> CreateTaskAsync(
-        string specIdArg, string storyId, string title, string? description, int? priority,
+        string specIdArg, string storyId, string title, string? description, int? priority, string? taskType,
         List<string> createdStoryIds, List<string> createdTaskIds,
         Dictionary<string, int> taskCountByStory, CancellationToken ct)
     {
@@ -294,7 +295,8 @@ public sealed class GroomerAgent
         var forStory = taskCountByStory.GetValueOrDefault(normalizedStoryId, 0);
         if (forStory >= 3) return "task_limit_reached_for_story";
         var task = await _issues.CreateAsync(new NewIssue(
-            Type: "task", Title: title, Description: description ?? "",
+            Type: string.IsNullOrWhiteSpace(taskType) ? "task" : taskType.Trim().ToLowerInvariant(),
+            Title: title, Description: description ?? "",
             ParentId: normalizedStoryId, Priority: priority ?? 2), ct);
         createdTaskIds.Add(task.Id);
         taskCountByStory[normalizedStoryId] = forStory + 1;

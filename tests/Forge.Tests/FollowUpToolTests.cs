@@ -150,6 +150,54 @@ public class FollowUpToolTests : IDisposable
     }
 
     [Fact]
+    public async Task TaskType_RoutesThrough_DraftAndImmediatePaths()
+    {
+        // Schema v36 (live 2026-08-23, porthorizon task-752): a
+        // follow-up's type routes the materialized task to the right
+        // role — a client-scope follow-up born type='task' dies at the
+        // plan-territory gate under coredev.
+        var source = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "original"));
+        var drafts = new FollowUpDraftStore(_issues);
+        var tool = new FollowUpTool(_issues, source.Id, "CoreDev",
+            drafts, activeSprintId: _ => Task.FromResult<string?>("sprint-x"));
+        var fn = tool.AsAIFunction();
+
+        // Draft path: the type rides the draft row.
+        await fn.InvokeAsync(new AIFunctionArguments
+        {
+            ["title"] = "Wire the client paint button",
+            ["description"] = "Client-side only: ShipwrightToolbar.",
+            ["taskType"] = "client",
+        });
+        var draft = Assert.Single(await drafts.ListUnconsumedAsync());
+        Assert.Equal("client", draft.TaskType);
+
+        // Immediate blocker path: the task is born with the type.
+        var inFlight = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "in-flight"));
+        var result = await fn.InvokeAsync(new AIFunctionArguments
+        {
+            ["title"] = "Fix the client render crash",
+            ["description"] = "Blocks in-flight work.",
+            ["blocksIssueId"] = inFlight.Id,
+            ["taskType"] = "Client",
+        });
+        var filedId = (result?.ToString() ?? "")["filed:".Length..].Split(' ')[0];
+        var filed = await _issues.GetAsync(filedId);
+        Assert.Equal("client", filed!.Type);
+
+        // Default: untyped stays 'task'.
+        await fn.InvokeAsync(new AIFunctionArguments
+        {
+            ["title"] = "Core follow-up",
+            ["description"] = "Sim-side.",
+            ["blocksIssueId"] = inFlight.Id,
+        });
+        var all = await _issues.ListAsync(new IssueFilter());
+        var core = all.First(i => i.Title == "Core follow-up");
+        Assert.Equal("task", core.Type);
+    }
+
+    [Fact]
     public async Task BlockerOfSprintMember_BornIntoActiveSprint()
     {
         // Operator rule 2026-07-31: a genuine blocker of ACTIVE

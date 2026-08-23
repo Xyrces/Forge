@@ -16,7 +16,11 @@ public sealed record FollowUpDraft(
     DateTime CreatedAt,
     DateTime? ConsumedAt,
     string? Disposition = null,
-    string? DispositionDetail = null);
+    string? DispositionDetail = null,
+    /// <summary>Task type for the materialized task (schema v36) —
+    /// routes dispatch to the right role (client/ui → clientdev,
+    /// test/playtest/qa → qa). Null = 'task' (coredev).</summary>
+    string? TaskType = null);
 
 /// <summary>
 /// Per-project store for follow-up drafts. Follow-ups filed mid-
@@ -41,13 +45,13 @@ public sealed class FollowUpDraftStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = _issues.Db.Provider == Db.ForgeDbProvider.SqlServer
             ? $"""
-                INSERT INTO {T("followup_draft")} (sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, created_at)
+                INSERT INTO {T("followup_draft")} (sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at)
                 OUTPUT INSERTED.id
-                VALUES (@sprint, @source, @role, @title, @desc, @pri, @blocks, @now);
+                VALUES (@sprint, @source, @role, @title, @desc, @pri, @blocks, @ttype, @now);
                 """
             : $"""
-                INSERT INTO {T("followup_draft")} (sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, created_at)
-                VALUES ($sprint, $source, $role, $title, $desc, $pri, $blocks, $now);
+                INSERT INTO {T("followup_draft")} (sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at)
+                VALUES ($sprint, $source, $role, $title, $desc, $pri, $blocks, $ttype, $now);
                 SELECT last_insert_rowid();
                 """;
         void Add(string name, object? value)
@@ -64,6 +68,7 @@ public sealed class FollowUpDraftStore
         Add("@desc", draft.Description); Add("$desc", draft.Description);
         Add("@pri", draft.Priority); Add("$pri", draft.Priority);
         Add("@blocks", draft.BlocksIssueId); Add("$blocks", draft.BlocksIssueId);
+        Add("@ttype", draft.TaskType); Add("$ttype", draft.TaskType);
         var now = DateTime.UtcNow.ToString(IssueStore.DateFormat);
         Add("@now", now); Add("$now", now);
         var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
@@ -87,7 +92,7 @@ public sealed class FollowUpDraftStore
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
-            SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, created_at, consumed_at, disposition, disposition_detail
+            SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at, consumed_at, disposition, disposition_detail
             FROM {T("followup_draft")}
             WHERE consumed_at IS NULL
             ORDER BY id
@@ -106,11 +111,11 @@ public sealed class FollowUpDraftStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = _issues.Db.Provider == Db.ForgeDbProvider.SqlServer
             ? $"""
-                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, created_at, consumed_at, disposition, disposition_detail
+                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at, consumed_at, disposition, disposition_detail
                 FROM {T("followup_draft")} WHERE id = @id
                 """
             : $"""
-                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, created_at, consumed_at, disposition, disposition_detail
+                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at, consumed_at, disposition, disposition_detail
                 FROM {T("followup_draft")} WHERE id = $id
                 """;
         var p = cmd.CreateParameter();
@@ -128,11 +133,11 @@ public sealed class FollowUpDraftStore
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = _issues.Db.Provider == Db.ForgeDbProvider.SqlServer
             ? $"""
-                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, created_at, consumed_at, disposition, disposition_detail
+                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at, consumed_at, disposition, disposition_detail
                 FROM {T("followup_draft")} WHERE consumed_at IS NULL AND sprint_id = @sid ORDER BY id
                 """
             : $"""
-                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, created_at, consumed_at, disposition, disposition_detail
+                SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at, consumed_at, disposition, disposition_detail
                 FROM {T("followup_draft")} WHERE consumed_at IS NULL AND sprint_id = $sid ORDER BY id
                 """;
         var p = cmd.CreateParameter();
@@ -196,8 +201,9 @@ public sealed class FollowUpDraftStore
             Description: rd.GetString(5),
             Priority: rd.GetInt32(6),
             BlocksIssueId: rd.IsDBNull(7) ? null : rd.GetString(7),
-            CreatedAt: IssueStore.ParseTime(rd.GetString(8)),
-            ConsumedAt: rd.IsDBNull(9) ? null : IssueStore.ParseTime(rd.GetString(9)),
-            Disposition: rd.FieldCount > 10 && !rd.IsDBNull(10) ? rd.GetString(10) : null,
-            DispositionDetail: rd.FieldCount > 11 && !rd.IsDBNull(11) ? rd.GetString(11) : null);
+            TaskType: rd.FieldCount > 8 && !rd.IsDBNull(8) ? rd.GetString(8) : null,
+            CreatedAt: IssueStore.ParseTime(rd.GetString(9)),
+            ConsumedAt: rd.IsDBNull(10) ? null : IssueStore.ParseTime(rd.GetString(10)),
+            Disposition: rd.FieldCount > 11 && !rd.IsDBNull(11) ? rd.GetString(11) : null,
+            DispositionDetail: rd.FieldCount > 12 && !rd.IsDBNull(12) ? rd.GetString(12) : null);
 }

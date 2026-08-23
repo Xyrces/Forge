@@ -143,8 +143,19 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             // attempt: requeue with a circuit breaker. (Observed live:
             // all six tasks of a sprint hollow-completed when the MAF
             // 40-iteration default cut every run during exploration.)
+            //
+            // Plan-gate-blocked runs can NEVER legitimately complete
+            // on no-diff: the run produced nothing because the gate
+            // refused every plan (misrouted task, territory mismatch) —
+            // not because the work was already done. A "the task is
+            // unchanged, the gates block me" message must requeue as a
+            // failure, not hollow-complete (observed live 2026-08-23:
+            // porthorizon task-752, a client-scope task routed to
+            // coredev, burned its plan revisions and closed Completed
+            // without a single edit).
             var explicitNoOp = (input.Text ?? "")
-                .Contains("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase);
+                .Contains("NO_CHANGES_NEEDED", StringComparison.OrdinalIgnoreCase)
+                && !PlanGateBlocked(current?.GetMetadata("planGate"));
             // Workflow policy noDiffOutcome=rework (pass 3): the
             // operator doesn't accept verified no-op completions —
             // even an explicit NO_CHANGES_NEEDED requeues (the
@@ -543,6 +554,26 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
     }
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
+
+    /// <summary>True when the task's planGate audit shows the run burned
+    /// its revision budget without ever getting an approved plan
+    /// (failed=true). Missing/malformed metadata or an approved plan →
+    /// false (the no-diff completion path stays available).</summary>
+    internal static bool PlanGateBlocked(string? planGateJson)
+    {
+        if (string.IsNullOrWhiteSpace(planGateJson)) return false;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(planGateJson);
+            return doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("failed", out var f)
+                && f.ValueKind == System.Text.Json.JsonValueKind.True;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
 
     private static async Task UpdateMetadataAsync(
         IIssueStore issues, string id,

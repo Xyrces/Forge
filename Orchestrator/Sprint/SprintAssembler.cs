@@ -656,7 +656,11 @@ public sealed class SprintAssembler
                     {
                         var src = sources.Select(id => byId[id]).ToList();
                         var task = await issues.CreateAsync(new NewIssue(
-                            Type: "task",
+                            // The draft's task type routes dispatch to
+                            // the right role (schema v36) — a client or
+                            // QA follow-up born type='task' dies at the
+                            // plan-territory gate (live: task-752).
+                            Type: src.Select(d => d.TaskType).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)) ?? "task",
                             Title: item.Title ?? src[0].Title,
                             Description: item.Description
                                 ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
@@ -710,7 +714,7 @@ public sealed class SprintAssembler
         foreach (var draft in remaining)
         {
             var task = await issues.CreateAsync(new NewIssue(
-                Type: "task",
+                Type: string.IsNullOrWhiteSpace(draft.TaskType) ? "task" : draft.TaskType,
                 Title: draft.Title,
                 Description: draft.Description,
                 Priority: draft.Priority,
