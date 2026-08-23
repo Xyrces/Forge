@@ -370,6 +370,53 @@ public sealed class GitWorktreeService
         return result.Stdout.Trim();
     }
 
+    /// <summary>Uncommitted/untracked paths (porcelain), for the QA
+    /// stage's evidence-only enforcement — QA may dirty ONLY evidence
+    /// paths; anything else refuses the evidence push.</summary>
+    public async Task<IReadOnlyList<string>> ListDirtyFilesAsync(string worktreePath, CancellationToken cancellationToken = default)
+    {
+        // -uall: untracked files listed individually (the default
+        // collapses untracked DIRECTORIES — a new evidence dir would
+        // hide its PNG files from the raster-evidence check).
+        var result = await RunGitInAsync(worktreePath, "status --porcelain -uall", cancellationToken);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"git status failed (exit={result.ExitCode}): {result.Stderr}");
+        var files = new List<string>();
+        foreach (var line in result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            // Porcelain v1: "XY path" (3-char prefix); renames read
+            // "orig -> new" — take the destination.
+            if (line.Length < 4) continue;
+            var path = line[3..].Trim();
+            var arrow = path.IndexOf(" -> ", StringComparison.Ordinal);
+            if (arrow >= 0) path = path[(arrow + 4)..];
+            if (path.Length > 0) files.Add(path);
+        }
+        return files;
+    }
+
+    /// <summary>Push the worktree's HEAD onto a DIFFERENT remote branch
+    /// (the QA stage: the QA worktree sits on agent/qa-&lt;taskId&gt;
+    /// but its evidence commit belongs on the task's PR branch).
+    /// Refuses protected targets and non-fast-forwards (a dev push
+    /// landing mid-QA fails the round; the watch retries).</summary>
+    public async Task<string> PushHeadToRefAsync(string worktreePath, string targetBranch, CancellationToken cancellationToken = default)
+    {
+        if (targetBranch.Equals("main", StringComparison.OrdinalIgnoreCase)
+            || targetBranch.Equals("master", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to push HEAD to protected branch '{targetBranch}'.");
+        }
+        ValidateGitComponent(targetBranch, "target branch");
+        var result = await RunGitInAsync(worktreePath,
+            $"push origin \"HEAD:refs/heads/{targetBranch}\"", cancellationToken);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"git push HEAD to '{targetBranch}' failed (exit={result.ExitCode}): {result.Stderr}");
+        return result.Stdout.Trim();
+    }
+
     public async Task<bool> WorktreeExistsAsync(string worktreePath, CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(worktreePath)) return false;

@@ -376,6 +376,35 @@ public class ProjectStoreRolesTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateQa_RoundTrips_AndPreservesAllBlocks()
+    {
+        await SeedAsync();
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 4 });
+        await _store.UpdateTriageAsync("forge", true);
+        var p0 = await _store.GetAsync("forge");
+        Assert.False(p0!.QaEnabled);
+
+        Assert.True(await _store.UpdateQaAsync("forge", true));
+        var p = await _store.GetAsync("forge");
+        Assert.NotNull(p);
+        Assert.True(p!.QaEnabled);
+        Assert.True(p.TriageEnabled);
+        Assert.Equal(4, p.Roles["coredev"]);
+
+        Assert.True(await _store.UpdateQaAsync("forge", false));
+        p = await _store.GetAsync("forge");
+        Assert.False(p!.QaEnabled);
+        Assert.True(p.TriageEnabled);
+
+        // The other writers preserve an enabled $qa block.
+        Assert.True(await _store.UpdateQaAsync("forge", true));
+        await _store.UpdateVerifyCommandsAsync("forge", new[] { "dotnet build -c Release" });
+        p = await _store.GetAsync("forge");
+        Assert.True(p!.QaEnabled);
+        Assert.Equal(new[] { "dotnet build -c Release" }, p.VerifyCommands);
+    }
+
+    [Fact]
     public async Task UpdateTerritories_RoundTrips_AndPreservesCaps()
     {
         await SeedAsync();

@@ -39,6 +39,10 @@ public sealed class ReviewerDispatcher
     private readonly IDashboardEventBus? _events;
     private readonly string? _projectId;
     private readonly Forge.Core.Messaging.IEventPublisher? _eventPublisher;
+    /// <summary>Watch-lane QA stage (project $qa flag): the reviewer
+    /// never runs ahead of QA — a head without a current QA verdict is
+    /// skipped (QA runs first; its completion relaunches the review).</summary>
+    private readonly bool _qaEnabled;
 
     /// <summary>Hard cap on one reviewer LLM call. Must be bounded
     /// (see the call site: a hung call must not freeze the loop
@@ -61,7 +65,8 @@ public sealed class ReviewerDispatcher
         Forge.Core.TaskStateMachine? lifecycle = null,
         IDashboardEventBus? events = null,
         string? projectId = null,
-        Forge.Core.Messaging.IEventPublisher? eventPublisher = null)
+        Forge.Core.Messaging.IEventPublisher? eventPublisher = null,
+        bool qaEnabled = false)
     {
         _issues = issues;
         _gitHub = gitHub;
@@ -71,6 +76,7 @@ public sealed class ReviewerDispatcher
         _events = events;
         _projectId = projectId;
         _eventPublisher = eventPublisher;
+        _qaEnabled = qaEnabled;
     }
 
     public sealed record ReviewOutcome(
@@ -134,6 +140,24 @@ public sealed class ReviewerDispatcher
         if (string.Equals(reworkSha, headSha, StringComparison.Ordinal))
         {
             return null;
+        }
+
+        // QA-stage sequencing (project $qa flag): QA verifies the head
+        // BEFORE review. No current QA verdict at this head → the sweep
+        // is (re)running QA right now; the review waits. A standing
+        // fail verdict is the watcher's rework trigger — reviewing a
+        // QA-failed head wastes a round on a verdict the watch will
+        // discard.
+        if (_qaEnabled)
+        {
+            var qaSha = task.GetMetadata("qaSha");
+            var qaVerdict = task.GetMetadata("qaVerdict");
+            if (!string.Equals(qaSha, headSha, StringComparison.Ordinal)
+                || string.IsNullOrEmpty(qaVerdict)
+                || string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal))
+            {
+                return null;
+            }
         }
 
         // Worktree access is MANDATORY (operator rule 2026-07-30): the

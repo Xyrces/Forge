@@ -52,6 +52,11 @@ public sealed record ProjectOptions
     // published for the project and the triage consumer drops hints.
     public bool TriageEnabled { get; set; }
 
+    // Watch-lane QA stage opt-in (the "$qa" roles_json key). On: every
+    // PR gets a QA playthrough at the head before the reviewer runs,
+    // and the merge gate requires qaVerdict=pass at the current head.
+    public bool QaEnabled { get; set; }
+
     // P8: optional deployment pipeline config. Null/omitted means the
     // project has no configured deployment action -- it can still be
     // enqueued for build-verification, but "approve" has nothing to

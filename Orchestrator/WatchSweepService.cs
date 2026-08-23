@@ -39,6 +39,13 @@ public sealed class WatchSweepService
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _reviewsInFlight = new();
     private static readonly TimeSpan ReviewRelaunchAfter = TimeSpan.FromMinutes(15);
 
+    /// <summary>QA-stage runs launched off-loop, keyed project/task —
+    /// same relaunch discipline as reviews, bounded by
+    /// <see cref="QaDispatcher"/>'s own run timeout. qaStartedAt on the
+    /// task covers pre-restart runs.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _qaInFlight = new();
+    private static readonly TimeSpan QaRelaunchAfter = TimeSpan.FromMinutes(45);
+
     public WatchSweepService(
         IAgentRunner runner,
         LlmConfig? llmConfig,
@@ -271,13 +278,26 @@ public sealed class WatchSweepService
             return;
         }
 
+        // Watch-lane QA stage (project $qa flag): QA verifies the head
+        // BEFORE the reviewer. When QA is due (no current verdict — the
+        // dispatcher dedupes on the head sha inside), launch QA instead;
+        // the reviewer self-skips until qaSha matches the head, and QA
+        // completion relaunches this method so the review follows
+        // immediately on a pass.
+        if (bundle.Project.QaEnabled)
+        {
+            TryLaunchBackgroundQaAsync(task, bundle, cancellationToken);
+            return;
+        }
+
         var reviewer = new Forge.Reviewer.ReviewerDispatcher(
             bundle.IssueStore, bundle.GitHub, _runner,
             _loggerFactory.CreateLogger<Forge.Reviewer.ReviewerDispatcher>(),
             lifecycle: _lifecycle,
             events: _events,
             projectId: bundle.Project.Id,
-            eventPublisher: bundle.IssueStore.Events);
+            eventPublisher: bundle.IssueStore.Events,
+            qaEnabled: bundle.Project.QaEnabled);
         var run = reviewer.ReviewOnceAsync(task, cancellationToken);
         _reviewsInFlight[key] = run;
         _ = run.ContinueWith(t =>
@@ -289,6 +309,73 @@ public sealed class WatchSweepService
             }
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
+    }
+
+    /// <summary>Launch decision for the QA stage: skip when a QA run is
+    /// in flight (in-memory) or qaStartedAt is fresh (pre-restart runs —
+    /// the window covers the 30m run timeout with margin).</summary>
+    private bool ShouldLaunchQa(IssueRecord task, string projectId)
+    {
+        var key = projectId + "/" + task.Id;
+        if (_qaInFlight.TryGetValue(key, out var inFlight) && !inFlight.IsCompleted)
+        {
+            return false;
+        }
+        if (DateTime.TryParse(task.GetMetadata("qaStartedAt"), out var started)
+            && DateTime.UtcNow - started.ToUniversalTime() < QaRelaunchAfter)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>Launch the QA stage in the background. The dispatcher
+    /// records qaSha/qaVerdict metadata itself; a PASS relaunches the
+    /// review path immediately (no 15m backstop wait). Fail verdicts and
+    /// error outcomes are the watcher/PRWatcher's business on the next
+    /// poll.</summary>
+    private void TryLaunchBackgroundQaAsync(
+        IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    {
+        var key = bundle.Project.Id + "/" + task.Id;
+        if (!ShouldLaunchQa(task, bundle.Project.Id))
+        {
+            return;
+        }
+        var qa = new Forge.Reviewer.QaDispatcher(
+            bundle.IssueStore, bundle.GitHub, bundle.Worktrees, _runner,
+            _loggerFactory.CreateLogger<Forge.Reviewer.QaDispatcher>(),
+            projectId: bundle.Project.Id,
+            events: _events);
+        var run = qa.VerifyOnceAsync(task, cancellationToken);
+        _qaInFlight[key] = run;
+        _ = run.ContinueWith(async t =>
+        {
+            _qaInFlight.TryRemove(key, out _);
+            if (t.IsFaulted)
+            {
+                _logger.LogError(t.Exception, "background QA for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
+                return;
+            }
+            // QA passed → the review follows immediately (the reviewer
+            // self-skips on any other outcome). A null outcome means QA
+            // was already current — launch the review too, or a task
+            // whose QA predates the deploy would wait out the backstop.
+            if (t.Result is null || t.Result.Verdict == Forge.Reviewer.QaDispatcher.VerdictPass)
+            {
+                try
+                {
+                    var fresh = await bundle.IssueStore.GetAsync(task.Id, CancellationToken.None);
+                    if (fresh is not null)
+                        await TryLaunchBackgroundReviewAsync(fresh, bundle, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "post-QA review relaunch failed for {TaskId}", task.Id);
+                }
+            }
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        _logger.LogInformation("Watch (task {Id}): QA stage launched in background (project={Project})", task.Id, bundle.Project.Id);
     }
 
     private async Task ReportLifecycleAsync(

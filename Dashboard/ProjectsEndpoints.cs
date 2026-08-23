@@ -47,6 +47,10 @@ public static class ProjectsEndpoints
         group.MapPut("/{id}/triage", PutTriageAsync)
              .WithName("PutProjectTriage")
              .WithSummary("Set the failure-triage agent opt-in (the $triage roles_json key). Off = no TriageRequested events for the project.");
+
+        group.MapPut("/{id}/qa", PutQaAsync)
+             .WithName("PutProjectQa")
+             .WithSummary("Set the watch-lane QA stage opt-in (the $qa roles_json key). On = QA playthrough before review + merge gate requires qaVerdict=pass at head.");
         endpoints.MapGet("/api/board", BoardAsync)
                  .WithName("CrossProjectBoard")
                  .WithSummary("Cross-project kanban feed: each row tagged with project_id.");
@@ -386,6 +390,22 @@ public static class ProjectsEndpoints
         if (!updated) return Results.NotFound(new { error = "project not found", id });
         var project = await store.GetAsync(id, ct);
         return Results.Ok(new { projectId = id, triageEnabled = project?.TriageEnabled ?? false });
+    }
+
+    public sealed record PutQaRequest(bool Enabled);
+
+    private static async Task<IResult> PutQaAsync(
+        string id,
+        PutQaRequest? body,
+        IProjectStore store,
+        CancellationToken ct)
+    {
+        if (body is null)
+            return Results.BadRequest(new { error = "body required, e.g. { \"enabled\": true }" });
+        var updated = await store.UpdateQaAsync(id, body.Enabled, ct);
+        if (!updated) return Results.NotFound(new { error = "project not found", id });
+        var project = await store.GetAsync(id, ct);
+        return Results.Ok(new { projectId = id, qaEnabled = project?.QaEnabled ?? false });
     }
 
     public sealed record PutTerritoryEntry(List<string> Prefixes, bool RootFiles = false);
