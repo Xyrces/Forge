@@ -128,6 +128,44 @@ public sealed record ProjectRolesChanged : IForgeEvent
         => $"roles-changed:{projectId}:{changedAt:O}";
 }
 
+/// <summary>Which ledger transition a <see cref="TaskFailureSignal"/> hints at.</summary>
+public enum FailureSignalKind
+{
+    /// <summary>Task entered Failed or Blocked.</summary>
+    Failure,
+    /// <summary>Task left Failed/Blocked for Pending/InProgress/Closed.</summary>
+    Clearance,
+    /// <summary>Task reached a dispatch-success lifecycle state (PROpen
+    /// or later) — resolves a cleared row's pending outcome.</summary>
+    SuccessCandidate,
+}
+
+/// <summary>
+/// Failure-ledger hint (triage phase 1): published from the IssueStore
+/// transition choke points when a task enters/leaves a failure status or
+/// reaches a dispatch-success lifecycle state. Own topic — the in-memory
+/// transport is competing-consumer, so this cannot ride TaskTransitioned.
+/// The consumer re-reads the task + ledger rows (DB truth) and is
+/// idempotent; the signal only routes the handler branch.
+/// </summary>
+public sealed record TaskFailureSignal : IForgeEvent
+{
+    public required string MessageId { get; init; }
+    public required string ProjectId { get; init; }
+    public required string TaskId { get; init; }
+    public required FailureSignalKind Kind { get; init; }
+    public required string FromStatus { get; init; }
+    public required string ToStatus { get; init; }
+    /// <summary>The transition's error/reason text (≤300 chars) — the
+    /// freshest description of THIS failure; the classifier prefers it
+    /// over the task's persisted lastError.</summary>
+    public string? ErrorExcerpt { get; init; }
+    public DateTimeOffset OccurredAt { get; init; } = DateTimeOffset.UtcNow;
+
+    public static string IdFor(string projectId, string taskId, FailureSignalKind kind, DateTimeOffset occurredAt)
+        => $"failure-signal:{projectId}:{taskId}:{kind}:{occurredAt:O}";
+}
+
 /// <summary>Which scheduler a <see cref="SweepTick"/> backstop is for.</summary>
 public enum SweepKind
 {

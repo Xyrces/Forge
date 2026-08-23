@@ -1,0 +1,251 @@
+@page "/triage"
+@inject IState<Forge.Dashboard.Features.Triage.TriageState> TriageStore
+@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
+@inject Fluxor.IDispatcher Dispatch
+@implements IDisposable
+@using Forge.Dashboard.Features.Triage
+
+<PageTitle>Triage</PageTitle>
+<div class="page">
+    <div class="page-header">
+        <h1>Triage</h1>
+        <div class="page-header__meta">Failure ledger — observability only</div>
+        <div class="page-header__actions">
+            <button class="btn btn--primary" @onclick="LoadForCurrentProject">Refresh</button>
+        </div>
+    </div>
+
+    @if (TriageStore.Value.Loading)
+    {
+        <div class="page-subtitle">Loading…</div>
+    }
+    else if (TriageStore.Value.Error is not null)
+    {
+        <div class="page-subtitle page-subtitle--error">Error: @TriageStore.Value.Error</div>
+    }
+    else
+    {
+        var summary = TriageStore.Value.Summary;
+        @if (summary is not null)
+        {
+            <div class="dash-grid">
+                <div class="dash-tile">
+                    <span class="dash-tile__label">Open failures</span>
+                    <span class="dash-tile__value">@summary.OpenFailures</span>
+                    <span class="dash-tile__caption">needs clearance or unproven</span>
+                    <Sparkline Values="summary.DailyOpenFailures7d" />
+                </div>
+                <div class="dash-tile">
+                    <span class="dash-tile__label">Signatures 7d</span>
+                    <span class="dash-tile__value">@summary.DistinctSignatures7d</span>
+                    <span class="dash-tile__caption">distinct failure classes</span>
+                    <Sparkline Values="summary.DailyDistinctSignatures7d" />
+                </div>
+                <div class="dash-tile">
+                    <span class="dash-tile__label">Escalations</span>
+                    <span class="dash-tile__value">@summary.Escalations7d of @summary.EscalationBudget</span>
+                    <span class="dash-tile__caption">budget — phase 3</span>
+                    <Sparkline Values="EmptySeries" />
+                </div>
+                <div class="dash-tile">
+                    <span class="dash-tile__label">Auto-cleared 7d</span>
+                    <span class="dash-tile__value">@summary.AutoCleared7d</span>
+                    <span class="dash-tile__caption">aged-sweep clearances</span>
+                    <Sparkline Values="summary.DailyAutoCleared7d" />
+                </div>
+            </div>
+        }
+
+        <div class="triage-layout">
+            <div class="triage-layout__main">
+                @if (TriageStore.Value.Groups.Count == 0)
+                {
+                    <div class="page-subtitle">No failures recorded yet.</div>
+                }
+                else
+                {
+                    @foreach (var g in TriageStore.Value.Groups)
+                    {
+                        var expanded = TriageStore.Value.ExpandedSignature == g.Signature;
+                        <div class="triage-group">
+                            <button class="triage-group__row" @onclick="@(() => Toggle(g.Signature))">
+                                <span class="triage-dot triage-dot--@DotTone(g.Classification)"></span>
+                                <span class="triage-group__sig">@g.Signature</span>
+                                <span class="triage-group__count">@g.Count</span>
+                                <span class="pill pill--@PillTone(g.Classification)">@g.Classification</span>
+                                @if (g.BugSuspect)
+                                {
+                                    <span class="pill pill--error">bug suspect</span>
+                                }
+                                <span class="triage-group__when">@Ago(g.LastSeenAt)</span>
+                                <span class="pill pill--@OutcomeTone(g.DominantOutcome)">@(g.DominantOutcome ?? "open")</span>
+                            </button>
+                            @if (expanded)
+                            {
+                                <div class="triage-group__body">
+                                    @if (TriageStore.Value.DetailLoading)
+                                    {
+                                        <div class="page-subtitle">Loading…</div>
+                                    }
+                                    else
+                                    {
+                                        <table class="data-grid">
+                                            <thead>
+                                                <tr>
+                                                    <th>Task</th><th>Title</th><th>When</th><th>Error</th><th>Action</th><th>Outcome</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                @foreach (var row in TriageStore.Value.DetailRows)
+                                                {
+                                                    <tr>
+                                                        <td><a href="/tasks/@row.TaskId" class="mono">@row.TaskId</a></td>
+                                                        <td>@row.TaskTitle</td>
+                                                        <td class="mono">@Ago(row.FailedAt)</td>
+                                                        <td class="mono">@row.ErrorExcerpt</td>
+                                                        <td>@(row.Action ?? "—")</td>
+                                                        <td>
+                                                            @if (row.Outcome is not null)
+                                                            {
+                                                                <span class="pill pill--@OutcomeTone(row.Outcome)">@row.Outcome</span>
+                                                            }
+                                                            else
+                                                            {
+                                                                <span>—</span>
+                                                            }
+                                                        </td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                }
+            </div>
+
+            <div class="triage-layout__rail">
+                <div class="dash-panel">
+                    <div class="dash-panel__title">Bug suspects</div>
+                    @{ var suspects = TriageStore.Value.Groups.Where(g => g.BugSuspect).ToList(); }
+                    @if (suspects.Count == 0)
+                    {
+                        <div class="page-subtitle">No signatures crossing the ≥3-tasks threshold.</div>
+                    }
+                    else
+                    {
+                        @foreach (var s in suspects)
+                        {
+                            <div class="triage-suspect">
+                                <span class="triage-group__sig">@s.Signature</span>
+                                <span class="meta-text">@s.DistinctTasks tasks</span>
+                                <button class="btn btn--ghost" disabled title="Phase 2 promotes suspects">manual review for now</button>
+                            </div>
+                        }
+                    }
+                </div>
+
+                <div class="dash-panel">
+                    <div class="dash-panel__title">Prompt/gate health</div>
+                    @{ var health = TriageStore.Value.Health; }
+                    @if (health is not null)
+                    {
+                        var max = Math.Max(1, Math.Max(health.PlanGateRejections7d, Math.Max(health.NoDiffBounces7d, health.VerificationTimeouts7d)));
+                        <div class="triage-health__row">
+                            <span class="triage-health__label">Plan-gate rejections</span>
+                            <span class="dash-tile__bar"><div style="width:@(100.0 * health.PlanGateRejections7d / max)%"></div></span>
+                            <span class="triage-health__value">@health.PlanGateRejections7d</span>
+                        </div>
+                        <div class="triage-health__row">
+                            <span class="triage-health__label">No-diff bounces</span>
+                            <span class="dash-tile__bar"><div style="width:@(100.0 * health.NoDiffBounces7d / max)%"></div></span>
+                            <span class="triage-health__value">@health.NoDiffBounces7d</span>
+                        </div>
+                        <div class="triage-health__row">
+                            <span class="triage-health__label">Verification timeouts</span>
+                            <span class="dash-tile__bar"><div style="width:@(100.0 * health.VerificationTimeouts7d / max)%"></div></span>
+                            <span class="triage-health__value">@health.VerificationTimeouts7d</span>
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="banner">Triage agent: off for this project — Phase 1: observability only.</div>
+    }
+</div>
+
+@code {
+    private static readonly IReadOnlyList<int> EmptySeries = new int[7];
+    private string? _loadedProject;
+
+    protected override void OnInitialized()
+    {
+        TriageStore.StateChanged += OnStateChanged;
+        ShellStore.StateChanged += OnShellChanged;
+        LoadForCurrentProject();
+    }
+
+    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    private void OnShellChanged(object? sender, EventArgs e)
+    {
+        if (ShellStore.Value.CurrentProjectId != _loadedProject)
+            InvokeAsync(LoadForCurrentProject);
+    }
+
+    private void LoadForCurrentProject()
+    {
+        _loadedProject = ShellStore.Value.CurrentProjectId;
+        Dispatch.Dispatch(new TriageActions.LoadLedgerAction(_loadedProject));
+    }
+
+    private void Toggle(string signature)
+    {
+        if (TriageStore.Value.ExpandedSignature == signature)
+            Dispatch.Dispatch(new TriageActions.CollapseSignatureAction());
+        else
+            Dispatch.Dispatch(new TriageActions.ExpandSignatureAction(signature, _loadedProject));
+    }
+
+    private static string DotTone(string classification) => classification switch
+    {
+        "state-poison" or "capability-bound" => "error",
+        "no-progress" or "verification" or "gate-loop" or "review-loop" => "warn",
+        "transient-upstream" => "info",
+        _ => "muted",
+    };
+
+    private static string PillTone(string classification) => classification switch
+    {
+        "state-poison" or "capability-bound" => "error",
+        "no-progress" or "verification" or "gate-loop" or "review-loop" => "warn",
+        "transient-upstream" => "info",
+        _ => "outline",
+    };
+
+    private static string OutcomeTone(string? outcome) => outcome switch
+    {
+        "succeeded" => "success",
+        "failed-again" => "failed",
+        "pending" => "pending",
+        _ => "outline",
+    };
+
+    private static string Ago(DateTime when)
+    {
+        var span = DateTime.UtcNow - DateTime.SpecifyKind(when, DateTimeKind.Utc);
+        if (span.TotalMinutes < 1) return "just now";
+        if (span.TotalHours < 1) return $"{(int)span.TotalMinutes}m ago";
+        if (span.TotalDays < 1) return $"{(int)span.TotalHours}h ago";
+        return $"{(int)span.TotalDays}d ago";
+    }
+
+    public void Dispose()
+    {
+        TriageStore.StateChanged -= OnStateChanged;
+        ShellStore.StateChanged -= OnShellChanged;
+    }
+}

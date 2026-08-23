@@ -45,6 +45,7 @@ public static class SqlServerMigrations
         new M032AgentRunTokens(),
         new M033IntakeMessageQuestions(),
         new M034IntakeMessageProposalPayload(),
+        new M035FailureTriage(),
     };
 
     public static int ExpectedVersion =>

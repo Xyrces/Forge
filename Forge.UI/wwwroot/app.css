@@ -980,3 +980,42 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .situation--action  { color: var(--error); font-weight: 600; }
 .situation--warn    { color: var(--warn); }
 .situation--info    { color: var(--on-surface-variant); }
+
+/* Triage page: failure-ledger signature groups + summary sparklines
+   (phase 1 observability, 2026-08-23). */
+.triage-layout { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 16px; }
+.triage-layout__main { flex: 1; min-width: 0; }
+.triage-layout__rail { width: 320px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+@media (max-width: 960px) {
+    .triage-layout { flex-direction: column; }
+    .triage-layout__rail { width: 100%; }
+}
+.triage-group { background: var(--surface); border: 1px solid var(--outline-variant); border-radius: 10px; margin-bottom: 8px; }
+.triage-group__row {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 10px 14px; background: none; border: none; cursor: pointer;
+    text-align: left; color: inherit; font: inherit;
+}
+.triage-group__row:hover { background: var(--surface-1, rgba(255,255,255,.04)); }
+.triage-group__sig { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; }
+.triage-group__count {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+    background: var(--surface-3); border-radius: var(--radius-pill);
+    padding: 1px 8px; color: var(--on-surface-variant);
+}
+.triage-group__when { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--on-surface-variant); }
+.triage-group__body { padding: 0 14px 12px; }
+.triage-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.triage-dot--error { background: var(--error); }
+.triage-dot--warn { background: var(--warn); }
+.triage-dot--info { background: var(--primary); }
+.triage-dot--muted { background: var(--outline-variant); }
+.triage-suspect { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--outline-variant); }
+.triage-suspect:last-child { border-bottom: none; }
+.triage-suspect .btn { margin-left: auto; }
+.triage-health__row { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+.triage-health__label { font-size: 12px; color: var(--on-surface-variant); width: 140px; flex-shrink: 0; }
+.triage-health__row .dash-tile__bar { flex: 1; }
+.triage-health__value { font-family: var(--font-mono); font-size: 12px; width: 28px; text-align: right; }
+.sparkline { display: inline-flex; align-items: flex-end; gap: 2px; height: 18px; margin-top: auto; align-self: flex-end; }
+.sparkline > i { display: block; width: 4px; background: var(--primary); border-radius: 1px; opacity: .8; }

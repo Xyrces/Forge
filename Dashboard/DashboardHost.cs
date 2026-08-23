@@ -524,6 +524,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             _providerApiKeys);
         QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
             _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
+        TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory);
 
 if (_groomerRuns is not null)
             {
