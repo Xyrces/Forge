@@ -516,9 +516,7 @@ public async Task<AgentRunResult> RunAsync(
                 }
             }
 
-            var text = string.Concat(response.Messages
-                .Where(m => m.Role == ChatRole.Assistant)
-                .Select(m => m.Text));
+            var text = JoinAssistantText(response.Messages);
             // Pause/resume: persist the session so the next run of
             // this (project, task, role) resumes warm. The returned
             // reference is the storage KEY, not the blob — issue
@@ -1294,6 +1292,22 @@ public async Task<AgentRunResult> RunAsync(
 
     private static string LastAssistantText(AgentResponse response) =>
         response.Messages.LastOrDefault(m => m.Role == ChatRole.Assistant)?.Text ?? string.Empty;
+
+    /// <summary>
+    /// Assemble the run's result text from the final response's
+    /// assistant messages. NEWLINE-joined, never bare-concatenated:
+    /// an intermediate assistant prose message (pre-tool-call) whose
+    /// text has no trailing newline would otherwise fuse with the
+    /// final message's first line, and a line-oriented contract marker
+    /// there (QA_VERDICT:, observed live 2026-08-24 — task-740's pass
+    /// verdicts vanished as "no QA_VERDICT marker" twice) is no longer
+    /// at a line start and becomes unparseable. Internal for tests.
+    /// </summary>
+    internal static string JoinAssistantText(IEnumerable<ChatMessage> messages) =>
+        string.Join('\n', messages
+            .Where(m => m.Role == ChatRole.Assistant)
+            .Select(m => m.Text)
+            .Where(t => !string.IsNullOrEmpty(t)));
 
     /// <summary>
     /// True when assistant text contains tool-call markup that leaked

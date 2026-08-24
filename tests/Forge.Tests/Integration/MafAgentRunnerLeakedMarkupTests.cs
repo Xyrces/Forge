@@ -26,6 +26,43 @@ public class MafAgentRunnerLeakedMarkupTests
         Assert.Equal(expected, MafAgentRunner.HasLeakedToolCallMarkup(text));
     }
 
+    [Fact]
+    public void JoinAssistantText_NewlineJoins_SoLineContractsSurvive()
+    {
+        // Regression (2026-08-24, task-740): the runner assembled
+        // AgentRunResult.Text with string.Concat — an intermediate
+        // assistant prose message (no trailing newline) fused with the
+        // final message's first line, and the QA_VERDICT marker was no
+        // longer at a line start. Two full pass verdicts vanished as
+        // "no QA_VERDICT marker in the run's final message".
+        var messages = new[]
+        {
+            new ChatMessage(ChatRole.Assistant, "4630411 is a test-results-only refresh. Running the harness:"),
+            new ChatMessage(ChatRole.Tool, "ok"),
+            new ChatMessage(ChatRole.Assistant, "QA_VERDICT: pass\nplayed the build; evidence captured"),
+        };
+
+        var text = MafAgentRunner.JoinAssistantText(messages);
+
+        var (verdict, notes) = Forge.Reviewer.QaDispatcher.ParseQaOutput(text);
+        Assert.Equal(Forge.Reviewer.QaDispatcher.VerdictPass, verdict);
+        Assert.Contains("played the build", notes);
+    }
+
+    [Fact]
+    public void JoinAssistantText_SkipsNonAssistantMessages()
+    {
+        var messages = new[]
+        {
+            new ChatMessage(ChatRole.User, "the prompt"),
+            new ChatMessage(ChatRole.Assistant, "first"),
+            new ChatMessage(ChatRole.Tool, "tool output"),
+            new ChatMessage(ChatRole.Assistant, "second"),
+        };
+
+        Assert.Equal("first\nsecond", MafAgentRunner.JoinAssistantText(messages));
+    }
+
     /// <summary>
     /// Scripted client: first response is leaked markup (no structured
     /// tool calls, so MAF ends its loop); subsequent responses are clean.
