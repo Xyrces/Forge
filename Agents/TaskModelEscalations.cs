@@ -47,11 +47,16 @@ public sealed class TaskModelEscalations
 
     /// <summary>Written by the triage tool AFTER the ledger action is
     /// recorded. An existing marker is overwritten (a re-escalation
-    /// before dispatch just replaces the note).</summary>
+    /// before dispatch just replaces the note). Markers carry a 7-day
+    /// TTL: an unconsumed marker (rollback to a build that never
+    /// consumes them, a parked-then-much-later-requeued task) must not
+    /// rehydrate and fire against an unrelated future dispatch —
+    /// expired rows are skipped by <see cref="MemoryStore.RecallAsync"/>
+    /// on startup.</summary>
     public async Task WriteAsync(string projectId, string taskId, string note, CancellationToken ct = default)
     {
         var marker = new EscalationMarker(note, FailureTriageActors.Triage, DateTime.UtcNow);
-        await _memory.RememberAsync(Key(projectId, taskId), Serialize(marker), ttlDays: null, ct);
+        await _memory.RememberAsync(Key(projectId, taskId), Serialize(marker), ttlDays: 7, ct);
         _cache[CacheKey(projectId, taskId)] = marker;
     }
 

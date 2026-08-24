@@ -300,6 +300,38 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task DispatchSingleTask_ClaimFailure_DoesNotBurnMarker_OrStamp()
+    {
+        // The marker is consumed only once a run actually exists: a
+        // claim failure (the task reached a terminal status between
+        // the ready-list read and the claim — same shape as the
+        // AlreadyClaimed test) must leave the marker AND the task
+        // metadata untouched — no run, no burn, no stale stamp.
+        var markers = BuildMarkers();
+        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
+        BindMafWithEscalation(orch, markers);
+
+        var issue = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "completed before dispatch", Description: "x"));
+        var first = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        Assert.True(first.Success, $"setup dispatch: {first.Message}");
+        var completed = (await _issues.GetAsync(issue.Id))!;
+        Assert.Equal(IssueStatus.Completed, completed.Status);
+
+        // The escalation lands AFTER the task is already terminal;
+        // the late dispatch is refused at the claim.
+        await markers.WriteAsync("test", issue.Id, "escalate");
+        var result = await orch.DispatchSingleTaskAsync(completed, _bundle, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("already-claimed", result.Message);
+        Assert.True(markers.Peek("test", issue.Id));
+        var after = (await _issues.GetAsync(issue.Id))!;
+        Assert.Null(after.GetMetadata("modelEscalated"));
+        Assert.Null(after.GetMetadata("modelEscalatedTo"));
+    }
+
+    [Fact]
     public async Task DispatchCycle_EscalatedTask_UsesOnlyEscalationPool_SecondEscalatedWaits_NormalRoleUnaffected()
     {
         // Concurrency bound (operator decision 2026-08-23): 1

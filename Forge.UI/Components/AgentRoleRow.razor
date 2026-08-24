@@ -327,6 +327,7 @@
 
     private bool _expanded;
     private bool _wasEditing;
+    private bool _wasEditingEscalation;
     private string _editProvider = "";
     private string _editModel = "";
     private string[] _availableModels = Array.Empty<string>();
@@ -392,10 +393,13 @@
 
     protected override async Task OnParametersSetAsync()
     {
-        // Entering edit mode (either tier): seed the inputs from the
-        // current model and load the provider's available-model catalog.
+        // Entering edit mode (either tier) OR switching tiers mid-edit:
+        // seed the inputs from THAT tier's current model and load the
+        // provider's available-model catalog. Without the tier check a
+        // model→escalation switch keeps the normal model's values and
+        // Save silently writes them as the escalation override.
         var editingNow = Editing || EditingEscalation;
-        if (editingNow && !_wasEditing)
+        if (editingNow && (!_wasEditing || _wasEditingEscalation != EditingEscalation))
         {
             var seed = EditingEscalation ? EscalationModel : Model;
             _editProvider = seed?.Provider ?? (Providers.FirstOrDefault() ?? "");
@@ -403,6 +407,7 @@
             await LoadModelsAsync();
         }
         _wasEditing = editingNow;
+        _wasEditingEscalation = EditingEscalation;
     }
 
     /// <summary>Available models for the selected provider, fetched

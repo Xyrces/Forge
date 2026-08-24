@@ -280,6 +280,34 @@ public class RoleModelOverridesTests : IDisposable
     }
 
     [Fact]
+    public async Task ResolveEscalation_DanglingProjectOverride_FallsToGlobalOverride_NotConfig()
+    {
+        // Each override tier gets its OWN provider-validity check: a
+        // dangling project-scoped override falls to the GLOBAL
+        // override, never straight to config.
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "removed-provider", "esc-dangling", projectId: "porthorizon");
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "openai", "esc-global");
+
+        var config = new LlmConfig(
+            Providers: new[]
+            {
+                new ProviderConfig("kilo-gateway", "http://gw", "key", null, "m"),
+                new ProviderConfig("openai", "http://oai", "key", null, "gpt-5"),
+            },
+            DefaultProvider: "kilo-gateway",
+            Roles: new Dictionary<AgentType, RoleModel>(),
+            EscalationRoles: new Dictionary<AgentType, RoleModel>
+            {
+                [AgentType.CoreDev] = new("kilo-gateway", "esc-config"),
+            });
+
+        var resolved = config.ResolveEscalationEffective(AgentType.CoreDev, overrides, "porthorizon");
+        Assert.Equal("esc-global", resolved!.Value.Model);
+        Assert.True(resolved.Value.IsOverride);
+    }
+
+    [Fact]
     public async Task Escalation_Clear_RemovesFromStoreAndSnapshot()
     {
         var overrides = new RoleModelOverrides(_memory);

@@ -36,6 +36,26 @@ public sealed class TriageTools
         _escalation = escalation;
     }
 
+    /// <summary>The shared guard preamble for the requeue-style
+    /// actions (requeue_with_guidance, escalate_model): task exists,
+    /// is Failed or Blocked, has an open ledger row, and the row is
+    /// not already actioned. One helper so a future guard lands on
+    /// BOTH actions at once — hand-maintained copies drift (park/flag
+    /// deliberately use the three-guard variant without the status
+    /// check).</summary>
+    private async Task<(IssueRecord Task, FailureTriageEntry Open, string? Error)> GuardRequeueStyleAsync(
+        string taskId, string verb, CancellationToken ct)
+    {
+        var task = await _issues.GetAsync(taskId, ct);
+        if (task is null) return (null!, null!, $"error: task {taskId} not found");
+        if (task.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
+            return (null!, null!, $"error: task {taskId} is {task.Status} — only Failed or Blocked tasks can be {verb}");
+        var open = await _triage.GetOpenForTaskAsync(taskId, ct);
+        if (open is null) return (null!, null!, $"error: task {taskId} has no open ledger row — nothing to action");
+        if (open.Action is not null) return (null!, null!, $"error: task {taskId}'s ledger row is already actioned ({open.Action})");
+        return (task, open, null);
+    }
+
     /// <summary>Requeue the failed/blocked task with an evidence-cited
     /// reorientation that rides the next run's prompt (reworkReason /
     /// reworkContext). Unlike an operator requeue the strike budget is
@@ -44,13 +64,8 @@ public sealed class TriageTools
     public async Task<string> RequeueWithGuidanceAsync(
         string taskId, string signature, string note, string? context, CancellationToken ct = default)
     {
-        var task = await _issues.GetAsync(taskId, ct);
-        if (task is null) return $"error: task {taskId} not found";
-        if (task.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
-            return $"error: task {taskId} is {task.Status} — only Failed or Blocked tasks can be requeued";
-        var open = await _triage.GetOpenForTaskAsync(taskId, ct);
-        if (open is null) return $"error: task {taskId} has no open ledger row — nothing to action";
-        if (open.Action is not null) return $"error: task {taskId}'s ledger row is already actioned ({open.Action})";
+        var (task, open, guardError) = await GuardRequeueStyleAsync(taskId, "requeued", ct);
+        if (guardError is not null) return guardError;
 
         // Ledger first: the boundary crossing below publishes a
         // Clearance signal, and the FailureTriageConsumer's branch
@@ -109,13 +124,8 @@ public sealed class TriageTools
     public async Task<string> EscalateModelAsync(
         string taskId, string signature, string note, CancellationToken ct = default)
     {
-        var task = await _issues.GetAsync(taskId, ct);
-        if (task is null) return $"error: task {taskId} not found";
-        if (task.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
-            return $"error: task {taskId} is {task.Status} — only Failed or Blocked tasks can be escalated";
-        var open = await _triage.GetOpenForTaskAsync(taskId, ct);
-        if (open is null) return $"error: task {taskId} has no open ledger row — nothing to action";
-        if (open.Action is not null) return $"error: task {taskId}'s ledger row is already actioned ({open.Action})";
+        var (task, open, guardError) = await GuardRequeueStyleAsync(taskId, "escalated", ct);
+        if (guardError is not null) return guardError;
         if (_escalation is null)
             return "error: model escalation is not wired in this deployment";
         var role = RoleAgentRegistry.FromTaskType(task.Type);

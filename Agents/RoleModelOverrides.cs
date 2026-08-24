@@ -83,6 +83,15 @@ public sealed class RoleModelOverrides
         return _escalationCache.TryGetValue(CacheKey(role, null), out var global) ? global : null;
     }
 
+    /// <summary>Exact-tier escalation read with NO fallback: the
+    /// project-scoped override when <paramref name="projectId"/> is
+    /// given, the global one when null. Resolution uses this so each
+    /// tier gets its own provider-validity check — a dangling project
+    /// override must fall to the GLOBAL override, not straight to
+    /// config.</summary>
+    public RoleModel? GetEscalationDirect(AgentType role, string? projectId)
+        => _escalationCache.TryGetValue(CacheKey(role, projectId), out var m) ? m : null;
+
     /// <summary>Which escalation override applies for (role,
     /// projectId): the project-scoped one, the global one, or none.</summary>
     public string? GetEscalationScope(AgentType role, string? projectId)
@@ -112,36 +121,27 @@ public sealed class RoleModelOverrides
     /// load here.</summary>
     public async Task LoadAsync(CancellationToken ct = default)
     {
-        foreach (var row in await _memory.RecallAsync(Prefix, ct))
+        await LoadTierAsync(Prefix, _cache, ct);
+        await LoadTierAsync(EscalationPrefix, _escalationCache, ct);
+    }
+
+    private async Task LoadTierAsync(
+        string prefix, ConcurrentDictionary<string, RoleModel> cache, CancellationToken ct)
+    {
+        foreach (var row in await _memory.RecallAsync(prefix, ct))
         {
-            var rest = row.Key[Prefix.Length..];
+            var rest = row.Key[prefix.Length..];
             var parsed = Parse(row.Body);
             if (parsed is null) continue;
             var slash = rest.IndexOf('/');
             if (slash < 0)
             {
                 if (Enum.TryParse<AgentType>(rest, out var role))
-                    _cache[CacheKey(role, null)] = parsed;
+                    cache[CacheKey(role, null)] = parsed;
             }
             else if (Enum.TryParse<AgentType>(rest[(slash + 1)..], out var role))
             {
-                _cache[CacheKey(role, rest[..slash])] = parsed;
-            }
-        }
-        foreach (var row in await _memory.RecallAsync(EscalationPrefix, ct))
-        {
-            var rest = row.Key[EscalationPrefix.Length..];
-            var parsed = Parse(row.Body);
-            if (parsed is null) continue;
-            var slash = rest.IndexOf('/');
-            if (slash < 0)
-            {
-                if (Enum.TryParse<AgentType>(rest, out var role))
-                    _escalationCache[CacheKey(role, null)] = parsed;
-            }
-            else if (Enum.TryParse<AgentType>(rest[(slash + 1)..], out var role))
-            {
-                _escalationCache[CacheKey(role, rest[..slash])] = parsed;
+                cache[CacheKey(role, rest[..slash])] = parsed;
             }
         }
     }
@@ -170,6 +170,13 @@ public sealed class RoleModelOverrides
 
 public static class LlmConfigOverrideResolution
 {
+    /// <summary>Case-insensitive provider lookup shared by every
+    /// resolver — the model tier, the escalation tier, and explicit
+    /// per-task overrides must agree on what is configured.</summary>
+    private static ProviderConfig? FindProvider(LlmConfig config, string providerName)
+        => config.Providers.FirstOrDefault(p =>
+            string.Equals(p.Name, providerName, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>
     /// Resolve the effective (provider, model) for a role:
     /// project-scoped DB override → global DB override (each only when
@@ -182,8 +189,7 @@ public static class LlmConfigOverrideResolution
         var o = overrides?.Get(role, projectId);
         if (o is not null)
         {
-            var provider = config.Providers.FirstOrDefault(p =>
-                string.Equals(p.Name, o.ProviderName, StringComparison.OrdinalIgnoreCase));
+            var provider = FindProvider(config, o.ProviderName);
             if (provider is not null) return (provider, o.Model, true);
             // Dangling override (provider removed from config) — fall
             // through to the configured resolution rather than failing.
@@ -194,8 +200,10 @@ public static class LlmConfigOverrideResolution
 
     /// <summary>
     /// Resolve the ESCALATION target for a role (phase 3): project
-    /// escalation override → global escalation override (each only
-    /// when it still names a configured provider) →
+    /// escalation override → global escalation override (each tier
+    /// checked INDEPENDENTLY, only when it still names a configured
+    /// provider — a dangling project override falls to the global
+    /// override, not straight to config) →
     /// <c>llm.roles.&lt;AgentType&gt;.escalationModel</c> →
     /// <b>unset</b> (null). Unlike <see cref="ResolveEffective"/>
     /// there is NO provider-default fallback: a role without an
@@ -205,20 +213,23 @@ public static class LlmConfigOverrideResolution
     public static (ProviderConfig Provider, string Model, bool IsOverride)? ResolveEscalationEffective(
         this LlmConfig config, AgentType role, RoleModelOverrides? overrides, string? projectId = null)
     {
-        var o = overrides?.GetEscalation(role, projectId);
-        if (o is not null)
+        if (overrides is not null)
         {
-            var provider = config.Providers.FirstOrDefault(p =>
-                string.Equals(p.Name, o.ProviderName, StringComparison.OrdinalIgnoreCase));
-            if (provider is not null) return (provider, o.Model, true);
-            // Dangling override (provider removed from config) — fall
-            // through to the configured escalation entry.
+            var projectTier = projectId is not null
+                ? overrides.GetEscalationDirect(role, projectId)
+                : null;
+            foreach (var o in new[] { projectTier, overrides.GetEscalationDirect(role, null) })
+            {
+                if (o is null) continue;
+                var provider = FindProvider(config, o.ProviderName);
+                if (provider is not null) return (provider, o.Model, true);
+                // Dangling override — fall to the NEXT tier.
+            }
         }
         if (config.EscalationRoles is not null
             && config.EscalationRoles.TryGetValue(role, out var configured))
         {
-            var provider = config.Providers.FirstOrDefault(p =>
-                string.Equals(p.Name, configured.ProviderName, StringComparison.OrdinalIgnoreCase));
+            var provider = FindProvider(config, configured.ProviderName);
             // A misconfigured escalation entry reads as UNSET rather
             // than faulting dispatch — escalation is optional, and the
             // /agents surface shows the role as having no target.
@@ -234,8 +245,7 @@ public static class LlmConfigOverrideResolution
     public static (ProviderConfig Provider, string Model) ResolveExplicit(
         this LlmConfig config, RoleModel explicitModel)
     {
-        var provider = config.Providers.FirstOrDefault(p =>
-            string.Equals(p.Name, explicitModel.ProviderName, StringComparison.OrdinalIgnoreCase))
+        var provider = FindProvider(config, explicitModel.ProviderName)
             ?? throw new InvalidOperationException(
                 $"Explicit model references provider '{explicitModel.ProviderName}' which is not in the Providers list. " +
                 $"Known providers: {string.Join(", ", config.Providers.Select(p => p.Name))}.");

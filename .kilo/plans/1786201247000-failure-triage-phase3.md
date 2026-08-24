@@ -113,6 +113,13 @@ Phase 2 must be live with `$triage` enabled on porthorizon.
    overrides for designer/groomer/artist equal to the CURRENT effective coredev resolution
    (records what they inherit today) — executed via the existing
    `PUT /api/agents/roles/{name}/model` API after deploy, before any operator changes.
+   **Sequencing (review 2026-08-24): the seed cannot be pre-staged** — the old binary's
+   `ResolveAgentType` 404s designer/groomer/artist, and pre-staging
+   `llm.roles.Designer/Groomer/Artist` in appsettings crash-loops the OLD binary at startup
+   (`LlmConfigAdapter` throws on unknown role keys). So a window exists between the new
+   binary's first boot and the seed PUTs where pipeline sweeps resolve to the provider
+   default. Deploy order: hold the `design`/`groom` stage gates (`POST /api/gates`) BEFORE
+   the restart, deploy, seed immediately, confirm the /agents labels, then release the gates.
 7. /agents UI: escalation-model display + edit per role; /triage strip reshape.
 8. `agents/triage.md` prompt update; AGENTS.md model-semantics paragraph.
 
@@ -138,6 +145,7 @@ Phase 2 must be live with `$triage` enabled on porthorizon.
   re-escalate (spends another action).
 - Seed step forgotten at deploy: designer/groomer/artist fall to provider default — loud (model
   label on /agents + run registry), not silent data corruption; recover by running task 6 late.
+  The pre-seed window is unavoidable (see task 6 sequencing) — the stage-gate hold bounds it.
 - Concurrency cap full while a long escalated run executes: another escalated task for the SAME
   (project, role) waits in Pending; other roles/projects dispatch normally, and the project's
   normal role pools are unaffected by escalated runs — intended.

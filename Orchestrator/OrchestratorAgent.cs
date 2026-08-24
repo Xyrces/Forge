@@ -431,26 +431,6 @@ public sealed class OrchestratorAgent : IAgent
         // Concurrency is owned by the caller: the dispatch loop holds
         // a per-role SlotTable slot for the whole run.
         var startedAt = DateTime.UtcNow;
-        // Phase 3: single-shot triage escalation consume — BEFORE the
-        // claim re-fetch so the stamped metadata rides the workflow
-        // input into RunAgentExecutor, and before any failure-path
-        // cooldown recording (the escalated run cools the ESCALATED
-        // model, never the normal one).
-        var escalationKey = await ConsumeEscalationMarkerAsync(issue, bundle, cancellationToken);
-        var runModelKey = escalationKey ?? ResolveModelKey(issue, bundle.Project.Id);
-        if (escalationKey is null && issue.GetMetadata("modelEscalated") is not null)
-        {
-            // Stale-stamp guard: the escalation stamp is PER-RUN — a
-            // later normal dispatch of the same task must not read a
-            // previous run's stamp and escalate again.
-            await UpdateMetadataAsync(issue.Id, m => MergeDict(m, new Dictionary<string, object>
-            {
-                ["modelEscalated"] = null!,
-                ["modelEscalatedFrom"] = null!,
-                ["modelEscalatedTo"] = null!,
-                ["modelEscalationNote"] = null!,
-            }), bundle, cancellationToken);
-        }
         try
         {
             // P3 (final wiring): dispatch is now driven by the MAF
@@ -502,6 +482,29 @@ public sealed class OrchestratorAgent : IAgent
                 return new Result(false, "already-claimed");
             }
             await PublishTransition(claimed, IssueStatus.Pending, IssueStatus.InProgress, null, cancellationToken);
+
+            // Phase 3: single-shot triage escalation consume — AFTER
+            // the successful claim (a claim failure must not burn the
+            // marker or leave a stale stamp) and BEFORE the workflow-
+            // input re-fetch so the stamped metadata rides into
+            // RunAgentExecutor; every failure-path cooldown recording
+            // below keys on runModelKey (the ESCALATED model for an
+            // escalated run, never the normal one).
+            var escalationKey = await ConsumeEscalationMarkerAsync(issue, bundle, cancellationToken);
+            var runModelKey = escalationKey ?? ResolveModelKey(issue, bundle.Project.Id);
+            if (escalationKey is null && issue.GetMetadata("modelEscalated") is not null)
+            {
+                // Stale-stamp guard: the escalation stamp is PER-RUN —
+                // a later normal dispatch of the same task must not
+                // read a previous run's stamp and escalate again.
+                await UpdateMetadataAsync(issue.Id, m => MergeDict(m, new Dictionary<string, object>
+                {
+                    ["modelEscalated"] = null!,
+                    ["modelEscalatedFrom"] = null!,
+                    ["modelEscalatedTo"] = null!,
+                    ["modelEscalationNote"] = null!,
+                }), bundle, cancellationToken);
+            }
 
             // Re-fetch after the claim/transition so the workflow's
             // input has InProgress + assignee=forge (ClaimExecutor
