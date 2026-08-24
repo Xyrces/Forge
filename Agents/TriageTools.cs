@@ -19,18 +19,21 @@ public sealed class TriageTools
     private readonly IIssueStore _issues;
     private readonly FailureTriageStore _triage;
     private readonly TaskStateMachine? _lifecycle;
+    private readonly TriageEscalationContext? _escalation;
     private readonly ILogger _logger;
 
     public TriageTools(
         IIssueStore issues,
         FailureTriageStore triage,
         TaskStateMachine? lifecycle,
-        ILogger logger)
+        ILogger logger,
+        TriageEscalationContext? escalation = null)
     {
         _issues = issues;
         _triage = triage;
         _lifecycle = lifecycle;
         _logger = logger;
+        _escalation = escalation;
     }
 
     /// <summary>Requeue the failed/blocked task with an evidence-cited
@@ -95,6 +98,83 @@ public sealed class TriageTools
         return $"ok: requeued {taskId} with guidance; the failure ledger records actor=triage";
     }
 
+    /// <summary>Phase 3: escalate the task's next dev run to the
+    /// role's configured ESCALATION model. Writes the single-shot
+    /// llm/taskModel marker and requeues the task (the escalated run
+    /// resolves the ledger outcome, same as a requeue). The agent
+    /// never picks a model — the tool validates that the task's role
+    /// HAS one configured (explicit-only escalation, operator
+    /// decision 2026-08-23); unset → error, nothing written, no
+    /// action spent.</summary>
+    public async Task<string> EscalateModelAsync(
+        string taskId, string signature, string note, CancellationToken ct = default)
+    {
+        var task = await _issues.GetAsync(taskId, ct);
+        if (task is null) return $"error: task {taskId} not found";
+        if (task.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
+            return $"error: task {taskId} is {task.Status} — only Failed or Blocked tasks can be escalated";
+        var open = await _triage.GetOpenForTaskAsync(taskId, ct);
+        if (open is null) return $"error: task {taskId} has no open ledger row — nothing to action";
+        if (open.Action is not null) return $"error: task {taskId}'s ledger row is already actioned ({open.Action})";
+        if (_escalation is null)
+            return "error: model escalation is not wired in this deployment";
+        var role = RoleAgentRegistry.FromTaskType(task.Type);
+        var target = _escalation.Config.ResolveEscalationEffective(
+            role, _escalation.Overrides, _escalation.ProjectId);
+        if (target is null)
+        {
+            var roleName = role.ToString().ToLowerInvariant();
+            return $"error: no escalation model configured for {roleName} — set one on /agents";
+        }
+
+        // Ledger first: the boundary crossing below publishes a
+        // Clearance signal, and the FailureTriageConsumer's branch
+        // no-ops on an already-actioned row — recording here first is
+        // what keeps the actor 'triage' instead of 'operator'.
+        await _triage.RecordActionAsync(
+            open.Id, FailureTriageActions.TriageEscalateModel, FailureTriageActors.Triage,
+            DateTime.UtcNow, FailureTriageOutcomes.Pending, ct);
+
+        // The marker is what the dispatch path consumes (single-shot)
+        // to route the next run onto the escalation model.
+        await _escalation.Markers.WriteAsync(_escalation.ProjectId, taskId, note, ct);
+
+        var meta = new Dictionary<string, object>
+        {
+            // Same stale-error/fossil-head clearing as a triage
+            // requeue — the task goes back to Pending and strike
+            // counters deliberately survive (escalation SPENDS a
+            // round; it counts toward the 2/day/task triage cap).
+            ["lastError"] = null!,
+            ["lastErrorAt"] = null!,
+            ["reworkForSha"] = null!,
+            ["reworkReason"] = $"triage-escalate: {signature}",
+            ["reworkContext"] = $"This run has been escalated to a stronger model by the failure-triage agent. Triage note: {note}",
+            ["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O"),
+            ["triageAction"] = "escalate",
+            ["triageNote"] = note,
+            ["triageActionAt"] = DateTime.UtcNow.ToString("O"),
+        };
+        if (task.GetMetadata("prNumber") is not null)
+            meta["prOpenedAt"] = DateTime.UtcNow.ToString("O");
+        await _issues.TransitionAsync(taskId, IssueStatus.Pending,
+            $"triage escalate to the role's escalation model ({signature})", meta, ct);
+
+        // Same lifecycle repair as the requeue: without the machine
+        // report the state stays Failed and the next dispatch violates.
+        if (_lifecycle is not null)
+        {
+            var requeued = await _issues.GetAsync(taskId, ct);
+            if (requeued is not null)
+                await _lifecycle.ReportAsync(_issues, requeued, TaskEvent.OperatorRequeue,
+                    watch: null, hasActiveDevRun: false, ct);
+        }
+        _logger.LogInformation(
+            "Triage: escalated {TaskId} to the role's escalation model {Provider}/{Model} (signature {Signature})",
+            taskId, target.Value.Provider.Name, target.Value.Model, signature);
+        return $"ok: escalated {taskId} — the next dev run rides the role's escalation model ({target.Value.Provider.Name}/{target.Value.Model}); the failure ledger records actor=triage";
+    }
+
     /// <summary>Park the task for the operator: no status change (it
     /// stays Failed/Blocked), the ledger row closes with the park
     /// action, and the task metadata says why — loudly.</summary>
@@ -147,3 +227,15 @@ public sealed class TriageTools
         return $"ok: flagged {taskId} as a bug suspect (signature {signature}) — the operator decides what happens next";
     }
 }
+
+/// <summary>Everything <see cref="TriageTools.EscalateModelAsync"/>
+/// needs: the marker store (primary MemoryStore-backed, same store as
+/// the role overrides), the LLM config + role overrides for
+/// escalation-target resolution, and the project the markers +
+/// project-scoped overrides resolve against. Null on paths that never
+/// escalate (the deterministic guardrail park).</summary>
+public sealed record TriageEscalationContext(
+    TaskModelEscalations Markers,
+    LlmConfig Config,
+    RoleModelOverrides? Overrides,
+    string ProjectId);

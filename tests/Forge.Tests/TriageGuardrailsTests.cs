@@ -105,4 +105,33 @@ public class TriageGuardrailsTests
         var decision = TriageGuardrails.Evaluate(history, "llm-529-overload", Now);
         Assert.Equal(TriageGuardrails.Decision.Allowed, decision);
     }
+
+    [Fact]
+    public void EscalateModel_CountsTowardDailyCap()
+    {
+        // Phase 3: escalation IS a triage action — two escalate_model
+        // actions in the rolling 24h hit the daily cap (operator
+        // decision 2026-08-23 §7).
+        var history = new[]
+        {
+            Row("sig-a", FailureTriageActors.Triage, FailureTriageActions.TriageEscalateModel, Now.AddHours(-4), FailureTriageOutcomes.Pending),
+            Row("sig-b", FailureTriageActors.Triage, FailureTriageActions.TriageEscalateModel, Now.AddHours(-2), FailureTriageOutcomes.Pending),
+        };
+        var decision = TriageGuardrails.Evaluate(history, "sig-c", Now);
+        Assert.Equal(TriageGuardrails.Decision.DailyCapReached, decision);
+    }
+
+    [Fact]
+    public void EscalateModel_DoesNotTripRequeueBurnRule()
+    {
+        // The burn rule is specific to requeue-with-guidance loops;
+        // repeated escalations are bounded by the daily cap instead.
+        var history = new[]
+        {
+            Row("llm-429-quota", FailureTriageActors.Triage, FailureTriageActions.TriageEscalateModel, Now.AddDays(-2), FailureTriageOutcomes.FailedAgain),
+            Row("llm-429-quota", FailureTriageActors.Triage, FailureTriageActions.TriageEscalateModel, Now.AddDays(-4), FailureTriageOutcomes.FailedAgain),
+        };
+        var decision = TriageGuardrails.Evaluate(history, "llm-429-quota", Now);
+        Assert.Equal(TriageGuardrails.Decision.Allowed, decision);
+    }
 }

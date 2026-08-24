@@ -16,8 +16,8 @@ public sealed class TriageEffects
     {
         try
         {
-            var (summary, groups, health, enabled) = await _client.GetLedgerAsync(action.ProjectId, CancellationToken.None);
-            dispatcher.Dispatch(new TriageActions.LedgerLoadedAction(summary, groups, health, enabled));
+            var (summary, groups, health, enabled, escalatedInFlight) = await _client.GetLedgerAsync(action.ProjectId, CancellationToken.None);
+            dispatcher.Dispatch(new TriageActions.LedgerLoadedAction(summary, groups, health, enabled, escalatedInFlight));
         }
         catch (Exception ex)
         {

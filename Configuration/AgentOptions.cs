@@ -346,4 +346,10 @@ public sealed record LlmRoleModelOptions
 {
     public string ProviderName { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
+
+    // Optional per-role escalation model (phase 3): the model a
+    // triage-escalated run rides instead of the role's normal model.
+    // Null = the role has no escalation target; the triage agent's
+    // escalate_model action refuses for that role.
+    public LlmRoleModelOptions? EscalationModel { get; set; }
 }

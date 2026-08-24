@@ -132,15 +132,11 @@ public sealed class DesignerAgent
     private async Task<DesignerResult> RunLlmAsync(
         long runId, SpecRecord spec, HygieneReport hygiene, DateTime startedAt, CancellationToken ct)
     {
-        // Pick the chat-client factory entry. The Designer is an
-        // Orchestrator-only role; it doesn't have an AgentType, so
-        // we honor the configured "designer" role's provider +
-        // model (the agent name we resolve to CoreDev's
-        // config for the factory call). Falls back to CoreDev's
-        // config when the "designer" role isn't configured.
-        var designerRole = _roles.ByAgentName(RoleAgentRegistry.DesignerAgentName);
-        var roleForClient = designerRole ?? _roles.ForType(AgentType.CoreDev);
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, spec.ProjectId);
+        // Phase 3 inheritance cut: the Designer has its own AgentType,
+        // so its provider + model resolve independently (override →
+        // llm.roles.Designer → provider default) — no more borrowing
+        // CoreDev's entry.
+        var chatClient = _chatClientFactory.Create(_config, AgentType.Designer, spec.ProjectId);
         // Function-invocation middleware: the LLM's tool_calls get
         // executed and the result feeds back into the next turn.
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();

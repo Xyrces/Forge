@@ -251,7 +251,7 @@ public sealed class OrchestratorAgent : IAgent
                 var claimable = new List<IssueRecord>(ready.Count);
                 foreach (var t in ready)
                 {
-                    var mk = ResolveModelKey(t.Type, bundle.Project.Id);
+                    var mk = ResolveModelKey(t, bundle.Project.Id);
                     var until = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
                     if (until is null) claimable.Add(t);
                     else coolingModels[mk.Provider + "/" + mk.Model] = until.Value;
@@ -270,12 +270,36 @@ public sealed class OrchestratorAgent : IAgent
                 foreach (var dev in claimable)
                 {
                     var role = ResolveRoleName(dev.Type);
-                    EnsureSlotCap(bundle.Project, role);
-                    var slot = await _slots.TryAcquireAsync(bundle.Project.Id, role, TimeSpan.Zero, cancellationToken);
+                    // Triage model escalation (phase 3): a task
+                    // carrying an unconsumed marker acquires ONLY its
+                    // (project, escalated-role) slot — never the
+                    // normal role pool. Slots are per-model
+                    // concurrency limiters and the escalated run rides
+                    // a DIFFERENT model with its own limit pool; a
+                    // full escalation pool skips just this task this
+                    // cycle (it stays Pending), same as a full role
+                    // pool.
+                    var escalated = TaskEscalations is not null
+                        && TaskEscalations.Peek(bundle.Project.Id, dev.Id)
+                        && TryResolveEscalationModel(dev.Type, bundle.Project.Id, out _);
+                    if (escalated)
+                    {
+                        var poolRole = EscalationPoolRole(role);
+                        if (_slots.MaxFor(bundle.Project.Id, poolRole) == 0)
+                            _slots.Configure(bundle.Project.Id, poolRole, EscalationSlotCap);
+                    }
+                    else
+                    {
+                        EnsureSlotCap(bundle.Project, role);
+                    }
+                    var slot = await _slots.TryAcquireAsync(
+                        bundle.Project.Id,
+                        escalated ? EscalationPoolRole(role) : role,
+                        TimeSpan.Zero, cancellationToken);
                     if (slot is null)
                     {
-                        _logger.LogDebug("Dispatch cycle: role '{Role}' at cap (project={Project}) — {Id} waits for a free slot",
-                            role, bundle.Project.Id, dev.Id);
+                        _logger.LogDebug("Dispatch cycle: role '{Role}'{Escalated} at cap (project={Project}) — {Id} waits for a free slot",
+                            role, escalated ? " (escalation pool)" : "", bundle.Project.Id, dev.Id);
                         continue;
                     }
                     if (!_inFlight.TryAdd(dev.Id, 0))
@@ -407,6 +431,26 @@ public sealed class OrchestratorAgent : IAgent
         // Concurrency is owned by the caller: the dispatch loop holds
         // a per-role SlotTable slot for the whole run.
         var startedAt = DateTime.UtcNow;
+        // Phase 3: single-shot triage escalation consume — BEFORE the
+        // claim re-fetch so the stamped metadata rides the workflow
+        // input into RunAgentExecutor, and before any failure-path
+        // cooldown recording (the escalated run cools the ESCALATED
+        // model, never the normal one).
+        var escalationKey = await ConsumeEscalationMarkerAsync(issue, bundle, cancellationToken);
+        var runModelKey = escalationKey ?? ResolveModelKey(issue, bundle.Project.Id);
+        if (escalationKey is null && issue.GetMetadata("modelEscalated") is not null)
+        {
+            // Stale-stamp guard: the escalation stamp is PER-RUN — a
+            // later normal dispatch of the same task must not read a
+            // previous run's stamp and escalate again.
+            await UpdateMetadataAsync(issue.Id, m => MergeDict(m, new Dictionary<string, object>
+            {
+                ["modelEscalated"] = null!,
+                ["modelEscalatedFrom"] = null!,
+                ["modelEscalatedTo"] = null!,
+                ["modelEscalationNote"] = null!,
+            }), bundle, cancellationToken);
+        }
         try
         {
             // P3 (final wiring): dispatch is now driven by the MAF
@@ -477,7 +521,7 @@ public sealed class OrchestratorAgent : IAgent
             {
                 if (IsLlmAuthFailure(ex))
                 {
-                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
+                    var mk = runModelKey;
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
                     _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
                         preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
@@ -486,7 +530,7 @@ public sealed class OrchestratorAgent : IAgent
                 }
                 if (IsLlmRateLimited(ex))
                 {
-                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
+                    var mk = runModelKey;
                     // Max-semantics: never shortens a longer
                     // escalating cooldown the client layer recorded
                     // (the 2026-08-08 herd bug flattened them to 3m).
@@ -555,7 +599,7 @@ public sealed class OrchestratorAgent : IAgent
                 var alreadyTerminal = after?.Status is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Closed;
                 if (IsLlmAuthFailure(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
-                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
+                    var mk = runModelKey;
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmAuthFailureCooldown);
                     _logger.LogWarning("Issue {Id}: LLM auth failure on {Provider}/{Model}; re-queued strike-free, dispatch on that model cooling down for {Cooldown} — operator must restore provider auth",
                         preClaimed.Id, mk.Provider, mk.Model, LlmAuthFailureCooldown);
@@ -564,7 +608,7 @@ public sealed class OrchestratorAgent : IAgent
                 }
                 if (IsLlmRateLimited(new InvalidOperationException(lastError)) && !reachedPr && !alreadyTerminal)
                 {
-                    var mk = ResolveModelKey(preClaimed.Type, bundle.Project.Id);
+                    var mk = runModelKey;
                     _modelCooldowns.RecordRateLimit(mk.Provider, mk.Model, LlmRateLimitCooldown);
                     var effective = _modelCooldowns.CoolingDownUntil(mk.Provider, mk.Model);
                     var kind = Agents.LlmRateLimitException.Classify(lastError);
@@ -676,31 +720,122 @@ public sealed class OrchestratorAgent : IAgent
         }
     }
 
-    /// <summary>
-    /// Resolve the (provider, model) a task would run on — the cooldown
-    /// key. Falls back to ("default","default") when no LLM config is
-    /// bound (tests) or the role's entry is broken, which reproduces
-    /// the pre-per-model global cooldown for that bucket.
-    /// </summary>
     /// <summary>DB model overrides (per project → global), bound at
     /// startup — the cooldown key must be the EFFECTIVE model for the
     /// task's project or a cooldown meant for one project's override
     /// skips another project's tasks (operator rule 2026-07-30).</summary>
     public Agents.RoleModelOverrides? ModelOverrides { get; set; }
 
-    private (string Provider, string Model) ResolveModelKey(string taskType, string? projectId)
+    /// <summary>Single-shot triage escalation markers (phase 3),
+    /// bound at startup. A task carrying a marker runs its next dev
+    /// run on the role's ESCALATION model: the cooldown key is the
+    /// escalated model and the run draws on the (project,
+    /// escalated-role) slot pool instead of the normal role pool.</summary>
+    public Agents.TaskModelEscalations? TaskEscalations { get; set; }
+
+    /// <summary>The escalation pool rides the SAME (project, role)
+    /// semaphore machinery as normal role pools — the role dimension
+    /// is just prefixed. Kept as a distinct prefix (not a bare role
+    /// name) so a future (project, model) bucket layer composes as a
+    /// key-shape change, and so the normal pool's accounting is never
+    /// touched by escalated runs.</summary>
+    internal static string EscalationPoolRole(string role) => "escalated:" + role;
+
+    /// <summary>Concurrency cap for escalated runs: 1 per
+    /// (project, role) (operator decision 2026-08-23 — the bound
+    /// replaces count budgets).</summary>
+    internal const int EscalationSlotCap = 1;
+
+    /// <summary>Resolve the role's ESCALATION (provider, model) for a
+    /// task, when one is configured: project escalation override →
+    /// global escalation override → llm.roles.&lt;AgentType&gt;.
+    /// escalationModel. False when unset or unusable — explicit-only
+    /// escalation, never a provider-default fallback.</summary>
+    private bool TryResolveEscalationModel(string taskType, string? projectId, out (string Provider, string Model) key)
+    {
+        key = default;
+        if (_llmConfig is null) return false;
+        try
+        {
+            var resolved = _llmConfig.ResolveEscalationEffective(
+                RoleAgentRegistry.FromTaskType(taskType), ModelOverrides, projectId);
+            if (resolved is null) return false;
+            key = (resolved.Value.Provider.Name, resolved.Value.Model);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Resolve the (provider, model) a task would run on — the cooldown
+    /// key. A task carrying an unconsumed escalation marker resolves to
+    /// the ESCALATED model. Falls back to ("default","default") when no
+    /// LLM config is bound (tests) or the role's entry is broken, which
+    /// reproduces the pre-per-model global cooldown for that bucket.
+    /// </summary>
+    private (string Provider, string Model) ResolveModelKey(IssueRecord task, string? projectId)
     {
         if (_llmConfig is null) return ("default", "default");
         try
         {
+            // A task carrying an unconsumed escalation marker cools
+            // against the ESCALATED model — a 429 on the premium
+            // model must not cool the normal one, and vice versa.
+            if (projectId is not null
+                && TaskEscalations is not null
+                && TaskEscalations.Peek(projectId, task.Id)
+                && TryResolveEscalationModel(task.Type, projectId, out var escalated))
+            {
+                return escalated;
+            }
             var (provider, model, _) = _llmConfig.ResolveEffective(
-                RoleAgentRegistry.FromTaskType(taskType), ModelOverrides, projectId);
+                RoleAgentRegistry.FromTaskType(task.Type), ModelOverrides, projectId);
             return (provider.Name, model);
         }
         catch (InvalidOperationException)
         {
             return ("default", "default");
         }
+    }
+
+    /// <summary>
+    /// Single-shot consume of the task's escalation marker (phase 3):
+    /// the key is deleted even when the run later fails (no refund —
+    /// the failure re-enters triage and the agent may re-escalate).
+    /// Returns the escalated (provider, model) the run must ride, or
+    /// null for a normal run. Run metadata (modelEscalated, from→to)
+    /// is stamped here so the workflow input (re-fetched after this)
+    /// carries the escalation into RunAgentExecutor → the runner.
+    /// </summary>
+    private async Task<(string Provider, string Model)?> ConsumeEscalationMarkerAsync(
+        IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken ct)
+    {
+        if (TaskEscalations is null) return null;
+        var marker = await TaskEscalations.ConsumeAsync(bundle.Project.Id, issue.Id, ct);
+        if (marker is null) return null;
+        if (!TryResolveEscalationModel(issue.Type, bundle.Project.Id, out var escalated))
+        {
+            _logger.LogWarning(
+                "Issue {Id}: triage escalation marker consumed but no escalation model is configured for the role — running on the normal model (marker is single-shot, no refund)",
+                issue.Id);
+            return null;
+        }
+        var normal = ResolveModelKey(issue, bundle.Project.Id);
+        await UpdateMetadataAsync(issue.Id, m => MergeDict(m, new Dictionary<string, object>
+        {
+            ["modelEscalated"] = "true",
+            ["modelEscalatedFrom"] = normal.Provider + "/" + normal.Model,
+            ["modelEscalatedTo"] = escalated.Provider + "/" + escalated.Model,
+            ["modelEscalationNote"] = marker.Note,
+        }), bundle, ct);
+        _logger.LogInformation(
+            "Issue {Id}: model escalation consumed — {From} → {To} (triage note: {Note})",
+            issue.Id, normal.Provider + "/" + normal.Model,
+            escalated.Provider + "/" + escalated.Model, marker.Note);
+        return escalated;
     }
 
     /// <summary>Task type → slot-pool role name (coredev/clientdev/qa/reviewer).</summary>

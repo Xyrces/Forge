@@ -12,8 +12,10 @@ namespace Forge.Tests;
 public sealed class TriageToolsTests : IDisposable
 {
     private readonly string _dbPath;
+    private readonly string _memDir;
     private readonly IssueStore _issues;
     private readonly FailureTriageStore _triage;
+    private readonly TaskModelEscalations _markers;
     private readonly TriageTools _tools;
 
     public TriageToolsTests()
@@ -21,6 +23,11 @@ public sealed class TriageToolsTests : IDisposable
         _dbPath = TempRoot.Instance.NewDbPath("triage-tools");
         _issues = new IssueStore(_dbPath);
         _triage = new FailureTriageStore(_issues);
+        _memDir = TempRoot.Instance.NewDirectory("triage-tools-mem");
+        Directory.CreateDirectory(_memDir);
+        var bootstrap = new IssueStore(Path.Combine(_memDir, "memory.db"));
+        bootstrap.Dispose();
+        _markers = new TaskModelEscalations(new MemoryStore(Path.Combine(_memDir, "memory.db")));
         _tools = new TriageTools(_issues, _triage, lifecycle: null,
             NullLogger<TriageTools>.Instance);
     }
@@ -31,6 +38,7 @@ public sealed class TriageToolsTests : IDisposable
         try { File.Delete(_dbPath); } catch { }
         try { File.Delete(_dbPath + "-wal"); } catch { }
         try { File.Delete(_dbPath + "-shm"); } catch { }
+        try { Directory.Delete(_memDir, recursive: true); } catch { }
     }
 
     private async Task<IssueRecord> FailedTaskWithOpenRow(string signature = "llm-429-quota")
@@ -138,5 +146,114 @@ public sealed class TriageToolsTests : IDisposable
         Assert.StartsWith("error:", await _tools.ParkForOperatorAsync(task.Id, "nothing to park"));
         Assert.StartsWith("error:", await _tools.FlagBugSuspectAsync(task.Id, "other", "none"));
         Assert.StartsWith("error:", await _tools.RequeueWithGuidanceAsync(task.Id, "other", "none", null));
+    }
+
+    // ---- Phase 3: escalate_model ----
+
+    private TriageTools EscalationTools(LlmConfig? config = null)
+    {
+        var llm = config ?? new LlmConfig(
+            Providers: new[]
+            {
+                new ProviderConfig("kilo-gateway", "http://gw", "key", null, "minimax/minimax-m3"),
+                new ProviderConfig("openai", "http://oai", "key", null, "gpt-5"),
+            },
+            DefaultProvider: "kilo-gateway",
+            Roles: new Dictionary<AgentType, RoleModel>(),
+            EscalationRoles: new Dictionary<AgentType, RoleModel>
+            {
+                [AgentType.CoreDev] = new("openai", "gpt-5-pro"),
+            });
+        return new TriageTools(_issues, _triage, lifecycle: null,
+            NullLogger<TriageTools>.Instance,
+            escalation: new TriageEscalationContext(_markers, llm, Overrides: null, ProjectId: "test"));
+    }
+
+    [Fact]
+    public async Task EscalateModel_ActionsRow_WritesMarker_RequeuesTask_StampsMetadata()
+    {
+        var tools = EscalationTools();
+        var task = await FailedTaskWithOpenRow("plan-gate-revisions");
+
+        var result = await tools.EscalateModelAsync(
+            task.Id, "plan-gate-revisions", "three sound plans rejected by plan-llm-review — capability-bound");
+
+        Assert.StartsWith("ok:", result);
+        var row = await _triage.GetOpenForTaskAsync(task.Id);
+        Assert.NotNull(row);
+        Assert.Equal(FailureTriageActions.TriageEscalateModel, row!.Action);
+        Assert.Equal(FailureTriageActors.Triage, row.Actor);
+        Assert.Equal(FailureTriageOutcomes.Pending, row.Outcome);
+
+        // The single-shot marker waits for the dispatch path.
+        Assert.True(_markers.Peek("test", task.Id));
+
+        var after = await _issues.GetAsync(task.Id);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("escalate", after.GetMetadata("triageAction"));
+        Assert.Contains("capability-bound", after.GetMetadata("triageNote"));
+        Assert.Equal("triage-escalate: plan-gate-revisions", after.GetMetadata("reworkReason"));
+        Assert.NotNull(after.GetMetadata("requeuedFromFailedAt"));
+        Assert.Null(after.GetMetadata("lastError"));
+        // Escalation SPENDS a round, like a triage requeue — strike
+        // counters are NOT reset.
+        Assert.Equal("2", after.GetMetadata("retryCount"));
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+    }
+
+    [Fact]
+    public async Task EscalateModel_NoEscalationModelConfigured_Refuses_NothingWritten()
+    {
+        // Explicit-only escalation: a role with no escalation target
+        // gets an error string — no ledger action, no marker, no
+        // status change, no action spent.
+        var tools = EscalationTools(config: new LlmConfig(
+            Providers: new[] { new ProviderConfig("kilo-gateway", "http://gw", "key", null, "m") },
+            DefaultProvider: "kilo-gateway",
+            Roles: new Dictionary<AgentType, RoleModel>()));
+        var task = await FailedTaskWithOpenRow();
+
+        var result = await tools.EscalateModelAsync(task.Id, "llm-429-quota", "note");
+
+        Assert.StartsWith("error:", result);
+        Assert.Contains("no escalation model configured", result, StringComparison.Ordinal);
+        var row = await _triage.GetOpenForTaskAsync(task.Id);
+        Assert.NotNull(row);
+        Assert.Null(row!.Action); // still un-actioned
+        Assert.False(_markers.Peek("test", task.Id));
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task EscalateModel_AlreadyActioned_Refuses()
+    {
+        var tools = EscalationTools();
+        var task = await FailedTaskWithOpenRow();
+        await tools.EscalateModelAsync(task.Id, "llm-429-quota", "first");
+
+        var second = await tools.EscalateModelAsync(task.Id, "llm-429-quota", "second");
+        Assert.StartsWith("error:", second);
+        var rows = await _triage.ListForTaskAsync(task.Id);
+        Assert.Single(rows, r => r.Action == FailureTriageActions.TriageEscalateModel);
+    }
+
+    [Fact]
+    public async Task EscalateModel_TaskNotFailed_Refuses()
+    {
+        var tools = EscalationTools();
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "pending task"));
+        await _triage.OpenAsync(task.Id, DateTime.UtcNow, "other", "unclassified", null);
+
+        var result = await tools.EscalateModelAsync(task.Id, "other", "note");
+        Assert.StartsWith("error:", result);
+        Assert.False(_markers.Peek("test", task.Id));
+    }
+
+    [Fact]
+    public async Task EscalateModel_NoOpenRow_Refuses()
+    {
+        var tools = EscalationTools();
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "never failed"));
+        Assert.StartsWith("error:", await tools.EscalateModelAsync(task.Id, "other", "none"));
     }
 }

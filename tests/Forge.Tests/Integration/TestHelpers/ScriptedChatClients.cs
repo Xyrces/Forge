@@ -52,7 +52,7 @@ public sealed class ScriptingChatClientFactory : IChatClientFactory
 {
     private readonly IChatClient _client;
     public ScriptingChatClientFactory(IChatClient client) { _client = client; }
-    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => _client;
+    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null, RoleModel? modelOverride = null) => _client;
 }
 
 /// <summary>

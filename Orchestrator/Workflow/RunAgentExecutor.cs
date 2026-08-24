@@ -170,6 +170,21 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             {
                 context["dispatchId"] = dispatchId;
             }
+            // Triage model escalation (phase 3): the dispatch path
+            // consumed the task's llm/taskModel marker and stamped
+            // modelEscalatedTo — this run rides THAT provider+model
+            // instead of the role's normal resolution. Split back
+            // into the context pair the runner reads.
+            if (string.Equals(issue.GetMetadata("modelEscalated"), "true", StringComparison.OrdinalIgnoreCase)
+                && issue.GetMetadata("modelEscalatedTo") is { Length: > 0 } escalatedTo)
+            {
+                var slash = escalatedTo.IndexOf('/');
+                if (slash > 0 && slash < escalatedTo.Length - 1)
+                {
+                    context["modelOverrideProvider"] = escalatedTo[..slash];
+                    context["modelOverrideModel"] = escalatedTo[(slash + 1)..];
+                }
+            }
             // Sprint flow: when the issue belongs to the ACTIVE
             // sprint, the runner gets the sprint id (drives the
             // `sprint/{id}/` memory recall), the sprint goal, and a

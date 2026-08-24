@@ -76,8 +76,9 @@ public sealed class TriageEndpointTests : IDisposable
         Assert.Equal(2, summary.GetProperty("openFailures").GetInt32());
         Assert.Equal(2, summary.GetProperty("distinctSignatures7d").GetInt32());
         Assert.Equal(0, summary.GetProperty("escalations7d").GetInt32());
-        Assert.Equal(5, summary.GetProperty("escalationBudget").GetInt32());
         Assert.Equal(7, summary.GetProperty("dailyOpenFailures7d").GetArrayLength());
+        Assert.Equal(7, summary.GetProperty("dailyEscalations7d").GetArrayLength());
+        Assert.Empty(root.GetProperty("escalatedInFlight").EnumerateArray());
 
         var groups = root.GetProperty("groups");
         Assert.Equal(2, groups.GetArrayLength());
@@ -91,6 +92,24 @@ public sealed class TriageEndpointTests : IDisposable
         var health = root.GetProperty("health");
         Assert.Equal(1, health.GetProperty("noDiffBounces7d").GetInt32());
         Assert.Equal(0, health.GetProperty("planGateRejections7d").GetInt32());
+    }
+
+    [Fact]
+    public async Task Ledger_Escalations7d_CountsEscalateModelActions()
+    {
+        // Phase 3: escalations7d derives from the ledger — escalate_model
+        // actions by ACTION date, no budget cap.
+        var t1 = await _triage.OpenAsync("task-1", DateTime.UtcNow.AddHours(-3), "plan-gate-revisions", "gate-loop", "rejected");
+        await _triage.RecordActionAsync(t1, FailureTriageActions.TriageEscalateModel, "triage", DateTime.UtcNow.AddHours(-2), FailureTriageOutcomes.Pending);
+        // An OLD escalation (outside the 7d window) does not count.
+        var t2 = await _triage.OpenAsync("task-2", DateTime.UtcNow.AddDays(-10), "plan-gate-revisions", "gate-loop", "rejected");
+        await _triage.RecordActionAsync(t2, FailureTriageActions.TriageEscalateModel, "triage", DateTime.UtcNow.AddDays(-9), FailureTriageOutcomes.Pending);
+
+        using var doc = JsonDocument.Parse(await (await _client.GetAsync("/api/triage/ledger")).Content.ReadAsStringAsync());
+        var summary = doc.RootElement.GetProperty("summary");
+        Assert.Equal(1, summary.GetProperty("escalations7d").GetInt32());
+        Assert.Equal(7, summary.GetProperty("dailyEscalations7d").GetArrayLength());
+        Assert.Equal(1, summary.GetProperty("dailyEscalations7d").EnumerateArray().Sum(d => d.GetInt32()));
     }
 
     [Fact]

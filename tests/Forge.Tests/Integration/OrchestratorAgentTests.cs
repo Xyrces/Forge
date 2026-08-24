@@ -148,7 +148,7 @@ public sealed class OrchestratorAgentTests : IDisposable
             NullLoggerFactory.Instance,
             NullLogger<Forge.Orchestrator.WatchSweepService>.Instance);
 
-    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner)
+    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null)
         => new OrchestratorAgent(
             _projectStore,
             new StubBundleFactory(_bundle),
@@ -159,7 +159,8 @@ public sealed class OrchestratorAgentTests : IDisposable
                 (issue, bundle, ct) => RunWorkflowInProcess(runner, issue, ct),
                 NullLogger<InProcessDispatcher>.Instance),
             _events,
-            NullLogger<OrchestratorAgent>.Instance);
+            NullLogger<OrchestratorAgent>.Instance,
+            slots: slots);
 
     private async Task RunWorkflowInProcess(IAgentRunner runner, IssueRecord issue, CancellationToken ct)
     {
@@ -204,6 +205,226 @@ public sealed class OrchestratorAgentTests : IDisposable
             },
         });
     }
+
+    // ---- Phase 3: triage model escalation through dispatch ----
+
+    private TaskModelEscalations BuildMarkers()
+    {
+        var memDb = Path.Combine(_dataRoot, "esc-memory.db");
+        var bootstrap = new IssueStore(memDb);
+        bootstrap.Dispose();
+        return new TaskModelEscalations(new MemoryStore(memDb));
+    }
+
+    /// <summary>LLM config with a CoreDev ESCALATION model
+    /// (openai/gpt-5-pro) alongside the normal minimax resolution.</summary>
+    private void BindMafWithEscalation(OrchestratorAgent orch, TaskModelEscalations markers)
+    {
+        orch.BindOptions(new AgentOptions
+        {
+            Workspace = new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+            Spawner = new SpawnerOptions { MaxConcurrentSessions = 1, PollIntervalSeconds = 1 },
+            Llm = new LlmOptions
+            {
+                Providers =
+                {
+                    new LlmProviderOptions { Name = "kilo-gateway", BaseUrl = "http://stub", DefaultModel = "minimax/minimax-m3" },
+                    new LlmProviderOptions { Name = "openai", BaseUrl = "http://oai", DefaultModel = "gpt-5" },
+                },
+                DefaultProvider = "kilo-gateway",
+                Roles =
+                {
+                    ["CoreDev"] = new LlmRoleModelOptions
+                    {
+                        ProviderName = "kilo-gateway",
+                        Model = "minimax/minimax-m3",
+                        EscalationModel = new LlmRoleModelOptions { ProviderName = "openai", Model = "gpt-5-pro" },
+                    },
+                },
+            },
+        });
+        orch.TaskEscalations = markers;
+    }
+
+    [Fact]
+    public async Task DispatchSingleTask_EscalationMarker_RidesEscalatedModel_MarkerConsumedOnce()
+    {
+        var markers = BuildMarkers();
+        var capture = new ContextCapturingRunner("verified, nothing to do. NO_CHANGES_NEEDED");
+        var orch = BuildOrchestrator(capture);
+        BindMafWithEscalation(orch, markers);
+
+        var issue = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "escalated work", Description: "x"));
+        await markers.WriteAsync("test", issue.Id, "capability-bound: sound plans rejected");
+
+        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+
+        Assert.True(result.Success, $"expected success, got: {result.Message}");
+        // Single-shot: the marker is gone after ONE dispatch.
+        Assert.False(markers.Peek("test", issue.Id));
+        var after = (await _issues.GetAsync(issue.Id))!;
+        Assert.Equal("true", after.GetMetadata("modelEscalated"));
+        Assert.Equal("kilo-gateway/minimax/minimax-m3", after.GetMetadata("modelEscalatedFrom"));
+        Assert.Equal("openai/gpt-5-pro", after.GetMetadata("modelEscalatedTo"));
+        Assert.Contains("capability-bound", after.GetMetadata("modelEscalationNote"));
+        // The runner's context carried the explicit model override.
+        Assert.Equal("openai", capture.LastContext?["modelOverrideProvider"]);
+        Assert.Equal("gpt-5-pro", capture.LastContext?["modelOverrideModel"]);
+    }
+
+    [Fact]
+    public async Task DispatchSingleTask_NoMarker_ClearsStaleEscalationStamp()
+    {
+        var markers = BuildMarkers();
+        var capture = new ContextCapturingRunner("verified, nothing to do. NO_CHANGES_NEEDED");
+        var orch = BuildOrchestrator(capture);
+        BindMafWithEscalation(orch, markers);
+
+        var issue = await _issues.CreateAsync(new NewIssue(
+            Type: DevTaskType, Title: "escalated then normal", Description: "x"));
+        await markers.WriteAsync("test", issue.Id, "first run escalated");
+        var first = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        Assert.True(first.Success, $"first dispatch: {first.Message}");
+
+        // Requeue without a marker: the next dispatch must run NORMAL
+        // and clear the per-run stamp (no stale re-escalation).
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null,
+            new Dictionary<string, object> { ["reworkForSha"] = null! });
+        var requeued = (await _issues.GetAsync(issue.Id))!;
+        var second = await orch.DispatchSingleTaskAsync(requeued, _bundle, CancellationToken.None);
+        Assert.True(second.Success, $"second dispatch: {second.Message}");
+        var after = (await _issues.GetAsync(issue.Id))!;
+        Assert.Null(after.GetMetadata("modelEscalated"));
+        Assert.False(capture.LastContext?.ContainsKey("modelOverrideProvider") ?? false);
+    }
+
+    [Fact]
+    public async Task DispatchCycle_EscalatedTask_UsesOnlyEscalationPool_SecondEscalatedWaits_NormalRoleUnaffected()
+    {
+        // Concurrency bound (operator decision 2026-08-23): 1
+        // escalated run per (project, role). A second escalated task
+        // for the same role waits in Pending while a NORMAL task of
+        // the same role claims from the untouched normal pool.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new BlockingRunner(gate);
+        var slots = new Forge.Orchestrator.Slots.SlotTable();
+        var markers = BuildMarkers();
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        var orch = BuildOrchestrator(runner, slots);
+        BindMafWithEscalation(orch, markers);
+
+        var esc1 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc1", Description: "x"));
+        var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc2", Description: "x"));
+        var normal = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "normal", Description: "x"));
+        await ActivateSprintWithAsync(esc1.Id, esc2.Id, normal.Id);
+        await markers.WriteAsync("test", esc1.Id, "escalate 1");
+        await markers.WriteAsync("test", esc2.Id, "escalate 2");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var loop = orch.ExecuteAsync(cts.Token);
+
+        // The first escalated task claims the (test, escalated:coredev)
+        // pool; the normal task claims from the NORMAL coredev pool.
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            return (await _issues.GetAsync(esc1.Id))!.Status == IssueStatus.InProgress
+                && (await _issues.GetAsync(normal.Id))!.Status == IssueStatus.InProgress;
+        }, TimeSpan.FromSeconds(15));
+        // Pool accounting: the escalated run did NOT touch the normal
+        // pool beyond the normal task's own slot.
+        Assert.Equal(1, slots.InFlight("test", "escalated:coredev"));
+        Assert.Equal(1, slots.MaxFor("test", "escalated:coredev"));
+        Assert.Equal(1, slots.InFlight("test", "coredev"));
+        // The second escalated task waits for the escalation pool.
+        await Task.Delay(2500);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
+        Assert.True(markers.Peek("test", esc2.Id)); // marker not consumed while waiting
+
+        gate.SetResult();
+        await WaitForAsync(async () =>
+            (await _issues.GetAsync(esc2.Id))!.Status != IssueStatus.Pending, TimeSpan.FromSeconds(15));
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+    }
+
+    [Fact]
+    public async Task DispatchCycle_EscalatedRun429_CoolsEscalatedModel_NotNormalModel()
+    {
+        // The 429 cooldown keys on the ESCALATED provider+model: the
+        // premium model's quota problem must not cool the normal one,
+        // and a later escalated task waits on the escalated cooldown.
+        var runner = new EscalatedOnlyRateLimitedRunner();
+        var markers = BuildMarkers();
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        var orch = BuildOrchestrator(runner);
+        BindMafWithEscalation(orch, markers);
+
+        var esc = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-429", Description: "x"));
+        var sprintId = await ActivateSprintWithAsync(esc.Id);
+        await markers.WriteAsync("test", esc.Id, "escalate");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var loop = orch.ExecuteAsync(cts.Token);
+        await WaitForAsync(() => Task.FromResult(runner.Escalated429d), TimeSpan.FromSeconds(15));
+        await WaitForAsync(async () =>
+            (await _issues.GetAsync(esc.Id))!.Status == IssueStatus.Pending, TimeSpan.FromSeconds(10));
+
+        // A normal dev task enters mid-cooldown for the escalated
+        // model — it claims immediately on the normal model.
+        var normal = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "normal", Description: "x",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await _bundle.Sprints.AddIssueAsync(sprintId, normal.Id);
+        await WaitForAsync(async () =>
+        {
+            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+            return (await _issues.GetAsync(normal.Id))!.Status is IssueStatus.InProgress or IssueStatus.Completed;
+        }, TimeSpan.FromSeconds(15));
+
+        // A SECOND escalated task is held by the escalated-model
+        // cooldown (the marker is still unconsumed, so its cooldown
+        // key is the escalated model).
+        var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-waits", Description: "x",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await _bundle.Sprints.AddIssueAsync(sprintId, esc2.Id);
+        await markers.WriteAsync("test", esc2.Id, "escalate 2");
+        await Task.Delay(2500);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
+
+        cts.Cancel();
+        try { await loop; } catch (OperationCanceledException) { }
+    }
+
+    private sealed class ContextCapturingRunner : IAgentRunner
+    {
+        private readonly string _response;
+        public Dictionary<string, object>? LastContext { get; private set; }
+        public ContextCapturingRunner(string response) { _response = response; }
+        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            LastContext = context is null ? null : new Dictionary<string, object>(context);
+            return Task.FromResult(new AgentRunResult(_response, null, 1, 1, TimeSpan.FromMilliseconds(1)));
+        }
+    }
+
+    private sealed class EscalatedOnlyRateLimitedRunner : IAgentRunner
+    {
+        public volatile bool Escalated429d;
+        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            if (context is not null && context.ContainsKey("modelOverrideProvider"))
+            {
+                Escalated429d = true;
+                return Task.FromException<AgentRunResult>(
+                    new HttpRequestException("Error 429 Too Many Requests: rate limit reached"));
+            }
+            return Task.FromResult(new AgentRunResult("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1)));
+        }
+    }
+
 
     [Fact]
     public async Task DispatchCycle_ModelCooldown_OtherModelStillClaims()

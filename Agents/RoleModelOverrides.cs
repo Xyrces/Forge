@@ -24,15 +24,20 @@ namespace Forge.Agents;
 public sealed class RoleModelOverrides
 {
     private const string Prefix = "llm/roleModel/";
+    private const string EscalationPrefix = "llm/roleEscalationModel/";
 
     private readonly MemoryStore _memory;
     // Cache key: "<projectId>|<AgentType>" ("" projectId = global).
     private readonly ConcurrentDictionary<string, RoleModel> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, RoleModel> _escalationCache = new(StringComparer.OrdinalIgnoreCase);
 
     public RoleModelOverrides(MemoryStore memory) => _memory = memory;
 
     private static string Key(AgentType role, string? projectId)
         => projectId is null ? $"{Prefix}{role}" : $"{Prefix}{projectId}/{role}";
+
+    private static string EscalationKey(AgentType role, string? projectId)
+        => projectId is null ? $"{EscalationPrefix}{role}" : $"{EscalationPrefix}{projectId}/{role}";
 
     private static string CacheKey(AgentType role, string? projectId)
         => (projectId ?? "") + "|" + role;
@@ -61,9 +66,50 @@ public sealed class RoleModelOverrides
         return null;
     }
 
+    /// <summary>Escalation tier (phase 3): the per-role ESCALATION
+    /// model override — where a triage-escalated run goes. Same
+    /// project-scoped-wins / global-fallback shape as
+    /// <see cref="Get"/>; keys live under
+    /// <c>llm/roleEscalationModel/</c> so the two tiers never
+    /// collide. Null = no escalation override (config may still set
+    /// one — see <c>ResolveEscalationEffective</c>).</summary>
+    public RoleModel? GetEscalation(AgentType role, string? projectId = null)
+    {
+        if (projectId is not null
+            && _escalationCache.TryGetValue(CacheKey(role, projectId), out var scoped))
+        {
+            return scoped;
+        }
+        return _escalationCache.TryGetValue(CacheKey(role, null), out var global) ? global : null;
+    }
+
+    /// <summary>Which escalation override applies for (role,
+    /// projectId): the project-scoped one, the global one, or none.</summary>
+    public string? GetEscalationScope(AgentType role, string? projectId)
+    {
+        if (projectId is not null && _escalationCache.ContainsKey(CacheKey(role, projectId)))
+            return "project";
+        if (_escalationCache.ContainsKey(CacheKey(role, null)))
+            return "global";
+        return null;
+    }
+
+    public async Task SetEscalationAsync(AgentType role, string provider, string model, CancellationToken ct = default, string? projectId = null)
+    {
+        await _memory.RememberAsync(EscalationKey(role, projectId), $"{provider}|{model}", ttlDays: null, ct);
+        _escalationCache[CacheKey(role, projectId)] = new RoleModel(provider, model);
+    }
+
+    public async Task ClearEscalationAsync(AgentType role, CancellationToken ct = default, string? projectId = null)
+    {
+        await _memory.ForgetAsync(EscalationKey(role, projectId), ct);
+        _escalationCache.TryRemove(CacheKey(role, projectId), out _);
+    }
+
     /// <summary>Rehydrate the snapshot from the store (startup).
     /// Key shape after the prefix: one segment = global, two =
-    /// project-scoped.</summary>
+    /// project-scoped. Both tiers (role models + escalation models)
+    /// load here.</summary>
     public async Task LoadAsync(CancellationToken ct = default)
     {
         foreach (var row in await _memory.RecallAsync(Prefix, ct))
@@ -80,6 +126,22 @@ public sealed class RoleModelOverrides
             else if (Enum.TryParse<AgentType>(rest[(slash + 1)..], out var role))
             {
                 _cache[CacheKey(role, rest[..slash])] = parsed;
+            }
+        }
+        foreach (var row in await _memory.RecallAsync(EscalationPrefix, ct))
+        {
+            var rest = row.Key[EscalationPrefix.Length..];
+            var parsed = Parse(row.Body);
+            if (parsed is null) continue;
+            var slash = rest.IndexOf('/');
+            if (slash < 0)
+            {
+                if (Enum.TryParse<AgentType>(rest, out var role))
+                    _escalationCache[CacheKey(role, null)] = parsed;
+            }
+            else if (Enum.TryParse<AgentType>(rest[(slash + 1)..], out var role))
+            {
+                _escalationCache[CacheKey(role, rest[..slash])] = parsed;
             }
         }
     }
@@ -128,5 +190,55 @@ public static class LlmConfigOverrideResolution
         }
         var (p, m) = config.Resolve(role);
         return (p, m, false);
+    }
+
+    /// <summary>
+    /// Resolve the ESCALATION target for a role (phase 3): project
+    /// escalation override → global escalation override (each only
+    /// when it still names a configured provider) →
+    /// <c>llm.roles.&lt;AgentType&gt;.escalationModel</c> →
+    /// <b>unset</b> (null). Unlike <see cref="ResolveEffective"/>
+    /// there is NO provider-default fallback: a role without an
+    /// explicitly configured escalation model cannot be escalated
+    /// (operator decision 2026-08-23 — explicit-only escalation).
+    /// </summary>
+    public static (ProviderConfig Provider, string Model, bool IsOverride)? ResolveEscalationEffective(
+        this LlmConfig config, AgentType role, RoleModelOverrides? overrides, string? projectId = null)
+    {
+        var o = overrides?.GetEscalation(role, projectId);
+        if (o is not null)
+        {
+            var provider = config.Providers.FirstOrDefault(p =>
+                string.Equals(p.Name, o.ProviderName, StringComparison.OrdinalIgnoreCase));
+            if (provider is not null) return (provider, o.Model, true);
+            // Dangling override (provider removed from config) — fall
+            // through to the configured escalation entry.
+        }
+        if (config.EscalationRoles is not null
+            && config.EscalationRoles.TryGetValue(role, out var configured))
+        {
+            var provider = config.Providers.FirstOrDefault(p =>
+                string.Equals(p.Name, configured.ProviderName, StringComparison.OrdinalIgnoreCase));
+            // A misconfigured escalation entry reads as UNSET rather
+            // than faulting dispatch — escalation is optional, and the
+            // /agents surface shows the role as having no target.
+            if (provider is not null) return (provider, configured.Model, false);
+        }
+        return null;
+    }
+
+    /// <summary>Resolve an explicit (providerName, model) pair against
+    /// the configured providers — the per-task model-override path
+    /// (triage escalation markers). Throws when the provider is not
+    /// configured; callers degrade to the normal resolution.</summary>
+    public static (ProviderConfig Provider, string Model) ResolveExplicit(
+        this LlmConfig config, RoleModel explicitModel)
+    {
+        var provider = config.Providers.FirstOrDefault(p =>
+            string.Equals(p.Name, explicitModel.ProviderName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
+                $"Explicit model references provider '{explicitModel.ProviderName}' which is not in the Providers list. " +
+                $"Known providers: {string.Join(", ", config.Providers.Select(p => p.Name))}.");
+        return (provider, explicitModel.Model);
     }
 }

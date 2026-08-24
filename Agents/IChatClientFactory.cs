@@ -19,6 +19,12 @@ public interface IChatClientFactory
     /// <paramref name="projectId"/> scopes DB model overrides: a
     /// project-scoped override wins over the global one (an override
     /// set for another project never applies).
+    /// <paramref name="modelOverride"/> is the per-task explicit model
+    /// (triage escalation, phase 3): when set it wins over EVERY other
+    /// resolution tier for this one client. Throws
+    /// <see cref="InvalidOperationException"/> when the override names
+    /// an unconfigured provider — callers degrade to the normal
+    /// resolution.
     /// </summary>
-    IChatClient Create(LlmConfig config, AgentType role, string? projectId = null);
+    IChatClient Create(LlmConfig config, AgentType role, string? projectId = null, RoleModel? modelOverride = null);
 }

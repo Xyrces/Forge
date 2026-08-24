@@ -120,13 +120,11 @@ public sealed class ArtistAgent
     private async Task<ArtistResult> RunLlmAsync(
         long runId, SpecRecord spec, DateTime startedAt, CancellationToken ct)
     {
-        // P2.b: same factory-keyed-by-orchestrator pattern as the
-        // Designer. The Artist is an Orchestrator-only role; it
-        // doesn't have an AgentType. We honor the configured
-        // "artist" role's provider + model; fall back to CoreDev's
-        // config when the "artist" role isn't configured.
-        var artistRole = _roles.ByAgentName(RoleAgentRegistry.ArtistAgentName);
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, spec.ProjectId);
+        // P2.b: same pattern as the Designer. Phase 3 inheritance
+        // cut: the Artist has its own AgentType, so its provider +
+        // model resolve independently (override → llm.roles.Artist →
+        // provider default) — no more borrowing CoreDev's entry.
+        var chatClient = _chatClientFactory.Create(_config, AgentType.Artist, spec.ProjectId);
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
 
         var tools = BuildTools(spec);
