@@ -211,6 +211,7 @@ public class MafAgentRunnerSessionTests : IDisposable
     [InlineData("HTTP 400: invalid params, tool call result does not follow tool call (2013) [uri=https://api.minimax.io/anthropic/v1/messages]", true)]
     [InlineData("HTTP 400: messages.5: `tool_use` ids were found without `tool_result` blocks immediately after", true)]
     [InlineData("HTTP 400: unexpected `tool_use_id` found in `tool_result` block: call_123", true)]
+    [InlineData("HTTP 401: k3-256k supports only 256K context. [uri=https://api.kimi.com/coding/v1/messages]", true)]
     [InlineData("HTTP 429 Too Many Requests: rate limit reached", false)]
     [InlineData("provider exploded", false)]
     public void IsPoisonedSessionError_Classifies(string message, bool expected)
