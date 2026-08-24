@@ -702,6 +702,18 @@ public async Task<AgentRunResult> RunAsync(
             {
                 return true;
             }
+            // kimi phrasing (observed live 2026-08-24: porthorizon
+            // task-740's reviewer, "HTTP 401: k3-256k supports only
+            // 256K context." — a reviewer session grown past the model
+            // window across many review rounds of the same PR; the
+            // endpoint mislabels it 401). Every retry replayed the
+            // oversized blob and failed in seconds until the session
+            // was dropped.
+            if (e.Message.Contains("supports only", StringComparison.OrdinalIgnoreCase)
+                && e.Message.Contains("context", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
             // MiniMax Anthropic-endpoint phrasing (observed live
             // 2026-08-14: porthorizon task-525, "invalid params, tool
             // call result does not follow tool call (2013)" — a
