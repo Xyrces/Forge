@@ -46,6 +46,20 @@ public sealed class WatchSweepService
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _qaInFlight = new();
     private static readonly TimeSpan QaRelaunchAfter = TimeSpan.FromMinutes(45);
 
+    /// <summary>Background reviews/QA runs are fire-and-forget — they
+    /// must outlive the caller (a sweep tick, a consumer handle), so
+    /// they NEVER inherit the caller's CancellationToken: a caller
+    /// token canceling mid-run escapes the dispatchers' non-OCE catch
+    /// filters, and the continuation's t.Result access then throws
+    /// unobserved — a completed pass vanishing without a single log
+    /// line (the task-740 silent-verdict loop, 2026-08-24). Each
+    /// background run gets its own CTS bounded by the dispatcher's run
+    /// timeout plus git-work margin.</summary>
+    private static readonly TimeSpan ReviewBackgroundBudget =
+        Forge.Reviewer.ReviewerDispatcher.ReviewRunTimeout + TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan QaBackgroundBudget =
+        Forge.Reviewer.QaDispatcher.QaRunTimeout + TimeSpan.FromMinutes(5);
+
     public WatchSweepService(
         IAgentRunner runner,
         LlmConfig? llmConfig,
@@ -303,14 +317,20 @@ public sealed class WatchSweepService
             projectId: bundle.Project.Id,
             eventPublisher: bundle.IssueStore.Events,
             qaEnabled: bundle.Project.QaEnabled);
-        var run = reviewer.ReviewOnceAsync(task, cancellationToken);
+        var runCts = new CancellationTokenSource(ReviewBackgroundBudget);
+        var run = reviewer.ReviewOnceAsync(task, runCts.Token);
         _reviewsInFlight[key] = run;
         _ = run.ContinueWith(t =>
         {
+            runCts.Dispose();
             _reviewsInFlight.TryRemove(key, out _);
             if (t.IsFaulted)
             {
                 _logger.LogError(t.Exception, "background review for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
+            }
+            else if (t.IsCanceled)
+            {
+                _logger.LogWarning("background review for {TaskId} was canceled before landing a verdict (project={Project}) — relaunch gate covers", task.Id, bundle.Project.Id);
             }
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);
@@ -374,14 +394,24 @@ public sealed class WatchSweepService
             _loggerFactory.CreateLogger<Forge.Reviewer.QaDispatcher>(),
             projectId: bundle.Project.Id,
             events: _events);
-        var run = qa.VerifyOnceAsync(task, cancellationToken);
+        var runCts = new CancellationTokenSource(QaBackgroundBudget);
+        var run = qa.VerifyOnceAsync(task, runCts.Token);
         _qaInFlight[key] = run;
         _ = run.ContinueWith(async t =>
         {
+            runCts.Dispose();
             _qaInFlight.TryRemove(key, out _);
             if (t.IsFaulted)
             {
                 _logger.LogError(t.Exception, "background QA for {TaskId} faulted (project={Project})", task.Id, bundle.Project.Id);
+                return;
+            }
+            if (t.IsCanceled)
+            {
+                // Never access t.Result on a canceled task — it throws
+                // and the exception dies unobserved in this fire-and-
+                // forget continuation.
+                _logger.LogWarning("background QA for {TaskId} was canceled before landing a verdict (project={Project}) — relaunch gate covers", task.Id, bundle.Project.Id);
                 return;
             }
             // QA passed → the review follows immediately (the reviewer
@@ -400,6 +430,17 @@ public sealed class WatchSweepService
                 {
                     _logger.LogWarning(ex, "post-QA review relaunch failed for {TaskId}", task.Id);
                 }
+            }
+            else
+            {
+                // Non-pass, non-current outcome: the verdict/error is
+                // already on the task (qaVerdict / qaLastError) — echo
+                // it here so the sweep journal names it too.
+                _logger.LogWarning(
+                    "background QA for {TaskId}: {Verdict} at {Sha} — {Detail} (project={Project})",
+                    task.Id, t.Result.Verdict,
+                    t.Result.HeadSha[..Math.Min(7, t.Result.HeadSha.Length)],
+                    t.Result.Error ?? t.Result.Notes, bundle.Project.Id);
             }
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         _logger.LogInformation("Watch (task {Id}): QA stage launched in background (project={Project})", task.Id, bundle.Project.Id);

@@ -54,7 +54,7 @@ public sealed class ReviewerDispatcher
     /// review at the timeout — observed live 2026-07-31: porthorizon
     /// tasks 17/20 burned their whole auto-resume budget on
     /// TaskCanceledException reviews.</summary>
-    private static readonly TimeSpan ReviewRunTimeout = TimeSpan.FromMinutes(12);
+    internal static readonly TimeSpan ReviewRunTimeout = TimeSpan.FromMinutes(12);
     private readonly ILogger<ReviewerDispatcher> _logger;
 
     public ReviewerDispatcher(

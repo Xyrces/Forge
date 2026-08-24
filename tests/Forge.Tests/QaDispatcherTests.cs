@@ -222,6 +222,86 @@ public sealed class QaDispatcherTests : IDisposable
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal("1", after.GetMetadata("qaAttempts"));
         Assert.Null(after.GetMetadata("qaVerdict"));
+        // Error outcomes are never silent: the reason is stamped on the
+        // task (TaskDetail-visible) — the 2026-08-24 task-740 loop was
+        // invisible precisely because these paths left no trace.
+        Assert.Contains("raster", after.GetMetadata("qaLastError"));
+        Assert.NotNull(after.GetMetadata("qaLastErrorAt"));
+    }
+
+    [Fact]
+    public async Task LandedVerdict_ClearsTheErrorStamp()
+    {
+        // First attempt errors (no marker) → qaLastError stamped; the
+        // retry at the same head passes → the stamp clears with the
+        // landed verdict (no stale error next to a green verdict).
+        var runner = new FakeRunner { Reply = "no marker here" };
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var dispatcher = NewDispatcher(runner);
+
+        var errored = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+        Assert.Equal(QaDispatcher.VerdictError, errored!.Verdict);
+        Assert.NotNull(((await _issues.GetAsync(task.Id))!).GetMetadata("qaLastError"));
+
+        runner.Reply = "QA_VERDICT: pass\nplayed it";
+        runner.Drops.Add(("test-results/qa/task-1/01.png", "png"));
+        var passed = await dispatcher.VerifyOnceAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+        Assert.Equal(QaDispatcher.VerdictPass, passed!.Verdict);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(after.GetMetadata("qaLastError"));
+        Assert.Null(after.GetMetadata("qaLastErrorAt"));
+    }
+
+    [Fact]
+    public async Task ClearedBudget_ReAttemptsQaAtTheSameHead()
+    {
+        // The operator-requeue contract (task-740 loop): a
+        // qa-unavailable park burns the per-head budget; clearing the
+        // budget keys (what POST /api/tasks/{id}/requeue now does)
+        // lets QA re-attempt at the SAME head instead of instantly
+        // re-blocking.
+        var runner = new FakeRunner { Reply = "no verdict marker at all" };
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var dispatcher = NewDispatcher(runner);
+
+        for (var i = 0; i < QaDispatcher.MaxQaAttempts; i++)
+        {
+            await dispatcher.VerifyOnceAsync(
+                (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+                headOverride: _ => (codeHead, "agent/task-1"));
+        }
+        Assert.Equal(QaDispatcher.MaxQaAttempts, runner.Calls);
+
+        // Budget exhausted: the next launch parks without running.
+        var parked = await dispatcher.VerifyOnceAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+        Assert.Equal(QaDispatcher.VerdictError, parked!.Verdict);
+        Assert.Equal(QaDispatcher.MaxQaAttempts, runner.Calls);
+        Assert.Equal(IssueStatus.Blocked, ((await _issues.GetAsync(task.Id))!).Status);
+
+        // Operator requeue: Pending + the QA budget keys cleared.
+        await _issues.TransitionAsync(task.Id, IssueStatus.Pending, "operator requeue",
+            new Dictionary<string, object>
+            {
+                ["qaAttempts"] = null!,
+                ["qaAttemptSha"] = null!,
+                ["qaStartedAt"] = null!,
+                ["blockedKind"] = null!,
+            });
+
+        var retry = await dispatcher.VerifyOnceAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+        Assert.Equal(QaDispatcher.VerdictError, retry!.Verdict); // still no marker — but it RAN
+        Assert.Equal(QaDispatcher.MaxQaAttempts + 1, runner.Calls);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("1", after.GetMetadata("qaAttempts"));
     }
 
     [Fact]
@@ -266,6 +346,10 @@ public sealed class QaDispatcherTests : IDisposable
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(IssueStatus.Blocked, after.Status);
         Assert.Equal(QaDispatcher.BlockedKindQaUnavailable, after.GetMetadata("blockedKind"));
+        // The park is audited too: the budget-exhaustion reason is on
+        // the task, not just in the transition note.
+        Assert.Contains("budget exhausted", after.GetMetadata("qaLastError"));
+        Assert.NotNull(after.GetMetadata("qaLastErrorAt"));
     }
 
     [Fact]

@@ -51,8 +51,10 @@ public sealed class QaDispatcher
     public const int MaxQaAttempts = 2;
 
     /// <summary>QA playthroughs build + run the product — far longer
-    /// than a review. Bounded so a hung QA run can't freeze the watch.</summary>
-    private static readonly TimeSpan QaRunTimeout = TimeSpan.FromMinutes(30);
+    /// than a review. Bounded so a hung QA run can't freeze the watch.
+    /// Internal so the watch sweep can bound the fire-and-forget
+    /// background run with the same budget (plus git-work margin).</summary>
+    internal static readonly TimeSpan QaRunTimeout = TimeSpan.FromMinutes(30);
 
     /// <summary>Only these path prefixes may appear in a QA evidence
     /// commit. The dispatcher refuses to push anything else.</summary>
@@ -97,8 +99,7 @@ public sealed class QaDispatcher
         var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
         {
-            _logger.LogError("QA: watched task {Id} missing prNumber", task.Id);
-            return new QaOutcome(VerdictError, "", "", "missing prNumber");
+            return await ErrorOutcomeAsync(task, "", "missing prNumber", cancellationToken);
         }
 
         PullRequest pr;
@@ -108,8 +109,7 @@ public sealed class QaDispatcher
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "QA: PR #{Pr} could not be fetched", prNumber);
-            return new QaOutcome(VerdictError, "", "", $"GetPullRequest: {ex.Message}");
+            return await ErrorOutcomeAsync(task, "", $"GetPullRequest: {ex.Message}", cancellationToken, prNumber);
         }
         // Test seam: Octokit's PR Head is init-only (same constraint as
         // the reviewer's headShaOverride).
@@ -134,9 +134,16 @@ public sealed class QaDispatcher
             : 0;
         if (attempts >= MaxQaAttempts)
         {
-            await _issues.TransitionAsync(task.Id, IssueStatus.Blocked,
-                $"QA stage unavailable after {attempts} attempts at head {headSha[..Math.Min(7, headSha.Length)]} — operator review required",
-                new Dictionary<string, object> { ["blockedKind"] = BlockedKindQaUnavailable }, cancellationToken);
+            var parked = $"QA stage unavailable after {attempts} attempts at head {headSha[..Math.Min(7, headSha.Length)]} — operator review required";
+            _logger.LogWarning("QA (task {Id}, PR #{Pr}): {Reason} (last error: {LastError})",
+                task.Id, prNumber, parked, task.GetMetadata("qaLastError") ?? "unknown");
+            await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, parked,
+                new Dictionary<string, object>
+                {
+                    ["blockedKind"] = BlockedKindQaUnavailable,
+                    ["qaLastError"] = $"qa attempt budget exhausted ({attempts}/{MaxQaAttempts}) at head {headSha[..Math.Min(7, headSha.Length)]} — parked",
+                    ["qaLastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                }, cancellationToken);
             _events?.Publish(new DashboardEvent(
                 DateTime.UtcNow, DashboardEventKind.TaskTransition,
                 task.Id, $"QA unavailable ({attempts} attempts) — parked for the operator"));
@@ -158,9 +165,30 @@ public sealed class QaDispatcher
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "QA: run for task {Id} (PR #{Pr}) faulted", task.Id, prNumber);
-            return new QaOutcome(VerdictError, "", headSha, ex.Message);
+            return await ErrorOutcomeAsync(task, headSha, ex.Message, cancellationToken, prNumber, ex);
         }
+    }
+
+    /// <summary>Error-outcome audit (2026-08-24, task-740 loop): every
+    /// VerdictError return logs a warning AND stamps
+    /// qaLastError/qaLastErrorAt task metadata (TaskDetail-visible). A
+    /// full pass verdict with raster evidence once vanished without a
+    /// single log line or metadata trace — these paths must never be
+    /// silent again. Side-effect-only: the outcome contract is
+    /// unchanged.</summary>
+    private async Task<QaOutcome> ErrorOutcomeAsync(
+        IssueRecord task, string headSha, string reason, CancellationToken ct,
+        int prNumber = 0, Exception? ex = null)
+    {
+        _logger.LogWarning(ex, "QA (task {Id}, PR #{Pr}) error at {Sha}: {Reason}",
+            task.Id, prNumber, headSha[..Math.Min(7, headSha.Length)], reason);
+        await _issues.TransitionAsync(task.Id, task.Status, $"QA error: {reason}",
+            new Dictionary<string, object>
+            {
+                ["qaLastError"] = reason,
+                ["qaLastErrorAt"] = DateTime.UtcNow.ToString("O"),
+            }, ct);
+        return new QaOutcome(VerdictError, "", headSha, reason);
     }
 
     private async Task<QaOutcome> RunQaAsync(
@@ -176,8 +204,9 @@ public sealed class QaDispatcher
         var syncedSha = await _worktrees.GetHeadShaAsync(worktreePath, ct);
         if (!string.Equals(syncedSha, headSha, StringComparison.Ordinal))
         {
-            return new QaOutcome(VerdictError, "", headSha,
-                $"worktree synced to {syncedSha[..Math.Min(7, syncedSha.Length)]}, expected {headSha[..Math.Min(7, headSha.Length)]}");
+            return await ErrorOutcomeAsync(task, headSha,
+                $"worktree synced to {syncedSha[..Math.Min(7, syncedSha.Length)]}, expected {headSha[..Math.Min(7, headSha.Length)]}",
+                ct, prNumber);
         }
 
         var context = new Dictionary<string, object>
@@ -198,14 +227,15 @@ public sealed class QaDispatcher
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return new QaOutcome(VerdictError, "", headSha, $"QA run timed out after {QaRunTimeout.TotalMinutes:F0}m");
+            return await ErrorOutcomeAsync(task, headSha,
+                $"QA run timed out after {QaRunTimeout.TotalMinutes:F0}m", ct, prNumber);
         }
 
         var (verdict, notes) = ParseQaOutput(result.Text);
         if (verdict is null)
         {
-            return new QaOutcome(VerdictError, "", headSha,
-                "no QA_VERDICT marker in the run's final message");
+            return await ErrorOutcomeAsync(task, headSha,
+                "no QA_VERDICT marker in the run's final message", ct, prNumber);
         }
 
         // Evidence enforcement: the dispatcher ships the evidence, never
@@ -217,8 +247,9 @@ public sealed class QaDispatcher
             !EvidencePathPrefixes.Any(p => f.StartsWith(p, StringComparison.Ordinal))).ToList();
         if (nonEvidence.Count > 0)
         {
-            return new QaOutcome(VerdictError, "", headSha,
-                $"QA run touched non-evidence paths (refused to ship): {string.Join(", ", nonEvidence.Take(5))}");
+            return await ErrorOutcomeAsync(task, headSha,
+                $"QA run touched non-evidence paths (refused to ship): {string.Join(", ", nonEvidence.Take(5))}",
+                ct, prNumber);
         }
         var rasterEvidence = dirty.Where(f =>
             f.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
@@ -226,8 +257,9 @@ public sealed class QaDispatcher
             || f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)).ToList();
         if (verdict == VerdictPass && rasterEvidence.Count == 0)
         {
-            return new QaOutcome(VerdictError, "", headSha,
-                "pass verdict without raster screenshot evidence (png/jpg under test-results/) — not QA");
+            return await ErrorOutcomeAsync(task, headSha,
+                "pass verdict without raster screenshot evidence (png/jpg under test-results/) — not QA",
+                ct, prNumber);
         }
 
         var qaHead = headSha;
@@ -250,6 +282,11 @@ public sealed class QaDispatcher
                 ["qaAttempts"] = null!,
                 ["qaAttemptSha"] = null!,
                 ["qaStartedAt"] = null!,
+                // A landed verdict clears the last-error stamp too —
+                // otherwise the TaskDetail strip shows a stale error
+                // next to a green verdict.
+                ["qaLastError"] = null!,
+                ["qaLastErrorAt"] = null!,
             }, ct);
         _events?.Publish(new DashboardEvent(
             DateTime.UtcNow, DashboardEventKind.TaskTransition,
