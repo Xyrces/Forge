@@ -296,6 +296,14 @@ public static class TaskEndpoints
                     // unanswered — the Aug-09 fossil matched the pushed
                     // head and only the 35-min stall path saved it).
                     ["reworkForSha"] = null!,
+                    // QA-stage budget reset (2026-08-24, task-740 loop):
+                    // operator intervention restarts the per-head QA
+                    // attempt budget exactly like the strike budgets —
+                    // a qa-unavailable block must re-attempt QA at the
+                    // same head after requeue, not instantly re-block.
+                    ["qaAttempts"] = null!,
+                    ["qaAttemptSha"] = null!,
+                    ["qaStartedAt"] = null!,
                     ["requeuedFromFailedAt"] = DateTime.UtcNow.ToString("O"),
                     // Failure-ledger clearance marker: the triage
                     // consumer records this action on the open row.
@@ -303,6 +311,13 @@ public static class TaskEndpoints
                 };
                 if (!string.IsNullOrWhiteSpace(guideReason)) meta["reworkReason"] = guideReason;
                 if (!string.IsNullOrWhiteSpace(guideContext)) meta["reworkContext"] = guideContext;
+                // Clear the block marker when the block WAS the QA stage
+                // — inert once Pending, but keeps the metadata honest
+                // (the reviewer-unavailable marker stays: that block
+                // kind has its own auto-resume bookkeeping).
+                if (string.Equals(t.GetMetadata("blockedKind"),
+                        Forge.Reviewer.QaDispatcher.BlockedKindQaUnavailable, StringComparison.Ordinal))
+                    meta["blockedKind"] = null!;
                 // A requeue IS the nudge: for a task with an open PR
                 // the watch sweep re-adopts it immediately — and the
                 // stale guard anchors to prOpenedAt, so a requeue of

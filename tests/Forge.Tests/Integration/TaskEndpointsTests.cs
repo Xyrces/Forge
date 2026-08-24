@@ -149,6 +149,59 @@ public class TaskEndpointsTests : IDisposable
     }
 
     [Fact]
+    public async Task Requeue_QaUnavailableBlock_ResetsTheQaBudget()
+    {
+        // 2026-08-24 task-740 loop: a qa-unavailable park burned the
+        // per-head QA attempt budget, and the operator requeue cleared
+        // strikes but NOT the QA keys — the requeued task instantly
+        // re-blocked at the same head. Operator intervention must
+        // restart the QA budget exactly like the strike budgets.
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "qa unavailable",
+            new Dictionary<string, object>
+            {
+                ["prNumber"] = "123",
+                ["blockedKind"] = "qa-unavailable",
+                ["qaAttempts"] = "2",
+                ["qaAttemptSha"] = "abc123",
+                ["qaStartedAt"] = DateTime.UtcNow.AddHours(-1).ToString("O"),
+                ["state"] = "BlockedOperator",
+            }, default);
+
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/requeue", new { });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        foreach (var key in new[] { "qaAttempts", "qaAttemptSha", "qaStartedAt", "blockedKind" })
+        {
+            Assert.Null(after.GetMetadata(key));
+        }
+    }
+
+    [Fact]
+    public async Task Requeue_OtherBlockKind_KeepsBlockedKind()
+    {
+        // Only the qa-unavailable marker clears — reviewer-unavailable
+        // has its own auto-resume bookkeeping the requeue must not
+        // disturb.
+        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "T", Priority: 2), default);
+        await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, "reviewer cooling",
+            new Dictionary<string, object>
+            {
+                ["blockedKind"] = "reviewer-unavailable",
+                ["state"] = "BlockedOperator",
+            }, default);
+
+        var resp = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/requeue", new { });
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var after = (await _issues.GetAsync(task.Id, default))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal("reviewer-unavailable", after.GetMetadata("blockedKind"));
+    }
+
+    [Fact]
     public async Task ResetStrikes_ClearsAllCounters_AndRequeues()
     {
         // Operator recovery nudge (2026-07-31): every strike counter
