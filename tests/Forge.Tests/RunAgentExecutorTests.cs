@@ -88,7 +88,7 @@ public class RunAgentExecutorTests : IDisposable
     {
         private readonly IChatClient _client;
         public TestScriptingFactory(IChatClient client) { _client = client; }
-        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => _client;
+        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null, RoleModel? modelOverride = null) => _client;
     }
 
     [Fact]

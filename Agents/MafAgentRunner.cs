@@ -320,7 +320,8 @@ public async Task<AgentRunResult> RunAsync(
             return null;
         }
 
-        var chatClient = _chatClientFactory.Create(_config, role, projectId);
+        var modelOverride = ResolveContextModelOverride(context);
+        var chatClient = CreateChatClient(role, projectId, modelOverride);
         // Per-round-trip activity heartbeat. Wraps the RAW provider
         // client so MAF's internal model→tool→model loop (inside one
         // agent.RunAsync) is visible in near-real-time; wrapping the
@@ -339,7 +340,7 @@ public async Task<AgentRunResult> RunAsync(
         // no-diff path marked the task done (observed live: all six
         // tasks of the dispatcher-resilience sprint hollow-completed).
         var chatClientWithTools = tools.Count > 0
-            ? BuildToolLoopClient(trackedClient, role, projectId)
+            ? BuildToolLoopClient(trackedClient, role, projectId, modelOverride)
             : trackedClient;
 
         var agent = new ChatClientAgent(
@@ -381,7 +382,7 @@ public async Task<AgentRunResult> RunAsync(
         {
             try
             {
-                var (_, runModel, _) = _config.ResolveEffective(role, _modelOverrides, projectId);
+                var runModel = ResolveRunModel(role, projectId, modelOverride);
                 await runStore.StartAsync(runId, runTaskId, role.ToString(), runModel, ct,
                     resumedSession: resumedSession, projectId: projectId,
                     dispatchId: ResolveContextString(context, "dispatchId"));
@@ -748,11 +749,11 @@ public async Task<AgentRunResult> RunAsync(
     /// requests are compacted. Disabled per provider when
     /// ContextWindowTokens is unset (unknown window — never guess).
     /// </summary>
-    private IChatClient BuildToolLoopClient(IChatClient trackedClient, AgentType role, string? projectId)
+    private IChatClient BuildToolLoopClient(IChatClient trackedClient, AgentType role, string? projectId, RoleModel? modelOverride = null)
     {
         var builder = new ChatClientBuilder(trackedClient)
             .UseFunctionInvocation(configure: c => c.MaximumIterationsPerRequest = 200);
-        var (windowTokens, maxOutputTokens) = ResolveCompactionBudget(role, projectId);
+        var (windowTokens, maxOutputTokens) = ResolveCompactionBudget(role, projectId, modelOverride);
         if (windowTokens is not null)
         {
             // MAAI001: MAF's compaction strategies are marked
@@ -771,11 +772,21 @@ public async Task<AgentRunResult> RunAsync(
         return builder.Build();
     }
 
-    private (int? WindowTokens, int MaxOutputTokens) ResolveCompactionBudget(AgentType role, string? projectId)
+    private (int? WindowTokens, int MaxOutputTokens) ResolveCompactionBudget(AgentType role, string? projectId, RoleModel? modelOverride = null)
     {
         try
         {
-            var (provider, _, _) = _config.ResolveEffective(role, _modelOverrides, projectId);
+            ProviderConfig provider;
+            if (modelOverride is not null)
+            {
+                var (p, _) = _config.ResolveExplicit(modelOverride);
+                provider = p;
+            }
+            else
+            {
+                var (p, _, _) = _config.ResolveEffective(role, _modelOverrides, projectId);
+                provider = p;
+            }
             return (provider.ContextWindowTokens, provider.MaxOutputTokens ?? 8192);
         }
         catch (Exception ex)
@@ -783,6 +794,66 @@ public async Task<AgentRunResult> RunAsync(
             _logger.LogDebug(ex, "compaction budget resolution failed for {Role}; running without compaction", role);
             return (null, 8192);
         }
+    }
+
+    /// <summary>Per-task explicit model (triage escalation, phase 3):
+    /// the dispatch path stamps the consumed marker onto the run
+    /// context; when present it wins over every other resolution tier
+    /// for THIS run's client. A broken override (provider removed
+    /// since the marker was written) degrades to the normal
+    /// resolution — a run must never die on a stale marker.</summary>
+    private IChatClient CreateChatClient(AgentType role, string? projectId, RoleModel? modelOverride)
+    {
+        if (modelOverride is not null)
+        {
+            try
+            {
+                return _chatClientFactory.Create(_config, role, projectId, modelOverride);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogWarning(ex,
+                    "escalated model {Provider}/{Model} unusable for {Role}; falling back to the normal resolution",
+                    modelOverride.ProviderName, modelOverride.Model, role);
+            }
+        }
+        return _chatClientFactory.Create(_config, role, projectId);
+    }
+
+    /// <summary>The model label the run registry records: the
+    /// escalated model when this run is escalated (the label is how
+    /// the operator sees WHICH model did the work), else the normal
+    /// resolution.</summary>
+    private string ResolveRunModel(AgentType role, string? projectId, RoleModel? modelOverride)
+    {
+        if (modelOverride is not null)
+        {
+            try
+            {
+                _config.ResolveExplicit(modelOverride);
+                return modelOverride.Model;
+            }
+            catch (InvalidOperationException)
+            {
+                // Broken override — the run fell back to the normal
+                // client, so the label shows the normal model.
+            }
+        }
+        var (_, runModel, _) = _config.ResolveEffective(role, _modelOverrides, projectId);
+        return runModel;
+    }
+
+    /// <summary>Reads the per-task explicit model off the run context
+    /// (set by RunAgentExecutor from the task's modelEscalated*
+    /// metadata). Both halves must be present.</summary>
+    internal static RoleModel? ResolveContextModelOverride(IReadOnlyDictionary<string, object>? context)
+    {
+        if (context is null) return null;
+        var provider = ResolveContextString(context, "modelOverrideProvider");
+        var model = ResolveContextString(context, "modelOverrideModel");
+        return !string.IsNullOrWhiteSpace(provider) && !string.IsNullOrWhiteSpace(model)
+            ? new RoleModel(provider, model)
+            : null;
     }
 
     /// <summary>Verify commands for a run: the project's $verify

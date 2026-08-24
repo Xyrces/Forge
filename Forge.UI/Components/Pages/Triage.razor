@@ -43,9 +43,15 @@
                 </div>
                 <div class="dash-tile">
                     <span class="dash-tile__label">Escalations</span>
-                    <span class="dash-tile__value">@summary.Escalations7d of @summary.EscalationBudget</span>
-                    <span class="dash-tile__caption">budget — phase 3</span>
-                    <Sparkline Values="EmptySeries" />
+                    <span class="dash-tile__value">@summary.Escalations7d</span>
+                    <span class="dash-tile__caption">
+                        escalate_model actions · 7d
+                        @if (TriageStore.Value.EscalatedInFlight.Count > 0)
+                        {
+                            <text> · in flight: @string.Join(", ", TriageStore.Value.EscalatedInFlight.Select(e => $"{e.Role} ({e.ProjectId})"))</text>
+                        }
+                    </span>
+                    <Sparkline Values="summary.DailyEscalations7d" />
                 </div>
                 <div class="dash-tile">
                     <span class="dash-tile__label">Auto-cleared 7d</span>
@@ -177,7 +183,7 @@
         @if (TriageStore.Value.TriageEnabled)
         {
             <div class="banner banner--ok">
-                Triage agent: ON for this project — bounded actions (requeue-with-guidance / park / flag-bug), ≤2 per task per day, audited on the ledger.
+                Triage agent: ON for this project — bounded actions (requeue-with-guidance / park / flag-bug / escalate-model), ≤2 per task per day, audited on the ledger.
                 @if (_loadedProject is not null)
                 {
                     <a class="btn btn--ghost" href="@($"/projects/{_loadedProject}/overview")">Manage on the project page</a>
@@ -198,7 +204,6 @@
 </div>
 
 @code {
-    private static readonly IReadOnlyList<int> EmptySeries = new int[7];
     private string? _loadedProject;
 
     protected override void OnInitialized()

@@ -17,17 +17,20 @@ namespace Forge.Dashboard;
 public static class TriageEndpoints
 {
     private const int BugSuspectTaskThreshold = 3;
-    private const int EscalationBudget = 5; // phase-3 budget; placeholder in phase 1
 
     public sealed record TriageSummaryDto(
         int OpenFailures,
         int DistinctSignatures7d,
         int Escalations7d,
-        int EscalationBudget,
         int AutoCleared7d,
         IReadOnlyList<int> DailyOpenFailures7d,
         IReadOnlyList<int> DailyDistinctSignatures7d,
-        IReadOnlyList<int> DailyAutoCleared7d);
+        IReadOnlyList<int> DailyAutoCleared7d,
+        IReadOnlyList<int> DailyEscalations7d);
+
+    /// <summary>One in-flight escalated run per (project, role) —
+    /// surfaced from the slot table's escalated:* pools (phase 3).</summary>
+    public sealed record EscalatedRunDto(string ProjectId, string Role, int InFlight, int Max);
 
     public sealed record TriageSignatureGroupDto(
         string Signature,
@@ -45,7 +48,8 @@ public static class TriageEndpoints
         TriageSummaryDto Summary,
         IReadOnlyList<TriageSignatureGroupDto> Groups,
         TriageHealthDto Health,
-        bool TriageEnabled);
+        bool TriageEnabled,
+        IReadOnlyList<EscalatedRunDto> EscalatedInFlight);
 
     public sealed record TriageEntryDto(
         long Id, string TaskId, string? TaskTitle, DateTime FailedAt,
@@ -55,7 +59,8 @@ public static class TriageEndpoints
         WebApplication app,
         IIssueStore issues,
         ILogger logger,
-        Projects.ProjectContextFactory? projectContexts = null)
+        Projects.ProjectContextFactory? projectContexts = null,
+        Orchestrator.Slots.SlotTable? slots = null)
     {
         app.MapGet("/api/triage/ledger", async (string? projectId, CancellationToken ct) =>
         {
@@ -71,14 +76,22 @@ public static class TriageEndpoints
                 var summary = new TriageSummaryDto(
                     OpenFailures: rows.Count(r => r.Action is null || r.Outcome == FailureTriageOutcomes.Pending),
                     DistinctSignatures7d: rows7d.Select(r => r.Signature).Distinct(StringComparer.Ordinal).Count(),
-                    Escalations7d: 0, // phase 3 wires per-task model escalation
-                    EscalationBudget: EscalationBudget,
+                    // Phase 3: triage escalate_model actions (model
+                    // escalation) — counted by ACTION date, not failure
+                    // date. No budget: frequent escalation is a signal
+                    // to fix why tasks keep failing, not something to
+                    // ration (operator decision 2026-08-23).
+                    Escalations7d: rows.Count(r => r.Action == FailureTriageActions.TriageEscalateModel
+                        && r.ActedAt >= since7d),
                     AutoCleared7d: rows.Count(r => r.Action == FailureTriageActions.AgedSweep
                         && r.ActedAt >= since7d),
                     DailyOpenFailures7d: DailyCounts(rows7d, r => true, now),
                     DailyDistinctSignatures7d: DailyDistinct(rows7d, now),
                     DailyAutoCleared7d: DailyCounts(
                         rows.Where(r => r.Action == FailureTriageActions.AgedSweep && r.ActedAt >= since7d),
+                        r => true, now, r => r.ActedAt!.Value),
+                    DailyEscalations7d: DailyCounts(
+                        rows.Where(r => r.Action == FailureTriageActions.TriageEscalateModel && r.ActedAt >= since7d),
                         r => true, now, r => r.ActedAt!.Value));
 
                 var groups = rows
@@ -111,7 +124,12 @@ public static class TriageEndpoints
                     VerificationTimeouts7d: rows7d.Count(r =>
                         r.Classification == "verification" && r.Signature == "verification-timeout"));
 
-                return Results.Json(new TriageLedgerResponse(summary, groups, health, enabled));
+                return Results.Json(new TriageLedgerResponse(summary, groups, health, enabled,
+                    EscalatedInFlight: slots?.Snapshot()
+                        .Where(s => s.Role.StartsWith("escalated:", StringComparison.Ordinal) && s.InFlight > 0)
+                        .Select(s => new EscalatedRunDto(s.ProjectId, s.Role["escalated:".Length..], s.InFlight, s.Max))
+                        .ToList()
+                        ?? (IReadOnlyList<EscalatedRunDto>)Array.Empty<EscalatedRunDto>()));
             }
             catch (Exception ex)
             {

@@ -33,7 +33,10 @@
                     <AgentRoleRow Name="@role.Name"
                                   Kind="@role.AgentType"
                                   Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
+                                  EscalationModel="@(role.EscalationModel is null ? null : new AgentRoleRow.ModelInfo(role.EscalationModel.Provider, role.EscalationModel.Model, role.EscalationModel.Source))"
+                                  ShowEscalation="true"
                                   Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
+                                  EscalationSlot="@(role.EscalationSlot is null ? null : new AgentRoleRow.SlotInfo(role.EscalationSlot.InFlight, role.EscalationSlot.Max))"
                                   CurrentRun="@(role.CurrentRun is null ? null : new AgentRoleRow.RunInfo(role.CurrentRun.Id, role.CurrentRun.TaskId, role.CurrentRun.StartedAt, role.CurrentRun.LastActivityAt, role.CurrentRun.MessageCount, role.CurrentRun.ToolCallCount, role.CurrentRun.Phase, role.CurrentRun.ResumedSession, role.CurrentRun.CurrentContextTokens))"
                                   LastRun="@(role.LastRun is null ? null : new AgentRoleRow.LastRunInfo(role.LastRun.Id, role.LastRun.TaskId, role.LastRun.Status, role.LastRun.FinishedAt, role.LastRun.DurationMs, role.LastRun.Error))"
                                   Territory="@role.Territory"
@@ -42,36 +45,46 @@
                                   ModelEditable="true"
                                   OverridesEditable="@_data.OverridesEditable"
                                   Providers="@_data.Providers"
-                                  Editing="@(_editingRole == role.Name)"
+                                  Editing="@(_editingRole == role.Name && !_editingEscalation)"
+                                  EditingEscalation="@(_editingRole == role.Name && _editingEscalation)"
                                   EditError="@(_editingRole == role.Name ? _editError : null)"
-                                  OnBeginEdit="@(name => _editingRole = name)"
+                                  OnBeginEdit="@(name => { _editingRole = name; _editingEscalation = false; })"
+                                  OnBeginEditEscalation="@(name => { _editingRole = name; _editingEscalation = true; })"
                                   OnCancelEdit="@(_ => _editingRole = null)"
                                   OnSaveModel="SaveModelAsync"
-                                  OnClearModel="ClearModelAsync" />
+                                  OnSaveEscalation="SaveEscalationAsync"
+                                  OnClearModel="ClearModelAsync"
+                                  OnClearEscalation="ClearEscalationAsync" />
                 }
             </div>
         </section>
 
         <section class="overview-section">
             <h2>Pipeline roles <span class="meta-text">· @_data.Pipeline.Count total</span></h2>
-            <p class="page-subtitle page-subtitle--meta">Scheduler-side agents plus the dispatch loop. Instructions live in code; designer/groomer/artist borrow coredev's model.</p>
+            <p class="page-subtitle page-subtitle--meta">Scheduler-side agents plus the dispatch loop. Instructions live in code; every LLM-backed pipeline role resolves its own model.</p>
             <div style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
                 @foreach (var role in _data.Pipeline)
                 {
                     <AgentRoleRow Name="@role.Name"
                                   Kind="pipeline"
                                   Model="@(new AgentRoleRow.ModelInfo(role.Model.Provider, role.Model.Model, role.Model.Source))"
+                                  EscalationModel="@(role.EscalationModel is null ? null : new AgentRoleRow.ModelInfo(role.EscalationModel.Provider, role.EscalationModel.Model, role.EscalationModel.Source))"
+                                  ShowEscalation="@role.ModelEditable"
                                   Slot="@(new AgentRoleRow.SlotInfo(role.Slot.InFlight, role.Slot.Max))"
                                   Surface="@role.Surface"
                                   ModelEditable="@role.ModelEditable"
                                   OverridesEditable="@_data.OverridesEditable"
                                   Providers="@_data.Providers"
-                                  Editing="@(_editingRole == role.Name)"
+                                  Editing="@(_editingRole == role.Name && !_editingEscalation)"
+                                  EditingEscalation="@(_editingRole == role.Name && _editingEscalation)"
                                   EditError="@(_editingRole == role.Name ? _editError : null)"
-                                  OnBeginEdit="@(name => _editingRole = name)"
+                                  OnBeginEdit="@(name => { _editingRole = name; _editingEscalation = false; })"
+                                  OnBeginEditEscalation="@(name => { _editingRole = name; _editingEscalation = true; })"
                                   OnCancelEdit="@(_ => _editingRole = null)"
                                   OnSaveModel="SaveModelAsync"
-                                  OnClearModel="ClearModelAsync" />
+                                  OnSaveEscalation="SaveEscalationAsync"
+                                  OnClearModel="ClearModelAsync"
+                                  OnClearEscalation="ClearEscalationAsync" />
                 }
             </div>
         </section>
@@ -82,6 +95,7 @@
     private RolesResponse? _data;
     private string? _error;
     private string? _editingRole;
+    private bool _editingEscalation;
     private string? _editError;
     private readonly CancellationTokenSource _pollCts = new();
 
@@ -157,6 +171,32 @@
         await LoadAsync();
     }
 
+    private async Task SaveEscalationAsync((string Role, string Provider, string Model) edit)
+    {
+        _editError = null;
+        // Phase 3: the role's escalation model — where a
+        // triage-escalated run goes. Project-scoped like the model
+        // override (operator rule 2026-07-30).
+        var resp = await Http.PutAsJsonAsync($"/api/agents/roles/{edit.Role}/escalation-model",
+            new { provider = edit.Provider, model = edit.Model, projectId = ShellStore.Value.CurrentProjectId });
+        if (!resp.IsSuccessStatusCode)
+        {
+            _editError = await resp.Content.ReadAsStringAsync();
+            return;
+        }
+        _editingRole = null;
+        await LoadAsync();
+    }
+
+    private async Task ClearEscalationAsync(string roleName)
+    {
+        var lens = ShellStore.Value.CurrentProjectId is { } pid
+            ? $"?projectId={Uri.EscapeDataString(pid)}"
+            : string.Empty;
+        await Http.DeleteAsync($"/api/agents/roles/{roleName}/escalation-model" + lens);
+        await LoadAsync();
+    }
+
     public void Dispose()
     {
         ShellStore.StateChanged -= OnShellChanged;
@@ -167,11 +207,11 @@
     private sealed record RolesResponse(List<RoleDto> Roles, List<PipelineRoleDto> Pipeline, string[] Providers, bool OverridesEditable);
     private sealed record RoleDto(
         string Name, string AgentType, string Territory, string[] Tools,
-        ModelDto Model, SlotDto Slot, PromptDto Prompt,
+        ModelDto Model, ModelDto? EscalationModel, SlotDto Slot, SlotDto? EscalationSlot, PromptDto Prompt,
         CurrentRunDto? CurrentRun, LastRunDto? LastRun);
     private sealed record PipelineRoleDto(
         string Name, string Description, string Surface,
-        ModelDto Model, bool ModelEditable, SlotDto Slot);
+        ModelDto Model, ModelDto? EscalationModel, bool ModelEditable, SlotDto Slot);
     private sealed record ModelDto(string? Provider, string? Model, string Source);
     private sealed record SlotDto(int InFlight, int Max);
     private sealed record PromptDto(string Source, string? Path, string? Content);

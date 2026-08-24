@@ -24,7 +24,7 @@ public interface ITriageRunner
 /// The failure-triage agent (phase 2). Pipeline-side role with its own
 /// <see cref="AgentType.Triage"/> (independently editable model via the
 /// standard override stack); no territory, no sprint membership, no bash
-/// or worktree — the ONLY things it can do are the three bounded actions
+/// or worktree — the ONLY things it can do are the bounded actions
 /// in <see cref="TriageTools"/>. Runs on the TriageRequested event, never
 /// on a poller.
 /// </summary>
@@ -35,6 +35,7 @@ public sealed class TriageAgent : ITriageRunner
     private readonly IIssueStore _issues;
     private readonly FailureTriageStore _triage;
     private readonly TaskStateMachine? _lifecycle;
+    private readonly TriageEscalationContext? _escalation;
     private readonly string? _projectRoot;
     private readonly string _projectId;
     private readonly ILogger<TriageAgent> _logger;
@@ -47,7 +48,8 @@ public sealed class TriageAgent : ITriageRunner
         TaskStateMachine? lifecycle,
         string projectId,
         string? projectRoot,
-        ILogger<TriageAgent> logger)
+        ILogger<TriageAgent> logger,
+        TriageEscalationContext? escalation = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -57,6 +59,7 @@ public sealed class TriageAgent : ITriageRunner
         _projectId = projectId;
         _projectRoot = projectRoot;
         _logger = logger;
+        _escalation = escalation;
     }
 
     public async Task<TriageRunResult> RunAsync(
@@ -66,7 +69,7 @@ public sealed class TriageAgent : ITriageRunner
         if (task is null) return new TriageRunResult(false, null, null, $"task {taskId} not found");
         var history = await _triage.ListForTaskAsync(taskId, ct);
 
-        var tools = new TriageTools(_issues, _triage, _lifecycle, _logger);
+        var tools = new TriageTools(_issues, _triage, _lifecycle, _logger, _escalation);
         string? actionTaken = null;
         string? actionNote = null;
 
@@ -102,6 +105,16 @@ public sealed class TriageAgent : ITriageRunner
             name: "flag_bug_suspect",
             description: "Flag this failure signature as a suspected PRODUCT BUG. Ledger flag only — never creates an issue, never edits code.");
 
+        var escalateTool = AIFunctionFactory.Create(
+            async ([Description("Why the evidence says this failure is CAPABILITY-BOUND — cite the specific signal (e.g. repeated plan rejections of sound plans, a complex multi-file change collapsing) and why a stronger model is the fix. Never 'try harder'.")] string note) =>
+            {
+                var result = await tools.EscalateModelAsync(taskId, signature, note, ct);
+                if (result.StartsWith("ok:", StringComparison.Ordinal)) { actionTaken = "escalate"; actionNote = note; }
+                return result;
+            },
+            name: "escalate_model",
+            description: "Requeue the task so its next dev run rides the role's configured ESCALATION model (a stronger model chosen by the operator, never by you). For capability-bound failures only — process failures get requeue/park/flag. Spends one of the task's strike rounds.");
+
         var chatClient = _chatClientFactory.Create(_config, AgentType.Triage, _projectId);
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
         var agent = new ChatClientAgent(
@@ -109,7 +122,7 @@ public sealed class TriageAgent : ITriageRunner
             instructions: LoadInstructions(),
             name: "triage",
             description: $"Triage agent for task {taskId}",
-            tools: new List<AITool> { requeueTool, parkTool, flagTool });
+            tools: new List<AITool> { requeueTool, parkTool, flagTool, escalateTool });
 
         var userMessage = new ChatMessage(ChatRole.User, BuildUserMessage(task, signature, classification, history));
         try
@@ -163,7 +176,7 @@ public sealed class TriageAgent : ITriageRunner
     /// wins over the built-in copy that ships next to the app.</summary>
     private string LoadInstructions()
     {
-        const string fallback = "You are the triage agent. Take exactly one action: requeue_with_guidance, park_for_operator, or flag_bug_suspect.";
+        const string fallback = "You are the triage agent. Take exactly one action: requeue_with_guidance, park_for_operator, flag_bug_suspect, or escalate_model.";
         try
         {
             var root = RolePromptRoot.Resolve(_projectRoot ?? AppContext.BaseDirectory);

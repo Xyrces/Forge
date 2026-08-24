@@ -75,13 +75,18 @@ public sealed class ScriptedChatClient : IChatClient
 
 public sealed class StubbedChatClientFactory : IChatClientFactory
 {
-    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null)
+    /// <summary>Recorded for assertions: the per-task explicit model
+    /// (triage escalation) of the most recent Create call.</summary>
+    public RoleModel? LastModelOverride { get; private set; }
+
+    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null, RoleModel? modelOverride = null)
     {
         // The stub factory ignores role + provider config and always returns
         // a fresh ScriptedChatClient. Tests pre-enqueue scripted responses
         // on the returned client via (ScriptedChatClient)factory.Create(...).
         _ = config;
         _ = role;
+        LastModelOverride = modelOverride;
         return new ScriptedChatClient(
             new ChatMessage(ChatRole.Assistant,
                 "[stub] ScriptedChatClient has no scripted responses; tests must Enqueue() at least one."));

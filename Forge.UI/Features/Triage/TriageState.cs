@@ -12,6 +12,7 @@ public sealed record TriageState
     public IReadOnlyList<TriageGroupRow> Groups { get; init; } = Array.Empty<TriageGroupRow>();
     public TriageHealthRow? Health { get; init; }
     public bool TriageEnabled { get; init; }
+    public IReadOnlyList<EscalatedRunRow> EscalatedInFlight { get; init; } = Array.Empty<EscalatedRunRow>();
     public string? ExpandedSignature { get; init; }
     public bool DetailLoading { get; init; }
     public IReadOnlyList<TriageEntryRow> DetailRows { get; init; } = Array.Empty<TriageEntryRow>();
@@ -21,11 +22,13 @@ public sealed record TriageSummaryRow(
     int OpenFailures,
     int DistinctSignatures7d,
     int Escalations7d,
-    int EscalationBudget,
     int AutoCleared7d,
     IReadOnlyList<int> DailyOpenFailures7d,
     IReadOnlyList<int> DailyDistinctSignatures7d,
-    IReadOnlyList<int> DailyAutoCleared7d);
+    IReadOnlyList<int> DailyAutoCleared7d,
+    IReadOnlyList<int> DailyEscalations7d);
+
+public sealed record EscalatedRunRow(string ProjectId, string Role, int InFlight, int Max);
 
 public sealed record TriageGroupRow(
     string Signature,
@@ -46,7 +49,7 @@ public sealed record TriageEntryRow(
 public static class TriageActions
 {
     public sealed record LoadLedgerAction(string? ProjectId = null);
-    public sealed record LedgerLoadedAction(TriageSummaryRow Summary, IReadOnlyList<TriageGroupRow> Groups, TriageHealthRow Health, bool TriageEnabled);
+    public sealed record LedgerLoadedAction(TriageSummaryRow Summary, IReadOnlyList<TriageGroupRow> Groups, TriageHealthRow Health, bool TriageEnabled, IReadOnlyList<EscalatedRunRow> EscalatedInFlight);
     public sealed record LedgerLoadFailedAction(string Error);
 
     public sealed record ExpandSignatureAction(string Signature, string? ProjectId = null);
@@ -64,9 +67,9 @@ public sealed class TriageClient
         _http = http;
     }
 
-    private sealed record LedgerResponse(TriageSummaryRow Summary, List<TriageGroupRow> Groups, TriageHealthRow Health, bool TriageEnabled);
+    private sealed record LedgerResponse(TriageSummaryRow Summary, List<TriageGroupRow> Groups, TriageHealthRow Health, bool TriageEnabled, List<EscalatedRunRow>? EscalatedInFlight);
 
-    public async Task<(TriageSummaryRow Summary, IReadOnlyList<TriageGroupRow> Groups, TriageHealthRow Health, bool TriageEnabled)> GetLedgerAsync(
+    public async Task<(TriageSummaryRow Summary, IReadOnlyList<TriageGroupRow> Groups, TriageHealthRow Health, bool TriageEnabled, IReadOnlyList<EscalatedRunRow> EscalatedInFlight)> GetLedgerAsync(
         string? projectId, CancellationToken ct)
     {
         var url = projectId is null
@@ -74,9 +77,10 @@ public sealed class TriageClient
             : $"/api/triage/ledger?projectId={Uri.EscapeDataString(projectId)}";
         var resp = await _http.GetFromJsonAsync<LedgerResponse>(url, ct);
         return resp is null
-            ? (new TriageSummaryRow(0, 0, 0, 5, 0, Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>()),
-               Array.Empty<TriageGroupRow>(), new TriageHealthRow(0, 0, 0), false)
-            : (resp.Summary, resp.Groups, resp.Health, resp.TriageEnabled);
+            ? (new TriageSummaryRow(0, 0, 0, 0, Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>()),
+               Array.Empty<TriageGroupRow>(), new TriageHealthRow(0, 0, 0), false, Array.Empty<EscalatedRunRow>())
+            : (resp.Summary, resp.Groups, resp.Health, resp.TriageEnabled,
+               resp.EscalatedInFlight ?? new List<EscalatedRunRow>());
     }
 
     public async Task<IReadOnlyList<TriageEntryRow>> GetSignatureRowsAsync(

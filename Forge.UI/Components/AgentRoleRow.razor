@@ -135,7 +135,7 @@
                                 @if (ModelEditable && OverridesEditable)
                                 {
                                     <button class="btn" style="margin-left:8px; padding:2px 10px; font-size:12px;" @onclick="() => OnBeginEdit.InvokeAsync(Name)">Edit</button>
-                                    @if (Model.Source == "override")
+                                    @if (Model.Source.StartsWith("override", StringComparison.Ordinal))
                                     {
                                         <button class="btn" style="margin-left:4px; padding:2px 10px; font-size:12px;" @onclick="() => OnClearModel.InvokeAsync(Name)">Clear override</button>
                                     }
@@ -143,6 +143,55 @@
                             }
                         </td>
                     </tr>
+                    @if (ShowEscalation)
+                    {
+                        <tr>
+                            <td class="meta-text">Escalation model</td>
+                            <td>
+                                @if (EditingEscalation)
+                                {
+                                    <div class="role-model-edit">
+                                        <select class="mono" @bind="_editProvider" @bind:after="LoadModelsAsync">
+                                            @foreach (var p in Providers)
+                                            {
+                                                <option value="@p">@p</option>
+                                            }
+                                        </select>
+                                        <input type="text" class="mono" list="models-@Name" @bind="_editModel"
+                                               placeholder="@(_availableModels.Length > 0 ? $"search {_availableModels.Length} models or type any id…" : "model (e.g. kimi-k3)")" />
+                                        <datalist id="models-@Name">
+                                            @foreach (var m in _availableModels)
+                                            {
+                                                <option value="@m"></option>
+                                            }
+                                        </datalist>
+                                        <button class="btn btn--primary" @onclick="SaveModelAsync">Save</button>
+                                        <button class="btn" @onclick="() => OnCancelEdit.InvokeAsync(Name)">Cancel</button>
+                                        @if (EditError is not null)
+                                        {
+                                            <span class="error-text">@EditError</span>
+                                        }
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="mono meta-text">@(EscalationModel?.Provider is null ? "unset — triage escalate_model refuses for this role" : $"{EscalationModel.Provider} / {EscalationModel.Model}")</span>
+                                    @if (EscalationModel?.Provider is not null)
+                                    {
+                                        <span class="pill pill--outline" style="height:16px; padding:0 6px; font-size:9px;">@EscalationModel.Source</span>
+                                    }
+                                    @if (ModelEditable && OverridesEditable)
+                                    {
+                                        <button class="btn" style="margin-left:8px; padding:2px 10px; font-size:12px;" @onclick="() => OnBeginEditEscalation.InvokeAsync(Name)">Edit</button>
+                                        @if (EscalationModel?.Source.StartsWith("override", StringComparison.Ordinal) == true)
+                                        {
+                                            <button class="btn" style="margin-left:4px; padding:2px 10px; font-size:12px;" @onclick="() => OnClearEscalation.InvokeAsync(Name)">Clear override</button>
+                                        }
+                                    }
+                                }
+                            </td>
+                        </tr>
+                    }
                     <tr>
                         <td class="meta-text" style="vertical-align:top;">Skills</td>
                         <td>
@@ -189,6 +238,10 @@
                         <td class="meta-text">
                             @Slot.InFlight in flight · cap @Slot.Max
                             <a href="/projects/forge/overview" style="margin-left:8px;">edit caps</a>
+                            @if (EscalationSlot is { Max: > 0 })
+                            {
+                                <span style="margin-left:8px;">· escalation pool @EscalationSlot.InFlight/@EscalationSlot.Max</span>
+                            }
                         </td>
                     </tr>
                     @if (Surface is not null)
@@ -250,19 +303,31 @@
     [Parameter] public string[]? Tools { get; set; }
     [Parameter] public PromptInfo? Prompt { get; set; }
     [Parameter] public string? Surface { get; set; }
+    // Phase 3: the role's escalation model (null = unset — the triage
+    // agent's escalate_model refuses) + its escalation slot pool.
+    [Parameter] public ModelInfo? EscalationModel { get; set; }
+    [Parameter] public SlotInfo? EscalationSlot { get; set; }
+    /// <summary>Escalation row renders for every LLM-backed role
+    /// (engineering + pipeline with an editable model).</summary>
+    [Parameter] public bool ShowEscalation { get; set; }
 
     [Parameter] public bool ModelEditable { get; set; }
     [Parameter] public bool OverridesEditable { get; set; }
     [Parameter] public string[] Providers { get; set; } = Array.Empty<string>();
     [Parameter] public bool Editing { get; set; }
+    [Parameter] public bool EditingEscalation { get; set; }
     [Parameter] public string? EditError { get; set; }
     [Parameter] public EventCallback<string> OnBeginEdit { get; set; }
+    [Parameter] public EventCallback<string> OnBeginEditEscalation { get; set; }
     [Parameter] public EventCallback<string> OnCancelEdit { get; set; }
     [Parameter] public EventCallback<(string Role, string Provider, string Model)> OnSaveModel { get; set; }
+    [Parameter] public EventCallback<(string Role, string Provider, string Model)> OnSaveEscalation { get; set; }
     [Parameter] public EventCallback<string> OnClearModel { get; set; }
+    [Parameter] public EventCallback<string> OnClearEscalation { get; set; }
 
     private bool _expanded;
     private bool _wasEditing;
+    private bool _wasEditingEscalation;
     private string _editProvider = "";
     private string _editModel = "";
     private string[] _availableModels = Array.Empty<string>();
@@ -328,15 +393,21 @@
 
     protected override async Task OnParametersSetAsync()
     {
-        // Entering edit mode: seed the inputs from the current model
-        // and load the provider's available-model catalog.
-        if (Editing && !_wasEditing)
+        // Entering edit mode (either tier) OR switching tiers mid-edit:
+        // seed the inputs from THAT tier's current model and load the
+        // provider's available-model catalog. Without the tier check a
+        // model→escalation switch keeps the normal model's values and
+        // Save silently writes them as the escalation override.
+        var editingNow = Editing || EditingEscalation;
+        if (editingNow && (!_wasEditing || _wasEditingEscalation != EditingEscalation))
         {
-            _editProvider = Model.Provider ?? (Providers.FirstOrDefault() ?? "");
-            _editModel = Model.Model ?? "";
+            var seed = EditingEscalation ? EscalationModel : Model;
+            _editProvider = seed?.Provider ?? (Providers.FirstOrDefault() ?? "");
+            _editModel = seed?.Model ?? "";
             await LoadModelsAsync();
         }
-        _wasEditing = Editing;
+        _wasEditing = editingNow;
+        _wasEditingEscalation = EditingEscalation;
     }
 
     /// <summary>Available models for the selected provider, fetched
@@ -360,7 +431,9 @@
     private sealed record ProviderModelsResponse(string Provider, string[] Models);
 
     private Task SaveModelAsync()
-        => OnSaveModel.InvokeAsync((Name, _editProvider, _editModel));
+        => EditingEscalation
+            ? OnSaveEscalation.InvokeAsync((Name, _editProvider, _editModel))
+            : OnSaveModel.InvokeAsync((Name, _editProvider, _editModel));
 
     private static string Elapsed(DateTime since)
     {

@@ -169,4 +169,214 @@ public class RoleModelOverridesTests : IDisposable
         Assert.Equal("scoped-model", second.Get(AgentType.CoreDev, "porthorizon")!.Model);
         Assert.Equal("global-model", second.Get(AgentType.CoreDev, "forge")!.Model);
     }
+
+    // ---- Phase 3: the escalation tier ----
+
+    [Fact]
+    public async Task Escalation_SetThenGet_RoundTrips_IndependentOfModelTier()
+    {
+        var overrides = new RoleModelOverrides(_memory);
+        Assert.Null(overrides.GetEscalation(AgentType.CoreDev));
+
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "openai", "gpt-5-pro");
+        Assert.Equal("gpt-5-pro", overrides.GetEscalation(AgentType.CoreDev)!.Model);
+        // The tiers never collide: the model override stays unset.
+        Assert.Null(overrides.Get(AgentType.CoreDev));
+        Assert.Equal("global", overrides.GetEscalationScope(AgentType.CoreDev, "forge"));
+    }
+
+    [Fact]
+    public async Task Escalation_LoadAsync_Rehydrates()
+    {
+        var first = new RoleModelOverrides(_memory);
+        await first.SetEscalationAsync(AgentType.CoreDev, "openai", "esc-global");
+        await first.SetEscalationAsync(AgentType.CoreDev, "kilo-gateway", "esc-scoped", projectId: "porthorizon");
+
+        var second = new RoleModelOverrides(_memory);
+        await second.LoadAsync();
+
+        Assert.Equal("esc-scoped", second.GetEscalation(AgentType.CoreDev, "porthorizon")!.Model);
+        Assert.Equal("esc-global", second.GetEscalation(AgentType.CoreDev, "forge")!.Model);
+        Assert.Equal("project", second.GetEscalationScope(AgentType.CoreDev, "porthorizon"));
+    }
+
+    [Fact]
+    public async Task Escalation_ProjectOverride_NeverLeaksIntoOtherProjects()
+    {
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "openai", "esc-scoped", projectId: "porthorizon");
+
+        Assert.Null(overrides.GetEscalation(AgentType.CoreDev, "forge"));
+        Assert.Null(overrides.GetEscalation(AgentType.CoreDev));
+        Assert.Equal("esc-scoped", overrides.GetEscalation(AgentType.CoreDev, "porthorizon")!.Model);
+    }
+
+    [Fact]
+    public async Task ResolveEscalation_Unset_WhenNothingConfigured()
+    {
+        // Explicit-only escalation: no override + no config entry =
+        // NO provider-default fallback.
+        var overrides = new RoleModelOverrides(_memory);
+        Assert.Null(Config().ResolveEscalationEffective(AgentType.CoreDev, overrides, "forge"));
+    }
+
+    [Fact]
+    public async Task ResolveEscalation_ResolutionOrder_ProjectOverride_GlobalOverride_Config()
+    {
+        var overrides = new RoleModelOverrides(_memory);
+        var config = new LlmConfig(
+            Providers: new[]
+            {
+                new ProviderConfig("kilo-gateway", "http://gw", "key", null, "minimax/minimax-m3"),
+                new ProviderConfig("openai", "http://oai", "key", null, "gpt-5"),
+            },
+            DefaultProvider: "kilo-gateway",
+            Roles: new Dictionary<AgentType, RoleModel>(),
+            EscalationRoles: new Dictionary<AgentType, RoleModel>
+            {
+                [AgentType.CoreDev] = new("kilo-gateway", "esc-config"),
+            });
+
+        // Config entry only.
+        var r1 = config.ResolveEscalationEffective(AgentType.CoreDev, overrides, "porthorizon");
+        Assert.Equal("esc-config", r1!.Value.Model);
+        Assert.False(r1.Value.IsOverride);
+
+        // Global override beats config.
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "openai", "esc-global");
+        var r2 = config.ResolveEscalationEffective(AgentType.CoreDev, overrides, "porthorizon");
+        Assert.Equal("esc-global", r2!.Value.Model);
+        Assert.True(r2.Value.IsOverride);
+
+        // Project override beats global.
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "openai", "esc-scoped", projectId: "porthorizon");
+        var r3 = config.ResolveEscalationEffective(AgentType.CoreDev, overrides, "porthorizon");
+        Assert.Equal("esc-scoped", r3!.Value.Model);
+        // Another project still sees the global override.
+        var r4 = config.ResolveEscalationEffective(AgentType.CoreDev, overrides, "forge");
+        Assert.Equal("esc-global", r4!.Value.Model);
+    }
+
+    [Fact]
+    public async Task ResolveEscalation_DanglingOverride_FallsToConfig_ThenUnset()
+    {
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "removed-provider", "esc-gone");
+
+        // No config entry → unset (never the provider default).
+        Assert.Null(Config().ResolveEscalationEffective(AgentType.CoreDev, overrides, "forge"));
+
+        // Config entry catches the fall.
+        var config = new LlmConfig(
+            Providers: new[] { new ProviderConfig("kilo-gateway", "http://gw", "key", null, "m") },
+            DefaultProvider: "kilo-gateway",
+            Roles: new Dictionary<AgentType, RoleModel>(),
+            EscalationRoles: new Dictionary<AgentType, RoleModel>
+            {
+                [AgentType.CoreDev] = new("kilo-gateway", "esc-config"),
+            });
+        Assert.Equal("esc-config",
+            config.ResolveEscalationEffective(AgentType.CoreDev, overrides, "forge")!.Value.Model);
+    }
+
+    [Fact]
+    public async Task ResolveEscalation_DanglingProjectOverride_FallsToGlobalOverride_NotConfig()
+    {
+        // Each override tier gets its OWN provider-validity check: a
+        // dangling project-scoped override falls to the GLOBAL
+        // override, never straight to config.
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "removed-provider", "esc-dangling", projectId: "porthorizon");
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "openai", "esc-global");
+
+        var config = new LlmConfig(
+            Providers: new[]
+            {
+                new ProviderConfig("kilo-gateway", "http://gw", "key", null, "m"),
+                new ProviderConfig("openai", "http://oai", "key", null, "gpt-5"),
+            },
+            DefaultProvider: "kilo-gateway",
+            Roles: new Dictionary<AgentType, RoleModel>(),
+            EscalationRoles: new Dictionary<AgentType, RoleModel>
+            {
+                [AgentType.CoreDev] = new("kilo-gateway", "esc-config"),
+            });
+
+        var resolved = config.ResolveEscalationEffective(AgentType.CoreDev, overrides, "porthorizon");
+        Assert.Equal("esc-global", resolved!.Value.Model);
+        Assert.True(resolved.Value.IsOverride);
+    }
+
+    [Fact]
+    public async Task Escalation_Clear_RemovesFromStoreAndSnapshot()
+    {
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetEscalationAsync(AgentType.CoreDev, "openai", "esc");
+        await overrides.ClearEscalationAsync(AgentType.CoreDev);
+        Assert.Null(overrides.GetEscalation(AgentType.CoreDev));
+
+        var fresh = new RoleModelOverrides(_memory);
+        await fresh.LoadAsync();
+        Assert.Null(fresh.GetEscalation(AgentType.CoreDev));
+    }
+
+    // ---- Phase 3 inheritance cut: per-role independence ----
+
+    [Fact]
+    public async Task ResolveEffective_OverrideForOneRole_NeverAppliesToAnother()
+    {
+        // The inheritance cut means designer/groomer/artist resolve
+        // independently: a CoreDev override must not leak into the
+        // groomer's resolution.
+        var overrides = new RoleModelOverrides(_memory);
+        await overrides.SetAsync(AgentType.CoreDev, "openai", "gpt-5-mini");
+
+        var config = Config();
+        var (pCore, mCore, _) = config.ResolveEffective(AgentType.CoreDev, overrides, "forge");
+        Assert.Equal("gpt-5-mini", mCore);
+        var (pGroomer, mGroomer, isOverrideGroomer) = config.ResolveEffective(AgentType.Groomer, overrides, "forge");
+        Assert.Equal("minimax/minimax-m3", mGroomer);
+        Assert.False(isOverrideGroomer);
+    }
+
+    [Fact]
+    public void Adapter_MapsEscalationModel_AndPipelineRoleKeys()
+    {
+        // llm.roles.<AgentType>.escalationModel lands in
+        // LlmConfig.EscalationRoles; the new pipeline AgentTypes
+        // (Designer/Groomer/Artist) are valid role keys.
+        var options = new Forge.Configuration.LlmOptions
+        {
+            DefaultProvider = "kilo-gateway",
+            Providers =
+            {
+                new Forge.Configuration.LlmProviderOptions
+                { Name = "kilo-gateway", BaseUrl = "http://gw", DefaultModel = "minimax/minimax-m3" },
+                new Forge.Configuration.LlmProviderOptions
+                { Name = "openai", BaseUrl = "http://oai", DefaultModel = "gpt-5" },
+            },
+            Roles =
+            {
+                ["CoreDev"] = new Forge.Configuration.LlmRoleModelOptions
+                {
+                    ProviderName = "kilo-gateway",
+                    Model = "minimax/minimax-m3",
+                    EscalationModel = new Forge.Configuration.LlmRoleModelOptions
+                    { ProviderName = "openai", Model = "gpt-5-pro" },
+                },
+                ["Groomer"] = new Forge.Configuration.LlmRoleModelOptions
+                { ProviderName = "kilo-gateway", Model = "kimi-k3" },
+            },
+        };
+
+        var config = LlmConfigAdapter.FromOptions(options);
+
+        Assert.Equal("kimi-k3", config.Roles[AgentType.Groomer].Model);
+        Assert.Equal("gpt-5-pro", config.EscalationRoles![AgentType.CoreDev].Model);
+        Assert.Equal("openai", config.EscalationRoles[AgentType.CoreDev].ProviderName);
+        Assert.False(config.EscalationRoles.ContainsKey(AgentType.Groomer));
+        // The groomer resolves its OWN entry, not coredev's.
+        var (_, groomerModel) = config.Resolve(AgentType.Groomer);
+        Assert.Equal("kimi-k3", groomerModel);
+    }
 }

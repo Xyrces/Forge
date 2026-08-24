@@ -156,7 +156,7 @@ public sealed class GroomerAgent
             {grounding}
             """;
 
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, runProjectId);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.Groomer, runProjectId);
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
 
         var createStoryTool = AIFunctionFactory.Create(
@@ -432,7 +432,7 @@ public sealed class GroomerAgent
             {grounding}
             """;
 
-        var chatClient = _chatClientFactory.Create(_config, AgentType.CoreDev, runProjectId);
+        var chatClient = _chatClientFactory.Create(_config, AgentType.Groomer, runProjectId);
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
         var agent = new ChatClientAgent(
             chatClient,

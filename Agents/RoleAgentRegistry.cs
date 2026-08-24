@@ -37,19 +37,17 @@ public sealed class RoleAgentRegistry
     }
 
     /// <summary>
-    /// Designer is an Orchestrator-only role (no AgentType). It's
-    /// registered as a custom entry under the key "designer" so
-    /// the LLM provider / model can be configured separately in
-    /// appsettings.json (llm.roles.designer). Falls back to CoreDev's
-    /// agent name when not configured.
+    /// Designer is an Orchestrator-only role (dispatched by the
+    /// DesignerScheduler, not per-task). Its model resolves through
+    /// its own <see cref="AgentType.Designer"/> (phase 3: no more
+    /// CoreDev inheritance).
     /// </summary>
     public const string DesignerAgentName = "designer";
 
     /// <summary>
-    /// P2.b: Artist is an Orchestrator-only role (no AgentType).
-    /// Same pattern as Designer: configured under
-    /// llm.roles.artist in appsettings.json; falls back to
-    /// CoreDev's agent name when not configured.
+    /// P2.b: Artist is an Orchestrator-only role. Same pattern as
+    /// Designer: its model resolves through its own
+    /// <see cref="AgentType.Artist"/>.
     /// </summary>
     public const string ArtistAgentName = "artist";
 
@@ -133,17 +131,16 @@ public sealed class RoleAgentRegistry
     /// A pipeline (scheduler-side) role: not dispatched per-task by the
     /// engineering loop, but a first-class agent the operator must be
     /// able to see (operator rule 2026-07-24: nothing hidden).
-    /// <see cref="ModelType"/> is set when the role has its own
-    /// AgentType (intake — its model is independently configurable);
-    /// <see cref="InheritsModelFrom"/> names the engineering role whose
-    /// model the scheduler borrows (designer/groomer/artist create
-    /// their chat clients as CoreDev). Orchestrator has no LLM at all.
+    /// <see cref="ModelType"/> is the role's own AgentType — every
+    /// pipeline role with an LLM resolves its model independently
+    /// (phase 3 inheritance cut: designer/groomer/artist used to
+    /// borrow CoreDev's client; nothing inherits anymore).
+    /// Orchestrator has no LLM at all.
     /// </summary>
     public sealed record PipelineRole(
         string AgentName,
         string Description,
         AgentType? ModelType,
-        string? InheritsModelFrom,
         string Surface);
 
     /// <summary>
@@ -153,12 +150,12 @@ public sealed class RoleAgentRegistry
     /// </summary>
     public static readonly IReadOnlyList<PipelineRole> Pipeline = new[]
     {
-        new PipelineRole("artist",       "Visual asset generation (Meshy)",            null,             "coredev", "/art"),
-        new PipelineRole("designer",     "Spec → design artifacts (hygiene + visuals)", null,            "coredev", "/designs"),
-        new PipelineRole("groomer",      "Spec + ad-hoc technical grooming",           null,             "coredev", "/specs"),
-        new PipelineRole("intake",       "Operator intake sessions → epics/specs",     AgentType.Intake, null,      "/intake"),
-        new PipelineRole("orchestrator", "Dispatch loop — no LLM",                     null,             null,      "/flow"),
-        new PipelineRole("triage",       "Failure triage — bounded auto-remediation",  AgentType.Triage, null,      "/triage"),
+        new PipelineRole("artist",       "Visual asset generation (Meshy)",            AgentType.Artist,  "/art"),
+        new PipelineRole("designer",     "Spec → design artifacts (hygiene + visuals)", AgentType.Designer, "/designs"),
+        new PipelineRole("groomer",      "Spec + ad-hoc technical grooming",           AgentType.Groomer,  "/specs"),
+        new PipelineRole("intake",       "Operator intake sessions → epics/specs",     AgentType.Intake,   "/intake"),
+        new PipelineRole("orchestrator", "Dispatch loop — no LLM",                     null,                "/flow"),
+        new PipelineRole("triage",       "Failure triage — bounded auto-remediation",  AgentType.Triage,   "/triage"),
     };
 
     /// <summary>

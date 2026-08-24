@@ -18,6 +18,12 @@ public enum AgentType
     Reviewer,
     Intake,
     Triage,
+    // Pipeline (scheduler-side) roles with their own model identity
+    // (phase 3 inheritance cut: every AgentType resolves
+    // independently — override → llm.roles → provider default).
+    Designer,
+    Groomer,
+    Artist,
 }
 
 public enum AgentStatus

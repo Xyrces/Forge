@@ -32,26 +32,26 @@ public class RoleCatalogTests
     [Fact]
     public void PipelineCatalog_ModelSemantics_AreExplicit()
     {
-        // Intake and triage are the only pipeline roles with their own
-        // AgentType — hence independently editable models.
+        // Phase 3 inheritance cut: every LLM-backed pipeline role has
+        // its OWN AgentType — nothing borrows coredev's client anymore.
         var intake = Assert.Single(RoleAgentRegistry.Pipeline, p => p.AgentName == "intake");
         Assert.Equal(Core.AgentType.Intake, intake.ModelType);
         var triage = Assert.Single(RoleAgentRegistry.Pipeline, p => p.AgentName == "triage");
         Assert.Equal(Core.AgentType.Triage, triage.ModelType);
-        Assert.Null(triage.InheritsModelFrom);
 
-        // Designer/groomer/artist borrow coredev's chat client; the
-        // UI must SAY that instead of implying separate config.
-        foreach (var name in new[] { "designer", "groomer", "artist" })
+        foreach (var (name, type) in new[]
+        {
+            ("designer", Core.AgentType.Designer),
+            ("groomer", Core.AgentType.Groomer),
+            ("artist", Core.AgentType.Artist),
+        })
         {
             var role = Assert.Single(RoleAgentRegistry.Pipeline, p => p.AgentName == name);
-            Assert.Null(role.ModelType);
-            Assert.Equal("coredev", role.InheritsModelFrom);
+            Assert.Equal(type, role.ModelType);
         }
 
         // The orchestrator runs no LLM at all.
         var orch = Assert.Single(RoleAgentRegistry.Pipeline, p => p.AgentName == "orchestrator");
         Assert.Null(orch.ModelType);
-        Assert.Null(orch.InheritsModelFrom);
     }
 }

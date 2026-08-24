@@ -21,6 +21,11 @@ public static class FailureTriageActions
     /// as a suspected product bug. Ledger flag only — no issue is
     /// created (operator constraint).</summary>
     public const string TriageFlagBug = "triage-flag-bug";
+    /// <summary>Phase 3: the triage agent escalated the task's next dev
+    /// run to the role's configured escalation model. Writes the
+    /// single-shot llm/taskModel marker and requeues the task (spends
+    /// a strike round, like a triage requeue).</summary>
+    public const string TriageEscalateModel = "escalate_model";
 }
 
 /// <summary>Ledger actors.</summary>

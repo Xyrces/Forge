@@ -70,7 +70,12 @@ public sealed record RoleModel(
 public sealed record LlmConfig(
     IReadOnlyList<ProviderConfig> Providers,
     string DefaultProvider,
-    IReadOnlyDictionary<AgentType, RoleModel> Roles)
+    IReadOnlyDictionary<AgentType, RoleModel> Roles,
+    // Per-role escalation models (phase 3): where a triage-escalated
+    // run goes. Sits BELOW the DB escalation overrides
+    // (llm/roleEscalationModel/...) in resolution; a role with no
+    // entry and no override has NO escalation target.
+    IReadOnlyDictionary<AgentType, RoleModel>? EscalationRoles = null)
 {
     /// <summary>
     /// Convenience constructor for single-provider / no-role-dict configs
@@ -142,6 +147,7 @@ public static class LlmConfigAdapter
             SharedQuota: p.SharedQuota,
             MaxOutputTokens: p.MaxOutputTokens > 0 ? p.MaxOutputTokens : null)).ToList();
         var roles = new Dictionary<AgentType, RoleModel>(capacity: options.Roles.Count);
+        var escalationRoles = new Dictionary<AgentType, RoleModel>();
         foreach (var (key, value) in options.Roles)
         {
             if (!Enum.TryParse<AgentType>(key, ignoreCase: true, out var role))
@@ -151,7 +157,13 @@ public static class LlmConfigAdapter
                     $"Valid roles: {string.Join(", ", Enum.GetNames<AgentType>())}.");
             }
             roles[role] = new RoleModel(value.ProviderName, value.Model);
+            if (value.EscalationModel is { } esc
+                && !string.IsNullOrWhiteSpace(esc.ProviderName)
+                && !string.IsNullOrWhiteSpace(esc.Model))
+            {
+                escalationRoles[role] = new RoleModel(esc.ProviderName, esc.Model);
+            }
         }
-        return new LlmConfig(providers, options.DefaultProvider, roles);
+        return new LlmConfig(providers, options.DefaultProvider, roles, escalationRoles);
     }
 }

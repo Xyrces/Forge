@@ -236,6 +236,11 @@ public static class ForgeComposition
         var roleModelOverrides = new RoleModelOverrides(memoryStore);
         await roleModelOverrides.LoadAsync(ct);
         services.AddSingleton(roleModelOverrides);
+        // Phase 3: single-shot triage escalation markers — same
+        // primary MemoryStore + snapshot shape as the role overrides.
+        var taskModelEscalations = new TaskModelEscalations(memoryStore);
+        await taskModelEscalations.LoadAsync(ct);
+        services.AddSingleton(taskModelEscalations);
         // ONE shared 429 tracker for the whole process: a 429 from ANY
         // subsystem cools that model for ALL of them.
         var modelRateLimits = new ModelRateLimitTracker();
@@ -459,7 +464,9 @@ public static class ForgeComposition
             runnerFactory: ctx => new Agents.TriageAgent(
                 chatClientFactory, llmConfig, ctx.Issues, ctx.Triage, lifecycle,
                 ctx.Options.Id, ctx.Options.Root,
-                loggerFactory.CreateLogger<Agents.TriageAgent>()),
+                loggerFactory.CreateLogger<Agents.TriageAgent>(),
+                escalation: new Agents.TriageEscalationContext(
+                    taskModelEscalations, llmConfig, roleModelOverrides, ctx.Options.Id)),
             sp.GetRequiredService<ILogger<Consumers.TriageConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TriageConsumer>());
         services.AddSingleton(sp => new Consumers.ReviewVerdictRecordedConsumer(
@@ -499,6 +506,7 @@ public static class ForgeComposition
             wakeup: wakeups.Dispatch);
         orchestrator.BindOptions(options);
         orchestrator.ModelOverrides = roleModelOverrides;
+        orchestrator.TaskEscalations = taskModelEscalations;
         services.AddSingleton(orchestrator);
 
         var intakeStore = new IntakeStore(issues);

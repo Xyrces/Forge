@@ -83,6 +83,8 @@ public static class AgentsEndpoints
                     model = new { provider = (string?)p.Name, model = (string?)m, source };
                 }
 
+                var escalationModel = ResolveEscalationDto(llmConfig, overrides, agentType, pid);
+
                 // Prompt: per-project agents/ dir wins, else built-ins.
                 var (promptSource, promptPath, promptContent) = LoadPrompt(projectRoot, role.AgentName);
 
@@ -97,6 +99,16 @@ public static class AgentsEndpoints
                     slotMax = Configuration.DefaultProjectRoles.MaxFor(
                         new Dictionary<string, int>(projectRoles, StringComparer.OrdinalIgnoreCase), role.AgentName);
 
+                // Phase 3: the role's escalation pool (1 per project+role
+                // while an escalated run is in flight). Zero-max when no
+                // escalated run has ever dispatched for this pool.
+                var escPoolRole = Orchestrator.OrchestratorAgent.EscalationPoolRole(role.AgentName);
+                var escalationSlot = new
+                {
+                    inFlight = slots?.InFlight(slotPid, escPoolRole) ?? 0,
+                    max = slots?.MaxFor(slotPid, escPoolRole) ?? 0,
+                };
+
                 roles.Add(new
                 {
                     name = role.AgentName,
@@ -104,7 +116,9 @@ public static class AgentsEndpoints
                     territory = role.ProjectSubdir,
                     tools = role.AllowedTools,
                     model,
+                    escalationModel,
                     slot = new { inFlight = slots?.InFlight(slotPid, role.AgentName) ?? 0, max = slotMax },
+                    escalationSlot,
                     prompt = new { source = promptSource, path = promptPath, content = promptContent },
                     currentRun = activeRun is null ? null : new
                     {
@@ -135,9 +149,9 @@ public static class AgentsEndpoints
             // Pipeline (scheduler-side) roles — the same catalog the
             // project drill-down's slot grid renders, so both surfaces
             // answer "what agents exist?" identically. Model column:
-            // intake resolves its own AgentType; designer/groomer/
-            // artist borrow coredev's client (shown, not separately
-            // editable); the orchestrator runs no LLM.
+            // every LLM-backed pipeline role resolves its own AgentType
+            // (phase 3 inheritance cut: nothing borrows coredev's
+            // client anymore); the orchestrator runs no LLM.
             var pipeline = new List<object>();
             foreach (var pr in RoleAgentRegistry.Pipeline)
             {
@@ -155,15 +169,14 @@ public static class AgentsEndpoints
                         : "default";
                     pModel = new { provider = (string?)p.Name, model = (string?)m, source };
                 }
-                else if (pr.InheritsModelFrom is not null)
-                {
-                    var (p, m, _) = llmConfig.ResolveEffective(Core.AgentType.CoreDev, overrides, pid);
-                    pModel = new { provider = (string?)p.Name, model = (string?)m, source = $"inherits {pr.InheritsModelFrom}" };
-                }
                 else
                 {
                     pModel = new { provider = (string?)null, model = (string?)null, source = "none" };
                 }
+
+                var pEscalationModel = pr.ModelType is { } emt
+                    ? ResolveEscalationDto(llmConfig, overrides, emt, pid)
+                    : null;
 
                 var pSlotMax = slots?.MaxFor(slotPid, pr.AgentName) ?? 0;
                 if (pSlotMax == 0)
@@ -176,6 +189,7 @@ public static class AgentsEndpoints
                     description = pr.Description,
                     surface = pr.Surface,
                     model = pModel,
+                    escalationModel = pEscalationModel,
                     modelEditable = pr.ModelType is not null,
                     slot = new { inFlight = slots?.InFlight(slotPid, pr.AgentName) ?? 0, max = pSlotMax },
                 });
@@ -237,17 +251,69 @@ public static class AgentsEndpoints
             await overrides.ClearAsync(agentType.Value, ct, projectId: projectId);
             return Results.Ok(new { role = name, projectId, source = "config-or-default" });
         });
+
+        // Phase 3: per-role ESCALATION model — where a triage-escalated
+        // run goes. Same override mechanics (project-scoped by default,
+        // DB-backed, no restart); distinct key tier so the two never
+        // collide.
+        app.MapPut("/api/agents/roles/{name}/escalation-model", async (string name, PutRoleModelRequest? body, CancellationToken ct) =>
+        {
+            if (overrides is null || llmConfig is null)
+                return Results.Json(new { error = "model overrides are not available in this mode" }, statusCode: 503);
+            if (body is null || string.IsNullOrWhiteSpace(body.Provider) || string.IsNullOrWhiteSpace(body.Model))
+                return Results.BadRequest(new { error = "provider and model are required" });
+            var agentType = ResolveAgentType(registry, name);
+            if (agentType is null)
+                return Results.NotFound(new { error = $"unknown role '{name}'" });
+            if (llmConfig.Providers.All(p => !string.Equals(p.Name, body.Provider, StringComparison.OrdinalIgnoreCase)))
+                return Results.BadRequest(new { error = $"provider '{body.Provider}' is not configured; known: {string.Join(", ", llmConfig.Providers.Select(p => p.Name))}" });
+
+            await overrides.SetEscalationAsync(agentType.Value, body.Provider, body.Model, ct, projectId: body.ProjectId);
+            return Results.Ok(new { role = name, provider = body.Provider, model = body.Model, source = "override" });
+        });
+
+        app.MapDelete("/api/agents/roles/{name}/escalation-model", async (string name, string? projectId, CancellationToken ct) =>
+        {
+            if (overrides is null)
+                return Results.Json(new { error = "model overrides are not available in this mode" }, statusCode: 503);
+            var agentType = ResolveAgentType(registry, name);
+            if (agentType is null)
+                return Results.NotFound(new { error = $"unknown role '{name}'" });
+            await overrides.ClearEscalationAsync(agentType.Value, ct, projectId: projectId);
+            return Results.Ok(new { role = name, projectId, source = "config-or-unset" });
+        });
+    }
+
+    /// <summary>The role's escalation-model display DTO: project
+    /// override → global override → llm.roles escalationModel → unset
+    /// (null — explicit-only escalation).</summary>
+    private static object? ResolveEscalationDto(
+        LlmConfig? llmConfig, RoleModelOverrides? overrides, Core.AgentType agentType, string? pid)
+    {
+        if (llmConfig is null) return null;
+        var resolved = llmConfig.ResolveEscalationEffective(agentType, overrides, pid);
+        if (resolved is null) return null;
+        var (p, m, isOverride) = resolved.Value;
+        var source = isOverride
+            ? (overrides?.GetEscalationScope(agentType, pid) == "project" ? "override (project)" : "override (global)")
+            : "config";
+        return new { provider = (string?)p.Name, model = (string?)m, source };
     }
 
     /// <summary>Role name → AgentType for the override APIs: the four
-    /// engineering roles via the registry, plus intake (the only
-    /// pipeline role with its own AgentType + model).</summary>
+    /// engineering roles via the registry, plus every pipeline role
+    /// with its own ModelType (intake, triage, and — since the phase 3
+    /// inheritance cut — designer/groomer/artist).</summary>
     private static Core.AgentType? ResolveAgentType(RoleAgentRegistry registry, string name)
     {
         var role = registry.ByAgentName(name);
         if (role is not null) return registry.TypeOf(role);
-        if (string.Equals(name, "intake", StringComparison.OrdinalIgnoreCase)) return Core.AgentType.Intake;
-        if (string.Equals(name, "triage", StringComparison.OrdinalIgnoreCase)) return Core.AgentType.Triage;
+        foreach (var pr in RoleAgentRegistry.Pipeline)
+        {
+            if (pr.ModelType is not null
+                && string.Equals(pr.AgentName, name, StringComparison.OrdinalIgnoreCase))
+                return pr.ModelType;
+        }
         return null;
     }
 

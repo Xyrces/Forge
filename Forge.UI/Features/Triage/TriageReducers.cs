@@ -10,7 +10,7 @@ public static class TriageReducers
 
     [ReducerMethod]
     public static TriageState OnLedgerLoaded(TriageState state, TriageActions.LedgerLoadedAction action)
-        => state with { Loading = false, Summary = action.Summary, Groups = action.Groups, Health = action.Health, TriageEnabled = action.TriageEnabled, Error = null };
+        => state with { Loading = false, Summary = action.Summary, Groups = action.Groups, Health = action.Health, TriageEnabled = action.TriageEnabled, EscalatedInFlight = action.EscalatedInFlight, Error = null };
 
     [ReducerMethod]
     public static TriageState OnLedgerLoadFailed(TriageState state, TriageActions.LedgerLoadFailedAction action)

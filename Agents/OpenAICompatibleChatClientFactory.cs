@@ -112,9 +112,23 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _permits = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ProviderPacer> _pacers = new(StringComparer.OrdinalIgnoreCase);
 
-    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null)
+    public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null, RoleModel? modelOverride = null)
     {
-        var (provider, model, _) = config.ResolveEffective(role, Overrides, projectId);
+        // Per-task explicit model (triage escalation): wins over every
+        // other tier; ResolveExplicit throws on an unconfigured
+        // provider and the caller (MafAgentRunner) falls back.
+        ProviderConfig provider;
+        string model;
+        if (modelOverride is not null)
+        {
+            (provider, model) = config.ResolveExplicit(modelOverride);
+        }
+        else
+        {
+            var (p, m, _) = config.ResolveEffective(role, Overrides, projectId);
+            provider = p;
+            model = m;
+        }
         // Live key first: a rotated secret must also rescue a config
         // whose placeholder was never boot-resolved.
         if (KeyResolver?.Get(provider.Name) is { Length: > 0 } freshKey)
@@ -200,12 +214,14 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
     /// review verdicts, implementation choices, AND the planning-lane
     /// roles — intake's epic decomposition and the groomer's
     /// sprint-readiness judgments are the highest-leverage reasoning
-    /// in the system ("probably moreso than most"). The groomer
-    /// creates its client as AgentType.CoreDev, so it inherits the
-    /// budget through that branch. Only meaningful for anthropic-api
+    /// in the system ("probably moreso than most"). Designer/Artist
+    /// keep the budget they previously inherited through the CoreDev
+    /// branch (phase 3 inheritance cut must not silently change
+    /// provider request shape). Only meaningful for anthropic-api
     /// providers — Build ignores it elsewhere.</summary>
     private static int? ThinkingBudgetFor(AgentType role)
         => role is AgentType.CoreDev or AgentType.Reviewer or AgentType.Intake
+            or AgentType.Groomer or AgentType.Designer or AgentType.Artist
             ? ThinkingBudgetTokens
             : null;
 

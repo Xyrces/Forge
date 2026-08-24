@@ -179,7 +179,7 @@ public class MafAgentRunnerSkillsTests
         public string? LastInstructions { get; private set; }
         public string? LastPrompt { get; private set; }
 
-        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null) => new CapturingClient(_inner, this);
+        public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null, RoleModel? modelOverride = null) => new CapturingClient(_inner, this);
 
         private sealed class CapturingClient : IChatClient
         {
