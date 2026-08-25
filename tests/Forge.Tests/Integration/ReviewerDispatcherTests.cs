@@ -156,6 +156,50 @@ public class ReviewerDispatcherTests : IDisposable
     }
 
     [Fact]
+    public async Task ReviewOnce_QaPendingAtHead_ReviewWaits()
+    {
+        // QA-stage sequencing pin: with the project $qa flag on and NO
+        // current QA verdict at the head, the review self-skips (the
+        // sweep is (re)running QA; QA completion relaunches the review).
+        var gh = new FakeGitHub();
+        var runner = new ScriptedRunner("REVIEWER_VERDICT: APPROVE");
+        var dispatcher = new ReviewerDispatcher(_issues, gh, runner,
+            NullLogger<ReviewerDispatcher>.Instance, qaEnabled: true);
+        var watch = await SeedWatchAsync();
+
+        var outcome = await dispatcher.ReviewOnceAsync(watch, headShaOverride: _ => "abc123");
+
+        Assert.Null(outcome);
+        Assert.Equal(0, runner.Calls);
+    }
+
+    [Fact]
+    public async Task ReviewOnce_QaNotApplicableAtHead_ReviewProceeds()
+    {
+        // The 3-tier QA gate pin: a dispatcher-stamped not-applicable
+        // verdict (docs-only head, no QA run) is CURRENT QA — the
+        // review must not wait on it.
+        var gh = new FakeGitHub();
+        var runner = new ScriptedRunner("REVIEWER_VERDICT: APPROVE");
+        var dispatcher = new ReviewerDispatcher(_issues, gh, runner,
+            NullLogger<ReviewerDispatcher>.Instance, qaEnabled: true);
+        var watch = await SeedWatchAsync();
+        await _issues.TransitionAsync(watch.Id, watch.Status, null,
+            new Dictionary<string, object>
+            {
+                ["qaSha"] = "abc123",
+                ["qaVerdict"] = QaDispatcher.VerdictNotApplicable,
+            });
+        watch = (await _issues.GetAsync(watch.Id))!;
+
+        var outcome = await dispatcher.ReviewOnceAsync(watch, headShaOverride: _ => "abc123");
+
+        Assert.NotNull(outcome);
+        Assert.Equal(ReviewerVerdict.Approve, outcome!.Verdict);
+        Assert.Equal(1, runner.Calls);
+    }
+
+    [Fact]
     public async Task ReviewOnce_LlmThrows_ErrorVerdict_NoSilentApprove()
     {
         var gh = new FakeGitHub();

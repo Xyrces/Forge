@@ -368,7 +368,11 @@ public sealed class PRWatcher
         var qaVerdict = task.GetMetadata("qaVerdict");
         var qaSha = task.GetMetadata("qaSha");
         var qaCurrent = string.Equals(qaSha, sha, StringComparison.Ordinal) && !string.IsNullOrEmpty(qaVerdict);
-        var qaPassed = !_qaEnabled || (qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictPass, StringComparison.Ordinal));
+        // pass OR not-applicable (docs-only head — the 3-tier
+        // applicability gate stamped it with no run) satisfy the gate.
+        var qaPassed = !_qaEnabled || (qaCurrent
+            && (string.Equals(qaVerdict, QaDispatcher.VerdictPass, StringComparison.Ordinal)
+                || string.Equals(qaVerdict, QaDispatcher.VerdictNotApplicable, StringComparison.Ordinal)));
         var qaFailed = _qaEnabled && qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal);
 
         // Rework guard: a rework round was already queued FOR THIS

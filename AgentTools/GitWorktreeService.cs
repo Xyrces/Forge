@@ -268,6 +268,16 @@ public sealed class GitWorktreeService
         return result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
+    /// <summary>ALL paths changed on HEAD relative to the base
+    /// (origin-preferred, three-dot merge-base diff) — the QA
+    /// applicability classifier's input.</summary>
+    public async Task<IReadOnlyList<string>> GetChangedFilesAsync(string worktreePath, string baseBranch, CancellationToken cancellationToken = default)
+    {
+        var baseRef = await ResolveRemoteBaseRefAsync(worktreePath, baseBranch, cancellationToken);
+        var result = await RunGitInAsync(worktreePath, $"diff --name-only \"{baseRef}...HEAD\"", cancellationToken);
+        return result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
     /// <summary>The local <c>main</c> ref in a worktree can be
     /// arbitrarily stale (created with the worktree, never moved).
     /// <c>origin/&lt;base&gt;</c> is refreshed by every sync/fetch
