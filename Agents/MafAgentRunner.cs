@@ -446,7 +446,7 @@ public async Task<AgentRunResult> RunAsync(
                 _logger.LogWarning(
                     "Role {Role}: tool-call markup leaked into response text; nudging model to continue ({N}/{Max})",
                     role, continuation + 1, maxContinuations);
-                var nudge = new ChatMessage(ChatRole.User, LeakedToolCallContinuationPrompt);
+                var nudge = new ChatMessage(ChatRole.User, LeakedToolCallMarkup.ContinuationPrompt);
                 response = await agent.RunAsync(
                     nudge,
                     session, cancellationToken: ct);
@@ -1292,16 +1292,6 @@ public async Task<AgentRunResult> RunAsync(
         }
     }
 
-    /// <summary>
-    /// Nudge sent when the model emits a tool call as plain-text markup
-    /// (see the minimax-m3 note in RunAsync). Deliberately short: the
-    /// model has the full conversation in its session already.
-    /// </summary>
-    private const string LeakedToolCallContinuationPrompt =
-        "Your previous message contained a tool call emitted as plain-text markup, which cannot be executed. " +
-        "If you intended to call a tool, re-issue it now as a proper tool call. " +
-        "If you have already completed the task, reply with a brief summary of what you changed (no markup).";
-
     private static string LastAssistantText(AgentResponse response) =>
         response.Messages.LastOrDefault(m => m.Role == ChatRole.Assistant)?.Text ?? string.Empty;
 
@@ -1324,12 +1314,12 @@ public async Task<AgentRunResult> RunAsync(
     /// <summary>
     /// True when assistant text contains tool-call markup that leaked
     /// into the content channel instead of arriving as structured
-    /// tool_calls. Internal for tests.
+    /// tool_calls. Delegates to <see cref="LeakedToolCallMarkup"/> —
+    /// the single source shared with <see cref="PipelineAgentRunner"/>.
+    /// Internal for tests.
     /// </summary>
     internal static bool HasLeakedToolCallMarkup(string text) =>
-        text.Contains("]<]minimax[>", StringComparison.Ordinal) ||
-        text.Contains("<tool_call>", StringComparison.Ordinal) ||
-        text.Contains("<invoke name=", StringComparison.Ordinal);
+        LeakedToolCallMarkup.IsPresent(text);
 
     /// <summary>
     /// The memory-store key a run's persisted MAF session lives under:

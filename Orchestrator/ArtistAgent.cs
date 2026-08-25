@@ -145,14 +145,20 @@ public sealed class ArtistAgent
             {spec.Body}
             """;
 
-        var response = await agent.RunAsync(prompt, cancellationToken: ct);
+        var outcome = await new PipelineAgentRunner(_logger).RunAsync(
+            agent,
+            new[] { new ChatMessage(ChatRole.User, prompt) },
+            roleLabel: "artist",
+            ct: ct);
 
-        // Inspect the response. Track:
+        // Inspect the accumulated messages (ALL rounds — a nudged
+        // final round does not carry earlier rounds' tool results).
+        // Track:
         //  - art-output ids (art-...) from db_save_art_output results
         //  - meshy tasks from db_submit_meshy_job results
         var artOutputIds = new List<string>();
         var meshyTasks = new List<MeshyTaskRecord>();
-        foreach (var msg in response.Messages)
+        foreach (var msg in outcome.NewMessages)
         {
             foreach (var c in msg.Contents)
             {
@@ -188,8 +194,12 @@ public sealed class ArtistAgent
 
         if (newStatus is null)
         {
+            // The artist_run record has no response-text column; the
+            // excerpt rides the error field so a fizzle records what
+            // the model actually said.
             return await FinishFailureAsync(runId, spec.Id, "llm did not call db_set_spec_status", startedAt, ct,
-                "LLM completed without committing a spec status transition. The spec is left in its current state; re-run the Artist.");
+                $"LLM completed without committing a spec status transition; final text: {PipelineAgentRunner.FinalTextExcerpt(outcome.NewMessages)}. " +
+                "The spec is left in its current state; re-run the Artist.");
         }
 
         // Rebuild the meshy_tasks list from the art_output rows'

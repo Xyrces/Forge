@@ -217,7 +217,8 @@ public sealed class ProductAgent
 
         try
         {
-            var response = await agent.RunAsync(userMessage, cancellationToken: ct);
+            await new PipelineAgentRunner(_logger).RunAsync(
+                agent, new[] { userMessage }, roleLabel: "product", ct: ct);
             var refreshed = await _specs.GetAsync(specId, ct);
             _events.Publish(new DashboardEvent(DateTime.UtcNow,
                 refreshed is null ? "product.run.failed" : "product.run.completed",

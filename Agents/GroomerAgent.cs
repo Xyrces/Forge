@@ -227,7 +227,8 @@ public sealed class GroomerAgent
 
         try
         {
-            var response = await agent.RunAsync(userMessage, cancellationToken: ct);
+            await new PipelineAgentRunner(_logger).RunAsync(
+                agent, new[] { userMessage }, roleLabel: "groomer", ct: ct);
             var refreshed = await _specs.GetAsync(specId, ct);
             _events.Publish(new DashboardEvent(DateTime.UtcNow,
                 "groomer.run.completed", specId,
@@ -460,7 +461,8 @@ public sealed class GroomerAgent
         string? outcome = null;
         try
         {
-            await agent.RunAsync(userMessage, cancellationToken: ct);
+            await new PipelineAgentRunner(_logger).RunAsync(
+                agent, new[] { userMessage }, roleLabel: "task-groomer", ct: ct);
             var after = await _issues.GetAsync(issue.Id, ct);
             outcome = after is null ? null
                 : after.Status == IssueStatus.Closed ? "closed"
