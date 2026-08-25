@@ -430,6 +430,41 @@ public sealed class QaDispatcherTests : IDisposable
     }
 
     [Fact]
+    public async Task Tier3DocsOnly_ExhaustedBudget_StillStampsNotApplicable()
+    {
+        // The budget guards RUNS, not classification: a docs-only head
+        // spends no attempt, so a budget burned at the same head
+        // (pre-deploy, under the old every-head-raster bar — the live
+        // porthorizon qa-1 shape) must not park the task before the
+        // classifier ever sees the diff.
+        var runner = new FakeRunner { Reply = "no verdict marker at all" };
+        var task = await SeedTask();
+        var docsHead = DocsHeadSha(_workDir);
+        await _issues.TransitionAsync(task.Id, task.Status, null,
+            new Dictionary<string, object>
+            {
+                ["qaAttemptSha"] = docsHead,
+                ["qaAttempts"] = QaDispatcher.MaxQaAttempts.ToString(),
+                ["qaLastError"] = "pass verdict without raster screenshot evidence — not QA",
+            });
+        var dispatcher = NewDispatcher(runner);
+
+        var outcome = await dispatcher.VerifyOnceAsync(
+            (await _issues.GetAsync(task.Id))!, CancellationToken.None,
+            headOverride: _ => (docsHead, "agent/task-docs"));
+
+        Assert.NotNull(outcome);
+        Assert.Equal(QaDispatcher.VerdictNotApplicable, outcome!.Verdict);
+        Assert.Equal(0, runner.Calls);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("not-applicable", after.GetMetadata("qaVerdict"));
+        Assert.Equal("docs", after.GetMetadata("qaTier"));
+        Assert.NotEqual(IssueStatus.Blocked, after.Status);
+        Assert.Null(after.GetMetadata("qaAttempts"));
+        Assert.Null(after.GetMetadata("qaLastError"));
+    }
+
+    [Fact]
     public async Task Tier2Code_AnyFileEvidenceAccepted_RasterNotDemanded()
     {
         // No visual prefixes configured ⇒ nothing visual: the branch's
