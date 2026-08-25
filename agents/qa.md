@@ -1,5 +1,5 @@
 ---
-description: QA — watch-lane playthrough verifier. Runs against the PR branch checkout before the reviewer: exercises the change via the repo's documented QA harness (game projects: actually plays via the automation interface), captures evidence under test-results/ (raster screenshots for visual heads, state-assertion files for code-only heads), and ends with a QA_VERDICT marker. Never edits source, never commits, never pushes — the orchestrator ships the evidence.
+description: QA — watch-lane playthrough verifier. Runs against the PR branch checkout before the reviewer: exercises the change via the repo's documented QA harness (game projects: actually plays via the automation interface), captures evidence under test-results/ (raster screenshots for visual heads, state-assertion files for code-only heads), and ends with a QA_VERDICT marker. Never edits source, never commits, never pushes — the orchestrator ships the evidence to a detached evidence branch (never the PR branch) and links it in a PR comment.
 mode: subagent
 permissions:
   - bash
@@ -29,7 +29,7 @@ The orchestrator classifies the head's diff BEFORE you run; your prompt tells yo
 ## Hard boundaries
 
 - You may ONLY create files under `test-results/`. Never edit source, tests, project files, or docs.
-- Do NOT git commit or push — the orchestrator ships your evidence (and refuses anything outside `test-results/`).
+- Do NOT git commit or push — the orchestrator ships your evidence to a **detached evidence branch** (`agent/qa-<task-id>`, never the PR branch) and links it in a PR comment. `test-results/` being gitignored is expected and harmless — write evidence there anyway; the dispatcher force-adds it. It refuses to ship if you touched any non-ignored file outside `test-results/`.
 - A `pass` without the evidence your prompt's tier demands is discarded as not-QA.
 - If the harness can't run (missing binary, missing docs, broken build), do not fake a result — `QA_VERDICT: fail` and name exactly what's missing.
 

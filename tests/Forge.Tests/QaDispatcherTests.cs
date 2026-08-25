@@ -12,9 +12,13 @@ namespace Forge.Tests;
 
 /// <summary>
 /// The watch-lane QA stage: worktree sync at the PR head, verdict
-/// parsing, dispatcher-owned evidence shipping (evidence-paths-only
-/// enforcement, never the agent pushing), metadata recording, per-head
-/// dedupe, and the attempt budget that parks QA-unavailable tasks.
+/// parsing, dispatcher-owned DETACHED evidence shipping (evidence-only
+/// enforcement, force-added onto the agent/qa-&lt;taskId&gt; branch —
+/// never the PR branch — and linked in a PR comment), metadata
+/// recording, per-head dedupe, and the attempt budget that parks
+/// QA-unavailable tasks. The fixture's .gitignore ignores
+/// test-results/ (the porthorizon qa-1 policy) — evidence is ALWAYS
+/// gitignored here, pinning the ignored-evidence detection path.
 /// </summary>
 public sealed class QaDispatcherTests : IDisposable
 {
@@ -87,6 +91,11 @@ public sealed class QaDispatcherTests : IDisposable
         RunGit(_workDir, "config user.email test@example.com");
         RunGit(_workDir, "config user.name Test");
         File.WriteAllText(Path.Combine(_workDir, "README.md"), "# init");
+        // The porthorizon qa-1 policy shape: test-results/ is gitignored
+        // build output, never committed. QA evidence written there is
+        // invisible to plain git status — the dispatcher must still see
+        // and ship it (force-add onto the detached evidence branch).
+        File.WriteAllText(Path.Combine(_workDir, ".gitignore"), "test-results/\n");
         RunGit(_workDir, "add -A");
         RunGit(_workDir, "commit -q -m initial");
         RunGit(_workDir, $"clone --bare {_workDir} {_bareDir}");
@@ -110,7 +119,7 @@ public sealed class QaDispatcherTests : IDisposable
         RunGit(_workDir, "checkout -q -b agent/task-docs");
         Directory.CreateDirectory(Path.Combine(_workDir, "docs", "QA"));
         File.WriteAllText(Path.Combine(_workDir, "docs", "QA", "policy.md"), "# QA policy");
-        File.WriteAllText(Path.Combine(_workDir, ".gitignore"), "test-results/");
+        File.WriteAllText(Path.Combine(_workDir, ".gitignore"), "test-results/\n*.tmp\n");
         RunGit(_workDir, "add -A");
         RunGit(_workDir, "commit -q -m docs");
         RunGit(_workDir, "push -q -u origin agent/task-docs");
@@ -123,8 +132,16 @@ public sealed class QaDispatcherTests : IDisposable
     private sealed class FakeGitHub : GitHubService
     {
         public FakeGitHub() : base("o", "r", null) { }
+        public List<string> Comments { get; } = new();
+        public bool ThrowOnComment;
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult(new PullRequest(number));
+        public override Task<long> CreateIssueCommentAsync(long issueNumber, string body, CancellationToken cancellationToken = default)
+        {
+            if (ThrowOnComment) throw new InvalidOperationException("comments API down");
+            Comments.Add(body);
+            return Task.FromResult(1L);
+        }
     }
 
     /// <summary>Scripted agent: optionally drops files into the QA
@@ -161,8 +178,8 @@ public sealed class QaDispatcherTests : IDisposable
         return (await _issues.GetAsync(task.Id))!;
     }
 
-    private QaDispatcher NewDispatcher(FakeRunner runner, IReadOnlyList<string>? visualPaths = null) => new(
-        _issues, new FakeGitHub(), _worktrees, runner,
+    private QaDispatcher NewDispatcher(FakeRunner runner, IReadOnlyList<string>? visualPaths = null, FakeGitHub? gh = null) => new(
+        _issues, gh ?? new FakeGitHub(), _worktrees, runner,
         NullLogger<QaDispatcher>.Instance, projectId: "proj",
         visualPaths: visualPaths ?? new[] { "Client/" });
 
@@ -181,14 +198,15 @@ public sealed class QaDispatcherTests : IDisposable
     }
 
     [Fact]
-    public async Task Pass_WithRasterEvidence_CommitsPushes_RecordsMetadata_ThenDedupes()
+    public async Task Pass_WithRasterEvidence_ShipsDetached_RecordsMetadata_ThenDedupes()
     {
         var runner = new FakeRunner();
         runner.Drops.Add(("test-results/qa/task-1/01-boot.png", "fake-png-bytes"));
         runner.Drops.Add(("test-results/qa/task-1/notes.md", "observations"));
         var task = await SeedTask();
         var codeHead = PrHeadSha(_workDir);
-        var dispatcher = NewDispatcher(runner);
+        var gh = new FakeGitHub();
+        var dispatcher = NewDispatcher(runner, gh: gh);
 
         var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
             headOverride: _ => (codeHead, "agent/task-1"));
@@ -196,16 +214,21 @@ public sealed class QaDispatcherTests : IDisposable
         Assert.NotNull(outcome);
         Assert.True(outcome!.Verdict == QaDispatcher.VerdictPass, $"expected pass, got {outcome.Verdict}: {outcome.Error}");
         Assert.Equal(1, runner.Calls);
-        // The evidence commit landed on the PR branch (head moved).
-        var newHead = PrHeadSha(_workDir);
-        Assert.NotEqual(codeHead, newHead);
-        Assert.Equal(newHead, outcome.HeadSha);
-        var files = GitOut(_workDir, "ls-tree -r --name-only origin/agent/task-1");
-        Assert.Contains("test-results/qa/task-1/01-boot.png", files);
-        // Metadata: the verdict applies to the post-push head; qaForSha
-        // keeps the code head that was verified.
+        // DETACHED shipping: the PR branch head did NOT move — the
+        // evidence lives on the agent/qa-task-1 branch instead.
+        Assert.Equal(codeHead, PrHeadSha(_workDir));
+        Assert.Equal(codeHead, outcome.HeadSha);
+        var evidenceFiles = GitOut(_workDir, "ls-tree -r --name-only origin/agent/qa-task-1");
+        Assert.Contains("test-results/qa/task-1/01-boot.png", evidenceFiles);
+        Assert.Contains("test-results/qa/task-1/notes.md", evidenceFiles);
+        // The PR comment links the evidence (raster embedded via raw URL).
+        var comment = Assert.Single(gh.Comments);
+        Assert.Contains("**QA pass**", comment);
+        Assert.Contains("agent/qa-task-1", comment);
+        Assert.Contains("https://raw.githubusercontent.com/o/r/agent/qa-task-1/test-results/qa/task-1/01-boot.png", comment);
+        // Metadata: detached evidence ⇒ qaSha IS the code head.
         var after = (await _issues.GetAsync(task.Id))!;
-        Assert.Equal(newHead, after.GetMetadata("qaSha"));
+        Assert.Equal(codeHead, after.GetMetadata("qaSha"));
         Assert.Equal(codeHead, after.GetMetadata("qaForSha"));
         Assert.Equal("pass", after.GetMetadata("qaVerdict"));
         Assert.Equal("1", after.GetMetadata("qaRound"));
@@ -215,9 +238,34 @@ public sealed class QaDispatcherTests : IDisposable
         // Second call at the same head: deduped, no new run.
         var second = await dispatcher.VerifyOnceAsync(
             (await _issues.GetAsync(task.Id))!, CancellationToken.None,
-            headOverride: _ => (newHead, "agent/task-1"));
+            headOverride: _ => (codeHead, "agent/task-1"));
         Assert.Null(second);
         Assert.Equal(1, runner.Calls);
+    }
+
+    [Fact]
+    public async Task Pass_CommentFailure_DoesNotFailTheRound()
+    {
+        // The evidence comment is audit, not gate: a comments-API
+        // outage must not turn a shipped pass into an error.
+        var runner = new FakeRunner();
+        runner.Drops.Add(("test-results/qa/task-1/01-boot.png", "fake-png-bytes"));
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var gh = new FakeGitHub { ThrowOnComment = true };
+        var dispatcher = NewDispatcher(runner, gh: gh);
+
+        var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+
+        Assert.NotNull(outcome);
+        Assert.Equal(QaDispatcher.VerdictPass, outcome!.Verdict);
+        Assert.Equal(codeHead, PrHeadSha(_workDir));
+        var evidenceFiles = GitOut(_workDir, "ls-tree -r --name-only origin/agent/qa-task-1");
+        Assert.Contains("test-results/qa/task-1/01-boot.png", evidenceFiles);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("pass", after.GetMetadata("qaVerdict"));
+        Assert.Equal(codeHead, after.GetMetadata("qaSha"));
     }
 
     [Fact]
@@ -385,6 +433,12 @@ public sealed class QaDispatcherTests : IDisposable
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal("fail", after.GetMetadata("qaVerdict"));
         Assert.Contains("menu button", after.GetMetadata("qaNotes"));
+        Assert.Equal(codeHead, after.GetMetadata("qaSha"));
+        // Fail evidence ships detached too: PR head untouched, the
+        // raster is on the evidence branch.
+        Assert.Equal(codeHead, PrHeadSha(_workDir));
+        var evidenceFiles = GitOut(_workDir, "ls-tree -r --name-only origin/agent/qa-task-1");
+        Assert.Contains("test-results/qa/task-1/01-fail.png", evidenceFiles);
 
         // Same head: no re-run (the watcher turns the fail into a
         // rework round; QA re-runs on the rework push).
@@ -485,8 +539,11 @@ public sealed class QaDispatcherTests : IDisposable
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal("pass", after.GetMetadata("qaVerdict"));
         Assert.Equal("code", after.GetMetadata("qaTier"));
-        // The evidence commit landed (head moved) — dispatcher-shipped.
-        Assert.NotEqual(codeHead, PrHeadSha(_workDir));
+        // Detached: the PR head is untouched; the evidence (gitignored
+        // JSON — invisible to plain git status) shipped on agent/qa-task-1.
+        Assert.Equal(codeHead, PrHeadSha(_workDir));
+        var evidenceFiles = GitOut(_workDir, "ls-tree -r --name-only origin/agent/qa-task-1");
+        Assert.Contains("test-results/qa/task-1/state-dump.json", evidenceFiles);
     }
 
     [Fact]
