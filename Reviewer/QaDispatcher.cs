@@ -461,14 +461,22 @@ public sealed class QaDispatcher
             sb.AppendLine();
             sb.Append("Evidence (").Append(evidencePaths.Count).Append(" file(s), on the detached evidence branch `")
                 .Append(qaBranch).AppendLine("` — never merged to this PR):");
+            // Rasters FIRST: the inline embeds are the operator's QA bar
+            // (screenshots visible on the PR) — an alphabetical dump
+            // pushes them past the listing cap (observed live: task-743's
+            // comment showed 20 JSON churn files, zero screenshots).
+            static bool IsRaster(string p) =>
+                p.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                || p.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                || p.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase);
+            var ordered = evidencePaths
+                .OrderByDescending(p => IsRaster(p))
+                .ThenBy(p => p, StringComparer.Ordinal).ToList();
             var embedded = 0;
-            foreach (var path in evidencePaths.Take(20))
+            foreach (var path in ordered.Take(20))
             {
                 var name = path[(path.LastIndexOf('/') + 1)..];
-                var isRaster = path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
-                    || path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-                    || path.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase);
-                if (isRaster && embedded < 6)
+                if (IsRaster(path) && embedded < 6)
                 {
                     sb.Append("![").Append(name).Append("](https://raw.githubusercontent.com/")
                         .Append(_gitHub.Owner).Append('/').Append(_gitHub.Repo).Append('/')

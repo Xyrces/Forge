@@ -244,6 +244,33 @@ public sealed class QaDispatcherTests : IDisposable
     }
 
     [Fact]
+    public async Task Pass_CommentListsRastersFirst()
+    {
+        // The inline raster embeds are the operator's QA bar (screenshots
+        // visible on the PR): evidence is listed rasters-first so JSON
+        // churn can't push them past the listing cap (observed live on
+        // task-743's first detached comment).
+        var runner = new FakeRunner();
+        runner.Drops.Add(("test-results/qa/task-1/00-state-dump.json", "{}"));
+        runner.Drops.Add(("test-results/qa/task-1/zz-screenshot.png", "fake-png-bytes"));
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var gh = new FakeGitHub();
+        var dispatcher = NewDispatcher(runner, gh: gh);
+
+        var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+
+        Assert.Equal(QaDispatcher.VerdictPass, outcome!.Verdict);
+        var comment = Assert.Single(gh.Comments);
+        var rasterAt = comment.IndexOf("![zz-screenshot.png](https://raw.githubusercontent.com/", StringComparison.Ordinal);
+        var jsonAt = comment.IndexOf("- [test-results/qa/task-1/00-state-dump.json]", StringComparison.Ordinal);
+        Assert.True(rasterAt >= 0, "raster embed missing from the comment");
+        Assert.True(jsonAt >= 0, "json evidence link missing from the comment");
+        Assert.True(rasterAt < jsonAt, "rasters must list before non-raster evidence");
+    }
+
+    [Fact]
     public async Task Pass_CommentFailure_DoesNotFailTheRound()
     {
         // The evidence comment is audit, not gate: a comments-API
