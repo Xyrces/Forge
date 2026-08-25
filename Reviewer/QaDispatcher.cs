@@ -22,18 +22,24 @@ namespace Forge.Reviewer;
 ///      no plan gate): it exercises the change via the repo's
 ///      documented QA harness and captures evidence into
 ///      test-results/.
-///   3. The dispatcher — never the agent — commits + pushes the evidence
-///      to the PR branch, and only when every touched path is an
-///      evidence path (test-results/). A pass without the tier's
-///      evidence is not QA (tier 1: raster PNG/JPG; tier 2: any files
-///      under test-results/qa/&lt;taskId&gt;/); evidence mixed with
-///      source edits is refused.
+///   3. The dispatcher — never the agent — ships the evidence DETACHED
+///      (operator decision 2026-08-25): force-added onto the
+///      dispatcher-owned agent/qa-&lt;taskId&gt; evidence branch
+///      (gitignored test-results/ is expected and harmless), which is
+///      force-pushed and linked in a PR comment. The PR branch never
+///      carries evidence, qaSha is always the code head, and merged
+///      PRs leave no test-results/ churn on main. A pass without the
+///      tier's evidence is not QA (tier 1: raster PNG/JPG; tier 2: any
+///      files under test-results/qa/&lt;taskId&gt;/); a non-ignored
+///      file outside the evidence paths refuses the ship.
 ///   4. The verdict lands in task metadata: qaForSha (code head
-///      verified), qaSha (head the verdict applies to, post evidence
-///      push), qaVerdict (pass|fail), qaNotes, qaRound. The reviewer
-///      self-skips until QA is current (ReviewerDispatcher qaEnabled
-///      guard); PRWatcher's merge gate requires pass at the head and a
-///      fail requeues a rework round with the QA notes as context.
+///      verified), qaSha (head the verdict applies to — always the
+///      code head under detached evidence), qaVerdict
+///      (pass|fail|not-applicable), qaNotes, qaRound, qaTier. The
+///      reviewer self-skips until QA is current (ReviewerDispatcher
+///      qaEnabled guard); PRWatcher's merge gate requires pass or
+///      not-applicable at the head and a fail requeues a rework round
+///      with the QA notes as context.
 ///
 /// Dedupe mirrors the reviewer: per-head (qaSha), Error outcomes never
 /// dedupe, and the watcher's circuit breaker bounds retries. QA-infra
@@ -340,22 +346,30 @@ public sealed class QaDispatcher
         // evidence (operator correction 2026-08-24); tier 2 (code)
         // demands evidence files of ANY type under
         // test-results/qa/<taskId>/. A pass without the tier's evidence
-        // is not QA; anything outside the evidence paths refuses the push.
+        // is not QA; a NON-IGNORED file outside the evidence paths is a
+        // source edit and refuses the ship. Gitignored files outside the
+        // evidence paths (bin/obj build churn) are ignored entirely, and
+        // gitignored EVIDENCE (repos that gitignore test-results/ —
+        // porthorizon policy, issue qa-1) still counts: the dispatcher
+        // force-adds it onto the detached evidence branch.
         var dirty = await _worktrees.ListDirtyFilesAsync(worktreePath, ct);
         var nonEvidence = dirty.Where(f =>
-            !EvidencePathPrefixes.Any(p => f.StartsWith(p, StringComparison.Ordinal))).ToList();
+            !f.Ignored
+            && !EvidencePathPrefixes.Any(p => f.Path.StartsWith(p, StringComparison.Ordinal))).ToList();
         if (nonEvidence.Count > 0)
         {
             return await ErrorOutcomeAsync(task, headSha,
-                $"QA run touched non-evidence paths (refused to ship): {string.Join(", ", nonEvidence.Take(5))}",
+                $"QA run touched non-evidence paths (refused to ship): {string.Join(", ", nonEvidence.Take(5).Select(f => f.Path))}",
                 ct, prNumber);
         }
+        var evidence = dirty.Where(f =>
+            EvidencePathPrefixes.Any(p => f.Path.StartsWith(p, StringComparison.Ordinal))).ToList();
         if (verdict == VerdictPass && tier == QaEvidenceTier.Visual)
         {
-            var rasterEvidence = dirty.Where(f =>
-                f.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
-                || f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-                || f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)).ToList();
+            var rasterEvidence = evidence.Where(f =>
+                f.Path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                || f.Path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                || f.Path.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)).ToList();
             if (rasterEvidence.Count == 0)
             {
                 return await ErrorOutcomeAsync(task, headSha,
@@ -366,8 +380,7 @@ public sealed class QaDispatcher
         if (verdict == VerdictPass && tier == QaEvidenceTier.Code)
         {
             var evidencePrefix = $"test-results/qa/{task.Id}/";
-            var evidence = dirty.Where(f => f.StartsWith(evidencePrefix, StringComparison.Ordinal)).ToList();
-            if (evidence.Count == 0)
+            if (!evidence.Any(f => f.Path.StartsWith(evidencePrefix, StringComparison.Ordinal)))
             {
                 return await ErrorOutcomeAsync(task, headSha,
                     $"pass verdict without evidence files under {evidencePrefix} — not QA",
@@ -375,19 +388,30 @@ public sealed class QaDispatcher
             }
         }
 
-        var qaHead = headSha;
-        if (dirty.Count > 0)
+        // DETACHED evidence shipping (operator decision 2026-08-25):
+        // the evidence commits on the dispatcher-owned agent/qa-<taskId>
+        // branch — NEVER the PR branch, so a QA round no longer moves
+        // the PR head and merged PRs carry no test-results/ churn on
+        // main (the porthorizon qa-1 policy). qaSha is therefore always
+        // the code head. The evidence branch is force-pushed scratch
+        // (re-synced per round; superseded rounds' links rot, the
+        // current head's comment is the audit). A PR comment links the
+        // evidence for the reviewer.
+        var qaBranch = $"agent/qa-{task.Id}";
+        if (evidence.Count > 0)
         {
-            await _worktrees.CommitAllAsync(worktreePath,
-                $"QA({task.Id}): playthrough evidence for {headSha[..Math.Min(7, headSha.Length)]}", ct);
-            await _worktrees.PushHeadToRefAsync(worktreePath, branch, ct);
-            qaHead = await _worktrees.GetHeadShaAsync(worktreePath, ct);
+            await _worktrees.CommitPathsAsync(worktreePath,
+                $"QA({task.Id}): playthrough evidence for {headSha[..Math.Min(7, headSha.Length)]}",
+                evidence.Select(f => f.Path).ToList(), ct);
+            await _worktrees.PushHeadToRefAsync(worktreePath, qaBranch, ct, force: true);
+            await PostEvidenceCommentAsync(task, prNumber, headSha, qaBranch, verdict, notes, round, tier,
+                evidence.Select(f => f.Path).ToList(), ct);
         }
 
         await _issues.TransitionAsync(task.Id, task.Status, $"QA {verdict} (round {round})",
             new Dictionary<string, object>
             {
-                ["qaSha"] = qaHead,
+                ["qaSha"] = headSha,
                 ["qaForSha"] = headSha,
                 ["qaVerdict"] = verdict,
                 ["qaNotes"] = notes.Length > 1000 ? notes[..1000] : notes,
@@ -404,12 +428,68 @@ public sealed class QaDispatcher
             }, ct);
         _events?.Publish(new DashboardEvent(
             DateTime.UtcNow, DashboardEventKind.TaskTransition,
-            task.Id, $"QA round {round}: {verdict} at {qaHead[..Math.Min(7, qaHead.Length)]}"));
+            task.Id, $"QA round {round}: {verdict} at {headSha[..Math.Min(7, headSha.Length)]}"));
         _logger.LogInformation("QA (task {Id}, PR #{Pr}): {Verdict} at {Sha} (round {Round})",
-            task.Id, prNumber, verdict, qaSha7(qaHead), round);
-        return new QaOutcome(verdict, notes, qaHead);
+            task.Id, prNumber, verdict, qaSha7(headSha), round);
+        return new QaOutcome(verdict, notes, headSha);
 
         static string qaSha7(string sha) => sha[..Math.Min(7, sha.Length)];
+    }
+
+    /// <summary>Post the QA evidence comment on the PR: verdict, notes,
+    /// and links to the evidence files on the detached agent/qa-&lt;taskId&gt;
+    /// branch (rasters embedded inline via raw URLs so the reviewer sees
+    /// the screenshots without leaving the PR). Audit only — a comment
+    /// failure never fails the round; the verdict metadata is the gate.</summary>
+    private async Task PostEvidenceCommentAsync(
+        IssueRecord task, int prNumber, string headSha, string qaBranch,
+        string verdict, string notes, int round, QaEvidenceTier tier,
+        IReadOnlyList<string> evidencePaths, CancellationToken ct)
+    {
+        try
+        {
+            var sha7 = headSha[..Math.Min(7, headSha.Length)];
+            var sb = new StringBuilder();
+            sb.Append("**QA ").Append(verdict).Append("** (round ").Append(round)
+                .Append(", tier ").Append(QaEvidenceTierClassifier.MetadataValue(tier))
+                .Append(") at `").Append(sha7).AppendLine("`");
+            if (!string.IsNullOrWhiteSpace(notes))
+            {
+                sb.AppendLine();
+                sb.AppendLine(notes.Length > 2000 ? notes[..2000] : notes);
+            }
+            sb.AppendLine();
+            sb.Append("Evidence (").Append(evidencePaths.Count).Append(" file(s), on the detached evidence branch `")
+                .Append(qaBranch).AppendLine("` — never merged to this PR):");
+            var embedded = 0;
+            foreach (var path in evidencePaths.Take(20))
+            {
+                var name = path[(path.LastIndexOf('/') + 1)..];
+                var isRaster = path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                    || path.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                    || path.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase);
+                if (isRaster && embedded < 6)
+                {
+                    sb.Append("![").Append(name).Append("](https://raw.githubusercontent.com/")
+                        .Append(_gitHub.Owner).Append('/').Append(_gitHub.Repo).Append('/')
+                        .Append(qaBranch).Append('/').Append(path).AppendLine(")");
+                    embedded++;
+                }
+                else
+                {
+                    sb.Append("- [").Append(path).Append("](https://github.com/")
+                        .Append(_gitHub.Owner).Append('/').Append(_gitHub.Repo).Append("/blob/")
+                        .Append(qaBranch).Append('/').Append(path).AppendLine(")");
+                }
+            }
+            if (evidencePaths.Count > 20)
+                sb.AppendLine($"- … and {evidencePaths.Count - 20} more on `{qaBranch}`");
+            await _gitHub.CreateIssueCommentAsync(prNumber, sb.ToString(), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "QA (task {Id}, PR #{Pr}): evidence comment failed — verdict metadata is unaffected", task.Id, prNumber);
+        }
     }
 
     /// <summary>The QA completion contract: the final message leads with
@@ -453,7 +533,7 @@ public sealed class QaDispatcher
             - Find the repo's QA/playtest documentation first (docs/, scripts/, README) and run the documented harness. For game projects: actually PLAY the build via its automation interface (e.g. an MCP server) — API-level state reads alone are not playing.
             {{evidenceRule}}
             - Capture facilities, in preference order: (1) an in-engine/in-app capture hook if the branch ships one (use it — even when the hook IS the change under review; a working hook is the proof), (2) the repo's documented screenshot tooling, (3) host window-capture of the running product window (grim/scrot/xwd/portal) when a display is available. Build the product first if the runtime needs its assemblies (e.g. dotnet build for a Godot C# client).
-            - You may ONLY create files under test-results/. Never edit source, tests, project files, or docs. Do NOT git commit or push — the orchestrator ships your evidence (and refuses anything outside test-results/).
+            - You may ONLY create files under test-results/. Never edit source, tests, project files, or docs. Do NOT git commit or push — the orchestrator ships your evidence to a DETACHED evidence branch (agent/qa-<task id>, never the PR branch) and links it in a PR comment. test-results/ being gitignored is expected and harmless — write evidence there anyway; the dispatcher force-adds it. It refuses to ship if you touched any non-ignored file outside test-results/.
             - If the harness can't run (missing binary, missing docs, broken build), do not fake a result — end with QA_VERDICT: fail and name exactly what's missing.
 
             When done, your final message MUST lead with exactly one verdict line:

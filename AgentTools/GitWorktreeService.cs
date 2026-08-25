@@ -380,37 +380,89 @@ public sealed class GitWorktreeService
         return result.Stdout.Trim();
     }
 
+    /// <summary>A dirty (uncommitted) worktree path, with whether it
+    /// is gitignored. Ignored paths matter to the QA stage: repos may
+    /// gitignore <c>test-results/</c> (porthorizon policy, issue qa-1)
+    /// and the dispatcher must still SEE the evidence the agent wrote
+    /// there — while ignoring build churn (bin/obj) that is equally
+    /// gitignored.</summary>
+    public sealed record DirtyFile(string Path, bool Ignored);
+
     /// <summary>Uncommitted/untracked paths (porcelain), for the QA
     /// stage's evidence-only enforcement — QA may dirty ONLY evidence
     /// paths; anything else refuses the evidence push.</summary>
-    public async Task<IReadOnlyList<string>> ListDirtyFilesAsync(string worktreePath, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<DirtyFile>> ListDirtyFilesAsync(string worktreePath, CancellationToken cancellationToken = default)
     {
         // -uall: untracked files listed individually (the default
         // collapses untracked DIRECTORIES — a new evidence dir would
         // hide its PNG files from the raster-evidence check).
-        var result = await RunGitInAsync(worktreePath, "status --porcelain -uall", cancellationToken);
+        // --ignored=traditional: gitignored files listed individually
+        // too (with the !! prefix — "matching" collapses ignored
+        // DIRECTORIES and would hide the PNGs inside an ignored
+        // test-results/) — evidence under a gitignored test-results/
+        // is still evidence; the caller discriminates by prefix + flag.
+        var result = await RunGitInAsync(worktreePath, "status --porcelain -uall --ignored=traditional", cancellationToken);
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"git status failed (exit={result.ExitCode}): {result.Stderr}");
-        var files = new List<string>();
+        var files = new List<DirtyFile>();
         foreach (var line in result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             // Porcelain v1: "XY path" (3-char prefix); renames read
-            // "orig -> new" — take the destination.
+            // "orig -> new" — take the destination. Ignored entries
+            // carry the "!!" prefix.
             if (line.Length < 4) continue;
+            var ignored = line.StartsWith("!!", StringComparison.Ordinal);
             var path = line[3..].Trim();
             var arrow = path.IndexOf(" -> ", StringComparison.Ordinal);
             if (arrow >= 0) path = path[(arrow + 4)..];
-            if (path.Length > 0) files.Add(path);
+            if (path.Length > 0) files.Add(new DirtyFile(path, ignored));
         }
         return files;
     }
 
+    /// <summary>Commit ONLY the listed paths, force-adding them (the
+    /// QA stage's detached evidence shipping: evidence under a
+    /// gitignored <c>test-results/</c> must still commit on the
+    /// dispatcher-owned evidence branch). Same agent-branch guard as
+    /// <see cref="CommitAllAsync"/>.</summary>
+    public async Task<CommitResult> CommitPathsAsync(
+        string worktreePath, string message, IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
+    {
+        var branchResult = await RunGitInAsync(worktreePath, "rev-parse --abbrev-ref HEAD", cancellationToken);
+        var currentBranch = branchResult.Stdout.Trim();
+        if (!currentBranch.StartsWith("agent/", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Refusing to commit on branch '{currentBranch}': must be agent/<taskId>. " +
+                "Direct commits outside the agent/* namespace bypass the Reviewer dispatcher.");
+        }
+        var addArgs = string.Join(" ", paths.Select(p => $"\"{p}\""));
+        await RunGitInAsync(worktreePath, $"add -f -- {addArgs}", cancellationToken);
+        var msgPath = Path.Combine(Path.GetTempPath(), $"commit-msg-{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(msgPath, message, cancellationToken);
+        try
+        {
+            var result = await RunGitInAsync(worktreePath, $"commit -F \"{msgPath}\"", cancellationToken);
+            if (result.ExitCode == 0)
+                return CommitResult.Created(result.Stdout.Trim());
+            if (result.Stderr.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase)
+                || result.Stdout.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase))
+                return CommitResult.NoChanges(result.Stdout.Trim());
+            throw new InvalidOperationException($"git commit failed (exit={result.ExitCode}): {result.Stderr}");
+        }
+        finally
+        {
+            try { File.Delete(msgPath); } catch { }
+        }
+    }
+
     /// <summary>Push the worktree's HEAD onto a DIFFERENT remote branch
-    /// (the QA stage: the QA worktree sits on agent/qa-&lt;taskId&gt;
-    /// but its evidence commit belongs on the task's PR branch).
-    /// Refuses protected targets and non-fast-forwards (a dev push
-    /// landing mid-QA fails the round; the watch retries).</summary>
-    public async Task<string> PushHeadToRefAsync(string worktreePath, string targetBranch, CancellationToken cancellationToken = default)
+    /// (the QA stage pushes its evidence commit onto the detached
+    /// agent/qa-&lt;taskId&gt; evidence branch — never the PR branch).
+    /// Refuses protected targets and, unless <paramref name="force"/>,
+    /// non-fast-forwards (a dev push landing mid-QA fails the round;
+    /// the watch retries).</summary>
+    public async Task<string> PushHeadToRefAsync(string worktreePath, string targetBranch, CancellationToken cancellationToken = default, bool force = false)
     {
         if (targetBranch.Equals("main", StringComparison.OrdinalIgnoreCase)
             || targetBranch.Equals("master", StringComparison.OrdinalIgnoreCase))
@@ -419,8 +471,11 @@ public sealed class GitWorktreeService
                 $"Refusing to push HEAD to protected branch '{targetBranch}'.");
         }
         ValidateGitComponent(targetBranch, "target branch");
+        // force: only for dispatcher-owned scratch refs (the QA evidence
+        // branch) that are re-synced per round — never for PR branches.
+        var forceArg = force ? " --force" : "";
         var result = await RunGitInAsync(worktreePath,
-            $"push origin \"HEAD:refs/heads/{targetBranch}\"", cancellationToken);
+            $"push origin{forceArg} \"HEAD:refs/heads/{targetBranch}\"", cancellationToken);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(
                 $"git push HEAD to '{targetBranch}' failed (exit={result.ExitCode}): {result.Stderr}");
