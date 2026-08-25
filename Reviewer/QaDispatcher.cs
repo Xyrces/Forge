@@ -146,37 +146,15 @@ public sealed class QaDispatcher
             return null;
         }
 
-        // Attempt budget per head: QA infra failures park the task for
-        // the operator instead of burning LLM runs forever.
-        var attempts = string.Equals(task.GetMetadata("qaAttemptSha"), headSha, StringComparison.Ordinal)
-            ? int.TryParse(task.GetMetadata("qaAttempts"), out var a) ? a : 0
-            : 0;
-        if (attempts >= MaxQaAttempts)
-        {
-            var parked = $"QA stage unavailable after {attempts} attempts at head {headSha[..Math.Min(7, headSha.Length)]} — operator review required";
-            _logger.LogWarning("QA (task {Id}, PR #{Pr}): {Reason} (last error: {LastError})",
-                task.Id, prNumber, parked, task.GetMetadata("qaLastError") ?? "unknown");
-            await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, parked,
-                new Dictionary<string, object>
-                {
-                    ["blockedKind"] = BlockedKindQaUnavailable,
-                    ["qaLastError"] = $"qa attempt budget exhausted ({attempts}/{MaxQaAttempts}) at head {headSha[..Math.Min(7, headSha.Length)]} — parked",
-                    ["qaLastErrorAt"] = DateTime.UtcNow.ToString("O"),
-                }, cancellationToken);
-            _events?.Publish(new DashboardEvent(
-                DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                task.Id, $"QA unavailable ({attempts} attempts) — parked for the operator"));
-            return new QaOutcome(VerdictError, "", headSha, "qa attempt budget exhausted — parked");
-        }
-
-        var round = (int.TryParse(task.GetMetadata("qaRound"), out var r) ? r : 0) + 1;
-
         // 3-tier applicability gate (deterministic, dispatcher-owned —
         // the agent never self-declares): classify the head's diff in
-        // the synced QA worktree BEFORE any run or attempt is spent.
-        // Unclassifiable (git/sync trouble) falls to the code tier —
-        // conservative: QA runs, and RunQaAsync's own sync surfaces the
-        // failure through the normal attempt-budgeted error path.
+        // the synced QA worktree BEFORE the attempt budget is consulted
+        // — a docs-only head spends no attempt, so an exhausted budget
+        // (e.g. burned pre-deploy under the old every-head-raster bar)
+        // must not park it. Unclassifiable (git/sync trouble) falls to
+        // the code tier — conservative: QA runs, and RunQaAsync's own
+        // sync surfaces the failure through the normal attempt-budgeted
+        // error path.
         var (tier, diffPaths, preSyncedWorktree) = await ClassifyHeadAsync(task, branch, headSha, cancellationToken);
         if (tier == QaEvidenceTier.Docs)
         {
@@ -203,6 +181,31 @@ public sealed class QaDispatcher
                 task.Id, prNumber, headSha[..Math.Min(7, headSha.Length)], notes);
             return new QaOutcome(VerdictNotApplicable, notes, headSha);
         }
+
+        // Attempt budget per head: QA infra failures park the task for
+        // the operator instead of burning LLM runs forever.
+        var attempts = string.Equals(task.GetMetadata("qaAttemptSha"), headSha, StringComparison.Ordinal)
+            ? int.TryParse(task.GetMetadata("qaAttempts"), out var a) ? a : 0
+            : 0;
+        if (attempts >= MaxQaAttempts)
+        {
+            var parked = $"QA stage unavailable after {attempts} attempts at head {headSha[..Math.Min(7, headSha.Length)]} — operator review required";
+            _logger.LogWarning("QA (task {Id}, PR #{Pr}): {Reason} (last error: {LastError})",
+                task.Id, prNumber, parked, task.GetMetadata("qaLastError") ?? "unknown");
+            await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, parked,
+                new Dictionary<string, object>
+                {
+                    ["blockedKind"] = BlockedKindQaUnavailable,
+                    ["qaLastError"] = $"qa attempt budget exhausted ({attempts}/{MaxQaAttempts}) at head {headSha[..Math.Min(7, headSha.Length)]} — parked",
+                    ["qaLastErrorAt"] = DateTime.UtcNow.ToString("O"),
+                }, cancellationToken);
+            _events?.Publish(new DashboardEvent(
+                DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                task.Id, $"QA unavailable ({attempts} attempts) — parked for the operator"));
+            return new QaOutcome(VerdictError, "", headSha, "qa attempt budget exhausted — parked");
+        }
+
+        var round = (int.TryParse(task.GetMetadata("qaRound"), out var r) ? r : 0) + 1;
 
         await _issues.TransitionAsync(task.Id, task.Status, $"QA round {round} started",
             new Dictionary<string, object>
