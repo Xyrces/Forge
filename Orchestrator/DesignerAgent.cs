@@ -159,16 +159,24 @@ public sealed class DesignerAgent
             {spec.Body}
             """;
 
-        var response = await agent.RunAsync(prompt, cancellationToken: ct);
-        // The LLM has run; the next block inspects the response. We
+        var outcome = await new PipelineAgentRunner(_logger).RunAsync(
+            agent,
+            new[] { new ChatMessage(ChatRole.User, prompt) },
+            roleLabel: "designer",
+            requiredToolName: "db_set_spec_status",
+            contractNudgePrompt: SetStatusContractNudge,
+            ct);
+        // The LLM has run; the next block inspects the outcome. We
         // intentionally do NOT catch here — exceptions from the LLM
         // path bubble to the outer try in DesignSpecAsync.
 
-        // Inspect the response: did the LLM call db_set_spec_status
-        // and what value? Did it save any artifacts?
+        // Inspect the accumulated messages: did the LLM call
+        // db_set_spec_status and what value? Did it save any artifacts?
+        // (Scan ALL rounds' messages — a contract-nudged final round
+        // does not carry earlier rounds' tool results.)
         var artifactIds = new List<string>();
         SpecStatus? newStatus = null;
-        foreach (var msg in response.Messages)
+        foreach (var msg in outcome.NewMessages)
         {
             foreach (var c in msg.Contents)
             {
@@ -196,15 +204,30 @@ public sealed class DesignerAgent
 
         if (newStatus is null)
         {
-            // LLM ran but never called db_set_spec_status. Treat as a
-            // silent failure — operator sees the run in designer_run
-            // with error.
+            // LLM ran but never called db_set_spec_status (even after
+            // the wrapper's contract nudges). Treat as a silent failure
+            // — operator sees the run in designer_run with error +
+            // what the model actually said (the run record has no
+            // response-text column; the excerpt rides the error field).
             return await FinishFailureAsync(runId, spec.Id, "llm did not call db_set_spec_status", startedAt, ct,
-                "LLM completed without committing a spec status transition. The spec is left in its current state; re-run the Designer.");
+                $"LLM completed without committing a spec status transition; final text: {PipelineAgentRunner.FinalTextExcerpt(outcome.NewMessages)}. " +
+                "The spec is left in its current state; re-run the Designer.");
         }
 
         return await FinishSuccessAsync(runId, spec.Id, newStatus.Value, artifactIds, hygiene, startedAt, ct);
     }
+
+    /// <summary>
+    /// Contract-nudge text for <see cref="PipelineAgentRunner"/> when a
+    /// round completes without <c>db_set_spec_status</c>. Names ALL
+    /// three valid exits — NeedsRevision is a legitimate out, never
+    /// nudge toward Approved specifically.
+    /// </summary>
+    private const string SetStatusContractNudge =
+        "You finished without committing a design decision. Call db_set_spec_status exactly once with one of: " +
+        "Designed (visual spec done, artifacts saved), Approved (non-visual, skip design), or " +
+        "NeedsRevision (structural problem — a legitimate exit; do NOT save artifacts). " +
+        "The pipeline cannot proceed without that call.";
 
     private IList<AITool> BuildTools(SpecRecord spec)
     {

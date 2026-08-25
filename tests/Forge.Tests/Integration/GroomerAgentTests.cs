@@ -154,6 +154,37 @@ public class GroomerAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task GroomAsync_LeakedMarkup_PipelineRunnerNudges_RunRecovers()
+    {
+        // minimax-m3 quirk recovery, single-shot lane: the first
+        // response leaks the tool call as plain-text markup (MAF ends
+        // its loop, zero stories created); the pipeline runner nudges
+        // and the model re-issues properly.
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "P", Title: "T",
+            Body: """
+                ## Acceptance criteria
+                - [ ] one
+                """));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+
+        var fcs = new[]
+        {
+            new FunctionCallContent("c1", "create_story",
+                new Dictionary<string, object?> { ["title"] = "Story 1" }),
+            new FunctionCallContent("c2", "set_spec_status",
+                new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        };
+        var agent = BuildAgent(new LeakThenMultiToolClient(fcs, "Done."));
+        var result = await agent.GroomAsync(spec.Id, default);
+
+        Assert.NotNull(result);
+        Assert.Single(result!.StoryIds);
+        var refreshed = await _specs.GetAsync(spec.Id);
+        Assert.Equal(SpecStatus.Groomed, refreshed!.Status);
+    }
+
+    [Fact]
     public async Task GroomAsync_BareNumericStoryId_NormalizesToCreatedStory()
     {
         // Live corruption 2026-08-09 (porthorizon spec-257a4c26,
@@ -467,4 +498,52 @@ public class SprintAssemblerGuardTests : IDisposable
         Assert.Contains(ownSpec.Id, order);
         Assert.Contains(Forge.Orchestrator.Sprint.SprintAssembler.AdHocGroupName, order);
     }
+}
+
+/// <summary>
+/// First response is leaked tool-call markup (the minimax-m3 quirk —
+/// MAF sees no tool calls and ends its loop); after the pipeline
+/// runner's nudge the client behaves like
+/// <see cref="MultiToolCallingChatClient"/>.
+/// </summary>
+internal sealed class LeakThenMultiToolClient : IChatClient
+{
+    private readonly FunctionCallContent[] _functionCalls;
+    private readonly string _followUpText;
+    private int _callIndex;
+
+    public LeakThenMultiToolClient(FunctionCallContent[] functionCalls, string followUpText)
+    {
+        _functionCalls = functionCalls;
+        _followUpText = followUpText;
+    }
+
+    public Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        var idx = _callIndex++;
+        if (idx == 0)
+        {
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                "Creating the stories:]<]minimax[><tool_call><invoke name=\"create_story\">")));
+        }
+        var fcIndex = idx - 1;
+        if (fcIndex < _functionCalls.Length)
+        {
+            var call = _functionCalls[fcIndex];
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, new[] { (AIContent)call })));
+        }
+        return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _followUpText)));
+    }
+
+    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await Task.Yield();
+        yield break;
+    }
+
+    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+    public void Dispose() { }
 }

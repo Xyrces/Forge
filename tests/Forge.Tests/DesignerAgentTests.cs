@@ -315,10 +315,39 @@ public class DesignerAgentTests : IDisposable
 
         Assert.False(result.Success);
         Assert.Contains("without committing a spec status", result.Error);
+        // The fizzle now records what the model actually said (the
+        // designer_run record has no response-text column; the excerpt
+        // rides the error field).
+        Assert.Contains("final text:", result.Error);
+        Assert.Contains("design-fake-001", result.Error);
         var fresh = (await _specs.GetAsync(spec.Id))!;
         Assert.Equal(SpecStatus.ReadyForDesign, fresh.Status);  // unchanged
         var run = (await _runs.ListAsync(spec.Id)).Single();
         Assert.Equal(DesignerRunStatus.LlmFailed, run.Status);
+    }
+
+    [Fact]
+    public async Task LeakedStatusCall_RunnerNudges_RunRecovers()
+    {
+        // minimax-m3 quirk: the status call arrives as plain-text
+        // markup instead of structured tool_calls. The pipeline
+        // runner's leak nudge makes the model re-issue it properly
+        // and the run commits Designed.
+        var spec = await CreateSpecAsync();
+        var client = new LeakThenCallClient(
+            "db_set_spec_status", new Dictionary<string, object?>
+            {
+                ["specId"] = spec.Id,
+                ["status"] = "Designed",
+            }, "Designed after re-issue.");
+        var agent = NewAgent(client);
+        var result = await agent.DesignSpecAsync(spec.Id, DesignerTriggerKind.Manual);
+
+        Assert.True(result.Success);
+        Assert.Equal(SpecStatus.Designed, result.NewSpecStatus);
+        Assert.True(client.CallCount >= 3); // leak + re-issued call + settle
+        var fresh = (await _specs.GetAsync(spec.Id))!;
+        Assert.Equal(SpecStatus.Designed, fresh.Status);
     }
 
     [Fact]
@@ -342,6 +371,52 @@ public class DesignerAgentTests : IDisposable
         Assert.NotNull(report);
         Assert.True(report!.Passed);
     }
+}
+
+/// <summary>
+/// Leaked-markup-then-tool-call client. Turn 1 is assistant prose with
+/// the tool call leaked as literal text markup (the minimax-m3 quirk —
+/// MAF sees no tool calls and ends the loop); after the pipeline
+/// runner's nudge, turn 2 issues the real FunctionCallContent and
+/// turn 3 settles on plain text.
+/// </summary>
+internal sealed class LeakThenCallClient : IChatClient
+{
+    private readonly string _toolName;
+    private readonly Dictionary<string, object?> _args;
+    private readonly string _finalText;
+    public int CallCount;
+
+    public LeakThenCallClient(string toolName, Dictionary<string, object?> args, string finalText)
+    {
+        _toolName = toolName;
+        _args = args;
+        _finalText = finalText;
+    }
+
+    public Task<ChatResponse> GetResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        CallCount++;
+        if (CallCount == 1)
+        {
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                "Committing the design:]<]minimax[><tool_call><invoke name=\"db_set_spec_status\">")));
+        }
+        if (CallCount == 2)
+        {
+            var call = new FunctionCallContent("c1", _toolName, _args);
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, new[] { (AIContent)call })));
+        }
+        return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _finalText)));
+    }
+
+    public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        => throw new NotImplementedException();
+
+    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+    public void Dispose() { }
 }
 
 /// <summary>

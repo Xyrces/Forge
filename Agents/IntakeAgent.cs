@@ -299,9 +299,12 @@ public sealed class IntakeAgent
             }
             catch (NotSupportedException)
             {
-                // Provider doesn't do streaming — one buffered call.
-                var response = await agent.RunAsync(history, cancellationToken: ct);
-                assistantText = string.Concat(response.Messages
+                // Provider doesn't do streaming — one buffered call
+                // (through the pipeline runner so a leaked-markup
+                // response gets nudged instead of ending the turn).
+                var outcome = await new PipelineAgentRunner(_logger).RunAsync(
+                    agent, history, roleLabel: "intake", ct: ct);
+                assistantText = string.Concat(outcome.NewMessages
                     .Where(m => m.Role == ChatRole.Assistant)
                     .Select(m => m.Text));
             }

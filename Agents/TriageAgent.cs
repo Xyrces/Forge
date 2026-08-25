@@ -127,11 +127,13 @@ public sealed class TriageAgent : ITriageRunner
         var userMessage = new ChatMessage(ChatRole.User, BuildUserMessage(task, signature, classification, history));
         try
         {
-            var response = await agent.RunAsync(userMessage, cancellationToken: ct);
+            var outcome = await new PipelineAgentRunner(_logger).RunAsync(
+                agent, new[] { userMessage }, roleLabel: "triage", ct: ct);
+            var replyText = outcome.FinalResponse.Text;
             _logger.LogInformation(
                 "Triage run for {TaskId} ({Signature}): action={Action} note={Note} reply={Reply}",
                 taskId, signature, actionTaken ?? "none", actionNote ?? "-",
-                response.Text is { Length: > 200 } ? response.Text[..200] : response.Text);
+                replyText is { Length: > 200 } ? replyText[..200] : replyText);
             return new TriageRunResult(actionTaken is not null, actionTaken, actionNote, null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
