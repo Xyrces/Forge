@@ -57,6 +57,12 @@ public sealed record ProjectOptions
     // and the merge gate requires qaVerdict=pass at the current head.
     public bool QaEnabled { get; set; }
 
+    // Optional visual-path override for the QA applicability classifier
+    // (the "$qa.visualPaths" roles_json key): prefixes that make a head
+    // tier-1 (raster QA mandatory). Null = unset — the classifier falls
+    // back to the clientdev $territory prefixes; empty = nothing visual.
+    public List<string>? QaVisualPaths { get; set; }
+
     // P8: optional deployment pipeline config. Null/omitted means the
     // project has no configured deployment action -- it can still be
     // enqueued for build-verification, but "approve" has nothing to
@@ -111,5 +117,6 @@ public static class ProjectRecordOptionsMapping
         VerifyCommands = r.VerifyCommands?.ToList(),
         TriageEnabled = r.TriageEnabled,
         QaEnabled = r.QaEnabled,
+        QaVisualPaths = r.QaVisualPaths?.ToList(),
     };
 }

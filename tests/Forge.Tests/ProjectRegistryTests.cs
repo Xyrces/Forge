@@ -405,6 +405,47 @@ public class ProjectStoreRolesTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateQa_VisualPaths_RoundTrips_AndSurvivesEveryWriter()
+    {
+        await SeedAsync();
+
+        // Unset ⇒ null (the classifier defaults to clientdev territory).
+        var p = await _store.GetAsync("forge");
+        Assert.Null(p!.QaVisualPaths);
+
+        Assert.True(await _store.UpdateQaAsync("forge", true, new[] { "PortHorizon.Client/" }));
+        p = await _store.GetAsync("forge");
+        Assert.True(p!.QaEnabled);
+        Assert.Equal(new[] { "PortHorizon.Client/" }, p.QaVisualPaths);
+
+        // A flag-only PUT preserves the override.
+        Assert.True(await _store.UpdateQaAsync("forge", true));
+        p = await _store.GetAsync("forge");
+        Assert.Equal(new[] { "PortHorizon.Client/" }, p!.QaVisualPaths);
+
+        // The other writers preserve it too.
+        await _store.UpdateRolesAsync("forge", new Dictionary<string, int> { ["coredev"] = 4 });
+        await _store.UpdateTriageAsync("forge", true);
+        await _store.UpdateVerifyCommandsAsync("forge", new[] { "dotnet build" });
+        p = await _store.GetAsync("forge");
+        Assert.Equal(new[] { "PortHorizon.Client/" }, p!.QaVisualPaths);
+
+        // Disabling QA keeps the override (the block round-trips with
+        // enabled=false) so re-enabling doesn't lose it.
+        Assert.True(await _store.UpdateQaAsync("forge", false));
+        p = await _store.GetAsync("forge");
+        Assert.False(p!.QaEnabled);
+        Assert.Equal(new[] { "PortHorizon.Client/" }, p.QaVisualPaths);
+
+        // An explicit EMPTY list round-trips as empty (≠ null —
+        // "explicitly nothing visual", not "unset").
+        Assert.True(await _store.UpdateQaAsync("forge", true, Array.Empty<string>()));
+        p = await _store.GetAsync("forge");
+        Assert.NotNull(p!.QaVisualPaths);
+        Assert.Empty(p.QaVisualPaths!);
+    }
+
+    [Fact]
     public async Task UpdateTerritories_RoundTrips_AndPreservesCaps()
     {
         await SeedAsync();

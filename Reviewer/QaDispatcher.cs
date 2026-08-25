@@ -15,13 +15,19 @@ namespace Forge.Reviewer;
 /// the reviewer on every new PR head for projects with the $qa flag on:
 ///
 ///   1. Sync a dedicated QA worktree (agent/qa-&lt;taskId&gt;) to the PR head.
-///   2. Run the QA role agent (bash, no plan gate): it exercises the
-///      change via the repo's documented QA harness and captures RASTER
-///      screenshot evidence into test-results/.
+///   2. Classify the head's diff into an applicability tier
+///      (deterministic — see <see cref="QaEvidenceTierClassifier"/>):
+///      tier 3 (docs-only) stamps qaVerdict=not-applicable with no run
+///      and no attempt spent; tiers 1-2 run the QA role agent (bash,
+///      no plan gate): it exercises the change via the repo's
+///      documented QA harness and captures evidence into
+///      test-results/.
 ///   3. The dispatcher — never the agent — commits + pushes the evidence
 ///      to the PR branch, and only when every touched path is an
-///      evidence path (test-results/). A pass without evidence files is
-///      not QA; evidence mixed with source edits is refused.
+///      evidence path (test-results/). A pass without the tier's
+///      evidence is not QA (tier 1: raster PNG/JPG; tier 2: any files
+///      under test-results/qa/&lt;taskId&gt;/); evidence mixed with
+///      source edits is refused.
 ///   4. The verdict lands in task metadata: qaForSha (code head
 ///      verified), qaSha (head the verdict applies to, post evidence
 ///      push), qaVerdict (pass|fail), qaNotes, qaRound. The reviewer
@@ -40,6 +46,12 @@ public sealed class QaDispatcher
     public const string VerdictPass = "pass";
     public const string VerdictFail = "fail";
     public const string VerdictError = "error";
+
+    /// <summary>Stamped at the head when the 3-tier applicability gate
+    /// classifies the diff as docs-only (tier 3): no agent run, no
+    /// attempt spent. The merge gate and the review relaunch treat it
+    /// like a pass; the reviewer self-skip guard lets it through.</summary>
+    public const string VerdictNotApplicable = "not-applicable";
 
     /// <summary>Blocked marker when QA cannot run at all (no harness,
     /// repeated runner errors) — operator-decision block, NOT the
@@ -68,6 +80,11 @@ public sealed class QaDispatcher
     private readonly IDashboardEventBus? _events;
     private readonly ILogger<QaDispatcher> _logger;
 
+    /// <summary>Visual path prefixes for the applicability classifier
+    /// (resolved by the caller from $qa.visualPaths → clientdev
+    /// $territory). Empty = nothing visual; all code diffs are tier 2.</summary>
+    private readonly IReadOnlyList<string> _visualPaths;
+
     public QaDispatcher(
         IIssueStore issues,
         GitHubService gitHub,
@@ -75,7 +92,8 @@ public sealed class QaDispatcher
         IAgentRunner agentRunner,
         ILogger<QaDispatcher> logger,
         string? projectId = null,
-        IDashboardEventBus? events = null)
+        IDashboardEventBus? events = null,
+        IReadOnlyList<string>? visualPaths = null)
     {
         _issues = issues;
         _gitHub = gitHub;
@@ -84,6 +102,7 @@ public sealed class QaDispatcher
         _logger = logger;
         _projectId = projectId;
         _events = events;
+        _visualPaths = visualPaths ?? Array.Empty<string>();
     }
 
     public sealed record QaOutcome(string Verdict, string Notes, string HeadSha, string? Error = null);
@@ -151,21 +170,85 @@ public sealed class QaDispatcher
         }
 
         var round = (int.TryParse(task.GetMetadata("qaRound"), out var r) ? r : 0) + 1;
+
+        // 3-tier applicability gate (deterministic, dispatcher-owned —
+        // the agent never self-declares): classify the head's diff in
+        // the synced QA worktree BEFORE any run or attempt is spent.
+        // Unclassifiable (git/sync trouble) falls to the code tier —
+        // conservative: QA runs, and RunQaAsync's own sync surfaces the
+        // failure through the normal attempt-budgeted error path.
+        var (tier, diffPaths, preSyncedWorktree) = await ClassifyHeadAsync(task, branch, headSha, cancellationToken);
+        if (tier == QaEvidenceTier.Docs)
+        {
+            var preview = string.Join(", ", diffPaths.Take(5));
+            var notes = $"docs-only diff ({diffPaths.Count} files): {preview}";
+            await _issues.TransitionAsync(task.Id, task.Status, "QA not applicable (docs-only diff)",
+                new Dictionary<string, object>
+                {
+                    ["qaSha"] = headSha,
+                    ["qaForSha"] = headSha,
+                    ["qaVerdict"] = VerdictNotApplicable,
+                    ["qaNotes"] = notes,
+                    ["qaTier"] = QaEvidenceTierClassifier.MetadataValue(tier),
+                    ["qaAttempts"] = null!,
+                    ["qaAttemptSha"] = null!,
+                    ["qaStartedAt"] = null!,
+                    ["qaLastError"] = null!,
+                    ["qaLastErrorAt"] = null!,
+                }, cancellationToken);
+            _events?.Publish(new DashboardEvent(
+                DateTime.UtcNow, DashboardEventKind.TaskTransition,
+                task.Id, $"QA not applicable at {headSha[..Math.Min(7, headSha.Length)]} (docs-only diff)"));
+            _logger.LogInformation("QA (task {Id}, PR #{Pr}): not applicable at {Sha} — {Notes}",
+                task.Id, prNumber, headSha[..Math.Min(7, headSha.Length)], notes);
+            return new QaOutcome(VerdictNotApplicable, notes, headSha);
+        }
+
         await _issues.TransitionAsync(task.Id, task.Status, $"QA round {round} started",
             new Dictionary<string, object>
             {
                 ["qaStartedAt"] = DateTime.UtcNow.ToString("O"),
                 ["qaAttemptSha"] = headSha,
                 ["qaAttempts"] = (attempts + 1).ToString(),
+                ["qaTier"] = QaEvidenceTierClassifier.MetadataValue(tier),
             }, cancellationToken);
 
         try
         {
-            return await RunQaAsync(task, prNumber, branch, headSha, round, cancellationToken);
+            return await RunQaAsync(task, prNumber, branch, headSha, round, tier, preSyncedWorktree, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return await ErrorOutcomeAsync(task, headSha, ex.Message, cancellationToken, prNumber, ex);
+        }
+    }
+
+    /// <summary>Classify the head's diff into a QA applicability tier.
+    /// Syncs the dedicated QA worktree (reused by the run when the tier
+    /// says "run") and diffs against the default branch. Any failure —
+    /// sync error, sha mismatch, diff error — degrades to the code tier
+    /// with no pre-synced worktree, so the run path re-syncs and reports
+    /// the real error through the attempt-budgeted channel.</summary>
+    private async Task<(QaEvidenceTier Tier, IReadOnlyList<string> Paths, string? WorktreePath)> ClassifyHeadAsync(
+        IssueRecord task, string branch, string headSha, CancellationToken ct)
+    {
+        try
+        {
+            var qaTaskId = "qa-" + task.Id;
+            var worktreePath = await _worktrees.CreateAsync(
+                qaTaskId, _worktrees.DefaultBranch, ct, branchOverride: $"agent/qa-{task.Id}");
+            await _worktrees.SyncWorktreeToRefAsync(worktreePath, qaTaskId, $"origin/{branch}", ct);
+            var syncedSha = await _worktrees.GetHeadShaAsync(worktreePath, ct);
+            if (!string.Equals(syncedSha, headSha, StringComparison.Ordinal))
+                return (QaEvidenceTier.Code, Array.Empty<string>(), null);
+            var paths = await _worktrees.GetChangedFilesAsync(worktreePath, _worktrees.DefaultBranch, ct);
+            return (QaEvidenceTierClassifier.Classify(paths, _visualPaths), paths, worktreePath);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "QA (task {Id}): diff classification failed — falling back to the code tier (QA runs)", task.Id);
+            return (QaEvidenceTier.Code, Array.Empty<string>(), null);
         }
     }
 
@@ -192,21 +275,31 @@ public sealed class QaDispatcher
     }
 
     private async Task<QaOutcome> RunQaAsync(
-        IssueRecord task, int prNumber, string branch, string headSha, int round, CancellationToken ct)
+        IssueRecord task, int prNumber, string branch, string headSha, int round,
+        QaEvidenceTier tier, string? preSyncedWorktree, CancellationToken ct)
     {
         // Dedicated QA worktree on its own agent-namespace branch, synced
         // to the PR head. The dev worktree is untouched — a rework round
-        // may be running in it.
-        var qaTaskId = "qa-" + task.Id;
-        var worktreePath = await _worktrees.CreateAsync(
-            qaTaskId, _worktrees.DefaultBranch, ct, branchOverride: $"agent/qa-{task.Id}");
-        await _worktrees.SyncWorktreeToRefAsync(worktreePath, qaTaskId, $"origin/{branch}", ct);
-        var syncedSha = await _worktrees.GetHeadShaAsync(worktreePath, ct);
-        if (!string.Equals(syncedSha, headSha, StringComparison.Ordinal))
+        // may be running in it. The applicability classifier usually
+        // pre-synced it; sync here only when classification degraded.
+        string worktreePath;
+        if (preSyncedWorktree is not null)
         {
-            return await ErrorOutcomeAsync(task, headSha,
-                $"worktree synced to {syncedSha[..Math.Min(7, syncedSha.Length)]}, expected {headSha[..Math.Min(7, headSha.Length)]}",
-                ct, prNumber);
+            worktreePath = preSyncedWorktree;
+        }
+        else
+        {
+            var qaTaskId = "qa-" + task.Id;
+            worktreePath = await _worktrees.CreateAsync(
+                qaTaskId, _worktrees.DefaultBranch, ct, branchOverride: $"agent/qa-{task.Id}");
+            await _worktrees.SyncWorktreeToRefAsync(worktreePath, qaTaskId, $"origin/{branch}", ct);
+            var syncedSha = await _worktrees.GetHeadShaAsync(worktreePath, ct);
+            if (!string.Equals(syncedSha, headSha, StringComparison.Ordinal))
+            {
+                return await ErrorOutcomeAsync(task, headSha,
+                    $"worktree synced to {syncedSha[..Math.Min(7, syncedSha.Length)]}, expected {headSha[..Math.Min(7, headSha.Length)]}",
+                    ct, prNumber);
+            }
         }
 
         var context = new Dictionary<string, object>
@@ -222,7 +315,7 @@ public sealed class QaDispatcher
         try
         {
             result = await _agentRunner.RunAsync(
-                AgentType.QA, BuildPrompt(task, prNumber, branch, headSha),
+                AgentType.QA, BuildPrompt(task, prNumber, branch, headSha, tier),
                 sessionId: null, context: context, ct: timeoutCts.Token);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -239,9 +332,12 @@ public sealed class QaDispatcher
         }
 
         // Evidence enforcement: the dispatcher ships the evidence, never
-        // the agent. A pass without raster evidence files is not QA
-        // (operator correction 2026-08-24); anything outside the
-        // evidence paths refuses the push.
+        // the agent. The pass bar is tier-dependent (operator decisions
+        // 2026-08-25): tier 1 (visual) demands RASTER screenshot
+        // evidence (operator correction 2026-08-24); tier 2 (code)
+        // demands evidence files of ANY type under
+        // test-results/qa/<taskId>/. A pass without the tier's evidence
+        // is not QA; anything outside the evidence paths refuses the push.
         var dirty = await _worktrees.ListDirtyFilesAsync(worktreePath, ct);
         var nonEvidence = dirty.Where(f =>
             !EvidencePathPrefixes.Any(p => f.StartsWith(p, StringComparison.Ordinal))).ToList();
@@ -251,15 +347,29 @@ public sealed class QaDispatcher
                 $"QA run touched non-evidence paths (refused to ship): {string.Join(", ", nonEvidence.Take(5))}",
                 ct, prNumber);
         }
-        var rasterEvidence = dirty.Where(f =>
-            f.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
-            || f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-            || f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)).ToList();
-        if (verdict == VerdictPass && rasterEvidence.Count == 0)
+        if (verdict == VerdictPass && tier == QaEvidenceTier.Visual)
         {
-            return await ErrorOutcomeAsync(task, headSha,
-                "pass verdict without raster screenshot evidence (png/jpg under test-results/) — not QA",
-                ct, prNumber);
+            var rasterEvidence = dirty.Where(f =>
+                f.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                || f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                || f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (rasterEvidence.Count == 0)
+            {
+                return await ErrorOutcomeAsync(task, headSha,
+                    "pass verdict without raster screenshot evidence (png/jpg under test-results/) — not QA",
+                    ct, prNumber);
+            }
+        }
+        if (verdict == VerdictPass && tier == QaEvidenceTier.Code)
+        {
+            var evidencePrefix = $"test-results/qa/{task.Id}/";
+            var evidence = dirty.Where(f => f.StartsWith(evidencePrefix, StringComparison.Ordinal)).ToList();
+            if (evidence.Count == 0)
+            {
+                return await ErrorOutcomeAsync(task, headSha,
+                    $"pass verdict without evidence files under {evidencePrefix} — not QA",
+                    ct, prNumber);
+            }
         }
 
         var qaHead = headSha;
@@ -279,6 +389,7 @@ public sealed class QaDispatcher
                 ["qaVerdict"] = verdict,
                 ["qaNotes"] = notes.Length > 1000 ? notes[..1000] : notes,
                 ["qaRound"] = round.ToString(),
+                ["qaTier"] = QaEvidenceTierClassifier.MetadataValue(tier),
                 ["qaAttempts"] = null!,
                 ["qaAttemptSha"] = null!,
                 ["qaStartedAt"] = null!,
@@ -319,7 +430,7 @@ public sealed class QaDispatcher
         return (null, "");
     }
 
-    private static string BuildPrompt(IssueRecord task, int prNumber, string branch, string headSha)
+    private static string BuildPrompt(IssueRecord task, int prNumber, string branch, string headSha, QaEvidenceTier tier)
     {
         var sb = new StringBuilder();
         sb.Append("QA-verify PR #").Append(prNumber).Append(" (branch ").Append(branch)
@@ -329,12 +440,15 @@ public sealed class QaDispatcher
         if (!string.IsNullOrWhiteSpace(task.Description))
             sb.Append("\nTask description (acceptance criteria live here — verify EACH):\n```\n")
                 .AppendLine(task.Description).AppendLine("```");
-        sb.AppendLine("""
+        var evidenceRule = tier == QaEvidenceTier.Visual
+            ? "- Capture RASTER screenshot evidence (PNG/JPG) of the running product at the moments that prove each acceptance criterion, into test-results/qa/<this task id>/ (create it). JSON/SVG/ASCII state dumps are never screenshots."
+            : "- This head touches no visual paths — drive the sim via the documented harness and prove behavior with state-assertion evidence files (any type) under test-results/qa/<this task id>/ (create it). Raster screenshots are NOT required for this head; a pass with zero evidence files is discarded as not-QA.";
+        sb.AppendLine($$"""
 
 
             Rules:
             - Find the repo's QA/playtest documentation first (docs/, scripts/, README) and run the documented harness. For game projects: actually PLAY the build via its automation interface (e.g. an MCP server) — API-level state reads alone are not playing.
-            - Capture RASTER screenshot evidence (PNG/JPG) of the running product at the moments that prove each acceptance criterion, into test-results/qa/<this task id>/ (create it). JSON/SVG/ASCII state dumps are never screenshots.
+            {{evidenceRule}}
             - Capture facilities, in preference order: (1) an in-engine/in-app capture hook if the branch ships one (use it — even when the hook IS the change under review; a working hook is the proof), (2) the repo's documented screenshot tooling, (3) host window-capture of the running product window (grim/scrot/xwd/portal) when a display is available. Build the product first if the runtime needs its assemblies (e.g. dotnet build for a Godot C# client).
             - You may ONLY create files under test-results/. Never edit source, tests, project files, or docs. Do NOT git commit or push — the orchestrator ships your evidence (and refuses anything outside test-results/).
             - If the harness can't run (missing binary, missing docs, broken build), do not fake a result — end with QA_VERDICT: fail and name exactly what's missing.

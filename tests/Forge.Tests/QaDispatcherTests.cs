@@ -93,16 +93,32 @@ public sealed class QaDispatcherTests : IDisposable
         RunGit(_workDir, $"remote add origin {_bareDir}");
         RunGit(_workDir, "fetch origin");
 
-        // The PR branch: agent/task-1 with one code commit over main.
+        // The PR branch: agent/task-1 with one code commit + one VISUAL
+        // commit over main (Client/ is the visual prefix the dispatcher
+        // tests configure — mixed diff, highest tier wins ⇒ visual).
         RunGit(_workDir, "checkout -q -b agent/task-1");
         File.WriteAllText(Path.Combine(_workDir, "feature.txt"), "the change");
+        Directory.CreateDirectory(Path.Combine(_workDir, "Client"));
+        File.WriteAllText(Path.Combine(_workDir, "Client", "scene.txt"), "the scene");
         RunGit(_workDir, "add -A");
         RunGit(_workDir, "commit -q -m feature");
         RunGit(_workDir, "push -q -u origin agent/task-1");
         RunGit(_workDir, "checkout -q main");
+
+        // The docs-only branch: agent/task-docs — every path is in the
+        // tier-3 set (docs/, **.md, .gitignore, test-results/).
+        RunGit(_workDir, "checkout -q -b agent/task-docs");
+        Directory.CreateDirectory(Path.Combine(_workDir, "docs", "QA"));
+        File.WriteAllText(Path.Combine(_workDir, "docs", "QA", "policy.md"), "# QA policy");
+        File.WriteAllText(Path.Combine(_workDir, ".gitignore"), "test-results/");
+        RunGit(_workDir, "add -A");
+        RunGit(_workDir, "commit -q -m docs");
+        RunGit(_workDir, "push -q -u origin agent/task-docs");
+        RunGit(_workDir, "checkout -q main");
     }
 
     private static string PrHeadSha(string dir) => GitOut(dir, "rev-parse origin/agent/task-1");
+    private static string DocsHeadSha(string dir) => GitOut(dir, "rev-parse origin/agent/task-docs");
 
     private sealed class FakeGitHub : GitHubService
     {
@@ -145,9 +161,10 @@ public sealed class QaDispatcherTests : IDisposable
         return (await _issues.GetAsync(task.Id))!;
     }
 
-    private QaDispatcher NewDispatcher(FakeRunner runner) => new(
+    private QaDispatcher NewDispatcher(FakeRunner runner, IReadOnlyList<string>? visualPaths = null) => new(
         _issues, new FakeGitHub(), _worktrees, runner,
-        NullLogger<QaDispatcher>.Instance, projectId: "proj");
+        NullLogger<QaDispatcher>.Instance, projectId: "proj",
+        visualPaths: visualPaths ?? new[] { "Client/" });
 
     [Fact]
     public void ParseQaOutput_PassAndFail()
@@ -192,6 +209,7 @@ public sealed class QaDispatcherTests : IDisposable
         Assert.Equal(codeHead, after.GetMetadata("qaForSha"));
         Assert.Equal("pass", after.GetMetadata("qaVerdict"));
         Assert.Equal("1", after.GetMetadata("qaRound"));
+        Assert.Equal("visual", after.GetMetadata("qaTier"));
         Assert.Null(after.GetMetadata("qaAttempts"));
 
         // Second call at the same head: deduped, no new run.
@@ -374,5 +392,86 @@ public sealed class QaDispatcherTests : IDisposable
             headOverride: _ => (outcome.HeadSha, "agent/task-1"));
         Assert.Null(second);
         Assert.Equal(1, runner.Calls);
+    }
+
+    [Fact]
+    public async Task Tier3DocsOnly_StampsNotApplicable_NoRunNoAttemptSpent()
+    {
+        var runner = new FakeRunner();
+        var task = await SeedTask();
+        var docsHead = DocsHeadSha(_workDir);
+        var dispatcher = NewDispatcher(runner);
+
+        var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (docsHead, "agent/task-docs"));
+
+        Assert.NotNull(outcome);
+        Assert.Equal(QaDispatcher.VerdictNotApplicable, outcome!.Verdict);
+        Assert.Equal(docsHead, outcome.HeadSha);
+        // No agent run, no attempt spent, no evidence commit — the head
+        // is untouched.
+        Assert.Equal(0, runner.Calls);
+        Assert.Equal(docsHead, DocsHeadSha(_workDir));
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(docsHead, after.GetMetadata("qaSha"));
+        Assert.Equal(docsHead, after.GetMetadata("qaForSha"));
+        Assert.Equal("not-applicable", after.GetMetadata("qaVerdict"));
+        Assert.Equal("docs", after.GetMetadata("qaTier"));
+        Assert.Contains("docs-only diff", after.GetMetadata("qaNotes"));
+        Assert.Null(after.GetMetadata("qaAttempts"));
+        Assert.Null(after.GetMetadata("qaAttemptSha"));
+        Assert.Null(after.GetMetadata("qaStartedAt"));
+
+        // Dedupe: the stamped verdict at the head suppresses re-evaluation.
+        var second = await dispatcher.VerifyOnceAsync(after, CancellationToken.None,
+            headOverride: _ => (docsHead, "agent/task-docs"));
+        Assert.Null(second);
+        Assert.Equal(0, runner.Calls);
+    }
+
+    [Fact]
+    public async Task Tier2Code_AnyFileEvidenceAccepted_RasterNotDemanded()
+    {
+        // No visual prefixes configured ⇒ nothing visual: the branch's
+        // Client/ + feature.txt diff is tier 2. A state-assertion dump
+        // (JSON — never acceptable as tier-1 evidence) satisfies the
+        // tier-2 any-file bar.
+        var runner = new FakeRunner();
+        runner.Drops.Add(("test-results/qa/task-1/state-dump.json", "{}"));
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var dispatcher = NewDispatcher(runner, Array.Empty<string>());
+
+        var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+
+        Assert.NotNull(outcome);
+        Assert.True(outcome!.Verdict == QaDispatcher.VerdictPass, $"expected pass, got {outcome.Verdict}: {outcome.Error}");
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("pass", after.GetMetadata("qaVerdict"));
+        Assert.Equal("code", after.GetMetadata("qaTier"));
+        // The evidence commit landed (head moved) — dispatcher-shipped.
+        Assert.NotEqual(codeHead, PrHeadSha(_workDir));
+    }
+
+    [Fact]
+    public async Task Tier2Code_ZeroEvidencePass_DiscardedAsNotQa()
+    {
+        var runner = new FakeRunner(); // drops nothing
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var dispatcher = NewDispatcher(runner, Array.Empty<string>());
+
+        var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+
+        Assert.NotNull(outcome);
+        Assert.Equal(QaDispatcher.VerdictError, outcome!.Verdict);
+        Assert.Contains("evidence files", outcome.Error);
+        Assert.Equal(codeHead, PrHeadSha(_workDir)); // nothing shipped
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(after.GetMetadata("qaVerdict"));
+        Assert.Equal("code", after.GetMetadata("qaTier"));
+        Assert.Contains("evidence files", after.GetMetadata("qaLastError"));
     }
 }

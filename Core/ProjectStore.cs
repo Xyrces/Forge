@@ -24,7 +24,8 @@ public sealed record ProjectRecord(
     IReadOnlyDictionary<string, RoleTerritory>? Territories = null,
     IReadOnlyList<string>? VerifyCommands = null,
     bool TriageEnabled = false,
-    bool QaEnabled = false)
+    bool QaEnabled = false,
+    IReadOnlyList<string>? QaVisualPaths = null)
 {
     /// <summary>Per-project role-cap overrides (role -&gt; max). Empty = use defaults.</summary>
     public IReadOnlyDictionary<string, int> Roles { get; init; } =
@@ -49,6 +50,14 @@ public sealed record ProjectRecord(
     /// reviewer runs, and the merge gate requires qaVerdict=pass at the
     /// current head.</summary>
     public bool QaEnabled { get; init; } = QaEnabled;
+
+    /// <summary>Optional visual-path override for the QA applicability
+    /// classifier (the <c>$qa.visualPaths</c> roles_json key): path
+    /// prefixes that make a head tier-1 (raster QA mandatory). Null =
+    /// unset — the classifier falls back to the project's clientdev
+    /// <c>$territory</c> prefixes; an empty list = explicitly nothing
+    /// visual (all code is tier 2).</summary>
+    public IReadOnlyList<string>? QaVisualPaths { get; init; } = QaVisualPaths;
 }
 
 public sealed record NewProject(
@@ -99,8 +108,10 @@ public interface IProjectStore
     /// <summary>
     /// Set the watch-lane QA stage opt-in (the <c>$qa</c> roles_json
     /// key). Caps, territory, verify, and triage are preserved.
+    /// <paramref name="visualPaths"/> null = preserve the existing
+    /// <c>$qa.visualPaths</c>; a list (even empty) replaces it.
     /// </summary>
-    Task<bool> UpdateQaAsync(string id, bool enabled, CancellationToken ct = default);
+    Task<bool> UpdateQaAsync(string id, bool enabled, IReadOnlyList<string>? visualPaths = null, CancellationToken ct = default);
 }
 
 public sealed class ProjectStore : IProjectStore, IAsyncDisposable
@@ -241,7 +252,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(roles);
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
-        var json = SerializeRolesJson(roles, existing.Territories, existing.Verify, existing.TriageEnabled, existing.QaEnabled);
+        var json = SerializeRolesJson(roles, existing.Territories, existing.Verify, existing.TriageEnabled, existing.QaEnabled, existing.QaVisualPaths);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
@@ -251,7 +262,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
         if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, territories, existing.Verify, existing.TriageEnabled, existing.QaEnabled);
+        var json = SerializeRolesJson(existing.Roles, territories, existing.Verify, existing.TriageEnabled, existing.QaEnabled, existing.QaVisualPaths);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
@@ -261,7 +272,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
         if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, existing.Territories, commands, existing.TriageEnabled, existing.QaEnabled);
+        var json = SerializeRolesJson(existing.Roles, existing.Territories, commands, existing.TriageEnabled, existing.QaEnabled, existing.QaVisualPaths);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
@@ -270,29 +281,30 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
         if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, existing.Territories, existing.Verify, enabled, existing.QaEnabled);
+        var json = SerializeRolesJson(existing.Roles, existing.Territories, existing.Verify, enabled, existing.QaEnabled, existing.QaVisualPaths);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
-    public async Task<bool> UpdateQaAsync(string id, bool enabled, CancellationToken ct = default)
+    public async Task<bool> UpdateQaAsync(string id, bool enabled, IReadOnlyList<string>? visualPaths = null, CancellationToken ct = default)
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
         var existing = await ReadRolesJsonAsync(conn, id, ct);
         if (!existing.Exists) return false;
-        var json = SerializeRolesJson(existing.Roles, existing.Territories, existing.Verify, existing.TriageEnabled, enabled);
+        var json = SerializeRolesJson(existing.Roles, existing.Territories, existing.Verify, existing.TriageEnabled, enabled,
+            visualPaths ?? existing.QaVisualPaths);
         return await WriteRolesJsonAsync(conn, id, json, ct);
     }
 
-    private async Task<(bool Exists, IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories, IReadOnlyList<string>? Verify, bool TriageEnabled, bool QaEnabled)> ReadRolesJsonAsync(
+    private async Task<(bool Exists, IReadOnlyDictionary<string, int> Roles, IReadOnlyDictionary<string, RoleTerritory> Territories, IReadOnlyList<string>? Verify, bool TriageEnabled, bool QaEnabled, IReadOnlyList<string>? QaVisualPaths)> ReadRolesJsonAsync(
         System.Data.Common.DbConnection conn, string id, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""SELECT roles_json FROM {T("project")} WHERE id = @id""";
         cmd.AddParam("@id", id);
         var raw = await cmd.ExecuteScalarAsync(ct);
-        if (raw is null || raw is DBNull) return (false, new Dictionary<string, int>(), new Dictionary<string, RoleTerritory>(), null, false, false);
+        if (raw is null || raw is DBNull) return (false, new Dictionary<string, int>(), new Dictionary<string, RoleTerritory>(), null, false, false, null);
         var (roles, territories) = ParseRolesJson(raw as string);
-        return (true, roles, territories, ParseVerify(raw as string), ParseTriage(raw as string), ParseQa(raw as string));
+        return (true, roles, territories, ParseVerify(raw as string), ParseTriage(raw as string), ParseQa(raw as string), ParseQaVisualPaths(raw as string));
     }
 
     private async Task<bool> WriteRolesJsonAsync(System.Data.Common.DbConnection conn, string id, string json, CancellationToken ct)
@@ -319,7 +331,8 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         Territories: ParseTerritories(rd.IsDBNull(9) ? null : rd.GetString(9)),
         VerifyCommands: ParseVerify(rd.IsDBNull(9) ? null : rd.GetString(9)),
         TriageEnabled: ParseTriage(rd.IsDBNull(9) ? null : rd.GetString(9)),
-        QaEnabled: ParseQa(rd.IsDBNull(9) ? null : rd.GetString(9)));
+        QaEnabled: ParseQa(rd.IsDBNull(9) ? null : rd.GetString(9)),
+        QaVisualPaths: ParseQaVisualPaths(rd.IsDBNull(9) ? null : rd.GetString(9)));
 
     /// <summary>Reserved roles_json key holding the territory block; keys
     /// starting with '$' are metadata, never role caps.</summary>
@@ -348,6 +361,29 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
             && enabled is System.Text.Json.Nodes.JsonValue v
             && v.TryGetValue<bool>(out var b)
             && b;
+    }
+
+    /// <summary>The optional <c>$qa.visualPaths</c> override for the QA
+    /// applicability classifier. Null when the key is absent (unset —
+    /// the classifier defaults to the clientdev territory prefixes); a
+    /// present array round-trips even when empty (explicitly nothing
+    /// visual).</summary>
+    private static IReadOnlyList<string>? ParseQaVisualPaths(string? json)
+    {
+        var obj = ParseObject(json);
+        if (obj is null
+            || !obj.TryGetPropertyValue(QaKey, out var block)
+            || block is not System.Text.Json.Nodes.JsonObject qa
+            || !qa.TryGetPropertyValue("visualPaths", out var vp)
+            || vp is not System.Text.Json.Nodes.JsonArray arr)
+            return null;
+        var paths = new List<string>();
+        foreach (var item in arr)
+        {
+            var s = item?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(s)) paths.Add(s);
+        }
+        return paths;
     }
 
     private static bool ParseTriage(string? json)
@@ -444,7 +480,8 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         IReadOnlyDictionary<string, RoleTerritory> territories,
         IReadOnlyList<string>? verifyCommands = null,
         bool triageEnabled = false,
-        bool qaEnabled = false)
+        bool qaEnabled = false,
+        IReadOnlyList<string>? qaVisualPaths = null)
     {
         var obj = new System.Text.Json.Nodes.JsonObject();
         foreach (var kv in roles)
@@ -475,9 +512,15 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
         {
             obj[TriageKey] = new System.Text.Json.Nodes.JsonObject { ["enabled"] = true };
         }
-        if (qaEnabled)
+        if (qaEnabled || qaVisualPaths is not null)
         {
-            obj[QaKey] = new System.Text.Json.Nodes.JsonObject { ["enabled"] = true };
+            var qa = new System.Text.Json.Nodes.JsonObject { ["enabled"] = qaEnabled };
+            if (qaVisualPaths is not null)
+            {
+                qa["visualPaths"] = new System.Text.Json.Nodes.JsonArray(
+                    qaVisualPaths.Select(p => (System.Text.Json.Nodes.JsonNode)System.Text.Json.Nodes.JsonValue.Create(p)!).ToArray());
+            }
+            obj[QaKey] = qa;
         }
         return obj.ToJsonString();
     }

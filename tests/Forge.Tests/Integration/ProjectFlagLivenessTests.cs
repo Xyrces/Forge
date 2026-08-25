@@ -68,7 +68,7 @@ public sealed class ProjectFlagLivenessTests : IDisposable
         public Task<bool> UpdateTerritoriesAsync(string id, IReadOnlyDictionary<string, RoleTerritory> territories, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<bool> UpdateVerifyCommandsAsync(string id, IReadOnlyList<string> commands, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<bool> UpdateTriageAsync(string id, bool enabled, CancellationToken ct = default) => throw new NotImplementedException();
-        public Task<bool> UpdateQaAsync(string id, bool enabled, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task<bool> UpdateQaAsync(string id, bool enabled, IReadOnlyList<string>? visualPaths = null, CancellationToken ct = default) => throw new NotImplementedException();
     }
 
     [Fact]

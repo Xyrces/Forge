@@ -393,7 +393,9 @@ public sealed class WatchSweepService
             bundle.IssueStore, bundle.GitHub, bundle.Worktrees, _runner,
             _loggerFactory.CreateLogger<Forge.Reviewer.QaDispatcher>(),
             projectId: bundle.Project.Id,
-            events: _events);
+            events: _events,
+            visualPaths: Forge.Reviewer.QaEvidenceTierClassifier.ResolveVisualPrefixes(
+                bundle.Project.Territories, bundle.Project.QaVisualPaths));
         var runCts = new CancellationTokenSource(QaBackgroundBudget);
         var run = qa.VerifyOnceAsync(task, runCts.Token);
         _qaInFlight[key] = run;
@@ -414,11 +416,15 @@ public sealed class WatchSweepService
                 _logger.LogWarning("background QA for {TaskId} was canceled before landing a verdict (project={Project}) — relaunch gate covers", task.Id, bundle.Project.Id);
                 return;
             }
-            // QA passed → the review follows immediately (the reviewer
-            // self-skips on any other outcome). A null outcome means QA
-            // was already current — launch the review too, or a task
-            // whose QA predates the deploy would wait out the backstop.
-            if (t.Result is null || t.Result.Verdict == Forge.Reviewer.QaDispatcher.VerdictPass)
+            // QA passed (or was stamped not-applicable — a docs-only
+            // head owes no playthrough) → the review follows immediately
+            // (the reviewer self-skips on any other outcome). A null
+            // outcome means QA was already current — launch the review
+            // too, or a task whose QA predates the deploy would wait
+            // out the backstop.
+            if (t.Result is null
+                || t.Result.Verdict == Forge.Reviewer.QaDispatcher.VerdictPass
+                || t.Result.Verdict == Forge.Reviewer.QaDispatcher.VerdictNotApplicable)
             {
                 try
                 {

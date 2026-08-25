@@ -396,7 +396,7 @@ public static class ProjectsEndpoints
         return Results.Ok(new { projectId = id, triageEnabled = project?.TriageEnabled ?? false });
     }
 
-    public sealed record PutQaRequest(bool Enabled);
+    public sealed record PutQaRequest(bool Enabled, IReadOnlyList<string>? VisualPaths = null);
 
     private static async Task<IResult> PutQaAsync(
         string id,
@@ -406,10 +406,10 @@ public static class ProjectsEndpoints
     {
         if (body is null)
             return Results.BadRequest(new { error = "body required, e.g. { \"enabled\": true }" });
-        var updated = await store.UpdateQaAsync(id, body.Enabled, ct);
+        var updated = await store.UpdateQaAsync(id, body.Enabled, body.VisualPaths, ct);
         if (!updated) return Results.NotFound(new { error = "project not found", id });
         var project = await store.GetAsync(id, ct);
-        return Results.Ok(new { projectId = id, qaEnabled = project?.QaEnabled ?? false });
+        return Results.Ok(new { projectId = id, qaEnabled = project?.QaEnabled ?? false, qaVisualPaths = project?.QaVisualPaths });
     }
 
     public sealed record PutTerritoryEntry(List<string> Prefixes, bool RootFiles = false);

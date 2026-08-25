@@ -130,6 +130,27 @@ public class PRWatcherQaGateTests : IDisposable
     }
 
     [Fact]
+    public async Task QaEnabled_NotApplicableAtHead_Merges()
+    {
+        // The 3-tier applicability gate: a docs-only head is stamped
+        // not-applicable by the dispatcher with no QA run — the merge
+        // gate treats it like a pass.
+        var gh = new FakeGitHub();
+        var task = await SeedAsync(new Dictionary<string, object>
+        {
+            ["qaSha"] = Head,
+            ["qaVerdict"] = QaDispatcher.VerdictNotApplicable,
+            ["qaTier"] = "docs",
+        });
+        var watcher = NewWatcher(gh, qaEnabled: true);
+
+        var outcome = await Poll(watcher, task);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
+        Assert.Equal(1, gh.MergeCalls);
+    }
+
+    [Fact]
     public async Task QaEnabled_StaleVerdict_NoMerge()
     {
         var gh = new FakeGitHub();
