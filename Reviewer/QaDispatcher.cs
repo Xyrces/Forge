@@ -68,6 +68,12 @@ public sealed class QaDispatcher
     /// qa-unavailable.</summary>
     public const int MaxQaAttempts = 2;
 
+    /// <summary>Per-file evidence size cap for the detached evidence
+    /// push: GitHub rejects files over 100MB (GH001); 95MB leaves
+    /// margin. Oversized files are dropped from the ship list, not
+    /// pushed-and-rejected.</summary>
+    internal const long MaxEvidenceFileBytes = 95L * 1024 * 1024;
+
     /// <summary>QA playthroughs build + run the product — far longer
     /// than a review. Bounded so a hung QA run can't freeze the watch.
     /// Internal so the watch sweep can bound the fire-and-forget
@@ -364,6 +370,31 @@ public sealed class QaDispatcher
         }
         var evidence = dirty.Where(f =>
             EvidencePathPrefixes.Any(p => f.Path.StartsWith(p, StringComparison.Ordinal))).ToList();
+
+        // GitHub hard-rejects files >100MB (GH001 pre-receive): one
+        // giant capture (a live client log can reach GBs — observed live
+        // 2026-08-25: task-742's 2.5GB godot-client.log sank the whole
+        // evidence push) must not fail the round. Oversized files are
+        // dropped from the ship list with a warning; the tier bars
+        // evaluate against what actually ships, so a pass leaning only
+        // on an unshippable file still fails honestly.
+        var oversized = new List<string>();
+        var shippable = new List<GitWorktreeService.DirtyFile>();
+        foreach (var f in evidence)
+        {
+            long size = 0;
+            try { size = new FileInfo(Path.Combine(worktreePath, f.Path)).Length; }
+            catch (IOException) { } // unreadable → treat as 0, let git try
+            if (size > MaxEvidenceFileBytes) oversized.Add($"{f.Path} ({size / 1024 / 1024}MB)");
+            else shippable.Add(f);
+        }
+        if (oversized.Count > 0)
+        {
+            _logger.LogWarning("QA (task {Id}, PR #{Pr}): dropping oversized evidence (>100MB GitHub limit): {Files}",
+                task.Id, prNumber, string.Join(", ", oversized));
+        }
+        evidence = shippable;
+
         if (verdict == VerdictPass && tier == QaEvidenceTier.Visual)
         {
             var rasterEvidence = evidence.Where(f =>
@@ -405,7 +436,7 @@ public sealed class QaDispatcher
                 evidence.Select(f => f.Path).ToList(), ct);
             await _worktrees.PushHeadToRefAsync(worktreePath, qaBranch, ct, force: true);
             await PostEvidenceCommentAsync(task, prNumber, headSha, qaBranch, verdict, notes, round, tier,
-                evidence.Select(f => f.Path).ToList(), ct);
+                evidence.Select(f => f.Path).ToList(), oversized, ct);
         }
 
         await _issues.TransitionAsync(task.Id, task.Status, $"QA {verdict} (round {round})",
@@ -444,7 +475,7 @@ public sealed class QaDispatcher
     private async Task PostEvidenceCommentAsync(
         IssueRecord task, int prNumber, string headSha, string qaBranch,
         string verdict, string notes, int round, QaEvidenceTier tier,
-        IReadOnlyList<string> evidencePaths, CancellationToken ct)
+        IReadOnlyList<string> evidencePaths, IReadOnlyList<string> oversized, CancellationToken ct)
     {
         try
         {
@@ -492,6 +523,11 @@ public sealed class QaDispatcher
             }
             if (evidencePaths.Count > 20)
                 sb.AppendLine($"- … and {evidencePaths.Count - 20} more on `{qaBranch}`");
+            foreach (var dropped in oversized)
+            {
+                sb.Append("- ⚠ dropped oversized evidence (>100MB GitHub limit, not shipped): `")
+                    .Append(dropped).AppendLine("`");
+            }
             await _gitHub.CreateIssueCommentAsync(prNumber, sb.ToString(), ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

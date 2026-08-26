@@ -145,10 +145,12 @@ public sealed class QaDispatcherTests : IDisposable
     }
 
     /// <summary>Scripted agent: optionally drops files into the QA
-    /// worktree (from the run context), then returns the verdict text.</summary>
+    /// worktree (from the run context), then returns the verdict text.
+    /// LargeDrops creates sparse oversized files via SetLength.</summary>
     private sealed class FakeRunner : IAgentRunner
     {
         public List<(string Path, string Content)> Drops { get; } = new();
+        public List<(string Path, long SizeBytes)> LargeDrops { get; } = new();
         public string Reply { get; set; } = "QA_VERDICT: pass\nplayed the build; evidence captured";
         public int Calls;
 
@@ -164,6 +166,13 @@ public sealed class QaDispatcherTests : IDisposable
                 var full = Path.Combine(worktree, path);
                 Directory.CreateDirectory(Path.GetDirectoryName(full)!);
                 File.WriteAllText(full, content);
+            }
+            foreach (var (path, size) in LargeDrops)
+            {
+                var full = Path.Combine(worktree, path);
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                using var fs = new FileStream(full, System.IO.FileMode.Create, FileAccess.Write);
+                fs.SetLength(size);
             }
             return Task.FromResult(new AgentRunResult(Reply, null, 0, 0, TimeSpan.FromSeconds(1)));
         }
@@ -473,6 +482,57 @@ public sealed class QaDispatcherTests : IDisposable
             headOverride: _ => (outcome.HeadSha, "agent/task-1"));
         Assert.Null(second);
         Assert.Equal(1, runner.Calls);
+    }
+
+    [Fact]
+    public async Task Pass_OversizedEvidence_DroppedButRoundShips()
+    {
+        // GitHub hard-rejects >100MB files (GH001 — observed live:
+        // task-742's 2.5GB godot-client.log sank the whole evidence
+        // push and burned the attempt). The oversized file is dropped
+        // from the ship list, the round still ships and passes, and
+        // the comment names the drop.
+        var runner = new FakeRunner();
+        runner.Drops.Add(("test-results/qa/task-1/01-boot.png", "fake-png-bytes"));
+        runner.LargeDrops.Add(("test-results/qa/task-1/live/client.log", QaDispatcher.MaxEvidenceFileBytes + 1));
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var gh = new FakeGitHub();
+        var dispatcher = NewDispatcher(runner, gh: gh);
+
+        var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+
+        Assert.NotNull(outcome);
+        Assert.True(outcome!.Verdict == QaDispatcher.VerdictPass, $"expected pass, got {outcome.Verdict}: {outcome.Error}");
+        var evidenceFiles = GitOut(_workDir, "ls-tree -r --name-only origin/agent/qa-task-1");
+        Assert.Contains("test-results/qa/task-1/01-boot.png", evidenceFiles);
+        Assert.DoesNotContain("test-results/qa/task-1/live/client.log", evidenceFiles);
+        var comment = Assert.Single(gh.Comments);
+        Assert.Contains("dropped oversized evidence", comment);
+        Assert.Contains("client.log", comment);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("pass", after.GetMetadata("qaVerdict"));
+    }
+
+    [Fact]
+    public async Task Pass_OnlyOversizedRaster_StillFailsTheTierBar()
+    {
+        // The tier bar evaluates against what actually ships: a visual
+        // pass whose ONLY raster is unshippable is not QA.
+        var runner = new FakeRunner();
+        runner.LargeDrops.Add(("test-results/qa/task-1/huge.png", QaDispatcher.MaxEvidenceFileBytes + 1));
+        var task = await SeedTask();
+        var codeHead = PrHeadSha(_workDir);
+        var dispatcher = NewDispatcher(runner);
+
+        var outcome = await dispatcher.VerifyOnceAsync(task, CancellationToken.None,
+            headOverride: _ => (codeHead, "agent/task-1"));
+
+        Assert.NotNull(outcome);
+        Assert.Equal(QaDispatcher.VerdictError, outcome!.Verdict);
+        Assert.Contains("raster", outcome.Error);
+        Assert.Equal(codeHead, PrHeadSha(_workDir));
     }
 
     [Fact]
