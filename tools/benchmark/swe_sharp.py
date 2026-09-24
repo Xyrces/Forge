@@ -290,6 +290,7 @@ def validate_preflight(manifest_path, receipt_path):
     receipt = read_json(receipt_path)
     ids = [c["id"] for c in manifest["cases"]]
     baselines = receipt.get("baselines")
+    negative_controls = receipt.get("negativeControls")
     images = receipt.get("imageIds")
     if (receipt.get("success") is not True or receipt.get("schemaVersion") != 1
             or receipt.get("manifestSha256") != digest(manifest_path)
@@ -303,9 +304,18 @@ def validate_preflight(manifest_path, receipt_path):
                    for value in images.values())
             or not isinstance(baselines, dict) or set(baselines) != set(ids)
             or any(baselines[i] != {"gold": True, "empty": True} for i in ids)
+            or not isinstance(negative_controls, dict) or set(negative_controls) != set(ids)
+            or any(not valid_negative_control_receipt(negative_controls[i]) for i in ids)
             or receipt.get("errors") != []):
         raise ValueError("official gold/empty environment preflight is missing, failed, or stale")
     return {key: receipt[key] for key in ("manifestSha256", "datasetSha256", "sourceRevision", "caseIds", "evaluatorFingerprint", "imageIds")} | {"receiptSha256": digest(receipt_path)}
+
+
+def valid_negative_control_receipt(value):
+    return (isinstance(value, dict) and set(value) == {"kind", "signatureSha256"}
+            and value.get("kind") in {"declared-test-failure", "hidden-test-compile-failure"}
+            and isinstance(value.get("signatureSha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", value["signatureSha256"]) is not None)
 
 
 def check_official_report(report, row, expected_resolved):
@@ -321,7 +331,8 @@ def check_official_report(report, row, expected_resolved):
     statuses = value.get("tests_status", {})
     observed = value.get("forge_observed_tests", {})
     expected_tests = set(row["FAIL_TO_PASS"]) | set(row["PASS_TO_PASS"])
-    if (value.get("forge_log_parse_success") is not True or set(observed) != expected_tests
+    if (value.get("forge_log_parse_success") is not True
+            or value.get("forge_independent_trx_valid") is not True or set(observed) != expected_tests
             or any(status not in ("PASSED", "FAILED") for status in observed.values())):
         raise ValueError("declared tests were missing, skipped, or errored in parsed test output")
     failed_repair = False
@@ -341,6 +352,72 @@ def check_official_report(report, row, expected_resolved):
     if not expected_resolved and not failed_repair:
         raise ValueError("baseline did not reproduce the defect")
     return True
+
+
+def _control_signature(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _hidden_test_paths(row):
+    paths = set()
+    for name in re.findall(r"^\+\+\+ b/(.+)$", row["test_patch"], re.MULTILINE):
+        paths.add(str(safe_path(name)))
+    if not paths:
+        raise ValueError("hidden test patch has no changed paths")
+    return paths
+
+
+def classify_empty_baseline(report, row):
+    """Accept an ordinary failing test or a tightly-scoped hidden-test compile failure.
+
+    This function is used only for the trusted empty control. Candidate and gold
+    evaluation continue to require every declared test to run and pass.
+    """
+    try:
+        check_official_report(report, row, False)
+    except ValueError as ordinary_error:
+        ident = row["instance_id"]
+        if set(report) != {ident}:
+            raise ordinary_error
+        value = report[ident]
+        if (value.get("patch_is_None") is not False or value.get("patch_exists") is not True
+                or value.get("patch_successfully_applied") is not True or value.get("resolved") is not False):
+            raise ordinary_error
+        evidence = value.get("forge_compiler_evidence")
+        diagnostics = evidence.get("diagnostics") if isinstance(evidence, dict) else None
+        if (not isinstance(diagnostics, list) or not diagnostics
+                or evidence.get("unparsedErrorLineDigests") != []
+                or evidence.get("environmentErrorCategories") != []):
+            raise ValueError("empty control lacks an isolated C# hidden-test compiler failure") from ordinary_error
+        hidden_paths = _hidden_test_paths(row)
+        normalized = []
+        projects = set()
+        for item in diagnostics:
+            if (not isinstance(item, dict) or set(item) != {"path", "code", "project"}
+                    or item.get("path") not in hidden_paths
+                    or not isinstance(item.get("code"), str) or not re.fullmatch(r"CS\d{4}", item["code"])
+                    or not isinstance(item.get("project"), str) or not item["project"].endswith(".csproj")):
+                raise ValueError("compiler failure was not confined to a hidden-test source/project") from ordinary_error
+            safe_path(item["project"])
+            projects.add(item["project"])
+            normalized.append(item)
+        if len(projects) != 1:
+            raise ValueError("compiler failure spans multiple or unidentified projects") from ordinary_error
+        counts = value.get("forge_all_observed_status_counts")
+        if (value.get("forge_pristine_build_succeeded") is not True
+                or value.get("forge_independent_trx_valid") is not True
+                or not isinstance(counts, dict) or not counts
+                or any(not isinstance(k, str) or not isinstance(v, int) or v < 0
+                                               for k, v in counts.items())
+                or any(k != "PASSED" and v for k, v in counts.items())):
+            raise ValueError("other tests failed while hidden tests did not compile") from ordinary_error
+        signature = {"kind": "hidden-test-compile-failure", "diagnostics": normalized,
+                     "project": next(iter(projects))}
+        return {"kind": signature["kind"], "signatureSha256": _control_signature(signature)}
+    value = report[row["instance_id"]]
+    signature = {"kind": "declared-test-failure", "observed": value["forge_observed_tests"],
+                 "testsStatus": value["tests_status"]}
+    return {"kind": signature["kind"], "signatureSha256": _control_signature(signature)}
 
 
 def validate_candidate_patch(patch_path, row, repository):
@@ -413,6 +490,8 @@ def prepared_control(path):
 
 def evaluate_official(meta, python, predictions, ids, output, timeout):
     """Invoke pinned official evaluator in a new directory, no production env."""
+    output = Path(output).absolute()
+    python = Path(python).absolute()  # Preserve the venv executable symlink.
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / "predictions.json", predictions)
     env = {k: os.environ[k] for k in ("PATH", "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "XDG_RUNTIME_DIR") if k in os.environ}
@@ -422,8 +501,8 @@ def evaluate_official(meta, python, predictions, ids, output, timeout):
                 "PYTHONPATH": str(Path(meta["sourceRoot"]) / "harness")})
     container_label = "forge-swe-sharp-" + uuid.uuid4().hex
     env["FORGE_BENCHMARK_CONTAINER_LABEL"] = container_label
-    wrapper = Path(__file__).with_name("swe_sharp_eval.py")
-    command = [str(python), str(Path(__file__).with_name("swe_sharp_eval.py")),
+    wrapper = Path(__file__).absolute().with_name("swe_sharp_eval.py")
+    command = [str(python), str(wrapper),
                "--dataset_name", meta["datasetPath"], "--predictions_path", str(output / "predictions.json"),
                "--instance_ids", *ids, "--max_workers", "1", "--run_id", "forge-" + uuid.uuid4().hex,
                "--namespace", "swebcs", "--timeout", str(timeout), "--cache_level", "instance"]
@@ -459,10 +538,12 @@ def preflight(prepared, python, timeout):
     ids = [c["id"] for c in manifest["cases"]]
     receipt = {"schemaVersion": 1, "sourceRevision": SOURCE_REVISION, "datasetSha256": manifest["datasetSha256"],
                "manifestSha256": digest(meta["manifestPath"]), "caseIds": ids, "success": False,
-               "baselines": {}, "evaluatorFingerprint": None, "imageIds": {}, "errors": []}
+               "baselines": {}, "negativeControls": {},
+               "evaluatorFingerprint": None, "imageIds": {}, "errors": []}
     try:
         fingerprints = []
         image_sets = []
+        compile_controls = {}
         for baseline in ("gold", "empty"):
             preds = [{"instance_id": i, "model_name_or_path": baseline,
                       "model_patch": rows[i]["patch"] if baseline == "gold" else EMPTY_PATCH} for i in ids]
@@ -475,7 +556,13 @@ def preflight(prepared, python, timeout):
                 try:
                     if process["exitCode"] or process["timedOut"]:
                         raise ValueError("evaluator process failed")
-                    check_official_report(reports.get(ident, {}), rows[ident], baseline == "gold")
+                    if baseline == "gold":
+                        check_official_report(reports.get(ident, {}), rows[ident], True)
+                    else:
+                        classification = classify_empty_baseline(reports.get(ident, {}), rows[ident])
+                        receipt["negativeControls"][ident] = classification
+                        if classification["kind"] == "hidden-test-compile-failure":
+                            compile_controls[ident] = classification
                     receipt["baselines"].setdefault(ident, {})[baseline] = True
                 except ValueError as error:
                     receipt["errors"].append(f"{baseline}/{ident}: {error}")
@@ -486,7 +573,28 @@ def preflight(prepared, python, timeout):
             receipt["evaluatorFingerprint"], receipt["imageIds"] = fingerprints[0], image_sets[0]
         else:
             receipt["errors"].append("evaluator/images unverified or changed between baselines")
-        receipt["success"] = not receipt["errors"] and all(receipt["baselines"].get(i) == {"gold": True, "empty": True} for i in ids)
+        if not receipt["errors"] and compile_controls:
+            repeat_ids = sorted(compile_controls)
+            predictions = [{"instance_id": i, "model_name_or_path": "empty-repeat",
+                            "model_patch": EMPTY_PATCH} for i in repeat_ids]
+            process, reports, environment = evaluate_official(
+                meta, python, predictions, repeat_ids, output / "empty-repeat", timeout)
+            if process["exitCode"] or process["timedOut"]:
+                receipt["errors"].append("empty-repeat: evaluator process failed; see private evaluator.log")
+            elif (environment.get("fingerprint") != receipt["evaluatorFingerprint"]
+                  or environment.get("images") != {i: receipt["imageIds"].get(i) for i in repeat_ids}):
+                receipt["errors"].append("empty-repeat: evaluator/image identity changed")
+            else:
+                for ident in repeat_ids:
+                    try:
+                        repeated = classify_empty_baseline(reports.get(ident, {}), rows[ident])
+                        if repeated != compile_controls[ident]:
+                            raise ValueError("compiler failure signature changed on repeat")
+                    except ValueError as error:
+                        receipt["errors"].append(f"empty-repeat/{ident}: {error}")
+        receipt["success"] = (not receipt["errors"]
+            and all(receipt["baselines"].get(i) == {"gold": True, "empty": True} for i in ids)
+            and set(receipt["negativeControls"]) == set(ids))
     finally:
         write_json(output / "receipt.json", receipt)
         print(f"Preflight receipt: {output / 'receipt.json'}", flush=True)
