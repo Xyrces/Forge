@@ -60,6 +60,9 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if (args.Any(static a => a.StartsWith("--benchmark-", StringComparison.Ordinal)))
+            return await BenchmarkHarness.RunAsync(args);
+
         var repoRoot = args.FirstOrDefault(a => a.StartsWith("--repo-root="))?.Split('=', 2)[1]
             ?? FindRepoRoot() ?? throw new InvalidOperationException("Cannot find repo root");
         var workspaceRoot = Path.Combine(repoRoot, ".portHorizon", "e2e");
