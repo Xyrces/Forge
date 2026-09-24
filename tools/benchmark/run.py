@@ -784,14 +784,20 @@ def main(argv=None):
         binary = ROOT / "tools/e2e-harness/bin/Release/net10.0/ph-e2e-harness.dll"
         if args.mode != "reliability" and binary.exists():
             report["harnessBinarySha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
-            grader_test = run_process([args.dotnet, str(binary), "--benchmark-self-test-graders",
+            # External tasks use their own SDK and independently preflighted
+            # official grader. Do not require toy fixtures targeting .NET 10
+            # to compile inside an otherwise valid repository-specific worker.
+            self_test_flag = "--benchmark-self-test-external" if external is not None else "--benchmark-self-test-graders"
+            pass_marker = "PASS: external patch generation" if external is not None else "PASS: every trusted grader"
+            grader_test = run_process([args.dotnet, str(binary), self_test_flag,
                                       "--repo-root=" + str(output / "grader-self-test-workspace")],
                                       ROOT, env, output / "grader-self-test.log", 180)
+            grader_test["kind"] = "external-harness" if external is not None else "fixture-graders"
             report["graderSelfTest"] = grader_test
-            if (grader_test["exitCode"] != 0 or "PASS: every trusted grader" not in
+            if (grader_test["exitCode"] != 0 or grader_test["timedOut"] or pass_marker not in
                     (output / "grader-self-test.log").read_text(errors="replace")):
                 grader_test["exitCode"] = grader_test["exitCode"] or 1
-                report["setupError"] = "Independent graders failed their reference/bad-solution self-test; no model trials started."
+                report["setupError"] = "Benchmark harness/grader self-test failed; no model trials started."
                 return 1
         if args.mode in ("all", "reliability"):
             command = [args.dotnet, "test", "tests/Forge.Tests", "-c", "Release", "--no-restore",

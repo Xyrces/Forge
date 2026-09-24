@@ -405,8 +405,9 @@ class ExternalCaseTests(unittest.TestCase):
             output_root = root / "output"
 
             def fake_process(command, cwd, env, log, timeout):
-                if "--benchmark-self-test-graders" in command:
-                    log.write_text("PASS: every trusted grader\n")
+                self.assertNotIn("--benchmark-self-test-graders", command)
+                if "--benchmark-self-test-external" in command:
+                    log.write_text("PASS: external patch generation\n")
                     return {"exitCode": 0, "timedOut": False, "elapsedSeconds": 0.01}
                 self.assertEqual(1, sum(arg.startswith("--benchmark-external-case=") for arg in command))
                 self.assertFalse(any(arg.startswith("--benchmark-case=") for arg in command))
@@ -442,10 +443,38 @@ class ExternalCaseTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             report_path = next(output_root.iterdir()) / "results.json"
             report = json.loads(report_path.read_text())
+            self.assertEqual("external-harness", report["graderSelfTest"]["kind"])
             self.assertTrue(report["generationComplete"])
             self.assertFalse(report["success"])
             self.assertTrue(report["attempts"][0]["generationSuccess"])
             self.assertEqual("pending", report["attempts"][0]["result"]["externalEvaluation"])
+
+    def test_external_self_test_failure_stops_before_trials(self):
+        for exit_code, timed_out, message in ((1, False, "PASS: external patch generation"),
+                                               (0, True, "PASS: external patch generation"),
+                                               (0, False, "PASS: every trusted grader")):
+            with self.subTest(exit_code=exit_code, timed_out=timed_out, message=message), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                manifest_path, _, _ = self.make_manifest(root)
+                config = root / "policies.json"
+                config.write_text(json.dumps({"policies": [PolicyTests().policy()]}))
+                output_root = root / "output"
+
+                def fake_process(command, cwd, env, log, timeout):
+                    self.assertIn("--benchmark-self-test-external", command)
+                    log.write_text(message)
+                    return {"exitCode": exit_code, "timedOut": timed_out, "elapsedSeconds": 0.01}
+
+                with mock_patch.object(benchmark, "run_process", side_effect=fake_process) as process:
+                    actual = benchmark.main([
+                        "--mode", "fake", "--config", str(config), "--external-cases", str(manifest_path),
+                        "--output-root", str(output_root), "--no-build",
+                    ])
+                self.assertEqual(1, actual)
+                self.assertEqual(1, process.call_count)
+                report = json.loads((next(output_root.iterdir()) / "results.json").read_text())
+                self.assertEqual([], report["attempts"])
+                self.assertIn("no model trials started", report["setupError"])
 
 
 class SweSharpEvaluationTests(unittest.TestCase):
