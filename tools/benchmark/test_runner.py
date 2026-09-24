@@ -482,7 +482,7 @@ class SweSharpEvaluationTests(unittest.TestCase):
                                "PASS_TO_PASS": ["regression"]}}
         official = {"external-1": {"external-1": {"patch_is_None": False, "patch_exists": True,
                     "patch_successfully_applied": True, "resolved": True,
-                    "forge_log_parse_success": True,
+                    "forge_log_parse_success": True, "forge_independent_trx_valid": True,
                     "forge_observed_tests": {"repair": "PASSED", "regression": "PASSED"},
                     "tests_status": {"FAIL_TO_PASS": {"success": ["repair"], "failure": []},
                                      "PASS_TO_PASS": {"success": ["regression"], "failure": []}}}}}
@@ -550,7 +550,11 @@ class SweSharpEvaluationTests(unittest.TestCase):
                        "evaluatorFingerprint": "b" * 64,
                        "imageIds": {"one": "sha256:" + "c" * 64, "two": "sha256:" + "d" * 64},
                        "baselines": {"one": {"gold": True, "empty": True},
-                                     "two": {"gold": True, "empty": True}}, "errors": []}
+                                     "two": {"gold": True, "empty": True}},
+                       "negativeControls": {
+                           "one": {"kind": "declared-test-failure", "signatureSha256": "e" * 64},
+                           "two": {"kind": "hidden-test-compile-failure", "signatureSha256": "f" * 64}},
+                       "errors": []}
             receipt_path = root / "receipt.json"
             receipt_path.write_text(json.dumps(receipt))
             with mock_patch.object(swe_sharp, "validate_manifest", return_value=manifest):

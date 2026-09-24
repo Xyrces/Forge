@@ -43,6 +43,17 @@ The official task images supply their own repository-specific .NET tooling.
 Allow disk space for repository snapshots and container images. The evaluator
 uses one container at a time, with 8 GiB RAM, 2 CPUs and 512 PIDs as limits.
 
+On Linux, a rootless Podman installation can expose the Docker-compatible API:
+
+```bash
+systemctl --user start podman.socket
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman/podman.sock"
+```
+
+Set this only in the benchmark shell. The agent worker must never receive the
+socket. Container creation settings and live cgroup limits are checked before
+candidate execution; unsupported or silently ignored restrictions fail closed.
+
 From the Forge repository:
 
 ```bash
@@ -67,15 +78,63 @@ The harness also sanitizes its clone and verifies that the original history is
 physically unavailable. Reference patches, test patches and test lists stay in
 the trusted `source/` and `control/` directories. Only `agent/` is an agent input.
 
-Preflight uses the official published `swebcs` images, records their immutable
-image IDs, and runs two controls for every admitted task: the reference patch
+Preflight requests the upstream harness's `swebcs` image names, records their
+immutable image IDs, and runs two controls for every admitted task: the reference patch
 must resolve it, while the unchanged solution must reproduce a repair-test
-failure with all regression tests passing. Because the upstream CLI skips empty
+failure with all regression tests passing. A compile-time repair has a separate
+negative-control classification: the unchanged solution must build before the
+hidden tests are applied, then fail with C# compiler diagnostics confined to a
+hidden-test source in one project, with no infrastructure errors or other failing
+test results. That failure must repeat in a fresh container with the same image,
+evaluator and diagnostic signature. Candidate patches never receive this
+exception: every declared repair and regression test must run and pass.
+Because the upstream CLI skips empty
 patches, the unchanged-solution control adds an inert marker file, touching no
 existing file. Missing/skipped tests, setup errors or an unavailable Docker API
 fail preflight. Its receipt is required before the live driver reserves/spends
 any model budget. Dependencies, wrapper source and evaluator source are
 fingerprinted; image identities must agree across controls and final grading.
+Public receipts expose only the negative-control kind and signature hash;
+compiler details and hidden test identities stay in the private control output.
+
+The trusted wrapper activates the pinned harness's fully qualified test-name
+filter for C# CSV rows that omit its undocumented `dotnet` marker, preserving
+the harness's special full-suite commands. It independently reconciles all TRX
+variants: a later passing parameterization or target framework cannot overwrite
+an earlier failure. These compatibility corrections are fingerprinted with the
+evaluator and do not alter the declared expected tests.
+
+On 24 September 2026, anonymous pulls of all nine selected `swebcs` images were
+denied and Docker Hub listed no public repositories in that namespace. The
+namespace default is not evidence that published images are available. Locally
+built images must preserve the pinned upstream recipes and have recorded build
+provenance; they still require both controls before any model spending.
+
+The rootless Podman builder records generated Dockerfiles and setup-script
+hashes, parent image IDs and final image IDs under the private benchmark root:
+
+```bash
+.portHorizon/benchmarks/swe-sharp/venv/bin/python tools/benchmark/swe_sharp_images.py \
+  --dataset .portHorizon/benchmarks/swe-sharp/pilot-01/control/dataset.json \
+  --output .portHorizon/benchmarks/swe-sharp/pilot-01/images \
+  --instance-id ardalis__cleanarchitecture-546
+```
+
+Omit `--instance-id` to build every prepared task. It tags local images with the
+names expected by the upstream evaluator, and refuses to overwrite an image
+whose provenance does not match. The build normalizes the upstream x86 platform
+spelling to `linux/amd64`, qualifies the Ubuntu registry name, and corrects the
+C# environment's parent tag as the upstream build helper does. Build commands
+retain upstream setup behavior. Each stage pins its inspected parent image ID.
+The instance setup also removes all Git history beyond the original base commit,
+in the same build layer as the clone, while preserving the base SHA, tree,
+upstream setup edits and build outputs. A global lock prevents competing builds.
+`--replace-owned-images` explicitly permits replacing this builder's own tags;
+old image contents and unrelated tags remain available.
+
+Image builds need network access for
+toolchains and packages; acceptance containers remain offline. Installing Docker
+packages inside an image does not grant nested Docker or host-socket access.
 
 ## Generate with an isolated agent worker
 
@@ -158,3 +217,7 @@ validated on the actual host. Production scheduler concurrency, shared provider
 cooldowns, QA evidence, GitHub merging and restart recovery require separate
 Forge replay/fault scenarios. No public benchmark score establishes those
 properties.
+
+The current runtime checks do not enforce a separate writable-layer disk quota.
+Use a dedicated disposable host or filesystem quota when evaluating untrusted
+or adversarial code; memory/process limits do not bound disk consumption.
