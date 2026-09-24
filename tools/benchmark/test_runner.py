@@ -6,11 +6,20 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import hashlib
+import subprocess
+from unittest.mock import patch as mock_patch
 from decimal import Decimal
 
 spec = importlib.util.spec_from_file_location("benchmark", Path(__file__).with_name("run.py"))
 benchmark = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(benchmark)
+swe_spec = importlib.util.spec_from_file_location("swe_sharp", Path(__file__).with_name("swe_sharp.py"))
+swe_sharp = importlib.util.module_from_spec(swe_spec)
+swe_spec.loader.exec_module(swe_sharp)
+eval_spec = importlib.util.spec_from_file_location("swe_sharp_eval", Path(__file__).with_name("swe_sharp_eval.py"))
+swe_sharp_eval = importlib.util.module_from_spec(eval_spec)
+eval_spec.loader.exec_module(swe_sharp_eval)
 
 
 class RunnerTests(unittest.TestCase):
@@ -267,6 +276,418 @@ class PolicyTests(unittest.TestCase):
         benchmark.execute_waves([("calculator", self.profile(), n) for n in range(2)], 1, Decimal("1"), True,
                                 lambda j, a, t: j, execute, finish, lambda j, r: skipped.append(j[2]))
         self.assertEqual([1], skipped)
+
+
+class ExternalCaseTests(unittest.TestCase):
+    def make_manifest(self, root):
+        repository = root / "repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repository, check=True)
+        subprocess.run(["git", "config", "user.name", "Benchmark"], cwd=repository, check=True)
+        subprocess.run(["git", "config", "user.email", "benchmark@localhost"], cwd=repository, check=True)
+        (repository / "source.cs").write_text("class Source {}\n")
+        subprocess.run(["git", "add", "source.cs"], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repository, check=True)
+        base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+        tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True).strip()
+        case = {"id": "external-1", "title": "Fix it", "prompt": "Fix source.cs",
+                "repositoryPath": str(repository.resolve()), "baseCommit": base,
+                "allowedPaths": ["source.cs"]}
+        case_path = root / "case.json"
+        case_path.write_text(json.dumps(case))
+        case_hash = hashlib.sha256(case_path.read_bytes()).hexdigest()
+        manifest = {"schemaVersion": 1, "dataset": "swe-sharp-bench", "sourceRevision": "a" * 40,
+                    "datasetSha256": "b" * 64,
+                    "cases": [{"id": "external-1", "casePath": str(case_path.resolve()),
+                               "caseSha256": case_hash, "baseCommit": base,
+                               "upstreamBaseCommit": "c" * 40, "repo": "owner/repo",
+                               "snapshotTree": tree}]}
+        manifest_path = root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest))
+        return manifest_path, repository, base
+
+    def test_external_manifest_binds_case_hash_and_clean_repository(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manifest_path, repository, _ = self.make_manifest(Path(temp))
+            manifest = benchmark.load_external_cases(manifest_path)
+            benchmark.verify_external_repository(manifest["cases"][0])
+            provenance = benchmark.external_provenance(manifest)
+            self.assertNotIn("casePath", json.dumps(provenance))
+            self.assertNotIn("prompt", json.dumps(provenance))
+
+            (repository / "source.cs").write_text("changed\n")
+            with self.assertRaises(ValueError):
+                benchmark.verify_external_repository(manifest["cases"][0])
+
+    def test_external_manifest_rejects_tampered_case_and_unsafe_allowed_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path, _, _ = self.make_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            case_path = Path(manifest["cases"][0]["casePath"])
+            case = json.loads(case_path.read_text())
+            case["allowedPaths"] = ["../hidden-tests"]
+            case_path.write_text(json.dumps(case))
+            manifest["cases"][0]["caseSha256"] = hashlib.sha256(case_path.read_bytes()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaises(ValueError):
+                benchmark.load_external_cases(manifest_path)
+
+            case["allowedPaths"] = ["source.cs"]
+            case_path.write_text(json.dumps(case))
+            with self.assertRaises(ValueError):
+                benchmark.load_external_cases(manifest_path)
+
+    def test_external_generation_requires_bound_nonempty_patch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path, repository, base = self.make_manifest(root)
+            row = benchmark.load_external_cases(manifest_path)["cases"][0]
+            attempt = root / "attempt"
+            attempt.mkdir()
+            patch = attempt / "model.patch"
+            (repository / "source.cs").write_text("class Source { public int Value => 1; }\n")
+            patch.write_bytes(subprocess.check_output(["git", "diff", "--binary", "--full-index"], cwd=repository))
+            subprocess.run(["git", "checkout", "--", "source.cs"], cwd=repository, check=True)
+            names = {"sanitized single-commit history", "dispatch", "pull request opened",
+                     "pushed head identity", "committed patch", "clean worktree",
+                     "allowed external file scope", "real reviewer patch recommendation",
+                     "policy model calls", "simulated CI closed loop", "remote head stable through watch",
+                     "produced remote head scope", "produced remote head snapshot", "patch produced"}
+            result = {"version": 1, "caseId": "external-1", "mode": "live", "policyId": "mixed",
+                      "success": False, "generationSuccess": True,
+                      "outcome": "pending-external-evaluation", "externalEvaluation": "pending",
+                      "sourceBaseCommit": base, "producedHeadSha": "d" * 40,
+                      "patchPath": str(patch.resolve()),
+                      "patchSha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+                      "checks": [{"name": name, "passed": True} for name in names]}
+            policy = {"id": "mixed", "roles": {}, "models": []}
+            benchmark.validate_external_generation_result(result, row, "live", policy, attempt)
+
+            result["checks"][0]["passed"] = False
+            with self.assertRaises(ValueError):
+                benchmark.validate_external_generation_result(result, row, "live", policy, attempt)
+            result["checks"][0]["passed"] = True
+            result["patchSha256"] = "e" * 64
+            with self.assertRaises(ValueError):
+                benchmark.validate_external_generation_result(result, row, "live", policy, attempt)
+
+    def test_failed_external_generation_retains_known_usage_accounting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path, _, base = self.make_manifest(root)
+            external_row = benchmark.load_external_cases(manifest_path)["cases"][0]
+            policy = PolicyTests().policy()
+            used = RunnerTests.usage()
+            unused = RunnerTests.usage(calls=0, completed=0, input_tokens=0, output_tokens=0,
+                                       known=0, estimated=0)
+            result = {"version": 1, "caseId": "external-1", "mode": "live", "policyId": "mixed",
+                      "success": False, "generationSuccess": False, "outcome": "patch-generation-failed",
+                      "externalEvaluation": "pending", "sourceBaseCommit": base,
+                      "checks": [{"name": "dispatch", "passed": False}], "usage": used,
+                      "modelUsage": {
+                          "trial": {"provider": "provider", "model": "model", "usage": used},
+                          "frontier": {"provider": "other", "model": "frontier-model", "usage": unused}}}
+            benchmark.validate_external_generation_result(result, external_row, "live", policy, root)
+            accounting_row = {"success": False, "generationSuccess": False,
+                              "outcome": result["outcome"]}
+            self.assertFalse(benchmark.finalize_live_accounting(accounting_row, result, policy))
+            self.assertAlmostEqual(.0002, accounting_row["estimatedCostUsd"])
+            self.assertEqual("patch-generation-failed", accounting_row["outcome"])
+
+    def test_fake_external_run_reports_generation_without_claiming_evaluation_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path, repository, base = self.make_manifest(root)
+            policy = PolicyTests().policy()
+            config = root / "policies.json"
+            config.write_text(json.dumps({"policies": [policy]}))
+            output_root = root / "output"
+
+            def fake_process(command, cwd, env, log, timeout):
+                if "--benchmark-self-test-graders" in command:
+                    log.write_text("PASS: every trusted grader\n")
+                    return {"exitCode": 0, "timedOut": False, "elapsedSeconds": 0.01}
+                self.assertEqual(1, sum(arg.startswith("--benchmark-external-case=") for arg in command))
+                self.assertFalse(any(arg.startswith("--benchmark-case=") for arg in command))
+                result_path = Path(next(arg.split("=", 1)[1] for arg in command
+                                        if arg.startswith("--benchmark-result=")))
+                attempt = result_path.parent
+                patch_path = attempt / "model.patch"
+                (repository / "source.cs").write_text("class Source { public int Value => 1; }\n")
+                patch_path.write_bytes(subprocess.check_output(
+                    ["git", "diff", "--binary", "--full-index"], cwd=repository))
+                subprocess.run(["git", "checkout", "--", "source.cs"], cwd=repository, check=True)
+                result = {"version": 1, "caseId": "external-1", "mode": "fake", "policyId": "mixed",
+                          "success": False, "generationSuccess": True,
+                          "outcome": "pending-external-evaluation", "externalEvaluation": "pending",
+                          "sourceBaseCommit": base, "producedHeadSha": "d" * 40,
+                          "patchPath": str(patch_path.resolve()),
+                          "patchSha256": hashlib.sha256(patch_path.read_bytes()).hexdigest(),
+                          "checks": [{"name": name, "passed": True} for name in {
+                              "sanitized single-commit history", "dispatch", "pull request opened",
+                              "pushed head identity", "committed patch", "clean worktree",
+                              "allowed external file scope", "deterministic reviewer patch recommendation",
+                              "simulated CI closed loop", "remote head stable through watch",
+                              "produced remote head scope", "produced remote head snapshot", "patch produced"}]}
+                result_path.write_text(json.dumps(result))
+                return {"exitCode": 0, "timedOut": False, "elapsedSeconds": 0.02}
+
+            with mock_patch.object(benchmark, "run_process", side_effect=fake_process):
+                exit_code = benchmark.main([
+                    "--mode", "fake", "--config", str(config), "--external-cases", str(manifest_path),
+                    "--output-root", str(output_root), "--no-build",
+                ])
+
+            self.assertEqual(0, exit_code)
+            report_path = next(output_root.iterdir()) / "results.json"
+            report = json.loads(report_path.read_text())
+            self.assertTrue(report["generationComplete"])
+            self.assertFalse(report["success"])
+            self.assertTrue(report["attempts"][0]["generationSuccess"])
+            self.assertEqual("pending", report["attempts"][0]["result"]["externalEvaluation"])
+
+
+class SweSharpEvaluationTests(unittest.TestCase):
+    def evaluation_fixture(self, root):
+        prepared = root / "prepared"
+        control = prepared / "control"
+        control.mkdir(parents=True)
+        manifest_path = control / "manifest.json"
+        case = {"id": "external-1", "repo": "owner/repo", "upstreamBaseCommit": "a" * 40,
+                "baseCommit": "b" * 40, "snapshotTree": "c" * 40,
+                "casePath": str(root / "case.json"), "caseSha256": "d" * 64}
+        Path(case["casePath"]).write_text(json.dumps({"repositoryPath": str(root / "repository")}))
+        manifest = {"schemaVersion": 1, "dataset": "swe-sharp-bench",
+                    "sourceRevision": swe_sharp.SOURCE_REVISION, "datasetSha256": "e" * 64,
+                    "cases": [case]}
+        manifest_path.write_text(json.dumps(manifest))
+        enriched = dict(manifest, manifestSha256=swe_sharp.digest(manifest_path))
+        receipt = {"manifestSha256": enriched["manifestSha256"], "datasetSha256": "e" * 64,
+                   "sourceRevision": swe_sharp.SOURCE_REVISION, "caseIds": ["external-1"],
+                   "evaluatorFingerprint": "trusted-evaluator", "imageIds": {"external-1": "image@sha256:1"},
+                   "receiptSha256": "f" * 64}
+        patch_path = root / "candidate.patch"
+        patch_path.write_text("candidate patch")
+        attempt = {"caseId": "external-1", "profile": "mixed", "generationSuccess": True,
+                   "success": False, "outcome": "pending-external-evaluation",
+                   "result": {"patchPath": str(patch_path), "patchSha256": swe_sharp.digest(patch_path),
+                              "sourceBaseCommit": "b" * 40}, "estimatedCostUsd": 1.0}
+        report = {"mode": "live", "externalPreflight": receipt,
+                  "externalDataset": benchmark.external_provenance(enriched), "attempts": [attempt], "notRun": []}
+        results = root / "generation.json"
+        results.write_text(json.dumps(report))
+        meta = {"manifestPath": str(manifest_path)}
+        rows = {"external-1": {"instance_id": "external-1", "FAIL_TO_PASS": ["repair"],
+                               "PASS_TO_PASS": ["regression"]}}
+        official = {"external-1": {"external-1": {"patch_is_None": False, "patch_exists": True,
+                    "patch_successfully_applied": True, "resolved": True,
+                    "forge_log_parse_success": True,
+                    "forge_observed_tests": {"repair": "PASSED", "regression": "PASSED"},
+                    "tests_status": {"FAIL_TO_PASS": {"success": ["repair"], "failure": []},
+                                     "PASS_TO_PASS": {"success": ["regression"], "failure": []}}}}}
+        return prepared, results, manifest, meta, rows, receipt, official
+
+    def test_evaluation_binds_sanitized_provenance_and_per_instance_image(self):
+        with tempfile.TemporaryDirectory() as temp:
+            prepared, results, manifest, meta, rows, receipt, official = self.evaluation_fixture(Path(temp))
+            environment = {"fingerprint": "trusted-evaluator",
+                           "images": {"external-1": "image@sha256:1"}}
+            process = {"exitCode": 0, "timedOut": False}
+            with mock_patch.dict(sys.modules, {"run": benchmark}), \
+                    mock_patch.object(swe_sharp, "prepared_control", return_value=(meta, manifest, rows)), \
+                    mock_patch.object(swe_sharp, "validate_preflight", return_value=receipt), \
+                    mock_patch.object(swe_sharp, "validate_candidate_patch", return_value=["source.cs"]), \
+                    mock_patch.object(swe_sharp, "evaluate_official", return_value=(process, official, environment)):
+                self.assertTrue(swe_sharp.evaluate(prepared, results, Path(temp) / "receipt", Path(sys.executable), 10))
+            evaluation = next((prepared / "control").glob("evaluation-*/results.json"))
+            saved = json.loads(evaluation.read_text())
+            self.assertTrue(saved["complete"])
+            self.assertEqual("accepted", saved["attempts"][0]["outcome"])
+
+    def test_evaluation_persists_incomplete_report_when_official_runner_raises(self):
+        with tempfile.TemporaryDirectory() as temp:
+            prepared, results, manifest, meta, rows, receipt, _ = self.evaluation_fixture(Path(temp))
+            with mock_patch.dict(sys.modules, {"run": benchmark}), \
+                    mock_patch.object(swe_sharp, "prepared_control", return_value=(meta, manifest, rows)), \
+                    mock_patch.object(swe_sharp, "validate_preflight", return_value=receipt), \
+                    mock_patch.object(swe_sharp, "validate_candidate_patch", return_value=["source.cs"]), \
+                    mock_patch.object(swe_sharp, "evaluate_official", side_effect=RuntimeError("interrupted")):
+                with self.assertRaises(RuntimeError):
+                    swe_sharp.evaluate(prepared, results, Path(temp) / "receipt", Path(sys.executable), 10)
+            evaluation = next((prepared / "control").glob("evaluation-*/results.json"))
+            saved = json.loads(evaluation.read_text())
+            self.assertFalse(saved["complete"])
+            self.assertEqual("external-evaluation-error", saved["attempts"][0]["outcome"])
+
+    def test_evaluation_rejects_test_poisoning_before_official_runner(self):
+        with tempfile.TemporaryDirectory() as temp:
+            prepared, results, manifest, meta, rows, receipt, _ = self.evaluation_fixture(Path(temp))
+            with mock_patch.dict(sys.modules, {"run": benchmark}), \
+                    mock_patch.object(swe_sharp, "prepared_control", return_value=(meta, manifest, rows)), \
+                    mock_patch.object(swe_sharp, "validate_preflight", return_value=receipt), \
+                    mock_patch.object(swe_sharp, "validate_candidate_patch",
+                                      side_effect=ValueError("pilot patch changes tests")), \
+                    mock_patch.object(swe_sharp, "evaluate_official") as official_runner:
+                self.assertFalse(swe_sharp.evaluate(
+                    prepared, results, Path(temp) / "receipt", Path(sys.executable), 10))
+            official_runner.assert_not_called()
+            evaluation = next((prepared / "control").glob("evaluation-*/results.json"))
+            saved = json.loads(evaluation.read_text())
+            self.assertTrue(saved["complete"])
+            self.assertEqual("external-candidate-rejected", saved["attempts"][0]["outcome"])
+
+    def test_preflight_requires_exact_baselines_and_per_case_images(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest_path = root / "manifest.json"
+            manifest = {"datasetSha256": "a" * 64,
+                        "cases": [{"id": "one"}, {"id": "two"}]}
+            manifest_path.write_text("{}")
+            receipt = {"schemaVersion": 1, "success": True,
+                       "manifestSha256": swe_sharp.digest(manifest_path), "datasetSha256": "a" * 64,
+                       "sourceRevision": swe_sharp.SOURCE_REVISION, "caseIds": ["one", "two"],
+                       "evaluatorFingerprint": "b" * 64,
+                       "imageIds": {"one": "sha256:" + "c" * 64, "two": "sha256:" + "d" * 64},
+                       "baselines": {"one": {"gold": True, "empty": True},
+                                     "two": {"gold": True, "empty": True}}, "errors": []}
+            receipt_path = root / "receipt.json"
+            receipt_path.write_text(json.dumps(receipt))
+            with mock_patch.object(swe_sharp, "validate_manifest", return_value=manifest):
+                sanitized = swe_sharp.validate_preflight(manifest_path, receipt_path)
+                self.assertEqual(set(receipt["imageIds"]), set(sanitized["imageIds"]))
+                for mutation in (lambda value: value["imageIds"].pop("two"),
+                                 lambda value: value["baselines"].update({"extra": {"gold": True, "empty": True}}),
+                                 lambda value: value["errors"].append("failed")):
+                    changed = json.loads(json.dumps(receipt))
+                    mutation(changed)
+                    receipt_path.write_text(json.dumps(changed))
+                    with self.assertRaises(ValueError):
+                        swe_sharp.validate_preflight(manifest_path, receipt_path)
+
+    def test_prepared_control_rejects_duplicate_or_mismatched_subset_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            control = root / "control"
+            control.mkdir()
+            manifest_path = control / "manifest.json"
+            dataset_path = control / "dataset.json"
+            manifest_path.write_text("{}")
+            manifest = {"cases": [{"id": "one"}]}
+
+            def write_prepared(rows):
+                dataset_path.write_text(json.dumps(rows))
+                (control / "prepared.json").write_text(json.dumps({
+                    "sourceRoot": str(root / "source"), "datasetPath": str(dataset_path),
+                    "manifestPath": str(manifest_path), "datasetSubsetSha256": swe_sharp.digest(dataset_path),
+                    "manifestSha256": swe_sharp.digest(manifest_path)}))
+
+            with mock_patch.object(swe_sharp, "verify_source"), \
+                    mock_patch.object(swe_sharp, "validate_manifest", return_value=manifest):
+                write_prepared([{"instance_id": "one"}, {"instance_id": "one"}])
+                with self.assertRaisesRegex(ValueError, "duplicate"):
+                    swe_sharp.prepared_control(root)
+                write_prepared([{"instance_id": "one"}, {"instance_id": "extra"}])
+                with self.assertRaisesRegex(ValueError, "exactly match"):
+                    swe_sharp.prepared_control(root)
+                write_prepared([{"instance_id": "one"}])
+                _, _, rows = swe_sharp.prepared_control(root)
+                self.assertEqual({"one"}, set(rows))
+
+
+class SweSharpContainerCleanupTests(unittest.TestCase):
+    class NotFound(Exception):
+        pass
+
+    class Container:
+        def __init__(self, ident, label):
+            self.id = ident
+            self.labels = {swe_sharp_eval.LABEL_KEY: label}
+            self.stopped = False
+            self.removed = False
+
+        def stop(self, timeout):
+            self.stopped = timeout == 10
+
+        def remove(self, force):
+            self.removed = force
+
+    class Collection:
+        def __init__(self, containers):
+            self.containers = containers
+            self.filters = None
+
+        def list(self, **kwargs):
+            self.filters = kwargs
+            return self.containers
+
+    class Client:
+        def __init__(self, containers):
+            self.containers = SweSharpContainerCleanupTests.Collection(containers)
+
+    def test_cleanup_removes_only_exactly_labeled_containers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            label = "forge-swe-sharp-" + "a" * 32
+            container = self.Container("owned", label)
+            client = self.Client([container])
+            environment = Path(temp) / "environment.json"
+            environment.write_text(json.dumps({"containerLabel": label, "containerIds": ["owned"]}))
+            swe_sharp_eval.cleanup_labeled_containers(client, label, environment, self.NotFound)
+            self.assertEqual({"all": True, "filters": {"label": f"{swe_sharp_eval.LABEL_KEY}={label}"}},
+                             client.containers.filters)
+            self.assertTrue(container.stopped)
+            self.assertTrue(container.removed)
+            self.assertTrue(json.loads(environment.read_text())["cleanup"]["success"])
+
+    def test_cleanup_refuses_label_mismatch_without_touching_container(self):
+        with tempfile.TemporaryDirectory() as temp:
+            label = "forge-swe-sharp-" + "a" * 32
+            container = self.Container("foreign", "forge-swe-sharp-" + "b" * 32)
+            environment = Path(temp) / "environment.json"
+            with self.assertRaisesRegex(RuntimeError, "label mismatch"):
+                swe_sharp_eval.cleanup_labeled_containers(
+                    self.Client([container]), label, environment, self.NotFound)
+            self.assertFalse(container.stopped)
+            self.assertFalse(container.removed)
+            self.assertFalse(json.loads(environment.read_text())["cleanup"]["success"])
+
+    def test_official_timeout_still_runs_labeled_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            calls = []
+
+            def fake_process(command, cwd, env, log, timeout):
+                calls.append((command, dict(env), timeout))
+                if len(calls) == 1:
+                    return {"exitCode": -9, "timedOut": True, "elapsedSeconds": 10}
+                return {"exitCode": 0, "timedOut": False, "elapsedSeconds": .1}
+
+            meta = {"sourceRoot": str(root / "source"), "datasetPath": str(root / "dataset.json")}
+            with mock_patch.dict(sys.modules, {"run": benchmark}), \
+                    mock_patch.object(benchmark, "run_process", side_effect=fake_process):
+                process, reports, environment = swe_sharp.evaluate_official(
+                    meta, Path(sys.executable), [], ["one"], root / "evaluation", 1)
+            self.assertTrue(process["timedOut"])
+            self.assertEqual({}, reports)
+            self.assertEqual({}, environment)
+            self.assertEqual(2, len(calls))
+            self.assertIn("--namespace", calls[0][0])
+            self.assertEqual("swebcs", calls[0][0][calls[0][0].index("--namespace") + 1])
+            label = calls[0][1]["FORGE_BENCHMARK_CONTAINER_LABEL"]
+            self.assertEqual(["--cleanup-label", label], calls[1][0][2:4])
+
+    def test_cleanup_failure_invalidates_successful_official_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outcomes = iter(({"exitCode": 0, "timedOut": False},
+                             {"exitCode": 7, "timedOut": False}))
+            meta = {"sourceRoot": str(root / "source"), "datasetPath": str(root / "dataset.json")}
+            with mock_patch.dict(sys.modules, {"run": benchmark}), \
+                    mock_patch.object(benchmark, "run_process", side_effect=lambda *args: next(outcomes)):
+                process, _, _ = swe_sharp.evaluate_official(
+                    meta, Path(sys.executable), [], ["one"], root / "evaluation", 1)
+            self.assertTrue(process["cleanupFailed"])
+            self.assertEqual(7, process["exitCode"])
 
 
 if __name__ == "__main__":

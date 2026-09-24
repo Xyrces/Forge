@@ -76,6 +76,9 @@ jobs:
       - name: Mixed-policy failure-path checks (no provider calls)
         run: dotnet tools/e2e-harness/bin/Release/net10.0/ph-e2e-harness.dll --benchmark-self-test-policies
 
+      - name: External repository benchmark checks (no provider calls)
+        run: dotnet tools/e2e-harness/bin/Release/net10.0/ph-e2e-harness.dll --benchmark-self-test-external
+
       - name: No-cost engineering benchmark
         run: python3 tools/benchmark/run.py --mode fake --no-build
 

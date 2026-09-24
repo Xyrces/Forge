@@ -25,6 +25,12 @@ internal sealed record BenchmarkResult
     public List<BenchmarkStageAttempt> Attempts { get; } = [];
     public string? ReviewVerdict { get; set; }
     public bool Escalated { get; set; }
+    public bool GenerationSuccess { get; set; }
+    public string? ExternalEvaluation { get; set; }
+    public string? SourceBaseCommit { get; set; }
+    public string? ProducedHeadSha { get; set; }
+    public string? PatchPath { get; set; }
+    public string? PatchSha256 { get; set; }
     public string? Error { get; set; }
 
     [JsonIgnore]

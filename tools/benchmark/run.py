@@ -24,6 +24,10 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 CASES = ("calculator", "normalize", "invoice")
+SHA1 = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+SIMPLE_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+REPO_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _PROCESS_LOCK = threading.Lock()
 _ACTIVE_PROCESSES = set()
 _STOP_REQUESTED = threading.Event()
@@ -78,6 +82,110 @@ def positive_int(value, name):
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def read_json_strict(path: Path):
+    def object_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON property: {key}")
+            value[key] = item
+        return value
+    return json.loads(path.read_text(), object_pairs_hook=object_pairs)
+
+
+def file_sha256(path: Path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load_external_cases(path: Path):
+    path = path.resolve()
+    data = read_json_strict(path)
+    required = {"schemaVersion", "dataset", "sourceRevision", "datasetSha256", "cases"}
+    if not isinstance(data, dict) or set(data) != required or data.get("schemaVersion") != 1:
+        raise ValueError("external case manifest schema is invalid")
+    if data.get("dataset") != "swe-sharp-bench":
+        raise ValueError("external case manifest dataset must be swe-sharp-bench")
+    if not isinstance(data.get("sourceRevision"), str) or not SHA1.fullmatch(data["sourceRevision"]):
+        raise ValueError("external sourceRevision must be a full lowercase commit SHA")
+    if not isinstance(data.get("datasetSha256"), str) or not SHA256.fullmatch(data["datasetSha256"]):
+        raise ValueError("external datasetSha256 must be a lowercase SHA-256")
+    if not isinstance(data.get("cases"), list) or not data["cases"]:
+        raise ValueError("external case manifest needs at least one case")
+    seen = set()
+    rows = []
+    row_fields = {"id", "casePath", "caseSha256", "baseCommit", "upstreamBaseCommit", "repo", "snapshotTree"}
+    case_required = {"id", "title", "prompt", "repositoryPath", "baseCommit"}
+    for row in data["cases"]:
+        if not isinstance(row, dict) or set(row) != row_fields:
+            raise ValueError("external case rows have an invalid schema")
+        case_id = row.get("id")
+        if not isinstance(case_id, str) or not SIMPLE_ID.fullmatch(case_id) or case_id in seen:
+            raise ValueError("external case ids must be unique simple names")
+        seen.add(case_id)
+        for field in ("baseCommit", "upstreamBaseCommit", "snapshotTree"):
+            if not isinstance(row.get(field), str) or not SHA1.fullmatch(row[field]):
+                raise ValueError(f"external case {field} must be a full lowercase Git SHA")
+        if not isinstance(row.get("repo"), str) or not REPO_ID.fullmatch(row["repo"]):
+            raise ValueError("external case repo must be canonical owner/name")
+        if not isinstance(row.get("caseSha256"), str) or not SHA256.fullmatch(row["caseSha256"]):
+            raise ValueError("external case caseSha256 must be a lowercase SHA-256")
+        case_path_text = row.get("casePath")
+        if not isinstance(case_path_text, str) or not Path(case_path_text).is_absolute():
+            raise ValueError("external casePath must be absolute")
+        case_path = Path(case_path_text).resolve()
+        if not case_path.is_file() or file_sha256(case_path) != row["caseSha256"]:
+            raise ValueError(f"external case file is missing or changed: {case_id}")
+        case = read_json_strict(case_path)
+        if (not isinstance(case, dict) or set(case) not in (case_required, case_required | {"allowedPaths"})
+                or case.get("id") != case_id or case.get("baseCommit") != row["baseCommit"]):
+            raise ValueError(f"external case document identity/schema mismatch: {case_id}")
+        if any(not isinstance(case.get(field), str) or not case[field].strip()
+               for field in ("title", "prompt")):
+            raise ValueError(f"external case title/prompt must be nonempty: {case_id}")
+        repository_path = case.get("repositoryPath")
+        if not isinstance(repository_path, str) or not Path(repository_path).is_absolute():
+            raise ValueError(f"external repositoryPath must be absolute: {case_id}")
+        if "allowedPaths" in case:
+            allowed = case["allowedPaths"]
+            if (not isinstance(allowed, list) or not allowed
+                    or any(not isinstance(item, str) or not safe_relative_path(item) for item in allowed)
+                    or len(set(allowed)) != len(allowed)):
+                raise ValueError(f"external allowedPaths are invalid: {case_id}")
+        rows.append({**row, "casePath": str(case_path), "case": case})
+    return {**data, "manifestPath": str(path), "manifestSha256": file_sha256(path), "cases": rows}
+
+
+def safe_relative_path(value):
+    path = Path(value)
+    return (bool(value) and not path.is_absolute() and "\0" not in value and "\\" not in value
+            and not any(ord(character) < 32 for character in value)
+            and all(part not in ("", ".", "..") for part in path.parts))
+
+
+def verify_external_repository(row):
+    repository = Path(row["case"]["repositoryPath"])
+    if not repository.is_dir():
+        raise ValueError(f"external repository is missing: {row['id']}")
+    def capture(*args):
+        return subprocess.check_output(
+            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repository), *args],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    if capture("rev-parse", "HEAD") != row["baseCommit"]:
+        raise ValueError(f"external repository base changed: {row['id']}")
+    if capture("rev-parse", "HEAD^{tree}") != row["snapshotTree"]:
+        raise ValueError(f"external repository tree changed: {row['id']}")
+    if capture("status", "--porcelain", "--untracked-files=all"):
+        raise ValueError(f"external repository is not clean: {row['id']}")
+
+
+def external_provenance(manifest):
+    return {"dataset": manifest["dataset"], "sourceRevision": manifest["sourceRevision"],
+            "datasetSha256": manifest["datasetSha256"], "manifestSha256": manifest["manifestSha256"],
+            "cases": [{key: row[key] for key in
+                       ("id", "caseSha256", "repo", "baseCommit", "upstreamBaseCommit", "snapshotTree")}
+                      for row in manifest["cases"]]}
 
 
 def load_profiles(path: Path):
@@ -433,12 +541,106 @@ def validate_result(result, case, mode, profile):
         raise ValueError("successful result lacks required passing checks")
 
 
+def validate_external_generation_result(result, row, mode, profile, attempt_dir):
+    validate_result(result, row["id"], mode, profile)
+    generation_success = result.get("generationSuccess")
+    if (result.get("success") is not False or not isinstance(generation_success, bool)
+            or result.get("externalEvaluation") != "pending"
+            or result.get("sourceBaseCommit") != row["baseCommit"]):
+        raise ValueError("external generation result state/identity is invalid")
+    if not generation_success:
+        return
+    reviewer_check = ("real reviewer patch recommendation" if mode == "live"
+                      else "deterministic reviewer patch recommendation")
+    required_checks = {
+        "sanitized single-commit history", "dispatch", "pull request opened",
+        "pushed head identity", "committed patch", "clean worktree",
+        "allowed external file scope", reviewer_check, "simulated CI closed loop",
+        "remote head stable through watch", "produced remote head scope",
+        "produced remote head snapshot", "patch produced",
+    }
+    if mode == "live":
+        required_checks.add("policy model calls")
+    checks = result["checks"]
+    if (result.get("outcome") != "pending-external-evaluation"
+            or not all(check["passed"] for check in checks)
+            or not required_checks.issubset(check["name"] for check in checks)):
+        raise ValueError("successful external generation lacks required passing checks")
+    head = result.get("producedHeadSha")
+    if not isinstance(head, str) or not SHA1.fullmatch(head) or head == row["baseCommit"]:
+        raise ValueError("external generation result has no distinct full head SHA")
+    patch_hash = result.get("patchSha256")
+    patch_text = result.get("patchPath")
+    if (not isinstance(patch_hash, str) or not SHA256.fullmatch(patch_hash)
+            or not isinstance(patch_text, str) or not Path(patch_text).is_absolute()):
+        raise ValueError("external generation patch identity is invalid")
+    patch_path = Path(patch_text).resolve()
+    attempt_root = Path(attempt_dir).resolve()
+    try:
+        patch_path.relative_to(attempt_root)
+    except ValueError as ex:
+        raise ValueError("external generation patch escaped its attempt directory") from ex
+    if not patch_path.is_file() or patch_path.stat().st_size <= 0:
+        raise ValueError("external generation patch is absent or empty")
+    patch_bytes = patch_path.read_bytes()
+    if not patch_bytes.strip() or hashlib.sha256(patch_bytes).hexdigest() != patch_hash:
+        raise ValueError("external generation patch hash/content mismatch")
+    repository = Path(row["case"]["repositoryPath"])
+    apply_command = ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repository),
+                     "apply", "--check", "--binary", str(patch_path)]
+    if subprocess.run(apply_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+        raise ValueError("external generation patch does not apply to its immutable base")
+    changed_paths = patch_changed_paths(repository, patch_path)
+    if not changed_paths:
+        raise ValueError("external generation patch changes no files")
+    allowed = row["case"].get("allowedPaths")
+    if allowed is not None and not changed_paths.issubset(set(allowed)):
+        raise ValueError("external generation patch changes files outside allowedPaths")
+
+
+def patch_changed_paths(repository, patch_path):
+    output = subprocess.check_output(
+        ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repository),
+         "apply", "--numstat", "-z", "--binary", str(patch_path)],
+        stderr=subprocess.DEVNULL)
+    fields = output.split(b"\0")
+    paths = set()
+    index = 0
+    while index < len(fields) and fields[index]:
+        record = fields[index]
+        index += 1
+        pieces = record.split(b"\t", 2)
+        if len(pieces) != 3:
+            raise ValueError("external generation patch has malformed numstat output")
+        raw_paths = []
+        if pieces[2]:
+            raw_paths.append(pieces[2])
+        else:
+            if index + 1 >= len(fields):
+                raise ValueError("external generation rename metadata is incomplete")
+            raw_paths.extend((fields[index], fields[index + 1]))
+            index += 2
+        for raw_path in raw_paths:
+            try:
+                value = raw_path.decode("utf-8")
+            except UnicodeDecodeError as ex:
+                raise ValueError("external generation patch path is not UTF-8") from ex
+            if not safe_relative_path(value) or value == ".git" or value.startswith(".git/"):
+                raise ValueError("external generation patch contains an unsafe path")
+            paths.add(value)
+    return paths
+
+
 def report_markdown(report):
     lines = ["# Forge benchmark", "", f"Mode: **{report['mode']}**. Commit: `{report['commit']}`.", "",
              "CI/GitHub are simulated. Live policy trials use a real model reviewer; legacy single-model and fake trials simulate review. Fake results establish wiring only.",
              f"Parallel trial limit: {report.get('parallel', 1)}. Independent processes do not share production cooldowns or role slots.",
              "A missing cost is unknown, never zero; estimates price all input at the supplied upper rate, without cache discounts.",
              "These are not provider invoices. Partial matrices are not comparable policy rankings.", ""]
+    if report.get("externalDataset"):
+        complete = "YES" if report.get("generationComplete") else "NO"
+        lines += [f"External patch generation complete: **{complete}**. Official SWE-Sharp evaluation is pending; "
+                  "generated patches are not counted as completed tasks.", ""]
     if "trialWallSeconds" in report:
         lines += [f"Trial wall time: {report['trialWallSeconds']:.2f}s; observed concurrent trial processes: {report.get('maxObservedConcurrentTrials', 0)}.", ""]
     if report.get("reliability"):
@@ -478,7 +680,9 @@ def main(argv=None):
     parser.add_argument("--config", type=Path)
     parser.add_argument("--allow-live", action="store_true")
     parser.add_argument("--budget-usd", type=str)
-    parser.add_argument("--cases", nargs="+", choices=CASES, default=list(CASES))
+    parser.add_argument("--cases", nargs="+", choices=CASES)
+    parser.add_argument("--external-cases", type=Path)
+    parser.add_argument("--external-preflight", type=Path)
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--parallel", type=int, default=1, help="Concurrent independent trial processes (1-8)")
     parser.add_argument("--seed", type=int, default=42)
@@ -495,8 +699,20 @@ def main(argv=None):
     positive_int(args.timeout_seconds, "timeout-seconds")
     if args.timeout_seconds > 3600:
         parser.error("timeout-seconds must be at most 3600")
-    if len(set(args.cases)) != len(args.cases):
+    if args.external_cases and args.cases:
+        parser.error("--external-cases and --cases are mutually exclusive")
+    if args.external_preflight and not args.external_cases:
+        parser.error("--external-preflight requires --external-cases")
+    if args.external_cases and args.mode not in ("fake", "live"):
+        parser.error("external cases support only fake or live mode")
+    cases = args.cases or list(CASES)
+    if len(set(cases)) != len(cases):
         parser.error("cases must not repeat; use --repetitions")
+    external = load_external_cases(args.external_cases) if args.external_cases else None
+    if external is not None:
+        cases = external["cases"]
+        for external_row in cases:
+            verify_external_repository(external_row)
     profiles = [{"id": "fake"}]
     budget = Decimal(0)
     if args.mode == "live":
@@ -516,6 +732,22 @@ def main(argv=None):
             parser.error("fake config accepts policies only")
     elif args.allow_live or args.config or args.budget_usd:
         parser.error("live settings are only accepted with --mode live")
+    if external is not None and (not args.config or any("roles" not in profile for profile in profiles)):
+        parser.error("external cases require mixed benchmark policies")
+    preflight = None
+    if external is not None and args.mode == "live":
+        if not args.external_preflight:
+            parser.error("live external cases require --external-preflight")
+        import importlib.util
+        module_path = Path(__file__).with_name("swe_sharp.py")
+        module_spec = importlib.util.spec_from_file_location("forge_swe_sharp", module_path)
+        if module_spec is None or module_spec.loader is None:
+            raise ValueError("could not load the SWE-Sharp preflight validator")
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        preflight = module.validate_preflight(Path(external["manifestPath"]), args.external_preflight.resolve())
+    elif external is not None and args.external_preflight:
+        parser.error("fake external generation does not consume a live preflight receipt")
     # New unique child every run: never delete or reuse a caller-supplied directory.
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
     output = args.output_root.resolve() / run_id
@@ -529,6 +761,10 @@ def main(argv=None):
               "seed": args.seed, "parallel": args.parallel, "noBuild": args.no_build, "profiles": profiles,
               "budgetUsd": str(budget), "reservedUsd": "0", "reliability": None,
               "attempts": [], "notRun": [], "summary": [], "success": False}
+    if external is not None:
+        report["externalDataset"] = external_provenance(external)
+        report["externalPreflight"] = preflight
+        report["generationComplete"] = False
     # Hash tooling/role sources so dirty working-tree experiments are distinguishable.
     sources = [p for folder in ("tools/e2e-harness", "tools/benchmark", "agents") for p in (ROOT / folder).rglob("*")
                if p.is_file() and not any(x in p.parts for x in ("bin", "obj", "__pycache__"))]
@@ -570,20 +806,27 @@ def main(argv=None):
             report["reliability"]["success"] &= result["exitCode"] == 0
             save()
         if args.mode != "reliability":
-            jobs = [(case, p, rep) for rep in range(1, args.repetitions + 1) for case in args.cases for p in profiles]
+            jobs = [(case, p, rep) for rep in range(1, args.repetitions + 1) for case in cases for p in profiles]
             random.Random(args.seed).shuffle(jobs)
             def prepare(job, reserve, total_reserved):
                 case, profile, rep = job
-                name = f"{case}-{profile['id']}-{rep}"
+                case_id = case["id"] if external is not None else case
+                name = f"{case_id}-{profile['id']}-{rep}"
                 report["reservedUsd"] = str(total_reserved)
                 attempt = output / name
                 attempt.mkdir()
                 save()  # Reservation reaches disk BEFORE launching any model call.
+                if external is not None:
+                    verify_external_repository(case)
                 result_path = attempt / "result.json"
                 command = [args.dotnet, str(ROOT / "tools/e2e-harness/bin/Release/net10.0/ph-e2e-harness.dll"),
-                           "--repo-root=" + str(attempt / "workspace"), "--benchmark-case=" + case,
+                           "--repo-root=" + str(attempt / "workspace"),
                            "--benchmark-result=" + str(result_path),
                            "--benchmark-timeout-seconds=" + str(args.timeout_seconds)]
+                if external is not None:
+                    command.append("--benchmark-external-case=" + case["casePath"])
+                else:
+                    command.append("--benchmark-case=" + case_id)
                 trial_env = dict(env)
                 if "roles" in profile:
                     policy_path = attempt / "policy.json"
@@ -605,10 +848,12 @@ def main(argv=None):
                 else:
                     command += ["--benchmark-mode=fake"]
                 print(f"Running {name} ({args.mode})", flush=True)
-                row = {"profile": profile["id"], "caseId": case, "repetition": rep,
+                row = {"profile": profile["id"], "caseId": case_id, "repetition": rep,
                        "success": False, "outcome": "interrupted-or-running", "estimatedCostUsd": None,
                        "reservedUsd": str(reserve), "elapsedSeconds": 0,
                        "scheduledAt": dt.datetime.now(dt.timezone.utc).isoformat()}
+                if external is not None:
+                    row["generationSuccess"] = False
                 report["attempts"].append(row)
                 save()
                 return (case, profile, row, command, trial_env, attempt, result_path)
@@ -626,11 +871,18 @@ def main(argv=None):
                 row["outcome"] = "timeout" if process["timedOut"] else "missing-result"
                 if result_path.exists():
                     try:
-                        result = json.loads(result_path.read_text())
+                        result = read_json_strict(result_path)
                         expected_mode = "live" if args.mode == "live" else "fake"
-                        validate_result(result, case, expected_mode, profile)
+                        if external is None:
+                            validate_result(result, case, expected_mode, profile)
+                        else:
+                            validate_external_generation_result(
+                                result, case, expected_mode, profile, result_path.parent)
                         row["result"] = result
-                        row["success"] = result["success"] and process["exitCode"] == 0
+                        if external is None:
+                            row["success"] = result["success"] and process["exitCode"] == 0
+                        else:
+                            row["generationSuccess"] = result["generationSuccess"] and process["exitCode"] == 0
                         row["outcome"] = "timeout" if process["timedOut"] else result.get("outcome", "unknown")
                     except (ValueError, OSError):
                         row["outcome"] = "invalid-result"
@@ -639,13 +891,16 @@ def main(argv=None):
                 else:
                     # Unknown usage (including a failed provider call) invalidates the dollar comparison.
                     stop_live = finalize_live_accounting(row, row.get("result", {}), profile)
+                    if external is not None and row["estimatedCostUsd"] is None:
+                        row["generationSuccess"] = False
                     # Don't spend the rest of the matrix repeatedly discovering unavailable quota/protocol.
                 save()
                 return stop_live
 
             def skip(job, reason):
                 case, profile, rep = job
-                report["notRun"].append({"attempt": f"{case}-{profile['id']}-{rep}", "reason": reason})
+                case_id = case["id"] if external is not None else case
+                report["notRun"].append({"attempt": f"{case_id}-{profile['id']}-{rep}", "reason": reason})
                 save()
 
             trials_started = time.monotonic()
@@ -658,6 +913,11 @@ def main(argv=None):
                 active += delta
                 peak = max(peak, active)
             report["maxObservedConcurrentTrials"] = peak
+        if external is not None:
+            report["generationComplete"] = (not report["notRun"] and bool(report["attempts"])
+                                            and all(r.get("generationSuccess") is True for r in report["attempts"]))
+            report["success"] = False  # Official external evaluation is a separate trusted step.
+            return 0 if report["generationComplete"] else 1
         report["success"] = (not report["notRun"] and all(r["success"] for r in report["attempts"])
                              and (report["reliability"] is None or report["reliability"]["success"]))
         return 0 if report["success"] else 1

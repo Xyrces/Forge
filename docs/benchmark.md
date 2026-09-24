@@ -1,5 +1,10 @@
 # Forge benchmark
 
+For real C# repository tasks, see [SWE-Sharp-Bench integration](swe-sharp-benchmark.md).
+It uses a pinned public dataset, isolated repository snapshots, mixed-policy patch
+generation and the official evaluator in a separate trusted process. The small
+fixtures below remain compatibility checks; they are not model-quality rankings.
+
 This benchmark measures engineering task acceptance and records a separate,
 LLM-free reliability baseline. It runs in new local Git repositories with local
 bare remotes, SQLite state and fake GitHub. It does not start or configure the
