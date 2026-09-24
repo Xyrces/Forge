@@ -35,7 +35,8 @@ RELIABILITY_CLASSES = (
     "ModelRateLimitTrackerTests", "RateLimitAwareChatClientTests",
     "RunAgentExecutorTests", "RunGateTests", "QaDispatcherTests",
     "TaskStateMachineTests", "TaskStateProjectorTests", "StartupRecoveryTests",
-    "KillRestartVerificationTests",
+    "KillRestartVerificationTests", "OrchestratorRateLimitRegressionTests",
+    "OrphanedClaimReaperTests", "WatchdogScannerTests",
 )
 
 

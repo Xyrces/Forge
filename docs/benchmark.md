@@ -4,6 +4,8 @@ For real C# repository tasks, see [SWE-Sharp-Bench integration](swe-sharp-benchm
 It uses a pinned public dataset, isolated repository snapshots, mixed-policy patch
 generation and the official evaluator in a separate trusted process. The small
 fixtures below remain compatibility checks; they are not model-quality rankings.
+See the [first repository calibration and reliability findings](benchmark-calibration-2026-09-24.md)
+for measured failures and remaining coverage gaps.
 
 This benchmark measures engineering task acceptance and records a separate,
 LLM-free reliability baseline. It runs in new local Git repositories with local
@@ -85,6 +87,8 @@ are labeled `wiring-only-pass`. They must never be presented as model scores.
 The reliability bundle selects existing tests for model cooldowns, account quota,
 request concurrency, agent timeouts, plan gates, QA evidence and attempt budgets,
 task states, and startup recovery, including real local Git recovery fixtures.
+It also covers production dispatch's pre-PR 429 handling, orphaned claims and
+watchdog scanning. These component tests do not establish full scheduler liveness.
 It reports every discovered case; missing classes, failed or skipped cases, and
 zero discovered tests fail the baseline. A green baseline does not demonstrate
 that every failure from the project review is fixed. In particular, test-level
