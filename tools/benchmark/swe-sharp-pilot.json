@@ -1,0 +1,17 @@
+{
+  "sourceRevision": "50cc38f602fffe14073953cf128825ea8d92b188",
+  "selectionReason": "One task from each of eleven C# repositories, with nonempty fail-to-pass and pass-to-pass sets. Fixed before observing model results; environment/scope preparation may reject tasks but must report exclusions. Source, documentation, and API text edits only for this initial pilot.",
+  "instanceIds": [
+    "ardalis__cleanarchitecture-546",
+    "jellyfin__jellyfin-12621",
+    "dotnet__benchmarkdotnet-2491",
+    "messagepack-csharp__messagepack-csharp-1842",
+    "polly-2068",
+    "autofac__autofac-1428",
+    "sixlabors__imagesharp-2541",
+    "joshclose__csvhelper-2132",
+    "restsharp__restsharp-2021",
+    "serilog__serilog-2116",
+    "avaloniaui__avalonia-17171"
+  ]
+}
