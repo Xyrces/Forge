@@ -45,6 +45,13 @@ randomization seed, and build mode. `--no-build`
 is only for binaries you have already rebuilt; the flag is recorded, but a Git
 commit alone does not prove that an old local binary matches it.
 
+Live attempts also retain agent runs and full/partial tool transcripts in
+`workspace/.portHorizon/e2e/state/issues.db` (`agent_run`), with the diagnostic
+side-channel at `workspace/.portHorizon/e2e/state/logs/agent.log`. These belong to
+the disposable attempt, not the installed service. Inspect them when an approved
+plan produces no code or PR; a successful provider response alone does not show
+why the agent stopped. Treat transcripts as private execution artifacts.
+
 ## What is measured
 
 | Case | Independent acceptance checks |
