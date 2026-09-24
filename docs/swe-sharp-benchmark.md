@@ -149,6 +149,13 @@ Repository-specific SDKs/dependency caches needed by the engineering agent must
 also be provisioned in that worker; grader readiness does not prove agent-worker
 readiness.
 
+The driver runs the external-harness self-test before external trials. Fixture
+trials retain their separate trusted-grader self-test. This lets a repository
+worker use its required SDK (for example .NET 9 RC) alongside the .NET 10 runtime
+needed by the prebuilt harness, without requiring the unrelated .NET 10 toy
+fixtures to compile. External acceptance still requires the passing official
+grader preflight receipt and separate candidate evaluation.
+
 After filling in a mixed-policy config as described in [benchmark.md](benchmark.md):
 
 ```bash
