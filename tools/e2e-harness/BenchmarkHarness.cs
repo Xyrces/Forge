@@ -138,6 +138,7 @@ internal static class BenchmarkHarness
         var dbPath = Path.Combine(workspaceRoot, "state", "issues.db");
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var issues = new IssueStore(dbPath);
+        using var agentRuns = new AgentRunStore(issues.Db);
         var designArtifacts = new DesignArtifactStore(dbPath);
         var artOutputs = new ArtOutputStore(dbPath);
         var recoveryStore = new Orchestrator.MemoryExtractionStore(Path.Combine(workspaceRoot, "state", "extraction.db"));
@@ -157,7 +158,8 @@ internal static class BenchmarkHarness
         var eventBus = new InMemoryDashboardEventBus();
         using var bridge = new PushBridge(bare, gitHub);
 
-        var runner = CreateRunner(options, fixture, roleRegistry, result, workspaceRoot, issues);
+        var runner = CreateRunner(
+            options, fixture, roleRegistry, result, workspaceRoot, issues, agentRuns);
         if (options.Mode == "live") ScrubModelCredentialsFromEnvironment();
         var dispatcher = new InProcessDispatcher(
             async (issue, _, ct) =>
@@ -308,7 +310,8 @@ internal static class BenchmarkHarness
         RoleAgentRegistry roleRegistry,
         BenchmarkResult result,
         string workspaceRoot,
-        IssueStore issues)
+        IssueStore issues,
+        AgentRunStore agentRuns)
     {
         if (options.Mode == "fake")
             return new BenchmarkFakeAgentRunner(fixture);
@@ -354,8 +357,10 @@ internal static class BenchmarkHarness
             snapshot => result.Usage = BenchmarkResultUsage.From(snapshot));
         result.Meter = meteredFactory;
         result.Usage = BenchmarkResultUsage.From(meteredFactory.Snapshot);
+        MafAgentRunner.DiagnosticLogPath = Path.Combine(
+            workspaceRoot, "state", "logs", "agent.log");
         return new MafAgentRunner(meteredFactory, LlmConfigAdapter.FromOptions(llmOptions), roleRegistry,
-            NullLogger<MafAgentRunner>.Instance, issues: issues);
+            NullLogger<MafAgentRunner>.Instance, issues: issues, runs: agentRuns);
     }
 
     private static void ValidateCommittedScope(
