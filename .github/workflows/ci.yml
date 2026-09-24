@@ -73,6 +73,9 @@ jobs:
       - name: Benchmark runner checks
         run: python3 -m unittest discover -s tools/benchmark -v
 
+      - name: Mixed-policy failure-path checks (no provider calls)
+        run: dotnet tools/e2e-harness/bin/Release/net10.0/ph-e2e-harness.dll --benchmark-self-test-policies
+
       - name: No-cost engineering benchmark
         run: python3 tools/benchmark/run.py --mode fake --no-build
 

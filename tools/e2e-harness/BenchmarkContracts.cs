@@ -20,10 +20,18 @@ internal sealed record BenchmarkResult
     public string Scope { get; init; } = "engineering-with-simulated-review";
     public string? Model { get; init; }
     public string? Provider { get; init; }
+    public string? PolicyId { get; init; }
+    public Dictionary<string, BenchmarkModelUsage> ModelUsage { get; } = new(StringComparer.Ordinal);
+    public List<BenchmarkStageAttempt> Attempts { get; } = [];
+    public string? ReviewVerdict { get; set; }
+    public bool Escalated { get; set; }
     public string? Error { get; set; }
 
     [JsonIgnore]
     public BenchmarkMeteringFactory? Meter { get; set; }
+
+    [JsonIgnore]
+    public BenchmarkPolicyRuntime? PolicyRuntime { get; set; }
 }
 
 internal sealed record GraderReport(IReadOnlyList<BenchmarkCheck> Checks);
@@ -57,9 +65,35 @@ internal sealed record BenchmarkResultUsage(
         snapshot.AccountingComplete);
 }
 
+internal sealed record BenchmarkModelUsage(
+    string Provider,
+    string Model,
+    BenchmarkResultUsage Usage);
+
+internal sealed record BenchmarkStageAttempt(
+    int Attempt,
+    string Stage,
+    string? ModelId,
+    string? Provider,
+    string? Model,
+    bool? Success,
+    string Reason,
+    string? HeadSha,
+    string? ReviewVerdict,
+    bool Escalated,
+    IReadOnlyList<BenchmarkCheck>? Checks = null);
+
+internal sealed record BenchmarkPlanCriticAudit(
+    bool? Success,
+    string Outcome,
+    string Detail,
+    bool Observed);
+
 [JsonSerializable(typeof(BenchmarkResult))]
 [JsonSerializable(typeof(GraderReport))]
 [JsonSerializable(typeof(BenchmarkResultUsage))]
+[JsonSerializable(typeof(BenchmarkModelUsage))]
+[JsonSerializable(typeof(BenchmarkStageAttempt))]
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     WriteIndented = true)]

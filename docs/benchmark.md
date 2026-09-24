@@ -70,9 +70,11 @@ Acceptance tests are separate from
 the task prompt, but this repository is not a secure hidden-test service.
 
 The real engineering dispatch path, worktrees, commit/push, local PR creation,
-and watcher completion are exercised. CI and review are simulated; grooming,
-real reviewer/QA agents, automatic escalation policies, production scheduling,
-and actual remote GitHub/Azure SQL behavior are not measured here. Fake results
+and watcher completion are exercised. CI and remote GitHub are simulated. Legacy
+profiles simulate final review; live policies invoke a read-only model reviewer.
+Grooming, production Reviewer/QA dispatchers, production triage decisions,
+production scheduling, and actual remote GitHub/Azure SQL behavior are not
+measured here. Fake results
 are labeled `wiring-only-pass`. They must never be presented as model scores.
 
 The reliability bundle selects existing tests for model cooldowns, account quota,
@@ -115,6 +117,57 @@ The command only runs if the budget can reserve at least one complete attempt.
 The `5` is an example reservation limit, not a predicted trial cost. Set the API
 key environment variables through your worker's secret mechanism beforehand.
 The benchmark itself never purchases credits or changes provider plans.
+
+### Mixed role policies
+
+For role-routing experiments, a config may use either the legacy top-level
+`profiles` array or a policy document with a `policies` array. Each policy has
+`id`, `models`, `roles`, and `maxEngineeringAttempts` (an integer from 1
+through 3). `models` uses the same profile object shape as
+`profiles.example.json`; every declared model must be referenced by at least
+one role. The role map accepts `engineer`, `critic`, `reviewer`, and optional
+`escalation` model IDs. See
+`tools/benchmark/policies.example.json` for a cheap-engineer/frontier-review
+placeholder setup. The IDs and zero rates deliberately require replacement: verify model IDs,
+endpoint support, and positive reference rates before running. Policy credential
+variable names must start with `BENCHMARK_`; sharing a credential variable across
+different providers or endpoints is rejected.
+
+`--parallel 1..8` applies only to independent benchmark subprocess trials. It
+does not share production slots, cooldowns, or account state. A policy attempt
+reserves the sum of all referenced model caps once, covering bounded engineering
+rework plus critic, final-review, and escalation calls from those profiles'
+budgets. Reservations happen before a batch/wave starts; a provider failure or
+unknown usage stops new waves, while already-running trials finish under their
+bounded timeout. Fake mode accepts policy configs without credentials and is
+useful for testing routing and reservation logic only.
+
+After filling in a policy config, run a bounded comparison in the disposable worker:
+
+```bash
+python3 tools/benchmark/run.py --mode live --allow-live \
+  --config tools/benchmark/policies.local.json --budget-usd 12 \
+  --cases calculator --parallel 2
+```
+
+A policy's `maxEngineeringAttempts` bounds the entire same-task rework loop;
+model call caps are shared across all those attempts, not renewed on escalation.
+The benchmark chooses escalation after a qualifying failed engineering or
+review/grader attempt. This is an experimental routing policy, not the production
+triage agent's decision process. Provider/accounting errors halt it without fallback.
+
+Run deterministic workflow failure checks without model calls:
+
+```bash
+dotnet tools/e2e-harness/bin/Release/net10.0/ph-e2e-harness.dll --benchmark-self-test-policies
+```
+
+In live policy mode, final-review verdicts are strict, while the graders remain
+authoritative for acceptance. Legacy profiles keep the simulated final-review
+path. This extension does not claim QA, production integration, or production
+fault-recovery validation. The current transport still supports only tested
+OpenAI-compatible text/tool Chat Completions; native Anthropic and Responses
+transports remain unsupported and require a separately verified adapter.
 
 Every profile requires maximum calls, maximum input tokens per call, maximum
 output tokens per call, and input/output USD rates per million tokens. For input,

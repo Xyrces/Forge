@@ -86,17 +86,30 @@ internal sealed class BenchmarkMeteringFactory : IChatClientFactory
     }
 
     public BenchmarkUsageSnapshot Snapshot => _meter.Snapshot();
+    public string? HaltReason => _meter.HaltReason;
 
     public IChatClient Create(
         LlmConfig config,
         AgentType role,
         string? projectId = null,
         RoleModel? modelOverride = null)
-        => new BenchmarkMeteringChatClient(
+        => CreateWithRoleIdentity(config, role, role.ToString(), projectId, modelOverride);
+
+    public IChatClient CreateWithRoleIdentity(
+        LlmConfig config,
+        AgentType role,
+        string roleIdentity,
+        string? projectId = null,
+        RoleModel? modelOverride = null)
+    {
+        if (string.IsNullOrWhiteSpace(roleIdentity) || roleIdentity.Any(char.IsControl))
+            throw new ArgumentException("Benchmark role identity must be nonempty metadata.", nameof(roleIdentity));
+        return new BenchmarkMeteringChatClient(
             _inner.Create(config, role, projectId, modelOverride),
             _meter,
-            role.ToString(),
+            roleIdentity,
             projectId);
+    }
 
     /// <summary>
     /// Conservative whole-attempt reservation used by the driver. It assumes
@@ -170,12 +183,20 @@ internal sealed class BenchmarkMeteringFactory : IChatClientFactory
                 return BuildSnapshot();
         }
 
+        public string? HaltReason
+        {
+            get
+            {
+                lock (_gate) return _haltReason;
+            }
+        }
+
         public long BeginCall(IReadOnlyList<ChatMessage> messages, ChatOptions? requestedOptions, string role, string? projectId)
         {
             var estimatedInput = EstimateInputTokens(messages, requestedOptions);
             if (estimatedInput > _options.MaxInputTokensPerCall)
             {
-                throw new BenchmarkLimitExceededException(
+                RejectForLimit(
                     $"Conservative input estimate {estimatedInput} exceeds the benchmark per-call limit " +
                     $"{_options.MaxInputTokensPerCall}. No provider call was made.");
             }
@@ -185,12 +206,14 @@ internal sealed class BenchmarkMeteringFactory : IChatClientFactory
                 if (_haltReason is not null)
                 {
                     throw new BenchmarkLimitExceededException(
-                        $"Benchmark metering is halted after a prior limit breach: {_haltReason}");
+                        $"Benchmark metering is halted after a prior provider/accounting failure: {_haltReason}");
                 }
                 if (_calls.Count >= _options.MaxCalls)
                 {
+                    _haltReason = $"Benchmark call limit {_options.MaxCalls} has been reached.";
+                    PersistLocked();
                     throw new BenchmarkLimitExceededException(
-                        $"Benchmark call limit {_options.MaxCalls} has been reached. No provider call was made.");
+                        $"{_haltReason} No provider call was made.");
                 }
 
                 var id = ++_nextCallId;
@@ -215,6 +238,16 @@ internal sealed class BenchmarkMeteringFactory : IChatClientFactory
             }
         }
 
+        private void RejectForLimit(string message)
+        {
+            lock (_gate)
+            {
+                _haltReason ??= message;
+                PersistLocked();
+            }
+            throw new BenchmarkLimitExceededException(message);
+        }
+
         public void CompleteCall(
             long id,
             UsageDetails? usage,
@@ -226,6 +259,9 @@ internal sealed class BenchmarkMeteringFactory : IChatClientFactory
                 var index = _calls.FindIndex(c => c.CallId == id);
                 if (index < 0) throw new InvalidOperationException($"Unknown benchmark call {id}.");
                 var limitBreach = UsageLimitBreach(usage);
+                var usageMissing = forceUsageMissing
+                    || usage?.InputTokenCount is null
+                    || usage.OutputTokenCount is null;
                 _calls[index] = _calls[index] with
                 {
                     CompletedAt = DateTimeOffset.UtcNow,
@@ -234,11 +270,12 @@ internal sealed class BenchmarkMeteringFactory : IChatClientFactory
                     OutputTokens = usage?.OutputTokenCount,
                     CachedInputTokens = ReadCachedInput(usage),
                     CacheWriteInputTokens = ReadAdditionalCount(usage, "cache_creation_input_tokens"),
-                    UsageMissing = forceUsageMissing
-                        || usage?.InputTokenCount is null
-                        || usage.OutputTokenCount is null,
+                    UsageMissing = usageMissing,
                 };
-                _haltReason ??= limitBreach;
+                _haltReason ??= limitBreach
+                    ?? (string.Equals(status, "failed", StringComparison.Ordinal)
+                        ? "provider call failed"
+                        : usageMissing ? "provider usage accounting was incomplete" : null);
                 PersistLocked();
                 if (limitBreach is not null)
                 {
