@@ -70,6 +70,26 @@ jobs:
         # on ubuntu-latest).
         run: dotnet run --project tools/e2e-harness --no-build --configuration Release -- --repo-root=$(pwd)
 
+      - name: Benchmark runner checks
+        run: python3 -m unittest discover -s tools/benchmark -v
+
+      - name: No-cost engineering benchmark
+        run: python3 tools/benchmark/run.py --mode fake --no-build
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-benchmark
+          path: |
+            .portHorizon/benchmarks/**/report.md
+            .portHorizon/benchmarks/**/results.json
+            .portHorizon/benchmarks/**/result.json
+            .portHorizon/benchmarks/**/run.log
+            .portHorizon/benchmarks/**/grader-self-test.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+
       - name: Live verify Headroom sidecar (smoke)
         # Bring up the Headroom proxy sidecar + verify it
         # accepts a /v1/chat/completions request (HEADROOM ONLY;

@@ -1,5 +1,10 @@
 # P4 E2E harness — `tools/e2e-harness`
 
+For reproducible task trials, independent grading, machine-readable results,
+and opt-in model usage limits, use the [benchmark runner](benchmark.md). The
+historical smoke mode below remains available; its token summary is not a
+complete model cost benchmark.
+
 An end-to-end smoke test that proves the orchestrator can take
 a spec, run the engineering dispatch workflow against a fresh
 local repo, and open a PR with the right code. No GitHub token,

@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\Forge.Core\Forge.Core.csproj" />
+    <Compile Include="..\..\tools\e2e-harness\BenchmarkMetering.cs" Link="BenchmarkMetering.cs" />
   </ItemGroup>
 
 </Project>

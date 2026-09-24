@@ -1,0 +1,16 @@
+{
+  "profiles": [
+    {
+      "id": "candidate-a",
+      "provider": "REPLACE_WITH_PROVIDER_LABEL",
+      "model": "REPLACE_WITH_EXACT_CHAT_COMPLETIONS_MODEL_ID",
+      "baseUrl": "https://REPLACE_WITH_VERIFIED_ENDPOINT/v1",
+      "apiKeyEnv": "BENCHMARK_CANDIDATE_API_KEY",
+      "maxCalls": 12,
+      "maxInputTokens": 131072,
+      "maxOutputTokens": 4096,
+      "inputUsdPerMillion": "REPLACE_WITH_VERIFIED_UPPER_INPUT_RATE",
+      "outputUsdPerMillion": "REPLACE_WITH_VERIFIED_OUTPUT_RATE"
+    }
+  ]
+}
