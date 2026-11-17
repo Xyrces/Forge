@@ -73,7 +73,7 @@ def job(namespace, image, dataset, operation, name, initialize=False):
         container["args"] = ["--namespace", namespace, "--image", image, "--dataset", dataset, "--operation", operation]
     return {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": name, "namespace": namespace,
         "labels": {"app": "forge-release", "operation": operation}}, "spec": {
-            "backoffLimit": 0, "activeDeadlineSeconds": 3600,  # Application explicitly reconciles retries.
+            "backoffLimit": 0 if initialize else 3, "activeDeadlineSeconds": 3600,  # New supervisor pods resume the journal; DDL never retries implicitly.
             "template": {"metadata": {"labels": {"app": "forge-release"}}, "spec": {
                 "restartPolicy": "Never", "serviceAccountName": "forge-initialize" if initialize else "forge-release",
                 "automountServiceAccountToken": not initialize,

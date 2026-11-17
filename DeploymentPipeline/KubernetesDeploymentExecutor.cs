@@ -115,7 +115,7 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IDeploymentE
             metadata = new { name = "forge-release-" + candidate.Id, @namespace = options.KubernetesNamespace,
                 annotations = new Dictionary<string, string> { ["forge/source-sha"] = candidate.CommitSha,
                     ["forge/image"] = image, ["forge/dataset"] = options.KubernetesDatasetId! } },
-            spec = new { backoffLimit = 0, activeDeadlineSeconds = 3600,
+            spec = new { backoffLimit = 3, activeDeadlineSeconds = 3600,
                 template = new { spec = new {
                     restartPolicy = "Never", serviceAccountName = "forge-release", automountServiceAccountToken = true,
                     securityContext = new { runAsUser = 10001, runAsGroup = 10001, fsGroup = 10001,
