@@ -17,16 +17,29 @@ public sealed record NewSprint(
     DateTime StartDate, DateTime EndDate,
     SprintStatus Status = SprintStatus.Active);
 
+public sealed record SprintActivationSnapshot(
+    IReadOnlyList<IssueRecord> Issues, IReadOnlyList<SpecRecord> Specs, IReadOnlyList<string> TaskIds,
+    long? ProposalAuditId = null, string? CommittedBy = null);
+
 public interface ISprintStore
 {
     Task<SprintRecord> CreateAsync(NewSprint spec, CancellationToken ct = default);
+    Task<SprintRecord> CreateWithIssuesAsync(NewSprint spec, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+        => throw new NotSupportedException("Atomic sprint activation is required.");
     Task<IReadOnlyList<SprintRecord>> ListAsync(bool activeOnly, CancellationToken ct = default);
     Task<SprintRecord?> GetAsync(string id, CancellationToken ct = default);
     Task<SprintRecord?> GetActiveAsync(CancellationToken ct = default);
     Task<SprintRecord> UpdateAsync(string id, IReadOnlyDictionary<string, object?> fields, CancellationToken ct = default);
     Task DeleteAsync(string id, CancellationToken ct = default);
     Task<SprintRecord> SetActiveAsync(string id, CancellationToken ct = default);
+    Task<SprintRecord> ActivateWithIssuesAsync(string id, SprintActivationSnapshot snapshot,
+        IReadOnlyList<string> expectedMembership, CancellationToken ct = default)
+        => throw new NotSupportedException("Validated sprint activation is required.");
     Task AddIssueAsync(string sprintId, string issueId, CancellationToken ct = default);
+    Task AddInactiveIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
+        => throw new NotSupportedException("Fenced inactive membership editing is required.");
+    Task AddValidatedIssueAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+        => throw new NotSupportedException("Validated sprint membership is required.");
     Task RemoveIssueAsync(string sprintId, string issueId, CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetIssueIdsAsync(string sprintId, CancellationToken ct = default);
 }
@@ -38,10 +51,16 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
 
     private string T(string name) => _issues.Db.Dialect.Table(name);
 
-    public async Task<SprintRecord> CreateAsync(NewSprint spec, CancellationToken ct = default)
+    public Task<SprintRecord> CreateAsync(NewSprint spec, CancellationToken ct = default)
+        => CreateCoreAsync(spec, null, ct);
+
+    public Task<SprintRecord> CreateWithIssuesAsync(NewSprint spec, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+        => CreateCoreAsync(spec, snapshot, ct);
+
+    private async Task<SprintRecord> CreateCoreAsync(NewSprint spec, SprintActivationSnapshot? snapshot, CancellationToken ct)
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         var id = $"sprint-{Guid.NewGuid().ToString("N")[..10]}";
         var now = DateTime.UtcNow;
         // Sequential sprint number (per store/project): names read
@@ -53,7 +72,7 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             ? spec.Name
             : $"Sprint {number}: {baseName}";
         if (spec.Status == SprintStatus.Active)
-            await DeactivateOthersAsync(conn, tx, id, ct);
+            await EnsureNoOtherActiveAsync(conn, tx, id, ct);
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
@@ -69,6 +88,31 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             cmd.AddParam("@status", spec.Status.ToString());
             cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
+        }
+        if (snapshot is not null)
+        {
+            await ValidateSnapshotAsync(conn, tx, snapshot, ct);
+            if (snapshot.ProposalAuditId is { } auditId)
+            {
+                await using var audit = conn.CreateCommand();
+                audit.Transaction = tx;
+                audit.CommandText = $"UPDATE {T("sprint_proposal_audit")} SET committed_sprint_id=@sid, committed_by=@who WHERE id=@audit AND committed_sprint_id IS NULL";
+                audit.AddParam("@sid", id);
+                audit.AddParam("@who", snapshot.CommittedBy ?? "operator");
+                audit.AddParam("@audit", auditId);
+                if (await audit.ExecuteNonQueryAsync(ct) != 1)
+                    throw new InvalidOperationException("Proposal was already committed or no longer exists.");
+            }
+            foreach (var issue in snapshot.Issues)
+            {
+                await using var link = conn.CreateCommand();
+                link.Transaction = tx;
+                link.CommandText = $"INSERT INTO {T("sprint_issue")} (sprint_id, issue_id, added_at) VALUES (@sid, @iid, @now)";
+                link.AddParam("@sid", id);
+                link.AddParam("@iid", issue.Id);
+                link.AddParam("@now", IssueStore.DateFormatTime(now));
+                await link.ExecuteNonQueryAsync(ct);
+            }
         }
         await tx.CommitAsync(ct);
         await PublishStatusChangedAsync(id, fromStatus: null, spec.Status, now, ct);
@@ -153,8 +197,8 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         if (merged.Status == SprintStatus.Active)
         {
-            await using var tx = await conn.BeginTransactionAsync(ct);
-            await DeactivateOthersAsync(conn, tx, id, ct);
+            await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+            await EnsureNoOtherActiveAsync(conn, tx, id, ct);
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
             ApplySprintUpdateCommand(cmd, merged, now);
@@ -182,13 +226,73 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task AddValidatedIssueAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+    {
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        await using (var sprint = conn.CreateCommand())
+        {
+            sprint.Transaction = tx;
+            sprint.CommandText = $"SELECT status FROM {T("sprint")} WHERE id=@id";
+            sprint.AddParam("@id", sprintId);
+            if (await sprint.ExecuteScalarAsync(ct) is not string status || status != SprintStatus.Active.ToString())
+                throw new InvalidOperationException("Sprint is no longer active.");
+        }
+        await ValidateSnapshotAsync(conn, tx, snapshot, ct);
+        foreach (var issue in snapshot.Issues)
+        {
+            await using var member = conn.CreateCommand();
+            member.Transaction = tx;
+            member.CommandText = $"INSERT INTO {T("sprint_issue")} (sprint_id,issue_id,added_at) SELECT @sid,@iid,@now WHERE NOT EXISTS (SELECT 1 FROM {T("sprint_issue")} WHERE sprint_id=@sid AND issue_id=@iid)";
+            member.AddParam("@sid", sprintId);
+            member.AddParam("@iid", issue.Id);
+            member.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+            await member.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+    }
+
+    public async Task<SprintRecord> ActivateWithIssuesAsync(string id, SprintActivationSnapshot snapshot,
+        IReadOnlyList<string> expectedMembership, CancellationToken ct = default)
+    {
+        var existing = await GetAsync(id, ct) ?? throw new InvalidOperationException($"Sprint {id} not found");
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        await EnsureNoOtherActiveAsync(conn, tx, id, ct);
+        await ValidateSnapshotAsync(conn, tx, snapshot, ct);
+        var currentMembers = new List<string>();
+        await using (var members = conn.CreateCommand())
+        {
+            members.Transaction = tx;
+            members.CommandText = $"SELECT issue_id FROM {T("sprint_issue")} WHERE sprint_id=@id";
+            members.AddParam("@id", id);
+            await using var row = await members.ExecuteReaderAsync(ct);
+            while (await row.ReadAsync(ct)) currentMembers.Add(row.GetString(0));
+        }
+        if (!currentMembers.Order(StringComparer.Ordinal).SequenceEqual(expectedMembership.Order(StringComparer.Ordinal)))
+            throw new InvalidOperationException("Sprint membership changed during activation.");
+        var now = DateTime.UtcNow;
+        await using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = $"UPDATE {T("sprint")} SET status='Active', updated_at=@now WHERE id=@id";
+            cmd.AddParam("@id", id);
+            cmd.AddParam("@now", IssueStore.DateFormatTime(now));
+            if (await cmd.ExecuteNonQueryAsync(ct) != 1)
+                throw new InvalidOperationException($"Sprint {id} no longer exists.");
+        }
+        await tx.CommitAsync(ct);
+        await PublishStatusChangedAsync(id, existing.Status, SprintStatus.Active, now, ct);
+        return existing with { Status = SprintStatus.Active, UpdatedAt = now };
+    }
+
     public async Task<SprintRecord> SetActiveAsync(string id, CancellationToken ct = default)
     {
         var existing = await GetAsync(id, ct);
         var now = DateTime.UtcNow;
         await using var conn = await _issues.Db.OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-        await DeactivateOthersAsync(conn, tx, id, ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        await EnsureNoOtherActiveAsync(conn, tx, id, ct);
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
@@ -202,10 +306,27 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         return (await GetAsync(id, ct))!;
     }
 
-    public async Task AddIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
+    public Task AddIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
+        => AddIssueCoreAsync(sprintId, issueId, false, ct);
+
+    public Task AddInactiveIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
+        => AddIssueCoreAsync(sprintId, issueId, true, ct);
+
+    private async Task AddIssueCoreAsync(string sprintId, string issueId, bool requireInactive, CancellationToken ct)
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        if (requireInactive)
+        {
+            await using var check = conn.CreateCommand();
+            check.Transaction = tx;
+            check.CommandText = $"SELECT status FROM {T("sprint")} WHERE id=@sid";
+            check.AddParam("@sid", sprintId);
+            if (await check.ExecuteScalarAsync(ct) is not string status || status == "Active")
+                throw new InvalidOperationException("Sprint became active; retry with validated membership.");
+        }
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
             ? $"""
                 IF NOT EXISTS (SELECT 1 FROM {T("sprint_issue")} WHERE sprint_id = @sid AND issue_id = @iid)
@@ -219,6 +340,7 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         cmd.AddParam("@iid", issueId);
         cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
         await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     public async Task RemoveIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
@@ -243,14 +365,59 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         return ids;
     }
 
-    private async Task DeactivateOthersAsync(DbConnection conn, DbTransaction tx, string keepId, CancellationToken ct)
+    private async Task EnsureNoOtherActiveAsync(DbConnection conn, DbTransaction tx, string keepId, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = $"""UPDATE {T("sprint")} SET status='Archived', updated_at=@now WHERE status='Active' AND id != @keep""";
-        cmd.AddParam("@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        cmd.CommandText = $"SELECT COUNT(*) FROM {T("sprint")} WHERE status='Active' AND id != @keep";
         cmd.AddParam("@keep", keepId);
-        await cmd.ExecuteNonQueryAsync(ct);
+        if (Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) != 0)
+            throw new InvalidOperationException("An active sprint already exists; complete it before activating another.");
+    }
+
+    private async Task ValidateSnapshotAsync(DbConnection conn, DbTransaction tx, SprintActivationSnapshot snapshot, CancellationToken ct)
+    {
+        if (snapshot.TaskIds.Count == 0 || snapshot.TaskIds.Distinct(StringComparer.Ordinal).Count() != snapshot.TaskIds.Count)
+            throw new InvalidOperationException("Sprint selection must contain distinct tasks.");
+        foreach (var issue in snapshot.Issues)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = $"SELECT status, updated_at, metadata_json, COALESCE(parent_issue_id,''), title, COALESCE(description,''), type, priority FROM {T("issue")} WHERE id=@id";
+            cmd.AddParam("@id", issue.Id);
+            await using var row = await cmd.ExecuteReaderAsync(ct);
+            // Compare exact text in managed code: SQL Server's default collation is
+            // case-insensitive, including for JSON and task descriptions.
+            if (!await row.ReadAsync(ct) || row.GetString(0) != issue.Status.ToString()
+                || row.GetString(1) != IssueStore.DateFormatTime(issue.UpdatedAt)
+                || row.GetString(2) != issue.MetadataJson || row.GetString(3) != (issue.ParentIssueId ?? "")
+                || row.GetString(4) != issue.Title || row.GetString(5) != (issue.Description ?? "")
+                || row.GetString(6) != issue.Type || Convert.ToInt32(row.GetValue(7)) != issue.Priority)
+                throw new InvalidOperationException($"Sprint selection is stale: {issue.Id} changed.");
+        }
+        foreach (var id in snapshot.TaskIds)
+        {
+            if (!snapshot.Issues.Any(i => i.Id == id && i.Status == IssueStatus.Pending))
+                throw new InvalidOperationException($"Sprint task {id} has no pending snapshot.");
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = $"SELECT COUNT(*) FROM {T("issue_dep")} d JOIN {T("issue")} b ON b.id=d.blocker_id WHERE d.blocked_id=@id AND d.kind='blocks' AND b.status NOT IN ('Completed','Closed')";
+            cmd.AddParam("@id", id);
+            if (Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) != 0)
+                throw new InvalidOperationException($"Sprint task {id} acquired an open prerequisite.");
+        }
+        foreach (var spec in snapshot.Specs)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = $"SELECT COUNT(*) FROM {T("spec")} WHERE id=@id AND project_id=@project AND status=@status AND current_version=@version";
+            cmd.AddParam("@id", spec.Id);
+            cmd.AddParam("@project", spec.ProjectId);
+            cmd.AddParam("@status", spec.Status.ToString());
+            cmd.AddParam("@version", spec.CurrentVersion);
+            if (Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) != 1)
+                throw new InvalidOperationException($"Sprint specification is stale: {spec.Id} changed.");
+        }
     }
 
     private void ApplySprintUpdateCommand(DbCommand cmd, SprintRecord s, DateTime now)

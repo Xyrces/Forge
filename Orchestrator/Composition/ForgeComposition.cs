@@ -279,7 +279,7 @@ public static class ForgeComposition
         services.AddSingleton(sprintProposalAudit);
         var scorer = new DeterministicScorer();
         services.AddSingleton(scorer);
-        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit);
+        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates);
         services.AddSingleton(sprintPropose);
         var memoryExtractor = new MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,

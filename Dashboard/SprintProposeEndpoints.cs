@@ -47,7 +47,8 @@ public static class SprintProposeEndpoints
             }
             auditStore = new SprintProposalAuditStore(((Core.IssueStore)ctx.Issues).Db);
             issueStore = ctx.Issues;
-            return new SprintProposeService(ctx.Issues, ctx.Sprints, new Agents.DeterministicScorer(), auditStore);
+            return new SprintProposeService(ctx.Issues, ctx.Sprints, new Agents.DeterministicScorer(), auditStore,
+                gates: proposer.Gates, specs: ctx.Specs, projectId: ctx.Options.Id);
         }
 
         app.MapGet("/api/sprints/propose-next", async (string? theme, string? goal, int? count, string? projectId, CancellationToken ct) =>
@@ -124,6 +125,10 @@ public static class SprintProposeEndpoints
                 catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
                 {
                     return Results.NotFound(new { error = ex.Message, projectId });
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.Conflict(new { error = ex.Message, projectId });
                 }
             }
             catch (Exception ex)

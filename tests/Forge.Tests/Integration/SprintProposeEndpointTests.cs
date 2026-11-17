@@ -75,8 +75,8 @@ public class SprintProposeEndpointTests : IDisposable
     [Fact]
     public async Task Propose_WithTasks_ReturnsRankedCandidates()
     {
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Memory bank hot path", Priority: 1), default);
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Refactor dashboard", Priority: 3), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "Memory bank hot path", Priority: 1), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "Refactor dashboard", Priority: 3), default);
 
         var resp = await _client.GetAsync("/api/sprints/propose-next?count=5");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -88,7 +88,7 @@ public class SprintProposeEndpointTests : IDisposable
     [Fact]
     public async Task Propose_ThemeMatch_BumpsScore()
     {
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "Memory bank refinements", Priority: 2), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "Memory bank refinements", Priority: 2), default);
 
         var respWith = await _client.GetAsync("/api/sprints/propose-next?theme=memory&count=5");
         var bodyWith = await respWith.Content.ReadFromJsonAsync<ProposeShape>();
@@ -102,8 +102,8 @@ public class SprintProposeEndpointTests : IDisposable
     [Fact]
     public async Task Commit_CreatesSprintAndLinksTasks()
     {
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "P6 UI", Priority: 2), default);
-        await _issues.CreateAsync(new NewIssue(Type: "task", Title: "P6 backend", Priority: 2), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "P6 UI", Priority: 2), default);
+        await _issues.CreateAsync(new NewIssue(Metadata: new Dictionary<string, object> { ["groomed"] = true }, Type: "task", Title: "P6 backend", Priority: 2), default);
 
         var proposeResp = await _client.GetAsync("/api/sprints/propose-next?count=2");
         var propose = await proposeResp.Content.ReadFromJsonAsync<ProposeShape>();

@@ -30,6 +30,7 @@ public class ProjectLensEndpointTests : IDisposable
     private readonly IssueStore _issues;        // primary == alpha
     private readonly SprintStore _sprints;
     private readonly SpecStore _specs;
+    private readonly StageGates _gates;
     private readonly ProjectContextFactory _factory;
     private readonly IHost _host;
     private readonly HttpClient _client;
@@ -44,6 +45,7 @@ public class ProjectLensEndpointTests : IDisposable
         _issues = new IssueStore(alphaDb);
         _sprints = new SprintStore(_issues);
         _specs = new SpecStore(_issues);
+        _gates = new StageGates(new MemoryStore(_issues.Db));
         var agents = new AgentStore(_issues);
         var skills = new SkillStore(_issues);
         var bus = new AgentMessageBus();
@@ -77,7 +79,7 @@ public class ProjectLensEndpointTests : IDisposable
         SprintProposeEndpoints.MapSprintProposeEndpoints(app, propose, audit, logger, _factory);
         SpecEndpoints.MapSpecEndpoints(app, _specs, new NullSpecExtractionReader(), logger,
             projectContexts: _factory, issues: _issues);
-        DashboardEndpoints.MapP1Endpoints(app, _issues, agents, skills, _sprints, bus, logger, _factory);
+        DashboardEndpoints.MapP1Endpoints(app, _issues, agents, skills, _sprints, bus, logger, _factory, _gates);
         TaskEndpoints.MapTaskEndpoints(app, _issues, bus, null, logger, _factory, _sprints);
         AgentRunEndpoints.MapAgentRunEndpoints(app, new AgentRunStore(alphaDb), _factory);
         SprintReadEndpoints.MapSprintReadEndpoints(app, _issues, _factory);
@@ -213,7 +215,8 @@ public class ProjectLensEndpointTests : IDisposable
     [Fact]
     public async Task SprintPropose_Commit_WritesOwningProject()
     {
-        var id = await CreateBetaTaskAsync("beta candidate");
+        var id = (await Beta.Issues.CreateAsync(new NewIssue("task", "beta candidate",
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }))).Id;
 
         var propose = await _client.GetFromJsonAsync<JsonElement>(
             "/api/sprints/propose-next?projectId=beta&count=5");
@@ -265,13 +268,53 @@ public class ProjectLensEndpointTests : IDisposable
     public async Task SprintMutations_LensWritesOwningProject()
     {
         var create = await _client.PostAsJsonAsync("/api/sprints?projectId=beta",
-            new { name = "beta sprint", goal = "g", startDate = DateTime.UtcNow, endDate = DateTime.UtcNow.AddDays(7) });
+            new { name = "beta sprint", goal = "g", startDate = DateTime.UtcNow, endDate = DateTime.UtcNow.AddDays(7), status = "Archived" });
         Assert.Equal(HttpStatusCode.Created, create.StatusCode);
         var created = await create.Content.ReadFromJsonAsync<JsonElement>();
         var sprintId = created.GetProperty("id").GetString()!;
 
         Assert.Contains((await Beta.Sprints.ListAsync(activeOnly: false, default)), s => s.Id == sprintId);
         Assert.DoesNotContain((await _sprints.ListAsync(activeOnly: false, default)), s => s.Id == sprintId);
+    }
+
+    [Fact]
+    public async Task DirectActiveCreationCannotBypassSelectionValidation()
+    {
+        var response = await _client.PostAsJsonAsync("/api/sprints?projectId=beta",
+            new { name = "bypass", goal = "g", startDate = DateTime.UtcNow, endDate = DateTime.UtcNow.AddDays(7) });
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Empty(await Beta.Sprints.ListAsync(false));
+    }
+
+    [Fact]
+    public async Task DirectActivationChecksGroomingAndGateIncludingNumericStatus()
+    {
+        var sprint = await Beta.Sprints.CreateAsync(new NewSprint("draft", "g", DateTime.UtcNow,
+            DateTime.UtcNow.AddDays(7), SprintStatus.Archived));
+        var task = await Beta.Issues.CreateAsync(new NewIssue("task", "ungroomed"));
+        await Beta.Sprints.AddIssueAsync(sprint.Id, task.Id);
+        var url = $"/api/sprints/{sprint.Id}?projectId=beta";
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PatchAsJsonAsync(url, new { status = 0 })).StatusCode);
+        await Beta.Issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null, metadata: new Dictionary<string, object> { ["groomed"] = true }, ct: default);
+        await _gates.HoldAsync(StageGates.Sprint);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PatchAsJsonAsync(url, new { status = "Active" })).StatusCode);
+        await _gates.ReleaseAsync(StageGates.Sprint);
+        Assert.Equal(HttpStatusCode.OK, (await _client.PatchAsJsonAsync(url, new { status = 0 })).StatusCode);
+        Assert.Equal(sprint.Id, (await Beta.Sprints.GetActiveAsync())!.Id);
+    }
+
+    [Fact]
+    public async Task ActiveMembershipRejectsUngroomedAndAcceptsEligibleAmendment()
+    {
+        var sprint = await Beta.Sprints.CreateAsync(new NewSprint("active", "g", DateTime.UtcNow, DateTime.UtcNow.AddDays(7)));
+        var task = await Beta.Issues.CreateAsync(new NewIssue("task", "candidate"));
+        var url = $"/api/sprints/{sprint.Id}/issues?projectId=beta";
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PostAsJsonAsync(url, new { issueId = task.Id })).StatusCode);
+        Assert.Empty(await Beta.Sprints.GetIssueIdsAsync(sprint.Id));
+        await Beta.Issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null, metadata: new Dictionary<string, object> { ["groomed"] = true }, ct: default);
+        Assert.Equal(HttpStatusCode.NoContent, (await _client.PostAsJsonAsync(url, new { issueId = task.Id })).StatusCode);
+        Assert.Equal(task.Id, Assert.Single(await Beta.Sprints.GetIssueIdsAsync(sprint.Id)));
+        Assert.Equal(HttpStatusCode.NoContent, (await _client.PostAsJsonAsync(url, new { issueId = task.Id })).StatusCode);
     }
 
     [Fact]

@@ -1049,48 +1049,12 @@ public sealed class SprintAssembler
                 .Take(MaxThemeTasks).ToList();
         }
 
+        var snapshot = await new SprintActivationValidator(issues, sprints, specs, projectId, _gates)
+            .ValidateAsync(chosen.Select(t => t.Id).ToArray(), ct);
         var start = DateTime.UtcNow;
-        var sprint = await sprints.CreateAsync(new NewSprint(
-            Name: name,
-            Goal: goal,
-            StartDate: start,
-            EndDate: start.Add(SprintDuration),
-            Status: SprintStatus.Active), ct);
-
-        // Link tasks AND their parent stories (stories power the
-        // Sprints page progress display; they don't gate completion).
-        var toLink = new HashSet<string>(chosen.Select(t => t.Id), StringComparer.Ordinal);
-        foreach (var task in chosen)
-        {
-            if (task.ParentIssueId is not null)
-            {
-                toLink.Add(task.ParentIssueId);
-            }
-        }
-        foreach (var id in toLink)
-        {
-            await sprints.AddIssueAsync(sprint.Id, id, ct);
-        }
-
-        // Re-publish the activation hint AFTER membership links commit:
-        // the store-level CreateAsync(Active) publish races the linking
-        // writes, so a dispatch loop woken by it can see an active
-        // sprint with an empty member list and park with no further
-        // hint coming (observed in the e2e smoke). Hints are cheap and
-        // idempotent — this second one is the reliable kick.
-        if (_eventPublisher is not null)
-        {
-            var activatedAt = DateTimeOffset.UtcNow;
-            await _eventPublisher.PublishAsync(new Core.Messaging.SprintStatusChanged
-            {
-                MessageId = Core.Messaging.SprintStatusChanged.IdFor(projectId, sprint.Id, "Active:linked", activatedAt),
-                ProjectId = projectId,
-                SprintId = sprint.Id,
-                FromStatus = "(new)",
-                ToStatus = "Active",
-                ChangedAt = activatedAt,
-            }, ct);
-        }
+        var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(
+            Name: name, Goal: goal, StartDate: start, EndDate: start.Add(SprintDuration),
+            Status: SprintStatus.Active), snapshot, ct);
 
         _logger.LogInformation(
             "Sprint {SprintId} assembled + activated: '{Name}' with {Tasks} task(s) (group={Group})",
