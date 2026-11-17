@@ -42,6 +42,28 @@
         {
             <p class="page-subtitle">Qualified source: <code>@receipt.SourceSha</code></p>
         }
+        @if (receipt.AbandonedAt is not null)
+        {
+            <p class="banner banner--warn">Stopped by operator — not delivered. @receipt.AbandonmentReason</p>
+        }
+        else if (receipt.PlanHash is not null && receipt.Outcome is "Incomplete" or "PendingEvidence")
+        {
+            <details class="card">
+                <summary>Stop this incomplete outcome</summary>
+                <p>This records an explicit interruption with your reason. It does not mark the work delivered or qualify a release.</p>
+                @if (receipt.DeploymentCandidateId is not null && receipt.DeploymentStatus is not ("Deployed" or "DeployFailed" or "BuildFailed" or "Rejected"))
+                {
+                    <p>Reject an unstarted release on the Deployments page first. If a release is already authorized or running, wait for its safe result before stopping this outcome.</p>
+                    <a href="@($"/deployments?project={Uri.EscapeDataString(ProjectId!)}")">Review linked deployment</a>
+                }
+                else
+                {
+                    <label for="completion-stop-reason">Reason for stopping</label>
+                    <textarea id="completion-stop-reason" maxlength="2000" @bind="_stopReason" @bind:event="oninput"></textarea>
+                    <button class="btn btn--danger" disabled="@(_retrying || string.IsNullOrWhiteSpace(_stopReason))" @onclick="StopOutcomeAsync">Stop outcome without marking it delivered</button>
+                }
+            </details>
+        }
         @foreach (var criterion in _detail.Criteria)
         {
             <div class="card">
@@ -81,6 +103,7 @@
     [Parameter] public string? SprintId { get; set; }
     [Parameter] public DateTime RefreshAt { get; set; }
     private string? _identity, _cursor, _error, _actionError, _notice;
+    private string _stopReason = "";
     private DateTime _refreshAt;
     private CompletionDetail? _detail;
     private CancellationTokenSource? _request;
@@ -98,6 +121,7 @@
             _detail = null;
             _notice = null;
             _actionError = null;
+            _stopReason = "";
         }
         _refreshAt = RefreshAt;
         await LoadAsync();
@@ -164,12 +188,37 @@
         }
         finally { _retrying = false; }
     }
+    private async Task StopOutcomeAsync()
+    {
+        if (_retrying || ProjectId is null || SprintId is null || _detail?.Receipt.PlanHash is not { } planHash
+            || string.IsNullOrWhiteSpace(_stopReason)) return;
+        var generation = _generation;
+        var token = _request?.Token ?? CancellationToken.None;
+        _retrying = true; _actionError = null; _notice = null;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync($"/api/sprints/{Uri.EscapeDataString(SprintId)}/completion/abandon?projectId={Uri.EscapeDataString(ProjectId)}",
+                new { planHash, reason = _stopReason.Trim() }, token);
+            response.EnsureSuccessStatusCode();
+            if (generation != _generation) return;
+            _notice = "Explicit interruption recorded. The outcome has not been marked delivered.";
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not record completion interruption");
+            if (generation == _generation) _actionError = "Interruption was not confirmed. Reload evidence and check the linked release before trying again.";
+        }
+        finally { _retrying = false; }
+    }
     private async Task FirstPageAsync() { _cursor = null; await LoadAsync(); }
     private async Task NextPageAsync() { _cursor = _detail?.NextCursor; await LoadAsync(); }
     public void Dispose() { ++_generation; _request?.Cancel(); _request?.Dispose(); }
     private sealed record CompletionSummary(string Id, string ProjectId, string SprintId, string Outcome,
         string BookkeepingState, bool ReadyForDeployment, string? SourceSha, string? DeploymentCandidateId,
-        string? DeploymentStatus, string? DeliveryNote, string? PlanHash);
+        string? DeploymentStatus, string? DeliveryNote, string? PlanHash, string? SprintName = null,
+        string? AbandonmentReason = null, DateTimeOffset? AbandonedAt = null);
     private sealed record CompletionBatch(string Id, string State, string? Error);
     private sealed record CompletionCriterion(string Id, string Text, string EvidenceKind, string? ProofReference, string? OperatorIdentity);
     private sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatch> Batches, string? NextCursor, IReadOnlyList<CompletionCriterion> Criteria);
