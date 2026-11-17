@@ -33,6 +33,10 @@ def choose_release(kube, controllers, operation, policy):
     if policy is None:
         return Release, None
     current = kube.get("services", "forge")["spec"].get("selector", {}).get("slot")
+    if current == "none":
+        # The installer has already completed initialization. Ordinary standby
+        # readiness verifies this target binary's strict schema before admission.
+        return Release, None
     if current not in ("blue", "green"):
         raise RuntimeError("schema policy requires an observed existing controller")
     status = controllers.call(current, "status", operation)

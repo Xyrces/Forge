@@ -185,6 +185,20 @@ class SchemaReleaseTests(unittest.TestCase):
         self.assertIs(SchemaRelease, choose_release(kube, controllers, "upgrade", POLICY)[0])
         with self.assertRaises(RuntimeError): choose_release(kube, controllers, "upgrade", None)
 
+    def test_fresh_initialized_install_uses_ordinary_release_even_with_policy(self):
+        _, kube, controllers = self.make()
+        kube.objects[("services", "forge")]["spec"]["selector"]["slot"] = "none"
+        kube.objects.pop(("deployments", "forge-blue"))
+        class NoExistingController:
+            def call(self, *args, **kwargs):
+                raise AssertionError("fresh selection must not query a nonexistent controller")
+        kind, policy = choose_release(kube, NoExistingController(), "initial", POLICY)
+        self.assertIs(Release, kind)
+        self.assertIsNone(policy)
+        # A retained schema journal still wins over the public selector.
+        kube.create("configmaps", {"metadata": {"name": "forge-release-upgrade"}, "data": {"kind": "schema-upgrade"}})
+        self.assertIs(SchemaRelease, choose_release(kube, NoExistingController(), "upgrade", POLICY)[0])
+
     def test_policy_rejects_unknown_fields_and_nonimmutable_bridge(self):
         for policy in ({**POLICY, "extra": True}, {**POLICY, "rollbackImage": "latest"}, {**POLICY, "toVersion": 39}, {**POLICY, "fromVersion": True}):
             with self.assertRaises(ValueError): validate_policy(policy)
