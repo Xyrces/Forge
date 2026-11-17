@@ -19,6 +19,7 @@ Reports:
 - [Usage accounting](budget.md)
 - [Budget release compatibility](budget-release.md)
 - [Completed live budget correction and release qualification](budget-live-qualification.md)
+- [Completed live workflow repair qualification](workflow-live-qualification.md)
 
 Top issues to decide together:
 
