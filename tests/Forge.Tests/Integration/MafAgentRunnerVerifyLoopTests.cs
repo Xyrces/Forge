@@ -193,6 +193,24 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
     }
 
     [Fact]
+    public async Task DistributedWorkerLeavesFullVerificationToIndependentHost()
+    {
+        var client = new VerifyScriptedChatClient();
+        var runner = new MafAgentRunner(new ScriptingFactory(client),
+            new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
+            new RoleAgentRegistry(), NullLogger<MafAgentRunner>.Instance,
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("distributed-verify"),
+            verifyCommandsLookup: _ => ["dotnet test"]);
+        runner.VerifyRunner = (_, _, _, _) => throw new InvalidOperationException("Duplicate full suite must not run");
+        var result = await runner.RunAsync(AgentType.CoreDev, "Implement the task", null,
+            new Dictionary<string, object> { ["worktreePath"] = _worktree, ["issueId"] = "task-test",
+                ["projectId"] = "test", ["workerAttemptId"] = "attempt" }, default);
+        Assert.Equal("work done", result.Text);
+        Assert.Null(result.Verification); // Model completion alone can never authorize publication.
+        Assert.Equal(3, client.CallCount);
+    }
+
+    [Fact]
     public async Task NoPlanApproval_VerificationSkipped()
     {
         // QA/reviewer runs (no plan gate) never verify — no mutations
