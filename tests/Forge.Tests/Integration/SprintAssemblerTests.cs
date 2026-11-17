@@ -1,4 +1,7 @@
 using Forge.Core;
+using Forge.Core.Initiatives;
+using Forge.Core.Completion;
+using System.Text.Json;
 using Forge.Dashboard;
 using Forge.Orchestrator.Sprint;
 using Forge.Projects;
@@ -50,7 +53,24 @@ public class SprintAssemblerTests : IDisposable
         try { Directory.Delete(_workDir, recursive: true); } catch { }
     }
 
-    private Task Tick() => _assembler.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
+    private async Task Tick()
+    {
+        // This suite models successful engineering when a test marks mapped work Completed.
+        // Missing/mismatched proof is independently tested by CompletionEvidenceTests.
+        foreach (var task in (await _issues.ListAsync(new IssueFilter { Status = IssueStatus.Completed }))
+            .Where(t => SprintPlanJson.ReadBinding(t) is not null && t.GetMetadata("trustedPublication") is null))
+        {
+            var head = new string('a', 40);
+            await _issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+            {
+                ["prNumber"] = 1, ["branchSha"] = head,
+                ["trustedPublication"] = JsonSerializer.Serialize(new TrustedPublicationEvidence(task.Id, head,
+                    new("fixture-attempt", new string('b', 40), new string('c', 64), DateTimeOffset.UtcNow))),
+                ["observedMerge"] = JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 1, head, new string('d', 40), DateTimeOffset.UtcNow))
+            });
+        }
+        await _assembler.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
+    }
 
     [Fact]
     public async Task GroomedSpecPlansWholeDependencyChainButOnlyPrerequisiteIsReady()
@@ -216,10 +236,17 @@ public class SprintAssemblerTests : IDisposable
     private async Task<(string specId, List<string> storyIds, List<string> taskIds)> SeedGroomedSpecAsync(
         string title, int taskCount, string? epicDescription = null)
     {
-        var epic = await _issues.CreateAsync(new NewIssue(
-            Type: "epic", Title: $"Epic: {title}", Description: epicDescription));
-        var spec = await _specs.CreateAsync(new NewSpec(
-            ProjectId: "test", Title: title, Body: "body", ParentIssueId: epic.Id));
+        var proposals = new InitiativeProposalStore(_issues);
+        var draft = await proposals.CreateAsync(new("test", Guid.NewGuid().ToString(), "user", title,
+            epicDescription ?? "Deliver " + title));
+        await proposals.ExpandInIntakeAsync("test", draft.Id);
+        var approved = await proposals.ApproveAsync("test", draft.Id, 1, draft.Hash, "test operator");
+        var ingestion = new InitiativeIngestionStore(_issues);
+        var receipt = await ingestion.IngestAsync(approved);
+        await ingestion.TryBeginRefinementAsync(approved.Id, 1);
+        await ingestion.CompleteRefinementAsync(approved.Id, 1);
+        var spec = (await _specs.GetAsync(receipt.SpecId))!;
+        var scope = new SprintScopeReference(spec.Id, approved.Id, 1, approved.Hash, approved.Body);
         var storyIds = new List<string>();
         var taskIds = new List<string>();
         for (var i = 0; i < taskCount; i++)
@@ -234,6 +261,10 @@ public class SprintAssemblerTests : IDisposable
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, default);
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, default);
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
+        foreach (var taskId in taskIds)
+            await new SprintOutcomeAuthority(_issues).BindAsync(taskId, new(1, spec.Id, title,
+                [new(spec.Id + "-acceptance", epicDescription ?? title, SprintEvidenceKind.MergedAndVerified, scope)],
+                taskIds, [spec.Id + "-acceptance"], SprintMemberReason.Delivers, scope));
         return (spec.Id, storyIds, taskIds);
     }
 
