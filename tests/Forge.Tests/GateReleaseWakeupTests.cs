@@ -48,6 +48,15 @@ public sealed class GateReleaseWakeupTests : IAsyncLifetime
         _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_app.GetPort()}/") };
     }
 
+    [Fact]
+    public async Task DeploymentReleaseUsesItsOwnDurableReconcilerRatherThanAPlanningSweep()
+    {
+        await _gates.HoldAsync(StageGates.Deploy);
+        (await _client.PostAsync("api/gates/deploy/release", null)).EnsureSuccessStatusCode();
+        Assert.False(await _gates.IsHeldAsync(StageGates.Deploy));
+        Assert.Empty(_publisher.Events);
+    }
+
     [Theory]
     [InlineData("design", SweepKind.Design)]
     [InlineData("groom", SweepKind.Groom)]

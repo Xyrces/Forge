@@ -45,7 +45,8 @@ public static class GateEndpoints
             // Releasing a persisted hold must wake the ordinary pipeline, not
             // wait for its 15-minute recovery backstop. Consumers re-read gates
             // and eligibility; this notification never dispatches work directly.
-            if (publisher is not null && projects is not null)
+            // Deployment has its own 15-second durable reconciler, not a workflow sweep.
+            if (stage != StageGates.Deploy && publisher is not null && projects is not null)
             {
                 try
                 {
