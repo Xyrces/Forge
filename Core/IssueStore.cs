@@ -2843,7 +2843,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         return new IssueEventRecord(id, issueId, DateTime.UtcNow, "orchestrator", kind, detail);
     }
 
-    private static IssueRecord ReadIssue(DbDataReader rd)
+    internal static IssueRecord ReadIssue(DbDataReader rd)
         => new(
             Id: rd.GetString(0),
             ShortId: rd.GetString(1),

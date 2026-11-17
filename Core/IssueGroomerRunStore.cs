@@ -14,7 +14,7 @@ namespace Forge.Core;
 /// when each spec was last groomed, how many stories / tasks
 /// came out, and any error.
 /// </summary>
-public sealed class IssueGroomerRunStore
+public sealed partial class IssueGroomerRunStore
 {
     private readonly IDbConnectionFactory _db;
     private readonly string _dbPath;
@@ -129,7 +129,7 @@ public sealed class IssueGroomerRunStore
                 SELECT {d.TopParam("@limit")}id, ts, spec_id, trigger_kind, status,
                        stories_produced, tasks_produced, error, duration_ms
                 FROM {T("issue_groomer_run")}
-                ORDER BY ts DESC
+                ORDER BY ts DESC, id DESC
                 {d.LimitParam("@limit")}
                 """;
         }
@@ -140,7 +140,7 @@ public sealed class IssueGroomerRunStore
                        stories_produced, tasks_produced, error, duration_ms
                 FROM {T("issue_groomer_run")}
                 WHERE spec_id = @spec
-                ORDER BY ts DESC
+                ORDER BY ts DESC, id DESC
                 {d.LimitParam("@limit")}
                 """;
             cmd.AddParam("@spec", specId);
@@ -167,6 +167,8 @@ public sealed class IssueGroomerRunStore
     private static string StatusToDb(GroomerRunStatus s) => s switch
     {
         GroomerRunStatus.Started => "started",
+        GroomerRunStatus.Queued => "queued",
+        GroomerRunStatus.NeedsReview => "needs_review",
         GroomerRunStatus.Succeeded => "succeeded",
         GroomerRunStatus.Failed => "failed",
         _ => "failed",
@@ -175,6 +177,8 @@ public sealed class IssueGroomerRunStore
     private static GroomerRunStatus ParseStatus(string s) => s switch
     {
         "started" => GroomerRunStatus.Started,
+        "queued" => GroomerRunStatus.Queued,
+        "needs_review" => GroomerRunStatus.NeedsReview,
         "succeeded" => GroomerRunStatus.Succeeded,
         "failed" => GroomerRunStatus.Failed,
         _ => GroomerRunStatus.Failed,
@@ -184,13 +188,14 @@ public sealed class IssueGroomerRunStore
     {
         "manual" => GroomerTriggerKind.Manual,
         "scheduled" => GroomerTriggerKind.Scheduled,
+        "retry" => GroomerTriggerKind.Retry,
         _ => GroomerTriggerKind.Manual,
     };
 }
 
-public enum GroomerTriggerKind { Manual, Scheduled }
+public enum GroomerTriggerKind { Manual, Scheduled, Retry }
 
-public enum GroomerRunStatus { Started, Succeeded, Failed }
+public enum GroomerRunStatus { Started, Succeeded, Failed, Queued, NeedsReview }
 
 public sealed record IssueGroomerRun(
     long Id,

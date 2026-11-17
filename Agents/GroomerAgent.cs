@@ -78,7 +78,7 @@ public sealed class GroomerAgent
     /// Groom a spec. Returns the list of new story issue ids, or
     /// null if the agent didn't call any create_story.
     /// </summary>
-    public async Task<GroomResult?> GroomAsync(string specId, CancellationToken ct = default)
+    public async Task<GroomResult?> GroomAsync(string specId, CancellationToken ct = default, bool resumeExisting = false)
     {
         var spec = await _specs.GetAsync(specId, ct);
         if (spec is null)
@@ -88,7 +88,8 @@ public sealed class GroomerAgent
         }
         // Visual work must finish the artist stage first. Approved is
         // the explicit nonvisual bypass; Groomed is an operator re-decomposition.
-        if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed)
+        if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed
+            && !(resumeExisting && spec.Status == SpecStatus.Grooming))
         {
             _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} status={Status} (expected AssetReady | Approved | Groomed)",
                 specId, spec.Status);
@@ -104,6 +105,18 @@ public sealed class GroomerAgent
         var createdStoryIds = new List<string>();
         var createdTaskIds = new List<string>();
         var taskCountByStory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<IssueRecord> existing = [];
+        if (spec.Status != SpecStatus.Groomed)
+        {
+            var owner = _issues as IssueStore ?? throw new InvalidOperationException("Grooming requires the owning project store.");
+            existing = await new GroomingDecompositionStore(owner, _specs).ReadPendingAsync(specId, ct);
+            createdStoryIds.AddRange(existing.Where(r => r.Type == "story").Select(r => r.Id));
+            createdTaskIds.AddRange(existing.Where(r => r.Type != "story").Select(r => r.Id));
+            foreach (var storyId in createdStoryIds)
+                taskCountByStory[storyId] = existing.Count(r => r.ParentIssueId == storyId);
+        }
+        var reusedStories = createdStoryIds.Count;
+        var reusedTasks = createdTaskIds.Count;
         List<string> CreateStoryList() => createdStoryIds;
 
         var grounding = await BuildGroundingBlockAsync(spec.ProjectId, ct);
@@ -203,6 +216,10 @@ public sealed class GroomerAgent
         var scopeTool = CreateApprovedScopeTool(ct);
         systemPrompt += OutcomeInstructions;
         systemPrompt += "\nApproved scope lookup: read_approved_scope with specId=" + specId;
+        systemPrompt += "\nPreserved decomposition is authoritative: reuse these exact Pending IDs, bind any missing outcomes, and create only genuinely missing work. Do not repeat decomposition or replace existing descriptions. Exact repeated create calls return the existing row.\n"
+            + System.Text.Json.JsonSerializer.Serialize(existing.Select(r => new { r.Id, r.Type, r.Title, r.ParentIssueId,
+                description = r.Description is { Length: > 2000 } text ? text[..2000] : r.Description,
+                hasOutcomeMapping = SprintPlanJson.ReadBinding(r) is not null }));
         var tools = new List<AITool> { createStoryTool, createTaskTool, addDependencyTool, bindTool, scopeTool, CreateOutcomeCatalogTool(ct), CreateOutcomeReadTool(ct), setStatusTool };
         var agent = new ChatClientAgent(
             chatClient,
@@ -237,7 +254,9 @@ public sealed class GroomerAgent
                 throw new InvalidOperationException("Groomer exhausted its completion budget; partial tasks remain ineligible.");
             if (completionRequested)
             {
-                foreach (var id in createdTaskIds) await RequireOutcomeBindingAsync(id, ct);
+                var finalRows = await new GroomingDecompositionStore((IssueStore)_issues, _specs)
+                    .ReadPendingAsync(specId, ct, allowFinishedHistory: spec.Status == SpecStatus.Groomed);
+                foreach (var row in finalRows.Where(r => r.Type != "story")) await RequireOutcomeBindingAsync(row.Id, ct);
                 await _specs.SetStatusAsync(specId, SpecStatus.Groomed, ct);
             }
             var refreshed = await _specs.GetAsync(specId, ct);
@@ -252,7 +271,7 @@ public sealed class GroomerAgent
                     ["runId"] = _runId,
                     ["storyIds"] = string.Join(",", createdStoryIds),
                 }));
-            return createdStoryIds.Count == 0 ? null : new GroomResult(createdStoryIds, createdTaskIds);
+            return new GroomResult(createdStoryIds.Skip(reusedStories).ToArray(), createdTaskIds.Skip(reusedTasks).ToArray());
         }
         catch (Exception ex)
         {
@@ -271,6 +290,15 @@ public sealed class GroomerAgent
         List<string> createdStoryIds, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(title)) return "title_required";
+        foreach (var id in createdStoryIds)
+        {
+            var existing = await _issues.GetAsync(id, ct);
+            if (existing?.Title != title) continue;
+            if (existing.Status != IssueStatus.Pending || existing.Type != "story" || existing.ParentIssueId != specIdArg)
+                return "existing_story_is_not_pending_in_this_spec";
+            return (existing.Description ?? "") == (description ?? "")
+                ? existing.Id : "existing_story_differs_reuse_its_exact_id_and_scope";
+        }
         // Structural cap — the prompt's 1-3 story limit is enforced
         // here because weaker models ignore prompt constraints.
         if (createdStoryIds.Count >= 3) return "story_limit_reached";
@@ -303,6 +331,18 @@ public sealed class GroomerAgent
             return $"unknown_story_id: '{storyId}' was not created by this run. " +
                 $"Valid story ids: {(createdStoryIds.Count == 0 ? "(none yet — call create_story first)" : string.Join(", ", createdStoryIds))}. " +
                 "Pass the exact id returned by create_story.";
+        }
+        var parent = await _issues.GetAsync(normalizedStoryId, ct);
+        if (parent is not { Status: IssueStatus.Pending, Type: "story" } || parent.ParentIssueId != specIdArg)
+            return "story_is_not_pending_in_this_spec";
+        foreach (var id in createdTaskIds)
+        {
+            var existing = await _issues.GetAsync(id, ct);
+            if (existing?.ParentIssueId != normalizedStoryId || existing.Title != title) continue;
+            if (existing.Status != IssueStatus.Pending) return "existing_task_is_not_pending";
+            var expectedType = string.IsNullOrWhiteSpace(taskType) ? "task" : taskType.Trim().ToLowerInvariant();
+            return (existing.Description ?? "") == (description ?? "") && existing.Type == expectedType && existing.Priority == (priority ?? 2)
+                ? existing.Id : "existing_task_differs_reuse_its_exact_id_and_scope";
         }
         // Structural cap: 3 tasks per story (same rationale as the
         // story cap).

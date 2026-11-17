@@ -78,6 +78,8 @@ public sealed class ScheduledGroomer
 
     public async Task RunAsync(CancellationToken ct)
     {
+        // The controller has exclusive ownership; interrupted paid calls require an explicit decision.
+        await _runStore.RecoverInterruptedAsync(ct);
         // Stagger the first tick so we don't fight the dashboard at boot.
         try
         {
@@ -139,6 +141,17 @@ public sealed class ScheduledGroomer
         {
             _logger.LogInformation("ScheduledGroomer: held by operator gate; skipping tick");
             return;
+        }
+
+        foreach (var queued in await _runStore.ListQueuedAsync(ct))
+        {
+            var queuedSpec = await _specs.GetAsync(queued.SpecId, ct);
+            if (queuedSpec is null)
+            {
+                await _runStore.FinishAsync(queued.Id, GroomerRunStatus.Failed, 0, 0, "Specification no longer exists.", TimeSpan.Zero, ct);
+                continue;
+            }
+            await RunOneAsync(queuedSpec, queued.Trigger, ct, queued);
         }
 
         IReadOnlyList<SpecRecord> candidates;
@@ -295,9 +308,16 @@ public sealed class ScheduledGroomer
         return DateTime.UtcNow - last.Ts >= _interval;
     }
 
-    private async Task RunOneAsync(SpecRecord spec, GroomerTriggerKind trigger, CancellationToken ct)
+    private async Task RunOneAsync(SpecRecord spec, GroomerTriggerKind trigger, CancellationToken ct, IssueGroomerRun? queued = null)
     {
-        var run = await _runStore.StartAsync(spec.Id, trigger, ct);
+        IssueGroomerRun? run;
+        if (queued is not null)
+        {
+            if (!await _runStore.TryClaimQueuedAsync(queued.Id, ct)) return;
+            run = queued;
+        }
+        else run = await _runStore.TryStartScheduledAsync(spec.Id, ct);
+        if (run is null) return;
         var startedAt = DateTime.UtcNow;
         _logger.LogInformation("ScheduledGroomer: starting run {RunId} for spec {SpecId} (trigger={Trigger})",
             run.Id, spec.Id, trigger);
@@ -305,7 +325,10 @@ public sealed class ScheduledGroomer
         try
         {
             var groomer = _groomerFactory.Create(projectId: spec.ProjectId);
-            var result = await groomer.GroomAsync(spec.Id, ct);
+            if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed
+                && !(trigger == GroomerTriggerKind.Retry && spec.Status == SpecStatus.Grooming))
+                throw new InvalidOperationException("Specification state changed before the queued grooming run.");
+            var result = await groomer.GroomAsync(spec.Id, ct, resumeExisting: trigger == GroomerTriggerKind.Retry);
             var duration = DateTime.UtcNow - startedAt;
             await _runStore.FinishAsync(
                 run.Id, GroomerRunStatus.Succeeded,
@@ -320,12 +343,13 @@ public sealed class ScheduledGroomer
         catch (Exception ex)
         {
             var duration = DateTime.UtcNow - startedAt;
+            using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             await _runStore.FinishAsync(
-                run.Id, GroomerRunStatus.Failed,
+                run.Id, ex is OperationCanceledException ? GroomerRunStatus.NeedsReview : GroomerRunStatus.Failed,
                 storiesProduced: 0, tasksProduced: 0,
                 error: $"{ex.GetType().Name}: {ex.Message}",
                 duration: duration,
-                ct: ct);
+                ct: finalize.Token);
             _logger.LogWarning(ex, "ScheduledGroomer: spec {SpecId} failed in {Ms}ms", spec.Id, duration.TotalMilliseconds);
         }
     }

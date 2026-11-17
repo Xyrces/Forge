@@ -23,7 +23,7 @@ public class GroomerAgentTests : IDisposable
     public GroomerAgentTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("groomer");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, projectId: "P");
         _specs = new SpecStore(_issues);
     }
 
@@ -76,6 +76,38 @@ public class GroomerAgentTests : IDisposable
         var events = new InMemoryDashboardEventBus();
         return new GroomerAgent(_issues, _specs, events, factory, config,
             NullLogger<GroomerAgent>.Instance, runId: "test-run");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ExplicitResume_ReusesExactRows_AndRequiresEveryPreservedTaskBinding(bool mapped)
+    {
+        var scope = await ApprovedSprintFixture.Scope(_issues);
+        await _specs.SetStatusAsync(scope.SpecId, SpecStatus.Approved);
+        var story = await _issues.CreateAsync(new NewIssue("story", "Preserved story", ParentId: scope.SpecId));
+        var task = await _issues.CreateAsync(new NewIssue("task", "Preserved task", ParentId: story.Id, Priority: 2));
+        if (mapped) await ApprovedSprintFixture.Bind(_issues, scope, [task]);
+        await _specs.SetStatusAsync(scope.SpecId, SpecStatus.Grooming);
+        var before = (await _issues.ListAsync(new IssueFilter())).Count;
+        var client = new MultiToolCallingChatClient([
+            new FunctionCallContent("story", "create_story", new Dictionary<string, object?> { ["title"] = story.Title }),
+            new FunctionCallContent("task", "create_task", new Dictionary<string, object?> { ["storyId"] = story.Id, ["title"] = task.Title }),
+            new FunctionCallContent("done", "set_spec_status", new Dictionary<string, object?> { ["status"] = "Groomed" })
+        ], "Done.");
+        if (mapped)
+        {
+            var result = await BuildAgent(client).GroomAsync(scope.SpecId, resumeExisting: true);
+            Assert.Empty(result!.StoryIds);
+            Assert.Empty(result.TaskIds);
+            Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(scope.SpecId))!.Status);
+        }
+        else
+        {
+            await Assert.ThrowsAnyAsync<Exception>(() => BuildAgent(client).GroomAsync(scope.SpecId, resumeExisting: true));
+            Assert.Equal(SpecStatus.Grooming, (await _specs.GetAsync(scope.SpecId))!.Status);
+        }
+        Assert.Equal(before, (await _issues.ListAsync(new IssueFilter())).Count);
     }
 
     [Fact]
@@ -498,7 +530,7 @@ public class SprintAssemblerGuardTests : IDisposable
     public SprintAssemblerGuardTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("guard");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, projectId: "P");
         _specs = new SpecStore(_issues);
     }
 

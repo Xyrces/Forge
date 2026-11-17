@@ -92,3 +92,14 @@ without creating project-local completion/deployment tables. Both fresh and
 idempotent upgrade paths include the added fields. A separate reviewed schema
 bridge and isolated Azure SQL rehearsal are required before production upgrade.
 The source test receipt is not a substitute for that qualification.
+
+
+## Interrupted grooming recovery
+
+Manual grooming now persists a queued `issue_groomer_run` before sending an existing groom wakeup hint. The normal scheduler owns execution and honors the groom hold. A controller restart marks interrupted Started runs NeedsReview; neither failed nor uncertain runs are automatically started again. No schema change is needed: the existing string status and trigger columns carry Queued, NeedsReview, and Retry.
+
+The specification detail exposes the latest run ID and an explicit retry action. Retry compares that exact previous attempt, rejects duplicate admission, and queues work without running a model in the HTTP request. A crash before the specification entered Grooming is also recoverable through this action. The prior paid request may have completed, so the UI must retain its uncertainty/cost explanation.
+
+Safe retry reads at most 100 descendants from the owning project's exact specification tree. Only Pending stories/tasks can be resumed. Their IDs and current mapping state enter the groomer context; exact repeated create calls reuse those IDs. Completion validates outcome bindings for every Pending descendant before publishing Groomed. Explicit force re-decomposition remains a separate action, permits only terminal historical rows, and also validates all remaining Pending descendants. The generic specification PATCH cannot invent Grooming/Groomed completion.
+
+Offline qualification covers queue/retry CAS, interrupted-run recovery without automatic generation, exact row reuse and missing mapping refusal, project ownership, preserved parked work rejection, HTTP stale/duplicate retry, and generic status bypass rejection. SQL Server admission uses a serializable transaction and update/range locks on the latest-run query; actual Azure SQL qualification is recorded separately by the integration review.
