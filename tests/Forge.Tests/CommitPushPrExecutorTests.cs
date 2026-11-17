@@ -149,6 +149,11 @@ public class CommitPushPrExecutorTests : IDisposable
             new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events, new NoOpMemoryExtractor(),
             new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")), NullLogger.Instance, null, commands);
         Assert.Equal(42, result.PrNumber);
+        var published = (await _issues.GetAsync(issue.Id))!;
+        var evidence = System.Text.Json.JsonSerializer.Deserialize<Forge.Core.Completion.TrustedPublicationEvidence>(published.GetMetadata("trustedPublication")!)!;
+        Assert.Equal(issue.Id, evidence.TaskId);
+        Assert.Equal(published.GetMetadata("branchSha"), evidence.PublishedHeadSha);
+        Assert.Equal(receipt, evidence.Verification);
     }
 
     [Fact]

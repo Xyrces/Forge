@@ -21,4 +21,4 @@ public interface IDeploymentExecutor
 // synchronously: the swap is complete by the time ExecuteAsync
 // returns, so StillInProgress is reserved for future executors
 // (e.g. a remote cloud deploy that returns a job id).
-public sealed record DeploymentExecutionResult(bool Success, string Log, bool StillInProgress = false);
+public sealed record DeploymentExecutionResult(bool Success, string Log, bool StillInProgress = false, bool AdmissionHeld = false);

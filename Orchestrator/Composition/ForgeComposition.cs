@@ -187,6 +187,19 @@ public static class ForgeComposition
         services.AddSingleton(workflowResolver);
         var stageGates = new StageGates(memoryStore, workflowResolver);
         services.AddSingleton(stageGates);
+        services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
+        services.AddSingleton<Forge.Deploy.IRoutineReleaseSource>(_ => new Forge.Deploy.TrustedGitHubReleaseSource(
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
+            (project, ct) => GitHubTokenResolver.ResolveTokenAsync(null, project, options.GitHub, secretStore, ct),
+            () => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "source-revision"))));
+        services.AddSingleton(provider => new Forge.Deploy.RoutineDeploymentCoordinator(
+            () => projectFactory.KnownProjects.Select(project => projectFactory.Find(project.Id))
+                .Where(context => context is not null).Select(context => new Forge.Deploy.RoutineDeploymentProject(
+                    context!.Options, new Core.Completion.SprintCompletionStore((IssueStore)context.Issues), context.Deployments)).ToArray(),
+            provider.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(),
+            project => (Forge.Deploy.IIndependentDeploymentExecutor)provider.GetRequiredService<Forge.Deploy.DeploymentExecutorFactory>().Create(project)!,
+            stageGates, loggerFactory.CreateLogger<Forge.Deploy.RoutineDeploymentCoordinator>()));
 
         var issuesJsonlPath = Path.Combine(primaryStateDir, "issues.jsonl");
         var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
@@ -280,7 +293,7 @@ public static class ForgeComposition
         services.AddSingleton(sprintProposalAudit);
         var scorer = new DeterministicScorer();
         services.AddSingleton(scorer);
-        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates);
+        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates, planning: options.SprintPlanning, roleCaps: primary.Roles);
         services.AddSingleton(sprintPropose);
         var memoryExtractor = new MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
@@ -750,7 +763,9 @@ public static class ForgeComposition
             gates: stageGates,
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
-            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals));
+            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals, planning: options.SprintPlanning,
+            routineDeploymentEnabled: projectId => projectFactory.Find(projectId)?.Options.Deployment
+                is { Kind: DeploymentKind.Kubernetes, RoutineEnabled: true }));
 
         return services.BuildServiceProvider();
     }

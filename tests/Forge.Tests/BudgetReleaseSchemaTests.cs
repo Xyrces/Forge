@@ -12,13 +12,14 @@ public sealed class BudgetReleaseSchemaTests
     [Theory]
     [InlineData(38, false)]
     [InlineData(39, false)]
-    [InlineData(40, true)]
-    [InlineData(41, false)]
+    [InlineData(40, false)]
+    [InlineData(41, true)]
+    [InlineData(42, false)]
     [InlineData(0, false)]
-    public async Task CurrentReleaseRequires40AndCannotInheritBridgeCompatibility(int version, bool allowed)
+    public async Task CurrentReleaseRequires41AndCannotInheritBridgeCompatibility(int version, bool allowed)
     {
-        Assert.Equal(40, IssueStore.CurrentSchemaVersion);
-        Assert.Equal(40, SqlServerMigrations.ExpectedVersion);
+        Assert.Equal(41, IssueStore.CurrentSchemaVersion);
+        Assert.Equal(41, SqlServerMigrations.ExpectedVersion);
         var path = TempRoot.Instance.NewDbPath("budget-release-schema");
         await using (var setup = new SqliteConnection($"Data Source={path}"))
         {
@@ -36,7 +37,7 @@ public sealed class BudgetReleaseSchemaTests
         var factory = new ReadOnlyCatalogFactory(path);
         await using var runtimeStore = new IssueStore(factory);
         runtimeStore.EnsureSchema(); // runtime construction must not initialize even this minimal fixture
-        if (allowed) Assert.Equal(40, await ControllerHost.VerifySchemaAsync(factory, default));
+        if (allowed) Assert.Equal(41, await ControllerHost.VerifySchemaAsync(factory, default));
         else await Assert.ThrowsAsync<InvalidOperationException>(() => ControllerHost.VerifySchemaAsync(factory, default));
         await using var connection = await factory.OpenAsync();
         using var verify = connection.CreateCommand();

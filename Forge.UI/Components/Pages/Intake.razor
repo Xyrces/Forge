@@ -791,6 +791,8 @@
             var resp=await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{sessionId}",_readCts.Token);
             if(generation!=_readGeneration) return;
             if(resp is null || resp.ProjectId != _loadedProject) throw new InvalidOperationException("Session project did not match selection.");
+            var sessionIndex = _sessions?.FindIndex(s => s.Id == resp.Id) ?? -1;
+            if (sessionIndex >= 0) _sessions![sessionIndex] = resp;
             _messages=resp.Messages?.ToList() ?? new(); _proposalVersion++;
             await LoadSessionSpecs();
             if(generation!=_readGeneration) return;

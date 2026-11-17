@@ -50,6 +50,22 @@ public class IntakeStoreTests : IDisposable
             () => _intake.CreateAsync("", null, default));
     }
 
+    [Theory]
+    [InlineData(null, "Show the running revision")]
+    [InlineData("New session", "Show the running revision")]
+    [InlineData("Release investigation", "Release investigation")]
+    public async Task FirstProposalNamesUntitledConversationAndPreservesChosenTitle(string? initialTitle, string expectedTitle)
+    {
+        var session = await _intake.CreateAsync("forge", initialTitle);
+        await _intake.AppendMessageAsync(session.Id, new NewIntakeMessage(IntakeMessageRole.System,
+            "Draft only", ProposedEpicTitle: "Show the running revision"));
+        await _intake.AppendMessageAsync(session.Id, new NewIntakeMessage(IntakeMessageRole.System,
+            "A later draft", ProposedEpicTitle: "Another proposal"));
+
+        Assert.Equal(expectedTitle, (await _intake.GetAsync(session.Id))!.Title);
+        Assert.Equal(expectedTitle, Assert.Single(await _intake.ListAsync()).Title);
+    }
+
     [Fact]
     public async Task GetAsync_RoundTripsMessages()
     {

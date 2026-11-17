@@ -79,12 +79,8 @@ public static class DeploymentsEndpoints
             foreach (var candidate in await ctx.Deployments.ListAsync(ctx.Options.Id, ct: ct))
             {
                 if (candidate.Status is not (DeploymentStatus.Approved or DeploymentStatus.Deploying)) continue;
-                if (candidate.Status == DeploymentStatus.Approved)
-                    await ctx.Deployments.SetStatusAsync(candidate.Id, DeploymentStatus.Deploying, ct);
                 var progress = await executor.ReadProgressAsync(ctx.Options, candidate, ct);
-                if (progress.StillInProgress) continue;
-                if (progress.Success) await ctx.Deployments.MarkDeployedAsync(candidate.Id, progress.Log, ct);
-                else await ctx.Deployments.MarkDeployFailedAsync(candidate.Id, progress.Log, ct);
+                await ctx.Deployments.MarkIndependentProgressAsync(candidate.Id, progress, ct);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

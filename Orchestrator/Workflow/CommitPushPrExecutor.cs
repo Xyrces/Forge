@@ -478,6 +478,9 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         {
             m["prNumber"] = pr.Number;
             m["branchSha"] = headSha;
+            m["trustedPublication"] = input.RequiresWorkerVerification && input.Verification is not null
+                ? System.Text.Json.JsonSerializer.Serialize(new Core.Completion.TrustedPublicationEvidence(issue.Id, headSha, input.Verification))
+                : null!;
             // Stale-window anchor for the state-driven watch sweep.
             // Rework rounds reuse the PR — keep the ORIGINAL open time.
             if (!m.ContainsKey("prOpenedAt")) m["prOpenedAt"] = DateTime.UtcNow.ToString("O");

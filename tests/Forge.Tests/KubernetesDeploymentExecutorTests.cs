@@ -19,6 +19,21 @@ public sealed class KubernetesDeploymentExecutorTests
         "deploy-" + new string('c', 32), "forge", Sha, null, status, DateTime.UtcNow, null, null, null, null, null, null);
 
     [Fact]
+    public async Task RoutinePinnedReceiptNeedsNoCatalogAndCannotFallBackWhenMissing()
+    {
+        var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };
+        project.Deployment!.RoutineImageRepository = "registry/forge";
+        var receipt = new TrustedImageReceipt(Sha, Image, true, true, "controller-image.yml", "92", "Xyrces/Forge", "main",
+            "93", "sha256:" + new string('d', 64), Forge.Core.IssueStore.CurrentSchemaVersion, "ci.yml", "91");
+        var handler = new FakeHandler("{}");
+        var executor = new KubernetesDeploymentExecutor(Client(handler));
+        var candidate = Candidate() with { CompletionId = "completion-1", ReceiptJson = JsonSerializer.Serialize(receipt) };
+        Assert.Equal(Image, KubernetesDeploymentExecutor.ResolveImage(await executor.ResolveProfileAsync(project, candidate, default), candidate));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executor.ResolveProfileAsync(project, candidate with { ReceiptJson = null }, default));
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Fact]
     public async Task CatalogIsReadForExactSourceWithoutChangingConfig()
     {
         var project = Project();
@@ -99,13 +114,39 @@ public sealed class KubernetesDeploymentExecutorTests
             .ReadProgressAsync(Project(), Candidate(), default));
     }
 
+    [Fact]
+    public async Task HeldGateAfterApprovalPreventsMissingJobCreationButAllowsExistingProgress()
+    {
+        var handler = new FakeHandler("{}") { MissingJournal = true, MissingJob = true };
+        var executor = new KubernetesDeploymentExecutor(Client(handler));
+        var candidate = Candidate(DeploymentStatus.Approved);
+        var held = await executor.ReadProgressAsync(Project(), candidate, default, _ => Task.FromResult(false));
+        Assert.True(held.AdmissionHeld);
+        Assert.Equal(0, handler.Posts);
+        handler.MissingJob = false;
+        var ongoing = await executor.ReadProgressAsync(Project(), candidate, default, _ => throw new InvalidOperationException("Already running must not consult start gate"));
+        Assert.True(ongoing.StillInProgress);
+        Assert.False(ongoing.AdmissionHeld);
+        handler.MissingJob = true;
+        var resumed = await executor.ReadProgressAsync(Project(), candidate, default, _ => Task.FromResult(true));
+        Assert.True(resumed.StillInProgress);
+        Assert.Equal(1, handler.Posts);
+    }
+
     private static HttpClient Client(FakeHandler handler) => new(handler) { BaseAddress = new Uri("https://kubernetes/") };
     private sealed class FakeHandler(string body) : HttpMessageHandler
     {
         public int Calls { get; private set; }
+        public int Posts;
+        public bool MissingJournal;
+        public bool MissingJob;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Calls++;
+            if (request.Method == HttpMethod.Post) { Posts++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created)); }
+            if ((MissingJournal && request.RequestUri!.AbsolutePath.Contains("/configmaps/forge-release-")) ||
+                (MissingJob && request.RequestUri!.AbsolutePath.Contains("/jobs/forge-release-")))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             var payload = request.RequestUri!.AbsolutePath.EndsWith("/forge-image-catalog", StringComparison.Ordinal)
                 ? JsonSerializer.Serialize(new { data = new Dictionary<string, string> { [Sha] = JsonSerializer.Serialize(new {
                     sourceSha = Sha, imageDigest = Image, buildPassed = true, testPassed = true,

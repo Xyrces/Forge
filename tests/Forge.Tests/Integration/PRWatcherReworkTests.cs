@@ -50,6 +50,7 @@ public class PRWatcherReworkTests : IDisposable
         public int CloseCalls;
         public int DeleteCalls;
         public bool Merged;
+        public bool StaleAfterMerge;
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
         {
             var pr = new PullRequest(number);
@@ -60,7 +61,11 @@ public class PRWatcherReworkTests : IDisposable
             typeof(PullRequest).GetProperty(nameof(PullRequest.ChangedFiles))!
                 .SetValue(pr, 1);
             if (Merged)
+            {
                 typeof(PullRequest).GetProperty(nameof(PullRequest.MergedAt))!.SetValue(pr, DateTimeOffset.UtcNow);
+                typeof(PullRequest).GetProperty(nameof(PullRequest.MergeCommitSha))!.SetValue(pr, new string('b', 40));
+                typeof(PullRequest).GetProperty(nameof(PullRequest.Head))!.SetValue(pr, new GitReference(null!, null!, null!, "agent/task", new string('a', 40), null!, null!));
+            }
             return Task.FromResult(pr);
         }
         public override Task<PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
@@ -82,6 +87,7 @@ public class PRWatcherReworkTests : IDisposable
         {
             MergeCalls++;
             ExpectedMergeSha = expectedHeadSha;
+            if (MergeResult && !StaleAfterMerge) Merged = true;
             return Task.FromResult(MergeResult);
         }
         public override Task<bool> DeleteBranchAsync(string branch, CancellationToken cancellationToken = default)
@@ -258,6 +264,24 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, outcome);
         Assert.Equal(1, gh.MergeCalls);                              // one attempt, then routed
         Assert.Contains("conflicts", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkReason"));
+    }
+
+    [Fact]
+    public async Task AcceptedMergeWithStaleObservationRetainsWatchUntilExactMergeAppears()
+    {
+        var gh = new FakeGitHub { Ci = CommitState.Success, StaleAfterMerge = true };
+        var task = await SeedAsync();
+        var watcher = NewWatcher(gh);
+        var first = await watcher.PollWatchedTaskAsync(task, default,
+            reviewsOverride: _ => [PullRequestReviewState.Approved], headShaOverride: _ => "abc123");
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, first);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(0, gh.DeleteCalls);
+        gh.Merged = true;
+        var next = await watcher.PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!, default);
+        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, next);
+        Assert.NotNull((await _issues.GetAsync(task.Id))!.GetMetadata("observedMerge"));
+        Assert.Equal(1, gh.MergeCalls);
     }
 
     [Fact]
@@ -684,6 +708,11 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(IssueStatus.Completed, after.Status);
+        var evidence = System.Text.Json.JsonSerializer.Deserialize<Forge.Core.Completion.ObservedMergeEvidence>(after.GetMetadata("observedMerge")!)!;
+        Assert.Equal(task.Id, evidence.TaskId);
+        Assert.Equal(new string('a', 40), evidence.HeadSha);
+        Assert.Equal(new string('b', 40), evidence.MergeSha);
+        Assert.False(Forge.Core.Completion.TaskDeliveryEvidence.IsMergedAndVerified(after)); // merge alone is not verification
         Assert.Equal(1, gh.DeleteCalls);
     }
 

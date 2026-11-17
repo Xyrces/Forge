@@ -20,6 +20,7 @@ public sealed record AgentOptions
     /// this config; built-in defaults apply when both are empty.
     /// </summary>
     public GateOptions Gates { get; set; } = new();
+    public SprintPlanningOptions SprintPlanning { get; set; } = new();
     /// <summary>
     /// Lifecycle state machine (Phase 2). WriteAuthority=false
     /// (default): shadow mode — illegal transitions logged as

@@ -71,9 +71,13 @@ public sealed class SprintAssembler
         Core.Messaging.IEventPublisher? eventPublisher = null,
         // Compatibility only: elapsed time never clears Failed work.
         TimeSpan? failureAgingWindow = null,
-        InitiativeProposalStore? initiativeProposals = null)
+        InitiativeProposalStore? initiativeProposals = null,
+        Func<string, bool>? routineDeploymentEnabled = null,
+        Forge.Configuration.SprintPlanningOptions? planning = null)
     {
+        _routineDeploymentEnabled = routineDeploymentEnabled;
         _initiativeProposals = initiativeProposals;
+        _planning = planning ?? new();
         _projects = projects;
         _events = events;
         _logger = logger;
@@ -84,7 +88,10 @@ public sealed class SprintAssembler
         _eventPublisher = eventPublisher;
     }
 
+    private readonly Func<string, bool>? _routineDeploymentEnabled;
     private readonly InitiativeProposalStore? _initiativeProposals;
+    private readonly Forge.Configuration.SprintPlanningOptions _planning;
+    private readonly Dictionary<string, (string Capacities, SprintPlanBuilder Builder)> _planners = new();
     private readonly Core.IFollowUpTriage? _followUpTriage;
     private readonly WakeupSignal? _wakeup;
     private readonly Core.Messaging.IEventPublisher? _eventPublisher;
@@ -234,10 +241,15 @@ public sealed class SprintAssembler
     /// are all terminal, then assemble + activate the next one from
     /// eligible work. Exposed for tests.
     /// </summary>
+    private readonly Dictionary<string, CompletionCoordinator> completionCoordinators = new(StringComparer.Ordinal);
+
     internal async Task TickProjectAsync(
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
+        if (!completionCoordinators.TryGetValue(projectId, out var completion))
+            completionCoordinators[projectId] = completion = new CompletionCoordinator((IssueStore)issues, _followUpTriage, _initiativeProposals, _logger, _events);
         await RecoverProposalSourcesAsync(projectId, issues, ct);
+        await completion.ReconcileAsync(ct);
         var prevState = await ReadBuildStateAsync(issues, ct);
         // Failed tasks remain open until an explicit operator action. Age is
         // diagnostic information, never evidence of completion or abandonment.
@@ -266,37 +278,13 @@ public sealed class SprintAssembler
                     ActiveTotal: total, ActiveTerminal: terminal, HeldWork: heldMembers), ct);
                 return;
             }
-            await sprints.UpdateAsync(active.Id,
-                new Dictionary<string, object?> { ["status"] = nameof(SprintStatus.Completed) }, ct);
-            _logger.LogInformation("Sprint {SprintId} ({Name}) completed — all member tasks terminal (project={Project})",
-                active.Id, active.Name, projectId);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
-                null, $"Sprint '{active.Name}' completed"));
+            var receipt = await completion.CompleteAsync(active, sprints, ct, _routineDeploymentEnabled?.Invoke(projectId) ?? false);
             completedSprintId = active.Id;
             completedSprintName = active.Name;
-
-            // Materialize tracked follow-ups (operator model
-            // 2026-07-31): drafts filed DURING the sprint become real
-            // work only now — the work they reference is merged and
-            // canonical. The batch triage (when wired) merges dupes,
-            // groups epics, and discards junk first; invalid or
-            // unavailable triage falls back to 1:1. Either way the
-            // results go through grooming before the next sprint
-            // assembles (the gate below).
-            var draftStore = new Core.FollowUpDraftStore((Core.IssueStore)issues);
-            var unconsumed = await draftStore.ListUnconsumedAsync(ct);
-            var materialized = await MaterializeFollowUpsAsync(projectId, issues, specs, draftStore, unconsumed, ct);
-            if (materialized > 0)
-            {
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintMaterialized,
-                    null, $"{materialized} work item(s) materialized from '{active.Name}' follow-ups",
-                    new Dictionary<string, object?>
-                    {
-                        ["projectId"] = projectId,
-                        ["created"] = materialized,
-                        ["drafts"] = unconsumed.Count,
-                    }));
-            }
+            _logger.LogInformation("Sprint {SprintId} work terminal; outcome={Outcome}, durable bookkeeping pending", active.Id, receipt.EngineeringOutcome);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
+                null, $"Sprint '{active.Name}' work terminal; outcome: {receipt.EngineeringOutcome}"));
+            await completion.ReconcileAsync(ct);
         }
 
         // Epic lifecycle: close epics whose entire tree is terminal
@@ -317,6 +305,17 @@ public sealed class SprintAssembler
                 PendingGroom: Array.Empty<PendingGroomItem>(),
                 EligibleGroups: heldGroups,
                 ActiveSprintId: null, ActiveSprintName: null, ActiveTotal: 0, ActiveTerminal: 0), ct);
+            return;
+        }
+
+        var blockers = await new Core.Completion.SprintCompletionStore((IssueStore)issues).ListPlanningBlockersAsync(limit: 1, ct: ct);
+        if (blockers.Count > 0)
+        {
+            var blocker = blockers[0];
+            var reason = blocker.BookkeepingState != "Completed"
+                ? $"Sprint {blocker.SprintId} follow-up bookkeeping is unfinished; review triage status before starting another sprint"
+                : $"Sprint {blocker.SprintId} requires delivery evidence ({blocker.EngineeringOutcome}): {blocker.DeliveryNote ?? "await qualified deployment or explicit operator observation; abandon the outcome to interrupt"}";
+            await WriteBuildStateAsync(issues, EmptyState("awaiting-completion", reason, blocker.SprintId, completedSprintName), ct);
             return;
         }
 
@@ -465,7 +464,8 @@ public sealed class SprintAssembler
         foreach (var id in memberIds)
         {
             var issue = await issues.GetAsync(id, ct);
-            if (issue is null || AgentTaskTypes.IsContainer(issue.Type)
+            if (issue is null) throw new InvalidOperationException("Sprint contains a missing member; completion requires investigation.");
+            if (AgentTaskTypes.IsContainer(issue.Type)
                 || issue.Type == AgentTaskTypes.PrWatch)
             {
                 continue;
@@ -502,46 +502,13 @@ public sealed class SprintAssembler
     {
         try
         {
-            var eligible = await ListEligibleAsync(issues, sprints, ct);
-            if (eligible.Count == 0) return Array.Empty<EligibleGroupItem>();
-            var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
-            var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal);
-            var order = new List<string>();
-            foreach (var task in eligible)
-            {
-                var key = ResolveThemeKey(task, byId);
-                if (groups.TryGetValue(key, out var list))
-                {
-                    list.Add(task);
-                }
-                else
-                {
-                    groups[key] = new List<IssueRecord> { task };
-                    order.Add(key);
-                }
-            }
-            await DropCrossProjectGroupsAsync(groups, order, projectId, specs, _logger, ct);
-            var items = new List<EligibleGroupItem>();
-            foreach (var key in order)
-            {
-                var members = groups[key];
-                // Ad-hoc assembles one SOLO sprint per task named
-                // after the task — show the task that would go first.
-                // Follow-up themes name after the LEADING MEMBER too
-                // (the chain root is usually merged already — see
-                // DescribeAsync), not the root task's title.
-                var name = key == AdHocGroupName
-                    ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
-                    : key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                        ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
-                        : (await specs.GetAsync(key, ct))?.Title ?? key;
-                items.Add(new EligibleGroupItem(key, name, members.Count,
-                    members.Min(t => t.Priority), members.Min(t => t.CreatedAt)));
-            }
-            return items
-                .OrderBy(g => g.MinPriority)
-                .ThenBy(g => g.CreatedAt)
-                .ToList();
+            if (issues is not IssueStore concrete) return [];
+            var result = await new SprintPlanBuilder(concrete, sprints, specs, projectId, _gates, _planning,
+                _projects.Find(projectId)?.Options.Roles).BuildAsync(ct);
+            if (result.Snapshot is not { Plan: { } plan } snapshot) return [];
+            var tasks = snapshot.Issues.Where(i => snapshot.TaskIds.Contains(i.Id)).ToArray();
+            return [new EligibleGroupItem(plan.Hash, plan.Objective, tasks.Length,
+                tasks.Min(t => t.Priority), tasks.Min(t => t.CreatedAt))];
         }
         catch (Exception ex)
         {
@@ -563,7 +530,7 @@ public sealed class SprintAssembler
     {
         if (_initiativeProposals is null) return;
         var drafts = new FollowUpDraftStore((IssueStore)issues);
-        var pending = await drafts.ListUnconsumedAsync(ct);
+        var pending = await drafts.ListUnconsumedAsync(ct, excludeCompletionClaims: true);
         var recovered = new HashSet<string>(StringComparer.Ordinal);
         foreach (var chunk in pending.Select(d => d.Id).Chunk(100))
         {
@@ -584,143 +551,6 @@ public sealed class SprintAssembler
         }
     }
 
-    private async Task<int> MaterializeFollowUpsAsync(
-        string projectId, IIssueStore issues, ISpecStore specs,
-        Core.FollowUpDraftStore draftStore, IReadOnlyList<Core.FollowUpDraft> unconsumed, CancellationToken ct)
-    {
-        if (unconsumed.Count == 0) return 0;
-
-        Core.FollowUpTriageDecision? decision = null;
-        if (_followUpTriage is not null && unconsumed.Count >= 2)
-        {
-            decision = await _followUpTriage.TriageAsync(projectId, unconsumed, ct);
-            if (decision is null)
-            {
-                _logger.LogWarning("Sprint materialization: triage unavailable — falling back to 1:1 ({Count} drafts, project={Project})",
-                    unconsumed.Count, projectId);
-            }
-            else
-            {
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintTriageCompleted,
-                    null, $"Follow-up triage: {decision.Items.Count} disposition(s) over {unconsumed.Count} draft(s)",
-                    new Dictionary<string, object?>
-                    {
-                        ["projectId"] = projectId,
-                        ["drafts"] = unconsumed.Count,
-                        ["items"] = decision.Items.Count,
-                    }));
-            }
-        }
-
-        // Validate the whole response before creating any disposition: a model
-        // cannot assign one source finding to competing initiative scopes.
-        if (decision is not null)
-        {
-            var known = unconsumed.Select(d => d.Id).ToHashSet();
-            var citations = decision.Items.SelectMany(i => i.SourceDraftIds.Where(known.Contains)).ToList();
-            if (citations.Count != citations.Distinct().Count()
-                || decision.Items.Any(i => i.SourceDraftIds.Count(known.Contains) > 1000))
-                throw new InvalidOperationException("Follow-up triage sources overlap or exceed the supported bound; no dispositions were applied.");
-        }
-        var created = 0;
-        var cited = new HashSet<long>();
-        if (decision is not null)
-        {
-            var byId = unconsumed.ToDictionary(d => d.Id);
-            foreach (var item in decision.Items)
-            {
-                var sources = item.SourceDraftIds.Where(byId.ContainsKey).ToList();
-                if (sources.Count == 0)
-                {
-                    _logger.LogWarning("Sprint materialization: triage item cites unknown drafts [{Ids}] — dropped",
-                        string.Join(",", item.SourceDraftIds));
-                    continue;
-                }
-                cited.UnionWith(sources);
-                switch (item.Action)
-                {
-                    case "create":
-                    case "merge":
-                    {
-                        var src = sources.Select(id => byId[id]).ToList();
-                        var task = await issues.CreateAsync(new NewIssue(
-                            // The draft's task type routes dispatch to
-                            // the right role (schema v36) — a client or
-                            // QA follow-up born type='task' dies at the
-                            // plan-territory gate (live: task-752).
-                            Type: src.Select(d => d.TaskType).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)) ?? "task",
-                            Title: item.Title ?? src[0].Title,
-                            Description: item.Description
-                                ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
-                            Priority: item.Priority ?? src.Min(d => d.Priority),
-                            Metadata: new Dictionary<string, object>
-                            {
-                                ["source"] = src[0].SourceRole,
-                                ["followUpOf"] = src[0].SourceIssueId,
-                                ["fromDraft"] = string.Join(",", sources),
-                            }), ct);
-                        foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id,
-                                item.Action == "merge" ? "merged" : "materialized", task.Id, ct);
-                        }
-                        created++;
-                        break;
-                    }
-                    case "epic":
-                    {
-                        var src = sources.Select(id => byId[id]).ToList();
-                        var proposals = _initiativeProposals ?? throw new InvalidOperationException("Initiative proposal storage is required for epic suggestions.");
-                        var suggestion = await proposals.CreateAsync(new NewInitiativeProposal(
-                            projectId, "followup:" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
-                                System.Text.Encoding.UTF8.GetBytes(string.Join(",", sources.Distinct().Order())))), "forge",
-                            item.Title ?? $"Follow-up theme from {src.Count} findings",
-                            item.Description ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
-                            item.Priority ?? src.Min(d => d.Priority),
-                            System.Text.Json.JsonSerializer.Serialize(new { sourceDraftIds = sources, findings = src })), ct);
-                        await draftStore.SetDispositionBatchAsync(sources, "proposal", suggestion.Id, ct);
-                        created++;
-                        break;
-                    }
-                    case "discard":
-                    {
-                        foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id, "discarded",
-                                item.Reason ?? "triaged as junk", ct);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Fallback + coverage: 1:1 for anything the triage didn't
-        // cite (or all of it when no triage ran).
-        var remaining = unconsumed.Where(d => !cited.Contains(d.Id)).ToList();
-        foreach (var draft in remaining)
-        {
-            var task = await issues.CreateAsync(new NewIssue(
-                Type: string.IsNullOrWhiteSpace(draft.TaskType) ? "task" : draft.TaskType,
-                Title: draft.Title,
-                Description: draft.Description,
-                Priority: draft.Priority,
-                Metadata: new Dictionary<string, object>
-                {
-                    ["source"] = draft.SourceRole,
-                    ["followUpOf"] = draft.SourceIssueId,
-                    ["fromDraft"] = draft.Id.ToString(),
-                }), ct);
-            await draftStore.SetDispositionAsync(draft.Id, "materialized", task.Id, ct);
-            created++;
-        }
-
-        _logger.LogInformation(
-            "Sprint materialization: {Created} work items from {Drafts} drafts (triaged={Triaged}, project={Project})",
-            created, unconsumed.Count, decision is not null, projectId);
-        return created;
-    }
-
     /// <summary>
     /// Add technically groomed ad-hoc prerequisites of active sprint members.
     /// A real blocks edge establishes necessity. Priority, blocker labels,
@@ -730,24 +560,25 @@ public sealed class SprintAssembler
     private async Task InjectPrerequisitesAsync(
         SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
-        var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
+        var currentPlan = issues is IssueStore concrete ? await new SprintProposalAuditStore(concrete.Db).GetPlanForSprintAsync(active.Id,ct) : null;
+        if (currentPlan is null) { _logger.LogWarning("Sprint {Sprint}: approved outcome evidence is missing; no automatic amendments",active.Id); return; }
+        var plannedIds = currentPlan.Members.Select(m=>m.TaskId).ToHashSet(StringComparer.Ordinal);
         var blockersOfMembers = await issues.ListBlockersOfAsync(memberIds, ct);
-        var eligibleIds = (await ListEligibleAsync(issues, sprints, ct)).Select(i => i.Id).ToHashSet(StringComparer.Ordinal);
-        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates);
+        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates, _planning, _projects.Find(projectId)?.Options.Roles);
 
-        foreach (var task in pending)
+        foreach (var blockerId in blockersOfMembers.Order(StringComparer.Ordinal).Take(100))
         {
-            if (AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
-            if (memberIds.Contains(task.Id)) continue;
-
-            if (!blockersOfMembers.Contains(task.Id) || !eligibleIds.Contains(task.Id)) continue;
+            var task = await issues.GetAsync(blockerId, ct);
+            if (task is null || task.Status != IssueStatus.Pending || AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
+            if (plannedIds.Contains(task.Id)) continue;
             const string reason = "unblocks ongoing work";
             try
             {
                 var snapshot = await validator.ValidateAsync([task.Id], ct, activating: false);
                 await sprints.AddValidatedPrerequisiteAsync(active.Id, snapshot, ct);
                 memberIds.UnionWith(snapshot.TaskIds);
+                plannedIds.UnionWith(snapshot.TaskIds);
             }
             catch (InvalidOperationException ex)
             {
@@ -880,157 +711,26 @@ public sealed class SprintAssembler
     private async Task<(string Id, string Name, int TaskCount)?> AssembleNextAsync(
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
-        var eligible = await ListEligibleAsync(issues, sprints, ct);
-        if (eligible.Count == 0) return null;
-        var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
-
-        // Group by THEME (operator rule 2026-08-08): spec-chained
-        // tasks under their spec, follow-ups under their followUpOf
-        // root (one sprint per theme — never a solo follow-up
-        // sprint), rootless ad-hoc under the singleton ad-hoc key.
-        var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal);
-        var groupOrder = new List<string>();
-        foreach (var task in eligible)
+        if (issues is not IssueStore concrete)
+            throw new InvalidOperationException("Approved outcome planning requires the owning project store.");
+        var roles = _projects.Find(projectId)?.Options.Roles;
+        var capacities = SprintPlanJson.Hash(roles?.OrderBy(p => p.Key));
+        if (!_planners.TryGetValue(projectId, out var cached) || cached.Capacities != capacities)
+            _planners[projectId] = cached = (capacities, new SprintPlanBuilder(concrete, sprints, specs, projectId, _gates, _planning, roles));
+        var result = await cached.Builder.BuildAsync(ct);
+        if (result.Snapshot is not { } snapshot)
         {
-            var groupKey = ResolveThemeKey(task, byId);
-            if (groups.TryGetValue(groupKey, out var list))
-            {
-                list.Add(task);
-            }
-            else
-            {
-                groups[groupKey] = new List<IssueRecord> { task };
-                groupOrder.Add(groupKey);
-            }
+            _logger.LogInformation("Sprint planning deferred: {Reason}", result.Reason);
+            return null;
         }
-
-        // Cross-project guard: a spec group belongs to the project
-        // that OWNS the spec (see DropCrossProjectGroupsAsync).
-        await DropCrossProjectGroupsAsync(groups, groupOrder, projectId, specs, _logger, ct);
-        if (groupOrder.Count == 0) return null;
-
-        // Resolve each group's display name / goal / age for ordering.
-        // Spec groups: name = spec title, goal = parent epic's
-        // description (the epic is the spec's parent_issue_id) or the
-        // spec title. Oldest group wins; ad-hoc sorts last so real
-        // pipeline work always goes first.
-        async Task<(string Name, string Goal, DateTime CreatedAt)> DescribeAsync(string key)
-        {
-            if (key == AdHocGroupName)
-            {
-                return (AdHocGroupName,
-                    "Operator-enqueued work not tied to a spec epic.",
-                    DateTime.MaxValue);
-            }
-            if (key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                && groups.TryGetValue(key, out var cluster) && cluster.Count > 0)
-            {
-                var rootId = key[FollowUpThemePrefix.Length..];
-                var rootTitle = byId.TryGetValue(rootId, out var rootTask) ? rootTask.Title : rootId;
-                // Name after the LEADING MEMBER, not the root: the
-                // root is usually long-merged (the follow-up chain
-                // outlives it), and a sprint named for a task it does
-                // not contain reads as work happening OUTSIDE the
-                // sprint (operator confusion 2026-08-18: Sprint 130
-                // was named 'Fix stale inline comment near
-                // MarkConsumed' — the completed root task-660 — while
-                // its only member was task-705's docs wording fix).
-                // The root stays in the goal for chain context.
-                var ordered = cluster.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).ToList();
-                var memberTitles = string.Join("; ", ordered.Take(3).Select(t => t.Title));
-                var goal = $"Follow-up work filed from {rootId} ({rootTitle}): {memberTitles}" +
-                    (cluster.Count > 3 ? $" (+{cluster.Count - 3} more)" : "");
-                return (ordered[0].Title, goal, cluster.Min(t => t.CreatedAt));
-            }
-            var spec = await specs.GetAsync(key, ct);
-            var epicDesc = spec?.ParentIssueId is not null
-                && byId.TryGetValue(spec.ParentIssueId, out var epic)
-                && !string.IsNullOrWhiteSpace(epic.Description)
-                    ? epic.Description!
-                    : null;
-            // Fallback chain when the spec read misses (transient
-            // version-bump race): the parent STORY's title is still a
-            // meaningful short goal — a raw spec id never is.
-            var storyTitle = groups.TryGetValue(key, out var members) && members.Count > 0
-                && members[0].ParentIssueId is not null
-                && byId.TryGetValue(members[0].ParentIssueId!, out var story)
-                    ? story.Title
-                    : null;
-            return (spec?.Title ?? storyTitle ?? key,
-                epicDesc ?? $"Complete all groomed tasks for {spec?.Title ?? storyTitle ?? key}.",
-                spec?.CreatedAt ?? DateTime.MaxValue);
-        }
-
-        var described = new Dictionary<string, (string Name, string Goal, DateTime CreatedAt)>();
-        foreach (var key in groupOrder)
-        {
-            described[key] = await DescribeAsync(key);
-        }
-        // Assembly ordering (operator direction 2026-07-31): priority
-        // FIRST (the group's highest-priority member), then oldest.
-        // Ad-hoc work participates in the same ordering — no longer
-        // forced behind spec groups.
-        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates);
-        // One shared graph/spec read context filters unavailable roots. Avoid
-        // rereading the entire backlog once for each rejected candidate.
-        var validRoots = await validator.PreviewSnapshotsAsync(eligible.Select(t => t.Id), eligible.Count, ct);
-        var candidates = groupOrder.SelectMany(key => key == AdHocGroupName
-            ? groups[key].Select(task => (Key: key, Tasks: new List<IssueRecord> { task }))
-            : new[] { (Key: key, Tasks: groups[key]) })
-            .OrderBy(candidate => candidate.Tasks.Min(t => t.Priority))
-            .ThenBy(candidate => candidate.Key == AdHocGroupName
-                ? candidate.Tasks[0].CreatedAt : described[candidate.Key].CreatedAt);
-        foreach (var candidate in candidates)
-        {
-            var chosenKey = candidate.Key;
-            var chosen = candidate.Tasks;
-            var (name, goal, _) = described[chosenKey];
-
-            // Rootless ad-hoc assembly selects one outcome root (highest
-            // priority first, then oldest), plus its necessary prerequisites. Follow-up
-            // themes pack up to MaxThemeTasks per sprint (priority, then
-            // oldest); the remainder stays eligible for the next sprint.
-            if (chosenKey == AdHocGroupName)
-            {
-                var single = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First();
-                chosen = new List<IssueRecord> { single };
-                name = single.Title;
-                goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
-                    ?? $"Complete {single.Id}: {single.Title}";
-            }
-            else if (chosenKey.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                && chosen.Count > MaxThemeTasks)
-            {
-                chosen = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt)
-                    .Take(MaxThemeTasks).ToList();
-            }
-
-            if (chosen.Any(task => !validRoots.ContainsKey(task.Id))) continue;
-
-            SprintActivationSnapshot snapshot;
-            try
-            {
-                snapshot = await validator.ValidateAsync(chosen.Select(t => t.Id).ToArray(), ct);
-            }
-            catch (InvalidOperationException ex)
-            {
-                _logger.LogInformation(ex, "Sprint candidate {Group} has an unavailable dependency closure; evaluating the next coherent candidate", chosenKey);
-                continue;
-            }
-            var start = DateTime.UtcNow;
-            var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(
-                Name: name, Goal: goal, StartDate: start, EndDate: start.Add(SprintDuration),
-                Status: SprintStatus.Active), snapshot, ct);
-
-            _logger.LogInformation(
-                "Sprint {SprintId} assembled + activated: '{Name}' with {Tasks} task(s) (group={Group})",
-                sprint.Id, name, snapshot.TaskIds.Count, chosenKey);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
-                null, $"Sprint '{name}' started with {snapshot.TaskIds.Count} task(s)",
-                new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = snapshot.TaskIds.Count }));
-            return (sprint.Id, name, snapshot.TaskIds.Count);
-        }
-        return null;
+        var plan = snapshot.Plan!;
+        var start = DateTime.UtcNow;
+        var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(plan.Objective, plan.Objective,
+            start, start.Add(SprintDuration)), snapshot, ct);
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
+            null, $"Sprint '{plan.Objective}' started with {snapshot.TaskIds.Count} task(s)",
+            new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = snapshot.TaskIds.Count }));
+        return (sprint.Id, plan.Objective, snapshot.TaskIds.Count);
     }
 
     /// <summary>

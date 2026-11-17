@@ -8,7 +8,7 @@ on:
 
 # Cancel superseded PR runs to save CI minutes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 permissions:

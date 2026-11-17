@@ -36,7 +36,8 @@ public sealed record DeploymentRow(
     DateTime? ApprovedAt,
     string? ApprovedBy,
     DateTime? DeployedAt,
-    string? DeployLog);
+    string? DeployLog,
+    string? CompletionId = null);
 
 public sealed record CommitRow(string Sha, string ShortSha, string Subject, string Author, string DateIso);
 

@@ -38,6 +38,11 @@
         <a href="/flow?mode=edit" class="page-subtitle">Edit on the Flow page →</a>
     </div>
 
+    @if (_loadedProject is not null)
+    {
+        <CompletionWaitingList ProjectId="@_loadedProject" RefreshAt="@(_board?.GeneratedAt ?? DateTime.MinValue)" OnSelect="ReviewCompletionAsync" />
+    }
+
     @if (_error is not null && _board is not null)
     {
         <p class="banner banner--warn">@_error Showing the last successful update from @_board.GeneratedAt.ToLocalTime().ToString("g").</p>
@@ -153,6 +158,8 @@
 
         @if (selected is not null)
         {
+            <SprintCompletionPanel ProjectId="@_loadedProject" SprintId="@selected.Id" RefreshAt="_board.GeneratedAt" />
+
             var members = EnrichMembers(selected);
             var done = _board?.Done ?? 0;
             var total = _board?.Total ?? 0;
@@ -260,7 +267,7 @@
 
             @if (selected.Status != "Active")
             {
-                <div class="page-subtitle" style="margin:8px 0">Viewing a past sprint (read-only).</div>
+                <div class="page-subtitle" style="margin:8px 0">Viewing a past sprint. The task board is read-only; completion review actions remain available.</div>
             }
 
             @* Scrum board: every task in the sprint, grouped by state. *@
@@ -370,7 +377,7 @@
         .DistinctBy(s => s.Id).ToList();
     private string? _repoUrl;
 
-    private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge" };
+    private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge", "deploy" };
     private Dictionary<string, string> _gates = new();
     private bool _gatesLoading = true;
     private System.Threading.Timer? _gateTimer;
@@ -729,6 +736,8 @@
         await RefreshAsync();
     }
     private Task ShowActiveAsync() => SelectSprintAsync(new ChangeEventArgs { Value = null });
+    private Task ReviewCompletionAsync(string sprintId) => SelectSprintAsync(new ChangeEventArgs { Value = sprintId });
+
     private async Task NextHistoryAsync() { _historyPages.Push(_historyCursor); _historyCursor = _summary?.NextCursor; await RefreshSelectionAsync(); }
     private async Task PreviousHistoryAsync() { _historyCursor = _historyPages.Pop(); await RefreshSelectionAsync(); }
     private async Task NextMembersAsync()

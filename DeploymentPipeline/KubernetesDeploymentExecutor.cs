@@ -7,10 +7,30 @@ using Forge.Configuration;
 namespace Forge.Deploy;
 
 // The release Job outlives this controller. Its ConfigMap journal is reconciled after replacement.
-public sealed class KubernetesDeploymentExecutor(HttpClient http) : IDeploymentExecutor
+public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependentDeploymentExecutor
 {
     public async Task<ProjectOptions> ResolveProfileAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct)
     {
+        if (candidate.CompletionId is not null)
+        {
+            var pinnedReceipt = JsonSerializer.Deserialize<TrustedImageReceipt>(candidate.ReceiptJson ?? "null", new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new InvalidOperationException("Routine release receipt is missing.");
+            var options = project.Deployment ?? throw new InvalidOperationException("Deployment configuration missing.");
+            if (pinnedReceipt.SourceSha != candidate.CommitSha || !pinnedReceipt.BuildPassed || !pinnedReceipt.TestPassed ||
+                !string.Equals(pinnedReceipt.Repository, TrustedGitHubReleaseSource.Repository(project), StringComparison.OrdinalIgnoreCase) ||
+                pinnedReceipt.Branch != project.DefaultBranch || pinnedReceipt.Workflow != options.RoutineWorkflow ||
+                pinnedReceipt.ValidationWorkflow != options.RoutineValidationWorkflow ||
+                !long.TryParse(pinnedReceipt.WorkflowRunId, out var run) || run <= 0 ||
+                !long.TryParse(pinnedReceipt.ValidationRunId, out var validationRun) || validationRun <= 0 ||
+                !long.TryParse(pinnedReceipt.ArtifactId, out var artifact) || artifact <= 0 ||
+                pinnedReceipt.SchemaVersion != Forge.Core.IssueStore.CurrentSchemaVersion ||
+                !Regex.IsMatch(pinnedReceipt.ArtifactDigest, "^sha256:[0-9a-f]{64}$") ||
+                !Regex.IsMatch(pinnedReceipt.ImageDigest, "^" + Regex.Escape(options.RoutineImageRepository) + "@sha256:[0-9a-f]{64}$"))
+                throw new InvalidOperationException("Pinned routine receipt does not match configured release authority.");
+            var pinnedProject = project with { Deployment = options with { KubernetesImages = new() { [candidate.CommitSha] = pinnedReceipt.ImageDigest } } };
+            ResolveImage(pinnedProject, candidate);
+            return pinnedProject;
+        }
         var catalog = project.Deployment?.KubernetesImageCatalog;
         if (string.IsNullOrEmpty(catalog)) throw new InvalidOperationException("Kubernetes deployment requires a reviewed CI image catalog.");
         if (!Regex.IsMatch(catalog, "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$") ||
@@ -72,7 +92,7 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IDeploymentE
         return new(false, "Independent release Job accepted; durable progress is available in the deployment list.", true);
     }
 
-    public async Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct)
+    public async Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct, Func<CancellationToken, Task<bool>>? canStart = null)
     {
         project = await ResolveProfileAsync(project, candidate, ct);
         var image = ResolveImage(project, candidate);
@@ -82,6 +102,8 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IDeploymentE
             using var jobResponse = await http.GetAsync($"apis/batch/v1/namespaces/{project.Deployment.KubernetesNamespace}/jobs/forge-release-{candidate.Id}", ct);
             if (jobResponse.StatusCode == HttpStatusCode.NotFound)
             {
+                if (canStart is null || !await canStart(ct))
+                    return new(false, "Release has not started; awaiting deployment admission.", true, AdmissionHeld: true);
                 // The SQL approval may have committed just before its controller stopped. Deterministic Job name makes retry safe.
                 return await ExecuteAsync(project, candidate with { Status = DeploymentStatus.BuildPassed }, ct);
             }

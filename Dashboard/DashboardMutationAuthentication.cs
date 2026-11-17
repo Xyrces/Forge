@@ -9,6 +9,7 @@ namespace Forge.Dashboard;
 /// <summary>Private operator API protection; browser circuits still require a trusted operator network.</summary>
 public sealed class DashboardMutationAuthentication
 {
+    internal const string AuthenticatedOperatorItem = "Forge.AuthenticatedOperator";
     private readonly string _token;
     private readonly byte[] _hash;
 
@@ -33,6 +34,7 @@ public sealed class DashboardMutationAuthentication
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 return;
             }
+            context.Items[AuthenticatedOperatorItem] = "authenticated shared dashboard operator";
         }
         await next();
     });

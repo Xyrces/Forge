@@ -37,11 +37,12 @@ public sealed partial class SprintStore
             using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
             var parameters = batch.Select((_, index) => "@id" + index).ToArray();
-            cmd.CommandText = $"SELECT d.blocker_id,d.blocked_id,b.status FROM {T("issue_dep")} d LEFT JOIN {T("issue")} b ON b.id=d.blocker_id WHERE d.kind='blocks' AND d.blocked_id IN ({string.Join(",", parameters)})";
+            cmd.CommandText = $"SELECT d.blocker_id,d.blocked_id,b.status,b.metadata_json,CASE WHEN {IssueResolution.SatisfiedSql("b", _issues.Db.Dialect)} THEN 1 ELSE 0 END FROM {T("issue_dep")} d LEFT JOIN {T("issue")} b ON b.id=d.blocker_id WHERE d.kind='blocks' AND d.blocked_id IN ({string.Join(",", parameters)})";
             for (var i = 0; i < batch.Length; i++) cmd.AddParam(parameters[i], batch[i]);
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
-                result.Add(new(reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : Enum.Parse<IssueStatus>(reader.GetString(2))));
+                result.Add(new(reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : Enum.Parse<IssueStatus>(reader.GetString(2)),
+                    reader.IsDBNull(3) ? null : reader.GetString(3), Convert.ToInt32(reader.GetValue(4)) != 0));
         }
         return result;
     }
@@ -54,21 +55,24 @@ public sealed partial class SprintStore
             throw new InvalidOperationException("Dependency closure exceeds the 1000-node validation bound; decompose the work.");
         var actual = await ReadDependenciesAsync(conn, tx, membership, ct);
         if (snapshot.Dependencies is not null
-            && (snapshot.Dependencies.Count != actual.Count || !actual.ToHashSet().SetEquals(snapshot.Dependencies)))
+            && (snapshot.Dependencies.Count != actual.Count || snapshot.Dependencies.Any(expected => !actual.Any(current =>
+                current.BlockerId == expected.BlockerId && current.BlockedId == expected.BlockedId
+                && current.BlockerStatus == expected.BlockerStatus
+                && (expected.BlockerMetadataJson is null || current.BlockerMetadataJson == expected.BlockerMetadataJson)
+                && (expected.BlockerSatisfied is null || current.BlockerSatisfied == expected.BlockerSatisfied)))))
             throw new InvalidOperationException("Sprint dependency edges or prerequisite states changed during activation.");
         var unfinishedTargets = snapshot.TaskIds.Concat(snapshot.ExistingSprintMembers?
             .Where(i => i.Status is not (IssueStatus.Completed or IssueStatus.Closed)).Select(i => i.Id) ?? [])
             .ToHashSet(StringComparer.Ordinal);
         foreach (var edge in actual.Where(e => unfinishedTargets.Contains(e.BlockedId)))
         {
-            // Closed retains legacy dependency semantics here; it is not proof of delivery.
-            if (edge.BlockerStatus is IssueStatus.Completed or IssueStatus.Closed) continue;
+            if (edge.BlockerSatisfied == true) continue;
             if (edge.BlockerStatus is null or IssueStatus.Failed or IssueStatus.Blocked
                 || snapshot.Dependencies is null || !membership.Contains(edge.BlockerId))
                 throw new InvalidOperationException($"Sprint task {edge.BlockedId} has an unresolved prerequisite {edge.BlockerId}.");
         }
         var incoming = actual.Where(e => unfinishedTargets.Contains(e.BlockedId) && membership.Contains(e.BlockerId)
-            && e.BlockerStatus is not (IssueStatus.Completed or IssueStatus.Closed))
+            && e.BlockerSatisfied != true)
             .GroupBy(e => e.BlockedId).ToDictionary(g => g.Key, g => g.Select(e => e.BlockerId).ToArray());
         var visiting = new HashSet<string>(StringComparer.Ordinal);
         var visited = new HashSet<string>(StringComparer.Ordinal);

@@ -461,7 +461,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         });
 
         DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory,
-            _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)));
+            _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _sprintPropose?.Planning);
 
         if (_projectFactory is not null && _slots is not null)
         {
@@ -500,7 +500,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger, _initiativeApprovals);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues, _initiativeApprovals);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues, _initiativeApprovals, _eventPublisher);
 
         if (_memory is not null)
         {
@@ -547,6 +547,12 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
             _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
         SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
+        CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory, async ct =>
+        {
+            try { return (await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "source-revision"), ct)).Trim(); }
+            catch (IOException ex) { _logger.LogWarning(ex, "Running revision unavailable for operator observation"); return null; }
+            catch (UnauthorizedAccessException ex) { _logger.LogWarning(ex, "Running revision unreadable for operator observation"); return null; }
+        });
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)

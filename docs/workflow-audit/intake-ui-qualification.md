@@ -50,3 +50,25 @@ tests, and the fake closed-loop engineering harness at the exact integration
 revision above. Image run `44110862238` independently passed its build/tests
 and published immutable digest
 `9bd125844f0b43f164fce71f30bee403b36c495c71503d687a4f88b469569b04`.
+
+## Subsequent responsive and naming checks
+
+The unattended-workflow integration through `5a4b61d` was exercised in the
+same kind of isolated, scripted preview on port4297. At 480×850, the navigation
+disclosure opened, closed with Escape, and closed after selecting a page.
+Proposal selection, conversation filtering, revision text and the approval
+control remained readable. At 1280×900 the regular sidebar remained visible
+and the narrow-screen menu control was absent.
+
+These browser checks exposed a CSS ordering defect that squeezed the Menu
+label into an icon-width button, and a stale conversation-list title after
+the first proposal. Both were corrected. A new scripted UI conversation then
+changed its sidebar title immediately after the draft response, without a
+reload. No proposal was approved during this additional check and no paid
+model request was made.
+
+Private evidence is in the unattended-workflow checkout under
+`.portHorizon/validation/intake-preview/`, including
+`proposal-narrow-after-fix.jpg` and `proposal-desktop-after-fix.jpg`.
+This extends the targeted UI evidence; it does not establish live autonomous
+planning, delivery, or rollback.

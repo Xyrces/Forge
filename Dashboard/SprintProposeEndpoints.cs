@@ -22,6 +22,7 @@ public static class SprintProposeEndpoints
         Projects.ProjectContextFactory? projectContexts = null,
         IIssueStore? primaryIssues = null)
     {
+        var planners = new Dictionary<string,(string Roles,SprintProposeService Service)>(StringComparer.Ordinal);
         // Per-project resolution: the injected proposer/audit are the
         // PRIMARY project's. A ?projectId= request gets a service over
         // that project's own stores — scored tasks, the created sprint,
@@ -38,7 +39,9 @@ public static class SprintProposeEndpoints
             auditStore = audit;
             issueStore = primaryIssues;
             error = null;
-            if (projectId is null || projectContexts is null) return proposer;
+            if (projectContexts is null) return proposer;
+            projectId ??= (primaryIssues as IssueStore)?.ProjectId;
+            if (projectId is null) return proposer;
             var ctx = projectContexts.Find(projectId);
             if (ctx is null)
             {
@@ -47,8 +50,15 @@ public static class SprintProposeEndpoints
             }
             auditStore = new SprintProposalAuditStore(((Core.IssueStore)ctx.Issues).Db);
             issueStore = ctx.Issues;
-            return new SprintProposeService(ctx.Issues, ctx.Sprints, new Agents.DeterministicScorer(), auditStore,
-                gates: proposer.Gates, specs: ctx.Specs, projectId: ctx.Options.Id);
+            var roles = SprintPlanJson.Hash(ctx.Options.Roles.OrderBy(p=>p.Key));
+            lock (planners)
+            {
+                if (planners.TryGetValue(projectId,out var cached) && cached.Roles==roles) return cached.Service;
+                var service = new SprintProposeService(ctx.Issues, ctx.Sprints, new Agents.DeterministicScorer(), auditStore,
+                    gates: proposer.Gates, specs: ctx.Specs, projectId: ctx.Options.Id, planning: proposer.Planning, roleCaps: ctx.Options.Roles);
+                planners[projectId]=(roles,service);
+                return service;
+            }
         }
 
         app.MapGet("/api/sprints/propose-next", async (string? theme, string? goal, int? count, string? projectId, CancellationToken ct) =>

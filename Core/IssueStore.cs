@@ -1,4 +1,4 @@
-﻿using System.Data.Common;
+using System.Data.Common;
 using Forge.Core.Db;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
@@ -223,7 +223,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 40;
+    public const int CurrentSchemaVersion = 41;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1025,6 +1025,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         Control.ControlSchema.Create(conn, SqliteDialect.Instance);
         M039BudgetUsage.ApplySqlite(conn);
         M040InitiativeApproval.Create(conn, SqliteDialect.Instance);
+        M041SprintCompletion.Create(conn, SqliteDialect.Instance);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;
@@ -1645,6 +1646,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }
 
         M040InitiativeApproval.Create(conn, d);
+        if (_db.Profile == ForgeSchemaProfile.Workload) M041SprintCompletion.Create(conn, d);
 
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the
@@ -2063,10 +2065,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         var notBlockedPredicate = $"""
             NOT EXISTS (
                 SELECT 1 FROM {T("issue_dep")} d
-                INNER JOIN {T("issue")} b ON b.id = d.blocker_id
+                LEFT JOIN {T("issue")} b ON b.id = d.blocker_id
                 WHERE d.blocked_id = i.id
                   AND d.kind = 'blocks'
-                  AND b.status NOT IN ('Completed', 'Closed')
+                  AND (b.id IS NULL OR NOT {IssueResolution.SatisfiedSql("b", _db.Dialect)})
             )
             """;
 
@@ -2164,6 +2166,51 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         return await GetAsync(id, ct);
     }
 
+    public async Task<IssueRecord> CloseWithDispositionAsync(string id, CloseDisposition disposition, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(disposition.Reason)) throw new ArgumentException("Closure reason required.");
+        if (disposition.Kind is CloseDispositionKind.DeliveredElsewhere or CloseDispositionKind.DuplicateDelivered
+            && string.IsNullOrWhiteSpace(disposition.Evidence)) throw new ArgumentException("Delivery evidence required.");
+        if (disposition.Kind == CloseDispositionKind.DuplicateDelivered)
+        {
+            var target = disposition.ReferenceIssueId is null ? null : await GetAsync(disposition.ReferenceIssueId, ct);
+            if (target is null || target.Id == id || target.Status != IssueStatus.Completed)
+                throw new InvalidOperationException("Duplicate closure requires a different completed issue in this project.");
+        }
+        return await TransitionAsync(id, IssueStatus.Closed, disposition.Reason, new Dictionary<string, object>
+        {
+            ["closeDisposition"] = disposition.Kind.ToString(), ["closeEvidence"] = disposition.Evidence ?? "",
+            ["closeReferenceIssueId"] = disposition.ReferenceIssueId ?? "", ["closeReason"] = disposition.Reason
+        }, ct);
+    }
+
+    /// <summary>Grooming metadata never changes status or revives a concurrently parked task.</summary>
+    public async Task MergePendingMetadataAsync(string id, IDictionary<string, object> additions, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        string metadata;
+        using (var read = conn.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = $"SELECT status,metadata_json FROM {T("issue")} WHERE id=@id";
+            read.AddParam("@id", id);
+            await using var reader = await read.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct) || reader.GetString(0) != nameof(IssueStatus.Pending))
+                throw new InvalidOperationException("Only pending work can receive grooming metadata.");
+            metadata = MergeAndSerializeMetadata(reader.GetString(1), additions);
+        }
+        using (var write = conn.CreateCommand())
+        {
+            write.Transaction = tx;
+            write.CommandText = $"UPDATE {T("issue")} SET metadata_json=@meta,updated_at=@now WHERE id=@id AND status='Pending'";
+            write.AddParam("@id", id); write.AddParam("@meta", metadata); write.AddParam("@now", DateFormatTime(DateTime.UtcNow));
+            if (await write.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Task is no longer pending.");
+        }
+        await InsertEventAsync(conn, tx, id, "grooming_metadata", "Updated pending grooming metadata", ct);
+        await tx.CommitAsync(ct);
+    }
+
     public async Task<IssueRecord> TransitionAsync(
         string id,
         IssueStatus to,
@@ -2177,6 +2224,15 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         var isTerminal = to is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Blocked or IssueStatus.Closed;
         var current = await GetAsync(id, ct)
             ?? throw new InvalidOperationException($"Issue {id} not found");
+
+        if ((to == IssueStatus.Closed && metadata?.ContainsKey("closeDisposition") != true)
+            || (current.Status == IssueStatus.Closed && to != IssueStatus.Closed))
+        {
+            metadata = metadata is null ? new Dictionary<string, object>() : new Dictionary<string, object>(metadata);
+            metadata["closeDisposition"] = nameof(CloseDispositionKind.Unknown);
+            metadata["closeEvidence"] = "";
+            metadata["closeReferenceIssueId"] = "";
+        }
 
         var metadataJson = metadata is { Count: > 0 }
             ? MergeAndSerializeMetadata(current.MetadataJson, metadata)
@@ -2653,10 +2709,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         cmd.CommandText = $"""
             SELECT {_db.Dialect.Top(1)}1
             FROM {T("issue_dep")} d
-            INNER JOIN {T("issue")} b ON b.id = d.blocker_id
+            LEFT JOIN {T("issue")} b ON b.id = d.blocker_id
             WHERE d.blocked_id = @id
               AND d.kind = 'blocks'
-              AND b.status NOT IN ('Completed', 'Closed')
+              AND (b.id IS NULL OR NOT {IssueResolution.SatisfiedSql("b", _db.Dialect)})
             {_db.Dialect.Limit(1)}
             """;
         cmd.AddParam("@id", id);
@@ -2676,10 +2732,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         cmd.CommandText = $"""
             SELECT DISTINCT d.blocker_id
             FROM {T("issue_dep")} d
-            INNER JOIN {T("issue")} b ON b.id = d.blocker_id
+            LEFT JOIN {T("issue")} b ON b.id = d.blocker_id
             WHERE d.blocked_id IN ({string.Join(",", names)})
               AND d.kind = 'blocks'
-              AND b.status NOT IN ('Completed', 'Closed')
+              AND (b.id IS NULL OR NOT {IssueResolution.SatisfiedSql("b", _db.Dialect)})
             """;
         var i = 0;
         foreach (var id in blockedIds) cmd.AddParam(names[i++], id);
@@ -2720,10 +2776,10 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         cmd.CommandText = $"""
             SELECT d.blocked_id, d.blocker_id
             FROM {T("issue_dep")} d
-            INNER JOIN {T("issue")} b ON b.id = d.blocker_id
+            LEFT JOIN {T("issue")} b ON b.id = d.blocker_id
             WHERE d.blocked_id IN ({string.Join(",", names)})
               AND d.kind = 'blocks'
-              AND b.status NOT IN ('Completed', 'Closed')
+              AND (b.id IS NULL OR NOT {IssueResolution.SatisfiedSql("b", _db.Dialect)})
             ORDER BY d.blocked_id, d.blocker_id
             """;
         var i = 0;
@@ -2787,7 +2843,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         return new IssueEventRecord(id, issueId, DateTime.UtcNow, "orchestrator", kind, detail);
     }
 
-    private static IssueRecord ReadIssue(DbDataReader rd)
+    internal static IssueRecord ReadIssue(DbDataReader rd)
         => new(
             Id: rd.GetString(0),
             ShortId: rd.GetString(1),

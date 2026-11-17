@@ -52,6 +52,10 @@ public sealed record DeploymentOptions
     public string? KubernetesImageCatalog { get; set; }
     public string KubernetesNamespace { get; set; } = "forge";
     public string? KubernetesDatasetId { get; set; }
+    public bool RoutineEnabled { get; set; }
+    public string RoutineWorkflow { get; set; } = "controller-image.yml";
+    public string RoutineValidationWorkflow { get; set; } = "ci.yml";
+    public string RoutineImageRepository { get; set; } = "ghcr.io/xyrces/forge";
 }
 
 public enum DeploymentKind

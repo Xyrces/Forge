@@ -218,6 +218,7 @@ public class ProjectLensEndpointTests : IDisposable
         var id = (await Beta.Issues.CreateAsync(new NewIssue("task", "beta candidate",
             Metadata: new Dictionary<string, object> { ["groomed"] = true }))).Id;
 
+        await ApprovedSprintFixture.Bind((IssueStore)Beta.Issues,await ApprovedSprintFixture.Scope((IssueStore)Beta.Issues),[(await Beta.Issues.GetAsync(id))!]);
         var propose = await _client.GetFromJsonAsync<JsonElement>(
             "/api/sprints/propose-next?projectId=beta&count=5");
         Assert.Contains(propose.GetProperty("candidates").EnumerateArray(),
@@ -227,7 +228,7 @@ public class ProjectLensEndpointTests : IDisposable
         {
             auditId = propose.GetProperty("auditId").GetInt64(),
             taskIds = new[] { id },
-            theme = "beta sprint",
+            theme = propose.GetProperty("theme").GetString(),
             projectId = "beta",
         });
         commit.EnsureSuccessStatusCode();
@@ -296,24 +297,37 @@ public class ProjectLensEndpointTests : IDisposable
         var url = $"/api/sprints/{sprint.Id}?projectId=beta";
         Assert.Equal(HttpStatusCode.Conflict, (await _client.PatchAsJsonAsync(url, new { status = 0 })).StatusCode);
         await Beta.Issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null, metadata: new Dictionary<string, object> { ["groomed"] = true }, ct: default);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PatchAsJsonAsync(url, new { status = "Active" })).StatusCode);
+        await ApprovedSprintFixture.Bind((IssueStore)Beta.Issues,await ApprovedSprintFixture.Scope((IssueStore)Beta.Issues),[task]);
         await _gates.HoldAsync(StageGates.Sprint);
         Assert.Equal(HttpStatusCode.Conflict, (await _client.PatchAsJsonAsync(url, new { status = "Active" })).StatusCode);
         await _gates.ReleaseAsync(StageGates.Sprint);
         Assert.Equal(HttpStatusCode.OK, (await _client.PatchAsJsonAsync(url, new { status = 0 })).StatusCode);
         Assert.Equal(sprint.Id, (await Beta.Sprints.GetActiveAsync())!.Id);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PatchAsJsonAsync(url, new { status = "Completed" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PatchAsJsonAsync(url, new { status = 2 })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.DeleteAsync(url)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.DeleteAsync($"/api/sprints/{sprint.Id}/issues/{task.Id}?projectId=beta")).StatusCode);
+        Assert.Equal(sprint.Id, (await Beta.Sprints.GetActiveAsync())!.Id);
+        Assert.Contains(task.Id, await Beta.Sprints.GetIssueIdsAsync(sprint.Id));
     }
 
     [Fact]
     public async Task ActiveMembershipRejectsUngroomedAndAcceptsEligibleAmendment()
     {
-        var sprint = await Beta.Sprints.CreateAsync(new NewSprint("active", "g", DateTime.UtcNow, DateTime.UtcNow.AddDays(7)));
+        var own=(IssueStore)Beta.Issues;
+        var scope=await ApprovedSprintFixture.Scope(own);
+        var current=await ApprovedSprintFixture.Task(own);await ApprovedSprintFixture.Bind(own,scope,[current]);
+        var snapshot=await new SprintActivationValidator(own,Beta.Sprints,Beta.Specs,"beta",null).ValidateAsync([current.Id],default);
+        var sprint = await Beta.Sprints.CreateWithIssuesAsync(new NewSprint("active", "g", DateTime.UtcNow, DateTime.UtcNow.AddDays(7)),snapshot);
         var task = await Beta.Issues.CreateAsync(new NewIssue("task", "candidate"));
         var url = $"/api/sprints/{sprint.Id}/issues?projectId=beta";
         Assert.Equal(HttpStatusCode.Conflict, (await _client.PostAsJsonAsync(url, new { issueId = task.Id })).StatusCode);
-        Assert.Empty(await Beta.Sprints.GetIssueIdsAsync(sprint.Id));
+        Assert.Equal(current.Id,Assert.Single(await Beta.Sprints.GetIssueIdsAsync(sprint.Id)));
         await Beta.Issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null, metadata: new Dictionary<string, object> { ["groomed"] = true }, ct: default);
+        await ApprovedSprintFixture.Bind(own,scope,[task]);
         Assert.Equal(HttpStatusCode.NoContent, (await _client.PostAsJsonAsync(url, new { issueId = task.Id })).StatusCode);
-        Assert.Equal(task.Id, Assert.Single(await Beta.Sprints.GetIssueIdsAsync(sprint.Id)));
+        Assert.Contains(task.Id, await Beta.Sprints.GetIssueIdsAsync(sprint.Id));
         Assert.Equal(HttpStatusCode.NoContent, (await _client.PostAsJsonAsync(url, new { issueId = task.Id })).StatusCode);
     }
 

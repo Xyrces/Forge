@@ -138,6 +138,15 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
         return await rd.ReadAsync(ct) ? Read(rd) : null;
     }
 
+    public async Task<SprintPlan?> GetPlanForSprintAsync(string sprintId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {_db.Dialect.Top(1)}weights_json FROM {T("sprint_proposal_audit")} WHERE committed_sprint_id=@id ORDER BY id DESC{_db.Dialect.Limit(1)}";
+        cmd.AddParam("@id", sprintId);
+        return await cmd.ExecuteScalarAsync(ct) is string json ? SprintPlanJson.ReadAuditPlan(json) : null;
+    }
+
     private static SprintProposalAuditRecord Read(DbDataReader rd) => new(
         Id: rd.GetInt64(0),
         Timestamp: DateTime.ParseExact(rd.GetString(1), DateFormat,

@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -336,11 +336,13 @@ public class SpecGroomerEndpointTests : IDisposable
     private readonly IHost _host;
     private readonly HttpClient _client;
     private readonly InMemoryDashboardEventBus _events;
+    private readonly IssueGroomerRunStore _runs;
 
     public SpecGroomerEndpointTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("spec-groom");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, "P");
+        _runs = new IssueGroomerRunStore(_issues.Db);
         _specs = new SpecStore(_issues);
         _events = new InMemoryDashboardEventBus();
         var scripted = new MultiToolCallingChatClient(new[]
@@ -390,7 +392,7 @@ public class SpecGroomerEndpointTests : IDisposable
         SpecEndpoints.MapSpecEndpoints(
             app, _specs, new SpecExtractionReader(_issues),
             NullLogger<DashboardHost>.Instance, new Core.IntakeStore(_issues),
-            groomerFactory, issues: _issues);
+            groomerFactory, groomerRuns: _runs, issues: _issues);
         return app;
     }
 
@@ -417,38 +419,21 @@ public class SpecGroomerEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task Groom_ApprovedSpec_Returns202_AndRunsAgent()
+    public async Task Groom_ApprovedSpec_Returns202_AndQueuesWithoutExecutingAgent()
     {
         var id = await CreateApprovedSpecAsync();
-
         var resp = await _client.PostAsync($"/api/specs/{id}/groom", content: null);
         Assert.Equal(HttpStatusCode.Accepted, resp.StatusCode);
-
-        // The agent runs on a background task; poll the spec until it
-        // moves to Grooming (or give up after a few seconds).
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        SpecStatus? finalStatus = null;
-        while (DateTime.UtcNow < deadline)
-        {
-            var fetched = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{id}");
-            finalStatus = Enum.Parse<SpecStatus>(fetched.GetProperty("status").GetString()!);
-            if (finalStatus == SpecStatus.Grooming) break;
-            await Task.Delay(100);
-        }
-        Assert.Equal(SpecStatus.Grooming, finalStatus);
-
-        // Stories are created DURING Grooming, so reaching the status
-        // doesn't mean the story exists yet — poll for it (CI runners
-        // are slower than dev boxes; the immediate assert was racy).
-        IReadOnlyList<IssueRecord> issues = Array.Empty<IssueRecord>();
-        while (DateTime.UtcNow < deadline)
-        {
-            issues = await _issues.ListAsync(new IssueFilter { Type = "story" });
-            if (issues.Count > 0) break;
-            await Task.Delay(100);
-        }
-        Assert.Single(issues);
-        Assert.Equal(id, issues[0].ParentIssueId);
+        var response = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("queued", response.GetProperty("status").GetString());
+        var queued = Assert.Single(await _runs.ListQueuedAsync());
+        Assert.Equal(id, queued.SpecId);
+        Assert.Equal(queued.Id, response.GetProperty("runId").GetInt64());
+        Assert.Equal(SpecStatus.Approved, (await _specs.GetAsync(id))!.Status);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Type = "story" }));
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), e => e.Kind == "groomer.run.started");
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PostAsync($"/api/specs/{id}/groom", content: null)).StatusCode);
+        Assert.Single(await _runs.ListQueuedAsync());
     }
 
     [Fact]
@@ -544,6 +529,11 @@ public class SpecGroomerEndpointTests : IDisposable
         // Explicit operator re-decompose still works.
         var forced = await _client.PostAsync($"/api/specs/{id}/groom?force=true", content: null);
         Assert.Equal(HttpStatusCode.Accepted, forced.StatusCode);
+        var queued = Assert.Single(await _runs.ListQueuedAsync());
+        Assert.Equal(id, queued.SpecId);
+        Assert.Equal(GroomerTriggerKind.Manual, queued.Trigger);
+        Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(id))!.Status);
+        Assert.Single(await _issues.ListAsync(new IssueFilter { Type = "story" }));
     }
 }
 

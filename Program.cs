@@ -1289,13 +1289,15 @@ Console.Error.WriteLine(ex.ToString());
                 backgroundLoops.Add(provider.GetRequiredService<Orchestrator.ScheduledWatchdog>().RunAsync(shutdownCts.Token));
                 backgroundLoops.Add(provider.GetRequiredService<Orchestrator.DesignerScheduler>().RunAsync(shutdownCts.Token));
                 backgroundLoops.Add(provider.GetRequiredService<Orchestrator.ArtistScheduler>().RunAsync(shutdownCts.Token));
-                backgroundLoops.Add(provider.GetRequiredService<Orchestrator.Sprint.SprintAssembler>().RunAsync(shutdownCts.Token));
 
                 logger.LogInformation("Orchestrator starting");
                 ready?.Invoke();
+                backgroundLoops.Add(provider.GetRequiredService<Orchestrator.Sprint.SprintAssembler>().RunAsync(shutdownCts.Token));
                 // Durable pending refinement must not claim work before paid
                 // admission opens. Its joined lifetime also fences shutdown.
                 backgroundLoops.Add(provider.GetRequiredService<Agents.ProductRefinementQueue>()
+                    .RunAsync(shutdownCts.Token));
+                backgroundLoops.Add(provider.GetRequiredService<Forge.Deploy.RoutineDeploymentCoordinator>()
                     .RunAsync(shutdownCts.Token));
                 await provider.GetRequiredService<OrchestratorAgent>().ExecuteAsync(shutdownCts.Token);
                 return 0;
