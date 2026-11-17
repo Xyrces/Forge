@@ -223,7 +223,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 40;
+    public const int CurrentSchemaVersion = 41;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1025,6 +1025,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         Control.ControlSchema.Create(conn, SqliteDialect.Instance);
         M039BudgetUsage.ApplySqlite(conn);
         M040InitiativeApproval.Create(conn, SqliteDialect.Instance);
+        M041SprintCompletion.Create(conn, SqliteDialect.Instance);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;
@@ -1645,6 +1646,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }
 
         M040InitiativeApproval.Create(conn, d);
+        M041SprintCompletion.Create(conn, d);
 
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the
