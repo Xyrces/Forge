@@ -28,7 +28,7 @@
         <dl>
             <dt>Engineering evidence</dt><dd>@CompletionPresentation.Outcome(receipt.Outcome)</dd>
             <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
-            <dt>Deployment</dt><dd>@(receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus) : (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
+            <dt>Deployment</dt><dd>@(receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus) : receipt.DeliveryRequired == false ? "Not required for this outcome" : (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
         </dl>
         @if (!string.IsNullOrWhiteSpace(receipt.DeliveryNote))
         {
@@ -218,7 +218,7 @@
     private sealed record CompletionSummary(string Id, string ProjectId, string SprintId, string Outcome,
         string BookkeepingState, bool ReadyForDeployment, string? SourceSha, string? DeploymentCandidateId,
         string? DeploymentStatus, string? DeliveryNote, string? PlanHash, string? SprintName = null,
-        string? AbandonmentReason = null, DateTimeOffset? AbandonedAt = null);
+        string? AbandonmentReason = null, DateTimeOffset? AbandonedAt = null, bool? DeliveryRequired = null);
     private sealed record CompletionBatch(string Id, string State, string? Error);
     private sealed record CompletionCriterion(string Id, string Text, string EvidenceKind, string? ProofReference, string? OperatorIdentity);
     private sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatch> Batches, string? NextCursor, IReadOnlyList<CompletionCriterion> Criteria);
