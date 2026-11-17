@@ -19,10 +19,49 @@ namespace Forge.Tests;
 
 public sealed class TaskRegroomTests
 {
-    private sealed record Fixture(IssueStore Issues, SprintStore Sprints, SprintRecord Sprint, IssueRecord Root, IssueRecord Extra, SprintScopeReference Scope);
-    private static async Task<Fixture> Seed(bool expanded = true)
+    private sealed class WakeRecorder : Forge.Core.Messaging.IEventPublisher
     {
-        var issues = new IssueStore(TempRoot.Instance.NewDbPath("regroom"), "forge");
+        public readonly List<Forge.Core.Messaging.GroomRequested> Hints = [];
+        public Func<Forge.Core.Messaging.GroomRequested, Task>? Observe { get; set; }
+        public async Task PublishAsync<T>(T evt, CancellationToken ct = default) where T : Forge.Core.Messaging.IForgeEvent
+        {
+            if (evt is not Forge.Core.Messaging.GroomRequested hint) return;
+            if (Observe is not null) await Observe(hint);
+            Hints.Add(hint);
+        }
+    }
+
+    [Fact]
+    public async Task RegroomWakeObservesCommittedAuditAndMetadata_AndNeverPublishesForRejectedRequests()
+    {
+        var publisher = new WakeRecorder();
+        var f = await Seed(publisher: publisher); await using var issues = f.Issues;
+        var request = Request(await issues.PreviewRegroomAsync(f.Extra.Id));
+        publisher.Observe = async hint =>
+        {
+            Assert.Equal("forge", hint.ProjectId); Assert.Equal(f.Extra.Id, hint.TaskId); Assert.Null(hint.SpecId);
+            var row = (await issues.GetAsync(f.Extra.Id))!;
+            Assert.False(bool.Parse(row.GetMetadata("groomed")!));
+            Assert.Equal(IssueStore.DateFormatTime(hint.RequestedAt.UtcDateTime), IssueStore.DateFormatTime(row.UpdatedAt));
+            Assert.Single((await issues.ListEventsAsync(f.Extra.Id)).Where(e => e.Kind == "operator_regroom_requested"));
+        };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => issues.RequestRegroomAsync(f.Extra.Id, request with { ExpectedBindingHash = "stale" }, "operator"));
+        Assert.Empty(publisher.Hints);
+        await using var c = await issues.Db.OpenAsync(); using var q = c.CreateCommand();
+        q.CommandText = "CREATE TRIGGER wake_fail BEFORE INSERT ON issue_event WHEN NEW.kind='operator_regroom_requested' BEGIN SELECT RAISE(ABORT,'audit failure'); END";
+        await q.ExecuteNonQueryAsync();
+        await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(() => issues.RequestRegroomAsync(f.Extra.Id, request, "operator"));
+        Assert.Empty(publisher.Hints);
+        q.CommandText = "DROP TRIGGER wake_fail"; await q.ExecuteNonQueryAsync();
+        await issues.RequestRegroomAsync(f.Extra.Id, request, "operator");
+        Assert.Single(publisher.Hints);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => issues.RequestRegroomAsync(f.Extra.Id, request, "operator"));
+        Assert.Single(publisher.Hints);
+    }
+    private sealed record Fixture(IssueStore Issues, SprintStore Sprints, SprintRecord Sprint, IssueRecord Root, IssueRecord Extra, SprintScopeReference Scope);
+    private static async Task<Fixture> Seed(bool expanded = true, Forge.Core.Messaging.IEventPublisher? publisher = null)
+    {
+        var issues = new IssueStore(TempRoot.Instance.NewDbPath("regroom"), "forge", publisher);
         var scope = await ApprovedSprintFixture.Scope(issues);
         var root = await ApprovedSprintFixture.Task(issues);
         await ApprovedSprintFixture.Bind(issues, scope, [root]);

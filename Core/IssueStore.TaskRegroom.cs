@@ -33,6 +33,7 @@ public sealed partial class IssueStore
         var row = await RequireRegroomableAsync(connection, tx, id, ct);
         if (row.UpdatedAt != request.ExpectedUpdatedAt || SprintPlanJson.Hash(SprintPlanJson.ReadBinding(row)!) != request.ExpectedBindingHash)
             throw new InvalidOperationException("Task grooming changed; reload the re-groom preview.");
+        var requestedAt = DateTimeOffset.UtcNow;
         var metadata = MergeAndSerializeMetadata(row.MetadataJson, new Dictionary<string, object>
         {
             ["groomed"] = false, ["groomedAt"] = null!, ["groomNote"] = null!, ["groomRunId"] = null!,
@@ -40,12 +41,18 @@ public sealed partial class IssueStore
         });
         using var update = connection.CreateCommand(); update.Transaction = tx;
         update.CommandText = $"UPDATE {T("issue")} SET metadata_json=@meta,updated_at=@now WHERE id=@id AND status='Pending' AND assignee IS NULL AND parent_issue_id IS NULL AND dispatch_checkpoint IS NULL AND updated_at=@expected AND metadata_json=@old";
-        update.AddParam("@meta", metadata); update.AddParam("@now", DateFormatTime(DateTime.UtcNow));
+        update.AddParam("@meta", metadata); update.AddParam("@now", DateFormatTime(requestedAt.UtcDateTime));
         update.AddParam("@id", id); update.AddParam("@expected", DateFormatTime(row.UpdatedAt)); update.AddParam("@old", row.MetadataJson);
         if (await update.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Task changed during re-groom request.");
         await InsertEventAsync(connection, tx, id, "operator_regroom_requested",
             SprintPlanJson.Serialize(new { actor, request.Reason, previousMetadata = row.MetadataJson, previousUpdatedAt = row.UpdatedAt }), ct);
         await tx.CommitAsync(ct);
+        // Best-effort wake hint; publisher implementations must not fail committed mutations.
+        await _events.PublishAsync(new Messaging.GroomRequested
+        {
+            MessageId = Messaging.GroomRequested.IdFor(_projectId, null, id, requestedAt),
+            ProjectId = _projectId, TaskId = id, RequestedAt = requestedAt
+        }, ct);
     }
 
     private async Task<IssueRecord> RequireRegroomableAsync(DbConnection connection, DbTransaction tx, string id, CancellationToken ct)
