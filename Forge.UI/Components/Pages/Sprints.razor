@@ -608,22 +608,25 @@
     {
         // Repo URL from the current project registration (never
         // hardcoded); re-resolved on project switch.
-        var projectId = ShellStore.Value.CurrentProjectId;
+        var projectId = _selection.ProjectId;
+        var generation = _selection.Generation;
+        var token = _selection.Token;
         if (string.IsNullOrEmpty(projectId)) return;
         try
         {
-            var projects = await Http.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/projects");
+            var projects = await Http.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/projects", token);
+            if (!_selection.IsCurrent(generation)) return;
             foreach (var p in projects.EnumerateArray())
             {
                 if (p.TryGetProperty("id", out var id) && string.Equals(id.GetString(), projectId, StringComparison.OrdinalIgnoreCase)
                     && p.TryGetProperty("repoUrl", out var url))
                 {
-                    if (projectId == ShellStore.Value.CurrentProjectId)
-                        _repoUrl = RepositoryLinks.WebUrl(url.GetString());
+                    _repoUrl = RepositoryLinks.WebUrl(url.GetString());
                     break;
                 }
             }
         }
+        catch (OperationCanceledException) when (!_selection.IsCurrent(generation)) { }
         catch (Exception ex) { Logger.LogWarning(ex, "Sprint repository links unavailable"); }
     }
 
@@ -671,6 +674,7 @@
                 var token = _selection.Token;
                 if (projectId is null) break;
                 _loading = _board is null;
+                StateHasChanged();
                 try
                 {
                     var client = new SprintReadClient(Http);
@@ -710,6 +714,7 @@
         _selectedSprintId = null; _historyCursor = null; _memberCursor = null;
         _historyPages.Clear(); _memberPages.Clear(); _summary = null; _board = null; _repoUrl = null;
         _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null; _queueTotal = 0; _error = null; _queueError = null;
+        StateHasChanged();
         await LoadRepoUrlAsync();
         await RefreshAsync();
     }
