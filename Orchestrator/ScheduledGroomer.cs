@@ -156,7 +156,14 @@ public sealed class ScheduledGroomer
                 await _runStore.FinishAsync(queued.Id, GroomerRunStatus.Failed, 0, 0, "Specification no longer exists.", TimeSpan.Zero, ct);
                 continue;
             }
-            await RunOneAsync(queuedSpec, queued.Trigger, ct, queued);
+            try
+            {
+                await RunOneAsync(queuedSpec, queued.Trigger, ct, queued);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Queued grooming run {RunId} could not prepare its repository; it remains unclaimed", queued.Id);
+            }
             if (_pendingFinalizations.Count != 0) return;
         }
 
@@ -276,7 +283,9 @@ public sealed class ScheduledGroomer
             string? outcome;
             try
             {
-                var groomer = _groomerFactory.Create(projectId: projectId);
+                var groomingProjectId = projectId ?? (issues as IssueStore)?.ProjectId;
+                await _groomerFactory.RefreshContextAsync(groomingProjectId, ct);
+                var groomer = _groomerFactory.Create(projectId: groomingProjectId);
                 outcome = await groomer.GroomTaskAsync(task.Id, ct);
                 _logger.LogInformation("ScheduledGroomer: ad-hoc task {Id} groom outcome={Outcome}", task.Id, outcome ?? "no-decision");
             }
@@ -318,6 +327,7 @@ public sealed class ScheduledGroomer
 
     private async Task RunOneAsync(SpecRecord spec, GroomerTriggerKind trigger, CancellationToken ct, IssueGroomerRun? queued = null)
     {
+        await _groomerFactory.RefreshContextAsync(spec.ProjectId, ct);
         IssueGroomerRun? run;
         if (queued is not null)
         {
