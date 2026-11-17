@@ -166,7 +166,7 @@
                     {
                         <li style="margin:2px 0">
                             <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
-                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
+                            <a href="@TaskLink(task.Id)" class="mono">@task.Id</a>
                             <span>@task.Title</span>
                             @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url)
                             {
@@ -184,7 +184,7 @@
                     {
                         <li>
                             <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
-                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
+                            <a href="@TaskLink(task.Id)" class="mono">@task.Id</a>
                             <span>@task.Title</span>
                             @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url2)
                             {
@@ -444,6 +444,8 @@
 
     private string? PrUrl(string prNumber) =>
         RepositoryLinks.PullRequest(_repoUrl, prNumber);
+
+    private string TaskLink(string id) => "/tasks/" + Uri.EscapeDataString(id) + LensQuery;
 
     private async Task SetStatusAsync(string status)
     {

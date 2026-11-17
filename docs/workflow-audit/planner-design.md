@@ -22,8 +22,6 @@ A sprint is a small independently demonstrable outcome within approved scope. An
 
 Membership and dispatch readiness are separate. A dependency chain A → B → C can belong to one sprint while only A is initially runnable. The validator closes over required prerequisites and rejects missing, failed, blocked, cyclic, foreign-project, ungroomed or unapproved necessary work. It never truncates a required delivery unit to fit the ceiling. An oversized unit needs a smaller useful decomposition through grooming. A prerequisite whose declared required partner is absent from its dependency closure is also deferred for correction rather than silently dropping that partner.
 
-## Activation and preservation of the current objective
-
 Grooming now receives the owning project's current CoreDev, ClientDev and QA
 slot limits on each run, using the same role defaults as execution. Reviewer
 slots do not count as engineering task capacity. The prompt describes a soft
@@ -36,6 +34,8 @@ criterion. Later `DeploymentHealthy` and `OperatorObserved` criteria stay in
 the same implementation outcome; they do not create observation-only
 engineering tasks or require fabricated PRs. Actual later evidence remains
 mandatory after deployment.
+
+## Activation and preservation of the current objective
 
 `SprintActivationValidator` is shared by automatic selection, proposal commit, generic activation and active membership amendment. Proposal commit accepts the complete recorded membership and canonical objective; it cannot substitute arbitrary task IDs or goal text. `SprintStore` atomically writes memberships and the typed `weights_json.plan` audit while rechecking issue/spec snapshots, dependencies, current approval authority and active-sprint exclusivity. The plan hash binds criteria, members, grooming mappings, deferrals and input fingerprint. Amendments add an audit version rather than overwriting history.
 
