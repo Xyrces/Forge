@@ -66,7 +66,8 @@
             }
         </aside>
 
-        <section class="intake-thread" id="intake-thread-scroll">
+        <section class="intake-thread">
+            <div class="intake-feed" id="intake-thread-scroll" role="log" aria-label="Intake conversation">
             @if (_activeSessionId is null)
             {
                 <div class="page-subtitle">Pick a session on the left, or start a new one.</div>
@@ -205,6 +206,10 @@
                         }
                     </div>
                 }
+            }
+            </div>
+            @if (_activeSessionId is not null && _messages is not null)
+            {
                 <div class="intake-input">
                     <input class="intake-input__field" @bind="_draft" @bind:event="oninput" placeholder="Type your message..."
                            @onkeydown="@(async e => { if (e.Key == "Enter" && !_sending) await SendMessage(); })" />
