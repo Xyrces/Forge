@@ -13,6 +13,8 @@ public sealed record InitiativeProposal(string Id, string ProjectId, int Revisio
 public sealed record InitiativeProposalSummary(string Id, string ProjectId, int Revision, string Hash,
     string Title, int Priority, string Origin, string SourceKey, string? SessionId, DateTime CreatedAt,
     DateTime? ApprovedAt, string? ApprovedBy, string? EpicId, string? SpecId);
+public sealed record InitiativeSourceBinding(string Id, string SourceJson);
+
 public sealed record InitiativeIngestion(string ProposalId, int Revision, string ProjectId, string Hash,
     string EpicId, string SpecId, string RefinementState, int Attempts, string? LastError, DateTime UpdatedAt);
 

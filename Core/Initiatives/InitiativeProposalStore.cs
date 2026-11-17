@@ -66,6 +66,30 @@ public sealed class InitiativeProposalStore(IssueStore issues)
     }
 
 
+    /// <summary>Bounded recovery lookup for source drafts still awaiting disposition acknowledgement.
+    /// Continue with the final proposal ID when a full page is returned.</summary>
+    public async Task<IReadOnlyList<InitiativeSourceBinding>> FindBySourceDraftIdsAsync(string projectId,
+        IReadOnlyList<long> sourceDraftIds, CancellationToken ct = default, string? afterId = null)
+    {
+        if (sourceDraftIds.Count is < 1 or > 100 || sourceDraftIds.Any(id => id <= 0))
+            throw new ArgumentException("A source lookup requires 1 to 100 positive draft IDs.");
+        await using var connection = await issues.Db.OpenAsync(ct);
+        var values = sourceDraftIds.Distinct().Select((id, index) => ($"@draft{index}", (object?)id)).ToArray();
+        var parameters = string.Join(',', values.Select(v => v.Item1));
+        var jsonMatch = issues.Db.Provider == ForgeDbProvider.SqlServer
+            ? $"EXISTS(SELECT 1 FROM OPENJSON(p.source_json,'$.sourceDraftIds') j WHERE TRY_CONVERT(bigint,j.value) IN ({parameters}))"
+            : $"EXISTS(SELECT 1 FROM json_each(p.source_json,'$.sourceDraftIds') j WHERE CAST(j.value AS INTEGER) IN ({parameters}))";
+        using var command = Command(connection, null,
+            $"SELECT {issues.Db.Dialect.Top(100)}p.id,p.source_json FROM {T("initiative_proposal")} p WHERE p.project_id=@project AND p.origin='forge' AND {jsonMatch}"
+            + (afterId is null ? "" : " AND p.id>@after") + $" ORDER BY p.id{issues.Db.Dialect.Limit(100)}",
+            values.Concat(new[] { ("@project", (object?)projectId), ("@after", (object?)afterId) }).ToArray());
+        var bindings = new List<InitiativeSourceBinding>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            bindings.Add(new(reader.GetString(0), reader.GetString(1)));
+        return bindings;
+    }
+
     private async Task<TResult> Write<TResult>(Func<DbConnection, DbTransaction, Task<TResult>> action, CancellationToken ct)
     {
         await using var c = await issues.Db.OpenAsync(ct);
