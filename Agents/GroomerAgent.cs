@@ -44,6 +44,7 @@ public sealed class GroomerAgent
     private readonly string? _projectRoot;
     private readonly string? _projectId;
     private readonly Func<string, string?>? _projectRootLookup;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? _roleCapacitiesLookup;
     private readonly string _runId;
 
     public GroomerAgent(
@@ -57,7 +58,8 @@ public sealed class GroomerAgent
         MemoryStore? memory = null,
         string? projectRoot = null,
         string? projectId = null,
-        Func<string, string?>? projectRootLookup = null)
+        Func<string, string?>? projectRootLookup = null,
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null)
     {
         _issues = issues;
         _specs = specs;
@@ -69,6 +71,7 @@ public sealed class GroomerAgent
         _projectRoot = projectRoot;
         _projectId = projectId;
         _projectRootLookup = projectRootLookup;
+        _roleCapacitiesLookup = roleCapacitiesLookup;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
     }
 
@@ -700,6 +703,19 @@ public sealed class GroomerAgent
     {
         var sb = new StringBuilder();
 
+        var configured = _roleCapacitiesLookup is not null && !string.IsNullOrWhiteSpace(projectId)
+            ? await _roleCapacitiesLookup(projectId, ct)
+            : new Dictionary<string, int>();
+        var roles = new Dictionary<string, int>(configured, StringComparer.OrdinalIgnoreCase);
+        var workers = new[] { "coredev", "clientdev", "qa" };
+        sb.AppendLine("## Engineering worker capacity (owning project)");
+        foreach (var role in workers)
+            sb.AppendLine($"- {role}: {Math.Max(0, Forge.Configuration.DefaultProjectRoles.MaxFor(roles, role))} concurrent workers");
+        sb.AppendLine("Soft parallel goal: where the approved outcome naturally supports it, plan genuine independent tasks that can use these workers concurrently.");
+        sb.AppendLine("For example, three suitable available workers favor three genuinely independent tasks, not an artificial three-task minimum.");
+        sb.AppendLine("Use fewer tasks when that is the coherent solution; never pad work, invent QA work, or remove real prerequisites to fill slots. Reviewer capacity is not engineering capacity.");
+        sb.AppendLine("Ten engineering tasks including prerequisites is a ceiling, never a fill target. Story/task tool caps still apply; they are maxima, not targets.");
+        sb.AppendLine();
         sb.AppendLine("## Project vision");
         // Per-project vision wins (vision/<projectId>); the legacy
         // global vision/master is the fallback so single-project

@@ -19,6 +19,7 @@ public sealed class GroomerAgentFactory
     private readonly MemoryStore? _memory;
     private readonly string? _projectRoot;
     private readonly Func<string, string?>? _projectRootLookup;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? _roleCapacitiesLookup;
     private readonly Func<string, IIssueStore?>? _issueStoreLookup;
     private readonly Func<string, CancellationToken, Task>? _refreshContext;
 
@@ -43,7 +44,8 @@ public sealed class GroomerAgentFactory
         // against the wrong repo (porthorizon stories → Forge PRs
         // #66/#67). Unknown/null project → the default store.
         Func<string, IIssueStore?>? issueStoreLookup = null,
-        Func<string, CancellationToken, Task>? refreshContext = null)
+        Func<string, CancellationToken, Task>? refreshContext = null,
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null)
     {
         _issues = issues;
         _specs = specs;
@@ -54,6 +56,7 @@ public sealed class GroomerAgentFactory
         _memory = memory;
         _projectRoot = projectRoot;
         _projectRootLookup = projectRootLookup;
+        _roleCapacitiesLookup = roleCapacitiesLookup;
         _issueStoreLookup = issueStoreLookup;
         _refreshContext = refreshContext;
     }
@@ -77,6 +80,6 @@ public sealed class GroomerAgentFactory
         return new(issues, _specs, _events, _chatClientFactory, _config,
             _loggerFactory.CreateLogger<GroomerAgent>(),
             runId: runId, memory: _memory, projectRoot: _projectRoot,
-            projectId: projectId, projectRootLookup: _projectRootLookup);
+            projectId: projectId, projectRootLookup: _projectRootLookup, roleCapacitiesLookup: _roleCapacitiesLookup);
     }
 }
