@@ -46,7 +46,7 @@ public sealed partial class IssueStore
             await new SprintOutcomeAuthority(this).ValidateAsync(connection, tx, scope, ct);
         var now = DateFormatTime(DateTime.UtcNow);
         using var update = connection.CreateCommand(); update.Transaction = tx;
-        update.CommandText = $"UPDATE {T("issue")} SET status='Completed',closed_at=@now,updated_at=@now,metadata_json=@metadata WHERE id=@id AND status='InProgress' AND updated_at=@expected AND metadata_json=@old";
+        update.CommandText = $"UPDATE {T("issue")} SET status='Completed',closed_at=@now,updated_at=@now,metadata_json=@metadata,assignee=NULL,dispatch_checkpoint=NULL,checkpoint_at=NULL WHERE id=@id AND status='InProgress' AND updated_at=@expected AND metadata_json=@old";
         update.AddParam("@now", now); update.AddParam("@metadata", metadata); update.AddParam("@id", id);
         update.AddParam("@expected", DateFormatTime(expectedUpdatedAt)); update.AddParam("@old", expectedMetadataJson);
         if (await update.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Task changed before evidence admission.");
