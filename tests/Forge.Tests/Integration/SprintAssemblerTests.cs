@@ -117,6 +117,24 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
+    public async Task IndependentNecessaryPrerequisitesJoinInOneClosedAmendment()
+    {
+        var (_, _, current) = await SeedGroomedSpecAsync("current", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var (_, _, prerequisites) = await SeedGroomedSpecAsync("two prerequisites", 2);
+        foreach (var prerequisite in prerequisites)
+            await _issues.AddDependencyAsync(prerequisite, current[0], IssueDepKind.Blocks);
+
+        await Tick();
+
+        Assert.Equal(active.Id, (await _sprints.GetActiveAsync())!.Id);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.All(prerequisites, id => Assert.Contains(id, members));
+        Assert.True(await _issues.IsBlockedAsync(current[0]));
+    }
+
+    [Fact]
     public async Task EpicFollowUpTriageCreatesOnlyProposalUntilOperatorApproval()
     {
         var (_, _, tasks) = await SeedGroomedSpecAsync("current", 1);

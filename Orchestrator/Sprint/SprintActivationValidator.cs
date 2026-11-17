@@ -90,7 +90,12 @@ internal sealed class SprintActivationValidator(
             visited.Add(id);
         }
         foreach (var id in taskIds) Visit(id);
-        // Existing members are observations, not new planning roots.
+        // Amend the unfinished sprint as one dependency-closed unit. Multiple
+        // newly discovered prerequisites must join together, not deadlock each
+        // other's single-task amendments at the transaction boundary.
+        foreach (var row in existing.Values.Where(row => row.Status is not (IssueStatus.Completed or IssueStatus.Closed)))
+            Visit(row.Id);
+        // Terminal members remain observations, never new planning roots.
         foreach (var id in existing.Keys.Where(id => !visited.Contains(id)))
             foreach (var edge in edgesByTarget[id])
                 dependencies.Add(new SprintDependencySnapshot(edge.BlockerId, id,
