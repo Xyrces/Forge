@@ -106,6 +106,40 @@ public class IntakeDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task IngestedSpecCannotSkipPendingRunningOrFailedRefinement()
+    {
+        var proposal = await _initiatives.Proposals.CreateAsync(new("P", "guard", "user", "Outcome", "Approved scope"));
+        await _initiatives.Proposals.ExpandInIntakeAsync("P", proposal.Id);
+        var receipt = await _initiatives.ApproveAsync("P", proposal.Id, proposal.Revision, proposal.Hash);
+        var ingestion = new InitiativeIngestionStore(_issues);
+        foreach (var state in new[] { "Pending", "Running", "Failed" })
+        {
+            if (state == "Running") Assert.True(await ingestion.TryBeginRefinementAsync(proposal.Id, proposal.Revision));
+            if (state == "Failed") await ingestion.RecordRefinementFailureAsync(proposal.Id, proposal.Revision, "test failure");
+            var actions = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{receipt.SpecId}/actions");
+            Assert.Equal(state, actions.GetProperty("refinementState").GetString());
+            Assert.Equal(proposal.Id, actions.GetProperty("initiativeProposalId").GetString());
+            Assert.False(actions.GetProperty("canApprove").GetBoolean());
+            Assert.False(actions.GetProperty("canSendToDesign").GetBoolean());
+            var matrix = await _client.GetFromJsonAsync<JsonElement>("/api/specs?project=P");
+            Assert.False(matrix.EnumerateArray().Single().GetProperty("canApprove").GetBoolean());
+            foreach (var status in new[] { "Approved", "ReadyForDesign" })
+            {
+                var response = await _client.PatchAsJsonAsync($"/api/specs/{receipt.SpecId}", new { op = "set_status", status });
+                Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+            }
+            Assert.Equal(SpecStatus.Draft, (await new SpecStore(_issues).GetAsync(receipt.SpecId))!.Status);
+        }
+        Assert.True(await ingestion.RetryRefinementAsync(proposal.Id, proposal.Revision));
+        Assert.True(await ingestion.TryBeginRefinementAsync(proposal.Id, proposal.Revision));
+        Assert.True(await ingestion.CompleteRefinementAsync(proposal.Id, proposal.Revision));
+        var completed = await _client.GetFromJsonAsync<JsonElement>($"/api/specs/{receipt.SpecId}/actions");
+        Assert.Equal("Completed", completed.GetProperty("refinementState").GetString());
+        Assert.Equal(SpecStatus.ReadyForDesign, (await new SpecStore(_issues).GetAsync(receipt.SpecId))!.Status);
+        await new SpecStore(_issues).SetStatusAsync(receipt.SpecId, SpecStatus.Designed);
+    }
+
+    [Fact]
     public async Task CreateSession_ProjectIdMissing_Returns400()
     {
         var resp = await _client.PostAsJsonAsync("/api/intake/sessions", new { title = "x" });

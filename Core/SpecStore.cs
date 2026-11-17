@@ -439,12 +439,20 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         SpecStatusTransitions.EnsureAllowed(current.Status, status);
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"""UPDATE {T("spec")} SET status = @status, updated_at = @now WHERE id = @id""";
+        // Refinement completion advances its own spec and receipt atomically.
+        // Other callers cannot skip that boundary, including direct API status writes.
+        cmd.CommandText = $"""UPDATE {T("spec")} SET status = @status, updated_at = @now WHERE id = @id AND NOT EXISTS (SELECT 1 FROM {T("initiative_ingestion")} r WHERE r.spec_id=@id AND r.refinement_state <> 'Completed')""";
         cmd.AddParam("@status", status.ToString());
         cmd.AddParam("@now", IssueStore.DateFormatTime(now));
         cmd.AddParam("@id", id);
         var rows = await cmd.ExecuteNonQueryAsync(ct);
-        if (rows == 0) throw new InvalidOperationException($"Spec {id} not found");
+        if (rows == 0)
+        {
+            var receipt = await new Initiatives.InitiativeIngestionStore(_issues).GetBySpecAsync(id, ct);
+            if (receipt is not null && receipt.RefinementState != "Completed")
+                throw new InitiativeRefinementPendingException(receipt.RefinementState);
+            throw new InvalidOperationException($"Spec {id} changed or was not found; reload before retrying.");
+        }
         // Publish AFTER the mutation commits; the publisher swallows
         // failures (a hint never breaks a DB mutation).
         if (current.Status != status)
@@ -461,6 +469,20 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             }, ct);
         }
         return (await GetAsync(id, ct))!;
+    }
+
+    public Task<Initiatives.InitiativeIngestion?> GetInitiativeRefinementAsync(string id, CancellationToken ct = default)
+        => new Initiatives.InitiativeIngestionStore(_issues).GetBySpecAsync(id, ct);
+
+    public async Task<IReadOnlySet<string>> ListRefinementBlockedSpecIdsAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT spec_id FROM {T("initiative_ingestion")} WHERE refinement_state <> 'Completed'";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetString(0));
+        return ids;
     }
 
     public async Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default)

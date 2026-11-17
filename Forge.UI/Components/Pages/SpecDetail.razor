@@ -54,6 +54,21 @@
             </div>
             @* Action bar — driven by /api/specs/{id}/actions so the UI
                doesn't ship its own copy of the state machine. *@
+            @if (ActionProp("refinementState") is { } refinement)
+            {
+                <div class="banner banner--info">
+                    <strong>Initiative approved · specification refinement: @refinement</strong>
+                    @if (refinement != "Completed")
+                    {
+                        <p>Planning continues after refinement completes. No second initiative approval is needed.</p>
+                        @if (refinement == "Failed")
+                        {
+                            <p>@ActionProp("refinementError") Retry from the approved proposal; another request may incur cost.</p>
+                        }
+                        <a href="/intake">Open Intake Proposals</a>
+                    }
+                </div>
+            }
             <div style="display:flex; gap:8px; margin-top:10px">
                 @if (ActionFlag("canApprove"))
                 {

@@ -26,6 +26,14 @@ public sealed class InitiativeIngestionStore(IssueStore issues)
         return await Get(c, null, id, revision, ct);
     }
 
+    public async Task<InitiativeIngestion?> GetBySpecAsync(string specId, CancellationToken ct = default)
+    {
+        await using var c = await issues.Db.OpenAsync(ct);
+        using var cmd = Command(c, null, Query + " WHERE spec_id=@spec", ("@spec", specId));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? Read(reader) : null;
+    }
+
     public async Task<IReadOnlyList<InitiativeIngestion>> ListPendingRefinementAsync(CancellationToken ct = default, int limit = 50, string? afterId = null)
     {
         await using var c = await issues.Db.OpenAsync(ct);
