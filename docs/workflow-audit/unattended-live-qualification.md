@@ -255,3 +255,50 @@ evidence-satisfied, and another refresh retained that result. This validates
 the control, not the live pilot's visual or running-image acceptance. Long
 sprint goals were also checked at desktop and 390-pixel widths with keyboard
 expansion, retaining the full criteria text.
+
+## Worker correction deployed; prerequisite admission and scheduling repaired
+
+PR #137 merged as `d42615e09454c766c2aa7eb5727bf0eb54dc4aa7`.
+Source `6b5c4be89d6b28240e373367e0e16c7c163b4d8f` passed CI
+`44166642614` (2,091 .NET tests, 44 release/installer tests and the offline
+end-to-end harness) and image workflow `44166660364`. Normal release
+`deploy-4cff7b6092074c448b8f44e0f8fb14ad` committed image
+`ghcr.io/xyrces/forge@sha256:98189b35495274e04d920235cd93dc0b5c32977978a298553846bd16b4ab88eb`.
+Blue owner `e8e36555-906e-48b1-b93a-a02f4eb59d12` became active at epoch 29.
+The running artifact matched; deployed read-only preflight passed. Schema 41,
+the dataset, pilot rows and all three budget-table snapshot hashes were retained.
+
+The stale backend timeout state was normalized through the existing project-scoped
+park and guided requeue APIs after both old worker pods were confirmed absent.
+This was an explicit operator recovery, not a worker publication or a direct queue
+write. Its binding and worktree were retained; lifecycle became Pending and the
+guidance required inspecting existing work before making further changes.
+
+Two further defects prevented normal progress. The ad-hoc groomer had given
+`task-3` a new `qualification-handoff` criterion, although the committed sprint's
+existing `offline-build` criterion already required that handoff. The amendment
+validator correctly refused the expansion. Separately, dispatch reserved the
+only CoreDev slot for this inadmissible, priority-boosted blocker before checking
+admission, repeatedly starving the eligible backend sibling.
+
+The corrections ground active prerequisite grooming in the exact committed
+criteria and enforce those constraints before persisting a mapping or grooming
+approval. A snapshot-bound, explicitly requested re-groom operation can reset
+eligibility only for untouched, parentless Pending tasks outside every committed
+plan. It retains prior metadata in the audit and preserves bindings, dependencies
+and initiative approval. The UI requires a reason, explains possible model cost,
+and discards stale or uncertain action snapshots. Dispatch now checks the same
+admission rule before reserving a slot and retains its pre-claim recheck.
+
+Actual Azure SQL qualification of source `dd61eadbb7f5b0b0687391f9e5fd9039ab3f5a53`
+passed preserved-state/replay checks, exact-criterion enforcement, audit-failure
+rollback, concurrent single-winner reset, and committed-member/foreign-approval
+refusal. The disposable workload schema was removed and absence verified. The
+separate rejected-visibility-link transaction was likewise qualified on Azure SQL
+at `0ef51d834eacf436ebb32e57b28545ac78353b51`. Neither rehearsal initialized the
+shared Core schema or changed production rows or grants.
+
+An offline browser requested technical review for a synthetic task, displayed the
+queued confirmation, and removed the action after refresh. This demonstrates the
+recovery control only: no model scheduler runs in that preview and the live
+`task-3` still needs the deployed correction and an explicit request.

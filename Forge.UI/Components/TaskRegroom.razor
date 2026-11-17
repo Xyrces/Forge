@@ -1,0 +1,104 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+@implements IDisposable
+
+@if (_snapshot is not null && _loadedTarget == Target)
+{
+    <details class="card">
+        <summary>Review this task's technical plan again</summary>
+        <p>Send this pending task through normal technical grooming again. Its approved scope, previous plan and history are retained. This does not start engineering work or directly edit its outcome mapping.</p>
+        <p>A new grooming model request may incur API charges. Explain what needs reconsideration before continuing.</p>
+        <label for="@_reasonId">Reason for another technical review</label>
+        <textarea id="@_reasonId" maxlength="2000" disabled="@_busy" @bind="_reason" @bind:event="oninput"></textarea>
+        <button class="btn" disabled="@(_busy || string.IsNullOrWhiteSpace(_reason))" @onclick="ApplyAsync">
+            @(_busy ? "Requesting review…" : "Request technical review again")
+        </button>
+    </details>
+}
+@if (_error is not null)
+{
+    <div class="banner banner--warn" role="alert">
+        <p>@_error</p>
+        <button class="btn" disabled="@_busy" @onclick="ReloadAsync">Check current eligibility</button>
+    </div>
+}
+@if (_notice is not null) { <p role="status">@_notice</p> }
+
+@code {
+    [Parameter] public string TaskId { get; set; } = "";
+    [Parameter] public string ProjectId { get; set; } = "";
+    [Parameter] public EventCallback Requested { get; set; }
+    private readonly string _reasonId = "regroom-reason-" + Guid.NewGuid().ToString("N");
+    private readonly CancellationTokenSource _lifetime = new();
+    private string? _requestedTarget, _loadedTarget, _error, _notice;
+    private string _reason = "";
+    private Snapshot? _snapshot;
+    private bool _busy, _disposed;
+    private int _generation;
+    private string Target => ProjectId + "|" + TaskId;
+    private string Url => $"/api/tasks/{Uri.EscapeDataString(TaskId)}/regroom?projectId={Uri.EscapeDataString(ProjectId)}";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_requestedTarget == Target) return;
+        _requestedTarget = Target; ++_generation;
+        _snapshot = null; _loadedTarget = null; _reason = ""; _notice = null; _busy = false;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (_busy || _disposed) return;
+        var target = Target; var generation = ++_generation;
+        _snapshot = null; _loadedTarget = null; _error = null;
+        if (string.IsNullOrWhiteSpace(ProjectId) || string.IsNullOrWhiteSpace(TaskId)) return;
+        try
+        {
+            var value = await Http.GetFromJsonAsync<Availability>(Url, _lifetime.Token);
+            if (_disposed || target != Target || generation != _generation) return;
+            if (value?.Eligible == true && value.Snapshot is { } snapshot
+                && !string.IsNullOrWhiteSpace(snapshot.UpdatedAt) && !string.IsNullOrWhiteSpace(snapshot.BindingHash))
+            { _snapshot = snapshot; _loadedTarget = target; }
+            else if (value?.Eligible == true || value is null)
+                _error = "Technical review eligibility could not be confirmed. No request has been sent.";
+        }
+        catch (OperationCanceledException) when (_disposed) { }
+        catch (Exception)
+        {
+            if (!_disposed && target == Target && generation == _generation)
+                _error = "Technical review eligibility could not be loaded. No request has been sent.";
+        }
+    }
+
+    private async Task ApplyAsync()
+    {
+        if (_busy || _disposed || _loadedTarget != Target || _snapshot is not { } snapshot || string.IsNullOrWhiteSpace(_reason)) return;
+        var target = Target; var generation = _generation; var url = Url;
+        _busy = true; _error = null; _notice = null;
+        var accepted = false;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync(url, new
+            { expectedUpdatedAt = snapshot.UpdatedAt, expectedBindingHash = snapshot.BindingHash, reason = _reason.Trim() }, _lifetime.Token);
+            if (_disposed || target != Target || generation != _generation) return;
+            _snapshot = null; _loadedTarget = null;
+            if (response.IsSuccessStatusCode)
+            { accepted = true; _notice = "Technical review requested. Normal grooming will reconsider this task; engineering has not been started."; }
+            else _error = response.StatusCode == System.Net.HttpStatusCode.Conflict
+                ? "This task changed or is no longer eligible. Check current eligibility before requesting another review."
+                : "The request was not confirmed. Check current eligibility before retrying. Your reason has been kept.";
+        }
+        catch (OperationCanceledException) when (_disposed) { }
+        catch (Exception)
+        {
+            if (!_disposed && target == Target && generation == _generation)
+            { _snapshot = null; _loadedTarget = null; _error = "The request acknowledgement was interrupted. Check current eligibility before retrying. Your reason has been kept."; }
+        }
+        finally { if (!_disposed && target == Target && generation == _generation) _busy = false; }
+        if (accepted && !_disposed && target == Target && generation == _generation) await Requested.InvokeAsync();
+    }
+
+    public void Dispose() { _disposed = true; ++_generation; _lifetime.Cancel(); _lifetime.Dispose(); }
+    private sealed record Availability(bool Eligible, string? Reason, Snapshot? Snapshot);
+    private sealed record Snapshot(string UpdatedAt, string BindingHash);
+}

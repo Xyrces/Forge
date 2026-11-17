@@ -157,7 +157,7 @@ public sealed class OrchestratorAgentTests : IDisposable
             NullLoggerFactory.Instance,
             NullLogger<Forge.Orchestrator.WatchSweepService>.Instance);
 
-    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null)
+    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null, WakeupSignal? wakeup = null)
         => new OrchestratorAgent(
             _projectStore,
             new StubBundleFactory(_bundle),
@@ -169,7 +169,7 @@ public sealed class OrchestratorAgentTests : IDisposable
                 NullLogger<InProcessDispatcher>.Instance),
             _events,
             NullLogger<OrchestratorAgent>.Instance,
-            slots: slots);
+            slots: slots, wakeup: wakeup);
 
     private async Task RunWorkflowInProcess(IAgentRunner runner, IssueRecord issue, CancellationToken ct)
     {
@@ -848,6 +848,69 @@ public sealed class OrchestratorAgentTests : IDisposable
         {
             var err = p.StandardError.ReadToEnd();
             throw new InvalidOperationException($"git {string.Join(' ', arguments)} (cwd={cwd}) failed: {err}");
+        }
+    }
+
+    [Fact]
+    public async Task DispatchCycle_InadmissibleFirstBlockerCannotStarveSingleRoleSlotOrSelfWake()
+    {
+        await _projectStore.UpsertAsync(new NewProject("test", "Test", _workDir, "main"));
+        _bundle.Project.Roles["coredev"] = 1;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new RecordingBlockingRunner(gate);
+        var slots = new Forge.Orchestrator.Slots.SlotTable();
+        var wakeup = new WakeupSignal();
+        var orch = BuildOrchestrator(runner, slots, wakeup);
+        BindMaf(orch);
+        var eligible = await _issues.CreateAsync(new NewIssue("dev", "Eligible implementation"));
+        var blockedMember = await _issues.CreateAsync(new NewIssue("client", "Blocked sibling"));
+        var sprint = await ActivateSprintWithAsync(eligible.Id, blockedMember.Id);
+        var visibility = await _issues.CreateAsync(new NewIssue("dev", "Unplanned prerequisite", Metadata:
+            new Dictionary<string, object> { ["groomed"] = true }));
+        await _issues.AddDependencyAsync(visibility.Id, blockedMember.Id, IssueDepKind.Blocks);
+        await _bundle.Sprints.AddIssueAsync(sprint, visibility.Id);
+        var ready = await _issues.ReadyAsync(0);
+        Assert.True(ready.ToList().FindIndex(x => x.Id == visibility.Id) < ready.ToList().FindIndex(x => x.Id == eligible.Id));
+
+        // Invoke one real cycle; leave the eligible run blocked so slot accounting
+        // and the absence of an ineligible-dispatch completion signal are observable.
+        var cycle = typeof(OrchestratorAgent).GetMethod("DispatchCycleAsync",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            await (Task)cycle.Invoke(orch, [stop.Token])!;
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(eligible.Id, runner.TaskId);
+            Assert.Equal(1, slots.InFlight("test", "coredev"));
+            Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(visibility.Id))!.Status);
+            Assert.Null((await _issues.GetAsync(visibility.Id))!.DispatchCheckpoint);
+            Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(blockedMember.Id))!.Status);
+            using var noWake = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await wakeup.WaitAsync(noWake.Token));
+        }
+        finally
+        {
+            gate.TrySetResult();
+            await WaitForAsync(() => Task.FromResult(slots.InFlight("test", "coredev") == 0), TimeSpan.FromSeconds(10));
+        }
+        Assert.Equal(1, runner.Calls);
+        Assert.Equal(0, slots.InFlight("test", "coredev"));
+    }
+
+    private sealed class RecordingBlockingRunner(TaskCompletionSource gate) : IAgentRunner
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string? TaskId { get; private set; }
+        public int Calls { get; private set; }
+        public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            Calls++;
+            TaskId = context!["issueId"].ToString();
+            Started.TrySetResult();
+            await gate.Task.WaitAsync(ct);
+            return new("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1));
         }
     }
 
