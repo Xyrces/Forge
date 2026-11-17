@@ -62,6 +62,75 @@ public class ProductAgentTests : IDisposable
             NullLogger<ProductAgent>.Instance, runId: runId);
     }
 
+    [Theory]
+    [InlineData("epic")]
+    [InlineData("missing")]
+    [InlineData("foreign")]
+    [InlineData("self")]
+    [InlineData("cycle")]
+    public async Task InvalidDependencyDoesNotPersistOrComplete(string kind)
+    {
+        var current = await _specs.CreateAsync(new NewSpec("P", "Approved title", "approved scope", ParentIssueId: "epic-1"));
+        var target = kind switch
+        {
+            "epic" => "epic-1",
+            "missing" => "spec-missing",
+            "self" => current.Id,
+            "foreign" => (await _specs.CreateAsync(new NewSpec("Other", "Foreign", "body"))).Id,
+            _ => (await _specs.CreateAsync(new NewSpec("P", "Cycle", $"## Dependencies\n- depends_on {current.Id}"))).Id
+        };
+        var client = new DependencyRepairClient([UpdateCall(current.Id, $"## Dependencies\n- related {target}")]);
+        Assert.Null(await BuildAgent(client).RefineSpecAsync(current.Id, "P"));
+        var after = (await _specs.GetAsync(current.Id))!;
+        Assert.Equal(current, after);
+        Assert.Single(await _specs.ListVersionsAsync(current.Id));
+        Assert.Contains(client.ToolResults, result => result.Contains("error:", StringComparison.Ordinal));
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), item => item.Kind == "product.run.completed");
+    }
+
+    [Fact]
+    public async Task InvalidIssueDependencyCanBeRepairedInSameRunWithoutSavingBadVersion()
+    {
+        var current = await _specs.CreateAsync(new NewSpec("P", "Approved title", "approved scope", ParentIssueId: "epic-1"));
+        var dependency = await _specs.CreateAsync(new NewSpec("P", "Existing spec", "body"));
+        var corrected = $"## Summary\nApproved scope refined.\n## Dependencies\n- depends_on {dependency.Id}\n## Notes\nParent issue: epic-1";
+        var client = new DependencyRepairClient([
+            UpdateCall(current.Id, "## Dependencies\n- related epic-1"),
+            UpdateCall(current.Id, corrected)]);
+        var result = await BuildAgent(client).RefineSpecAsync(current.Id, "P");
+        Assert.NotNull(result);
+        Assert.Equal(2, result.CurrentVersion);
+        Assert.Equal(corrected, result.Body);
+        Assert.Equal(current.Title, result.Title);
+        Assert.Equal(current.ParentIssueId, result.ParentIssueId);
+        Assert.Equal(current.Status, result.Status);
+        Assert.Equal("product:test-run", result.Author);
+        Assert.Equal(2, (await _specs.ListVersionsAsync(current.Id)).Count);
+        Assert.Contains(client.ToolResults, text => text.Contains("epic-1") && text.Contains("Notes"));
+    }
+
+    private static FunctionCallContent UpdateCall(string id, string body) => new(Guid.NewGuid().ToString("N"), "update_spec",
+        new Dictionary<string, object?> { ["specIdArg"] = id, ["body"] = body });
+
+    private sealed class DependencyRepairClient(FunctionCallContent[] calls) : IChatClient
+    {
+        private int _index;
+        public List<string> ToolResults { get; } = [];
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            ToolResults.AddRange(messages.SelectMany(message => message.Contents).OfType<FunctionResultContent>()
+                .Select(result => result.Result?.ToString() ?? ""));
+            var message = _index < calls.Length
+                ? new ChatMessage(ChatRole.Assistant, new AIContent[] { calls[_index++] })
+                : new ChatMessage(ChatRole.Assistant, "Finished.");
+            return Task.FromResult(new ChatResponse(message));
+        }
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("This offline fixture exercises buffered Product calls only.");
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
     [Fact]
     public async Task RefineSpecAsync_AgentCallsUpdateSpec_BodyReplacedAndVersionBumped()
     {
