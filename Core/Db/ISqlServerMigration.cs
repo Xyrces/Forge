@@ -50,6 +50,7 @@ public static class SqlServerMigrations
         new M037ControlPlane(),
         new M038WorkerAttempts(),
         new M039BudgetUsage(),
+        new M040InitiativeApproval(),
     };
 
     public static int ExpectedVersion =>

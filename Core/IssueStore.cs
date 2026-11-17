@@ -216,7 +216,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 39;
+    public const int CurrentSchemaVersion = 40;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1017,6 +1017,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         ApplyV36FollowUpDraftTaskType(conn);
         Control.ControlSchema.Create(conn, SqliteDialect.Instance);
         M039BudgetUsage.ApplySqlite(conn);
+        M040InitiativeApproval.Create(conn, SqliteDialect.Instance);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;
@@ -1636,6 +1637,8 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
             workers.ExecuteNonQuery();
         }
 
+        M040InitiativeApproval.Create(conn, d);
+
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the
         // migrations' guards make them no-ops there). Each applied
@@ -1957,7 +1960,14 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
     {
         await using var conn = await _db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
+        var issue = await CreateInTransactionAsync(conn, tx, spec, ct);
+        await tx.CommitAsync(ct);
+        await PublishCreatedAsync(issue, ct);
+        return issue;
+    }
 
+    internal async Task<IssueRecord> CreateInTransactionAsync(DbConnection conn, DbTransaction tx, NewIssue spec, CancellationToken ct)
+    {
         // Per-type monotonic short_id; transaction keeps it race-safe.
         var shortId = await NextShortIdAsync(conn, tx, spec.Type);
         var shortIdStr = shortId.ToString();
@@ -1987,20 +1997,23 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }
 
         await InsertEventAsync(conn, tx, id, "created", spec.Description, ct);
-        await tx.CommitAsync(ct);
+        return new IssueRecord(id, shortIdStr, spec.Type, spec.Title, spec.Description,
+            IssueStatus.Pending, spec.Priority, spec.Assignee, now, now, null, metadataJson);
+    }
+
+    internal async Task PublishCreatedAsync(IssueRecord issue, CancellationToken ct)
+    {
         // Publish AFTER the mutation commits. The event is a hint —
         // consumers re-read the store; publish failures are swallowed
         // by the publisher (never break a DB mutation over a hint).
         await _events.PublishAsync(new Messaging.TaskEnqueued
         {
-            MessageId = Messaging.TaskEnqueued.IdFor(_projectId, id, now),
+            MessageId = Messaging.TaskEnqueued.IdFor(_projectId, issue.Id, issue.CreatedAt),
             ProjectId = _projectId,
-            TaskId = id,
-            TaskType = spec.Type,
-            EnqueuedAt = now,
+            TaskId = issue.Id,
+            TaskType = issue.Type,
+            EnqueuedAt = issue.CreatedAt,
         }, ct);
-        return new IssueRecord(id, shortIdStr, spec.Type, spec.Title, spec.Description,
-            IssueStatus.Pending, spec.Priority, spec.Assignee, now, now, null, metadataJson);
     }
 
     public async Task<IReadOnlyList<IssueRecord>> ListAsync(IssueFilter filter, CancellationToken ct = default)

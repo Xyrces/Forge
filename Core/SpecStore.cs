@@ -200,6 +200,15 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
     public async Task<SpecRecord> CreateAsync(NewSpec spec, CancellationToken ct = default)
     {
+        await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var result = await CreateInTransactionAsync(conn, tx, spec, ct);
+        await tx.CommitAsync(ct);
+        return result;
+    }
+
+    internal async Task<SpecRecord> CreateInTransactionAsync(DbConnection conn, DbTransaction tx, NewSpec spec, CancellationToken ct)
+    {
         if (string.IsNullOrWhiteSpace(spec.ProjectId))
             throw new ArgumentException("projectId is required", nameof(spec));
         if (string.IsNullOrWhiteSpace(spec.Title))
@@ -208,8 +217,6 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var now = DateTime.UtcNow;
         var id = $"spec-{Guid.NewGuid():N}";
 
-        await using var conn = await _issues.Db.OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
 
         await using (var cmd = conn.CreateCommand())
         {
@@ -246,7 +253,6 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
 
         await PersistExtractionAsync(conn, tx, id, spec.Body, ct);
 
-        await tx.CommitAsync(ct);
         // Round 'now' to the same precision IssueStore.DateFormat
         // (millisecond) so the in-memory UpdatedAt matches the
         // value the DB stored. Without this, the next update
