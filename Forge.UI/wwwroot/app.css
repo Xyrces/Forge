@@ -435,6 +435,11 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .confirm-dialog__danger:hover { filter: brightness(1.1); }
 .banner--error { background: rgba(255, 107, 122, 0.10); border: 1px solid var(--error); color: var(--on-surface); }
 .banner > span { flex: 1; }
+/* Multi-paragraph workflow explanations keep their reading order at narrow widths. */
+.banner--stacked { flex-direction: column; align-items: flex-start; gap: 8px; overflow-wrap: anywhere; }
+.banner--stacked > * { max-width: 100%; min-width: 0; }
+.banner--stacked > p, .banner--stacked > ul { margin: 0; }
+.banner--stacked > ul { padding-inline-start: 18px; }
 .banner--warn:has(.cert-help) { flex-direction: column; align-items: stretch; }
 
 /* Cert trust help (OS-aware install one-liners + copy buttons) */

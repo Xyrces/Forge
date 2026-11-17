@@ -608,7 +608,8 @@ public static class ForgeComposition
             IngestionForProject,
             id => projectFactory.Find(id)?.Specs ?? throw new InvalidOperationException($"Unknown initiative project {id}"),
             (project, spec, ct) => productAgentFactory.Create().RefineSpecAsync(spec, project, ct), eventBus,
-            loggerFactory.CreateLogger<ProductRefinementQueue>());
+            loggerFactory.CreateLogger<ProductRefinementQueue>(),
+            repair: (project, spec, diagnostics, ct) => productAgentFactory.Create().RefineSpecAsync(spec, project, ct, diagnostics));
         services.AddSingleton(productRefinementQueue);
         var groomerFactory = new GroomerAgentFactory(
             issues, routingSpecStore, eventBus, chatClientFactory, llmConfig, loggerFactory,

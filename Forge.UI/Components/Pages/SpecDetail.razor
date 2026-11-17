@@ -15,7 +15,7 @@
             @(SpecProp("title") ?? SpecId)
         </h1>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="LoadAsync">Refresh</button>
+            <button class="btn btn--primary" @onclick="LoadAsync" disabled="@_acting">Refresh</button>
         </div>
     </div>
 
@@ -56,7 +56,7 @@
                doesn't ship its own copy of the state machine. *@
             @if (ActionProp("refinementState") is { } refinement)
             {
-                <div class="banner banner--info">
+                <div class="banner banner--info banner--stacked">
                     <strong>Initiative approved · specification refinement: @refinement</strong>
                     @if (refinement != "Completed")
                     {
@@ -69,9 +69,28 @@
                     }
                 </div>
             }
+            @if (ActionProp("designState") == "HygieneFailed" && ActionProp("designHygieneReport") is { } hygiene)
+            {
+                <div class="banner banner--error banner--stacked">
+                    <strong>Design validation needs attention</strong>
+                    <p>@ActionProp("designError")</p>
+                    <ul>
+                        @foreach (var finding in HygieneFindings(hygiene))
+                        {
+                            <li>@finding</li>
+                        }
+                    </ul>
+                    <a href="/designs">Review Design</a>
+                    @if (ActionFlag("canRepairHygiene"))
+                    {
+                        <p>Refine the same approved scope again using these diagnostics. Existing versions are retained. This requests another Product model run and may incur a charge.</p>
+                        <button class="btn btn--small" disabled="@(_acting || _loadedActionTarget != ActionTarget)" @onclick="RepairHygieneAsync">Refine again</button>
+                    }
+                </div>
+            }
             @if (ActionProp("groomingState") is { } groomingState || ActionFlag("groomingRetryAvailable"))
             {
-                <div class="banner banner--info">
+                <div class="banner banner--info banner--stacked">
                     <strong>Technical planning: @GroomingLabel(ActionProp("groomingState"))</strong>
                     @if (!string.IsNullOrWhiteSpace(ActionProp("groomingRetryReason")))
                     {
@@ -200,6 +219,53 @@
 
     private JsonElement? _spec;
     private JsonElement? _actions;
+    private static IReadOnlyList<string> HygieneFindings(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return ["Open Design to review the validation report."];
+            var findings = doc.RootElement.EnumerateObject().FirstOrDefault(p => p.Name.Equals("findings", StringComparison.OrdinalIgnoreCase)).Value;
+            if (findings.ValueKind != JsonValueKind.Array) return ["Open Design to review the validation report."];
+            if (findings.EnumerateArray().Any(f => f.ValueKind != JsonValueKind.Object)) return ["Open Design to review the validation report."];
+            var messages = findings.EnumerateArray().Select(f => string.Join(" ", f.EnumerateObject()
+                .Where(p => p.Name.Equals("message", StringComparison.OrdinalIgnoreCase) || p.Name.Equals("fixSuggestion", StringComparison.OrdinalIgnoreCase))
+                .Select(p => p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : null).Where(v => !string.IsNullOrWhiteSpace(v)))).Where(v => !string.IsNullOrWhiteSpace(v)).ToArray();
+            return messages.Length == 0 ? ["Open Design to review the validation report."] : messages;
+        }
+        catch (JsonException) { return ["Open Design to review the validation report."]; }
+    }
+
+    private async Task RepairHygieneAsync()
+    {
+        if (_acting || !ActionFlag("canRepairHygiene") || _loadedActionTarget != ActionTarget) return;
+        var target = ActionTarget;
+        var generation = _loadGeneration;
+        var url = $"/api/specs/{Uri.EscapeDataString(SpecId)}/refine-again" + LensQuery;
+        var request = new
+        {
+            proposalId = ActionProp("initiativeProposalId"), revision = int.Parse(ActionProp("initiativeRevision")!),
+            hash = ActionProp("initiativeHash"), specVersion = int.Parse(SpecProp("currentVersion")!),
+            designRunId = long.Parse(ActionProp("designRunId")!)
+        };
+        _acting = true;
+        _actionError = null;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync(url, request, _disposeCts.Token);
+            if (target != ActionTarget || generation != _loadGeneration) return;
+            if (!response.IsSuccessStatusCode) _actionError = "Refinement repair was not accepted. Reload and review the latest design diagnostics.";
+            else { _acting = false; await LoadAsync(); }
+        }
+        catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (target == ActionTarget && generation == _loadGeneration)
+                _actionError = "Refinement repair acknowledgement was interrupted. Refresh before requesting another run.";
+        }
+        finally { if (target == ActionTarget && generation == _loadGeneration) _acting = false; }
+    }
+
     private List<StoryVm> _stories = new();
     private List<TaskVm> _orphanTasks = new();
     private List<GroomRunVm> _groomRuns = new();
@@ -251,6 +317,7 @@
         var target = ActionTarget;
         if (_loadedSpecTarget != target)
         {
+            _acting = false;
             _spec = null;
             _actions = null;
             _loadedActionTarget = null;
