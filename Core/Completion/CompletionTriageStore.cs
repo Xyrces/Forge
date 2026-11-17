@@ -7,6 +7,33 @@ namespace Forge.Core.Completion;
 
 public sealed partial class SprintCompletionStore
 {
+    public async Task<IReadOnlyList<FollowUpDraft>> ListUnclaimedDraftsAsync(string completionId, CancellationToken ct = default)
+    {
+        var completion = await GetAsync(completionId, ct) ?? throw new InvalidOperationException("Completion not found.");
+        var d = issues.Db.Dialect;
+        await using var connection = await issues.Db.OpenAsync(ct);
+        using var command = Command(connection, null, $"SELECT {d.Top(100)}f.id FROM {T("followup_draft")} f WHERE f.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=f.id) AND (f.sprint_id=@sprint OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id=@sprint AND m.issue_id=f.source_issue_id)) ORDER BY f.id{d.Limit(100)}", ("@sprint", completion.SprintId));
+        var ids = new List<long>();
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+            while (await reader.ReadAsync(ct)) ids.Add(Convert.ToInt64(reader.GetValue(0)));
+        var drafts = new FollowUpDraftStore(issues);
+        var result = new List<FollowUpDraft>();
+        foreach (var id in ids) result.Add(await drafts.GetAsync(id, ct) ?? throw new InvalidOperationException("Draft disappeared."));
+        return result;
+    }
+
+    public async Task MarkBookkeepingCompleteAsync(string completionId, CancellationToken ct = default)
+    {
+        await using var connection = await issues.Db.OpenAsync(ct);
+        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed')", ("@now", Now()), ("@id", completionId));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+    public async Task RecordTriageFailureAsync(string batchId, string error, CancellationToken ct = default)
+    {
+        await using var connection = await issues.Db.OpenAsync(ct);
+        using var command = Command(connection, null, $"UPDATE {T("completion_triage")} SET state='NeedsReview',error=@error,updated_at=@now WHERE id=@id AND state='Running'", ("@error", error), ("@now", Now()), ("@id", batchId));
+        await command.ExecuteNonQueryAsync(ct);
+    }
     private static CompletionTriageBatch ReadBatch(DbDataReader reader) => new(reader.GetString(0), reader.GetString(1),
         reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4),
         reader.IsDBNull(5) ? null : reader.GetString(5), IssueStore.ParseTime(reader.GetString(6)));
@@ -17,10 +44,16 @@ public sealed partial class SprintCompletionStore
         await using var reader = await command.ExecuteReaderAsync(ct);
         return await reader.ReadAsync(ct) ? ReadBatch(reader) : null;
     }
-    public async Task<IReadOnlyList<CompletionTriageBatch>> ListBatchesAsync(string completionId, CancellationToken ct = default)
+    public async Task<IReadOnlyList<CompletionTriageBatch>> ListBatchesAsync(string completionId, CancellationToken ct = default,
+        int limit = 100, string? afterId = null, bool actionableOnly = false)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, BatchQuery + " WHERE completion_id=@completion ORDER BY id", ("@completion", completionId));
+        var d = issues.Db.Dialect;
+        var take = Math.Clamp(limit, 1, 100);
+        using var command = Command(connection, null, BatchQuery.Replace("SELECT ", $"SELECT {d.Top(take)}", StringComparison.Ordinal)
+            + " WHERE completion_id=@completion" + (afterId is null ? "" : " AND id>@after")
+            + (actionableOnly ? " AND state IN ('Pending','Decided')" : "")
+            + $" ORDER BY id{d.Limit(take)}", ("@completion", completionId), ("@after", afterId));
         var result = new List<CompletionTriageBatch>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct)) result.Add(ReadBatch(reader));
@@ -44,11 +77,12 @@ public sealed partial class SprintCompletionStore
         {
             if (draft.SprintId != completion.SprintId && !members.Contains(draft.SourceIssueId))
                 throw new InvalidOperationException("Draft does not belong to this completion.");
-            using var check = Command(connection, tx, $"SELECT title,description,source_issue_id,source_role,priority,COALESCE(task_type,''),consumed_at FROM {T("followup_draft")} WHERE id=@id", ("@id", draft.Id));
+            using var check = Command(connection, tx, $"SELECT title,description,source_issue_id,source_role,priority,COALESCE(task_type,''),consumed_at,COALESCE(sprint_id,''),COALESCE(blocks_issue_id,'') FROM {T("followup_draft")} WHERE id=@id", ("@id", draft.Id));
             await using (var reader = await check.ExecuteReaderAsync(ct))
                 if (!await reader.ReadAsync(ct) || reader.GetString(0) != draft.Title || reader.GetString(1) != draft.Description
                     || reader.GetString(2) != draft.SourceIssueId || reader.GetString(3) != draft.SourceRole
-                    || Convert.ToInt32(reader.GetValue(4)) != draft.Priority || reader.GetString(5) != (draft.TaskType ?? "") || !reader.IsDBNull(6))
+                    || Convert.ToInt32(reader.GetValue(4)) != draft.Priority || reader.GetString(5) != (draft.TaskType ?? "") || !reader.IsDBNull(6)
+                    || reader.GetString(7) != (draft.SprintId ?? "") || reader.GetString(8) != (draft.BlocksIssueId ?? ""))
                     throw new InvalidOperationException("Draft changed or was already consumed.");
             using var claim = Command(connection, tx, $"INSERT INTO {T("completion_draft_claim")}(draft_id,batch_id) VALUES(@draft,@batch)", ("@draft", draft.Id), ("@batch", id));
             await claim.ExecuteNonQueryAsync(ct);
@@ -57,7 +91,7 @@ public sealed partial class SprintCompletionStore
             ("@id", id), ("@completion", completionId), ("@sources", JsonSerializer.Serialize(drafts.OrderBy(d => d.Id))), ("@now", Now()));
         await insert.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
-        return (await ListBatchesAsync(completionId, ct)).Single(b => b.Id == id);
+        return (await GetBatchAsync(connection, null, id, ct))!;
     }
     public async Task<bool> TryBeginTriageAsync(string batchId, CancellationToken ct = default)
     {
@@ -89,6 +123,9 @@ public sealed partial class SprintCompletionStore
     }
 
     public async Task<string?> MaterializeItemAsync(string batchId, int itemIndex, string? proposalId = null, CancellationToken ct = default)
+        => (await MaterializeItemWithResultAsync(batchId, itemIndex, proposalId, ct)).TargetId;
+
+    public async Task<CompletionMaterializationResult> MaterializeItemWithResultAsync(string batchId, int itemIndex, string? proposalId = null, CancellationToken ct = default)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
         await using var tx = await connection.BeginTransactionAsync(ct);
@@ -106,7 +143,10 @@ public sealed partial class SprintCompletionStore
             if (!reader.IsDBNull(0))
             {
                 if (reader.GetString(0) != itemKey) throw new InvalidOperationException("Conflicting materialization.");
-                return reader.IsDBNull(1) ? null : reader.GetString(1);
+                var existingTarget = reader.IsDBNull(1) ? null : reader.GetString(1);
+                if (item.Action == "epic" && existingTarget != proposalId)
+                    throw new InvalidOperationException("Proposal identity cannot change on replay.");
+                return new(existingTarget, false);
             }
         }
         var source = JsonSerializer.Deserialize<FollowUpDraft[]>(batch.SourcesJson)!.Where(d => item.SourceDraftIds.Contains(d.Id)).ToArray();
@@ -129,7 +169,7 @@ public sealed partial class SprintCompletionStore
         foreach (var id in item.SourceDraftIds)
         {
             using var consume = Command(connection, tx, $"UPDATE {T("followup_draft")} SET consumed_at=@now,disposition=@action,disposition_detail=@target WHERE id=@id AND consumed_at IS NULL",
-                ("@now", Now()), ("@action", item.Action == "epic" ? "proposal" : item.Action), ("@target", target ?? item.Reason), ("@id", id));
+                ("@now", Now()), ("@action", item.Action switch { "epic" => "proposal", "merge" => "merged", "discard" => "discarded", _ => "materialized" }), ("@target", target ?? item.Reason), ("@id", id));
             if (await consume.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Draft already consumed outside its batch.");
             using var claim = Command(connection, tx, $"UPDATE {T("completion_draft_claim")} SET item_key=@key,target_id=@target WHERE draft_id=@id AND batch_id=@batch AND item_key IS NULL",
                 ("@key", itemKey), ("@target", target), ("@id", id), ("@batch", batchId));
@@ -139,7 +179,7 @@ public sealed partial class SprintCompletionStore
         await finish.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
         if (created is not null) await issues.PublishCreatedAsync(created, ct);
-        return target;
+        return new(target, item.Action != "discard");
     }
     public async Task RecoverRunningAsync(CancellationToken ct = default)
     {
@@ -147,10 +187,10 @@ public sealed partial class SprintCompletionStore
         using var command = Command(connection, null, $"UPDATE {T("completion_triage")} SET state='NeedsReview',error='Triage interrupted; previous paid request may have completed. Explicit retry required.',updated_at=@now WHERE state='Running'", ("@now", Now()));
         await command.ExecuteNonQueryAsync(ct);
     }
-    public async Task<bool> RetryTriageAsync(string batchId, CancellationToken ct = default)
+    public async Task<bool> RetryTriageAsync(string batchId, CancellationToken ct = default, string? completionId = null)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, $"UPDATE {T("completion_triage")} SET state='Pending',error=NULL,updated_at=@now WHERE id=@id AND state='NeedsReview'", ("@now", Now()), ("@id", batchId));
+        using var command = Command(connection, null, $"UPDATE {T("completion_triage")} SET state='Pending',error=NULL,updated_at=@now WHERE id=@id AND state='NeedsReview' AND (@completion IS NULL OR completion_id=@completion)", ("@now", Now()), ("@id", batchId), ("@completion", completionId));
         return await command.ExecuteNonQueryAsync(ct) == 1;
     }
 }

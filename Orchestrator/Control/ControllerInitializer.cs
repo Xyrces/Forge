@@ -156,7 +156,8 @@ public static class ControllerInitializer
         // Worker tools may read approved context, but only the controller's
         // operator-facing approval path may change authority or ingestion receipts.
         // The existence guard keeps the schema-39 compatibility bridge usable.
-        return string.Concat(new[] { "initiative_proposal", "initiative_revision", "initiative_ingestion", "initiative_lock" }
+        return string.Concat(new[] { "initiative_proposal", "initiative_revision", "initiative_ingestion", "initiative_lock",
+                "sprint_completion", "completion_triage", "completion_draft_claim", "completion_lock", "completion_criterion_evidence", "deployment" }
             .Select(table => $"IF OBJECT_ID(N'proj_forge.{table}',N'U') IS NOT NULL BEGIN "
                 + $"GRANT SELECT ON OBJECT::[proj_forge].[{table}] TO [{workerPrincipal}];"
                 + $"DENY INSERT,UPDATE,DELETE ON OBJECT::[proj_forge].[{table}] TO [{workerPrincipal}]; END;"));

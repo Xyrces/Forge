@@ -16,3 +16,5 @@ public sealed record CompletionTriageBatch(
 public sealed record CompletionEvidence(
     long? PlanAuditId, string? PlanHash, EngineeringOutcome Outcome, string EvidenceJson,
     bool ReadyForDeployment = false);
+
+public sealed record CompletionMaterializationResult(string? TargetId, bool Created);

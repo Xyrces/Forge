@@ -39,16 +39,28 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
         await using var connection = await issues.Db.OpenAsync(ct);
         return await GetAsync(connection, null, id, ct);
     }
+    public async Task<IReadOnlyList<SprintCompletionRecord>> ListVisibleAsync(int limit = 20, string? afterId = null, CancellationToken ct = default, bool waitingOnly = false)
+        => await ListAsync(waitingOnly ? "bookkeeping_state <> 'Completed' OR outcome='PendingEvidence' OR (ready_for_deployment=1 AND deployment_candidate_id IS NULL)" : "1=1", limit, afterId, ct);
+
+    public async Task<string?> GetDeploymentStatusAsync(string completionId, CancellationToken ct = default)
+    {
+        await using var connection = await issues.Db.OpenAsync(ct);
+        using var command = Command(connection, null, $"SELECT d.status FROM {T("deployment")} d INNER JOIN {T("sprint_completion")} c ON c.deployment_candidate_id=d.id AND d.completion_id=c.id WHERE c.id=@id", ("@id", completionId));
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
     public async Task<IReadOnlyList<SprintCompletionRecord>> ListAwaitingDeploymentAsync(int limit = 50, string? afterId = null, CancellationToken ct = default)
         => await ListAsync("ready_for_deployment=1 AND deployment_candidate_id IS NULL", limit, afterId, ct);
+    public async Task<IReadOnlyList<SprintCompletionRecord>> ListAwaitingDeliveryOutcomeAsync(int limit = 50, string? afterId = null, CancellationToken ct = default)
+        => await ListAsync("ready_for_deployment=1 AND deployment_candidate_id IS NOT NULL AND outcome='PendingEvidence'", limit, afterId, ct);
     public async Task<IReadOnlyList<SprintCompletionRecord>> ListPendingBookkeepingAsync(int limit = 50, string? afterId = null, CancellationToken ct = default)
-        => await ListAsync("bookkeeping_state <> 'Completed'", limit, afterId, ct);
+        => await ListAsync($"bookkeeping_state <> 'Completed' OR EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", limit, afterId, ct);
     private async Task<IReadOnlyList<SprintCompletionRecord>> ListAsync(string predicate, int limit, string? afterId, CancellationToken ct)
     {
         var d = issues.Db.Dialect;
         await using var connection = await issues.Db.OpenAsync(ct);
         using var command = Command(connection, null, Query.Replace("SELECT ", $"SELECT {d.Top(Math.Clamp(limit, 1, 100))}", StringComparison.Ordinal)
-            + $" WHERE {predicate}" + (afterId is null ? "" : " AND id>@after") + $" ORDER BY id{d.Limit(Math.Clamp(limit, 1, 100))}", ("@after", afterId));
+            + $" WHERE ({predicate})" + (afterId is null ? "" : " AND id>@after") + $" ORDER BY id{d.Limit(Math.Clamp(limit, 1, 100))}", ("@after", afterId));
         var result = new List<SprintCompletionRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct)) result.Add(Read(reader));
@@ -59,12 +71,16 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
         CompletionEvidence evidence, CancellationToken ct = default)
     {
         var id = "completion-" + sprintId;
-        if (members.Count == 0 || members.Select(m => m.Id).Distinct(StringComparer.Ordinal).Count() != members.Count)
-            throw new InvalidOperationException("Completion requires distinct executable members; empty or missing work is not delivery evidence.");
+        if (members.Select(m => m.Id).Distinct(StringComparer.Ordinal).Count() != members.Count)
+            throw new InvalidOperationException("Completion requires distinct executable members.");
         if (members.Any(m => m.Status is not (IssueStatus.Completed or IssueStatus.Closed)))
             throw new InvalidOperationException("Unfinished, failed or blocked members prevent completion.");
         if (evidence.Outcome == EngineeringOutcome.Satisfied && (evidence.PlanAuditId is null || evidence.PlanHash is null))
             throw new InvalidOperationException("Legacy terminal work cannot claim verified outcome delivery.");
+        if ((evidence.ReadyForDeployment || evidence.Outcome == EngineeringOutcome.Satisfied)
+            && (members.Count == 0 || members.Any(m => !TaskDeliveryEvidence.IsMergedAndVerified(m))
+                || evidence.PlanAuditId is null || evidence.Outcome is EngineeringOutcome.Incomplete or EngineeringOutcome.LegacyTerminalOnly))
+            throw new InvalidOperationException("Verified member publication and a bound plan are required for delivery.");
         await using var connection = await issues.Db.OpenAsync(ct);
         await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         await LockAsync(connection, tx, ct);
@@ -91,6 +107,18 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
             }
         }
         if (!actual.SetEquals(members.Select(m => m.Id))) throw new InvalidOperationException("Completion membership changed.");
+        if (evidence.PlanAuditId is { } auditId)
+        {
+            using var audit = Command(connection, tx, $"SELECT weights_json FROM {T("sprint_proposal_audit")} WHERE id=@audit AND committed_sprint_id=@sprint AND id=(SELECT MAX(id) FROM {T("sprint_proposal_audit")} WHERE committed_sprint_id=@sprint)", ("@audit", auditId), ("@sprint", sprintId));
+            var weights = await audit.ExecuteScalarAsync(ct) as string;
+            var plan = weights is null ? null : SprintPlanJson.ReadAuditPlan(weights);
+            if (plan is null || plan.Hash != evidence.PlanHash || plan.ProjectId != issues.ProjectId
+                || !actual.SetEquals(plan.Members.Select(m => m.TaskId)))
+                throw new InvalidOperationException("Committed completion plan changed or does not cover the exact members.");
+            if (evidence.Outcome == EngineeringOutcome.Satisfied && plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved))
+                throw new InvalidOperationException("Deployment criteria require the linked deployment outcome.");
+        }
+        else if (evidence.PlanHash is not null) throw new InvalidOperationException("Plan hash requires a bound audit.");
         var now = Now();
         using (var insert = Command(connection, tx, $"INSERT INTO {T("sprint_completion")}(id,project_id,sprint_id,plan_audit_id,plan_hash,outcome,members_json,evidence_json,bookkeeping_state,created_at,updated_at,ready_for_deployment) VALUES(@id,@project,@sprint,@audit,@hash,@outcome,@members,@evidence,'Pending',@now,@now,@ready)",
             ("@id", id), ("@project", issues.ProjectId), ("@sprint", sprintId), ("@audit", evidence.PlanAuditId), ("@hash", evidence.PlanHash),
@@ -137,4 +165,5 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
         using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET delivery_note=@note,updated_at=@now WHERE id=@id", ("@note", note), ("@now", Now()), ("@id", id));
         if (await command.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Completion not found.");
     }
+
 }

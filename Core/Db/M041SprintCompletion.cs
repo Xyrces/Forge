@@ -19,6 +19,7 @@ public sealed class M041SprintCompletion : ISqlServerMigration
         var integer = sqlServer ? "BIGINT" : "INTEGER";
         var tables = new Dictionary<string, string>
         {
+            ["completion_criterion_evidence"] = $"completion_id {key} NOT NULL,criterion_id {key} NOT NULL,plan_hash {key} NOT NULL,source_sha {key} NOT NULL,deployment_id {key} NOT NULL,proof_ref {text} NOT NULL,proof_sha256 {key} NOT NULL,operator_identity {key} NOT NULL,observed_at {key} NOT NULL,PRIMARY KEY(completion_id,criterion_id)",
             ["completion_lock"] = "id INT NOT NULL PRIMARY KEY,value INT NOT NULL",
             ["sprint_completion"] = $"id {key} NOT NULL PRIMARY KEY,project_id {key} NOT NULL,sprint_id {key} NOT NULL UNIQUE,plan_audit_id {integer} NULL,plan_hash {key} NULL,outcome {key} NOT NULL,members_json {text} NOT NULL,evidence_json {text} NOT NULL,bookkeeping_state {key} NOT NULL,source_sha {key} NULL,deployment_candidate_id {key} NULL,created_at {key} NOT NULL,updated_at {key} NOT NULL,ready_for_deployment INT NOT NULL,delivery_note {text} NULL",
             ["completion_triage"] = $"id {key} NOT NULL PRIMARY KEY,completion_id {key} NOT NULL,state {key} NOT NULL,sources_json {text} NOT NULL,decision_json {text} NULL,error {text} NULL,updated_at {key} NOT NULL",
