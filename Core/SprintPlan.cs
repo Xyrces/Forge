@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace Forge.Core;
 
-public enum SprintEvidenceKind { MergedAndVerified, DeploymentHealthy }
+public enum SprintEvidenceKind { MergedAndVerified, DeploymentHealthy, OperatorObserved }
 public enum SprintMemberReason { Delivers, Prerequisite, Remediates }
 public sealed record SprintScopeReference(string SpecId, string ProposalId, int Revision, string Hash, string ApprovedExcerpt);
 public sealed record SprintCriterion(string Id, string Text, SprintEvidenceKind EvidenceKind, SprintScopeReference Scope);
