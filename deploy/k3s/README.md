@@ -45,6 +45,10 @@ Supply a private connection-string file and private appsettings file. Do not put
 credentials in command arguments or checked-in examples. The SQL connection must
 target the separately prepared fresh Forge-owned database/state, not an unrelated
 service's schemas. The installer never drops data or resets an existing dataset.
+Set `State.WriteAuthority=true` in the private appsettings file so lifecycle
+violations are reported in authority mode. Keep the four operator stage gates
+held until the intended pilot is ready; holding sprint assembly does not pause
+engineering tasks already assigned to the active sprint.
 
 ```sh
 python3 deploy/k3s/install.py \

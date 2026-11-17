@@ -1,6 +1,31 @@
 # Forge revival review and Forge-first restart plan
 
-**Review date: November 16, 2026. Scope: analysis and plan first.** Settled requirements: use the existing Linux host initially, discard the old service workload/state, retain the existing Azure SQL service for Forge persistence, and prioritize correctness. The recommended sequence is Forge first, TimeLoop second. Migration, deployment, paid evaluations, and game changes remain future work. SSH access and plugged-in availability settings were separately requested and applied.
+**Current status, November 17, 2026: the controlled Forge-first pilot is complete.**
+Implementation and live qualification followed the initial review. Forge now runs on single-node K3s with embedded etcd,
+fresh Azure SQL application state, separate controller/worker identities and an
+independent release Job. Initial startup, API controller replacement, post-stop
+rollback and a newer-source upgrade are recorded in
+**[Live qualification and remaining proof](live-qualification.md)**. The bounded
+Forge task has produced trusted worker verification, automatically opened PR #124,
+green CI and exact-head review approval. A live recovery defect was repaired;
+explicit normal adoption restored the watch, controller replacement preserved it,
+and Forge merged PR #124. Its CI-qualified merged-source image was deployed through
+the normal API at 05:22:49 UTC. Operator receipt registration, deployment approval
+and explicit recovery actions were involved; this is not a claim of fully
+unattended operation. All stage gates are held, the pilot task is Completed/Merged,
+and conservative accounting is $24.809140 within the unchanged $25 cap. Work targets
+`codex/forge-first-k3s`, not `main`. TimeLoop onboarding,
+benchmark experiments and dedicated GitHub worker/approver identities remain later
+stages; see [benchmark next steps](benchmark-next.md).
+
+**Historical baseline, November 16, 2026:** this document and its linked reviews
+began as analysis and planning before implementation was authorized. Requirements
+were to reuse the Linux host, discard the old workload/state, retain Azure SQL,
+and prioritize correctness, with Forge first and TimeLoop second. The findings
+below describe the pinned baseline and informed the subsequent changes; they do
+not assert that every original defect remains unfixed. Consult the live evidence
+for current acceptance and limitations. SSH access and plugged-in availability
+settings were separately requested and applied.
 
 ## Recommendation
 
