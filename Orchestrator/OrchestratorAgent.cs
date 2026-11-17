@@ -23,6 +23,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ConcurrentDictionary<string, ProjectDispatchBundle> _bundles = new();
     private SpawnerOptions _spawnerOptions = new();
+    private string? _branchDatasetId;
     private readonly Slots.SlotTable _slots;
     private readonly int _maxRetryCount;
     // GitHub rate-limit cooldown for the PR-watch path. When Octokit
@@ -469,6 +470,9 @@ public sealed class OrchestratorAgent : IAgent
                     }
                 }
                 claimedMeta["dispatchId"] = dispatchId;
+                claimedMeta["branch"] = Workflow.DispatchBranch.Resolve(
+                    claimedMeta.TryGetValue("branch", out var existingBranch) ? existingBranch as string : null,
+                    _branchDatasetId, bundle.Project.Id, issue.Id);
                 await bundle.IssueStore.TransitionAsync(issue.Id, issue.Status, error: null, metadata: claimedMeta, ct: cancellationToken);
             }
             using var dispatchScope = _logger.BeginScope("DispatchId={DispatchId}", dispatchId);
@@ -712,6 +716,9 @@ public sealed class OrchestratorAgent : IAgent
     internal void BindOptions(AgentOptions options)
     {
         _spawnerOptions = options.Spawner;
+        if (options.Controller.Enabled && string.IsNullOrWhiteSpace(options.Controller.DatasetId))
+            throw new InvalidOperationException("Distributed dispatch requires a dataset identity for branch isolation.");
+        _branchDatasetId = options.Controller.Enabled ? options.Controller.DatasetId : null;
         // Provider+model map for per-model 429 cooldowns. Only names
         // are used (cooldown keys) — secret resolution stays with the
         // real chat-client factory. Invalid/absent config degrades to

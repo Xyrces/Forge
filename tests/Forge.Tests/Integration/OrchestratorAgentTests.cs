@@ -516,6 +516,31 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task DispatchSingleTask_FreshDataset_StampsIsolatedBranchBeforeWorkflow()
+    {
+        var orch = BuildOrchestrator(new ScriptedRunner("NO_CHANGES_NEEDED"));
+        BindMaf(orch);
+        orch.BindOptions(new AgentOptions { Controller = new ControllerOptions { Enabled = true, DatasetId = "fresh-dataset" } });
+        var issue = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "Fresh task"));
+
+        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        var after = (await _issues.GetAsync(issue.Id))!;
+        var branch = DispatchBranch.Resolve(null, "fresh-dataset", _bundle.Project.Id, issue.Id);
+        Assert.Equal(branch, after.GetMetadata("branch"));
+        Assert.Equal(branch, RunGitCaptureSha(after.GetMetadata("worktreePath")!, "branch --show-current"));
+    }
+
+    [Fact]
+    public void DistributedDispatch_RejectsMissingDatasetAtOptionsBinding()
+    {
+        var orch = BuildOrchestrator(new ScriptedRunner("NO_CHANGES_NEEDED"));
+        Assert.Throws<InvalidOperationException>(() => orch.BindOptions(
+            new AgentOptions { Controller = new ControllerOptions { Enabled = true } }));
+    }
+
+    [Fact]
     public async Task DispatchSingleTask_MafPath_NoOpBranch_CapturesModelResponse()
     {
         const string scripted = "I'll add a feature but make no edits. NO_CHANGES_NEEDED";
