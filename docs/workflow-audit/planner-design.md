@@ -109,8 +109,25 @@ Finish the current sprint unless the operator explicitly interrupts it. Unrelate
 
 The core direction is settled; these are defaults to make explicit rather than reasons to stop the invariant repairs:
 
-- **Initial size limit:** propose at most 10 engineering tasks including prerequisites, applied uniformly. Unknown effort is visible and encourages smaller slices; task count is not a substitute for effort or spend estimates.
+- **Initial size limit (settled):** configurable ceiling of 10 engineering tasks including prerequisites, applied uniformly. Unknown effort is visible and encourages smaller slices; task count is not a substitute for effort or spend estimates.
 - **Abandoned outcomes:** propose a distinct cancelled/partial disposition in sprint presentation rather than overloading Completed or silently archiving work. Specify which operator actions may remove a required criterion.
 - **Scope ambiguity:** propose draft/exclude when nonessential, and an explicit blocked decision when essential. No automatic approval of a new initiative because a model calls it remediation.
 
 These defaults require agreement before their product-facing behavior is implemented. The urgency rule above is settled; the remaining design proposals are not implementation authorization.
+
+
+## Outcome planner implementation contract (2026-11-17)
+
+The operator settled the numerical policy: **10 is the configurable ceiling, not a target**, and includes all engineering prerequisites. Select a small independently useful delivery unit. A soft preference may add naturally independent, explicitly related units to use configured role capacity (for example three ready same-goal tasks for three CoreDev slots). It never adds unrelated work, fills to ten, manufactures splits, or rewards sequential chains as parallel capacity. Current slot occupancy is not an input.
+
+Grooming uses its existing model call to publish `sprintOutcome` typed JSON: an explicit outcome identity/objective, complete required member set, observable criteria and evidence kinds, each member's criterion contribution, and exact approved scope references. `bind_outcome` validates project-local approved-ingestion revision/hash and completed refinement against intact accepted content. Literal scope excerpts make the mapping reviewable; the semantic judgment remains grooming's responsibility, not an implication that text matching proves meaning. Missing legacy mappings fail closed rather than creating new approval.
+
+`SprintPlanBuilder` reads bounded projections (at most 100 discovery candidates plus 100 explicitly same-outcome candidates) and targeted dependency/ancestor rows. Empty discovery pages advance a keyset cursor so ineligible old work does not permanently starve later work. It caches the deterministic selected result by observed candidate/snapshot/capacity inputs; no planner model call or transient slot/budget state participates. The window is explicit: it does not claim exhaustive whole-backlog optimization. Existing unrelated completion bookkeeping scans are separate from these bounded planning inputs.
+
+`SprintActivationValidator` is shared by automatic assembly, proposal commit, generic activation and active membership amendments. It rejects incomplete delivery units, missing authority, changed/foreign specifications, ungroomed prerequisites, inconsistent criterion definitions and over-ceiling closures. Proposal commits accept the complete recorded member set and canonical objective, not arbitrary substituted IDs or goal text. A necessary prerequisite whose declared delivery partner is absent from the dependency closure is deferred for correct grooming; it is not silently omitted.
+
+`SprintStore` writes membership and `weights_json.plan` audit together, with the current approval receipt rechecked in the same database transaction. The plan hash binds criteria, members, explicit deferrals and input fingerprint. Amendments append a new audit rather than overwriting historical plans. Stage gates remain evaluation-time checks; there is no unsupported cross-store atomic gate claim. Active generic API edits cannot silently replace the objective or remove required members.
+
+Evidence kinds are deliberately different: `MergedAndVerified` is implementation evidence, `DeploymentHealthy` is runtime deployment qualification, and `OperatorObserved` is actual operator-led acceptance such as browser/visual inspection. The completion/deployment subsystem owns durable evidence and pending-observation state; the planner does not manufacture success. Source implementation and offline tests do not by themselves claim live qualification.
+
+Activation also checks the shared prior-completion barrier inside the membership transaction: unresolved required bookkeeping, delivery or acceptance evidence prevents a new sprint. Committed audit-backed goals, status and membership history cannot be erased through generic PATCH/DELETE routes; completion and explicit stop records own those decisions. Before engineering claims a task, dispatch verifies current typed-plan membership, unchanged grooming binding and exact approval authority. Watch lifecycle processing stays exempt. Legacy active sprints without that evidence report a scope-repair gap instead of dispatching silently.

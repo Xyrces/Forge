@@ -44,7 +44,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         InitRepo(_workDir);
 
         _dbPath = Path.Combine(_dataRoot, "issues.db");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"test");
         _projectStore = new ProjectStore(_issues);
 
         _worktrees = new GitWorktreeService(
@@ -73,6 +73,13 @@ public sealed class DispatchLoopWakeupTests : IDisposable
             prWatcher: _prWatcher,
             events: _events,
             logger: NullLogger<ProjectDispatchBundle>.Instance);
+    }
+
+    private async Task ActivateApprovedAsync(IssueRecord task)
+    {
+        var scope=await ApprovedSprintFixture.Scope(_issues);await ApprovedSprintFixture.Bind(_issues,scope,[task]);
+        var snapshot=await new SprintActivationValidator(_issues,_bundle.Sprints,new SpecStore(_issues),"test",null).ValidateAsync([task.Id],default);
+        await _bundle.Sprints.CreateWithIssuesAsync(new("test","test",DateTime.UtcNow,DateTime.UtcNow.AddDays(1)),snapshot);
     }
 
     public void Dispose()
@@ -173,11 +180,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         var task = await _issues.CreateAsync(new NewIssue(
             Type: "dev", Title: "late work", Description: "enqueued after the loop parked",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        var sprint = await _bundle.Sprints.CreateAsync(new NewSprint(
-            Name: "sprint", Goal: "g",
-            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(1),
-            Status: SprintStatus.Active));
-        await _bundle.Sprints.AddIssueAsync(sprint.Id, task.Id);
+        await ActivateApprovedAsync(task);
 
         // The kick (production: TaskEnqueuedConsumer on the bus).
         _wakeup.Signal();
@@ -204,9 +207,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         await _projectStore.UpsertAsync(new NewProject("test", "Test", _workDir, "main"));
         var task = await _issues.CreateAsync(new NewIssue(Type: "dev", Title: "drain work",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        var sprint = await _bundle.Sprints.CreateAsync(new NewSprint(Name: "drain sprint", Goal: "g",
-            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(1), Status: SprintStatus.Active));
-        await _bundle.Sprints.AddIssueAsync(sprint.Id, task.Id);
+        await ActivateApprovedAsync(task);
         var runner = new DrainingRunner();
         using var stop = new CancellationTokenSource();
         var loop = BuildOrchestrator(runner).ExecuteAsync(stop.Token);

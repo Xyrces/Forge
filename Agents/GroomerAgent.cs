@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Text;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -199,7 +199,11 @@ public sealed class GroomerAgent
                          "the other task edits). Not for soft ordering — disjoint work stays " +
                          "parallel. Returns 'ok' or an error string.");
 
-        var tools = new List<AITool> { createStoryTool, createTaskTool, addDependencyTool, setStatusTool };
+        var bindTool = CreateOutcomeBindingTool(id => createdTaskIds.Contains(id), ct);
+        var scopeTool = CreateApprovedScopeTool(ct);
+        systemPrompt += OutcomeInstructions;
+        systemPrompt += "\nApproved scope lookup: read_approved_scope with specId=" + specId;
+        var tools = new List<AITool> { createStoryTool, createTaskTool, addDependencyTool, bindTool, scopeTool, CreateOutcomeCatalogTool(ct), CreateOutcomeReadTool(ct), setStatusTool };
         var agent = new ChatClientAgent(
             chatClient,
             instructions: systemPrompt,
@@ -232,7 +236,10 @@ public sealed class GroomerAgent
             if (outcome.BudgetExhausted)
                 throw new InvalidOperationException("Groomer exhausted its completion budget; partial tasks remain ineligible.");
             if (completionRequested)
+            {
+                foreach (var id in createdTaskIds) await RequireOutcomeBindingAsync(id, ct);
                 await _specs.SetStatusAsync(specId, SpecStatus.Groomed, ct);
+            }
             var refreshed = await _specs.GetAsync(specId, ct);
             if (refreshed?.Status == SpecStatus.Grooming)
                 throw new InvalidOperationException("Groomer ended without a committed completion decision; partial tasks remain ineligible.");
@@ -434,7 +441,7 @@ public sealed class GroomerAgent
                recording why it belongs and any sizing/approach guidance
                for the engineering agent, plus the priority from step 3.
 
-            Call exactly one tool, then stop.
+            Bind explicit approved outcome scope before approve_task. If this is new scope without approval, leave it ungroomed and explain the intake requirement; do not fabricate approval.
 
             {grounding}
             """;
@@ -443,10 +450,10 @@ public sealed class GroomerAgent
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
         var agent = new ChatClientAgent(
             chatClient,
-            instructions: systemPrompt,
+            instructions: systemPrompt + OutcomeInstructions,
             name: "task-groomer",
             description: $"Task groomer for {issue.Id}",
-            tools: new List<AITool> { approveTool, closeTool });
+            tools: new List<AITool> { approveTool, closeTool, CreateOutcomeBindingTool(id => id == issue.Id, ct), CreateApprovedScopeTool(ct), CreateOutcomeCatalogTool(ct), CreateOutcomeReadTool(ct) });
 
         var followUpOf = issue.GetMetadata("followUpOf");
         var userMessage = new ChatMessage(ChatRole.User, $"""
@@ -490,22 +497,101 @@ public sealed class GroomerAgent
         }
     }
 
+    private const string OutcomeInstructions = """
+
+        SPRINT OUTCOME CONTRACT: use bind_outcome for every task before completing grooming.
+        Use list_outcomes for a bounded existing-plan catalog; read_outcome(taskId) inspects explicit follow-up provenance.
+        Read the actual approved scope with read_approved_scope; use the exact proposalId/revision/hash/specId
+        and a literal approvedExcerpt from its approved body. Scope cannot be inferred from a title or project vision.
+        Describe a small independently useful delivery unit and explicit testable acceptance criteria.
+        Ten tasks INCLUDING prerequisites is a ceiling, not a target. Prefer natural independent pieces
+        that use configured role capacities, but one or two coherent tasks is valid; never pad or split artificially.
+        Tasks in one complete delivery unit share outcomeId, objective, criteria and complete requiredTaskIds.
+        Use a common outcomeId/objective across related approved specifications only with explicit semantic justification.
+        criterionIds specifies each task's contribution. evidenceKind is MergedAndVerified (pre-deploy merge + trusted verification),
+        DeploymentHealthy (post-deploy controller/runtime qualification), or OperatorObserved (post-deploy operator-led acceptance,
+        including visual/browser checks). Never substitute deployment health or merged code for actual visual acceptance.
+        Separate pre-deployment implementation criteria from post-deployment checks so deployment can proceed while
+        operator-observed criteria remain honestly pending; only the operator can record that evidence.
+        reason is Delivers, Remediates, or Prerequisite. Every prerequisite needs explicit criterion mapping too.
+        For remediation, bind to existing approved acceptance scope; followUpOf alone is not approval.
+        Binding JSON: {"version":1,"outcomeId":"stable-goal-id","objective":"useful outcome",
+          "criteria":[{"id":"criterion-id","text":"observable acceptance","evidenceKind":"MergedAndVerified",
+            "scope":{"specId":"...","proposalId":"...","revision":1,"hash":"...","approvedExcerpt":"literal approved text"}}],
+          "requiredTaskIds":["all tasks required for this unit"],"criterionIds":["criterion-id"],"reason":"Delivers",
+          "authority":{"specId":"...","proposalId":"...","revision":1,"hash":"...","approvedExcerpt":"literal approved text"}}
+        After wiring real prerequisite edges and binding all tasks, request Groomed/approve_task.
+        """;
+
+    private AIFunction CreateOutcomeBindingTool(Func<string, bool> allowed, CancellationToken ct) => AIFunctionFactory.Create(
+        async (string taskId, string bindingJson) =>
+        {
+            if (!allowed(taskId)) return "error: task is outside this grooming run";
+            if (_issues is not IssueStore store) return "error: owning project store required";
+            try
+            {
+                var binding = System.Text.Json.JsonSerializer.Deserialize<SprintOutcomeBinding>(bindingJson, SprintPlanJson.Options)
+                    ?? throw new InvalidOperationException("Outcome binding is required.");
+                await new SprintOutcomeAuthority(store).BindAsync(taskId, binding, ct);
+                return "bound";
+            }
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or ArgumentException)
+            { return "error: " + ex.Message; }
+        }, name: "bind_outcome", description: "Bind one task to an exact approved scope and complete independently useful delivery unit.");
+
+    private AIFunction CreateOutcomeCatalogTool(CancellationToken ct) => AIFunctionFactory.Create(
+        async () => _issues is IssueStore store
+            ? SprintPlanJson.Serialize((await new SprintPlanningStore(store).CandidatesAsync(20, ct: ct)).Select(c => new { c.Id, c.Title, c.Priority, binding = c.BindingJson is { Length: <= 12000 } ? c.BindingJson : "Use read_outcome for the complete mapping." }))
+            : "error: owning project store required",
+        name: "list_outcomes", description: "Read at most 20 pending task outcome mappings; this is a bounded catalog, not the full backlog.");
+
+    private AIFunction CreateOutcomeReadTool(CancellationToken ct) => AIFunctionFactory.Create(
+        async (string taskId) =>
+        {
+            var task = await _issues.GetAsync(taskId, ct);
+            return task is null ? "error: task not found" : SprintPlanJson.Serialize(SprintPlanJson.ReadBinding(task));
+        }, name: "read_outcome", description: "Read an existing task's exact outcome mapping, including a completed follow-up source. This does not itself approve new scope.");
+
+    private AIFunction CreateApprovedScopeTool(CancellationToken ct) => AIFunctionFactory.Create(
+        async (string specId, int offset = 0) =>
+        {
+            if (_issues is not IssueStore store) return "error: owning project store required";
+            var receipt = await new Forge.Core.Initiatives.InitiativeIngestionStore(store).GetBySpecAsync(specId, ct);
+            if (receipt is null || receipt.RefinementState != "Completed") return "error: no completed approved ingestion for this specification";
+            var epic = await _issues.GetAsync(receipt.EpicId, ct);
+            var body = epic?.Description ?? "";
+            offset = Math.Clamp(offset, 0, body.Length);
+            return SprintPlanJson.Serialize(new { specId, receipt.ProposalId, receipt.Revision, receipt.Hash,
+                offset, totalLength = body.Length, approvedBody = body.Substring(offset, Math.Min(8000, body.Length - offset)) });
+        }, name: "read_approved_scope", description: "Read exact approved scope identity and bounded approved body for a project specification.");
+
+    private async Task RequireOutcomeBindingAsync(string taskId, CancellationToken ct)
+    {
+        var task = await _issues.GetAsync(taskId, ct) ?? throw new InvalidOperationException("Task missing.");
+        var binding = SprintPlanJson.ReadBinding(task) ?? throw new InvalidOperationException("Task requires approved outcome mapping before grooming can complete.");
+        SprintOutcomeAuthority.ValidateShape(taskId, binding);
+        if (_issues is not IssueStore store) throw new InvalidOperationException("Owning project store required.");
+        foreach (var scope in binding.Criteria.Select(c => c.Scope).Append(binding.Authority).Distinct())
+            await new SprintOutcomeAuthority(store).ValidateAsync(scope, ct);
+    }
+
     private async Task<string> ApproveTaskAsync(string issueId, string note, int priority, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(note)) return "note_required";
         var cur = await _issues.GetAsync(issueId, ct);
         if (cur is null) return "issue_not_found";
+        await RequireOutcomeBindingAsync(issueId, ct);
         var clamped = Math.Clamp(priority, 1, 5);
         if (cur.Priority != clamped)
         {
             await _issues.SetPriorityAsync(issueId, clamped, ct);
         }
-        var meta = ReadMetadata(cur);
+        var meta = new Dictionary<string, object>();
         meta["groomed"] = "true";
         meta["groomedAt"] = DateTime.UtcNow.ToString("O");
         meta["groomNote"] = note;
         meta["groomRunId"] = _runId;
-        await _issues.TransitionAsync(issueId, cur.Status, error: null, metadata: meta, ct: ct);
+        await ((IssueStore)_issues).MergePendingMetadataAsync(issueId, meta, ct);
         // groomed=true is a metadata-only write, so the store's
         // lifecycle choke point publishes nothing — and the assembler /
         // dispatch fast path would wait for the 15m backstop. This is

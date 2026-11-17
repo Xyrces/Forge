@@ -21,7 +21,8 @@ public sealed record SprintActivationSnapshot(
     IReadOnlyList<IssueRecord> Issues, IReadOnlyList<SpecRecord> Specs, IReadOnlyList<string> TaskIds,
     long? ProposalAuditId = null, string? CommittedBy = null,
     IReadOnlyList<SprintDependencySnapshot>? Dependencies = null,
-    IReadOnlyList<IssueRecord>? ExistingSprintMembers = null);
+    IReadOnlyList<IssueRecord>? ExistingSprintMembers = null,
+    SprintPlan? Plan = null);
 
 public sealed record SprintDependencySnapshot(string BlockerId, string BlockedId, IssueStatus? BlockerStatus,
     string? BlockerMetadataJson = null, bool? BlockerSatisfied = null);
@@ -68,6 +69,7 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        if (snapshot?.Plan is { } approvedPlan) spec = spec with { Goal = approvedPlan.Objective, Name = approvedPlan.Objective };
         var id = $"sprint-{Guid.NewGuid().ToString("N")[..10]}";
         var now = DateTime.UtcNow;
         // Sequential sprint number (per store/project): names read
@@ -79,7 +81,10 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
             ? spec.Name
             : $"Sprint {number}: {baseName}";
         if (spec.Status == SprintStatus.Active)
+        {
             await EnsureNoOtherActiveAsync(conn, tx, id, ct);
+            if (snapshot?.Plan is not null) await EnsurePriorCompletionResolvedAsync(conn, tx, ct);
+        }
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
@@ -99,7 +104,8 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
         if (snapshot is not null)
         {
             await ValidateSnapshotAsync(conn, tx, snapshot, ct);
-            if (snapshot.ProposalAuditId is { } auditId)
+            await PersistPlanAsync(conn, tx, id, snapshot, ct);
+            if (snapshot.Plan is null && snapshot.ProposalAuditId is { } auditId)
             {
                 await using var audit = conn.CreateCommand();
                 audit.Transaction = tx;
@@ -202,23 +208,24 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
         };
         var now = DateTime.UtcNow;
         await using var conn = await _issues.Db.OpenAsync(ct);
-        if (merged.Status == SprintStatus.Active)
+        await using (var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct))
         {
-            await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
-            await EnsureNoOtherActiveAsync(conn, tx, id, ct);
-            await using var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
-            ApplySprintUpdateCommand(cmd, merged, now);
-            cmd.AddParam("@id", id);
+            // Bind generic edits to the current row, not a pre-transaction active/inactive read.
+            using var current = conn.CreateCommand(); current.Transaction = tx;
+            current.CommandText = $"SELECT status,goal FROM {T("sprint")} WHERE id=@id";
+            current.AddParam("@id", id);
+            await using (var reader = await current.ExecuteReaderAsync(ct))
+            {
+                if (!await reader.ReadAsync(ct) || reader.GetString(0) != existing.Status.ToString() || reader.GetString(1) != existing.Goal)
+                    throw new InvalidOperationException("Sprint changed; reload before editing.");
+            }
+            if ((merged.Status != existing.Status || merged.Goal != existing.Goal) && await HasCommittedAuditAsync(conn, tx, id, ct))
+                throw new InvalidOperationException("Committed outcome status and goal are owned by completion evidence; use the explicit completion or stop action.");
+            if (merged.Status == SprintStatus.Active) await EnsureNoOtherActiveAsync(conn, tx, id, ct);
+            await using var cmd = conn.CreateCommand(); cmd.Transaction = tx;
+            ApplySprintUpdateCommand(cmd, merged, now); cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
             await tx.CommitAsync(ct);
-        }
-        else
-        {
-            await using var cmd = conn.CreateCommand();
-            ApplySprintUpdateCommand(cmd, merged, now);
-            cmd.AddParam("@id", id);
-            await cmd.ExecuteNonQueryAsync(ct);
         }
         await PublishStatusChangedAsync(id, existing.Status, merged.Status, now, ct);
         return merged with { UpdatedAt = now };
@@ -227,10 +234,15 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
     public async Task DeleteAsync(string id, CancellationToken ct = default)
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        if (await HasCommittedAuditAsync(conn, tx, id, ct))
+            throw new InvalidOperationException("Committed sprint history and delivery evidence cannot be deleted.");
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = $"DELETE FROM {T("sprint")} WHERE id = @id";
         cmd.AddParam("@id", id);
         await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     public Task AddValidatedIssueAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
@@ -252,6 +264,7 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
                 throw new InvalidOperationException("Sprint is no longer active.");
         }
         await ValidateSnapshotAsync(conn, tx, snapshot, ct, sprintId);
+        await PersistPlanAsync(conn, tx, sprintId, snapshot, ct);
         if (requirePrerequisite)
             await ValidateNecessityAsync(conn, tx, sprintId, snapshot, ct);
         foreach (var issue in snapshot.Issues)
@@ -274,7 +287,9 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         await EnsureNoOtherActiveAsync(conn, tx, id, ct);
+        if (snapshot.Plan is not null) await EnsurePriorCompletionResolvedAsync(conn, tx, ct);
         await ValidateSnapshotAsync(conn, tx, snapshot, ct);
+        await PersistPlanAsync(conn, tx, id, snapshot, ct);
         var currentMembers = new List<string>();
         await using (var members = conn.CreateCommand())
         {
@@ -343,6 +358,8 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
         await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         if (requireInactive)
         {
+            if (await HasCommittedAuditAsync(conn, tx, sprintId, ct))
+                throw new InvalidOperationException("Committed sprint membership is immutable outside validated active amendments.");
             await using var check = conn.CreateCommand();
             check.Transaction = tx;
             check.CommandText = $"SELECT status FROM {T("sprint")} WHERE id=@sid";
@@ -371,11 +388,16 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
     public async Task RemoveIssueAsync(string sprintId, string issueId, CancellationToken ct = default)
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        if (await HasCommittedAuditAsync(conn, tx, sprintId, ct))
+            throw new InvalidOperationException("Required members and committed outcome history cannot be removed; use the explicit completion or stop action.");
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = $"DELETE FROM {T("sprint_issue")} WHERE sprint_id = @sid AND issue_id = @iid";
         cmd.AddParam("@sid", sprintId);
         cmd.AddParam("@iid", issueId);
         await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     public async Task<IReadOnlyList<string>> GetIssueIdsAsync(string sprintId, CancellationToken ct = default)

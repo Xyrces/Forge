@@ -2184,6 +2184,33 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }, ct);
     }
 
+    /// <summary>Grooming metadata never changes status or revives a concurrently parked task.</summary>
+    public async Task MergePendingMetadataAsync(string id, IDictionary<string, object> additions, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        string metadata;
+        using (var read = conn.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = $"SELECT status,metadata_json FROM {T("issue")} WHERE id=@id";
+            read.AddParam("@id", id);
+            await using var reader = await read.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct) || reader.GetString(0) != nameof(IssueStatus.Pending))
+                throw new InvalidOperationException("Only pending work can receive grooming metadata.");
+            metadata = MergeAndSerializeMetadata(reader.GetString(1), additions);
+        }
+        using (var write = conn.CreateCommand())
+        {
+            write.Transaction = tx;
+            write.CommandText = $"UPDATE {T("issue")} SET metadata_json=@meta,updated_at=@now WHERE id=@id AND status='Pending'";
+            write.AddParam("@id", id); write.AddParam("@meta", metadata); write.AddParam("@now", DateFormatTime(DateTime.UtcNow));
+            if (await write.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Task is no longer pending.");
+        }
+        await InsertEventAsync(conn, tx, id, "grooming_metadata", "Updated pending grooming metadata", ct);
+        await tx.CommitAsync(ct);
+    }
+
     public async Task<IssueRecord> TransitionAsync(
         string id,
         IssueStatus to,

@@ -461,7 +461,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         });
 
         DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory,
-            _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)));
+            _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _sprintPropose?.Planning);
 
         if (_projectFactory is not null && _slots is not null)
         {

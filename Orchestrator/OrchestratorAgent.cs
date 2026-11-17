@@ -432,6 +432,17 @@ public sealed class OrchestratorAgent : IAgent
         // Concurrency is owned by the caller: the dispatch loop holds
         // a per-role SlotTable slot for the whole run.
         var startedAt = DateTime.UtcNow;
+        if (await bundle.IssueStore.GetAsync(issue.Id, cancellationToken) is not { Status: IssueStatus.Pending })
+            return new Result(false, "already-claimed");
+        var scopeGap = bundle.IssueStore is IssueStore owned
+            ? await SprintDispatchGuard.CheckAsync(owned, bundle.Sprints, bundle.Project.Id, issue.Id, cancellationToken)
+            : "Engineering requires an owning project store with approved sprint evidence.";
+        if (scopeGap is not null)
+        {
+            _logger.LogWarning("Engineering dispatch held for {Task}: {ScopeGap}", issue.Id, scopeGap);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, "dispatch.scope-gap", issue.Id, scopeGap));
+            return new Result(false, "sprint-scope-gap: " + scopeGap);
+        }
         try
         {
             // P3 (final wiring): dispatch is now driven by the MAF

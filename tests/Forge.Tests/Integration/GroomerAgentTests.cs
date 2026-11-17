@@ -252,9 +252,10 @@ public class GroomerAgentTests : IDisposable
                 new Dictionary<string, object?> { ["status"] = "Groomed" }),
         };
         var agent = BuildAgent(new MultiToolCallingChatClient(fcs, "Done."));
-        var result = await agent.GroomAsync(spec.Id, default);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => agent.GroomAsync(spec.Id, default));
 
-        var storyId = Assert.Single(result!.StoryIds);
+        var storyId = Assert.Single(await _issues.ListAsync(new IssueFilter { Type = "story" })).Id;
+        Assert.Equal(SpecStatus.Grooming,(await _specs.GetAsync(spec.Id))!.Status);
         var tasks = (await _issues.ListAsync(new IssueFilter { Type = "task" }, default)).ToList();
         var task = Assert.Single(tasks);
         Assert.Equal(storyId, task.ParentIssueId);

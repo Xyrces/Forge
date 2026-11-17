@@ -18,7 +18,7 @@ public sealed class SprintPlanningAuditTests : IDisposable
     readonly SprintAssembler assembler;
     public SprintPlanningAuditTests()
     {
-        issues = new IssueStore(Path.Combine(dir,"issues.db"));
+        issues = new IssueStore(Path.Combine(dir,"issues.db"),"audit");
         sprints = new SprintStore(issues); specs = new SpecStore(issues);
         assembler = new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),
             new InMemoryDashboardEventBus(), NullLogger<SprintAssembler>.Instance);
@@ -27,13 +27,15 @@ public sealed class SprintPlanningAuditTests : IDisposable
     Task Tick() => assembler.TickProjectAsync("audit", issues, sprints, specs, default);
     async Task<List<IssueRecord>> Spec(int count)
     {
-        var spec = await specs.CreateAsync(new NewSpec("audit","One deliverable","body"));
+        var scope = await ApprovedSprintFixture.Scope(issues);
+        var spec = (await specs.GetAsync(scope.SpecId))!;
         var story = await issues.CreateAsync(new NewIssue("story","story",ParentId:spec.Id));
         var tasks = new List<IssueRecord>();
         for(int i=0;i<count;i++) tasks.Add(await issues.CreateAsync(new NewIssue("task","task"+i,ParentId:story.Id)));
         await specs.SetStatusAsync(spec.Id,SpecStatus.Approved,default);
         await specs.SetStatusAsync(spec.Id,SpecStatus.Grooming,default);
         await specs.SetStatusAsync(spec.Id,SpecStatus.Groomed,default);
+        await ApprovedSprintFixture.Bind(issues,scope,tasks,outcome:spec.Id);
         return tasks;
     }
     async Task<IssueRecord> AdHoc(string title, string? followUp=null, bool groomed=true)
@@ -41,7 +43,13 @@ public sealed class SprintPlanningAuditTests : IDisposable
         var metadata = new Dictionary<string,object>();
         if(groomed) metadata["groomed"]="true";
         if(followUp is not null) metadata["followUpOf"]=followUp;
-        return await issues.CreateAsync(new NewIssue("task",title,Metadata:metadata));
+        var task = await issues.CreateAsync(new NewIssue("task",title,Metadata:metadata));
+        var source = followUp is null ? null : await issues.GetAsync(followUp);
+        var binding = source is null ? null : SprintPlanJson.ReadBinding(source);
+        if (binding is not null)
+            await new SprintOutcomeAuthority(issues).BindAsync(task.Id,binding with { RequiredTaskIds=[task.Id],Reason=SprintMemberReason.Remediates });
+        else await ApprovedSprintFixture.Bind(issues,await ApprovedSprintFixture.Scope(issues),[task],outcome:task.Id);
+        return (await issues.GetAsync(task.Id))!;
     }
     [Fact] public async Task DependenciesRemainWithinOneSpecSprint()
     {
@@ -55,20 +63,20 @@ public sealed class SprintPlanningAuditTests : IDisposable
         Assert.Equal(first.Id,second.Id);
         Assert.Contains(tasks[1].Id,await sprints.GetIssueIdsAsync(second.Id));
     }
-    [Fact] public async Task SpecTasksAreNotSubjectToFollowUpTenTaskCap()
+    [Fact] public async Task EveryCompleteSpecOutcomeIsSubjectToWholeClosureTenTaskCeiling()
     {
         var tasks=await Spec(12); await Tick();
-        var ids=await sprints.GetIssueIdsAsync((await sprints.GetActiveAsync())!.Id);
-        Assert.All(tasks,t=>Assert.Contains(t.Id,ids));
+        Assert.Null(await sprints.GetActiveAsync());
+        Assert.All(tasks,t=>Assert.Equal(IssueStatus.Pending,issues.GetAsync(t.Id).GetAwaiter().GetResult()!.Status));
     }
-    [Fact] public async Task SameSpecSiblingOriginsMakeSeparateFollowUpThemes()
+    [Fact] public async Task ExplicitRelatedRemediationCombinesAcrossSiblingOrigins()
     {
         var roots=await Spec(2);
         foreach(var root in roots) await issues.TransitionAsync(root.Id,IssueStatus.Completed,null);
         var a=await AdHoc("Authentication reliability",roots[0].Id);
         var b=await AdHoc("Authentication reliability",roots[1].Id);
         await Tick(); var ids=await sprints.GetIssueIdsAsync((await sprints.GetActiveAsync())!.Id);
-        Assert.Single(new[]{a.Id,b.Id}.Where(ids.Contains));
+        Assert.Contains(a.Id,ids); Assert.Contains(b.Id,ids);
     }
     [Fact] public async Task UnrelatedUngroomedFollowUpDoesNotStopReadySpec()
     {
@@ -79,6 +87,10 @@ public sealed class SprintPlanningAuditTests : IDisposable
     {
         var first=await Spec(1); await Tick(); var active=(await sprints.GetActiveAsync())!;
         var prerequisite=await Spec(1);
+        var targetBinding = SprintPlanJson.ReadBinding((await issues.GetAsync(first[0].Id))!)!;
+        var ownBinding = SprintPlanJson.ReadBinding((await issues.GetAsync(prerequisite[0].Id))!)!;
+        await new SprintOutcomeAuthority(issues).BindAsync(prerequisite[0].Id, targetBinding with {
+            RequiredTaskIds=[prerequisite[0].Id],Authority=ownBinding.Authority,Reason=SprintMemberReason.Prerequisite });
         await issues.AddDependencyAsync(prerequisite[0].Id,first[0].Id,IssueDepKind.Blocks,default);
         await Tick();
         Assert.Equal(active.Id,(await sprints.GetActiveAsync())!.Id);
@@ -100,7 +112,7 @@ public sealed class SprintPlanningAuditTests : IDisposable
         Assert.Null(await sprints.GetActiveAsync());
         await Tick();
         Assert.Equal(2,(await drafts.ListUnconsumedAsync()).Count);
-        Assert.Single(await issues.ListAsync(new IssueFilter()));
+        Assert.Single(await issues.ListAsync(new IssueFilter { Type="task" }));
     }
     [Fact] public async Task ProposalCommitCannotDisplaceActiveSprintWithUngroomedTask()
     {

@@ -72,10 +72,12 @@ public sealed class SprintAssembler
         // Compatibility only: elapsed time never clears Failed work.
         TimeSpan? failureAgingWindow = null,
         InitiativeProposalStore? initiativeProposals = null,
-        Func<string, bool>? routineDeploymentEnabled = null)
+        Func<string, bool>? routineDeploymentEnabled = null,
+        Forge.Configuration.SprintPlanningOptions? planning = null)
     {
         _routineDeploymentEnabled = routineDeploymentEnabled;
         _initiativeProposals = initiativeProposals;
+        _planning = planning ?? new();
         _projects = projects;
         _events = events;
         _logger = logger;
@@ -88,6 +90,8 @@ public sealed class SprintAssembler
 
     private readonly Func<string, bool>? _routineDeploymentEnabled;
     private readonly InitiativeProposalStore? _initiativeProposals;
+    private readonly Forge.Configuration.SprintPlanningOptions _planning;
+    private readonly Dictionary<string, (string Capacities, SprintPlanBuilder Builder)> _planners = new();
     private readonly Core.IFollowUpTriage? _followUpTriage;
     private readonly WakeupSignal? _wakeup;
     private readonly Core.Messaging.IEventPublisher? _eventPublisher;
@@ -498,46 +502,13 @@ public sealed class SprintAssembler
     {
         try
         {
-            var eligible = await ListEligibleAsync(issues, sprints, ct);
-            if (eligible.Count == 0) return Array.Empty<EligibleGroupItem>();
-            var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
-            var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal);
-            var order = new List<string>();
-            foreach (var task in eligible)
-            {
-                var key = ResolveThemeKey(task, byId);
-                if (groups.TryGetValue(key, out var list))
-                {
-                    list.Add(task);
-                }
-                else
-                {
-                    groups[key] = new List<IssueRecord> { task };
-                    order.Add(key);
-                }
-            }
-            await DropCrossProjectGroupsAsync(groups, order, projectId, specs, _logger, ct);
-            var items = new List<EligibleGroupItem>();
-            foreach (var key in order)
-            {
-                var members = groups[key];
-                // Ad-hoc assembles one SOLO sprint per task named
-                // after the task — show the task that would go first.
-                // Follow-up themes name after the LEADING MEMBER too
-                // (the chain root is usually merged already — see
-                // DescribeAsync), not the root task's title.
-                var name = key == AdHocGroupName
-                    ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
-                    : key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                        ? members.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First().Title
-                        : (await specs.GetAsync(key, ct))?.Title ?? key;
-                items.Add(new EligibleGroupItem(key, name, members.Count,
-                    members.Min(t => t.Priority), members.Min(t => t.CreatedAt)));
-            }
-            return items
-                .OrderBy(g => g.MinPriority)
-                .ThenBy(g => g.CreatedAt)
-                .ToList();
+            if (issues is not IssueStore concrete) return [];
+            var result = await new SprintPlanBuilder(concrete, sprints, specs, projectId, _gates, _planning,
+                _projects.Find(projectId)?.Options.Roles).BuildAsync(ct);
+            if (result.Snapshot is not { Plan: { } plan } snapshot) return [];
+            var tasks = snapshot.Issues.Where(i => snapshot.TaskIds.Contains(i.Id)).ToArray();
+            return [new EligibleGroupItem(plan.Hash, plan.Objective, tasks.Length,
+                tasks.Min(t => t.Priority), tasks.Min(t => t.CreatedAt))];
         }
         catch (Exception ex)
         {
@@ -589,24 +560,25 @@ public sealed class SprintAssembler
     private async Task InjectPrerequisitesAsync(
         SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
-        var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
+        var currentPlan = issues is IssueStore concrete ? await new SprintProposalAuditStore(concrete.Db).GetPlanForSprintAsync(active.Id,ct) : null;
+        if (currentPlan is null) { _logger.LogWarning("Sprint {Sprint}: approved outcome evidence is missing; no automatic amendments",active.Id); return; }
+        var plannedIds = currentPlan.Members.Select(m=>m.TaskId).ToHashSet(StringComparer.Ordinal);
         var blockersOfMembers = await issues.ListBlockersOfAsync(memberIds, ct);
-        var eligibleIds = (await ListEligibleAsync(issues, sprints, ct)).Select(i => i.Id).ToHashSet(StringComparer.Ordinal);
-        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates);
+        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates, _planning, _projects.Find(projectId)?.Options.Roles);
 
-        foreach (var task in pending)
+        foreach (var blockerId in blockersOfMembers.Order(StringComparer.Ordinal).Take(100))
         {
-            if (AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
-            if (memberIds.Contains(task.Id)) continue;
-
-            if (!blockersOfMembers.Contains(task.Id) || !eligibleIds.Contains(task.Id)) continue;
+            var task = await issues.GetAsync(blockerId, ct);
+            if (task is null || task.Status != IssueStatus.Pending || AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
+            if (plannedIds.Contains(task.Id)) continue;
             const string reason = "unblocks ongoing work";
             try
             {
                 var snapshot = await validator.ValidateAsync([task.Id], ct, activating: false);
                 await sprints.AddValidatedPrerequisiteAsync(active.Id, snapshot, ct);
                 memberIds.UnionWith(snapshot.TaskIds);
+                plannedIds.UnionWith(snapshot.TaskIds);
             }
             catch (InvalidOperationException ex)
             {
@@ -739,157 +711,26 @@ public sealed class SprintAssembler
     private async Task<(string Id, string Name, int TaskCount)?> AssembleNextAsync(
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
-        var eligible = await ListEligibleAsync(issues, sprints, ct);
-        if (eligible.Count == 0) return null;
-        var byId = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
-
-        // Group by THEME (operator rule 2026-08-08): spec-chained
-        // tasks under their spec, follow-ups under their followUpOf
-        // root (one sprint per theme — never a solo follow-up
-        // sprint), rootless ad-hoc under the singleton ad-hoc key.
-        var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal);
-        var groupOrder = new List<string>();
-        foreach (var task in eligible)
+        if (issues is not IssueStore concrete)
+            throw new InvalidOperationException("Approved outcome planning requires the owning project store.");
+        var roles = _projects.Find(projectId)?.Options.Roles;
+        var capacities = SprintPlanJson.Hash(roles?.OrderBy(p => p.Key));
+        if (!_planners.TryGetValue(projectId, out var cached) || cached.Capacities != capacities)
+            _planners[projectId] = cached = (capacities, new SprintPlanBuilder(concrete, sprints, specs, projectId, _gates, _planning, roles));
+        var result = await cached.Builder.BuildAsync(ct);
+        if (result.Snapshot is not { } snapshot)
         {
-            var groupKey = ResolveThemeKey(task, byId);
-            if (groups.TryGetValue(groupKey, out var list))
-            {
-                list.Add(task);
-            }
-            else
-            {
-                groups[groupKey] = new List<IssueRecord> { task };
-                groupOrder.Add(groupKey);
-            }
+            _logger.LogInformation("Sprint planning deferred: {Reason}", result.Reason);
+            return null;
         }
-
-        // Cross-project guard: a spec group belongs to the project
-        // that OWNS the spec (see DropCrossProjectGroupsAsync).
-        await DropCrossProjectGroupsAsync(groups, groupOrder, projectId, specs, _logger, ct);
-        if (groupOrder.Count == 0) return null;
-
-        // Resolve each group's display name / goal / age for ordering.
-        // Spec groups: name = spec title, goal = parent epic's
-        // description (the epic is the spec's parent_issue_id) or the
-        // spec title. Oldest group wins; ad-hoc sorts last so real
-        // pipeline work always goes first.
-        async Task<(string Name, string Goal, DateTime CreatedAt)> DescribeAsync(string key)
-        {
-            if (key == AdHocGroupName)
-            {
-                return (AdHocGroupName,
-                    "Operator-enqueued work not tied to a spec epic.",
-                    DateTime.MaxValue);
-            }
-            if (key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                && groups.TryGetValue(key, out var cluster) && cluster.Count > 0)
-            {
-                var rootId = key[FollowUpThemePrefix.Length..];
-                var rootTitle = byId.TryGetValue(rootId, out var rootTask) ? rootTask.Title : rootId;
-                // Name after the LEADING MEMBER, not the root: the
-                // root is usually long-merged (the follow-up chain
-                // outlives it), and a sprint named for a task it does
-                // not contain reads as work happening OUTSIDE the
-                // sprint (operator confusion 2026-08-18: Sprint 130
-                // was named 'Fix stale inline comment near
-                // MarkConsumed' — the completed root task-660 — while
-                // its only member was task-705's docs wording fix).
-                // The root stays in the goal for chain context.
-                var ordered = cluster.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).ToList();
-                var memberTitles = string.Join("; ", ordered.Take(3).Select(t => t.Title));
-                var goal = $"Follow-up work filed from {rootId} ({rootTitle}): {memberTitles}" +
-                    (cluster.Count > 3 ? $" (+{cluster.Count - 3} more)" : "");
-                return (ordered[0].Title, goal, cluster.Min(t => t.CreatedAt));
-            }
-            var spec = await specs.GetAsync(key, ct);
-            var epicDesc = spec?.ParentIssueId is not null
-                && byId.TryGetValue(spec.ParentIssueId, out var epic)
-                && !string.IsNullOrWhiteSpace(epic.Description)
-                    ? epic.Description!
-                    : null;
-            // Fallback chain when the spec read misses (transient
-            // version-bump race): the parent STORY's title is still a
-            // meaningful short goal — a raw spec id never is.
-            var storyTitle = groups.TryGetValue(key, out var members) && members.Count > 0
-                && members[0].ParentIssueId is not null
-                && byId.TryGetValue(members[0].ParentIssueId!, out var story)
-                    ? story.Title
-                    : null;
-            return (spec?.Title ?? storyTitle ?? key,
-                epicDesc ?? $"Complete all groomed tasks for {spec?.Title ?? storyTitle ?? key}.",
-                spec?.CreatedAt ?? DateTime.MaxValue);
-        }
-
-        var described = new Dictionary<string, (string Name, string Goal, DateTime CreatedAt)>();
-        foreach (var key in groupOrder)
-        {
-            described[key] = await DescribeAsync(key);
-        }
-        // Assembly ordering (operator direction 2026-07-31): priority
-        // FIRST (the group's highest-priority member), then oldest.
-        // Ad-hoc work participates in the same ordering — no longer
-        // forced behind spec groups.
-        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates);
-        // One shared graph/spec read context filters unavailable roots. Avoid
-        // rereading the entire backlog once for each rejected candidate.
-        var validRoots = await validator.PreviewSnapshotsAsync(eligible.Select(t => t.Id), eligible.Count, ct);
-        var candidates = groupOrder.SelectMany(key => key == AdHocGroupName
-            ? groups[key].Select(task => (Key: key, Tasks: new List<IssueRecord> { task }))
-            : new[] { (Key: key, Tasks: groups[key]) })
-            .OrderBy(candidate => candidate.Tasks.Min(t => t.Priority))
-            .ThenBy(candidate => candidate.Key == AdHocGroupName
-                ? candidate.Tasks[0].CreatedAt : described[candidate.Key].CreatedAt);
-        foreach (var candidate in candidates)
-        {
-            var chosenKey = candidate.Key;
-            var chosen = candidate.Tasks;
-            var (name, goal, _) = described[chosenKey];
-
-            // Rootless ad-hoc assembly selects one outcome root (highest
-            // priority first, then oldest), plus its necessary prerequisites. Follow-up
-            // themes pack up to MaxThemeTasks per sprint (priority, then
-            // oldest); the remainder stays eligible for the next sprint.
-            if (chosenKey == AdHocGroupName)
-            {
-                var single = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First();
-                chosen = new List<IssueRecord> { single };
-                name = single.Title;
-                goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
-                    ?? $"Complete {single.Id}: {single.Title}";
-            }
-            else if (chosenKey.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-                && chosen.Count > MaxThemeTasks)
-            {
-                chosen = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt)
-                    .Take(MaxThemeTasks).ToList();
-            }
-
-            if (chosen.Any(task => !validRoots.ContainsKey(task.Id))) continue;
-
-            SprintActivationSnapshot snapshot;
-            try
-            {
-                snapshot = await validator.ValidateAsync(chosen.Select(t => t.Id).ToArray(), ct);
-            }
-            catch (InvalidOperationException ex)
-            {
-                _logger.LogInformation(ex, "Sprint candidate {Group} has an unavailable dependency closure; evaluating the next coherent candidate", chosenKey);
-                continue;
-            }
-            var start = DateTime.UtcNow;
-            var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(
-                Name: name, Goal: goal, StartDate: start, EndDate: start.Add(SprintDuration),
-                Status: SprintStatus.Active), snapshot, ct);
-
-            _logger.LogInformation(
-                "Sprint {SprintId} assembled + activated: '{Name}' with {Tasks} task(s) (group={Group})",
-                sprint.Id, name, snapshot.TaskIds.Count, chosenKey);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
-                null, $"Sprint '{name}' started with {snapshot.TaskIds.Count} task(s)",
-                new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = snapshot.TaskIds.Count }));
-            return (sprint.Id, name, snapshot.TaskIds.Count);
-        }
-        return null;
+        var plan = snapshot.Plan!;
+        var start = DateTime.UtcNow;
+        var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(plan.Objective, plan.Objective,
+            start, start.Add(SprintDuration)), snapshot, ct);
+        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
+            null, $"Sprint '{plan.Objective}' started with {snapshot.TaskIds.Count} task(s)",
+            new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = snapshot.TaskIds.Count }));
+        return (sprint.Id, plan.Objective, snapshot.TaskIds.Count);
     }
 
     /// <summary>

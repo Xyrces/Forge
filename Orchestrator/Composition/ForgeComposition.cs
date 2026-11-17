@@ -293,7 +293,7 @@ public static class ForgeComposition
         services.AddSingleton(sprintProposalAudit);
         var scorer = new DeterministicScorer();
         services.AddSingleton(scorer);
-        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates);
+        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates, planning: options.SprintPlanning, roleCaps: primary.Roles);
         services.AddSingleton(sprintPropose);
         var memoryExtractor = new MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
@@ -763,7 +763,7 @@ public static class ForgeComposition
             gates: stageGates,
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
-            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals,
+            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals, planning: options.SprintPlanning,
             routineDeploymentEnabled: projectId => projectFactory.Find(projectId)?.Options.Deployment
                 is { Kind: DeploymentKind.Kubernetes, RoutineEnabled: true }));
 

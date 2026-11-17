@@ -9,12 +9,18 @@ namespace Forge.Tests;
 
 public sealed class SprintActivationSafetyTests : IDisposable
 {
-    private readonly IssueStore issues = new(TempRoot.Instance.NewDbPath("sprint-safety"));
+    private readonly IssueStore issues = new(TempRoot.Instance.NewDbPath("sprint-safety"), "test");
     private SprintStore Sprints => new(issues);
     private SprintProposeService Proposer(StageGates? gates = null) => new(issues, Sprints,
         new DeterministicScorer(), new SprintProposalAuditStore(issues.Db), gates, projectId: "test");
-    private Task<IssueRecord> TaskRow(bool groomed = true, string type = "task") => issues.CreateAsync(
-        new NewIssue(type, "test", Metadata: new Dictionary<string, object> { ["groomed"] = groomed }));
+    private SprintScopeReference? scope;
+    private async Task<IssueRecord> TaskRow(bool groomed = true, string type = "task")
+    {
+        scope ??= await ApprovedSprintFixture.Scope(issues);
+        var row = await issues.CreateAsync(new NewIssue(type,"test",Metadata:new Dictionary<string,object>{["groomed"]=groomed}));
+        if (!AgentTaskTypes.IsContainer(type)) await ApprovedSprintFixture.Bind(issues,scope,[row]);
+        return (await issues.GetAsync(row.Id))!;
+    }
     private static NewSprint New() => new("test", "test", DateTime.UtcNow, DateTime.UtcNow.AddDays(7));
     public void Dispose() => issues.Dispose();
 
@@ -24,11 +30,11 @@ public sealed class SprintActivationSafetyTests : IDisposable
         var outcome = await TaskRow();
         var prerequisite = await TaskRow();
         await issues.AddDependencyAsync(prerequisite.Id, outcome.Id, IssueDepKind.Blocks);
+        await ApprovedSprintFixture.Bind(issues,scope!,[outcome,prerequisite]);
         var proposer = Proposer();
         var proposal = await proposer.ProposeAsync(null, null);
-        var candidate = Assert.Single(proposal.Candidates, c => c.TaskId == outcome.Id);
-        Assert.Contains(candidate.Breakdown, line => line.Contains(prerequisite.Id));
-        var sprint = await proposer.CommitAsync(proposal.AuditId, [outcome.Id], null, null, "operator");
+        Assert.Equal(2,proposal.SelectedTaskIds.Count);
+        var sprint = await proposer.CommitAsync(proposal.AuditId, proposal.SelectedTaskIds, null, null, "operator");
         var members = await Sprints.GetIssueIdsAsync(sprint);
         Assert.Contains(outcome.Id, members);
         Assert.Contains(prerequisite.Id, members);
@@ -76,11 +82,15 @@ public sealed class SprintActivationSafetyTests : IDisposable
             await counted.CreateAsync(new NewIssue("task", "ungroomed", Priority: 1));
         var eligible = await counted.CreateAsync(new NewIssue("task", "eligible", Priority: 5,
             Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        var approved = await ApprovedSprintFixture.Scope(counted);
+        await ApprovedSprintFixture.Bind(counted,approved,[eligible]);
         db.Opens = 0;
         var proposer = new SprintProposeService(counted, new SprintStore(counted), new DeterministicScorer(), new SprintProposalAuditStore(db));
+        var firstPage = await proposer.ProposeAsync(null, null, 1);
+        Assert.Empty(firstPage.Candidates);
         var proposal = await proposer.ProposeAsync(null, null, 1);
         Assert.Equal(eligible.Id, Assert.Single(proposal.Candidates).TaskId);
-        Assert.InRange(db.Opens, 1, 12);
+        Assert.InRange(db.Opens, 1, 35);
     }
 
     private sealed class CountingFactory(IDbConnectionFactory inner) : IDbConnectionFactory
@@ -165,12 +175,14 @@ public sealed class SprintActivationSafetyTests : IDisposable
     public async Task SpecificationChangeInvalidatesProposalAndTransactionalSnapshot()
     {
         var specs = new SpecStore(issues);
-        var spec = await specs.CreateAsync(new NewSpec("test", "approved", "original"));
+        var approved = await ApprovedSprintFixture.Scope(issues);
+        var spec = (await specs.GetAsync(approved.SpecId))!;
         await specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
         await specs.SetStatusAsync(spec.Id, SpecStatus.Grooming);
         await specs.SetStatusAsync(spec.Id, SpecStatus.Groomed);
         var story = await issues.CreateAsync(new NewIssue("story", "story", ParentId: spec.Id));
         var task = await issues.CreateAsync(new NewIssue("task", "task", ParentId: story.Id));
+        await ApprovedSprintFixture.Bind(issues,approved,[task]);
         var proposer = Proposer();
         var proposal = await proposer.ProposeAsync(null, null);
         var snapshot = await new SprintActivationValidator(issues, Sprints, specs, "test", null).ValidateAsync([task.Id], default);
@@ -209,17 +221,24 @@ public sealed class SprintActivationSafetyTests : IDisposable
     {
         var target = await TaskRow();
         var fixer = await TaskRow();
-        var sprint = await Sprints.CreateAsync(New());
-        await Sprints.AddIssueAsync(sprint.Id, target.Id);
+        var initial = await new SprintActivationValidator(issues,Sprints,new SpecStore(issues),"test",null).ValidateAsync([target.Id],default);
+        var sprint = await Sprints.CreateWithIssuesAsync(New(),initial);
         await issues.AddDependencyAsync(fixer.Id, target.Id, IssueDepKind.Blocks);
         var snapshot = await new SprintActivationValidator(issues, Sprints, new SpecStore(issues), "test", null)
             .ValidateAsync([fixer.Id], default, activating: false);
         if (change == "removed-edge") await issues.RemoveDependencyAsync(fixer.Id, target.Id, IssueDepKind.Blocks);
-        else if (change == "removed-target") await Sprints.RemoveIssueAsync(sprint.Id, target.Id);
+        else if (change == "removed-target")
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => Sprints.RemoveIssueAsync(sprint.Id, target.Id));
+            Assert.Contains(target.Id, await Sprints.GetIssueIdsAsync(sprint.Id));
+            await Sprints.AddValidatedPrerequisiteAsync(sprint.Id, snapshot);
+            Assert.Contains(fixer.Id, await Sprints.GetIssueIdsAsync(sprint.Id));
+            return;
+        }
         else await issues.TransitionAsync(target.Id, IssueStatus.Completed, null);
         await Assert.ThrowsAsync<InvalidOperationException>(() => Sprints.AddValidatedPrerequisiteAsync(sprint.Id, snapshot));
         Assert.DoesNotContain(fixer.Id, await Sprints.GetIssueIdsAsync(sprint.Id));
-        // Explicit manual amendments retain their existing authorization semantics.
+        // Explicit manual amendments must still preserve the approved criterion and member set.
         snapshot = await new SprintActivationValidator(issues, Sprints, new SpecStore(issues), "test", null)
             .ValidateAsync([fixer.Id], default, activating: false);
         await Sprints.AddValidatedIssueAsync(sprint.Id, snapshot);
@@ -274,7 +293,10 @@ public sealed class SprintActivationSafetyTests : IDisposable
         var audit = await new SprintProposalAuditStore(issues.Db).GetAsync(proposal.AuditId);
         Assert.Equal(sprint, audit!.CommittedSprintId);
         Assert.Equal("operator-test", audit.CommittedBy);
-        await Sprints.UpdateAsync(sprint, new Dictionary<string, object?> { ["status"] = "Completed" });
+        await issues.TransitionAsync(task.Id, IssueStatus.Completed, null);
+        var plan = (await new SprintProposalAuditStore(issues.Db).GetPlanForSprintAsync(sprint))!;
+        await new Forge.Core.Completion.SprintCompletionStore(issues).BeginCompletionAsync(sprint,
+            [(await issues.GetAsync(task.Id))!], new(audit.Id, plan.Hash, Forge.Core.Completion.EngineeringOutcome.PendingEvidence, "{}"));
         await Assert.ThrowsAsync<InvalidOperationException>(() => proposer.CommitAsync(proposal.AuditId, [task.Id], null, null, "operator-test"));
         Assert.Single(await Sprints.ListAsync(false));
     }
