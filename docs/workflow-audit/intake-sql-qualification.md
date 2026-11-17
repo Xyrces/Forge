@@ -36,7 +36,38 @@ Private source hashes, manifest and result records are retained under
 `audit_intake_6c159201308842c3aaa63aa110755476_primary` and its `_target`
 counterpart were removed, with cleanup recorded.
 
-This proves fresh-schema query and transaction behavior on Azure SQL. It does
-not yet qualify the complete UI flow, reconstructed39 upgrade, old-image read
-compatibility, runtime permissions, or unattended release. Those remain separate
-checks; no production schema40 migration has occurred.
+This proves fresh-schema query and transaction behavior on Azure SQL. The
+upgrade compatibility check below was performed separately.
+
+## Reconstructed schema39 upgrade and bridge reads
+
+The implementation at `d89f9ed42b35b13dc5c358d6b2622ce7680c5290` also passed
+an isolated schema39-to40 rehearsal. The fixture was reconstructed from the
+schema39 workload shape; it was not a historical production backup. The helper
+used a separate compiled assembly from bridge revision
+`a7c25bcd57078aedba44b46d37a94c56feed0efa` to read the fixture both before and
+after migration.
+
+Passed cases:
+
+- The bridge verified and read schema39, then verified and read schema40 after
+  additive M040 was applied twice.
+- Existing issue, event, spec, version and extraction rows remained identical.
+  The comparison snapshot hash was
+  `d01b5c4e77d6bdd3abe9a194fdd497c5da582f4a75ba67971224fd8c00fa8461`.
+- New proposal ingestion preserved the old work. Source-binding lookup using
+  SQL Server `OPENJSON` respected project ownership.
+- Source acknowledgement replay succeeded. A conflicting binding in a group
+  rolled the entire consumption transaction back.
+
+The disposable schema
+`audit_intake_dbc86a9c27db457d912769f8534dee2c_upgrade` was removed and its
+absence asserted. Exact assembly pins, manifest, source and results are under
+`.portHorizon/validation/upgrade-sql/`. This check predates the subsequent
+single-statement batch-consumption optimization; that query requires its own
+qualification.
+
+These are real Azure SQL query checks, not full bridge-image activation or
+runtime-principal permission tests. Complete UI flow and unattended migration,
+activation and rollback remain separate checks. No production schema40
+migration has occurred as of these rehearsals.
