@@ -56,7 +56,7 @@
                doesn't ship its own copy of the state machine. *@
             @if (ActionProp("refinementState") is { } refinement)
             {
-                <div class="banner banner--info">
+                <div class="banner banner--info banner--stacked">
                     <strong>Initiative approved · specification refinement: @refinement</strong>
                     @if (refinement != "Completed")
                     {
@@ -71,7 +71,7 @@
             }
             @if (ActionProp("designState") == "HygieneFailed" && ActionProp("designHygieneReport") is { } hygiene)
             {
-                <div class="banner banner--error">
+                <div class="banner banner--error banner--stacked">
                     <strong>Design validation needs attention</strong>
                     <p>@ActionProp("designError")</p>
                     <ul>
@@ -90,7 +90,7 @@
             }
             @if (ActionProp("groomingState") is { } groomingState || ActionFlag("groomingRetryAvailable"))
             {
-                <div class="banner banner--info">
+                <div class="banner banner--info banner--stacked">
                     <strong>Technical planning: @GroomingLabel(ActionProp("groomingState"))</strong>
                     @if (!string.IsNullOrWhiteSpace(ActionProp("groomingRetryReason")))
                     {
