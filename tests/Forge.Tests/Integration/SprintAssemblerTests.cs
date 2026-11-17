@@ -132,15 +132,10 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task AgedFailure_AutoClosed_BySweep_StoryAndEpicFollow()
+    public async Task AgedFailure_RemainsFailed_ParentsAndDependenciesStayOpen()
     {
-        // Operator direction 2026-08-18 ("fix this permanently"): a
-        // Failed task nobody touched past the aging window is
-        // abandoned work — leaving it Failed holds its story/epic
-        // (and sprint assembly) hostage forever, which is how
-        // porthorizon sat idle 24h+ on 20 ancient failures while the
-        // board read as a busy backlog. The sweep closes it and the
-        // terminal-tree cascade closes its parents in the same tick.
+        // Legacy positive aging configuration must not reinterpret unfinished
+        // required work as abandoned or unblock its dependent tasks.
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "test", Title: "s", Body: "b", ParentIssueId: epic.Id));
@@ -151,6 +146,10 @@ public class SprintAssemblerTests : IDisposable
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, CancellationToken.None);
         await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
 
+        var dependent = await _issues.CreateAsync(new NewIssue("task", "dependent",
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await _issues.AddDependencyAsync(task.Id, dependent.Id, IssueDepKind.Blocks);
+
         var sweeping = new SprintAssembler(
             new ProjectContextFactory(new List<ProjectOptions>()),
             _events, NullLogger<SprintAssembler>.Instance,
@@ -158,17 +157,65 @@ public class SprintAssemblerTests : IDisposable
         await Task.Delay(30); // let the failure age past the tiny window
         await sweeping.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
 
-        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(task.Id))!.Status);
-        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(story.Id))!.Status);
-        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(epic.Id))!.Status);
-        Assert.Contains(_events.GetHistorySnapshot(), e => e.Kind == "sprint.failure.swept");
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(story.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(epic.Id))!.Status);
+        Assert.DoesNotContain(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.Contains(task.Id, (await _issues.OpenBlockersAsync([dependent.Id]))[dependent.Id]);
+        Assert.Null(await _sprints.GetActiveAsync());
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), e => e.Kind is "sprint.failure.swept" or DashboardEventKind.SprintCompleted);
+        var state = (await new MemoryStore(_issues.Db).RecallAsync(SprintAssembler.BuildStateKey)).First();
+        using var json = System.Text.Json.JsonDocument.Parse(state.Body);
+        Assert.Equal("starved", json.RootElement.GetProperty("phase").GetString());
+        Assert.Contains("explicitly close", json.RootElement.GetProperty("reason").GetString());
+        Assert.DoesNotContain("auto-close", json.RootElement.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task AgedFailedSprintMember_RequiresExplicitOperatorClosure_EvenWithGateHeld()
+    {
+        var (_, _, tasks) = await SeedGroomedSpecAsync("required outcome", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var taskId = tasks.Single();
+        await _issues.TransitionAsync(taskId, IssueStatus.Failed, "required behavior still missing");
+        var dependent = await _issues.CreateAsync(new NewIssue("task", "dependent",
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await _issues.AddDependencyAsync(taskId, dependent.Id, IssueDepKind.Blocks);
+        var gates = new StageGates(new MemoryStore(_issues.Db));
+        await gates.HoldAsync(StageGates.Sprint);
+        var assembler = new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),
+            _events, NullLogger<SprintAssembler>.Instance, gates: gates,
+            failureAgingWindow: TimeSpan.FromMilliseconds(1));
+        await Task.Delay(30);
+        await assembler.TickProjectAsync("test", _issues, _sprints, _specs, default);
+        await assembler.TickProjectAsync("test", _issues, _sprints, _specs, default);
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(taskId))!.Status);
+        Assert.Equal(active.Id, (await _sprints.GetActiveAsync())!.Id);
+        Assert.Equal(SprintStatus.Active, (await _sprints.GetAsync(active.Id))!.Status);
+        Assert.DoesNotContain(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), e => e.Kind == DashboardEventKind.SprintCompleted);
+        var state = (await new MemoryStore(_issues.Db).RecallAsync(SprintAssembler.BuildStateKey)).First();
+        using var json = System.Text.Json.JsonDocument.Parse(state.Body);
+        Assert.Contains("held by Failed/Blocked", json.RootElement.GetProperty("reason").GetString());
+        Assert.Equal(0, json.RootElement.GetProperty("activeTerminal").GetInt32());
+        Assert.Contains(json.RootElement.GetProperty("heldWork").EnumerateArray(), i => i.GetProperty("id").GetString() == taskId);
+
+        // Explicit operator close remains authoritative. Completion bookkeeping
+        // is allowed while the gate prevents a new sprint from assembling.
+        await _issues.TransitionAsync(taskId, IssueStatus.Closed, "operator explicitly abandons this work");
+        await assembler.TickProjectAsync("test", _issues, _sprints, _specs, default);
+        Assert.Equal(SprintStatus.Completed, (await _sprints.GetAsync(active.Id))!.Status);
+        Assert.Null(await _sprints.GetActiveAsync());
+        Assert.Contains(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.Contains(_events.GetHistorySnapshot(), e => e.Kind == DashboardEventKind.SprintCompleted);
     }
 
     [Fact]
     public async Task FreshFailure_Untouched_BuildStateStarved()
     {
-        // The no-auto-clear rule protects FRESH failures (the operator
-        // is investigating); the build state must NAME the blockage
+        // The no-auto-clear rule protects all failures. The build state
+        // must NAME the blockage
         // instead of the flat "no eligible work" — a completed sprint
         // plus a busy board read as a dead pipeline (2026-08-17/18).
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
@@ -197,7 +244,7 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task FailureAging_Disabled_NeverSweeps()
+    public async Task DefaultConfiguration_NeverSweepsFailures()
     {
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
         var spec = await _specs.CreateAsync(new NewSpec(
@@ -207,7 +254,7 @@ public class SprintAssemblerTests : IDisposable
         await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
 
         await Task.Delay(30);
-        await Tick(); // the default assembler has NO aging window
+        await Tick(); // default and legacy configurations both preserve failure
         Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
     }
 

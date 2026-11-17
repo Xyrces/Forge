@@ -22,7 +22,7 @@ namespace Forge.Orchestrator.Sprint;
     /// without grooming (operator rule, 2026-07-23).</item>
 /// <item>The next sprint is assembled at the completion of the
 /// last: when every task linked to the Active sprint is terminal
-/// (Completed | Failed | Closed), the sprint is marked Completed
+/// (Completed | Closed), the sprint is marked Completed
 /// and the next one is assembled immediately.</item>
 /// <item>Exactly one Active sprint per project. Dispatch only
 /// claims tasks in the Active sprint (the gate lives in
@@ -68,6 +68,7 @@ public sealed class SprintAssembler
         Core.IFollowUpTriage? followUpTriage = null,
         WakeupSignal? wakeup = null,
         Core.Messaging.IEventPublisher? eventPublisher = null,
+        // Compatibility only: elapsed time never clears Failed work.
         TimeSpan? failureAgingWindow = null)
     {
         _projects = projects;
@@ -78,13 +79,11 @@ public sealed class SprintAssembler
         _followUpTriage = followUpTriage;
         _wakeup = wakeup;
         _eventPublisher = eventPublisher;
-        _failureAgingWindow = failureAgingWindow;
     }
 
     private readonly Core.IFollowUpTriage? _followUpTriage;
     private readonly WakeupSignal? _wakeup;
     private readonly Core.Messaging.IEventPublisher? _eventPublisher;
-    private readonly TimeSpan? _failureAgingWindow;
 
     public TimeSpan Interval => _interval;
 
@@ -235,23 +234,14 @@ public sealed class SprintAssembler
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
         var prevState = await ReadBuildStateAsync(issues, ct);
-        // Aged-failure triage FIRST: a sprint whose last open task is
-        // an ancient Failed would otherwise sit Active forever, and a
-        // backlog held hostage by dead failures starves assembly
-        // silently (operator direction 2026-08-18: "fix this
-        // permanently"). Fresh failures stay untouched — the
-        // no-auto-clear rule is about the operator investigating
-        // RECENT failures; past the aging window the task is
-        // definitionally abandoned. The closure cascades through
-        // CloseTerminalEpicsAsync below (stories/epics auto-close
-        // behind it).
-        await SweepAgedFailuresAsync(projectId, issues, ct);
+        // Failed tasks remain open until an explicit operator action. Age is
+        // diagnostic information, never evidence of completion or abandonment.
         string? completedSprintId = null;
         string? completedSprintName = null;
         var active = await sprints.GetActiveAsync(ct);
         if (active is not null)
         {
-            var (complete, total, terminal) = await CompletionProgressAsync(active, issues, sprints, ct);
+            var (complete, total, terminal, heldMembers) = await CompletionProgressAsync(active, issues, sprints, ct);
             if (!complete)
             {
                 // Ad-hoc injection (operator rule 2026-07-27): a
@@ -265,13 +255,15 @@ public sealed class SprintAssembler
                 await InjectAdHocAsync(active, projectId, issues, sprints, ct);
                 await WriteBuildStateAsync(issues, new SprintBuildState(
                     Phase: "running",
-                    Reason: $"Sprint '{active.Name}' in progress — {terminal}/{total} tasks terminal",
+                    Reason: heldMembers.Count == 0
+                        ? $"Sprint '{active.Name}' in progress - {terminal}/{total} tasks terminal"
+                        : $"Sprint '{active.Name}' held by Failed/Blocked work - investigate, requeue or explicitly close the affected tasks; age does not resolve failures",
                     UpdatedAt: DateTime.UtcNow,
                     CompletedSprintId: null, CompletedSprintName: null,
                     PendingGroom: Array.Empty<PendingGroomItem>(),
                     EligibleGroups: Array.Empty<EligibleGroupItem>(),
                     ActiveSprintId: active.Id, ActiveSprintName: active.Name,
-                    ActiveTotal: total, ActiveTerminal: terminal), ct);
+                    ActiveTotal: total, ActiveTerminal: terminal, HeldWork: heldMembers), ct);
                 return;
             }
             await sprints.UpdateAsync(active.Id,
@@ -390,7 +382,7 @@ public sealed class SprintAssembler
             // held open by Failed tasks — the operator sees a completed
             // sprint + a busy board and concludes the pipeline died.
             // Name the blockage: how many groups are held, by how many
-            // failures, and when the aging sweep clears them.
+            // failures, and the operator action needed to resolve them.
             var held = await SummarizeHeldWorkAsync(issues, ct);
             if (held.FailedTasks == 0)
             {
@@ -400,12 +392,9 @@ public sealed class SprintAssembler
             }
             else
             {
-                var windowNote = _failureAgingWindow is { } w
-                    ? $"failures auto-close after {w.TotalDays:0} days without operator action"
-                    : "failure aging is disabled — requeue or close Failed tasks to unblock";
                 var reason =
-                    $"No eligible work — {held.HeldGroups} group(s) held by {held.FailedTasks} Failed task(s); " +
-                    windowNote;
+                    $"No eligible work � {held.HeldGroups} group(s) held by {held.FailedTasks} Failed task(s); " +
+                    "investigate, requeue or explicitly close Failed tasks to unblock; age does not resolve failures";
                 if (prevState?.Phase != "starved"
                     || !(prevState.HeldWork ?? Array.Empty<HeldWorkItem>()).Select(h => h.Id).SequenceEqual(held.Items.Select(h => h.Id)))
                 {
@@ -430,44 +419,6 @@ public sealed class SprintAssembler
                     HeldWork: held.Items), ct);
             }
         }
-    }
-
-    /// <summary>
-    /// Close Failed tasks older than the aging window (operator
-    /// direction 2026-08-18): a failure nobody requeued or closed
-    /// within the window is abandoned work, and leaving it Failed
-    /// holds its story/epic (and sprint assembly) hostage forever —
-    /// observed live 2026-08-17/18: porthorizon sat idle 24h+ on 20
-    /// Failed tasks aged 8-17 days while the board read as "busy
-    /// backlog". Fresh failures are NEVER touched (the no-auto-clear
-    /// rule protects the operator's active investigation). Returns the
-    /// number swept.
-    /// </summary>
-    private async Task<int> SweepAgedFailuresAsync(string projectId, IIssueStore issues, CancellationToken ct)
-    {
-        if (_failureAgingWindow is not { } window) return 0;
-        var cutoff = DateTime.UtcNow - window;
-        var failed = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Failed }, ct);
-        var aged = failed.Where(i => i.UpdatedAt <= cutoff).OrderBy(i => i.UpdatedAt).ToList();
-        foreach (var task in aged)
-        {
-            var ageDays = (DateTime.UtcNow - task.UpdatedAt).TotalDays;
-            await issues.TransitionAsync(task.Id, IssueStatus.Closed,
-                $"auto-closed: abandoned failure — Failed {ageDays:0.#} days with no operator action " +
-                $"(aging window {window.TotalDays:0} days). Requeue or re-enqueue to revive the work.", ct: ct);
-            _logger.LogInformation(
-                "Aged failure auto-closed: {Id} (Failed {Age:0.#}d, window {Window:0}d, project={Project})",
-                task.Id, ageDays, window.TotalDays, projectId);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, "sprint.failure.swept",
-                task.Id, $"{task.Id} auto-closed (Failed {ageDays:0.#}d)",
-                new Dictionary<string, object?>
-                {
-                    ["projectId"] = projectId,
-                    ["taskId"] = task.Id,
-                    ["ageDays"] = ageDays,
-                }));
-        }
-        return aged.Count;
     }
 
     /// <summary>Work the operator sees as "backlog" that assembly can
@@ -505,12 +456,13 @@ public sealed class SprintAssembler
     /// floor in 2026-08-11 because Failed was counted as terminal
     /// — Failed must stay open and keep the sprint active.
     /// </summary>
-    private static async Task<(bool Complete, int Total, int Terminal)> CompletionProgressAsync(
+    private static async Task<(bool Complete, int Total, int Terminal, IReadOnlyList<HeldWorkItem> Held)> CompletionProgressAsync(
         SprintRecord sprint, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
     {
         var memberIds = await sprints.GetIssueIdsAsync(sprint.Id, ct);
         var total = 0;
         var terminal = 0;
+        var held = new List<HeldWorkItem>();
         foreach (var id in memberIds)
         {
             var issue = await issues.GetAsync(id, ct);
@@ -520,6 +472,8 @@ public sealed class SprintAssembler
                 continue;
             }
             total++;
+            if (issue.Status is IssueStatus.Failed or IssueStatus.Blocked && held.Count < 20)
+                held.Add(new HeldWorkItem(issue.Id, issue.Title, (int)(DateTime.UtcNow - issue.UpdatedAt).TotalDays));
             // Failed does NOT count as terminal: the operator must
             // investigate or requeue (rule 2026-07-25; Sprint 5 of
             // talaria dropped a Failed task onto the floor in
@@ -534,7 +488,7 @@ public sealed class SprintAssembler
         // linked) is complete — defensive, so an empty Active doesn't
         // block assembly forever. A sprint with tasks is NOT complete
         // until all of them are Completed/Closed.
-        return (total == 0 || terminal == total, total, terminal);
+        return (total == 0 || terminal == total, total, terminal, held);
     }
 
     /// <summary>

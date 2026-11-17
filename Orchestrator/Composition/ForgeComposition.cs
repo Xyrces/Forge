@@ -738,10 +738,7 @@ public static class ForgeComposition
             gates: stageGates,
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
-            eventPublisher: eventPublisher,
-            failureAgingWindow: options.Orchestrator.FailureAgingDays is > 0
-                ? TimeSpan.FromDays(options.Orchestrator.FailureAgingDays.Value)
-                : null));
+            eventPublisher: eventPublisher));
 
         return services.BuildServiceProvider();
     }

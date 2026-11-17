@@ -273,14 +273,11 @@ public sealed record OrchestratorOptions
         "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None";
 
     /// <summary>
-    /// Days a task may sit Failed with no operator action before the
-    /// sprint assembler auto-closes it as abandoned (operator
-    /// direction 2026-08-18: "fix this permanently" — a backlog held
-    /// hostage by ancient failures starved sprint assembly silently).
-    /// Fresh failures are never touched (the no-auto-clear rule
-    /// protects active investigation). 0/null disables the sweep.
+    /// Legacy configuration accepted for backward compatibility only. Failed
+    /// tasks are never auto-closed by age; operator triage is required.
     /// </summary>
-    public int? FailureAgingDays { get; set; } = 7;
+    public int? FailureAgingDays { get; set; }
+
 }
 
 public sealed record LlmOptions
