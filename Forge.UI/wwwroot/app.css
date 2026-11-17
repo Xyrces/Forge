@@ -205,6 +205,32 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
   display: flex; flex-direction: column;
 }
 
+/* Narrow screens use a disclosure menu, keeping every navigation link available. */
+.app-navigation-toggle { display: none; }
+@media (max-width: 760px) {
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "topbar" "main";
+    height: 100dvh;
+  }
+  .app-shell--navigation-open {
+    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas: "topbar" "nav" "main";
+  }
+  .app-navigation-toggle { display: inline-flex; width: auto; padding: 0 8px; }
+  .app-topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+  .app-topbar__search { display: none; }
+  .project-switcher { flex: 1; min-width: 0; margin-left: 0; }
+  .project-switcher__select { width: 100%; min-width: 0; }
+  .app-topbar__right { width: 100%; min-width: 0; flex-wrap: wrap; gap: 8px; }
+  .app-topbar__right .pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .app-nav { display: none; border-right: 0; border-bottom: 1px solid var(--outline); }
+  .app-shell--navigation-open .app-nav { display: block; max-height: 45dvh; }
+  .app-main { min-width: 0; padding: 16px 12px; }
+  .app-drawer { max-width: 100vw; }
+}
+
 /* =========================================================================
    Pills, badges, chips
    ------------------------------------------------------------------------- */
