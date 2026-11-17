@@ -41,6 +41,18 @@
         {
             <p class="page-subtitle">Qualified source: <code>@receipt.SourceSha</code></p>
         }
+        @foreach (var criterion in _detail.Criteria)
+        {
+            <div class="card">
+                <strong>@criterion.Text</strong>
+                <p class="page-subtitle">@criterion.EvidenceKind</p>
+                @if (criterion.EvidenceKind == "OperatorObserved")
+                {
+                    <p>@(criterion.ProofReference is null ? "Awaiting explicit operator observation of the exact deployed version." : "Operator observation recorded for this deployed version.")</p>
+                    @if (criterion.ProofReference is not null) { <p>Evidence: @criterion.ProofReference</p> }
+                }
+            </div>
+        }
         @foreach (var batch in _detail.Batches)
         {
             <div class="card">
@@ -108,7 +120,7 @@
                 response.EnsureSuccessStatusCode();
                 detail = await response.Content.ReadFromJsonAsync<CompletionDetail>(cancellationToken: token)
                     ?? throw new JsonException("Missing completion evidence.");
-                if (detail.Receipt is null || detail.Batches is null || detail.Receipt.ProjectId != ProjectId || detail.Receipt.SprintId != SprintId ||
+                if (detail.Receipt is null || detail.Batches is null || detail.Criteria is null || detail.Receipt.ProjectId != ProjectId || detail.Receipt.SprintId != SprintId ||
                     string.IsNullOrWhiteSpace(detail.Receipt.Outcome) || string.IsNullOrWhiteSpace(detail.Receipt.BookkeepingState) ||
                     detail.Batches.Any(b => string.IsNullOrWhiteSpace(b.Id) || string.IsNullOrWhiteSpace(b.State)))
                     throw new JsonException("Completion evidence does not match the selection.");
@@ -161,7 +173,8 @@
     public void Dispose() { ++_generation; _request?.Cancel(); _request?.Dispose(); }
     private sealed record CompletionSummary(string Id, string ProjectId, string SprintId, string Outcome,
         string BookkeepingState, bool ReadyForDeployment, string? SourceSha, string? DeploymentCandidateId,
-        string? DeploymentStatus, string? DeliveryNote);
+        string? DeploymentStatus, string? DeliveryNote, string? PlanHash);
     private sealed record CompletionBatch(string Id, string State, string? Error);
-    private sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatch> Batches, string? NextCursor);
+    private sealed record CompletionCriterion(string Id, string Text, string EvidenceKind, string? ProofReference, string? OperatorIdentity);
+    private sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatch> Batches, string? NextCursor, IReadOnlyList<CompletionCriterion> Criteria);
 }
