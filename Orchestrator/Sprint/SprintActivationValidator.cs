@@ -181,7 +181,7 @@ internal sealed class SprintActivationValidator(
             throw new InvalidOperationException("Acceptance criteria lack implementing members.");
         var snapshot = new SprintActivationSnapshot(rows.Values.ToArray(), specRows.Values.ToArray(), selected.Order(StringComparer.Ordinal).ToArray(),
             Dependencies: dependencies, ExistingSprintMembers: existing.Count == 0 ? null : existing.Values.ToArray());
-        var plan = new SprintPlan(1, projectId, previous?.Objective ?? string.Join("; ", criteria.Values.OrderBy(c => c.Id).Select(c => c.Text)),
+        var plan = new SprintPlan(1, projectId, previous?.Objective ?? objective ?? throw new InvalidOperationException("A new sprint requires an explicit validated outcome objective."),
             criteria.Values.OrderBy(c => c.Id, StringComparer.Ordinal).ToArray(), members.OrderBy(m => m.TaskId, StringComparer.Ordinal).ToArray(), [], Fingerprint(snapshot), "");
         return snapshot with { Plan = plan with { Hash = SprintPlan.ComputeHash(plan) } };
     }
