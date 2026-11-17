@@ -3,11 +3,15 @@ using Xunit;
 
 namespace Forge.Tests;
 
+[CollectionDefinition("OptionsLoader process environment", DisableParallelization = true)]
+public sealed class OptionsLoaderEnvironmentCollection { }
+
 /// <summary>
 /// Regression tests for <see cref="OptionsLoader"/>: the file-loading
 /// path is correct, the binder populates string + list + dict
 /// properties, and env-var overrides take effect.
 /// </summary>
+[Collection("OptionsLoader process environment")]
 public class OptionsLoaderTests : IDisposable
 {
     private readonly string _workDir;
@@ -136,40 +140,211 @@ public class OptionsLoaderTests : IDisposable
         }
     }
 
-    [Fact]
-    public void Load_EnvVarLlmApiKey_InjectsProvider()
+    private void WriteLlmConfig(string defaultProvider, params LlmProviderOptions[] providers)
     {
-        // The override path: a single provider entry with the API key from
-        // LLM_API_KEY gets injected when the env var is set.
-        WriteConfig("""
+        WriteConfig(System.Text.Json.JsonSerializer.Serialize(new
         {
-          "workspace": { "root": "x" },
-          "github": { "owner": "o", "repo": "r" },
-          "llm": {
-            "defaultProvider": "",
-            "providers": []
-          }
-        }
-        """);
+            Llm = new LlmOptions { DefaultProvider = defaultProvider, Providers = providers.ToList() },
+        }));
+    }
+
+    private static LlmProviderOptions ResponsesProvider() => new()
+    {
+        Name = "openai",
+        ApiKey = "configured-key",
+        Api = "responses",
+        BaseUrl = "https://api.openai.com/v1",
+        DefaultModel = "configured-model",
+        OrgId = "configured-org",
+        ProjectId = "configured-project",
+        ReasoningEffort = "high",
+        SharedQuota = true,
+        MaxOutputTokens = 1234,
+    };
+
+    private AgentOptions LoadWithLlmEnvironment(params (string Name, string? Value)[] overrides)
+    {
+        // Include hierarchical binder overrides (Llm__*) as well as LLM_*.
+        // Never let an ambient worker credential or provider affect these tests.
+        var names = Environment.GetEnvironmentVariables().Keys.Cast<string>()
+            .Where(name => name.StartsWith("LLM_", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("LLM:", StringComparison.OrdinalIgnoreCase))
+            .Concat(overrides.Select(entry => entry.Name))
+            .Distinct();
+        var savedEnv = names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
         var savedCwd = Directory.GetCurrentDirectory();
-        Environment.SetEnvironmentVariable("LLM_API_KEY", "kg-env-123");
-        Environment.SetEnvironmentVariable("LLM_BASE_URL", "http://forge.local:9999");
         try
         {
+            foreach (var name in savedEnv.Keys)
+                Environment.SetEnvironmentVariable(name, null);
+            foreach (var (name, value) in overrides)
+                Environment.SetEnvironmentVariable(name, value);
             Directory.SetCurrentDirectory(_workDir);
-            var options = OptionsLoader.Load();
-            var provider = options.Llm.Providers.FirstOrDefault(p => p.Name == "kilo-gateway");
-            Assert.NotNull(provider);
-            Assert.Equal("kg-env-123", provider!.ApiKey);
-            Assert.Equal("http://forge.local:9999", provider.BaseUrl);
-            Assert.Equal("kilo-gateway", options.Llm.DefaultProvider);
+            return OptionsLoader.Load();
         }
         finally
         {
-            Environment.SetEnvironmentVariable("LLM_API_KEY", null);
-            Environment.SetEnvironmentVariable("LLM_BASE_URL", null);
+            foreach (var (name, value) in savedEnv)
+                Environment.SetEnvironmentVariable(name, value);
             Directory.SetCurrentDirectory(savedCwd);
         }
+    }
+
+    [Theory]
+    [InlineData(null, "openai")]
+    [InlineData("", "OPENAI")]
+    [InlineData(" \t", "openai")]
+    public void Load_EnvVarLlmApiKey_UpdatesConfiguredDefaultAndPreservesTemplate(
+        string? providerName, string defaultProvider)
+    {
+        var template = ResponsesProvider();
+        WriteLlmConfig(defaultProvider, template);
+
+        var options = LoadWithLlmEnvironment(
+            ("LLM_PROVIDER_NAME", providerName), ("LLM_API_KEY", "env-key"));
+
+        Assert.Equal(defaultProvider, options.Llm.DefaultProvider);
+        Assert.Equal(template with { Name = defaultProvider, ApiKey = "env-key" },
+            Assert.Single(options.Llm.Providers));
+    }
+
+    [Theory]
+    [InlineData("alternate")]
+    [InlineData("ALTERNATE")]
+    public void Load_EnvVarLlmApiKey_ExplicitAlternateUpdatesOnlyMatchingProvider(string providerName)
+    {
+        var primary = ResponsesProvider();
+        var alternate = primary with
+        {
+            Name = "alternate", ApiKey = "alternate-key", BaseUrl = "https://alternate.test/v1",
+            DefaultModel = "alternate-model", ProjectId = "alternate-project",
+        };
+        WriteLlmConfig("openai", primary, alternate);
+
+        var options = LoadWithLlmEnvironment(
+            ("LLM_PROVIDER_NAME", providerName), ("LLM_API_KEY", "env-key"));
+
+        Assert.Equal("openai", options.Llm.DefaultProvider);
+        Assert.Equal(new[] { primary, alternate with { Name = providerName, ApiKey = "env-key" } },
+            options.Llm.Providers);
+    }
+
+    [Fact]
+    public void Load_EnvVarLlmApiKey_ExplicitNewProviderDoesNotSwitchConfiguredDefault()
+    {
+        var primary = ResponsesProvider();
+        WriteLlmConfig("openai", primary);
+
+        var options = LoadWithLlmEnvironment(
+            ("LLM_PROVIDER_NAME", "alternate"), ("LLM_API_KEY", "env-key"));
+
+        Assert.Equal("openai", options.Llm.DefaultProvider);
+        Assert.Equal(new[]
+        {
+            primary,
+            new LlmProviderOptions
+            {
+                Name = "alternate", ApiKey = "env-key",
+                BaseUrl = "http://127.0.0.1:4096", DefaultModel = "stub-model",
+            },
+        }, options.Llm.Providers);
+    }
+
+    [Theory]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+    [InlineData(" \t", " \t")]
+    public void Load_EnvVarLlmApiKey_WithoutProviderNamesUsesLegacyFallback(
+        string? providerName, string defaultProvider)
+    {
+        WriteLlmConfig(defaultProvider);
+
+        var options = LoadWithLlmEnvironment(
+            ("LLM_PROVIDER_NAME", providerName), ("LLM_API_KEY", "env-key"));
+
+        Assert.Equal("kilo-gateway", options.Llm.DefaultProvider);
+        Assert.Equal(new LlmProviderOptions
+        {
+            Name = "kilo-gateway", ApiKey = "env-key",
+            BaseUrl = "http://127.0.0.1:4096", DefaultModel = "stub-model",
+        }, Assert.Single(options.Llm.Providers));
+    }
+
+    [Fact]
+    public void Load_EnvVarLlmApiKey_ExplicitProviderBecomesDefaultWhenUnconfigured()
+    {
+        WriteLlmConfig(" ");
+
+        var options = LoadWithLlmEnvironment(
+            ("LLM_PROVIDER_NAME", "openai"), ("LLM_API_KEY", "env-key"),
+            ("LLM_BASE_URL", "https://override.test/v1"), ("LLM_MODEL", "env-model"));
+
+        Assert.Equal("openai", options.Llm.DefaultProvider);
+        Assert.Equal(new LlmProviderOptions
+        {
+            Name = "openai", ApiKey = "env-key",
+            BaseUrl = "https://override.test/v1", DefaultModel = "env-model",
+        }, Assert.Single(options.Llm.Providers));
+    }
+
+    [Fact]
+    public void Load_EnvVarLlmApiKey_ExplicitFieldOverridesReplaceTemplateValues()
+    {
+        var template = ResponsesProvider();
+        WriteLlmConfig("openai", template);
+
+        var options = LoadWithLlmEnvironment(
+            ("LLM_API_KEY", "env-key"), ("LLM_BASE_URL", "https://override.test/v1"),
+            ("LLM_MODEL", "env-model"), ("LLM_API", "openai"),
+            ("LLM_ORG_ID", "env-org"), ("LLM_PROJECT_ID", "env-project"),
+            ("LLM_REASONING_EFFORT", "low"));
+
+        Assert.Equal("openai", options.Llm.DefaultProvider);
+        Assert.Equal(template with
+        {
+            ApiKey = "env-key", BaseUrl = "https://override.test/v1", DefaultModel = "env-model",
+            Api = "openai", OrgId = "env-org", ProjectId = "env-project", ReasoningEffort = "low",
+        }, Assert.Single(options.Llm.Providers));
+    }
+
+    [Fact]
+    public void Load_EnvVarLlmApiKey_PreservesEmptyMatchingTemplateFields()
+    {
+        var template = ResponsesProvider() with { BaseUrl = "", DefaultModel = "" };
+        WriteLlmConfig("openai", template);
+
+        var options = LoadWithLlmEnvironment(("LLM_API_KEY", "env-key"));
+
+        Assert.Equal(template with { ApiKey = "env-key" }, Assert.Single(options.Llm.Providers));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Load_WithoutLlmApiKey_IgnoresSingleProviderOverrides(string? apiKey)
+    {
+        var template = ResponsesProvider();
+        WriteLlmConfig("openai", template);
+
+        var options = LoadWithLlmEnvironment(
+            ("LLM_API_KEY", apiKey), ("LLM_PROVIDER_NAME", "alternate"),
+            ("LLM_BASE_URL", "https://override.test/v1"), ("LLM_MODEL", "env-model"),
+            ("LLM_API", "openai"), ("LLM_ORG_ID", "env-org"),
+            ("LLM_PROJECT_ID", "env-project"), ("LLM_REASONING_EFFORT", "low"));
+
+        Assert.Equal("openai", options.Llm.DefaultProvider);
+        Assert.Equal(template, Assert.Single(options.Llm.Providers));
+    }
+
+    [Fact]
+    public void Load_WithoutLlmApiKey_DoesNotCreateProviderOrDefault()
+    {
+        WriteLlmConfig("");
+
+        var options = LoadWithLlmEnvironment(("LLM_PROVIDER_NAME", "alternate"));
+
+        Assert.Equal("", options.Llm.DefaultProvider);
+        Assert.Empty(options.Llm.Providers);
     }
 
     [Fact]
