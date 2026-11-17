@@ -12,7 +12,7 @@ RUN --mount=type=secret,id=nuget_config,required=true \
 RUN dotnet build Forge.sln -c Release --no-restore
 RUN dotnet test tests/Forge.Tests/Forge.Tests.csproj -c Release --no-build \
     --filter 'FullyQualifiedName!~RealLlmIntegrationTests&FullyQualifiedName!~MafAgentRunnerLiveTests&FullyQualifiedName!~MeshyLiveSmokeTests'
-RUN dotnet publish Forge.Core/Forge.Core.csproj -c Release --no-build -o /publish
+RUN dotnet publish Forge.Core/Forge.Core.csproj -c Release --no-restore -o /publish
 RUN test -f /publish/Forge.Core.dll && test -f /publish/wwwroot/app.css && test -f /publish/agents/coredev.md
 
 # SDK is deliberate: the same pinned artifact supports Forge CPU implementation/testing.
