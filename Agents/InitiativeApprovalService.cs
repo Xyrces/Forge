@@ -26,6 +26,15 @@ public sealed class InitiativeApprovalService(
         return retry;
     }
 
+    public async Task<bool> RepairHygieneAsync(string projectId, string id, int revision, string hash, HygieneRepairRequest request, CancellationToken ct = default)
+    {
+        var proposal = await Proposals.GetAsync(projectId, id, ct);
+        if (proposal?.ApprovedAt is null || proposal.Revision != revision || proposal.Hash != hash) return false;
+        var repaired = await ingestionForProject(projectId).RepairHygieneAsync(id, revision, hash, request, ct);
+        if (repaired) events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.refinement.retry", proposal.SessionId, "Operator requested refinement repair after deterministic design validation"));
+        return repaired;
+    }
+
     public async Task<InitiativeIngestion> ApproveAsync(string projectId, string proposalId,
         int revision, string hash, CancellationToken ct = default)
     {

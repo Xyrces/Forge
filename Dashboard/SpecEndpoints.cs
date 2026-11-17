@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Forge.Agents;
 using Forge.Core;
 using Forge.Core.Messaging;
+using Forge.Core.Initiatives;
 
 namespace Forge.Dashboard;
 
@@ -18,6 +19,8 @@ namespace Forge.Dashboard;
 /// what's there.
 /// </para>
 /// </summary>
+public sealed record SpecHygieneRepairRequest(string ProposalId, int Revision, string Hash, int SpecVersion, long DesignRunId);
+
 public sealed record GroomingRetryRequest(long? ExpectedRunId);
 
 public static class SpecEndpoints
@@ -33,8 +36,14 @@ public static class SpecEndpoints
         Projects.ProjectContextFactory? projectContexts = null,
         Forge.Core.IIssueStore? issues = null,
         InitiativeApprovalService? initiativeApprovals = null,
-        IEventPublisher? eventPublisher = null)
+        IEventPublisher? eventPublisher = null,
+        DesignerRunStore? designerRuns = null)
     {
+        bool HasLocalDesignEvidence(IIssueStore? candidate) => candidate is IssueStore target && issues is IssueStore primary
+            && target.ProjectId == primary.ProjectId && target.Db.Provider == primary.Db.Provider
+            && target.Db.Qualifier == primary.Db.Qualifier && target.Db.ConnectionString == primary.Db.ConnectionString
+            && designerRuns is not null && designerRuns.UsesDatabase(target.Db);
+
         // Multi-project: when ?project= names a registered project and the
         // factory is available, read from THAT project's spec store (spec
         // rows live in the per-project issues sqlite file). Absent param
@@ -447,6 +456,24 @@ public static class SpecEndpoints
         // (Approve only on Draft, Start Grooming only on Approved |
         // Designed, etc.) so the UI doesn't ship its own copy of the
         // state machine.
+        app.MapPost("/api/specs/{id}/refine-again", async (string id, string? project, SpecHygieneRepairRequest request, CancellationToken ct) =>
+        {
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound();
+            var spec = await owned.Value.Specs.GetAsync(id, ct);
+            if (spec is null) return Results.NotFound();
+            // Designer evidence is currently primary-store owned; never bind another project's same spec ID.
+            if (initiativeApprovals is null || designerRuns is null || owned.Value.Issues is not IssueStore target
+                || !HasLocalDesignEvidence(target)) return Results.Conflict(new { error = "Design repair is not configured for this owning project store." });
+            try
+            {
+                return await initiativeApprovals.RepairHygieneAsync(spec.ProjectId, request.ProposalId, request.Revision, request.Hash,
+                    new HygieneRepairRequest(id, request.SpecVersion, request.DesignRunId), ct)
+                    ? Results.Accepted() : Results.Conflict(new { error = "Repair evidence changed or downstream work exists. Reload and review the latest design result." });
+            }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
         app.MapGet("/api/specs/{id}/actions", async (string id, string? project, CancellationToken ct) =>
         {
             var owned = ResolveOwned(project);
@@ -460,6 +487,15 @@ public static class SpecEndpoints
                 ? await concrete.GetInitiativeRefinementAsync(id, ct)
                 : null;
             var refinementBlocked = receipt is not null && receipt.RefinementState != "Completed";
+            var design = designerRuns is not null && HasLocalDesignEvidence(owned.Value.Issues)
+                ? (await designerRuns.ListAsync(spec.Id, 1, ct)).FirstOrDefault() : null;
+            var designFailure = design?.Status == DesignerRunStatus.HygieneFailed && design.Ts >= spec.UpdatedAt;
+            var proposal = receipt is not null && initiativeApprovals is not null
+                ? await initiativeApprovals.Proposals.GetAsync(spec.ProjectId, receipt.ProposalId, ct) : null;
+            var canRepair = designFailure && receipt?.RefinementState == "Completed" && proposal?.ApprovedAt is not null
+                && owned.Value.Issues is IssueStore repairStore && HasLocalDesignEvidence(repairStore)
+                && await new InitiativeIngestionStore(repairStore).CanRepairHygieneAsync(receipt.ProposalId, receipt.Revision, proposal.Hash,
+                    new HygieneRepairRequest(spec.Id, spec.CurrentVersion, design!.Id), ct);
             var canApprove = !refinementBlocked && SpecActions.CanApprove(spec.Status);
             var latestGroom = groomerRuns is null ? null : (await groomerRuns.ListAsync(id, 1, ct)).FirstOrDefault();
             var groomingActive = latestGroom?.Status is GroomerRunStatus.Started or GroomerRunStatus.Queued;
@@ -475,6 +511,12 @@ public static class SpecEndpoints
 
             return Results.Json(new
             {
+                designState = design?.Status.ToString(),
+                designError = designFailure ? design!.Error : null,
+                designHygieneReport = designFailure ? design!.HygieneReportJson : null,
+                designRunId = design?.Id,
+                canRepairHygiene = canRepair,
+                initiativeHash = proposal?.Hash,
                 canApprove,
                 canStartGrooming,
                 canShip,
@@ -488,6 +530,7 @@ public static class SpecEndpoints
                 initiativeRevision = receipt?.Revision,
                 refinementError = receipt?.LastError,
                 reason = refinementBlocked ? $"Initiative already approved; refinement is {receipt!.RefinementState}. Wait for completion or retry failed refinement from Intake Proposals."
+                    : designFailure ? "Design validation found issues in this specification before any Designer model call. Review the diagnostics in Design; an explicit refinement repair may be needed."
                     : groomingActive ? "Technical planning is queued or running; existing planned work is retained."
                     : groomingRetryAvailable ? "Review the interrupted attempt, then explicitly retry to resume its planned work."
                     : canApprove ? "draft is ready for approval"

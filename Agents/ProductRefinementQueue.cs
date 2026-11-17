@@ -15,6 +15,7 @@ public sealed class ProductRefinementQueue : IAsyncDisposable
     private readonly Func<string, InitiativeIngestionStore> _ingestion;
     private readonly Func<string, ISpecStore> _specs;
     private readonly Func<string, string, CancellationToken, Task<SpecRecord?>> _refine;
+    private readonly Func<string, string, string, CancellationToken, Task<SpecRecord?>>? _repair;
     private readonly ILogger<ProductRefinementQueue> _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly Channel<bool> _wake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
@@ -29,13 +30,15 @@ public sealed class ProductRefinementQueue : IAsyncDisposable
     public ProductRefinementQueue(InitiativeApprovalService approvals, Func<IReadOnlyList<string>> projectIds,
         Func<string, InitiativeIngestionStore> ingestion, Func<string, ISpecStore> specs,
         Func<string, string, CancellationToken, Task<SpecRecord?>> refine,
-        IDashboardEventBus bus, ILogger<ProductRefinementQueue> logger)
+        IDashboardEventBus bus, ILogger<ProductRefinementQueue> logger,
+        Func<string, string, string, CancellationToken, Task<SpecRecord?>>? repair = null)
     {
         _approvals = approvals;
         _projectIds = projectIds;
         _ingestion = ingestion;
         _specs = specs;
         _refine = refine;
+        _repair = repair;
         _logger = logger;
         _bus = bus;
     }
@@ -146,7 +149,12 @@ public sealed class ProductRefinementQueue : IAsyncDisposable
                                 ?? throw new InvalidOperationException("Approved initiative spec is missing.");
                             if (spec.Status == SpecStatus.Draft)
                             {
-                                var result = await _refine(project, receipt.SpecId, ct);
+                                var repairContext = await target.GetRepairContextAsync(receipt.SpecId, spec.CurrentVersion, ct);
+                                if (repairContext is not null && _repair is null)
+                                    throw new InvalidOperationException("Hygiene repair requires a diagnostic-aware Product callback.");
+                                var result = repairContext is null
+                                    ? await _refine(project, receipt.SpecId, ct)
+                                    : await _repair!(project, receipt.SpecId, repairContext, ct);
                                 if (result is null)
                                     throw new InvalidOperationException("Product refinement did not commit a spec update; explicit retry is required.");
                             }

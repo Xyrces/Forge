@@ -5,7 +5,7 @@ using static Forge.Core.Initiatives.InitiativeDb;
 namespace Forge.Core.Initiatives;
 
 /// <summary>Project-local atomic ingestion and durable refinement bookkeeping; no model calls.</summary>
-public sealed class InitiativeIngestionStore(IssueStore issues)
+public sealed partial class InitiativeIngestionStore(IssueStore issues)
 {
     private string T(string name) => issues.Db.Dialect.Table(name);
     private string Query => $"SELECT proposal_id,revision,project_id,content_hash,epic_id,spec_id,refinement_state,attempts,last_error,updated_at FROM {T("initiative_ingestion")}";
