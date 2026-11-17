@@ -35,7 +35,7 @@ public class SprintAssemblerTests : IDisposable
         Directory.CreateDirectory(workDir);
         _dbPath = Path.Combine(workDir, "issues.db");
         _workDir = workDir;
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, "test");
         _sprints = new SprintStore(_issues);
         _specs = new SpecStore(_issues);
         _events = new InMemoryDashboardEventBus();
@@ -178,7 +178,11 @@ public class SprintAssemblerTests : IDisposable
         var proposals=new Forge.Core.Initiatives.InitiativeProposalStore(_issues);
         var assembler=new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),_events,
             NullLogger<SprintAssembler>.Instance,followUpTriage:new OverlapTriage(),initiativeProposals:proposals);
-        await Assert.ThrowsAsync<InvalidOperationException>(()=>assembler.TickProjectAsync("test",_issues,_sprints,_specs,default));
+        await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
+        var completionStore = new Forge.Core.Completion.SprintCompletionStore(_issues);
+        var receipt = Assert.Single(await completionStore.ListPendingBookkeepingAsync());
+        Assert.Equal("NeedsReview", Assert.Single(await completionStore.ListBatchesAsync(receipt.Id)).State);
+        await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
         Assert.Empty(await proposals.ListAsync("test"));
         Assert.Equal(2,(await drafts.ListUnconsumedAsync()).Count);
     }
@@ -364,7 +368,9 @@ public class SprintAssemblerTests : IDisposable
         await assembler.TickProjectAsync("test", _issues, _sprints, _specs, default);
         Assert.Equal(SprintStatus.Completed, (await _sprints.GetAsync(active.Id))!.Status);
         Assert.Null(await _sprints.GetActiveAsync());
-        Assert.Contains(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.DoesNotContain(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.Equal(Forge.Core.Completion.EngineeringOutcome.Incomplete,
+            (await new Forge.Core.Completion.SprintCompletionStore(_issues).GetAsync("completion-" + active.Id))!.EngineeringOutcome);
         Assert.Contains(_events.GetHistorySnapshot(), e => e.Kind == DashboardEventKind.SprintCompleted);
     }
 

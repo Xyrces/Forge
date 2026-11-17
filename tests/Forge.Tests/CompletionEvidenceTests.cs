@@ -92,5 +92,62 @@ public sealed class CompletionEvidenceTests : IDisposable
         Assert.False(TaskDeliveryEvidence.IsMergedAndVerified(task with { MetadataJson = JsonSerializer.Serialize(metadata) }));
     }
 
+    [Fact]
+    public async Task ExplicitAbandonmentResolvesBarrierWithoutClaimingDeliveryOrAdmittingDeployment()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true));
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.Single(await Store.ListPlanningBlockersAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.AbandonAsync(receipt.Id, "different-plan", "Stop this scope", "authenticated operator"));
+        await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop this scope", "authenticated operator");
+        await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop this scope", "authenticated operator");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.AbandonAsync(receipt.Id, plan.Hash, "Changed reason", "authenticated operator"));
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        Assert.Empty(await Store.ListAwaitingDeploymentAsync());
+        Assert.Equal(EngineeringOutcome.PendingEvidence, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
+        Assert.Equal("Stop this scope", Assert.Single(await Store.ListOverviewAsync(waitingOnly: false)).AbandonmentReason);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.BindDeploymentAsync(receipt.Id, "new-release"));
+    }
+
+    [Fact]
+    public async Task OperatorCannotAbandonAnIndependentUnfinishedRelease()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true));
+        await Store.BindDeploymentAsync(receipt.Id, "release");
+        await using var connection = await issues.Db.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO deployment(id,project_id,commit_sha,status,requested_at,completion_id) VALUES('release','project','source','Deploying','now',@completion)";
+        command.AddParam("@completion", receipt.Id);
+        await command.ExecuteNonQueryAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.AbandonAsync(receipt.Id, plan.Hash, "Stop", "authenticated operator"));
+        Assert.Null((await Store.GetAsync(receipt.Id))!.AbandonmentJson);
+        command.CommandText = "UPDATE deployment SET status='DeployFailed' WHERE id='release'";
+        await command.ExecuteNonQueryAsync();
+        await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop", "authenticated operator");
+        Assert.NotNull((await Store.GetAsync(receipt.Id))!.AbandonmentJson);
+    }
+
+    [Fact]
+    public async Task AbandonmentStopsUncertainBookkeepingButDoesNotRaceRunningTriage()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true));
+        var drafts = new FollowUpDraftStore(issues);
+        var id = await drafts.FileAsync(new(0, sprint.Id, task.Id, "reviewer", "Finding", "Detail", 2, null, DateTime.UtcNow, null));
+        var batch = await Store.ClaimBatchAsync(receipt.Id, [(await drafts.GetAsync(id))!]);
+        await Store.TryBeginTriageAsync(batch.Id);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.AbandonAsync(receipt.Id, plan.Hash, "Stop", "operator"));
+        await Store.RecoverRunningAsync();
+        await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop", "operator");
+        Assert.False(await Store.RetryTriageAsync(batch.Id));
+        Assert.False(await Store.TryBeginTriageAsync(batch.Id));
+        Assert.Empty(await Store.ListPendingBookkeepingAsync());
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        Assert.Single(await drafts.ListUnconsumedAsync());
+        Assert.Equal("Stopped", (await Store.GetAsync(receipt.Id))!.BookkeepingState);
+    }
+
     public void Dispose() => issues.Dispose();
 }

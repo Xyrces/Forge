@@ -21,7 +21,7 @@ public sealed class M041SprintCompletion : ISqlServerMigration
         {
             ["completion_criterion_evidence"] = $"completion_id {key} NOT NULL,criterion_id {key} NOT NULL,plan_hash {key} NOT NULL,source_sha {key} NOT NULL,deployment_id {key} NOT NULL,proof_ref {text} NOT NULL,proof_sha256 {key} NOT NULL,operator_identity {key} NOT NULL,observed_at {key} NOT NULL,PRIMARY KEY(completion_id,criterion_id)",
             ["completion_lock"] = "id INT NOT NULL PRIMARY KEY,value INT NOT NULL",
-            ["sprint_completion"] = $"id {key} NOT NULL PRIMARY KEY,project_id {key} NOT NULL,sprint_id {key} NOT NULL UNIQUE,plan_audit_id {integer} NULL,plan_hash {key} NULL,outcome {key} NOT NULL,members_json {text} NOT NULL,evidence_json {text} NOT NULL,bookkeeping_state {key} NOT NULL,source_sha {key} NULL,deployment_candidate_id {key} NULL,created_at {key} NOT NULL,updated_at {key} NOT NULL,ready_for_deployment INT NOT NULL,delivery_note {text} NULL",
+            ["sprint_completion"] = $"id {key} NOT NULL PRIMARY KEY,project_id {key} NOT NULL,sprint_id {key} NOT NULL UNIQUE,plan_audit_id {integer} NULL,plan_hash {key} NULL,outcome {key} NOT NULL,members_json {text} NOT NULL,evidence_json {text} NOT NULL,bookkeeping_state {key} NOT NULL,source_sha {key} NULL,deployment_candidate_id {key} NULL,created_at {key} NOT NULL,updated_at {key} NOT NULL,ready_for_deployment INT NOT NULL,delivery_note {text} NULL,abandonment_json {text} NULL,delivery_required INT NOT NULL DEFAULT 0",
             ["completion_triage"] = $"id {key} NOT NULL PRIMARY KEY,completion_id {key} NOT NULL,state {key} NOT NULL,sources_json {text} NOT NULL,decision_json {text} NULL,error {text} NULL,updated_at {key} NOT NULL",
             ["completion_draft_claim"] = $"draft_id {integer} NOT NULL PRIMARY KEY,batch_id {key} NOT NULL,item_key {key} NULL,target_id {key} NULL"
         };
@@ -33,20 +33,23 @@ public sealed class M041SprintCompletion : ISqlServerMigration
                 : $"CREATE TABLE IF NOT EXISTS {d.Table(name)}({columns});";
             cmd.ExecuteNonQuery();
         }
-        using (var sourceEvidence = connection.CreateCommand())
+        foreach (var column in new[] { "source_evidence_json", "abandonment_json", "delivery_required" })
         {
-            sourceEvidence.CommandText = sqlServer
-                ? $"IF COL_LENGTH(N'{d.Table("sprint_completion")}',N'source_evidence_json') IS NULL ALTER TABLE {d.Table("sprint_completion")} ADD source_evidence_json {text} NULL;"
-                : $"ALTER TABLE {d.Table("sprint_completion")} ADD COLUMN source_evidence_json {text} NULL;";
-            if (sqlServer) sourceEvidence.ExecuteNonQuery();
-            else
+            using var alter = connection.CreateCommand();
+            if (!sqlServer)
             {
-                using var columns = connection.CreateCommand(); columns.CommandText = "PRAGMA table_info(sprint_completion)";
-                using var reader = columns.ExecuteReader(); var exists = false;
-                while (reader.Read()) if (reader.GetString(1) == "source_evidence_json") exists = true;
-                reader.Close();
-                if (!exists) sourceEvidence.ExecuteNonQuery();
+                using var columns = connection.CreateCommand();
+                columns.CommandText = "PRAGMA table_info(sprint_completion)";
+                using var reader = columns.ExecuteReader();
+                var exists = false;
+                while (reader.Read()) if (reader.GetString(1) == column) exists = true;
+                if (exists) continue;
             }
+            var definition = column == "delivery_required" ? "INT NOT NULL DEFAULT 0" : text + " NULL";
+            alter.CommandText = sqlServer
+                ? $"IF COL_LENGTH(N'{d.Table("sprint_completion")}',N'{column}') IS NULL ALTER TABLE {d.Table("sprint_completion")} ADD {column} {definition};"
+                : $"ALTER TABLE {d.Table("sprint_completion")} ADD COLUMN {column} {definition};";
+            alter.ExecuteNonQuery();
         }
         using var seed = connection.CreateCommand();
         seed.CommandText = $"INSERT INTO {d.Table("completion_lock")}(id,value) SELECT 1,0 WHERE NOT EXISTS(SELECT 1 FROM {d.Table("completion_lock")} WHERE id=1)";

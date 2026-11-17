@@ -547,7 +547,12 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
             _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
         SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
-        CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory);
+        CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory, async ct =>
+        {
+            try { return (await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "source-revision"), ct)).Trim(); }
+            catch (IOException ex) { _logger.LogWarning(ex, "Running revision unavailable for operator observation"); return null; }
+            catch (UnauthorizedAccessException ex) { _logger.LogWarning(ex, "Running revision unreadable for operator observation"); return null; }
+        });
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)

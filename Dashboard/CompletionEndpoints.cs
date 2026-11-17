@@ -6,16 +6,15 @@ using Microsoft.AspNetCore.Http;
 
 namespace Forge.Dashboard;
 
-public sealed record CompletionSummary(string Id, string ProjectId, string SprintId, string Outcome,
-    string BookkeepingState, bool ReadyForDeployment, string? SourceSha, string? DeploymentCandidateId,
-    string? DeploymentStatus, string? DeliveryNote, string? PlanHash);
 public sealed record CompletionBatchSummary(string Id, string State, string? Error);
-public sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatchSummary> Batches,
+public sealed record AbandonCompletionRequest(string PlanHash, string Reason);
+public sealed record CompletionDetail(CompletionOverview Receipt, IReadOnlyList<CompletionBatchSummary> Batches,
     string? NextCursor, IReadOnlyList<CompletionCriterionStatus> Criteria);
 
 public static class CompletionEndpoints
 {
-    public static void MapCompletionEndpoints(WebApplication app, IIssueStore primary, ProjectContextFactory? projects)
+    public static void MapCompletionEndpoints(WebApplication app, IIssueStore primary, ProjectContextFactory? projects,
+        Func<CancellationToken, Task<string?>>? runningRevision = null)
     {
         IssueStore? Resolve(string projectId) => projects is null
             ? primary is IssueStore store && projectId == store.ProjectId ? store : null
@@ -27,10 +26,8 @@ public static class CompletionEndpoints
             if (issues is null) return Results.NotFound();
             var store = new SprintCompletionStore(issues);
             var take = Math.Clamp(limit ?? 20, 1, 100);
-            var rows = await store.ListVisibleAsync(take, cursor, ct, waitingOnly ?? true);
-            var summaries = new List<CompletionSummary>();
-            foreach (var row in rows) summaries.Add(await Summary(store, row, ct));
-            return Results.Ok(new { items = summaries, nextCursor = rows.Count == take ? rows[^1].Id : null });
+            var rows = await store.ListOverviewAsync(take, cursor, waitingOnly ?? true, ct: ct);
+            return Results.Ok(new { items = rows, nextCursor = rows.Count == take ? rows[^1].Id : null });
         });
         app.MapGet("/api/sprints/{sprintId}/completion", async (string sprintId, string projectId, string? cursor, CancellationToken ct) =>
         {
@@ -40,7 +37,7 @@ public static class CompletionEndpoints
             var receipt = await store.GetAsync("completion-" + sprintId, ct);
             if (receipt is null) return Results.NotFound();
             var batches = await store.ListBatchesAsync(receipt.Id, ct, limit: 20, afterId: cursor);
-            return Results.Ok(new CompletionDetail(await Summary(store, receipt, ct),
+            return Results.Ok(new CompletionDetail((await store.ListOverviewAsync(1, waitingOnly: false, completionId: receipt.Id, ct: ct)).Single(),
                 batches.Select(b => new CompletionBatchSummary(b.Id, b.State, b.Error)).ToArray(),
                 batches.Count == 20 ? batches[^1].Id : null, await store.ReadCriteriaAsync(receipt.Id, ct)));
         });
@@ -61,6 +58,8 @@ public static class CompletionEndpoints
         {
             if (context.Items[DashboardMutationAuthentication.AuthenticatedOperatorItem] is not string identity)
                 return Results.Unauthorized();
+            if (runningRevision is null || !string.Equals(await runningRevision(ct), evidence.SourceSha, StringComparison.Ordinal))
+                return Results.Conflict(new { error = "The running dashboard revision does not match the observed deployed source." });
             var issues = Resolve(projectId);
             if (issues is null) return Results.NotFound();
             var store = new SprintCompletionStore(issues);
@@ -73,10 +72,21 @@ public static class CompletionEndpoints
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
         });
+        app.MapPost("/api/sprints/{sprintId}/completion/abandon", async (string sprintId, string projectId,
+            AbandonCompletionRequest request, HttpContext context, CancellationToken ct) =>
+        {
+            if (context.Items[DashboardMutationAuthentication.AuthenticatedOperatorItem] is not string identity)
+                return Results.Unauthorized();
+            var issues = Resolve(projectId);
+            if (issues is null) return Results.NotFound();
+            try
+            {
+                await new SprintCompletionStore(issues).AbandonAsync("completion-" + sprintId, request.PlanHash, request.Reason, identity, ct);
+                return Results.Ok(new { message = "Outcome explicitly abandoned; no delivery success was recorded." });
+            }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
     }
 
-    private static async Task<CompletionSummary> Summary(SprintCompletionStore store, SprintCompletionRecord receipt, CancellationToken ct)
-        => new(receipt.Id, receipt.ProjectId, receipt.SprintId, receipt.EngineeringOutcome.ToString(),
-            receipt.BookkeepingState, receipt.ReadyForDeployment, receipt.SourceSha, receipt.DeploymentCandidateId,
-            await store.GetDeploymentStatusAsync(receipt.Id, ct), receipt.DeliveryNote, receipt.PlanHash);
 }

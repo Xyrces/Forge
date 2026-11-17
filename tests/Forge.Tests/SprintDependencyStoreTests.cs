@@ -134,11 +134,15 @@ public sealed class SprintDependencyStoreTests : IDisposable
     {
         var a = await Row("A"); var b = await Row("B");
         await issues.AddDependencyAsync(a.Id, b.Id, IssueDepKind.Blocks);
-        await issues.TransitionAsync(a.Id, terminal, null);
+        if (terminal == IssueStatus.Closed)
+            await issues.CloseWithDispositionAsync(a.Id, new(CloseDispositionKind.DeliveredElsewhere, "already implemented", "verified external delivery"));
+        else await issues.TransitionAsync(a.Id, terminal, null);
         var snapshot = await Snapshot(b);
         await issues.TransitionAsync(a.Id, IssueStatus.Pending, null);
         await Assert.ThrowsAsync<InvalidOperationException>(() => Sprints.CreateWithIssuesAsync(Sprint(), snapshot));
-        await issues.TransitionAsync(a.Id, terminal, null);
+        if (terminal == IssueStatus.Closed)
+            await issues.CloseWithDispositionAsync(a.Id, new(CloseDispositionKind.DeliveredElsewhere, "already implemented", "verified external delivery"));
+        else await issues.TransitionAsync(a.Id, terminal, null);
         var active = await Sprints.CreateWithIssuesAsync(Sprint(), await Snapshot(b));
         Assert.Equal(b.Id, Assert.Single(await Sprints.GetIssueIdsAsync(active.Id)));
     }

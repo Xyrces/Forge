@@ -11,6 +11,17 @@ namespace Forge.Reviewer;
 
 public sealed class PRWatcher
 {
+    private static bool HasMergeEvidence(PullRequest pr) => pr.Merged
+        && !string.IsNullOrWhiteSpace(pr.MergeCommitSha) && !string.IsNullOrWhiteSpace(pr.Head?.Sha);
+
+    private static Dictionary<string, object> MergeEvidence(string taskId, PullRequest pr)
+    {
+        var observed = pr.Merged && !string.IsNullOrWhiteSpace(pr.MergeCommitSha) && !string.IsNullOrWhiteSpace(pr.Head?.Sha)
+            ? System.Text.Json.JsonSerializer.Serialize(new Core.Completion.ObservedMergeEvidence(
+                taskId, pr.Number, pr.Head.Sha, pr.MergeCommitSha, DateTimeOffset.UtcNow))
+            : null;
+        return new Dictionary<string, object> { ["observedMerge"] = observed! };
+    }
     /// <summary>Grace window for a consumed rework round to move the
     /// PR head before the round is treated as stalled (no-op
     /// completion or a died run). Must exceed the agent run timeout
@@ -156,7 +167,7 @@ public sealed class PRWatcher
         if (freshTask.Status == IssueStatus.Failed)
         {
             var prFailed = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
-            if (!prFailed.Merged)
+            if (!HasMergeEvidence(prFailed))
             {
                 return WatchPollOutcome.Pending;
             }
@@ -166,7 +177,7 @@ public sealed class PRWatcher
             await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
             await _issues.TransitionAsync(taskId, IssueStatus.Completed,
-                "PR merged externally after the breaker tripped", ct: cancellationToken);
+                "PR merged externally after the breaker tripped", MergeEvidence(taskId, prFailed), cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally after failure; task completed"));
@@ -195,10 +206,15 @@ public sealed class PRWatcher
         // watch polls forever on CI+reviews of a dead PR.
         if (pr.Merged)
         {
+            if (!HasMergeEvidence(pr))
+            {
+                _logger.LogWarning("PR #{PrNumber} merge observation is incomplete; retaining watch", prNumber);
+                return WatchPollOutcome.Pending;
+            }
             _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
             await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, MergeEvidence(taskId, pr), cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally; task completed"));
@@ -473,9 +489,15 @@ public sealed class PRWatcher
             var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
             if (merged)
             {
+                var observedMerged = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+                if (!HasMergeEvidence(observedMerged))
+                {
+                    _logger.LogWarning("PR #{PrNumber} merge accepted but not yet fully observed; retaining watch", prNumber);
+                    return WatchPollOutcome.Pending;
+                }
                 await ReportAsync(Forge.Core.TaskEvent.Merged);
                 await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, MergeEvidence(taskId, observedMerged), cancellationToken);
                 await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
                 _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                     taskId, $"PR #{prNumber} merged and branch deleted"));

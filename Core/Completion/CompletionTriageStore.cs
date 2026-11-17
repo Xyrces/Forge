@@ -25,9 +25,16 @@ public sealed partial class SprintCompletionStore
     public async Task MarkBookkeepingCompleteAsync(string completionId, CancellationToken ct = default)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed')", ("@now", Now()), ("@id", completionId));
+        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed') AND NOT EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", ("@now", Now()), ("@id", completionId));
         await command.ExecuteNonQueryAsync(ct);
     }
+    public async Task RecordMaterializationFailureAsync(string batchId, string error, CancellationToken ct = default)
+    {
+        await using var connection = await issues.Db.OpenAsync(ct);
+        using var command = Command(connection, null, $"UPDATE {T("completion_triage")} SET error=@error,updated_at=@now WHERE id=@id AND state='Decided'", ("@error", error), ("@now", Now()), ("@id", batchId));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task RecordTriageFailureAsync(string batchId, string error, CancellationToken ct = default)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
@@ -72,6 +79,7 @@ public sealed partial class SprintCompletionStore
         var previous = await GetBatchAsync(connection, tx, id, ct);
         if (previous is not null) return previous;
         var completion = await GetAsync(connection, tx, completionId, ct) ?? throw new InvalidOperationException("Completion not found.");
+        if (completion.AbandonmentJson is not null) throw new InvalidOperationException("Completion was explicitly abandoned.");
         var members = JsonSerializer.Deserialize<IssueRecord[]>(completion.MembersJson)!.Select(m => m.Id).ToHashSet(StringComparer.Ordinal);
         foreach (var draft in drafts)
         {
@@ -90,14 +98,20 @@ public sealed partial class SprintCompletionStore
         using var insert = Command(connection, tx, $"INSERT INTO {T("completion_triage")}(id,completion_id,state,sources_json,updated_at) VALUES(@id,@completion,'Pending',@sources,@now)",
             ("@id", id), ("@completion", completionId), ("@sources", JsonSerializer.Serialize(drafts.OrderBy(d => d.Id))), ("@now", Now()));
         await insert.ExecuteNonQueryAsync(ct);
+        using var reopen = Command(connection, tx, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Pending',updated_at=@now WHERE id=@id", ("@now", Now()), ("@id", completionId));
+        await reopen.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
         return (await GetBatchAsync(connection, null, id, ct))!;
     }
     public async Task<bool> TryBeginTriageAsync(string batchId, CancellationToken ct = default)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, $"UPDATE {T("completion_triage")} SET state='Running',updated_at=@now WHERE id=@id AND state='Pending'", ("@now", Now()), ("@id", batchId));
-        return await command.ExecuteNonQueryAsync(ct) == 1;
+        await using var tx = await connection.BeginTransactionAsync(ct);
+        await LockAsync(connection, tx, ct);
+        using var command = Command(connection, tx, $"UPDATE {T("completion_triage")} SET state='Running',updated_at=@now WHERE id=@id AND state='Pending' AND EXISTS(SELECT 1 FROM {T("sprint_completion")} c WHERE c.id={T("completion_triage")}.completion_id AND c.abandonment_json IS NULL)", ("@now", Now()), ("@id", batchId));
+        var changed = await command.ExecuteNonQueryAsync(ct) == 1;
+        await tx.CommitAsync(ct);
+        return changed;
     }
     public async Task SaveDecisionAsync(string batchId, FollowUpTriageDecision decision, CancellationToken ct = default)
     {
@@ -105,6 +119,8 @@ public sealed partial class SprintCompletionStore
         await using var tx = await connection.BeginTransactionAsync(ct);
         await LockAsync(connection, tx, ct);
         var batch = await GetBatchAsync(connection, tx, batchId, ct) ?? throw new InvalidOperationException("Batch not found.");
+        var completion = await GetAsync(connection, tx, batch.CompletionId, ct);
+        if (completion?.AbandonmentJson is not null) throw new InvalidOperationException("Completion was explicitly abandoned.");
         var json = JsonSerializer.Serialize(decision);
         if (batch.DecisionJson is not null)
         {
@@ -131,6 +147,8 @@ public sealed partial class SprintCompletionStore
         await using var tx = await connection.BeginTransactionAsync(ct);
         await LockAsync(connection, tx, ct);
         var batch = await GetBatchAsync(connection, tx, batchId, ct) ?? throw new InvalidOperationException("Batch not found.");
+        var completion = await GetAsync(connection, tx, batch.CompletionId, ct);
+        if (completion?.AbandonmentJson is not null) throw new InvalidOperationException("Completion was explicitly abandoned.");
         if (batch.State is not ("Decided" or "Completed") || batch.DecisionJson is null) throw new InvalidOperationException("Recorded decision required.");
         var decision = JsonSerializer.Deserialize<FollowUpTriageDecision>(batch.DecisionJson)!;
         if (itemIndex < 0 || itemIndex >= decision.Items.Count) throw new ArgumentOutOfRangeException(nameof(itemIndex));
@@ -175,7 +193,7 @@ public sealed partial class SprintCompletionStore
                 ("@key", itemKey), ("@target", target), ("@id", id), ("@batch", batchId));
             if (await claim.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Draft claim changed.");
         }
-        using var finish = Command(connection, tx, $"UPDATE {T("completion_triage")} SET state='Completed',updated_at=@now WHERE id=@batch AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} WHERE batch_id=@batch AND item_key IS NULL)", ("@now", Now()), ("@batch", batchId));
+        using var finish = Command(connection, tx, $"UPDATE {T("completion_triage")} SET state='Completed',error=NULL,updated_at=@now WHERE id=@batch AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} WHERE batch_id=@batch AND item_key IS NULL)", ("@now", Now()), ("@batch", batchId));
         await finish.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
         if (created is not null) await issues.PublishCreatedAsync(created, ct);
@@ -190,7 +208,11 @@ public sealed partial class SprintCompletionStore
     public async Task<bool> RetryTriageAsync(string batchId, CancellationToken ct = default, string? completionId = null)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, $"UPDATE {T("completion_triage")} SET state='Pending',error=NULL,updated_at=@now WHERE id=@id AND state='NeedsReview' AND (@completion IS NULL OR completion_id=@completion)", ("@now", Now()), ("@id", batchId), ("@completion", completionId));
-        return await command.ExecuteNonQueryAsync(ct) == 1;
+        await using var tx = await connection.BeginTransactionAsync(ct);
+        await LockAsync(connection, tx, ct);
+        using var command = Command(connection, tx, $"UPDATE {T("completion_triage")} SET state='Pending',error=NULL,updated_at=@now WHERE id=@id AND state='NeedsReview' AND (@completion IS NULL OR completion_id=@completion) AND EXISTS(SELECT 1 FROM {T("sprint_completion")} c WHERE c.id={T("completion_triage")}.completion_id AND c.abandonment_json IS NULL)", ("@now", Now()), ("@id", batchId), ("@completion", completionId));
+        var changed = await command.ExecuteNonQueryAsync(ct) == 1;
+        await tx.CommitAsync(ct);
+        return changed;
     }
 }

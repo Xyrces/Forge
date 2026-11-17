@@ -44,7 +44,7 @@ public sealed class CompletionEndpointTests : IAsyncLifetime
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         app = builder.Build();
         new DashboardMutationAuthentication(Token).Protect(app);
-        CompletionEndpoints.MapCompletionEndpoints(app, issues, null);
+        CompletionEndpoints.MapCompletionEndpoints(app, issues, null, _ => Task.FromResult<string?>(new string('a', 40)));
         await app.StartAsync();
         client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
     }
@@ -73,6 +73,19 @@ public sealed class CompletionEndpointTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsync(route, null)).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsync(route, null)).StatusCode);
         Assert.Equal("Pending", Assert.Single(await new SprintCompletionStore(issues).ListBatchesAsync(receipt.Id)).State);
+    }
+
+    [Fact]
+    public async Task OperatorObservationRejectsUnauthenticatedAndWrongRunningRevision()
+    {
+        var route = $"api/sprints/{receipt.SprintId}/completion/operator-evidence?projectId=project";
+        var evidence = new OperatorCriterionEvidence("plan", "visual", new string('b', 40), "deployment", "proof", new string('c', 64));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync(route, evidence)).StatusCode);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Token);
+        var response = await client.PostAsJsonAsync(route, evidence);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Contains("running dashboard revision", await response.Content.ReadAsStringAsync());
+        Assert.Equal(EngineeringOutcome.LegacyTerminalOnly, (await new SprintCompletionStore(issues).GetAsync(receipt.Id))!.EngineeringOutcome);
     }
 
     public async Task DisposeAsync()

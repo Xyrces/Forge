@@ -71,8 +71,10 @@ public sealed class SprintAssembler
         Core.Messaging.IEventPublisher? eventPublisher = null,
         // Compatibility only: elapsed time never clears Failed work.
         TimeSpan? failureAgingWindow = null,
-        InitiativeProposalStore? initiativeProposals = null)
+        InitiativeProposalStore? initiativeProposals = null,
+        Func<string, bool>? routineDeploymentEnabled = null)
     {
+        _routineDeploymentEnabled = routineDeploymentEnabled;
         _initiativeProposals = initiativeProposals;
         _projects = projects;
         _events = events;
@@ -84,6 +86,7 @@ public sealed class SprintAssembler
         _eventPublisher = eventPublisher;
     }
 
+    private readonly Func<string, bool>? _routineDeploymentEnabled;
     private readonly InitiativeProposalStore? _initiativeProposals;
     private readonly Core.IFollowUpTriage? _followUpTriage;
     private readonly WakeupSignal? _wakeup;
@@ -234,10 +237,15 @@ public sealed class SprintAssembler
     /// are all terminal, then assemble + activate the next one from
     /// eligible work. Exposed for tests.
     /// </summary>
+    private readonly Dictionary<string, CompletionCoordinator> completionCoordinators = new(StringComparer.Ordinal);
+
     internal async Task TickProjectAsync(
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
+        if (!completionCoordinators.TryGetValue(projectId, out var completion))
+            completionCoordinators[projectId] = completion = new CompletionCoordinator((IssueStore)issues, _followUpTriage, _initiativeProposals, _logger, _events);
         await RecoverProposalSourcesAsync(projectId, issues, ct);
+        await completion.ReconcileAsync(ct);
         var prevState = await ReadBuildStateAsync(issues, ct);
         // Failed tasks remain open until an explicit operator action. Age is
         // diagnostic information, never evidence of completion or abandonment.
@@ -266,37 +274,13 @@ public sealed class SprintAssembler
                     ActiveTotal: total, ActiveTerminal: terminal, HeldWork: heldMembers), ct);
                 return;
             }
-            await sprints.UpdateAsync(active.Id,
-                new Dictionary<string, object?> { ["status"] = nameof(SprintStatus.Completed) }, ct);
-            _logger.LogInformation("Sprint {SprintId} ({Name}) completed — all member tasks terminal (project={Project})",
-                active.Id, active.Name, projectId);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
-                null, $"Sprint '{active.Name}' completed"));
+            var receipt = await completion.CompleteAsync(active, sprints, ct, _routineDeploymentEnabled?.Invoke(projectId) ?? false);
             completedSprintId = active.Id;
             completedSprintName = active.Name;
-
-            // Materialize tracked follow-ups (operator model
-            // 2026-07-31): drafts filed DURING the sprint become real
-            // work only now — the work they reference is merged and
-            // canonical. The batch triage (when wired) merges dupes,
-            // groups epics, and discards junk first; invalid or
-            // unavailable triage falls back to 1:1. Either way the
-            // results go through grooming before the next sprint
-            // assembles (the gate below).
-            var draftStore = new Core.FollowUpDraftStore((Core.IssueStore)issues);
-            var unconsumed = await draftStore.ListUnconsumedAsync(ct);
-            var materialized = await MaterializeFollowUpsAsync(projectId, issues, specs, draftStore, unconsumed, ct);
-            if (materialized > 0)
-            {
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintMaterialized,
-                    null, $"{materialized} work item(s) materialized from '{active.Name}' follow-ups",
-                    new Dictionary<string, object?>
-                    {
-                        ["projectId"] = projectId,
-                        ["created"] = materialized,
-                        ["drafts"] = unconsumed.Count,
-                    }));
-            }
+            _logger.LogInformation("Sprint {SprintId} work terminal; outcome={Outcome}, durable bookkeeping pending", active.Id, receipt.EngineeringOutcome);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
+                null, $"Sprint '{active.Name}' work terminal; outcome: {receipt.EngineeringOutcome}"));
+            await completion.ReconcileAsync(ct);
         }
 
         // Epic lifecycle: close epics whose entire tree is terminal
@@ -317,6 +301,17 @@ public sealed class SprintAssembler
                 PendingGroom: Array.Empty<PendingGroomItem>(),
                 EligibleGroups: heldGroups,
                 ActiveSprintId: null, ActiveSprintName: null, ActiveTotal: 0, ActiveTerminal: 0), ct);
+            return;
+        }
+
+        var blockers = await new Core.Completion.SprintCompletionStore((IssueStore)issues).ListPlanningBlockersAsync(limit: 1, ct: ct);
+        if (blockers.Count > 0)
+        {
+            var blocker = blockers[0];
+            var reason = blocker.BookkeepingState != "Completed"
+                ? $"Sprint {blocker.SprintId} follow-up bookkeeping is unfinished; review triage status before starting another sprint"
+                : $"Sprint {blocker.SprintId} requires delivery evidence ({blocker.EngineeringOutcome}): {blocker.DeliveryNote ?? "await qualified deployment or explicit operator observation; abandon the outcome to interrupt"}";
+            await WriteBuildStateAsync(issues, EmptyState("awaiting-completion", reason, blocker.SprintId, completedSprintName), ct);
             return;
         }
 
@@ -465,7 +460,8 @@ public sealed class SprintAssembler
         foreach (var id in memberIds)
         {
             var issue = await issues.GetAsync(id, ct);
-            if (issue is null || AgentTaskTypes.IsContainer(issue.Type)
+            if (issue is null) throw new InvalidOperationException("Sprint contains a missing member; completion requires investigation.");
+            if (AgentTaskTypes.IsContainer(issue.Type)
                 || issue.Type == AgentTaskTypes.PrWatch)
             {
                 continue;
@@ -563,7 +559,7 @@ public sealed class SprintAssembler
     {
         if (_initiativeProposals is null) return;
         var drafts = new FollowUpDraftStore((IssueStore)issues);
-        var pending = await drafts.ListUnconsumedAsync(ct);
+        var pending = await drafts.ListUnconsumedAsync(ct, excludeCompletionClaims: true);
         var recovered = new HashSet<string>(StringComparer.Ordinal);
         foreach (var chunk in pending.Select(d => d.Id).Chunk(100))
         {
@@ -582,143 +578,6 @@ public sealed class SprintAssembler
                 cursor = bindings[^1].Id;
             }
         }
-    }
-
-    private async Task<int> MaterializeFollowUpsAsync(
-        string projectId, IIssueStore issues, ISpecStore specs,
-        Core.FollowUpDraftStore draftStore, IReadOnlyList<Core.FollowUpDraft> unconsumed, CancellationToken ct)
-    {
-        if (unconsumed.Count == 0) return 0;
-
-        Core.FollowUpTriageDecision? decision = null;
-        if (_followUpTriage is not null && unconsumed.Count >= 2)
-        {
-            decision = await _followUpTriage.TriageAsync(projectId, unconsumed, ct);
-            if (decision is null)
-            {
-                _logger.LogWarning("Sprint materialization: triage unavailable — falling back to 1:1 ({Count} drafts, project={Project})",
-                    unconsumed.Count, projectId);
-            }
-            else
-            {
-                _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintTriageCompleted,
-                    null, $"Follow-up triage: {decision.Items.Count} disposition(s) over {unconsumed.Count} draft(s)",
-                    new Dictionary<string, object?>
-                    {
-                        ["projectId"] = projectId,
-                        ["drafts"] = unconsumed.Count,
-                        ["items"] = decision.Items.Count,
-                    }));
-            }
-        }
-
-        // Validate the whole response before creating any disposition: a model
-        // cannot assign one source finding to competing initiative scopes.
-        if (decision is not null)
-        {
-            var known = unconsumed.Select(d => d.Id).ToHashSet();
-            var citations = decision.Items.SelectMany(i => i.SourceDraftIds.Where(known.Contains)).ToList();
-            if (citations.Count != citations.Distinct().Count()
-                || decision.Items.Any(i => i.SourceDraftIds.Count(known.Contains) > 1000))
-                throw new InvalidOperationException("Follow-up triage sources overlap or exceed the supported bound; no dispositions were applied.");
-        }
-        var created = 0;
-        var cited = new HashSet<long>();
-        if (decision is not null)
-        {
-            var byId = unconsumed.ToDictionary(d => d.Id);
-            foreach (var item in decision.Items)
-            {
-                var sources = item.SourceDraftIds.Where(byId.ContainsKey).ToList();
-                if (sources.Count == 0)
-                {
-                    _logger.LogWarning("Sprint materialization: triage item cites unknown drafts [{Ids}] — dropped",
-                        string.Join(",", item.SourceDraftIds));
-                    continue;
-                }
-                cited.UnionWith(sources);
-                switch (item.Action)
-                {
-                    case "create":
-                    case "merge":
-                    {
-                        var src = sources.Select(id => byId[id]).ToList();
-                        var task = await issues.CreateAsync(new NewIssue(
-                            // The draft's task type routes dispatch to
-                            // the right role (schema v36) — a client or
-                            // QA follow-up born type='task' dies at the
-                            // plan-territory gate (live: task-752).
-                            Type: src.Select(d => d.TaskType).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)) ?? "task",
-                            Title: item.Title ?? src[0].Title,
-                            Description: item.Description
-                                ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
-                            Priority: item.Priority ?? src.Min(d => d.Priority),
-                            Metadata: new Dictionary<string, object>
-                            {
-                                ["source"] = src[0].SourceRole,
-                                ["followUpOf"] = src[0].SourceIssueId,
-                                ["fromDraft"] = string.Join(",", sources),
-                            }), ct);
-                        foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id,
-                                item.Action == "merge" ? "merged" : "materialized", task.Id, ct);
-                        }
-                        created++;
-                        break;
-                    }
-                    case "epic":
-                    {
-                        var src = sources.Select(id => byId[id]).ToList();
-                        var proposals = _initiativeProposals ?? throw new InvalidOperationException("Initiative proposal storage is required for epic suggestions.");
-                        var suggestion = await proposals.CreateAsync(new NewInitiativeProposal(
-                            projectId, "followup:" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
-                                System.Text.Encoding.UTF8.GetBytes(string.Join(",", sources.Distinct().Order())))), "forge",
-                            item.Title ?? $"Follow-up theme from {src.Count} findings",
-                            item.Description ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
-                            item.Priority ?? src.Min(d => d.Priority),
-                            System.Text.Json.JsonSerializer.Serialize(new { sourceDraftIds = sources, findings = src })), ct);
-                        await draftStore.SetDispositionBatchAsync(sources, "proposal", suggestion.Id, ct);
-                        created++;
-                        break;
-                    }
-                    case "discard":
-                    {
-                        foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id, "discarded",
-                                item.Reason ?? "triaged as junk", ct);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Fallback + coverage: 1:1 for anything the triage didn't
-        // cite (or all of it when no triage ran).
-        var remaining = unconsumed.Where(d => !cited.Contains(d.Id)).ToList();
-        foreach (var draft in remaining)
-        {
-            var task = await issues.CreateAsync(new NewIssue(
-                Type: string.IsNullOrWhiteSpace(draft.TaskType) ? "task" : draft.TaskType,
-                Title: draft.Title,
-                Description: draft.Description,
-                Priority: draft.Priority,
-                Metadata: new Dictionary<string, object>
-                {
-                    ["source"] = draft.SourceRole,
-                    ["followUpOf"] = draft.SourceIssueId,
-                    ["fromDraft"] = draft.Id.ToString(),
-                }), ct);
-            await draftStore.SetDispositionAsync(draft.Id, "materialized", task.Id, ct);
-            created++;
-        }
-
-        _logger.LogInformation(
-            "Sprint materialization: {Created} work items from {Drafts} drafts (triaged={Triaged}, project={Project})",
-            created, unconsumed.Count, decision is not null, projectId);
-        return created;
     }
 
     /// <summary>

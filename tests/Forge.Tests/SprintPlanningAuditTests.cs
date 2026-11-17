@@ -85,7 +85,7 @@ public sealed class SprintPlanningAuditTests : IDisposable
         Assert.Contains(prerequisite[0].Id,await sprints.GetIssueIdsAsync(active.Id));
         Assert.Contains(await issues.ReadyAsync(100,active.Id), t=>t.Id == prerequisite[0].Id);
     }
-    [Fact] public async Task CompletionInterruptionLeavesDraftsWithoutRetry()
+    [Fact] public async Task CompletionInterruptionPersistsNeedsReviewWithoutAutomaticPaidRetry()
     {
         var root=await AdHoc("Deliver feature"); await Tick();
         var active=(await sprints.GetActiveAsync())!;
@@ -94,7 +94,9 @@ public sealed class SprintPlanningAuditTests : IDisposable
         await issues.TransitionAsync(root.Id,IssueStatus.Completed,null);
         var crashing=new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),
             new InMemoryDashboardEventBus(),NullLogger<SprintAssembler>.Instance,followUpTriage:new InterruptedTriage());
-        await Assert.ThrowsAsync<IOException>(()=>crashing.TickProjectAsync("audit",issues,sprints,specs,default));
+        await crashing.TickProjectAsync("audit",issues,sprints,specs,default);
+        var completion = new Forge.Core.Completion.SprintCompletionStore(issues);
+        Assert.Equal("NeedsReview", Assert.Single(await completion.ListBatchesAsync("completion-" + active.Id)).State);
         Assert.Null(await sprints.GetActiveAsync());
         await Tick();
         Assert.Equal(2,(await drafts.ListUnconsumedAsync()).Count);

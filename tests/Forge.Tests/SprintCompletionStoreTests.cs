@@ -79,5 +79,79 @@ public sealed class SprintCompletionStoreTests : IDisposable
         new Forge.Core.Db.M041SprintCompletion().Up(closed, new Forge.Core.Db.SqlServerDialect("core"), Forge.Core.Db.ForgeSchemaProfile.Core);
         Assert.Equal(System.Data.ConnectionState.Closed, closed.State);
     }
+    [Fact]
+    public async Task ConsumptionFailureRollsBackCreatedTaskAndClaimThenReplaysOnce()
+    {
+        var (receipt, task) = await Complete();
+        var batch = await Batch(receipt, task);
+        var draft = System.Text.Json.JsonSerializer.Deserialize<FollowUpDraft[]>(batch.SourcesJson)![0];
+        await Store.TryBeginTriageAsync(batch.Id);
+        await Store.SaveDecisionAsync(batch.Id, new([new("create", [draft.Id])]));
+        await using var connection = await issues.Db.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "CREATE TRIGGER fail_consumption BEFORE UPDATE OF consumed_at ON followup_draft BEGIN SELECT RAISE(ABORT,'injected consumption fault'); END;";
+        await command.ExecuteNonQueryAsync();
+        await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(() => Store.MaterializeItemAsync(batch.Id, 0));
+        Assert.Single(await issues.ListAsync(new IssueFilter()));
+        Assert.Single(await new FollowUpDraftStore(issues).ListUnconsumedAsync());
+        Assert.Equal("Decided", Assert.Single(await Store.ListBatchesAsync(receipt.Id)).State);
+        command.CommandText = "DROP TRIGGER fail_consumption";
+        await command.ExecuteNonQueryAsync();
+        Assert.True((await Store.MaterializeItemWithResultAsync(batch.Id, 0)).Created);
+        Assert.False((await Store.MaterializeItemWithResultAsync(batch.Id, 0)).Created);
+        Assert.Equal(2, (await issues.ListAsync(new IssueFilter())).Count);
+    }
+
+    [Fact]
+    public async Task LateDraftReopensBookkeepingDiscoveryAndCrossCompletionRetryIsRejected()
+    {
+        var (receipt, task) = await Complete();
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.Empty(await Store.ListPendingBookkeepingAsync());
+        var drafts = new FollowUpDraftStore(issues);
+        await drafts.FileAsync(new(0, null, task.Id, "reviewer", "Late finding", "Details", 2, null, DateTime.UtcNow, null));
+        Assert.Equal(receipt.Id, Assert.Single(await Store.ListPendingBookkeepingAsync()).Id);
+        var batch = await Store.ClaimBatchAsync(receipt.Id, await Store.ListUnclaimedDraftsAsync(receipt.Id));
+        Assert.Equal("Pending", (await Store.GetAsync(receipt.Id))!.BookkeepingState);
+        await Store.TryBeginTriageAsync(batch.Id);
+        await Store.RecoverRunningAsync();
+        Assert.False(await Store.RetryTriageAsync(batch.Id, completionId: "different-completion"));
+        Assert.Equal("NeedsReview", Assert.Single(await Store.ListBatchesAsync(receipt.Id)).State);
+    }
+
+    [Fact]
+    public async Task MoreThanOneBatchCannotPrematurelyCompleteBookkeeping()
+    {
+        var (receipt, task) = await Complete();
+        var drafts = new FollowUpDraftStore(issues);
+        for (var i = 0; i < 101; i++)
+            await drafts.FileAsync(new(0, receipt.SprintId, task.Id, "reviewer", "Finding " + i, "Detail", 2, null, DateTime.UtcNow, null));
+        var first = await Store.ListUnclaimedDraftsAsync(receipt.Id);
+        Assert.Equal(100, first.Count);
+        var batch = await Store.ClaimBatchAsync(receipt.Id, first);
+        await Store.TryBeginTriageAsync(batch.Id);
+        await Store.SaveDecisionAsync(batch.Id, new([new("discard", first.Select(d => d.Id).ToArray(), Reason: "duplicate findings")]));
+        await Store.MaterializeItemAsync(batch.Id, 0);
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.Equal("Pending", (await Store.GetAsync(receipt.Id))!.BookkeepingState);
+        Assert.Single(await Store.ListUnclaimedDraftsAsync(receipt.Id));
+        Assert.Single(await Store.ListPendingBookkeepingAsync());
+    }
+
+    [Fact]
+    public async Task LegacyProposalRecoveryCannotConsumeDurablyClaimedSources()
+    {
+        var (receipt, task) = await Complete();
+        var batch = await Batch(receipt, task);
+        var draft = System.Text.Json.JsonSerializer.Deserialize<FollowUpDraft[]>(batch.SourcesJson)![0];
+        var drafts = new FollowUpDraftStore(issues);
+        Assert.Empty(await drafts.ListUnconsumedAsync(excludeCompletionClaims: true));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => drafts.SetDispositionBatchAsync([draft.Id], "proposal", "proposal"));
+        Assert.Single(await drafts.ListUnconsumedAsync());
+        await Store.TryBeginTriageAsync(batch.Id);
+        await Store.SaveDecisionAsync(batch.Id, new([new("epic", [draft.Id])]));
+        Assert.Equal("proposal", await Store.MaterializeItemAsync(batch.Id, 0, "proposal"));
+        Assert.Empty(await drafts.ListUnconsumedAsync());
+    }
     public void Dispose() => issues.Dispose();
 }
