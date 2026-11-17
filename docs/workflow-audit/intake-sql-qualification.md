@@ -81,7 +81,21 @@ The independently reviewed harness used only
 absence. Exact executable pins and results are under
 `.portHorizon/validation/batch-sql/`.
 
-These are real Azure SQL query checks, not full bridge-image activation or
-runtime-principal permission tests. Complete UI flow and unattended migration,
-activation and rollback remain separate checks. No production schema40
-migration has occurred as of these rehearsals.
+## Worker authority restriction
+
+The permission builder at `bb8a144cf483397b0b27a21ada8cc95e973905b6` passed
+an isolated Azure SQL permission rehearsal. Two temporary `WITHOUT LOGIN`
+users received the baseline schema-wide DML grant. The actual generated worker
+object-level denials, remapped only to the disposable schema, rejected all 12
+INSERT/UPDATE/DELETE attempts across the four initiative tables. Worker SELECT
+remained available, and the controller-like user's 12 writes still succeeded.
+
+Both users and schema `audit_auth_a6700820f6f04bcea8ae4f72e8035d9d` were removed
+and their absence asserted. Private exact-source, assembly and result records
+are under `.portHorizon/validation/initiative-permissions/` in the schema-upgrade
+checkout. This proves inherited-grant override behavior; it does not establish
+the production principals' effective permissions before the initializer runs.
+
+These are real Azure SQL query and permission checks. Complete UI flow and
+unattended migration, activation and rollback remain separate checks. No
+production schema40 migration has occurred as of these rehearsals.
