@@ -151,8 +151,8 @@ public sealed class InitiativeStoreTests
         M040InitiativeApproval.Create(c, SqliteDialect.Instance);
         M040InitiativeApproval.Create(c, SqliteDialect.Instance);
         Assert.Equal(issue.Title, (await issues.GetAsync(issue.Id))!.Title);
-        Assert.Equal(42, IssueStore.CurrentSchemaVersion);
-        Assert.Equal(42, SqlServerMigrations.ExpectedVersion);
+        Assert.Equal(41, IssueStore.CurrentSchemaVersion);
+        Assert.Equal(41, SqlServerMigrations.ExpectedVersion);
     }
     [Fact]
     public async Task SummariesAreBoundedAndSessionFilteringPrecedesPagination()

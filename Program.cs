@@ -837,13 +837,13 @@ Console.Error.WriteLine(ex.ToString());
             var dbLabel = issues.Db.Provider == ForgeDbProvider.SqlServer
                 ? $"sqlserver ({issues.Db.Qualifier}, {sw.ElapsedMilliseconds}ms)"
                 : "sqlite";
-            if (actualSchema == expectedSchema)
+            if (Core.Db.RuntimeSchemaCompatibility.CanRead(actualSchema))
             {
-                Console.WriteLine($"  [ok] db provider={dbLabel} schema v{actualSchema} (current)");
+                Console.WriteLine($"  [ok] db provider={dbLabel} schema v{actualSchema} (read-compatible; initializer target v{expectedSchema})");
             }
             else
             {
-                failures.Add($"db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+                failures.Add($"db schema v{actualSchema} is outside this runtime's read compatibility (initializer target v{expectedSchema}); use the explicit qualified migration procedure");
             }
             _ = probe;
         }

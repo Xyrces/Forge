@@ -130,9 +130,9 @@ public static class ControllerHost
         command.CommandText = $"SELECT MAX(version) FROM {factory.Dialect.Table("schema_version")}";
         var observed = await command.ExecuteScalarAsync(ct);
         var version = observed is null or DBNull ? 0 : Convert.ToInt32(observed);
-        // Version 42 is also a persisted-format boundary: older plan readers do
-        // not understand ImplementationVerified. Never inherit a bridge allowance.
-        if (version != SqlServerMigrations.ExpectedVersion)
+        // This maintenance bridge understands both persisted formats. Its
+        // initializer remains41; new-format writes independently require42.
+        if (!RuntimeSchemaCompatibility.CanRead(version))
             throw new InvalidOperationException("Database schema is outside this release's tested compatibility version.");
         return version;
     }

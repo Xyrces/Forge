@@ -26,6 +26,7 @@ public sealed class EmptyPrVerificationTests : IDisposable
 
     private async Task<IssueRecord> Seed(SprintEvidenceKind kind = SprintEvidenceKind.ImplementationVerified, bool blocked = false)
     {
+        await Format42Fixture.UpgradeAsync(_issues);
         var scope = await ApprovedSprintFixture.Scope(_issues);
         var task = await ApprovedSprintFixture.Task(_issues);
         await new SprintOutcomeAuthority(_issues).BindAsync(task.Id, new(1, "accepted", "Existing accepted behavior",

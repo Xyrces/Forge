@@ -18,6 +18,7 @@ public sealed class VerifiedExistingImplementationTests
     private static async Task<(IssueRecord Task, SprintRecord Sprint, SprintPlan Plan, VerifiedExistingImplementationEvidence Evidence)> Seed(IssueStore issues,
         SprintEvidenceKind kind = SprintEvidenceKind.ImplementationVerified)
     {
+        await Format42Fixture.UpgradeAsync(issues);
         var scope = await ApprovedSprintFixture.Scope(issues);
         var task = await ApprovedSprintFixture.Task(issues);
         var criteria = new[] { new SprintCriterion("behavior", "Accepted behavior exists and passes independent checks", kind, scope) };

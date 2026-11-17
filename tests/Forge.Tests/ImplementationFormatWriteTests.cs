@@ -65,6 +65,7 @@ public sealed class ImplementationFormatWriteTests
     public async Task ProofMetadataCannotBypassCanonicalAdmissionEvenOn42()
     {
         await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("format-reserved"), "project");
+        await Format42Fixture.UpgradeAsync(issues);
         var task = await issues.CreateAsync(new("task", "Task"));
         var proof = new Dictionary<string, object> { ["trustedExistingImplementation"] = "untrusted" };
         await Assert.ThrowsAsync<InvalidOperationException>(() => issues.CreateAsync(new("task", "Forged", Metadata: proof)));
@@ -77,6 +78,7 @@ public sealed class ImplementationFormatWriteTests
     public async Task DraftAndCommitPathsRejectNewKindBeforeAnySprintMutation()
     {
         await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("format-plan"), "project");
+        await Format42Fixture.UpgradeAsync(issues);
         var scope = await ApprovedSprintFixture.Scope(issues);
         var task = await ApprovedSprintFixture.Task(issues);
         var criterion = new SprintCriterion("behavior", "Approved behavior", SprintEvidenceKind.ImplementationVerified, scope);

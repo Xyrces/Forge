@@ -223,7 +223,7 @@ public interface IIssueStore
 /// </summary>
 public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 42;
+    public const int CurrentSchemaVersion = 41;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1026,7 +1026,6 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         M039BudgetUsage.ApplySqlite(conn);
         M040InitiativeApproval.Create(conn, SqliteDialect.Instance);
         M041SprintCompletion.Create(conn, SqliteDialect.Instance);
-        M042ImplementationEvidence.ApplySqlite(conn);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;

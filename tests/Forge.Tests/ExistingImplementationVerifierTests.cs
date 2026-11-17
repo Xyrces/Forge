@@ -45,6 +45,7 @@ public sealed class ExistingImplementationVerifierTests : IDisposable
     private ExistingImplementationVerifier Verifier() => new(_issues, new SprintStore(_issues), _git, _github, _runner, _slots, "project", "main");
     private async Task<(AgentCompleted Input, SprintPlan Plan)> Seed(SprintEvidenceKind kind = SprintEvidenceKind.ImplementationVerified)
     {
+        await Format42Fixture.UpgradeAsync(_issues);
         var scope = await ApprovedSprintFixture.Scope(_issues);
         var task = await ApprovedSprintFixture.Task(_issues);
         var criteria = new[] { new SprintCriterion("behavior", "Accepted existing behavior", kind, scope),
@@ -105,6 +106,16 @@ public sealed class ExistingImplementationVerifierTests : IDisposable
         Assert.True(File.Exists(Path.Combine(_root, "accepted.cs")));
         Assert.Equal(PrResult.Skipped, (await Execute()).Result);
         Assert.Single(_jobs.Created);
+    }
+
+    [Fact]
+    public async Task PreUpgradeBridgeRefusesReviewBeforeCreatingWorker()
+    {
+        var (input, _) = await Seed();
+        await ImplementationFormatWriteTests.Stamp41(_issues);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Verifier().TryCompleteAsync(input, [], default));
+        Assert.Empty(_jobs.Created);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(input.Worktree.Claim.Issue.Id))!.Status);
     }
 
     [Fact]

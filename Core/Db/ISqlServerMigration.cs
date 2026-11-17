@@ -52,7 +52,6 @@ public static class SqlServerMigrations
         new M039BudgetUsage(),
         new M040InitiativeApproval(),
         new M041SprintCompletion(),
-        new M042ImplementationEvidence(),
     };
 
     public static int ExpectedVersion =>

@@ -7,7 +7,7 @@ namespace Forge.Tests;
 public sealed class ImplementationFormatSchemaTests
 {
     [Fact]
-    public async Task ExplicitInitializationAdvances41WithoutChangingStoredWorkOrTableShape()
+    public async Task BridgeInitializationLeaves41UntilExplicitTargetFormatUpgrade()
     {
         var path = TempRoot.Instance.NewDbPath("implementation-format");
         string before;
@@ -26,6 +26,10 @@ public sealed class ImplementationFormatSchemaTests
         await using var check = await reopened.Db.OpenAsync();
         using var read = check.CreateCommand();
         read.CommandText = "SELECT MAX(version) FROM schema_version";
+        Assert.Equal(41L, Convert.ToInt64(await read.ExecuteScalarAsync()));
+        await Format42Fixture.UpgradeAsync(reopened);
+        Assert.Equal(42L, Convert.ToInt64(await read.ExecuteScalarAsync()));
+        reopened.EnsureSchema();
         Assert.Equal(42L, Convert.ToInt64(await read.ExecuteScalarAsync()));
         read.CommandText = "SELECT body FROM memory WHERE key='format-fixture'";
         Assert.Equal("unchanged", await read.ExecuteScalarAsync());
@@ -36,9 +40,10 @@ public sealed class ImplementationFormatSchemaTests
     [Theory]
     [InlineData(ForgeSchemaProfile.Core)]
     [InlineData(ForgeSchemaProfile.Workload)]
-    public void SqlMigrationIsRegisteredAndDoesNotReadOrWriteEitherProfile(ForgeSchemaProfile profile)
+    public void BridgeDoesNotRegisterTargetMigrationButCanReadItsUnchangedShape(ForgeSchemaProfile profile)
     {
-        var migration = Assert.IsType<M042ImplementationEvidence>(SqlServerMigrations.All.Single(m => m.Version == 42));
+        Assert.DoesNotContain(SqlServerMigrations.All, migration => migration.Version == 42);
+        var migration = new M042ImplementationEvidence();
         // A closed connection would reject SQL execution: this step only advances
         // the version through the existing runner, never creates or rewrites data.
         using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=:memory:");

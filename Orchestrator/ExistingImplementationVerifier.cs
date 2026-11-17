@@ -35,6 +35,9 @@ public sealed class ExistingImplementationVerifier(IssueStore issues, ISprintSto
         var criteria = plan.Criteria.Where(c => member.CriterionIds.Contains(c.Id)
             && c.EvidenceKind is SprintEvidenceKind.MergedAndVerified or SprintEvidenceKind.ImplementationVerified).ToArray();
         if (criteria.Length == 0 || criteria.Any(c => c.EvidenceKind != SprintEvidenceKind.ImplementationVerified)) return false;
+        // Refuse before git/network/reviewer work on the bridge's pre-upgrade catalog.
+        await using (var connection = await issues.Db.OpenAsync(ct))
+            await ImplementationEvidenceFormat.RequireAsync(connection, null, issues.Db.Dialect, ct);
         var path = input.Worktree.WorktreePath ?? throw new InvalidOperationException("Existing implementation has no checkout.");
         var source = await ValidateSourceAsync(path, verification, commands, ct);
         var request = new ReviewRequest(task.Id, projectId, plan.Hash, source, verification.TreeSha,
