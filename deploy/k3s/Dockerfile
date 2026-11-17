@@ -21,6 +21,7 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends git python3 ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 forge && useradd --uid 10001 --gid 10001 --create-home forge \
+    && install -d -o forge -g forge /var/lib/forge \
     && git config --system user.name 'Forge' && git config --system user.email 'forge@local' \
     && git config --system core.hooksPath /dev/null
 WORKDIR /app
@@ -29,7 +30,9 @@ COPY deploy/k3s/ /app/deploy/k3s/
 ARG SOURCE_REVISION
 RUN printf '%s' "$SOURCE_REVISION" > /app/source-revision
 LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
-ENV HOME=/var/lib/forge/home DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+# The PVC mount root always exists. A nested home directory would be hidden by
+# a fresh volume and breaks SDK first-use before an agent can run verification.
+ENV HOME=/var/lib/forge DOTNET_CLI_HOME=/var/lib/forge DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 ENV GIT_AUTHOR_NAME=Forge GIT_AUTHOR_EMAIL=forge@localhost GIT_COMMITTER_NAME=Forge GIT_COMMITTER_EMAIL=forge@localhost
 USER 10001:10001
 ENTRYPOINT ["dotnet", "/app/Forge.Core.dll"]

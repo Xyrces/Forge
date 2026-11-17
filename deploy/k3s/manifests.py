@@ -58,7 +58,7 @@ def job(namespace, image, dataset, operation, name, initialize=False):
         for key, value in {"Controller__Enabled": "true", "Controller__Mode": "initialize",
             "Controller__DatasetId": dataset, "Controller__KeyringPath": "/var/lib/forge/keyring",
             "Controller__TokenFile": "/run/forge-control/controller-token", "Forgesystem__DataRoot": "/var/lib/forge",
-            "Db__Provider": "sqlserver", "Db__AutoMigrate": "true", "HOME": "/var/lib/forge/home", "Bootstrap__ProjectId": "forge",
+            "Db__Provider": "sqlserver", "Db__AutoMigrate": "true", "HOME": "/var/lib/forge", "Bootstrap__ProjectId": "forge",
             "Bootstrap__RepoUrl": "https://github.com/Xyrces/Forge.git",
             "Bootstrap__WorkerPrincipal": "forge-k3s-worker"}.items():
             env.append({"name": key, "value": value})

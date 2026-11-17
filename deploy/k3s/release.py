@@ -97,7 +97,7 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
         "Controller__KeyringPath": "/var/lib/forge/keyring",
         "Db__Provider": "sqlserver", "Db__AutoMigrate": "false", "Forgesystem__DataRoot": "/var/lib/forge",
         "Worker__Enabled": "true", "Worker__Image": image, "Worker__Namespace": namespace,
-        "HOME": "/var/lib/forge/home", "Dashboard__Hostname": "0.0.0.0", "Dashboard__Port": "8080",
+        "HOME": "/var/lib/forge", "Dashboard__Hostname": "0.0.0.0", "Dashboard__Port": "8080",
     }.items()]
     env += [{"name": "Controller__InstanceId", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
             {"name": "Db__ConnectionString", "valueFrom": {"secretKeyRef": {
