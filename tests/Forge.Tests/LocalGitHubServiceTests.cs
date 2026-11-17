@@ -6,6 +6,30 @@ namespace Forge.Tests;
 public sealed class LocalGitHubServiceTests
 {
     [Fact]
+    public async Task MergeObservationContainsAcceptedReworkHeadAndRemainsImmutable()
+    {
+        var service = new LocalGitHubService("/tmp/fake-remote", "owner", "repo");
+        var original = new string('a', 40); var reworked = new string('b', 40);
+        service.RegisterPushedBranch("agent/task", original);
+        var created = await service.CreatePullRequestAsync("title", "body", "agent/task");
+        var before = await service.GetPullRequestAsync(created.Number);
+        Assert.False(before.Merged); Assert.Equal(original, before.Head.Sha);
+        service.RegisterPushedBranch("agent/task", reworked);
+        Assert.False(await service.MergePullRequestAsync(created.Number, expectedHeadSha: original));
+        Assert.False((await service.GetPullRequestAsync(created.Number)).Merged);
+        Assert.True(await service.MergePullRequestAsync(created.Number, expectedHeadSha: reworked));
+        var observed = await service.GetPullRequestAsync(created.Number);
+        Assert.True(observed.Merged); Assert.NotNull(observed.MergedAt);
+        Assert.Equal(reworked, observed.Head.Sha); Assert.Equal(reworked, observed.MergeCommitSha);
+        Assert.Equal("agent/task", observed.Head.Ref); Assert.Equal("main", observed.Base.Ref);
+        service.RegisterPushedBranch("agent/task", new string('c', 40));
+        var later = await service.GetPullRequestAsync(created.Number);
+        Assert.Equal(reworked, later.Head.Sha); Assert.Equal(reworked, later.MergeCommitSha);
+        Assert.Equal(observed.MergedAt, later.MergedAt);
+        Assert.False(before.Merged); // A previously read response cannot mutate underneath callers.
+    }
+
+    [Fact]
     public async Task Merge_AfterRework_RequiresCurrentBranchHead()
     {
         var svc = new LocalGitHubService("/tmp/fake-remote", "owner", "repo");
