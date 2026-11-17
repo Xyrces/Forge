@@ -634,6 +634,20 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .art-card__meta { font-size: 11px; color: var(--on-surface-variant); }
 
 .intake-view-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.initiative-proposals__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.initiative-proposals__toolbar h2 { margin: 0; }
+.initiative-proposals__filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.initiative-proposals__list { display: grid; gap: 8px; }
+.initiative-proposal-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: 100%; text-align: left; padding: 12px; border: 1px solid var(--outline); border-radius: var(--radius-md); background: var(--surface-1); color: var(--on-surface); font: inherit; cursor: pointer; }
+.initiative-proposal-choice:hover { background: var(--surface-2); }
+.initiative-proposal-choice:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.initiative-proposal-choice--selected { border-color: var(--primary); background: var(--primary-soft); }
+.initiative-proposal-choice__title { font-weight: 600; overflow-wrap: anywhere; }
+.initiative-proposal-choice__meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--on-surface-variant); font-size: 12px; }
+.initiative-proposals__detail { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; border-top: 1px solid var(--outline); padding-top: 16px; min-width: 0; }
+.initiative-proposals__detail > * { max-width: 100%; }
+.initiative-proposals__detail h3, .initiative-proposals__detail p { margin: 0; }
+.initiative-proposals__detail pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .intake-split { display: grid; grid-template-columns: minmax(150px, 180px) minmax(320px, 1fr) minmax(220px, 280px); gap: 12px; min-height: 480px; height: calc(100vh - 220px); }
 .intake-split[hidden] { display: none; }
 .intake-split > * { min-width: 0; }
