@@ -44,6 +44,14 @@ public sealed class SprintOutcomeAuthority(IssueStore issues)
             || binding.Criteria.Any(c => c is null || c.Scope is null || string.IsNullOrWhiteSpace(c.Id) || c.Id.Length > 128 || string.IsNullOrWhiteSpace(c.Text)
                 || c.Text.Length > 2000 || !Enum.IsDefined(c.EvidenceKind)))
             throw new InvalidOperationException("Malformed explicit outcome mapping.");
+
+        if (!binding.Criteria.Any(c => binding.CriterionIds.Contains(c.Id)
+                && c.EvidenceKind == SprintEvidenceKind.MergedAndVerified))
+            throw new InvalidOperationException(
+                "Every engineering task must contribute to a genuine pre-deployment MergedAndVerified criterion. "
+                + "Attach DeploymentHealthy and OperatorObserved criteria to the implementation delivery members in the same outcome, "
+                + "not to separate observation-only engineering tasks or sprints. Do not invent code changes or PRs to satisfy this requirement; "
+                + "post-deployment evidence still requires actual runtime or operator verification.");
     }
 
     public async Task BindAsync(string taskId, SprintOutcomeBinding binding, CancellationToken ct = default)

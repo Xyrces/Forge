@@ -551,8 +551,13 @@ public sealed class GroomerAgent
         criterionIds specifies each task's contribution. evidenceKind is MergedAndVerified (pre-deploy merge + trusted verification),
         DeploymentHealthy (post-deploy controller/runtime qualification), or OperatorObserved (post-deploy operator-led acceptance,
         including visual/browser checks). Never substitute deployment health or merged code for actual visual acceptance.
-        Separate pre-deployment implementation criteria from post-deployment checks so deployment can proceed while
-        operator-observed criteria remain honestly pending; only the operator can record that evidence.
+        Keep pre-deployment implementation and post-deployment acceptance as distinct criteria WITHIN THE SAME delivery outcome.
+        Each engineering task's own criterionIds MUST include a genuine MergedAndVerified criterion; it may also contribute
+        to DeploymentHealthy or OperatorObserved criteria. Attach those later criteria to the implementation delivery members.
+        requiredTaskIds contains actual pre-deployment engineering work, never separate operator-observation-only QA tasks
+        or a second observation-only sprint. Do not invent code changes, PRs, or fake operator evidence to pass this rule.
+        Deployment proceeds after genuine implementation verification; post-deployment acceptance remains honestly pending
+        until actual runtime qualification or operator observation. Only the operator can record operator-observed evidence.
         reason is Delivers, Remediates, or Prerequisite. Every prerequisite needs explicit criterion mapping too.
         For remediation, bind to existing approved acceptance scope; followUpOf alone is not approval.
         Binding JSON: {"version":1,"outcomeId":"stable-goal-id","objective":"useful outcome",
