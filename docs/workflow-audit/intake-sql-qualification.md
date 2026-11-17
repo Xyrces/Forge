@@ -64,8 +64,22 @@ The disposable schema
 `audit_intake_dbc86a9c27db457d912769f8534dee2c_upgrade` was removed and its
 absence asserted. Exact assembly pins, manifest, source and results are under
 `.portHorizon/validation/upgrade-sql/`. This check predates the subsequent
-single-statement batch-consumption optimization; that query requires its own
-qualification.
+single-statement batch-consumption optimization, which was qualified separately
+below.
+
+## Bounded batch acknowledgement
+
+The optimized query at `a4e038ebb4b5f25190b6a8241ac3fbb6964f3ec1` passed
+another actual Azure SQL rehearsal: a 1,000-source group was acknowledged by
+one bounded update; duplicate/replayed acknowledgements preserved timestamps;
+a missing or conflicting source rolled back the whole group; and concurrent
+different bindings produced exactly one winner. This exercises consumption,
+not proposal-source lookup (covered by the earlier upgrade fixture).
+
+The independently reviewed harness used only
+`audit_batch_ce8b79534fd74cb9be0076c97caabb56`, removed it, and asserted its
+absence. Exact executable pins and results are under
+`.portHorizon/validation/batch-sql/`.
 
 These are real Azure SQL query checks, not full bridge-image activation or
 runtime-principal permission tests. Complete UI flow and unattended migration,
