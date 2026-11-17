@@ -20,3 +20,26 @@ Browser testing found two remaining presentation defects and a project-switch re
 The final fixture used application source through `207b1d3`; the next commit only records SQL qualification. Earlier paging/error checks used the same read/query logic. Actual Azure SQL read and activation transaction checks are recorded separately in [the read model report](sprint-read-model.md) and [activation safety report](activation-safety.md).
 
 One fixture restart coincided with navigation and left a temporary browser connection-error page. After the fixture returned healthy, a fresh tab was used for the remaining checks. This was a test-host restart, not a production outage or a passed application recovery test. Test controls were reset and the private test host was stopped after qualification.
+
+## Completion evidence and larger history fixture
+
+The unattended-workflow preview through `5a4b61d` contained130 synthetic
+sprints and25 outstanding completion records, with no scheduler or provider
+credentials. History loaded20 summaries per page while preserving the
+selected sprint. The separate outstanding list loaded20 records followed by5.
+Selecting a historical sprint with no receipt removed the previous evidence;
+using an outstanding-record Review control selected its exact sprint even
+when that sprint was outside the current history page.
+
+A synthetic deployed completion with all tasks completed still displayed
+awaiting operator observation. Its interrupted follow-up batch exposed an
+explicit retry action; clicking it changed NeedsReview to Pending and
+confirmed the request without claiming delivery or making a model call.
+The private screenshot `completion-retry-desktop.jpg` is retained under
+`.portHorizon/validation/intake-preview/` in that integration checkout.
+
+The larger fixture also exposed an overly tall outstanding list and raw
+status names. Subsequent commits reduce that overview to five items,
+collapse it by default, and clarify the labels; those subsequent changes
+require their own browser recheck. This fixture is presentation and recovery
+interaction evidence only, not a real release or acceptance result.
