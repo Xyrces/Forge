@@ -74,14 +74,15 @@ internal sealed class ActivityTrackingChatClient : DelegatingChatClient
             var outTok = usage.OutputTokenCount ?? 0;
             Interlocked.Add(ref _inputTokens, inTok);
             Interlocked.Add(ref _outputTokens, outTok);
-            var cacheRead = usage.AdditionalCounts?.TryGetValue("cache_read_input_tokens", out var cr) == true ? cr : 0;
+            var legacyCacheRead = usage.AdditionalCounts?.TryGetValue("cache_read_input_tokens", out var cr) == true ? cr : 0;
+            var cacheRead = usage.CachedInputTokenCount ?? legacyCacheRead;
             var cacheCreate = usage.AdditionalCounts?.TryGetValue("cache_creation_input_tokens", out var cc) == true ? cc : 0;
             Interlocked.Add(ref _cacheReadTokens, cacheRead);
             // Anthropic-style usage reports the CACHED prefix separately
             // — input_tokens is only the non-cached tail. The live
             // context size is the sum (observed live 2026-08-06:
             // task-547 reported ctx=55 while cache-reading 43k/turn).
-            Interlocked.Exchange(ref _lastInputTokens, inTok + cacheRead + cacheCreate);
+            Interlocked.Exchange(ref _lastInputTokens, usage.CachedInputTokenCount.HasValue ? inTok : inTok + legacyCacheRead + cacheCreate);
         }
 
         // New history since the last call (tool results, layer-added

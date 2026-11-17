@@ -96,6 +96,7 @@ public static class BudgetRequestPolicy
 
         private async Task<string> ReserveAsync(ModelPriceOptions price, long inputTokens, int outputBound, CancellationToken ct)
         {
+            if (inputTokens > 922_000) throw new InvalidOperationException("Counted input exceeds the qualified model input limit.");
             if (outputBound <= 0) throw new InvalidOperationException("A positive output bound is required.");
             var bound = (inputTokens * price.InputUsdPerMillion + outputBound * price.OutputUsdPerMillion) / 1_000_000m;
             if (bound > options.Budget.MaximumRequestUsd)
@@ -112,15 +113,28 @@ public static class BudgetRequestPolicy
             return requestId;
         }
 
-        private async Task SettleAsync(string requestId, ModelPriceOptions price, UsageDetails? usage)
+        private async Task SettleAsync(string requestId, ModelPriceOptions price, UsageDetails? usage, ResponsesInputAdmission scope)
         {
             // Settle at conservative qualified rates, not an exact invoice estimate.
             // Charge all reported input at the upper rate; no assumed cache discount.
             // Missing or interrupted usage remains reserved, never silently refunded.
-            decimal? cost = usage?.InputTokenCount is { } input && usage.OutputTokenCount is { } output
+            decimal? cost = usage?.InputTokenCount is >= 0 and var input && input <= scope.CountedInputTokens
+                && usage.OutputTokenCount is >= 0 and var output && output <= scope.MaxOutputTokens
                 ? (input * price.InputUsdPerMillion + output * price.OutputUsdPerMillion) / 1_000_000m : null;
+            var basis = "legacy-conservative-bound-v1";
+            if (scope.BillingEvidenceJson is { } evidence)
+            {
+                var estimate = OpenAiSolPricing.Calculate(evidence, scope.CountedInputTokens, scope.MaxOutputTokens);
+                if (estimate is not null)
+                {
+                    cost = estimate.CostUsd;
+                    basis = OpenAiSolPricing.Version + (estimate.CompleteBreakdown ? ":usage-estimate" : ":cache-aware-upper-bound");
+                }
+                else basis = "conservative-fallback:incomplete-or-invalid-usage";
+            }
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            if (!await ledger.CompleteAsync(options.Controller.DatasetId, requestId, cost, timeout.Token))
+            if (!await ledger.CompleteWithUsageAsync(options.Controller.DatasetId, requestId, cost,
+                    scope.BillingEvidenceJson, basis, timeout.Token))
                 throw new InvalidOperationException("Model usage could not be reconciled with its reservation.");
         }
 
@@ -146,7 +160,7 @@ public static class BudgetRequestPolicy
                 usage = response.Usage;
                 return response;
             }
-            finally { if (request is not null) await SettleAsync(request, price, usage); }
+            finally { if (request is not null) await SettleAsync(request, price, usage, scope); }
         }
 
         public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
@@ -174,7 +188,7 @@ public static class BudgetRequestPolicy
                     yield return update;
                 }
             }
-            finally { if (request is not null) await SettleAsync(request, price, usage); }
+            finally { if (request is not null) await SettleAsync(request, price, usage, scope); }
         }
     }
 }

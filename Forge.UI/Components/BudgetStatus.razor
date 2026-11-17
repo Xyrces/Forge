@@ -1,0 +1,82 @@
+@implements IDisposable
+@inject HttpClient Http
+@inject ILogger<BudgetStatus> Logger
+@using System.Net.Http.Json
+@using System.Globalization
+@using Forge.Dashboard.Features.Budget
+
+<section class="card budget-status" aria-label="API spending">
+    <div class="budget-status__header">
+        <h2>API spending</h2>
+        <button class="btn" disabled="@_loading" @onclick="RefreshAsync">Refresh spending</button>
+    </div>
+    @if (_error is not null)
+    {
+        <p class="banner banner--warn" role="status">@_error</p>
+    }
+    @if (_snapshot is null)
+    {
+        <p>@(_loading ? "Loading spending information…" : "Spending information is unavailable.")</p>
+    }
+    else if (_snapshot.Configured == false)
+    {
+        <p>Spending authorization is not configured for this service.</p>
+    }
+    else
+    {
+        <p>Shared across all projects · USD · Updated @_snapshot.GeneratedAt?.ToLocalTime().ToString("MMM d, yyyy HH:mm:ss") · Refresh to see newer activity</p>
+        <dl class="budget-status__amounts">
+            <div><dt>Authorized limit</dt><dd>@Money(_snapshot.LimitUsd)</dd></div>
+            <div><dt>Usage-based estimate</dt><dd>@Money(_snapshot.UsageEstimatedUsd)</dd></div>
+            <div><dt>Operator-reported prior cost</dt><dd>@Money(_snapshot.OperatorReportedUsd)</dd></div>
+            <div><dt>Conservative amounts awaiting reconciliation</dt><dd>@Money(_snapshot.ConservativeSettledUsd)</dd></div>
+            <div><dt>Outstanding request holds</dt><dd>@Money(_snapshot.OutstandingUsd)</dd></div>
+            <div><dt>Available after estimates and holds</dt><dd>@Money(_snapshot.AvailableAfterHoldsUsd)</dd></div>
+        </dl>
+        <p>New usage estimates use API-reported tokens and model prices. Prior cost corrections use the operator's reported amount. Forge has not independently verified billing with OpenAI.</p>
+        @if (_snapshot.ConservativeSettledUsd > 0)
+        {
+            <p class="banner banner--warn">Older or incomplete usage records use conservative amounts. They reduce available authorization but do not establish how much OpenAI billed.</p>
+        }
+        @if (_snapshot.UncertainRequestCount > 0)
+        {
+            <p>@_snapshot.UncertainRequestCount request(s) have an unknown outcome; their spending holds remain in place.</p>
+        }
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _stop = new();
+    private BudgetSummary? _snapshot;
+    private bool _loading;
+    private string? _error;
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private async Task RefreshAsync()
+    {
+        if (_loading || _stop.IsCancellationRequested) return;
+        _loading = true;
+        try
+        {
+            var fresh = await Http.GetFromJsonAsync<BudgetSummary>("/api/budget", _stop.Token)
+                ?? throw new InvalidOperationException("Spending endpoint returned no data.");
+            fresh.Validate();
+            _snapshot = fresh;
+            _error = null;
+        }
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Spending information could not be refreshed");
+            _error = _snapshot is null
+                ? "Spending information could not be loaded. Retry with Refresh spending."
+                : "Spending could not be refreshed. The amounts below are from the last successful update.";
+        }
+        finally { _loading = false; }
+    }
+
+    private static string Money(decimal? value) => value?.ToString(value is > 0 and < .01m ? "C4" : "C2", CultureInfo.GetCultureInfo("en-US")) ?? "Unavailable";
+    public void Dispose() { _stop.Cancel(); _stop.Dispose(); }
+
+}

@@ -1,5 +1,6 @@
 # Exact input admission
 
+> Future settlement policy is updated by [the budget accuracy audit](../workflow-audit/budget.md): verified usage categories use the qualified tariff, while legacy rows remain unchanged. Pre-call conservative admission is retained.
 The qualified Forge pilot retains its $25 dataset ceiling, existing ledger rows,
 full 1,050,000-token context limit, and conservative $10/M input and $15/M output
 rates. New requests reserve against a free server input count plus the capped

@@ -11,6 +11,8 @@ internal sealed class ResponsesInputAdmission : IDisposable
     private int _claimed;
     internal static ResponsesInputAdmission? Current => Slot.Value;
     internal bool Admitted { get; private set; }
+    internal string? BillingEvidenceJson { get; set; }
+    internal long CountedInputTokens { get; private set; }
     internal string Model { get; }
     internal int MaxOutputTokens { get; }
     internal int ContextTokens { get; }
@@ -33,6 +35,7 @@ internal sealed class ResponsesInputAdmission : IDisposable
         if (inputTokens < 0 || inputTokens > ContextTokens || outputTokens <= 0 || outputTokens > MaxOutputTokens
             || inputTokens + outputTokens > ContextTokens)
             throw new InvalidOperationException("Counted request exceeds qualified model context/output limits.");
+        CountedInputTokens = inputTokens;
         await _admit(inputTokens, outputTokens, ct);
         Admitted = true;
     }

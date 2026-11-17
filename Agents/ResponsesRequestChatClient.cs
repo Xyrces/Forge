@@ -1,5 +1,8 @@
 #pragma warning disable OPENAI001 // Pinned SDK Responses adapter; covered by offline wire-contract tests.
 using Forge.Core;
+using System.ClientModel.Primitives;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Microsoft.Extensions.AI;
 using OpenAI.Responses;
 
@@ -48,11 +51,45 @@ internal sealed class ResponsesRequestChatClient(IChatClient inner, ProviderConf
         return options;
     }
 
-    public override Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
-        ChatOptions? options = null, CancellationToken cancellationToken = default) =>
-        InnerClient.GetResponseAsync(messages, Prepare(options), cancellationToken);
+    private static void CaptureBillingEvidence(object? raw, ResponsesInputAdmission? scope)
+    {
+        if (scope is null) return;
+        var response = raw switch
+        {
+            ResponseResult result => result,
+            StreamingResponseCompletedUpdate completed => completed.Response,
+            StreamingResponseIncompleteUpdate incomplete => incomplete.Response,
+            StreamingResponseFailedUpdate failed => failed.Response,
+            _ => null,
+        };
+        if (response is null) return;
+        // Persist only billing evidence, never prompts, output text or encrypted reasoning.
+        // JSON mode retains SDK-unknown fields such as cache-write TTL usage.
+        using var document = JsonDocument.Parse(ModelReaderWriter.Write(response).ToMemory());
+        var root = document.RootElement;
+        var evidence = new Dictionary<string, JsonElement>();
+        foreach (var key in new[] { "id", "model", "service_tier", "status", "usage" })
+            if (root.TryGetProperty(key, out var value)) evidence[key] = value;
+        scope.BillingEvidenceJson = JsonSerializer.Serialize(evidence);
+    }
 
-    public override IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
-        ChatOptions? options = null, CancellationToken cancellationToken = default) =>
-        InnerClient.GetStreamingResponseAsync(messages, Prepare(options), cancellationToken);
+    public override async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        var scope = ResponsesInputAdmission.Current;
+        var response = await InnerClient.GetResponseAsync(messages, Prepare(options), cancellationToken);
+        CaptureBillingEvidence(response.RawRepresentation, scope);
+        return response;
+    }
+
+    public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var scope = ResponsesInputAdmission.Current;
+        await foreach (var update in InnerClient.GetStreamingResponseAsync(messages, Prepare(options), cancellationToken))
+        {
+            CaptureBillingEvidence(update.RawRepresentation, scope);
+            yield return update;
+        }
+    }
 }

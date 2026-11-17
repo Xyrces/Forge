@@ -1,5 +1,6 @@
 # Forge-first request budget qualification
 
+> Future settlement policy is updated by [the budget accuracy audit](../workflow-audit/budget.md): verified usage categories use the qualified tariff, while legacy rows remain unchanged. Pre-call conservative admission is retained.
 Verified against official documentation on 2026-11-17 UTC. This is the implemented pilot profile, not evidence of a paid API run.
 
 The only qualified model is `gpt-6.1-sol`, through the direct global `https://api.openai.com/v1` Responses endpoint. The adapter pins `service_tier=default`, model identity and output limit. Proxy routing, regional endpoints, unknown models, hosted tools and media inputs are rejected by the pilot budget policy.

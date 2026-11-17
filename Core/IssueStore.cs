@@ -216,7 +216,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 38;
+    public const int CurrentSchemaVersion = 39;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1016,6 +1016,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // porthorizon task-752).
         ApplyV36FollowUpDraftTaskType(conn);
         Control.ControlSchema.Create(conn, SqliteDialect.Instance);
+        M039BudgetUsage.ApplySqlite(conn);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;

@@ -49,6 +49,7 @@ public static class SqlServerMigrations
         new M036FollowUpDraftTaskType(),
         new M037ControlPlane(),
         new M038WorkerAttempts(),
+        new M039BudgetUsage(),
     };
 
     public static int ExpectedVersion =>

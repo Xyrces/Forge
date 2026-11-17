@@ -47,9 +47,38 @@ public static class ControlSchema
             model {key} NOT NULL,
             reservation_microusd {number} NOT NULL CHECK (reservation_microusd > 0),
             actual_microusd {number} NULL CHECK (actual_microusd >= 0),
+            usage_json {(sqlServer ? "NVARCHAR(MAX)" : "TEXT")} NULL,
+            pricing_basis {key} NULL,
             status {key} NOT NULL CHECK (status IN ('reserved', 'uncertain', 'completed')),
             created_at {time} NOT NULL,
             updated_at {time} NOT NULL
+            """) + ReconciliationDdl(dialect);
+    }
+    public static string ReconciliationDdl(ISqlDialect dialect)
+    {
+        var sql = dialect.Provider == ForgeDbProvider.SqlServer;
+        var key = sql ? "NVARCHAR(128) COLLATE Latin1_General_100_BIN2" : "TEXT";
+        var number = sql ? "BIGINT" : "INTEGER";
+        var text = sql ? "NVARCHAR(MAX)" : "TEXT";
+        string Create(string table, string columns) => sql
+            ? $"IF OBJECT_ID(N'{dialect.Table(table)}', N'U') IS NULL CREATE TABLE {dialect.Table(table)} ({columns});"
+            : $"CREATE TABLE IF NOT EXISTS {table} ({columns});";
+        return Create("budget_reconciliation", $"""
+            reconciliation_id {key} NOT NULL PRIMARY KEY,
+            dataset_id {key} NOT NULL,
+            original_microusd {number} NOT NULL CHECK(original_microusd >= 0),
+            reported_microusd {number} NOT NULL CHECK(reported_microusd >= 0),
+            source {key} NOT NULL,
+            operator_name {key} NOT NULL,
+            evidence_sha256 {key} NOT NULL,
+            manifest_json {text} NOT NULL,
+            created_at {key} NOT NULL
+            """) + Create("budget_reconciliation_request", $"""
+            request_id {key} NOT NULL PRIMARY KEY,
+            reconciliation_id {key} NOT NULL,
+            dataset_id {key} NOT NULL,
+            original_microusd {number} NOT NULL CHECK(original_microusd >= 0)
             """);
     }
+
 }

@@ -32,6 +32,7 @@ public sealed class BootstrapOptions
     public string RepoUrl { get; set; } = "https://github.com/Xyrces/Forge.git";
     public string DefaultBranch { get; set; } = "main";
     public string WorkerPrincipal { get; set; } = "forge-k3s-worker";
+    public string ControllerPrincipal { get; set; } = "";
 }
 
 public sealed class BudgetOptions

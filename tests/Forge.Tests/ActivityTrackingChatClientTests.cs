@@ -32,6 +32,20 @@ public class ActivityTrackingChatClientTests : IDisposable
     }
 
     [Fact]
+    public async Task OpenAiCacheCountsAreReportedWithoutAddingThemToTotalContextAgain()
+    {
+        await _runs.StartAsync("cached", "task-1", "CoreDev", "m");
+        var inner = new StubChatClient { Usage = new() { InputTokenCount = 1000, OutputTokenCount = 20, CachedInputTokenCount = 800 } };
+        var tracked = new ActivityTrackingChatClient(inner, "cached", _runs);
+        await tracked.GetResponseAsync([new(ChatRole.User, "go")]);
+        await tracked.GetResponseAsync([new(ChatRole.User, "go")]);
+        var row = (await _runs.ListActiveAsync()).Single();
+        Assert.Equal(1600, row.CacheReadTokens);
+        Assert.Equal(2000, row.InputTokens);
+        Assert.Equal(1000, row.CurrentContextTokens);
+    }
+
+    [Fact]
     public async Task EachRoundTrip_UpdatesProgressCounters()
     {
         await _runs.StartAsync("run-act", "task-1", "CoreDev", "m");
@@ -96,6 +110,7 @@ public class ActivityTrackingChatClientTests : IDisposable
 
     private sealed class StubChatClient : IChatClient
     {
+        public UsageDetails? Usage;
         public Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
@@ -105,6 +120,7 @@ public class ActivityTrackingChatClientTests : IDisposable
                 new FunctionCallContent("call-1", "bash"),
                 new FunctionCallContent("call-2", "read"),
             ]));
+            response.Usage = Usage;
             return Task.FromResult(response);
         }
 

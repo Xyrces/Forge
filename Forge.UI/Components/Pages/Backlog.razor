@@ -1,3 +1,4 @@
+@using Forge.Dashboard.Services
 @page "/backlog"
 @inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
@@ -153,7 +154,7 @@
     private string? _repoUrl;
 
     private string? PrUrl(string prNumber) =>
-        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+        RepositoryLinks.PullRequest(_repoUrl, prNumber);
 
     private async Task LoadRepoUrlAsync()
     {
@@ -169,7 +170,8 @@
                 if (p.TryGetProperty("id", out var id) && string.Equals(id.GetString(), projectId, StringComparison.OrdinalIgnoreCase)
                     && p.TryGetProperty("repoUrl", out var url))
                 {
-                    _repoUrl = url.GetString()?.TrimEnd('/');
+                    if (projectId == ShellStore.Value.CurrentProjectId)
+                        _repoUrl = RepositoryLinks.WebUrl(url.GetString());
                     break;
                 }
             }

@@ -220,6 +220,7 @@ public sealed class DeploymentStore
         DeployLog: rd.IsDBNull(11) ? null : rd.GetString(11));
 }
 
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<DeploymentStatus>))]
 public enum DeploymentStatus
 {
     Pending,
