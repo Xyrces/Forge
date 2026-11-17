@@ -100,7 +100,7 @@ public sealed class SprintPlanningAuditTests : IDisposable
         Assert.Equal(2,(await drafts.ListUnconsumedAsync()).Count);
         Assert.Single(await issues.ListAsync(new IssueFilter()));
     }
-    [Fact] public async Task ProposalCommitDisplacesActiveSprintWithUngroomedTask()
+    [Fact] public async Task ProposalCommitCannotDisplaceActiveSprintWithUngroomedTask()
     {
         await AdHoc("Existing committed goal");
         await Tick();
@@ -109,10 +109,10 @@ public sealed class SprintPlanningAuditTests : IDisposable
         await using var audit=new SprintProposalAuditStore(issues.Db);
         var proposer=new SprintProposeService(issues,sprints,new Forge.Agents.DeterministicScorer(),audit);
         var proposal=await proposer.ProposeAsync(null,null);
-        var id=await proposer.CommitAsync(proposal.AuditId,new[]{ungroomed.Id},null,null,"audit");
-        Assert.Equal(id,(await sprints.GetActiveAsync())!.Id);
-        Assert.Equal(SprintStatus.Archived,(await sprints.GetAsync(active.Id))!.Status);
-        Assert.Contains(ungroomed.Id,await sprints.GetIssueIdsAsync(id));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => proposer.CommitAsync(proposal.AuditId,new[]{ungroomed.Id},null,null,"audit"));
+        Assert.Equal(active.Id,(await sprints.GetActiveAsync())!.Id);
+        Assert.Equal(SprintStatus.Active,(await sprints.GetAsync(active.Id))!.Status);
+        Assert.DoesNotContain(ungroomed.Id,await sprints.GetIssueIdsAsync(active.Id));
     }
     sealed class InterruptedTriage : IFollowUpTriage
     {

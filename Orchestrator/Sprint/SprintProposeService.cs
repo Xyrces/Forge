@@ -21,17 +21,28 @@ public sealed class SprintProposeService
     private readonly ISprintStore _sprints;
     private readonly IScorer _scorer;
     private readonly SprintProposalAuditStore _audit;
+    private readonly SprintActivationValidator _activation;
+    internal StageGates? Gates { get; }
+
 
     public SprintProposeService(
         IIssueStore issues,
         ISprintStore sprints,
         IScorer scorer,
-        SprintProposalAuditStore audit)
+        SprintProposalAuditStore audit,
+        StageGates? gates = null,
+        ISpecStore? specs = null,
+        string? projectId = null)
     {
         _issues = issues;
         _sprints = sprints;
         _scorer = scorer;
         _audit = audit;
+        Gates = gates;
+        var concrete = issues as IssueStore;
+        _activation = new SprintActivationValidator(issues, sprints,
+            specs ?? (concrete is not null ? new SpecStore(concrete) : throw new ArgumentException("A specification store is required.")),
+            projectId ?? concrete?.ProjectId ?? throw new ArgumentException("A project id is required."), gates);
     }
 
     public sealed record ProposedCandidate(
@@ -78,10 +89,13 @@ public sealed class SprintProposeService
         };
 
         var candidates = scored.Items
-            .Take(candidateCount)
             .Select(s => new ProposedCandidate(s.Task.Id, s.Task.Title, s.Score, s.Breakdown))
             .ToArray();
 
+        var fingerprints = await _activation.PreviewFingerprintsAsync(
+            candidates.Select(c => c.TaskId), candidateCount, ct);
+        candidates = candidates.Where(c => fingerprints.ContainsKey(c.TaskId)).ToArray();
+        weights["activationSnapshots"] = fingerprints;
         var selectedTaskIds = candidates.Select(c => c.TaskId).ToArray();
 
         var auditCandidates = candidates
@@ -112,20 +126,39 @@ public sealed class SprintProposeService
         var audit = await _audit.GetAsync(auditId, ct)
             ?? throw new InvalidOperationException($"audit row {auditId} not found");
 
+        if (audit.CommittedSprintId is not null)
+            throw new InvalidOperationException("This proposal has already been committed.");
+        using var weights = System.Text.Json.JsonDocument.Parse(audit.WeightsJson);
+        if (!weights.RootElement.TryGetProperty("activationSnapshots", out var fingerprints))
+            throw new InvalidOperationException("This proposal is stale; generate a new proposal.");
+        if (taskIds.Count == 0 || taskIds.Distinct(StringComparer.Ordinal).Count() != taskIds.Count)
+            throw new InvalidOperationException("Select one or more distinct eligible tasks.");
+        var validated = new List<SprintActivationSnapshot>();
+        foreach (var id in taskIds)
+        {
+            if (!fingerprints.TryGetProperty(id, out var fingerprint))
+                throw new InvalidOperationException($"Task {id} was not an eligible candidate in this proposal.");
+            var current = await _activation.ValidateAsync([id], ct);
+            validated.Add(current);
+            if (fingerprint.GetString() != SprintActivationValidator.Fingerprint(current))
+                throw new InvalidOperationException($"Proposal is stale: task {id} or its specification changed.");
+        }
+        var issueGroups = validated.SelectMany(s => s.Issues).GroupBy(i => i.Id).ToArray();
+        var specGroups = validated.SelectMany(s => s.Specs).GroupBy(s => s.Id).ToArray();
+        if (issueGroups.Any(g => g.Distinct().Count() != 1) || specGroups.Any(g => g.Distinct().Count() != 1))
+            throw new InvalidOperationException("Proposal changed during validation; generate a new proposal.");
+        var snapshot = new SprintActivationSnapshot(issueGroups.Select(g => g.First()).ToArray(),
+            specGroups.Select(g => g.First()).ToArray(), taskIds, auditId, committedBy);
+        if (Gates is not null && await Gates.IsHeldAsync(StageGates.Sprint, ct))
+            throw new InvalidOperationException("Sprint assembly is held by the operator.");
         var start = DateTime.UtcNow;
-        var sprint = await _sprints.CreateAsync(new NewSprint(
+        var sprint = await _sprints.CreateWithIssuesAsync(new NewSprint(
             Name: theme ?? "Proposed Sprint",
             Goal: goal ?? $"Auto-proposed from audit {auditId}",
             StartDate: start,
             EndDate: start.AddDays(14),
-            Status: SprintStatus.Active), ct);
+            Status: SprintStatus.Active), snapshot, ct);
 
-        foreach (var tid in taskIds)
-        {
-            await _sprints.AddIssueAsync(sprint.Id, tid, ct);
-        }
-
-        await _audit.MarkCommittedAsync(auditId, sprint.Id, committedBy, ct);
         return sprint.Id;
     }
 }

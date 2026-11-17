@@ -450,7 +450,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             }
         });
 
-        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory);
+        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory,
+            _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)));
 
         if (_projectFactory is not null && _slots is not null)
         {
@@ -535,6 +536,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             _providerApiKeys);
         QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
             _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
+        SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)

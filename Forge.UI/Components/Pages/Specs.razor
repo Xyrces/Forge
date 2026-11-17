@@ -49,6 +49,13 @@
                 <button class="btn btn--link" @onclick="() => _actionError = null">Dismiss</button>
             </div>
         }
+        @if (!SpecsStore.Value.Loading && SpecsStore.Value.Rows.Count == 0)
+        {
+            <div class="card">
+                <p>No specs match this view. Start a conversation in Intake to develop a new initiative into a specification.</p>
+                <a class="btn btn--primary" href="/intake">Start in Intake</a>
+            </div>
+        }
         <table class="data-grid">
             <thead>
                 <tr>

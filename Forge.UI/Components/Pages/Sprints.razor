@@ -1,8 +1,7 @@
 @using Forge.Dashboard.Services
 @page "/sprints"
-@inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
+@using Forge.Dashboard.Features.Sprints
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
-@inject Fluxor.IDispatcher Dispatch
 @inject HttpClient Http
 @inject ILogger<Sprints> Logger
 @inject NavigationManager Nav
@@ -16,9 +15,9 @@
 <div class="page">
     <div class="page-header">
         <h1>Sprints</h1>
-        <div class="page-header__meta">@ViewStore.Value.Sprints.Count total · @ViewStore.Value.Sprints.Count(s => s.Status == "Active") active@(ViewStore.Value.Refreshing ? " · updating…" : "")</div>
+        <div class="page-header__meta">@(_summary is null ? "Sprint totals not loaded" : $"{_summary.Total} total · {(_summary.Active is null ? 0 : 1)} active")@(_refreshing ? " · updating…" : "")</div>
         <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId, Background: true)))">Refresh</button>
+            <button class="btn btn--primary" @onclick="RefreshAsync">Refresh</button>
         </div>
     </div>
 
@@ -39,15 +38,28 @@
         <a href="/flow?mode=edit" class="page-subtitle">Edit on the Flow page →</a>
     </div>
 
-    @if (ViewStore.Value.Loading)
+    @if (_error is not null && _board is not null)
+    {
+        <p class="banner banner--warn">@_error Showing the last successful update from @_board.GeneratedAt.ToLocalTime().ToString("g").</p>
+    }
+    @if (_queueError is not null)
+    {
+        <p class="banner banner--warn">@_queueError</p>
+    }
+    @if (_loading)
     {
         <div class="page-subtitle">Loading…</div>
     }
-    else if (ViewStore.Value.Error is not null)
+    else if (_error is not null && _board is null)
     {
-        <div class="page-subtitle">Error: @ViewStore.Value.Error</div>
+        <div class="page-subtitle">Error: @_error</div>
+        <button class="btn" @onclick="ShowActiveAsync">Show active sprint</button>
     }
-    else if (ViewStore.Value.Sprints.Count == 0)
+    else if (_board is null)
+    {
+        <div class="page-subtitle">@(ShellStore.Value.CurrentProjectId is null ? "Waiting for a project selection…" : "Loading sprints…")</div>
+    }
+    else if (_board.Sprint is null)
     {
         @* Sprint flow: there is intentionally NO create button — the
            SprintAssembler builds each sprint automatically when the
@@ -56,7 +68,7 @@
     }
     else
     {
-        var sprints = ViewStore.Value.Sprints
+        var sprints = SprintHeaders
             .OrderByDescending(s => s.Status == "Active")
             .ThenByDescending(s => s.StartDate)
             .ToList();
@@ -70,7 +82,7 @@
             <label class="picker-bar__label" for="sprint-picker">Sprint</label>
             <select id="sprint-picker" class="picker-bar__select"
                     value="@(selected?.Id ?? "")"
-                    @onchange="@((ChangeEventArgs e) => _selectedSprintId = e.Value?.ToString())">
+                    @onchange="SelectSprintAsync">
                 @foreach (var sp in sprints)
                 {
                     <option value="@sp.Id" selected="@(selected?.Id == sp.Id)">
@@ -78,7 +90,9 @@
                     </option>
                 }
             </select>
-            <span class="meta-text">@sprints.Count total</span>
+            <span class="meta-text">@(_summary?.Total ?? 0) total</span>
+            <button class="btn" disabled="@(_historyPages.Count == 0 || _refreshing)" @onclick="PreviousHistoryAsync">Newer sprints</button>
+            <button class="btn" disabled="@(_summary?.NextCursor is null || _refreshing)" @onclick="NextHistoryAsync">Older sprints</button>
         </div>
 
         @* Inter-sprint build state (operator request 2026-08-06):
@@ -140,8 +154,9 @@
         @if (selected is not null)
         {
             var members = EnrichMembers(selected);
-            var done = members.Count(m => Bucket(m) == "done");
-            var pct = members.Count == 0 ? 0 : (int)Math.Round(100.0 * done / members.Count);
+            var done = _board?.Done ?? 0;
+            var total = _board?.Total ?? 0;
+            var pct = total == 0 ? 0 : (int)Math.Round(100.0 * done / total);
 
             <div class="sprint-hero">
                 <div class="sprint-hero__top">
@@ -151,7 +166,7 @@
                         @(selected.StartDate?.ToString("MMM d") ?? "")
                         @(selected.EndDate is not null ? $" → {selected.EndDate.Value:MMM d}" : "")
                     </span>
-                    <span class="mono">@done/@members.Count tasks · @pct%</span>
+                    <span class="mono">@done/@total tasks completed or closed · @pct%</span>
                 </div>
             @if (!string.IsNullOrEmpty(selected.Goal))
             {
@@ -160,6 +175,11 @@
             <div class="sprint-progress"><div class="sprint-progress__fill" style="width:@pct%"></div></div>
         </div>
 
+        <div class="picker-bar">
+            <span>Showing @members.Count of @total tasks. Column counts cover this page.</span>
+            <button class="btn" disabled="@(_memberPages.Count == 0 || _refreshing)" @onclick="PreviousMembersAsync">Previous tasks</button>
+            <button class="btn" disabled="@(_board?.NextCursor is null || _refreshing)" @onclick="NextMembersAsync">Next tasks</button>
+        </div>
         @* Dispatch queue: the ready sprint members in claim order
            (blocker boost → priority → FIFO — the same ordering the
            dispatch loop consumes), with why each is or isn't running.
@@ -170,11 +190,11 @@
                 <div class="page-subtitle" style="margin-bottom:8px">
                     Dispatch queue (@_queueTotal waiting) — claim order:
                 </div>
-                @if (_queueTotal == 0 && _blocked.Count == 0)
+                @if (_queueError is null && _queueTotal == 0 && _blocked.Count == 0)
                 {
                     <div class="meta-text" style="padding:2px 0">Nothing waiting to claim — every member is in flight, in review, or blocked.</div>
                 }
-                @if (_queueTotal == 0 && _blocked.Count > 0)
+                @if (_queueError is null && _queueTotal == 0 && _blocked.Count > 0)
                 {
                     <div class="meta-text" style="padding:2px 0">Nothing claimable right now — the remaining queued tasks are blocked (below).</div>
                 }
@@ -199,14 +219,14 @@
                 }
                 @if (_blocked.Count > 0)
                 {
-                    <div class="page-subtitle" style="margin:8px 0 4px">Blocked — enters the queue when these land:</div>
+                    <div class="page-subtitle" style="margin:8px 0 4px">Blocked (@_blockedTotal total, showing @_blocked.Count) — enters the queue when these land:</div>
                     @foreach (var b in _blocked)
                     {
                         <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{b.Id}"))">
                             <span class="mono">@b.Id</span>
                             <span class="mono">P@(b.Priority)</span>
                             <span>@b.Title</span>
-                            <span class="pill pill--blocked">blocked by @string.Join(", ", b.BlockedBy)</span>
+                            <span class="pill pill--blocked">blocked by @string.Join(", ", b.BlockedBy)@(b.BlockerCount > b.BlockedBy.Count ? $" (+{b.BlockerCount - b.BlockedBy.Count} more)" : "")</span>
                         </div>
                     }
                 }
@@ -306,7 +326,7 @@
                                 {
                                     <div class="kanban__card-meta">
                                         <span class="pill pill--blocked" title="Cannot proceed until these land (injected into this sprint)">
-                                            blocked by @string.Join(", ", blockers)
+                                            blocked by @string.Join(", ", blockers)@(card.BlockerCount > blockers.Count ? $" (+{card.BlockerCount - blockers.Count} more)" : "")
                                         </span>
                                     </div>
                                 }
@@ -336,6 +356,18 @@
 @code {
     private string? _loadedProject;
     private string? _selectedSprintId;
+    private SprintHistoryResponse? _summary;
+    private SprintBoardResponse? _board;
+    private readonly SprintSelection _selection = new();
+    private readonly Stack<string?> _historyPages = new();
+    private readonly Stack<string?> _memberPages = new();
+    private string? _historyCursor, _memberCursor;
+    private bool _loading, _refreshing, _refreshRequested, _disposed;
+    private string? _error, _queueError;
+    private List<ViewSprint> SprintHeaders => (_summary?.History ?? [])
+        .Concat(_summary?.Active is { } active ? [active] : [])
+        .Concat(_board?.Sprint is { } selected ? [selected] : [])
+        .DistinctBy(s => s.Id).ToList();
     private string? _repoUrl;
 
     private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge" };
@@ -386,10 +418,10 @@
         new("Running", c => Bucket(c) == "running"),
         new("Review", c => Bucket(c) == "review"),
         new("Needs you", c => Bucket(c) is "failed" or "blocked"),
-        new("Done", c => Bucket(c) == "done"),
+        new("Completed / closed", c => Bucket(c) == "done"),
     };
 
-    private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts, IReadOnlyList<string>? BlockedBy, string? Situation, string? SituationTone, bool Active, string? Role, int Priority, bool IsBlocked, bool Boosted);
+    private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts, IReadOnlyList<string>? BlockedBy, string? Situation, string? SituationTone, bool Active, string? Role, int Priority, bool IsBlocked, bool Boosted, long BlockerCount);
 
     /// <summary>Task type → owning role. Mirrors
     /// Agents/RoleAgentRegistry.FromTaskType — duplicated client-side
@@ -412,6 +444,7 @@
     private sealed record QueueVm(int Position, string Id, string Title, int Priority, string Role, bool Boosted, string Wait, string? Detail);
     private List<QueueVm> _queue = new();
     private int _queueTotal;
+    private int _blockedTotal;
 
     private sealed record PendingGroomVm(string Id, string Title);
     private sealed record BuildGroupVm(string Key, string Name, int TaskCount, int MinPriority);
@@ -430,13 +463,15 @@
 
     private async Task LoadBuildStateAsync()
     {
+        var generation = _selection.Generation;
         try
         {
             var projectId = ShellStore.Value.CurrentProjectId;
             var url = string.IsNullOrEmpty(projectId)
                 ? "/api/sprints/building"
                 : $"/api/sprints/building?projectId={Uri.EscapeDataString(projectId)}";
-            var doc = await Http.GetFromJsonAsync<JsonElement>(url);
+            var doc = await Http.GetFromJsonAsync<JsonElement>(url, _selection.Token);
+            if (!_selection.IsCurrent(generation)) return;
             if (!doc.TryGetProperty("phase", out var phaseEl))
             {
                 _build = null;
@@ -466,10 +501,10 @@
                 doc.TryGetProperty("completedSprintName", out var cs) && cs.ValueKind == JsonValueKind.String ? cs.GetString() : null,
                 pending, groups, held);
         }
-        catch { _build = null; }
+        catch (Exception ex) { if (!_selection.IsCurrent(generation)) return; Logger.LogWarning(ex, "Sprint build snapshot unavailable"); _build = null; }
     }
 
-    private sealed record BlockedVm(string Id, string Title, int Priority, IReadOnlyList<string> BlockedBy);
+    private sealed record BlockedVm(string Id, string Title, int Priority, IReadOnlyList<string> BlockedBy, long BlockerCount);
     private List<BlockedVm> _blocked = new();
 
     private static string WaitPill(string wait) => wait switch
@@ -482,13 +517,19 @@
 
     private async Task LoadQueueAsync()
     {
+        var generation = _selection.Generation;
         try
         {
             var projectId = ShellStore.Value.CurrentProjectId;
-            var url = string.IsNullOrEmpty(projectId)
-                ? "/api/queue"
-                : $"/api/queue?projectId={Uri.EscapeDataString(projectId)}";
-            var doc = await Http.GetFromJsonAsync<JsonElement>(url);
+            var url = $"/api/queue?limit=8&projectId={Uri.EscapeDataString(projectId ?? "")}";
+            var doc = await Http.GetFromJsonAsync<JsonElement>(url, _selection.Token);
+            if (!_selection.IsCurrent(generation)) return;
+            if (doc.TryGetProperty("sprintId", out var queueSprint) && queueSprint.GetString() != _board?.Sprint?.Id)
+            {
+                _queue.Clear(); _blocked.Clear(); _queueTotal = 0; _blockedTotal = 0;
+                _queueError = "The active sprint changed. Refresh to load its queue.";
+                return;
+            }
             if (!doc.TryGetProperty("items", out var items))
             {
                 _queue = new();
@@ -505,28 +546,33 @@
                 q.GetProperty("boosted").GetBoolean(),
                 q.GetProperty("wait").GetString() ?? "ready",
                 q.TryGetProperty("detail", out var d) ? d.GetString() : null)).ToList();
-            _queueTotal = all.Count;
+            _queueTotal = doc.GetProperty("total").GetInt32();
+            _blockedTotal = doc.GetProperty("blockedTotal").GetInt32();
+            _queueError = null;
             _queue = all.Take(8).ToList();
             _blocked = doc.TryGetProperty("blocked", out var bl)
                 ? bl.EnumerateArray().Select(b => new BlockedVm(
                     b.GetProperty("issueId").GetString() ?? "",
                     b.GetProperty("title").GetString() ?? "",
                     b.GetProperty("priority").GetInt32(),
-                    b.GetProperty("blockedBy").EnumerateArray().Select(x => x.GetString() ?? "").ToList())).ToList()
+                    b.GetProperty("blockedBy").EnumerateArray().Select(x => x.GetString() ?? "").ToList(),
+                    b.GetProperty("blockerCount").GetInt64())).ToList()
                 : new();
         }
-        catch { _queue = new(); _queueTotal = 0; _blocked = new(); }
+        catch (Exception ex) { if (!_selection.IsCurrent(generation)) return; Logger.LogWarning(ex, "Sprint queue refresh failed"); _queueError = "Queue could not be refreshed; displayed entries may be stale."; }
     }
 
     private async Task LoadDraftsAsync(string sprintId)
     {
+        var generation = _selection.Generation;
         try
         {
             var projectId = ShellStore.Value.CurrentProjectId;
             var url = string.IsNullOrEmpty(projectId)
                 ? $"/api/sprints/{sprintId}/followup-drafts"
                 : $"/api/sprints/{sprintId}/followup-drafts?projectId={Uri.EscapeDataString(projectId)}";
-            var doc = await Http.GetFromJsonAsync<JsonElement>(url);
+            var doc = await Http.GetFromJsonAsync<JsonElement>(url, _selection.Token);
+            if (!_selection.IsCurrent(generation)) return;
             _drafts = doc.EnumerateArray().Select(d => new DraftVm(
                 d.GetProperty("id").GetInt64(),
                 d.GetProperty("title").GetString() ?? "",
@@ -534,57 +580,19 @@
                 d.GetProperty("sourceIssueId").GetString() ?? "",
                 d.GetProperty("sourceRole").GetString() ?? "")).ToList();
         }
-        catch { _drafts = new(); }
+        catch (Exception ex) { if (!_selection.IsCurrent(generation)) return; Logger.LogWarning(ex, "Sprint draft preview unavailable"); _drafts = new(); }
     }
 
-    private ViewSprint? SelectedSprint(List<ViewSprint> sprints)
-    {
-        // Default: the Active sprint; fall back to the newest.
-        if (_selectedSprintId is not null)
-        {
-            var hit = sprints.FirstOrDefault(s => s.Id == _selectedSprintId);
-            if (hit is not null) return hit;
-        }
-        return sprints.FirstOrDefault(s => s.Status == "Active") ?? sprints.FirstOrDefault();
-    }
+    private ViewSprint? SelectedSprint(List<ViewSprint> sprints) => _board?.Sprint;
 
     /// <summary>
-    /// Sprint member rows carry id/title/status; enrich with the full
-    /// task view (assignee, prNumber from metadata) by cross-joining
-    /// the /api/state task list already in the store.
+    /// Cards are self-contained selected-page projections; no all-task export is needed.
     /// </summary>
-    private List<Card> EnrichMembers(ViewSprint sprint)
-    {
-        var byId = ViewStore.Value.Tasks.ToDictionary(t => t.Id);
-        var memberList = sprint.Members ?? (IReadOnlyList<ViewSprintMember>)Array.Empty<ViewSprintMember>();
-        // A card is a queue booster when another member's open
-        // blockers list names it (mirrors the ReadyAsync boost).
-        var boostedIds = new HashSet<string>(
-            memberList.SelectMany(m => m.BlockedBy ?? (IReadOnlyList<string>)Array.Empty<string>()),
-            StringComparer.Ordinal);
-        return memberList
-            .Select(m =>
-            {
-                byId.TryGetValue(m.Id, out var t);
-                // Active = a run is live RIGHT NOW: claimed AND in an
-                // engineering run-phase state. PR-phase states
-                // (PROpen/MergeReady/ParkedInfra) are watch-owned —
-                // the run ended when it pushed; the assignee chip
-                // stays as attribution but nothing is live (operator
-                // 2026-08-01: "running sessions in Review/Needs you").
-                // StalledRework is a dead round, also not live.
-                var active = t is not null
-                    && t.Status == "InProgress"
-                    && t.Assignee is not null
-                    && t.LifecycleState is null
-                        or "Dispatching" or "AgentRunning" or "ReworkRunning";
-                return new Card(m.Id, m.Title, m.Status, t?.LifecycleState, t?.Assignee, t?.PrNumber, t?.ReworkAttempts, m.BlockedBy, m.Situation, m.SituationTone, active, RoleFor(t?.Type),
-                    t?.Priority ?? 3,
-                    m.BlockedBy is { Count: > 0 },
-                    boostedIds.Contains(m.Id));
-            })
-            .ToList();
-    }
+    private List<Card> EnrichMembers(ViewSprint sprint) => (_board?.Members ?? [])
+        .Select(m => new Card(m.Id, m.Title, m.Status, m.State, m.Assignee, m.PrNumber, m.ReworkAttempts,
+            m.BlockedBy, m.Situation, m.SituationTone,
+            m.Status == "InProgress" && m.Assignee is not null && m.State is null or "Dispatching" or "AgentRunning" or "ReworkRunning",
+            RoleFor(m.Type), m.Priority, m.BlockerCount > 0, m.Boosted, m.BlockerCount)).ToList();
 
     private string? PrUrl(string prNumber) =>
         RepositoryLinks.PullRequest(_repoUrl, prNumber);
@@ -600,134 +608,141 @@
     {
         // Repo URL from the current project registration (never
         // hardcoded); re-resolved on project switch.
-        var projectId = ShellStore.Value.CurrentProjectId;
+        var projectId = _selection.ProjectId;
+        var generation = _selection.Generation;
+        var token = _selection.Token;
         if (string.IsNullOrEmpty(projectId)) return;
         try
         {
-            var projects = await Http.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/projects");
+            var projects = await Http.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/projects", token);
+            if (!_selection.IsCurrent(generation)) return;
             foreach (var p in projects.EnumerateArray())
             {
                 if (p.TryGetProperty("id", out var id) && string.Equals(id.GetString(), projectId, StringComparison.OrdinalIgnoreCase)
                     && p.TryGetProperty("repoUrl", out var url))
                 {
-                    if (projectId == ShellStore.Value.CurrentProjectId)
-                        _repoUrl = RepositoryLinks.WebUrl(url.GetString());
+                    _repoUrl = RepositoryLinks.WebUrl(url.GetString());
                     break;
                 }
             }
         }
-        catch { /* PR links are best-effort */ }
+        catch (OperationCanceledException) when (!_selection.IsCurrent(generation)) { }
+        catch (Exception ex) { Logger.LogWarning(ex, "Sprint repository links unavailable"); }
     }
 
     protected override void OnInitialized()
     {
-        ViewStore.StateChanged += OnStateChanged;
         ShellStore.StateChanged += OnShellChanged;
-        if (ViewStore.Value.LastFetchedAt is null)
-        {
-            LoadForCurrentProject();
-        }
-        _ = LoadRepoUrlAsync();
-        // Safety net only: 30s slow poll for drift. Live updates are
-        // server-push (SSE) via the DashboardEventStream subscription
-        // in OnAfterRenderAsync — the board is event-driven, not
-        // polled (operator direction 2026-07-31).
-        _gateTimer = new System.Threading.Timer(_ => InvokeAsync(async () =>
-        {
-            await LoadGatesAsync();
-            await LoadQueueAsync();
-            await LoadBuildStateAsync();
-            Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId, Background: true));
-            StateHasChanged();
-        }), null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(30));
+        _ = ChangeProjectAsync();
+        _gateTimer = new System.Threading.Timer(_ => InvokeAsync(RefreshAsync), null,
+            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (firstRender)
-        {
-            Events.Received += OnServerEvent;
-            await Events.StartAsync();
-        }
+        if (firstRender) { Events.Received += OnServerEvent; await Events.StartAsync(); }
     }
-
-    // Server-push → reload. Debounced (400ms trailing): a rework
-    // storm or sprint completion publishes a burst of events, and
-    // one coalesced BACKGROUND reload (no Loading placeholder — the
-    // board diffs in place) reflects them all.
     private CancellationTokenSource? _reloadDebounce;
-
     private void OnServerEvent(string kind)
     {
-        var cts = Interlocked.Exchange(ref _reloadDebounce, new CancellationTokenSource());
-        cts?.Cancel();
-        cts?.Dispose();
-        var token = _reloadDebounce.Token;
-        _ = Task.Run(async () =>
+        var previous = Interlocked.Exchange(ref _reloadDebounce, new CancellationTokenSource());
+        previous?.Cancel(); previous?.Dispose();
+        _ = DebouncedRefreshAsync(_reloadDebounce.Token);
+    }
+    private async Task DebouncedRefreshAsync(CancellationToken ct)
+    {
+        try { await Task.Delay(400, ct); await InvokeAsync(RefreshAsync); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
+
+    private async Task RefreshAsync()
+    {
+        if (_disposed) return;
+        if (_refreshing) { _refreshRequested = true; return; }
+        if (_selection.ProjectId is null) { _loading = false; return; }
+        _refreshing = true;
+        try
         {
-            try
+            do
             {
-                await Task.Delay(400, token);
-                if (token.IsCancellationRequested) return;
-                await InvokeAsync(ReloadAllAsync);
-            }
-            catch (TaskCanceledException) { }
-        });
-    }
-
-    private async Task ReloadAllAsync()
-    {
-        Dispatch.Dispatch(new ViewActions.LoadViewAction(ShellStore.Value.CurrentProjectId, Background: true));
-        await LoadQueueAsync();
-        await LoadBuildStateAsync();
-        var selected = ViewStore.Value.Sprints.FirstOrDefault(s => s.Status == "Active")
-            ?? ViewStore.Value.Sprints.FirstOrDefault();
-        if (selected?.Id is not null)
-        {
-            _draftsSprintId = selected.Id;
-            await LoadDraftsAsync(selected.Id);
+                _refreshRequested = false;
+                var generation = _selection.Generation;
+                var projectId = _selection.ProjectId;
+                var sprintId = _selectedSprintId;
+                var historyCursor = _historyCursor;
+                var memberCursor = _memberCursor;
+                var token = _selection.Token;
+                if (projectId is null) break;
+                _loading = _board is null;
+                StateHasChanged();
+                try
+                {
+                    var client = new SprintReadClient(Http);
+                    var history = await client.HistoryAsync(projectId, historyCursor, token);
+                    if (!_selection.IsCurrent(generation)) continue;
+                    var board = await client.BoardAsync(projectId, sprintId, memberCursor, token);
+                    if (!_selection.IsCurrent(generation)) continue;
+                    _summary = history; _board = board; _error = null;
+                    await LoadGatesAsync();
+                    if (!_selection.IsCurrent(generation)) continue;
+                    if (board.Sprint?.Status == "Active") await LoadQueueAsync();
+                    if (!_selection.IsCurrent(generation)) continue;
+                    await LoadBuildStateAsync();
+                    if (!_selection.IsCurrent(generation)) continue;
+                    _drafts = new();
+                    if (board.Sprint?.Id is { } id) await LoadDraftsAsync(id);
+                }
+                catch (OperationCanceledException) when (!_selection.IsCurrent(generation)) { }
+                catch (Exception ex)
+                {
+                    if (_selection.IsCurrent(generation))
+                    {
+                        Logger.LogWarning(ex, "Sprint read failed");
+                        _error = "Sprint information could not be loaded. Retry with Refresh.";
+                    }
+                }
+                finally { if (_selection.IsCurrent(generation)) _loading = false; }
+            } while (_refreshRequested && !_disposed);
         }
-        StateHasChanged();
+        finally { _refreshing = false; if (!_disposed) StateHasChanged(); }
     }
-
-    private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(async () =>
+    private async Task ChangeProjectAsync()
     {
-        var selected = ViewStore.Value.Sprints.FirstOrDefault(s => s.Status == "Active")
-            ?? ViewStore.Value.Sprints.FirstOrDefault();
-        if (selected?.Id is not null && selected.Id != _draftsSprintId)
-        {
-            _draftsSprintId = selected.Id;
-            await LoadDraftsAsync(selected.Id);
-        }
+        _loading = true;
+        _loadedProject = ShellStore.Value.CurrentProjectId;
+        _selection.Select(_loadedProject, null);
+        _selectedSprintId = null; _historyCursor = null; _memberCursor = null;
+        _historyPages.Clear(); _memberPages.Clear(); _summary = null; _board = null; _repoUrl = null;
+        _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null; _queueTotal = 0; _error = null; _queueError = null;
         StateHasChanged();
-    });
-
-    private string? _draftsSprintId;
-
+        await LoadRepoUrlAsync();
+        await RefreshAsync();
+    }
     private void OnShellChanged(object? sender, EventArgs e)
     {
-        if (ShellStore.Value.CurrentProjectId != _loadedProject)
-        {
-            _repoUrl = null;
-            _selectedSprintId = null;
-            InvokeAsync(LoadForCurrentProject);
-            _ = LoadRepoUrlAsync();
-        }
+        if (ShellStore.Value.CurrentProjectId != _loadedProject) _ = InvokeAsync(ChangeProjectAsync);
     }
-
-    private void LoadForCurrentProject()
+    private async Task SelectSprintAsync(ChangeEventArgs e)
     {
-        _loadedProject = ShellStore.Value.CurrentProjectId;
-        Dispatch.Dispatch(new ViewActions.LoadViewAction(_loadedProject));
+        _selectedSprintId = e.Value?.ToString(); _memberCursor = null; _memberPages.Clear();
+        _selection.Select(_loadedProject, _selectedSprintId); _board = null; _drafts.Clear();
+        await RefreshAsync();
     }
-
+    private Task ShowActiveAsync() => SelectSprintAsync(new ChangeEventArgs { Value = null });
+    private async Task NextHistoryAsync() { _historyPages.Push(_historyCursor); _historyCursor = _summary?.NextCursor; await RefreshSelectionAsync(); }
+    private async Task PreviousHistoryAsync() { _historyCursor = _historyPages.Pop(); await RefreshSelectionAsync(); }
+    private async Task NextMembersAsync()
+    {
+        _selectedSprintId ??= _board?.Sprint?.Id;
+        _memberPages.Push(_memberCursor); _memberCursor = _board?.NextCursor; await RefreshSelectionAsync();
+    }
+    private async Task PreviousMembersAsync() { _memberCursor = _memberPages.Pop(); await RefreshSelectionAsync(); }
+    private async Task RefreshSelectionAsync() { _selection.Select(_loadedProject, _selectedSprintId); await RefreshAsync(); }
     public void Dispose()
     {
-        _gateTimer?.Dispose();
-        _reloadDebounce?.Cancel();
-        _reloadDebounce?.Dispose();
-        Events.Received -= OnServerEvent;
-        ViewStore.StateChanged -= OnStateChanged;
-        ShellStore.StateChanged -= OnShellChanged;
+        _disposed = true;
+        _gateTimer?.Dispose(); _selection.Dispose();
+        _reloadDebounce?.Cancel(); _reloadDebounce?.Dispose();
+        Events.Received -= OnServerEvent; ShellStore.StateChanged -= OnShellChanged;
     }
 }

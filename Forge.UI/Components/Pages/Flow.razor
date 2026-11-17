@@ -15,7 +15,7 @@
         <div class="page-header__meta">
             @if (_fleet is not null && !EditMode)
             {
-                <span>@_fleet.Nodes.Sum(n => n.Count) items in flight · refreshed @_lastFetch?.ToString("HH:mm:ss")</span>
+                <span>@_fleet.Activity.InFlight active tasks · @_fleet.Activity.Completed completed · @_fleet.Activity.Closed closed · refreshed @_lastFetch?.ToString("HH:mm:ss")</span>
             }
         </div>
         <div class="page-header__actions">
@@ -507,7 +507,8 @@
 
     private sealed record FleetDto(
         string[] Lanes, List<NodeDto> Nodes, List<EdgeDto> Edges, string? ActiveSprintId,
-        List<IssueSampleDto> AllIssues, LayoutPayload? Layout, Dictionary<string, bool>? GateStates);
+        List<IssueSampleDto> AllIssues, LayoutPayload? Layout, Dictionary<string, bool>? GateStates, ActivityDto Activity);
+    private sealed record ActivityDto(int InFlight, int Completed, int Closed);
     private sealed class LayoutPayload
     {
         public double Width { get; set; }

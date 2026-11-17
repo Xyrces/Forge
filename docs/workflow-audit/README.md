@@ -18,6 +18,7 @@ Reports:
 - [Performance, query growth and refresh behavior](performance.md)
 - [Usage accounting](budget.md)
 - [Budget release compatibility](budget-release.md)
+- [Completed live budget correction and release qualification](budget-live-qualification.md)
 
 Top issues to decide together:
 

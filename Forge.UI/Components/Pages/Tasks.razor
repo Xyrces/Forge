@@ -5,10 +5,10 @@
 @implements IDisposable
 @using Forge.Dashboard.Features.Tasks
 
-<PageTitle>Tasks</PageTitle>
+<PageTitle>Active tasks</PageTitle>
 <div class="page">
     <div class="page-header">
-        <h1>Tasks</h1>
+        <h1>Active tasks</h1>
         <div class="page-header__meta">@TasksStore.Value.Rows.Count in progress</div>
         <div class="page-header__actions">
             <button class="btn btn--primary" @onclick="LoadForCurrentProject">Refresh</button>

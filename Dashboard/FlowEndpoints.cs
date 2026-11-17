@@ -142,7 +142,7 @@ public static class FlowEndpoints
                 nodes = definition.Steps.Select(n => new
                 {
                     id = n.Id,
-                    label = n.Label,
+                    label = n.Id == "done" ? "Completed / closed" : n.Label,
                     lane = n.Lane,
                     x = n.X,
                     y = n.Y,
@@ -158,6 +158,7 @@ public static class FlowEndpoints
                 layout = LayoutPayload(layout),
                 // Horizontal compact variant for the dashboard strip.
                 layoutHorizontal = LayoutPayload(layoutH),
+                activity = FlowGraph.Summarize(all),
                 activeSprintId = active?.Id,
                 // Issue-first picker: every traceable work item (newest
                 // activity first), capped for payload size.

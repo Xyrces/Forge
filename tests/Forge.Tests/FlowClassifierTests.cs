@@ -33,6 +33,26 @@ public class FlowClassifierTests
             ParentIssueId: parent, DispatchCheckpoint: ckpt);
 
     [Fact]
+    public void ActivitySummarySeparatesActiveCompletedAndClosedFromWaitingAndPlumbing()
+    {
+        var summary = FlowGraph.Summarize(new[] {
+            Issue(IssueStatus.InProgress), Issue(IssueStatus.Pending),
+            Issue(IssueStatus.Completed), Issue(IssueStatus.Closed, state: "AgentRunning"),
+            Issue(IssueStatus.Failed), Issue(IssueStatus.Blocked),
+            Issue(IssueStatus.InProgress, type: "epic"), Issue(IssueStatus.InProgress, type: "story"),
+            Issue(IssueStatus.InProgress, type: AgentTaskTypes.PrWatch) });
+        Assert.Equal(new FlowGraph.ActivitySummary(1, 1, 1), summary);
+    }
+
+    [Theory]
+    [InlineData(IssueStatus.Closed)]
+    [InlineData(IssueStatus.Completed)]
+    public void TerminalOutcomeCannotAppearRunningFromStaleMetadata(IssueStatus status)
+    {
+        Assert.Equal("done", FlowGraph.ClassifyIssue(Issue(status, state: "AgentRunning"), true, false));
+    }
+
+    [Fact]
     public void ClassifySpec_DesignDisabled_ReadyForDesignGoesToIntake()
     {
         // Pass 4: design step disabled — a ReadyForDesign spec has
