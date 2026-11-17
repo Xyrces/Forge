@@ -75,7 +75,8 @@ No swap, firewall, SSH, Wi-Fi, power, DNS or unrelated host settings are changed
 
 Foundation resources include namespace-local service accounts/RBAC, one state PVC,
 internal slot-control services and a cluster-private dashboard Service. Control port 9090
-requires the mounted bearer token for status/drain/activate; only `/healthz` is
+requires the mounted bearer token at `/run/forge-control/controller-token` for
+status/drain/activate; only `/healthz` is
 unauthenticated. The dashboard has no authentication and must not be exposed as a
 LAN NodePort. Use `sudo k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080`
 on the host and an SSH tunnel to that loopback port from the operator workstation.

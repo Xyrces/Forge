@@ -40,6 +40,16 @@ public sealed class KubernetesDeploymentExecutorTests
         var pod = root.GetProperty("spec").GetProperty("template").GetProperty("spec");
         Assert.Equal("forge-release", pod.GetProperty("serviceAccountName").GetString());
         Assert.Equal(Image, pod.GetProperty("containers")[0].GetProperty("image").GetString());
+        Assert.True(pod.GetProperty("automountServiceAccountToken").GetBoolean());
+        foreach (var mount in pod.GetProperty("containers")[0].GetProperty("volumeMounts").EnumerateArray())
+        {
+            var path = mount.GetProperty("mountPath").GetString()!.Replace("/var/run/", "/run/").TrimEnd('/');
+            Assert.False(mount.GetProperty("readOnly").GetBoolean() &&
+                (path == "/run/secrets/kubernetes.io/serviceaccount" ||
+                 "/run/secrets/kubernetes.io/serviceaccount".StartsWith(path + "/", StringComparison.Ordinal)));
+            if (mount.GetProperty("name").GetString() == "control-token") Assert.Equal("/run/forge-control", path);
+        }
+        Assert.Equal("/run/forge-control/controller-token", new ControllerOptions().TokenFile);
     }
 
     [Fact]

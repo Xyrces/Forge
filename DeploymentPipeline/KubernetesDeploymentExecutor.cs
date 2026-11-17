@@ -129,7 +129,7 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IDeploymentE
                             new { name = "POD_UID", valueFrom = new { fieldRef = new { fieldPath = "metadata.uid" } } } },
                         securityContext = new { allowPrivilegeEscalation = false, capabilities = new { drop = new[] { "ALL" } } },
                         resources = new { requests = new { cpu = "100m", memory = "128Mi" }, limits = new { cpu = "1", memory = "1Gi" } },
-                        volumeMounts = new[] { new { name = "control-token", mountPath = "/run/secrets", readOnly = true } } } },
+                        volumeMounts = new[] { new { name = "control-token", mountPath = "/run/forge-control", readOnly = true } } } },
                     volumes = new[] { new { name = "control-token", secret = new { secretName = "forge-control", defaultMode = 288 } } }
                 } }
             }

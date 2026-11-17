@@ -93,7 +93,7 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
     labels = {"app": "forge-controller", "slot": slot}
     env = [{"name": key, "value": value} for key, value in {
         "Controller__Enabled": "true", "Controller__Mode": "standby",
-        "Controller__DatasetId": dataset, "Controller__TokenFile": "/run/secrets/controller-token",
+        "Controller__DatasetId": dataset, "Controller__TokenFile": "/run/forge-control/controller-token",
         "Controller__KeyringPath": "/var/lib/forge/keyring",
         "Db__Provider": "sqlserver", "Db__AutoMigrate": "false", "Forgesystem__DataRoot": "/var/lib/forge",
         "Worker__Enabled": "true", "Worker__Image": image, "Worker__Namespace": namespace,
@@ -116,7 +116,7 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
                                        "limits": {"cpu": "2", "memory": "4Gi"}},
                          "readinessProbe": {"httpGet": {"path": "/healthz", "port": 9090}, "periodSeconds": 5},
                          "volumeMounts": [{"name": "state", "mountPath": "/var/lib/forge"},
-                             {"name": "control-token", "mountPath": "/run/secrets", "readOnly": True},
+                             {"name": "control-token", "mountPath": "/run/forge-control", "readOnly": True},
                              {"name": "config", "mountPath": "/app/appsettings.json", "subPath": "appsettings.json", "readOnly": True}]}],
                      "volumes": [{"name": "state", "persistentVolumeClaim": {"claimName": "forge-state"}},
                          {"name": "control-token", "secret": {"secretName": "forge-control", "defaultMode": 288}},
@@ -293,7 +293,7 @@ def main():
         with open("/app/source-revision", encoding="utf-8") as source:
             if source.read().strip() != args.source_sha:
                 raise RuntimeError("release image does not match approved source SHA")
-    release = Release(Kube(args.namespace), Controllers(args.namespace, "/run/secrets/controller-token"),
+    release = Release(Kube(args.namespace), Controllers(args.namespace, "/run/forge-control/controller-token"),
                       args.operation, args.image, args.dataset, os.environ["POD_NAME"], os.environ["POD_UID"], args.timeout)
     release.run()
 

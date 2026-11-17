@@ -105,5 +105,25 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertEqual([], references(release))
 
 
+    def test_control_mount_does_not_mask_service_account_directory(self):
+        image = "registry/forge@sha256:" + "a" * 64
+        for manifest in (deployment("blue", image, "dataset", "initial"),
+                         job("forge", image, "dataset", "upgrade", "upgrade"),
+                         job("forge", image, "dataset", "initial", "initial", initialize=True)):
+            pod = manifest["spec"]["template"]["spec"]
+            for container in pod["containers"]:
+                token_mount = next(m for m in container["volumeMounts"] if m["name"] == "control-token")
+                self.assertEqual("/run/forge-control", token_mount["mountPath"])
+                if pod.get("automountServiceAccountToken", True):
+                    for mount in container["volumeMounts"]:
+                        path = mount["mountPath"].replace("/var/run/", "/run/").rstrip("/")
+                        self.assertFalse(mount.get("readOnly", False) and
+                            ("/run/secrets/kubernetes.io/serviceaccount" == path or
+                             "/run/secrets/kubernetes.io/serviceaccount".startswith(path + "/")))
+                for value in container.get("env", []):
+                    if value["name"] == "Controller__TokenFile":
+                        self.assertEqual("/run/forge-control/controller-token", value["value"])
+
+
 if __name__ == "__main__":
     unittest.main()

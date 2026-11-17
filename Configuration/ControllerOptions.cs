@@ -6,7 +6,7 @@ public sealed class ControllerOptions
     public string Mode { get; set; } = "standby";
     public string DatasetId { get; set; } = "";
     public string InstanceId { get; set; } = "";
-    public string TokenFile { get; set; } = "/run/secrets/controller-token";
+    public string TokenFile { get; set; } = "/run/forge-control/controller-token";
     public string KeyringPath { get; set; } = "/var/lib/forge/keyring";
     public string ListenUrl { get; set; } = "http://0.0.0.0:9090";
     public int HeartbeatSeconds { get; set; } = 5;

@@ -52,12 +52,12 @@ def job(namespace, image, dataset, operation, name, initialize=False):
     container = {"name": "operation", "image": validate_image(image), "env": env,
         "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
         "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "1", "memory": "1Gi"}},
-        "volumeMounts": [{"name": "control-token", "mountPath": "/run/secrets", "readOnly": True}]}
+        "volumeMounts": [{"name": "control-token", "mountPath": "/run/forge-control", "readOnly": True}]}
     volumes = [{"name": "control-token", "secret": {"secretName": "forge-control", "defaultMode": 288}}]
     if initialize:
         for key, value in {"Controller__Enabled": "true", "Controller__Mode": "initialize",
             "Controller__DatasetId": dataset, "Controller__KeyringPath": "/var/lib/forge/keyring",
-            "Controller__TokenFile": "/run/secrets/controller-token", "Forgesystem__DataRoot": "/var/lib/forge",
+            "Controller__TokenFile": "/run/forge-control/controller-token", "Forgesystem__DataRoot": "/var/lib/forge",
             "Db__Provider": "sqlserver", "Db__AutoMigrate": "true", "HOME": "/var/lib/forge/home", "Bootstrap__ProjectId": "forge",
             "Bootstrap__RepoUrl": "https://github.com/Xyrces/Forge.git",
             "Bootstrap__WorkerPrincipal": "forge-k3s-worker"}.items():
