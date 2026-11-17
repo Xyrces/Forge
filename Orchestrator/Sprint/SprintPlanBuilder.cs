@@ -46,7 +46,7 @@ internal sealed class SprintPlanBuilder(IssueStore issues, ISprintStore sprints,
             catch (JsonException) { /* A malformed first mapping cannot create scope authority. */ }
         }
         var deferred = new List<SprintPlanDeferral>();
-        var units = new List<(SprintOutcomeBinding Binding, SprintActivationSnapshot Snapshot)>();
+        var units = new List<(string RootId, SprintOutcomeBinding Binding, SprintActivationSnapshot Snapshot)>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var candidate in candidates)
         {
@@ -66,7 +66,7 @@ internal sealed class SprintPlanBuilder(IssueStore issues, ISprintStore sprints,
                 var key = SprintPlanJson.Hash(new { binding.OutcomeId, Required = binding.RequiredTaskIds.Order(StringComparer.Ordinal), Criteria = binding.Criteria.OrderBy(c => c.Id) });
                 if (!seen.Add(key)) continue;
                 var snapshot = await validator.ValidateAsync([candidate.Id], ct, preview: true);
-                units.Add((binding, snapshot));
+                units.Add((candidate.Id, binding, snapshot));
             }
             catch (InvalidOperationException ex) { deferred.Add(new(candidate.Id, ex.Message)); }
         }
@@ -84,17 +84,17 @@ internal sealed class SprintPlanBuilder(IssueStore issues, ISprintStore sprints,
         var related = units.Where(u => u.Binding.OutcomeId == first.Binding.OutcomeId && u.Binding.Objective == first.Binding.Objective)
             .OrderBy(u => u.Snapshot.TaskIds.Count).ThenBy(u => u.Snapshot.TaskIds[0], StringComparer.Ordinal).ToList();
         var selected = related[0].Snapshot;
-        var roots = new List<string> { related[0].Binding.RequiredTaskIds[0] };
+        var roots = new List<string> { related[0].RootId };
         foreach (var unit in related.Skip(1))
         {
             if (unit.Snapshot.TaskIds.All(selected.TaskIds.Contains)) continue;
             try
             {
-                var expanded = await validator.ValidateAsync(roots.Append(unit.Binding.RequiredTaskIds[0]).ToArray(), ct, preview: true);
+                var expanded = await validator.ValidateAsync(roots.Append(unit.RootId).ToArray(), ct, preview: true);
                 if (ParallelCoverage(expanded) > ParallelCoverage(selected))
-                { selected = expanded; roots.Add(unit.Binding.RequiredTaskIds[0]); }
+                { selected = expanded; roots.Add(unit.RootId); }
             }
-            catch (InvalidOperationException ex) { deferred.Add(new(unit.Binding.RequiredTaskIds[0], ex.Message)); }
+            catch (InvalidOperationException ex) { deferred.Add(new(unit.RootId, ex.Message)); }
         }
         var selectedIds = selected.TaskIds.ToHashSet(StringComparer.Ordinal);
         foreach (var candidate in candidates.Where(c => !selectedIds.Contains(c.Id) && !deferred.Any(d => d.TaskId == c.Id)))

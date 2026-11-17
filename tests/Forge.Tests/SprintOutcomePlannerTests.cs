@@ -38,6 +38,36 @@ public sealed class SprintOutcomePlannerTests
         Assert.Single(oneSlot.Snapshot!.TaskIds);
     }
     [Fact]
+    public async Task ExpansionKeepsValidatedDeliveryRootWhenRequiredListStartsWithPrerequisite()
+    {
+        await using var issues = Store(); var scope = await ApprovedSprintFixture.Scope(issues);
+        var delivery = await ApprovedSprintFixture.Task(issues);
+        var prerequisite = await ApprovedSprintFixture.Task(issues);
+        var independent = await ApprovedSprintFixture.Task(issues);
+        await ApprovedSprintFixture.Bind(issues, scope, [prerequisite, delivery], criterion: "delivery");
+        var mapping = SprintPlanJson.ReadBinding((await issues.GetAsync(prerequisite.Id))!)!;
+        var supportingCriterion = new SprintCriterion("support", "Required supporting behavior", SprintEvidenceKind.MergedAndVerified, scope);
+        await new SprintOutcomeAuthority(issues).BindAsync(delivery.Id, mapping with
+        {
+            Criteria = [.. mapping.Criteria, supportingCriterion]
+        });
+        await new SprintOutcomeAuthority(issues).BindAsync(prerequisite.Id, mapping with
+        {
+            Criteria = [supportingCriterion], CriterionIds = ["support"],
+            RequiredTaskIds = [prerequisite.Id], Reason = SprintMemberReason.Prerequisite
+        });
+        await issues.AddDependencyAsync(prerequisite.Id, delivery.Id, IssueDepKind.Blocks);
+        await ApprovedSprintFixture.Bind(issues, scope, [independent], criterion: "independent");
+        var result = await Planner(issues, slots: 3).BuildAsync();
+        Assert.NotNull(result.Snapshot);
+        Assert.Equal(3, result.Snapshot.TaskIds.Count);
+        Assert.Contains(delivery.Id, result.Snapshot.TaskIds);
+        Assert.Contains(prerequisite.Id, result.Snapshot.TaskIds);
+        Assert.Contains(independent.Id, result.Snapshot.TaskIds);
+        Assert.Equal(3, result.Snapshot.Plan!.Criteria.Count);
+    }
+
+    [Fact]
     public async Task CompleteClosureAboveCapDefersRatherThanTruncating()
     {
         await using var issues = Store(); var scope = await ApprovedSprintFixture.Scope(issues);
