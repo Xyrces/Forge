@@ -19,7 +19,11 @@ public sealed record NewSprint(
 
 public sealed record SprintActivationSnapshot(
     IReadOnlyList<IssueRecord> Issues, IReadOnlyList<SpecRecord> Specs, IReadOnlyList<string> TaskIds,
-    long? ProposalAuditId = null, string? CommittedBy = null);
+    long? ProposalAuditId = null, string? CommittedBy = null,
+    IReadOnlyList<SprintDependencySnapshot>? Dependencies = null,
+    IReadOnlyList<IssueRecord>? ExistingSprintMembers = null);
+
+public sealed record SprintDependencySnapshot(string BlockerId, string BlockedId, IssueStatus? BlockerStatus);
 
 public interface ISprintStore
 {
@@ -46,7 +50,7 @@ public interface ISprintStore
     Task<IReadOnlyList<string>> GetIssueIdsAsync(string sprintId, CancellationToken ct = default);
 }
 
-public sealed class SprintStore : ISprintStore, IAsyncDisposable
+public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
 {
     private readonly IssueStore _issues;
     public SprintStore(IssueStore issues) { _issues = issues; }
@@ -246,20 +250,9 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             if (await sprint.ExecuteScalarAsync(ct) is not string status || status != SprintStatus.Active.ToString())
                 throw new InvalidOperationException("Sprint is no longer active.");
         }
-        await ValidateSnapshotAsync(conn, tx, snapshot, ct);
+        await ValidateSnapshotAsync(conn, tx, snapshot, ct, sprintId);
         if (requirePrerequisite)
-        {
-            foreach (var taskId in snapshot.TaskIds)
-            {
-                await using var necessity = conn.CreateCommand();
-                necessity.Transaction = tx;
-                necessity.CommandText = $"SELECT COUNT(*) FROM {T("issue_dep")} d JOIN {T("sprint_issue")} m ON m.issue_id=d.blocked_id JOIN {T("issue")} target ON target.id=m.issue_id WHERE d.blocker_id=@task AND d.kind='blocks' AND m.sprint_id=@sprint AND target.status NOT IN ('Completed','Closed')";
-                necessity.AddParam("@task", taskId);
-                necessity.AddParam("@sprint", sprintId);
-                if (Convert.ToInt32(await necessity.ExecuteScalarAsync(ct)) == 0)
-                    throw new InvalidOperationException("Task no longer blocks unfinished work in the active sprint.");
-            }
-        }
+            await ValidateNecessityAsync(conn, tx, sprintId, snapshot, ct);
         foreach (var issue in snapshot.Issues)
         {
             await using var member = conn.CreateCommand();
@@ -293,6 +286,16 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         if (!currentMembers.Order(StringComparer.Ordinal).SequenceEqual(expectedMembership.Order(StringComparer.Ordinal)))
             throw new InvalidOperationException("Sprint membership changed during activation.");
         var now = DateTime.UtcNow;
+        foreach (var issue in snapshot.Issues)
+        {
+            using var member = conn.CreateCommand();
+            member.Transaction = tx;
+            member.CommandText = $"INSERT INTO {T("sprint_issue")} (sprint_id,issue_id,added_at) SELECT @sid,@iid,@now WHERE NOT EXISTS (SELECT 1 FROM {T("sprint_issue")} WHERE sprint_id=@sid AND issue_id=@iid)";
+            member.AddParam("@sid", id);
+            member.AddParam("@iid", issue.Id);
+            member.AddParam("@now", IssueStore.DateFormatTime(now));
+            await member.ExecuteNonQueryAsync(ct);
+        }
         await using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = tx;
@@ -396,11 +399,12 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
             throw new InvalidOperationException("An active sprint already exists; complete it before activating another.");
     }
 
-    private async Task ValidateSnapshotAsync(DbConnection conn, DbTransaction tx, SprintActivationSnapshot snapshot, CancellationToken ct)
+    private async Task ValidateSnapshotAsync(DbConnection conn, DbTransaction tx, SprintActivationSnapshot snapshot, CancellationToken ct, string? activeSprintId = null)
     {
         if (snapshot.TaskIds.Count == 0 || snapshot.TaskIds.Distinct(StringComparer.Ordinal).Count() != snapshot.TaskIds.Count)
             throw new InvalidOperationException("Sprint selection must contain distinct tasks.");
-        foreach (var issue in snapshot.Issues)
+        await ValidateExistingMembersAsync(conn, tx, snapshot, activeSprintId, ct);
+        foreach (var issue in snapshot.Issues.Concat(snapshot.ExistingSprintMembers ?? []))
         {
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
@@ -420,13 +424,8 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         {
             if (!snapshot.Issues.Any(i => i.Id == id && i.Status == IssueStatus.Pending))
                 throw new InvalidOperationException($"Sprint task {id} has no pending snapshot.");
-            await using var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = $"SELECT COUNT(*) FROM {T("issue_dep")} d JOIN {T("issue")} b ON b.id=d.blocker_id WHERE d.blocked_id=@id AND d.kind='blocks' AND b.status NOT IN ('Completed','Closed')";
-            cmd.AddParam("@id", id);
-            if (Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) != 0)
-                throw new InvalidOperationException($"Sprint task {id} acquired an open prerequisite.");
         }
+        await ValidateDependenciesAsync(conn, tx, snapshot, ct);
         foreach (var spec in snapshot.Specs)
         {
             await using var cmd = conn.CreateCommand();
