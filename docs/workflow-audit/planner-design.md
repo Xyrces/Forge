@@ -101,13 +101,16 @@ Increment 1 can land correctness repairs while the current grouping remains temp
 | Triage outage | Persisted drafts remain retryable; unrelated approved work is not globally stalled |
 | Late paid budget hold or unavailable required role | Explain the real constraint; do not reset budget, weaken approval or create new initiative work |
 
+## Settled urgency decision (2026-11-17)
+
+Finish the current sprint unless the operator explicitly interrupts it. Unrelated urgent initiatives or work wait for later selection; priority P1, a blocker label, and requeue metadata alone do not permit automatic injection. Existing groomed ad-hoc prerequisites with an actual blocks edge into active work can join under normal validation. Ordinary follow-ups remain deferred until their existing later-sprint path; a followUpOf relationship alone does not establish necessity. No interruption UI or new manual-action semantics are introduced in this increment. Richer objective-based amendment validation remains proposed planner work.
+
 ## Remaining policy choices
 
 The core direction is settled; these are defaults to make explicit rather than reasons to stop the invariant repairs:
 
 - **Initial size limit:** propose at most 10 engineering tasks including prerequisites, applied uniformly. Unknown effort is visible and encourages smaller slices; task count is not a substitute for effort or spend estimates.
-- **Urgent unrelated approved work:** propose preserving the active objective and selecting urgency next; allow only an explicit operator interruption to supersede it. Current P1 injection must not become an implicit exception to approval/coherence.
 - **Abandoned outcomes:** propose a distinct cancelled/partial disposition in sprint presentation rather than overloading Completed or silently archiving work. Specify which operator actions may remove a required criterion.
 - **Scope ambiguity:** propose draft/exclude when nonessential, and an explicit blocked decision when essential. No automatic approval of a new initiative because a model calls it remediation.
 
-These defaults require agreement before their product-facing behavior is implemented. No production planner changes or host actions were made for this design.
+These defaults require agreement before their product-facing behavior is implemented. The urgency rule above is settled; the remaining design proposals are not implementation authorization.

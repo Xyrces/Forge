@@ -244,15 +244,10 @@ public sealed class SprintAssembler
             var (complete, total, terminal, heldMembers) = await CompletionProgressAsync(active, issues, sprints, ct);
             if (!complete)
             {
-                // Ad-hoc injection (operator rule 2026-07-27): a
-                // groomed ad-hoc task joins the ACTIVE sprint when it
-                // BELONGS there — it is part of the same work (its
-                // followUpOf chain reaches a sprint member) or it
-                // enables/unblocks the ongoing work (a blocks edge to
-                // a member, or an operator P1/blocker flag). Unrelated
-                // groomed ad-hoc work gets its own solo sprint at
-                // assembly instead.
-                await InjectAdHocAsync(active, projectId, issues, sprints, ct);
+                // Finish the current objective. Only groomed ad-hoc work with
+                // an actual blocks edge into this sprint may join automatically;
+                // urgency and requeue metadata do not interrupt the sprint.
+                await InjectAdHocAsync(active, projectId, issues, sprints, specs, ct);
                 await WriteBuildStateAsync(issues, new SprintBuildState(
                     Phase: "running",
                     Reason: heldMembers.Count == 0
@@ -689,30 +684,19 @@ public sealed class SprintAssembler
     }
 
     /// <summary>
-    /// Inject groomed ad-hoc tasks that BELONG to the active sprint
-    /// (operator rule 2026-07-27). A sprint is a coherent deployable
-    /// unit — ad-hoc work may join it, but only when it is part of
-    /// the same work or it enables/unblocks it. Three triggers,
-    /// all requiring groomed=true:
-    /// <list type="number">
-    /// <item><b>Same work</b>: the task's followUpOf chain reaches a
-    /// member of the active sprint (a follow-up filed from the
-    /// sprint's own work).</item>
-    /// <item><b>Unblocks</b>: a <c>blocks</c> dependency edge has the
-    /// task blocking an active sprint member (the member cannot
-    /// proceed until it lands — e.g. the merge-gate harness fix).</item>
-    /// <item><b>Operator-urgent</b>: priority 1 or metadata
-    /// blocker=true (the operator's explicit inject signal).</item>
-    /// </list>
-    /// Injection never completes, replaces, or reorders the sprint.
+    /// Add technically groomed ad-hoc prerequisites of active sprint members.
+    /// A real blocks edge establishes necessity. Priority, blocker labels,
+    /// requeue metadata, and follow-up provenance alone are not an interruption.
+    /// Ordinary follow-ups retain their later-sprint materialization policy.
     /// </summary>
     private async Task InjectAdHocAsync(
-        SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, CancellationToken ct)
+        SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
         var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
         var memberIds = (await sprints.GetIssueIdsAsync(active.Id, ct)).ToHashSet(StringComparer.Ordinal);
-        var all = (await issues.ListAsync(new IssueFilter(), ct)).ToDictionary(i => i.Id);
         var blockersOfMembers = await issues.ListBlockersOfAsync(memberIds, ct);
+        var eligibleIds = (await ListEligibleAsync(issues, sprints, ct)).Select(i => i.Id).ToHashSet(StringComparer.Ordinal);
+        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates);
 
         foreach (var task in pending)
         {
@@ -721,10 +705,19 @@ public sealed class SprintAssembler
             if (memberIds.Contains(task.Id)) continue;
             if (!string.Equals(task.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)) continue;
 
-            var reason = InjectionReason(task, memberIds, all, blockersOfMembers);
-            if (reason is null) continue;
-
-            await sprints.AddIssueAsync(active.Id, task.Id, ct);
+            if (!blockersOfMembers.Contains(task.Id) || !eligibleIds.Contains(task.Id)) continue;
+            const string reason = "unblocks ongoing work";
+            try
+            {
+                var snapshot = await validator.ValidateAsync([task.Id], ct, activating: false);
+                await sprints.AddValidatedPrerequisiteAsync(active.Id, snapshot, ct);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogInformation(ex, "Sprint {SprintId}: prerequisite {TaskId} changed or is no longer eligible; deferring amendment",
+                    active.Id, task.Id);
+                continue;
+            }
             _logger.LogInformation(
                 "Sprint {SprintId}: injected ad-hoc task {TaskId} ({Title}) — {Reason}",
                 active.Id, task.Id, task.Title, reason);
@@ -746,39 +739,6 @@ public sealed class SprintAssembler
                 }, ct);
             }
         }
-    }
-
-    private static string? InjectionReason(
-        IssueRecord task,
-        HashSet<string> memberIds,
-        Dictionary<string, IssueRecord> all,
-        HashSet<string> blockersOfMembers)
-    {
-        // Unblocks: a blocks edge has this task blocking a sprint
-        // member — the member cannot proceed until it lands.
-        // (Operator model 2026-07-31: this is the ONLY organic
-        // injection path — followUpOf-chain "same work" injection was
-        // removed; follow-ups now materialize at sprint completion
-        // and join a LATER sprint through grooming.)
-        if (blockersOfMembers.Contains(task.Id))
-        {
-            return "unblocks ongoing work";
-        }
-        // Operator-urgent.
-        if (task.Priority == 1
-            || string.Equals(task.GetMetadata("blocker"), "true", StringComparison.OrdinalIgnoreCase))
-        {
-            return "operator-flagged blocker";
-        }
-        // Operator requeue: an ad-hoc task the operator explicitly
-        // requeued from Failed/Blocked carries operator intent to
-        // run — inject it (otherwise ad-hoc work never assembles and
-        // the sanctioned requeue path would strand it forever).
-        if (task.GetMetadata("requeuedFromFailedAt") is not null)
-        {
-            return "operator requeue";
-        }
-        return null;
     }
 
     /// <summary>

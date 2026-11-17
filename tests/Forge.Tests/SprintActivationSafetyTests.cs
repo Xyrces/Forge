@@ -152,6 +152,29 @@ public sealed class SprintActivationSafetyTests : IDisposable
         Assert.Empty(await Sprints.ListAsync(false));
     }
 
+    [Theory]
+    [InlineData("removed-edge")]
+    [InlineData("removed-target")]
+    [InlineData("completed-target")]
+    public async Task AutomaticAmendmentRequiresCurrentUnfinishedPrerequisiteRelationship(string change)
+    {
+        var target = await TaskRow();
+        var fixer = await TaskRow();
+        var sprint = await Sprints.CreateAsync(New());
+        await Sprints.AddIssueAsync(sprint.Id, target.Id);
+        await issues.AddDependencyAsync(fixer.Id, target.Id, IssueDepKind.Blocks);
+        var snapshot = await new SprintActivationValidator(issues, Sprints, new SpecStore(issues), "test", null)
+            .ValidateAsync([fixer.Id], default, activating: false);
+        if (change == "removed-edge") await issues.RemoveDependencyAsync(fixer.Id, target.Id, IssueDepKind.Blocks);
+        else if (change == "removed-target") await Sprints.RemoveIssueAsync(sprint.Id, target.Id);
+        else await issues.TransitionAsync(target.Id, IssueStatus.Completed, null);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Sprints.AddValidatedPrerequisiteAsync(sprint.Id, snapshot));
+        Assert.DoesNotContain(fixer.Id, await Sprints.GetIssueIdsAsync(sprint.Id));
+        // Explicit manual amendments retain their existing authorization semantics.
+        await Sprints.AddValidatedIssueAsync(sprint.Id, snapshot);
+        Assert.Contains(fixer.Id, await Sprints.GetIssueIdsAsync(sprint.Id));
+    }
+
     [Fact]
     public async Task MembershipInsertFailureRollsBackWholeActivation()
     {

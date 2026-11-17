@@ -336,13 +336,9 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task BlockerTask_JoinsActiveSprint_WithoutWaitingForDrain()
+    public async Task UnrelatedPriorityOneTask_WaitsForCurrentSprintToFinish()
     {
-        // Blocker absorption (operator direction 2026-07-25): an
-        // urgent groomed ad-hoc task must join the ACTIVE sprint
-        // immediately — waiting for the current sprint to drain
-        // burned hours + tokens when an infra fix (task-166) queued
-        // behind six doomed tasks.
+        // Urgency chooses later work; it cannot expand the current objective.
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
@@ -359,14 +355,19 @@ public class SprintAssemblerTests : IDisposable
         var activeAfter = (await _sprints.GetActiveAsync())!;
         Assert.Equal(active.Id, activeAfter.Id);                    // sprint NOT replaced
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(blocker.Id, members);                       // blocker absorbed
+        Assert.DoesNotContain(blocker.Id, members);                // urgency alone waits
         Assert.DoesNotContain(normal.Id, members);                  // P3 ad-hoc waits for assembly
         // The in-flight tasks are untouched.
         foreach (var id in aTasks) Assert.Contains(id, members);
+        foreach (var id in aTasks) await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        await Tick();
+        var next = (await _sprints.GetActiveAsync())!;
+        Assert.NotEqual(active.Id, next.Id);
+        Assert.Contains(blocker.Id, await _sprints.GetIssueIdsAsync(next.Id));
     }
 
     [Fact]
-    public async Task BlockerFlag_MetadataBlockerTrue_AlsoAbsorbed()
+    public async Task UnrelatedBlockerLabel_DoesNotInterruptCurrentSprint()
     {
         var (_, _, _) = await SeedGroomedSpecAsync("Sprint A", 1);
         await Tick();
@@ -379,7 +380,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(flagged.Id, members);
+        Assert.DoesNotContain(flagged.Id, members);
     }
 
     [Fact]
@@ -497,7 +498,7 @@ public class SprintAssemblerTests : IDisposable
         // Operator model 2026-07-31: followUpOf-chain "same work"
         // injection is REMOVED — follow-ups materialize at sprint
         // completion and join a LATER sprint through grooming. Only
-        // blocks edges / operator signals inject mid-sprint.
+        // actual blocks edges permit automatic mid-sprint amendments.
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
@@ -812,11 +813,33 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task RequeuedAdHoc_InjectsIntoActiveSprint()
+    public async Task ActualPrerequisite_WaitsForGroomingAndItsOwnBlocker()
     {
-        // Injection trigger 3b: an operator requeue carries intent
-        // to run — otherwise an ad-hoc task requeued from Failed
-        // would strand forever (no assembly path).
+        var (_, _, tasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var fixer = await _issues.CreateAsync(new NewIssue("task", "needed fix", Priority: 5));
+        await _issues.AddDependencyAsync(fixer.Id, tasks[0], IssueDepKind.Blocks);
+        await Tick();
+        Assert.DoesNotContain(fixer.Id, await _sprints.GetIssueIdsAsync(active.Id));
+
+        await _issues.TransitionAsync(fixer.Id, IssueStatus.Pending, null,
+            metadata: new Dictionary<string, object> { ["groomed"] = true });
+        var prerequisite = await _issues.CreateAsync(new NewIssue("task", "fix prerequisite"));
+        await _issues.AddDependencyAsync(prerequisite.Id, fixer.Id, IssueDepKind.Blocks);
+        await Tick();
+        Assert.DoesNotContain(fixer.Id, await _sprints.GetIssueIdsAsync(active.Id));
+
+        await _issues.TransitionAsync(prerequisite.Id, IssueStatus.Completed, null);
+        await Tick();
+        Assert.Contains(fixer.Id, await _sprints.GetIssueIdsAsync(active.Id));
+        Assert.Equal(active.Id, (await _sprints.GetActiveAsync())!.Id);
+    }
+
+    [Fact]
+    public async Task UnrelatedRequeuedAdHoc_DoesNotInterruptCurrentSprint()
+    {
+        // Requeue requests another attempt, not an implicit sprint interruption.
         var (_, _, _) = await SeedGroomedSpecAsync("Sprint A", 1);
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
@@ -835,7 +858,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(requeued.Id, members);
+        Assert.DoesNotContain(requeued.Id, members);
         Assert.DoesNotContain(unrelated.Id, members);
     }
 
