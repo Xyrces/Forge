@@ -92,8 +92,8 @@ public static class ControllerHost
         });
         app.MapGet("/api/controller/status", async (CancellationToken ct) =>
         {
-            await VerifySchemaAsync(factory, ct);
-            return Results.Ok(await runtime.StatusAsync(ct));
+            var schemaVersion = await VerifySchemaAsync(factory, ct);
+            return Results.Ok((await runtime.StatusAsync(ct)) with { SchemaVersion = schemaVersion });
         });
         app.MapPost("/api/controller/activate", async (Activation activation, CancellationToken ct) =>
         {
