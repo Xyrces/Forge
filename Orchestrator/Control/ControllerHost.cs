@@ -130,9 +130,10 @@ public static class ControllerHost
         command.CommandText = $"SELECT MAX(version) FROM {factory.Dialect.Table("schema_version")}";
         var observed = await command.ExecuteScalarAsync(ct);
         var version = observed is null or DBNull ? 0 : Convert.ToInt32(observed);
-        // Unlike the schema-38 rollback bridge, this release reads M039 evidence
-        // and reconciliation tables. Never inherit the bridge's 38/39 allowance.
-        if (version != SqlServerMigrations.ExpectedVersion)
+        // Temporary maintenance bridge: M040 is additive-only. This binary uses
+        // the M039 shape and retains spending evidence on either qualified schema.
+        // Do not merge this allowance into the strict M040 proposal runtime.
+        if (version is not (39 or 40))
             throw new InvalidOperationException("Database schema is outside this release's tested compatibility version.");
         return version;
     }
