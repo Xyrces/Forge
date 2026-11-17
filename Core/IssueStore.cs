@@ -2174,12 +2174,8 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         if (string.IsNullOrWhiteSpace(disposition.Reason)) throw new ArgumentException("Closure reason required.");
         if (disposition.Kind is CloseDispositionKind.DeliveredElsewhere or CloseDispositionKind.DuplicateDelivered
             && string.IsNullOrWhiteSpace(disposition.Evidence)) throw new ArgumentException("Delivery evidence required.");
-        if (disposition.Kind == CloseDispositionKind.DuplicateDelivered)
-        {
-            var target = disposition.ReferenceIssueId is null ? null : await GetAsync(disposition.ReferenceIssueId, ct);
-            if (target is null || target.Id == id || target.Status != IssueStatus.Completed)
-                throw new InvalidOperationException("Duplicate closure requires a different completed issue in this project.");
-        }
+        if (disposition.Kind is CloseDispositionKind.DeliveredElsewhere or CloseDispositionKind.DuplicateDelivered)
+            return await ClosePositiveDispositionAsync(id, disposition, ct);
         return await TransitionAsync(id, IssueStatus.Closed, disposition.Reason, new Dictionary<string, object>
         {
             ["closeDisposition"] = disposition.Kind.ToString(), ["closeEvidence"] = disposition.Evidence ?? "",
@@ -2227,6 +2223,10 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+
+        if (to == IssueStatus.Closed && metadata?.TryGetValue("closeDisposition", out var requestedDisposition) == true
+            && requestedDisposition?.ToString() is nameof(CloseDispositionKind.DeliveredElsewhere) or nameof(CloseDispositionKind.DuplicateDelivered))
+            throw new InvalidOperationException("Positive closure must use canonical CloseWithDispositionAsync evidence admission.");
 
         var now = DateTime.UtcNow;
         var isTerminal = to is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Blocked or IssueStatus.Closed;

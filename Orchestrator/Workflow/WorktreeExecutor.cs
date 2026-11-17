@@ -69,7 +69,8 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         // tasks 185/186/189 burned their whole plan-gate revision
         // budget because plans referenced files that landed on main
         // AFTER their worktrees were created, then died on requeue).
-        var reused = Directory.Exists(worktrees.WorktreePathFor(input.Issue.Id));
+        var checkoutKey = IssueWorktreeIdentity.For(input.Issue);
+        var reused = Directory.Exists(worktrees.WorktreePathFor(checkoutKey));
         // One branch value for the whole pipeline: claim metadata,
         // the worktree checkout, the agent prompt, and the push
         // refspec must agree (found live 2026-07-28: a task whose
@@ -79,8 +80,8 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         // "src refspec does not match any", halting the workflow).
         var resolvedBranch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
         var worktreePath = reused
-            ? await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct, branchOverride: resolvedBranch)
-            : await worktrees.CreateFreshAsync(input.Issue.Id, defaultBranch, ct, branchOverride: resolvedBranch);
+            ? await worktrees.CreateAsync(checkoutKey, defaultBranch, ct, branchOverride: resolvedBranch)
+            : await worktrees.CreateFreshAsync(checkoutKey, defaultBranch, ct, branchOverride: resolvedBranch);
         // P4 Stage A: advance the dispatch checkpoint BEFORE we
         // touch metadata. If we crash between CreateAsync and the
         // TransitionAsync below, the recoverer sees
@@ -125,7 +126,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 try
                 {
                     await worktrees.SyncWorktreeToRefAsync(
-                        worktreePath, input.Issue.Id, remoteRef, ct);
+                        worktreePath, checkoutKey, remoteRef, ct);
                 }
                 catch (Exception ex)
                 {
@@ -156,7 +157,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                     try
                     {
                         await worktrees.SyncWorktreeToRefAsync(
-                            worktreePath, input.Issue.Id, $"origin/{defaultBranch}", ct);
+                            worktreePath, checkoutKey, $"origin/{defaultBranch}", ct);
                     }
                     catch (Exception ex)
                     {

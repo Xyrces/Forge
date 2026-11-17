@@ -11,6 +11,10 @@ internal static class ReviewWorkerAttempt
         Locks[(StringComparer.Ordinal.GetHashCode($"{project}/{task}/{role}") & int.MaxValue) % Locks.Length];
     public static string Prefix(AgentType role) => role == AgentType.QA ? "qaWorker" : "reviewWorker";
 
+    internal static IReadOnlyList<SemaphoreSlim> RetirementGates(string? project, string task) =>
+        new[] { Gate(project, task, AgentType.QA), Gate(project, task, AgentType.Reviewer) }
+            .Distinct().OrderBy(gate => Array.IndexOf(Locks, gate)).ToArray();
+
     public static async Task<(IssueRecord Task, ReviewWorkerState? Existing)> BeginAsync(IAgentRunner runner,
         IIssueStore issues, IssueRecord task, AgentType role, string? project, string head, CancellationToken ct)
     {

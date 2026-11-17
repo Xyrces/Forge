@@ -498,7 +498,7 @@ public sealed class StartupRecovery
 
     private async Task TryRemoveWorktreeAsync(IssueRecord issue, ProjectRecoveryContext ctx, CancellationToken ct)
     {
-        try { await ctx.Worktrees.RemoveAsync(issue.Id, ct); }
+        try { await ctx.Worktrees.RemoveAsync(IssueWorktreeIdentity.For(issue), ct); }
         catch (Exception ex) { _logger.LogWarning(ex, "Recovery({Id}): worktree removal failed", issue.Id); }
     }
 

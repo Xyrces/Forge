@@ -9,7 +9,7 @@ using static Octokit.PullRequestReviewState;
 
 namespace Forge.Reviewer;
 
-public sealed class PRWatcher
+public sealed partial class PRWatcher
 {
     private static bool HasMergeEvidence(PullRequest pr) => pr.Merged
         && !string.IsNullOrWhiteSpace(pr.MergeCommitSha) && !string.IsNullOrWhiteSpace(pr.Head?.Sha);
@@ -58,6 +58,8 @@ public sealed class PRWatcher
     /// at the head requeues a rework round with the QA notes.</summary>
     private readonly bool _qaEnabled;
     private readonly Func<string, CancellationToken, Task<bool>>? _hasDurableWorker;
+    private readonly Func<string, CancellationToken, Task<bool>>? _joinTaskWorkers;
+    private readonly string? _projectId;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -73,7 +75,9 @@ public sealed class PRWatcher
         AgentRunStore? runs = null,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
         bool qaEnabled = false,
-        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null)
+        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null,
+        Func<string, CancellationToken, Task<bool>>? joinTaskWorkers = null,
+        string? projectId = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -89,6 +93,8 @@ public sealed class PRWatcher
         _workflow = workflow;
         _qaEnabled = qaEnabled;
         _hasDurableWorker = hasDurableWorker;
+        _joinTaskWorkers = joinTaskWorkers;
+        _projectId = projectId;
     }
 
     /// <summary>
@@ -122,7 +128,7 @@ public sealed class PRWatcher
     /// stale window is anchored to the watch issue's CreatedAt, so it
     /// stays stable no matter which sweep picks the watch up.
     /// </summary>
-    public async Task<WatchPollOutcome> PollWatchedTaskAsync(
+    private async Task<WatchPollOutcome> PollWatchedTaskCoreAsync(
         IssueRecord task,
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
@@ -150,6 +156,8 @@ public sealed class PRWatcher
         // fire would resurrect a CLOSED task to Pending. Re-read:
         // the caller's record can be stale by minutes.
         var freshTask = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+        if (freshTask.GetMetadata("prNumber") != prText) return WatchPollOutcome.Pending;
+        task = freshTask;
         if (freshTask.Status is IssueStatus.Closed or IssueStatus.Completed)
         {
             _logger.LogInformation(
@@ -224,31 +232,10 @@ public sealed class PRWatcher
             return WatchPollOutcome.Merged;
         }
 
-        // Empty-diff guard: the branch carries NOTHING its base doesn't
-        // already have — the objective landed on main via other work
-        // (observed live 2026-08-13: porthorizon task-393's branch was
-        // tree-identical to main after sibling tasks 666/512/599/408
-        // delivered it — the reviewer correctly kept requesting
-        // changes on an empty PR, rework rounds CANNOT fix "already
-        // done", and the sprint stuck behind the breaker trip). Merge
-        // is meaningless and rework unfixable: close the PR, complete
-        // the task as superseded.
+        // No diff is a verification request, never proof that the objective was delivered.
         var changedFiles = changedFilesOverride?.Invoke(pr) ?? pr.ChangedFiles;
         if (changedFiles == 0)
-        {
-            _logger.LogInformation(
-                "PR #{PrNumber} (task {TaskId}) has an empty diff against its base — the objective is already on main; closing as superseded",
-                prNumber, taskId);
-            await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
-            await _gitHub.ClosePullRequestAsync(prNumber, cancellationToken);
-            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-            await _issues.TransitionAsync(taskId, IssueStatus.Completed,
-                "superseded: PR diff is empty — the objective is already on main via other work", ct: cancellationToken);
-            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                taskId, $"PR #{prNumber} closed as superseded (empty diff); task completed"));
-            return WatchPollOutcome.Merged;
-        }
+            return await RetireEmptyPrForVerificationAsync(task, pr, cancellationToken);
         // P4 e2e-harness seam: tests can return the SHA
         // directly without going through Octokit's
         // PullRequest.Head (which has a private setter).
@@ -754,7 +741,7 @@ public sealed class PRWatcher
     /// the transient reviewer-unavailable resume.
     /// Returns the resumed task, or null when the gate fails.
     /// </summary>
-    public async Task<IssueRecord?> TryResumeMergeableBlockedAsync(
+    private async Task<IssueRecord?> TryResumeMergeableBlockedCoreAsync(
         IssueRecord task, CancellationToken cancellationToken = default,
         Func<PullRequest, string>? headShaOverride = null,
         Func<PullRequest, bool?>? mergeableOverride = null,
@@ -786,32 +773,16 @@ public sealed class PRWatcher
         // says otherwise.
         try
         {
-            if (pr.State.Value != ItemState.Open) return null;
+            if (pr.State.Value != ItemState.Open && (pr.Merged || pr.ChangedFiles != 0)) return null;
         }
         catch (ArgumentException) { /* unset on test fakes — treat as open */ }
         var sha = headShaOverride?.Invoke(pr) ?? pr.Head.Sha;
         var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
 
-        // Empty-diff supersedes a Blocked watch too: the task can never
-        // become approvable (there is nothing to land), so the
-        // resume gate below would hold it forever (observed live
-        // 2026-08-13: porthorizon task-393 parked Blocked/Failed with
-        // PR #939 open and tree-identical to main).
-        if (pr.ChangedFiles == 0)
+        if (!pr.Merged && pr.ChangedFiles == 0)
         {
-            _logger.LogInformation(
-                "Blocked task {Id}: PR #{PrNumber} has an empty diff — closing as superseded",
-                task.Id, prNumber);
-            await ReportLifecycleAsync(task, Forge.Core.TaskEvent.ExternallyMerged, cancellationToken);
-            await _gitHub.ClosePullRequestAsync(prNumber, cancellationToken);
-            var branch = task.GetMetadata("branch") ?? $"agent/{task.Id}";
-            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-            await _issues.TransitionAsync(task.Id, IssueStatus.Completed,
-                "superseded: PR diff is empty — the objective is already on main via other work", ct: cancellationToken);
-            await TryRemoveWorktreeAsync(task.GetMetadata("worktreePath"), cancellationToken);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                task.Id, $"PR #{prNumber} closed as superseded (empty diff); task completed"));
-            return await _issues.GetAsync(task.Id, cancellationToken);
+            await RetireEmptyPrForVerificationAsync(task, pr, cancellationToken);
+            return null; // The normal sprint dispatcher owns any queued verification; never resume review of a retired PR.
         }
         if (mergeable != true) return null;
 

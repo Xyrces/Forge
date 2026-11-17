@@ -736,14 +736,8 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
-    public async Task EmptyDiff_SupersedesInsteadOfReworking()
+    public async Task EmptyDiff_WithoutApprovedExistingEvidenceScope_ParksWithoutClosing()
     {
-        // Live 2026-08-13 (porthorizon task-393): the branch was
-        // tree-identical to main — the objective had already landed
-        // via sibling tasks. The reviewer kept requesting changes on
-        // an empty PR and three rework rounds burned against a
-        // problem no push can fix. The watcher must close the PR and
-        // complete the task as superseded.
         var gh = new FakeGitHub { Ci = CommitState.Success };
         var task = await SeedAsync();
 
@@ -753,10 +747,10 @@ public class PRWatcherReworkTests : IDisposable
             headShaOverride: _ => "abc123",
             changedFilesOverride: _ => 0);
 
-        Assert.Equal(PRWatcher.WatchPollOutcome.Merged, outcome);
-        Assert.Equal(1, gh.CloseCalls);
+        Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
+        Assert.Equal(0, gh.CloseCalls);
         var after = (await _issues.GetAsync(task.Id))!;
-        Assert.Equal(IssueStatus.Completed, after.Status);
+        Assert.Equal(IssueStatus.Blocked, after.Status);
     }
 
     [Fact]

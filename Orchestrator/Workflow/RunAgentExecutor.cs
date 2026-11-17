@@ -92,6 +92,12 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
         var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
+        if (!string.IsNullOrWhiteSpace(issue.GetMetadata("existingVerificationRequest")))
+            prompt += "\n\nThe former PR was closed unmerged because it contained no changes. That is not acceptance evidence. " +
+                "This fresh configured-base checkout must be checked against the same approved task criteria. " +
+                "Do not manufacture edits to create a diff. If the approved implementation already exists, run the required checks, " +
+                "explain the concrete evidence, and request NO_CHANGES_NEEDED. Independent verification and review still decide acceptance; " +
+                "deployment and operator observations remain separate obligations.";
         // Rework loop: a task requeued by the PRWatcher carries the
         // failure context (CI failure or reviewer notes) — surface it
         // prominently so the agent fixes THAT, not re-explores.

@@ -32,6 +32,7 @@ public enum TaskEvent
     OperatorClosed,
     WatchResumed,
     OperatorAdoptPr,
+    EmptyPrRetired,
 }
 
 /// <summary>
@@ -73,6 +74,15 @@ public sealed class TaskStateMachine
     /// always legal (idempotent re-observation).</summary>
     private static readonly IReadOnlyDictionary<(TaskEvent, TaskLifecycleState), TaskLifecycleState> Table =
         BuildTable();
+
+    internal static Dictionary<string, object> ObservedMetadata(IssueRecord task, TaskEvent evt, DateTime now)
+    {
+        var current = Enum.TryParse<TaskLifecycleState>(task.GetMetadata("state"), out var recorded)
+            ? recorded : TaskStateProjector.Derive(task, null, false, now).State;
+        if (!Table.TryGetValue((evt, current), out var next))
+            throw new InvalidOperationException($"Illegal lifecycle observation {current}+{evt}.");
+        return new() { ["state"] = next.ToString(), ["stateEnteredAt"] = now.ToString("O"), ["lastEvent"] = evt.ToString() };
+    }
 
     private static IReadOnlyDictionary<(TaskEvent, TaskLifecycleState), TaskLifecycleState> BuildTable()
     {
@@ -195,6 +205,8 @@ public sealed class TaskStateMachine
             TaskLifecycleState.StalledRework, TaskLifecycleState.ParkedInfra,
             TaskLifecycleState.PROpen, TaskLifecycleState.MergeReady);
         Add(TaskEvent.OperatorBlocked, TaskLifecycleState.BlockedOperator, working);
+        Add(TaskEvent.EmptyPrRetired, TaskLifecycleState.Pending,
+            working.Append(TaskLifecycleState.BlockedOperator).ToArray());
         // Operator close-obsolete (2026-08-01): the operator retires
         // a task outright (work already on main via another task,
         // superseded, won't-fix) from ANY live or failed state. The

@@ -276,7 +276,14 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             // before review; the merge gate requires qaVerdict=pass at
             // the head and a fail verdict requeues a rework round.
             qaEnabled: project.QaEnabled,
-            hasDurableWorker: _hasDurableWorker is null ? null : (id, ct) => _hasDurableWorker(project.Id, id, ct));
+            hasDurableWorker: _hasDurableWorker is null ? null : (id, ct) => _hasDurableWorker(project.Id, id, ct),
+            joinTaskWorkers: async (id, ct) =>
+            {
+                if (_runner is not IReviewWorkerLifecycle lifecycle) return false;
+                foreach (var role in new[] { AgentType.CoreDev, AgentType.ClientDev, AgentType.QA, AgentType.Reviewer })
+                    if (await lifecycle.HasUntrackedReviewWorkerAsync(role, project.Id, id, ct)) return false;
+                return true;
+            }, projectId: project.Id);
 
         return new ProjectDispatchBundle(
             ensured.Project,

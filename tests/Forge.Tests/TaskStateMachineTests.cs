@@ -252,15 +252,17 @@ public class TaskStateMachineTests : IDisposable
             else if (from == TaskLifecycleState.BlockedOperator)
             {
                 // Explicit operator requeue/close/adoption are allowed; adoption
-                // requires a verified open PR. WatchResumed only nudges a
+                // requires a verified open PR. EmptyPrRetired requires an observed
+                // closed/unmerged PR and exact prospective verification scope. WatchResumed only nudges a
                 // transient reviewer-unavailable watch after model recovery.
                 var exits = events.Where(evt => ProbeTo(evt, from)).ToList();
-                Assert.True(exits.Count == 4
+                Assert.True(exits.Count == 5
                         && exits.Contains(TaskEvent.OperatorRequeue)
                         && exits.Contains(TaskEvent.WatchResumed)
                         && exits.Contains(TaskEvent.OperatorClosed)
-                        && exits.Contains(TaskEvent.OperatorAdoptPr),
-                    $"{from} must exit only via OperatorRequeue, WatchResumed, OperatorClosed, or OperatorAdoptPr, has [{string.Join(",", exits)}]");
+                        && exits.Contains(TaskEvent.OperatorAdoptPr)
+                        && exits.Contains(TaskEvent.EmptyPrRetired),
+                    $"{from} must exit only via OperatorRequeue, WatchResumed, OperatorClosed, OperatorAdoptPr, or observed EmptyPrRetired, has [{string.Join(",", exits)}]");
             }
             else if (from == TaskLifecycleState.Failed)
             {
