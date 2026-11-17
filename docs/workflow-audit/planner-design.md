@@ -1,6 +1,6 @@
 # Bounded outcome planning: implemented contract and qualification
 
-Status, 2026-11-17: the outcome planner, durable completion, routine-release integration and completion controls are implemented in the unattended-workflow integration source. This is no longer an unimplemented proposal. Offline tests and synthetic dashboard checks support the behaviors described below; the strict schema-41 production cutover and the new UI-originated end-to-end pilot remain qualification work until their actual receipts are recorded. Passing source tests is not a claim that the new planner has delivered the live pilot.
+Status, 2026-11-17: the outcome planner, durable completion, routine release and completion controls are deployed on schema 41. The UI-originated Forge pilot reached Satisfied after normal engineering/review/merge, automatic exact-source deployment and explicit operator acceptance through the UI. It required the documented system repairs and guided recovery, so this is not a claim of uninterrupted unattended execution. See [the final live qualification](unattended-live-qualification.md#final-qualification-2026-11-17) for source/image identities, evidence, spending and limits.
 
 The original audit described the code at `8460dde`. Its weaknesses and proposed increments are historical context, summarized at the end. They must not be read as a list of defects still present in the integrated source. See [routine delivery](routine-deployment.md) for release authority and [the earlier performance review](performance.md) for the original read-path findings.
 

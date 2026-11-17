@@ -1,5 +1,7 @@
 # Unattended workflow live qualification
 
+Latest result: the approved pilot reached **Satisfied**, with automatic deployment and explicit operator acceptance on 2026-11-17. See [the final qualification](#final-qualification-2026-11-17). Earlier blocked checkpoints below remain chronological evidence, not current status.
+
 ## Version 41 release
 
 On 2026-11-17, PR #131 merged as `3ca60c60610e968111247f7387d6e20226b97654`.
@@ -490,3 +492,135 @@ identity fields and exact API field/URL/artifact spellings. The backend contract
 link target was verified in task-2's source above; it is not yet present on this
 task's base and requires normal sibling integration. These documentation checks
 are separate from both the retained UI checks and all pending operator evidence.
+
+
+## Final qualification 2026-11-17
+
+The UI-originated approved pilot completed engineering, routine delivery and
+explicit operator acceptance. This was an **operator-assisted qualification of
+normal workflows**, not an uninterrupted unattended success: the system defects
+and sanctioned recovery steps above were necessary. No worker PR was hand-pushed
+or hand-merged to bypass Forge's review/publication loop.
+
+### Engineering and recovery
+
+| Member | Normal worker PR | Merged source | Merge time (UTC) |
+|---|---|---|---|
+| Backend reader/API, `task-2` | [#139](https://github.com/Xyrces/Forge/pull/139) | `6ae68e0593c38b52d2b1bb1ada380adf5a0d4ecb` | 20:57:38 |
+| Qualification handoff, `task-3` | [#140](https://github.com/Xyrces/Forge/pull/140) | `4a60a7c2a0e81d3154586289722a641641d4775b` | 21:12:39 |
+| Global revision UI, `client-1` | [#142](https://github.com/Xyrces/Forge/pull/142) | `178e98d9f3ada6a85ca4a980495331f55a1b95a4` | 21:30:42 |
+
+These members passed the normal trusted worker verification, current-head review,
+CI and merge path. The ClientDev retry preserved its earlier implementation,
+merged the configured default branch, and added real endpoint-to-UI integration
+checks. Its model phase ended at 21:22:22.932; independent verification completed
+at 21:27:17.4926477 against tree
+`4832843575b35458003b961fc1b9ab3fe6611158`. PR #142's approved head was
+`4338f339e49e932d29a1ffa59e4cb4ef6775d3bc`; CI run `44180000037` passed.
+Model prose was not substituted for the trusted receipt.
+
+System repairs remain distinct from that engineering delivery. PR #138 supplied
+scoped re-groom recovery, exact prerequisite criteria, admission before slot
+allocation and a grooming wake hint. The operator requested task-3 re-grooming
+at 20:43:07.101; normal grooming and audit 2 admitted it with the same seven
+criteria and original approval. It reused `offline-build`, without adding scope.
+The operator guided ClientDev's requeue; after task-3 merged, dependency release
+started ClientDev automatically at 21:12:44.903. No dependency edge was hand-edited.
+PR #141 corrected future objective labels and watch cadence. PR #143 separated
+serialized request bytes from native token admission without raising the $25
+ceiling or resetting history. Their changes are ancestors of the final release.
+
+### Manual repair X, then automatic pilot delivery Y
+
+PR #144 repaired the merged-source reader and forward recovery. GitHub's
+[2026 REST breaking changes](https://docs.github.com/en/rest/about-the-rest-api/breaking-changes?apiVersion=2026-03-10)
+removed `merge_commit_sha`; only merged-PR reads now request the supported
+2022-11-28 contract. Missing merge evidence still fails closed. GitHub currently
+lists **March 10, 2028** as that contract's end of support: migrate and requalify
+this reader before then, rather than removing the version pin or substituting a
+PR head. See [API version support](https://docs.github.com/en/rest/about-the-rest-api/api-versions).
+
+The manually approved controller repair **X** was
+`deploy-52cd4b8a42b2432e853c25ecc00dfebc`, source
+`575dc24f9e885834fcfd09eaacd31274525a30f8`, image digest
+`sha256:be9ccf3ced8ff2a31f1e1c393fe546ad6c7ad84c7caebd00d803636071aa1e37`.
+It started from the prior deployed controller and excluded the pilot UI. Its
+independent release journal committed; it was not counted as pilot delivery.
+
+The repaired controller then automatically selected, qualified, approved under
+the project's routine policy, and released **Y**:
+
+- Candidate: `deploy-7c406b8f1930d32458fc467fce3a7193`, requested 21:50:36.953,
+  Deployed 21:53:55.559; independent release journal `committed`.
+- Source: `44c0128a2c7be8f0e821b24e5d426fba454bfab9`.
+- Image: `ghcr.io/xyrces/forge@sha256:5470a4269b5d0aab298b55df17f6a88285df68f1ac063daa1cd74e3b636019d5`.
+- Exact-source [CI run 44183667879](https://github.com/Xyrces/Forge/actions/runs/44183667879):
+  2,300 .NET tests, 44 release/installer tests and deterministic engineering E2E passed.
+- [Image run 44183667896](https://github.com/Xyrces/Forge/actions/runs/44183667896),
+  artifact `14371939973`, archive digest
+  `sha256:7c13833bd0e7488e7993d37890542b904cc432e144744578ac1ece76d1d96b39`.
+
+Durable source evidence records member frontier `178e98d9...`, running repair
+`575dc24f...`, selected source `44c0128a...` and reason
+`running-source-forward-recovery`. Verified ancestry retained both the completed
+member merges and the running repair; this was not an arbitrary latest-branch
+release. Completion and candidate share exact source Y and committed plan hash
+`2a810274d95a46fd588228968cfa70771c3876ba518809aca3003536c217e042`.
+
+The final serving controller was green pod `forge-green-55f4cf7c6-q52gc`, UID
+`5ee7fb4a-3251-42f2-a827-c3860388b480`, container `forge`, epoch **32**.
+Its configured image and actual image ID matched the receipt. Core and Forge
+workload schemas remained **41**, with the same dataset
+`f610a39c-50e1-4aab-8d5a-e18e10aeede9`.
+
+### Actual operator acceptance and its limits
+
+Codex performed operator qualification on the user's behalf and recorded both
+`operator-browser` and `running-image-comparison` through the **actual completion
+UI**, not direct API submissions. The stored identity is `authenticated shared dashboard operator`; it does not establish a uniquely authenticated individual. The serving dashboard's expanded full SHA,
+`/api/meta/buildinfo.sourceRevision`, `/app/source-revision` read inside that
+exact running container, and qualified receipt all equalled source Y. Both API
+and dashboard linked exactly to
+[the qualified commit](https://github.com/Xyrces/Forge/commit/44c0128a2c7be8f0e821b24e5d426fba454bfab9).
+Keyboard activation opened that actual GitHub page.
+
+Live browser checks used the in-app browser through an SSH loopback connection,
+**1280×900** and **390×844** CSS-pixel viewports, scale **1**. Browser version was
+not exposed by the tool and is not inferred. The short SHA and readable full-SHA
+control persisted across Now, Intake, Specs, Sprints, Active tasks, Flow, Projects
+and Forge overview at both widths. Tab reached the labelled disclosure, Enter
+opened it, Space closed it, and Tab reached the commit link.
+
+An isolated actual DashboardHost/UI build from exact source Y separately checked
+Alpha→Forge→Alpha switching, an empty registry, and explicit-null metadata at
+desktop/narrow widths. The two-project fixture also used 1280×720 before the
+1280×900 inspection. Its clearly synthetic SHA was never presented as the live
+artifact. Null showed Unavailable with no revision link/disclosure, and keyboard
+navigation skipped it. These browser observations **do not include malformed
+metadata or HTTP-failure scenarios**; those have offline test coverage only.
+Production registry/artifact state was not altered for edge cases. Fixture
+listeners were stopped and their absence verified.
+
+At 21:58:38–42, the normal API and independent read-only SQL audit agreed:
+completion `completion-sprint-7bf2555ec5` was **Satisfied**, bookkeeping
+**Completed**, and its bound candidate **Deployed**. Both exact-plan/source-bound
+operator records were present. Parent/container issue labels are not substituted
+for this durable outcome; the spec remained Groomed rather than being manually
+stamped Shipped.
+
+The actual deployed-Y `--check` passed at **21:59:35 UTC** without model generation. A final mechanical audit confirmed unchanged work, budget and schema snapshots across read-only checks and matching four-way source/image identities. The completion UI showed zero outstanding sprint outcomes, required evidence satisfied and release healthy.
+
+The final budget snapshot at **21:58:38 UTC** retained the **$25** limit:
+**$4.330884 usage-estimated + $1.01 operator-reported**, zero outstanding holds,
+zero uncertain requests, and **$19.659116 available after holds**.
+`billingReconciled=false`: this is not a claim of provider-invoiced actual spend.
+
+Primary private evidence is retained under the qualification workspace's
+`.portHorizon/validation/routine-pilot/`: `final-accepted-live.json`,
+`final-accepted-source-audit.json`, `post-release-sql.json`,
+`live-browser-observations.json`, `synthetic-browser-observations.json`, operator
+notes, `final-deployed-check.txt`, `final-invariants.txt`, `final-qualified-sprint.jpg`, exact-Y receipt, and live/synthetic screenshots. The earlier
+`operator-unit-review/watch/` captures preserve worker, review and merge evidence.
+These local evidence paths are not public repository attachments. This proves
+this Forge pilot's delivered outcome with the recorded repairs and acceptance;
+it does not qualify TimeLoop, arbitrary future initiatives, or every failure mode.
