@@ -51,7 +51,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         Directory.CreateDirectory(_workDir);
         Directory.CreateDirectory(_dataRoot);
 
-        InitRepo(_workDir);
+        InitRepo(_workDir, Path.Combine(_dataRoot, "origin.git"));
 
         _dbPath = Path.Combine(_dataRoot, "issues.db");
         _issues = new IssueStore(_dbPath,"test");
@@ -811,7 +811,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.Null(outAfter.Assignee);
     }
 
-    private static void InitRepo(string path)
+    private static void InitRepo(string path, string originPath)
     {
         RunGit(path, "init", "-q -b main");
         RunGit(path, "config", "user.email a@b");
@@ -819,9 +819,17 @@ public sealed class OrchestratorAgentTests : IDisposable
         File.WriteAllText(Path.Combine(path, "README.md"), "# Test\n");
         RunGit(path, "add", "README.md");
         RunGit(path, "commit", "-q -m initial");
+        // A real local remote exercises fresh-fetch admission without network access.
+        // Keep it inside the existing fixture data directory for normal cleanup.
+        RunGitArguments(path, "init", "-q", "--bare", originPath);
+        RunGitArguments(path, "remote", "add", "origin", originPath);
+        RunGit(path, "push", "-u origin main");
     }
 
     private static void RunGit(string cwd, string verb, string args)
+        => RunGitArguments(cwd, [verb, .. args.Split(' ')]);
+
+    private static void RunGitArguments(string cwd, params string[] arguments)
     {
         var psi = new ProcessStartInfo
         {
@@ -833,14 +841,13 @@ public sealed class OrchestratorAgentTests : IDisposable
             CreateNoWindow = true,
         };
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
-        psi.ArgumentList.Add(verb);
-        foreach (var part in args.Split(' ')) psi.ArgumentList.Add(part);
+        foreach (var argument in arguments) psi.ArgumentList.Add(argument);
         using var p = Process.Start(psi)!;
         p.WaitForExit(60_000);
         if (p.ExitCode != 0)
         {
             var err = p.StandardError.ReadToEnd();
-            throw new InvalidOperationException($"git {verb} {args} (cwd={cwd}) failed: {err}");
+            throw new InvalidOperationException($"git {string.Join(' ', arguments)} (cwd={cwd}) failed: {err}");
         }
     }
 
@@ -1047,10 +1054,6 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         // Set up a remote with a PR branch that matches the dispatch convention.
         var taskId = issue.Id; // The workflow branch will be "agent/{issue.Id}"
-        var bareDir = Path.Combine(Path.GetTempPath(), "ph-orch-remote-" + Guid.NewGuid().ToString("N"));
-        RunGit(Path.GetTempPath(), "init", "-q --bare " + bareDir);
-        RunGit(_workDir, "remote", "add origin " + bareDir);
-        RunGit(_workDir, "push", "-u origin main");
         var branch = "agent/" + taskId;
         RunGit(_workDir, "checkout", "-b " + branch);
         File.WriteAllText(Path.Combine(_workDir, "rework-content.txt"), "from-remote-pr-head");
@@ -1063,6 +1066,11 @@ public sealed class OrchestratorAgentTests : IDisposable
         var remoteSha = RunGitCaptureSha(_workDir, "rev-parse origin/" + branch);
         var mainSha = RunGitCaptureSha(_workDir, "rev-parse main");
         Assert.NotEqual(remoteSha, mainSha);
+
+        // A rework round has a prior checkout; creating a new worktree must
+        // not reset an existing task branch. Seed that prior round at main.
+        var priorWorktree = await _worktrees.CreateAsync(taskId, "main", branchOverride: branch);
+        Assert.Equal(mainSha, RunGitCaptureSha(priorWorktree, "rev-parse HEAD"));
 
         // Now set the rework metadata on the issue.
         await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null, new Dictionary<string, object>

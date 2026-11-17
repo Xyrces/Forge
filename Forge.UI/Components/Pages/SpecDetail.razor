@@ -107,13 +107,14 @@
             </div>
             @if (!string.IsNullOrEmpty(ActionProp("reason")))
             {
-                <p class="hint" style="margin-top:6px">@ActionProp("reason")</p>
+                <p class="hint">@ActionProp("reason")</p>
+                <a href="/flow">View workflow and stage holds in Flow</a>
             }
         </div>
 
         <div class="card" style="margin-bottom:14px">
-            <h2>Spec body</h2>
-            <pre class="mono" style="white-space:pre-wrap; max-height:320px; overflow:auto">@SpecProp("body")</pre>
+            <h2>Specification</h2>
+            <div class="md">@((MarkupString)MarkdownRenderer.ToHtml(SpecProp("body")))</div>
         </div>
 
         <div class="card" style="margin-bottom:14px">

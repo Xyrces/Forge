@@ -20,6 +20,7 @@ public sealed class GroomerAgentFactory
     private readonly string? _projectRoot;
     private readonly Func<string, string?>? _projectRootLookup;
     private readonly Func<string, IIssueStore?>? _issueStoreLookup;
+    private readonly Func<string, CancellationToken, Task>? _refreshContext;
 
     public GroomerAgentFactory(
         IIssueStore issues,
@@ -41,7 +42,8 @@ public sealed class GroomerAgentFactory
         // primary project's sprint lane, where it gets dispatched
         // against the wrong repo (porthorizon stories → Forge PRs
         // #66/#67). Unknown/null project → the default store.
-        Func<string, IIssueStore?>? issueStoreLookup = null)
+        Func<string, IIssueStore?>? issueStoreLookup = null,
+        Func<string, CancellationToken, Task>? refreshContext = null)
     {
         _issues = issues;
         _specs = specs;
@@ -53,6 +55,16 @@ public sealed class GroomerAgentFactory
         _projectRoot = projectRoot;
         _projectRootLookup = projectRootLookup;
         _issueStoreLookup = issueStoreLookup;
+        _refreshContext = refreshContext;
+    }
+
+    /// <summary>Refresh planning context before claiming a paid attempt. Failure leaves the run unclaimed.</summary>
+    public Task RefreshContextAsync(string? projectId, CancellationToken ct = default)
+    {
+        if (_refreshContext is null) return Task.CompletedTask;
+        if (string.IsNullOrWhiteSpace(projectId))
+            throw new InvalidOperationException("A registered project is required to refresh grooming context.");
+        return _refreshContext(projectId, ct);
     }
 
     public GroomerAgent Create(string? runId = null, string? projectId = null)

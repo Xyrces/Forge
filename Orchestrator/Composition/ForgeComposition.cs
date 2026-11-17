@@ -614,7 +614,28 @@ public static class ForgeComposition
             issues, routingSpecStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
             memory: memoryStore, projectRoot: primary.Root,
             projectRootLookup: ProjectRootLookup,
-            issueStoreLookup: id => projectFactory.Find(id)?.Issues);
+            issueStoreLookup: id => projectFactory.Find(id)?.Issues,
+            refreshContext: async (id, refreshCt) =>
+            {
+                try
+                {
+                    var context = projectFactory.Find(id)
+                        ?? throw new InvalidOperationException($"Unknown grooming project {id}.");
+                    if (string.IsNullOrWhiteSpace(context.Options.Root))
+                        throw new InvalidOperationException($"Grooming project {id} has no configured checkout root.");
+                    var github = await GitHubTokenResolver.ResolveAsync(id, options.GitHub, secretStore, refreshCt);
+                    var refreshed = await cloner.SyncAsync(context.Options, github, refreshCt);
+                    if (!refreshed.Ok)
+                        throw new InvalidOperationException($"Grooming project {id} checkout could not be refreshed safely; no paid attempt was started.");
+                    await projectStore.UpdateSyncStatusAsync(id, DateTime.UtcNow, null, refreshCt);
+                }
+                catch (Exception ex) when (!refreshCt.IsCancellationRequested)
+                {
+                    await projectStore.UpdateSyncStatusAsync(id, DateTime.UtcNow,
+                        $"Planning refresh failed ({ex.GetType().Name}); verify the configured checkout is clean, on its configured branch, and reachable. No grooming model ran.", refreshCt);
+                    throw;
+                }
+            });
         services.AddSingleton(groomerFactory);
 
         var designHygiene = new DesignHygieneChecker(

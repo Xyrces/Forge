@@ -445,7 +445,7 @@ public sealed class GroomerAgent
             return "skipped";
         }
 
-        var grounding = await BuildGroundingBlockAsync(projectId: null, ct, excludeIssueId: issue.Id);
+        var grounding = await BuildGroundingBlockAsync(projectId: _projectId, ct, excludeIssueId: issue.Id);
         var runProjectId = _projectId;
 
         var approveTool = AIFunctionFactory.Create(

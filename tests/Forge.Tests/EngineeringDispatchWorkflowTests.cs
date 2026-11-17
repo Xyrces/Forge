@@ -54,6 +54,11 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         File.WriteAllText(Path.Combine(dir, "README.md"), "x");
         Run("git", "add README.md", dir);
         Run("git", "commit -q -m init", dir);
+        var origin = Path.Combine(dir, ".portHorizon", "fixture-origin.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(origin)!);
+        Run("git", $"init --bare -q \"{origin}\"", dir);
+        Run("git", $"remote add origin \"{origin}\"", dir);
+        Run("git", "push -q -u origin main", dir);
     }
 
     private static void Run(string exe, string args, string cwd)
@@ -70,6 +75,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         };
         using var p = Process.Start(psi)!;
         p.WaitForExit();
+        Assert.True(p.ExitCode == 0, p.StandardError.ReadToEnd());
     }
 
     private static IAgentRunner ScriptedRunner(string response)

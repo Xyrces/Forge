@@ -34,6 +34,12 @@ public class CommitPushPrExecutorTests : IDisposable
         _workDir = TempRoot.Instance.NewDirectory("cppr");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
+        // Fresh engineering checkout must fetch a real local remote before any agent work.
+        var bareDir = Path.Combine(_workDir, ".portHorizon", "remote.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(bareDir)!);
+        File.AppendAllText(Path.Combine(_workDir, ".git", "info", "exclude"), "\n/.portHorizon/\n");
+        Run("git", $"clone -q --bare \"{_workDir}\" \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
         _worktrees = new GitWorktreeService(
             new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
@@ -70,7 +76,10 @@ public class CommitPushPrExecutorTests : IDisposable
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
+        Assert.True(p.ExitCode == 0, $"Fixture command failed: {exe} {args}\n{stdout}\n{stderr}");
     }
 
     /// <summary>
@@ -109,10 +118,6 @@ public class CommitPushPrExecutorTests : IDisposable
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
 
@@ -135,10 +140,6 @@ public class CommitPushPrExecutorTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "receipt"));
         var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
         string[] commands = ["this-verification-command-must-never-run-in-controller"];
         // Simulate the trusted host's typed receipt; this command would fail if the controller executed it.
@@ -185,10 +186,6 @@ public class CommitPushPrExecutorTests : IDisposable
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         // Bare remote so PushAsync has somewhere to land the branch.
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         // Simulate the agent self-committing in the worktree (bash).
         var wtPath = worktree.WorktreePath!;
@@ -404,10 +401,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         var wtPath = worktree.WorktreePath!;
         Run("git", "config user.email test@test", wtPath);
         Run("git", "config user.name Test", wtPath);
@@ -438,10 +431,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         var wtPath = worktree.WorktreePath!;
         Run("git", "config user.email test@test", wtPath);
         Run("git", "config user.name Test", wtPath);
@@ -486,10 +475,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         var wtPath = worktree.WorktreePath!;
         Run("git", "config user.email test@test", wtPath);
         Run("git", "config user.name Test", wtPath);
@@ -580,10 +565,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
 
@@ -613,10 +594,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
 
@@ -641,10 +618,6 @@ public class CommitPushPrExecutorTests : IDisposable
         var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main",
             NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
         var callbackObserved = false;
         await CommitPushPrExecutor.HandleAsync(new AgentCompleted(worktree, AgentResult.Ok, "done", null),

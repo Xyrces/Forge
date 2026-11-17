@@ -24,6 +24,7 @@ public class WorktreeExecutorTests : IDisposable
         _workDir = TempRoot.Instance.NewDirectory("wtexec");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
+        InitRepoWithOrigin();
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
         _worktrees = new GitWorktreeService(
             new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
@@ -34,6 +35,7 @@ public class WorktreeExecutorTests : IDisposable
     {
         _issues.Dispose();
         try { Directory.Delete(_workDir, recursive: true); } catch { }
+        try { Directory.Delete(_workDir + "-bare.git", recursive: true); } catch { }
     }
 
     private static void InitRepo(string dir)
@@ -116,6 +118,7 @@ public class WorktreeExecutorTests : IDisposable
         // Re-root the fixture repo with a bare origin so fetches and
         // origin/main refs work.
         var bare = _workDir + "-bare.git";
+        if (Directory.Exists(bare)) return bare;
         Run("git", $"clone --bare {_workDir} {bare}", _workDir);
         Run("git", "remote add origin " + bare, _workDir);
         Run("git", "fetch origin", _workDir);

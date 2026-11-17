@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using Microsoft.AspNetCore.Builder;
@@ -72,6 +72,24 @@ public class SpecActionsEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task Actions_ReadyForDesign_ExplainsAutomaticStepAndPossibleHoldWithoutEnablingManualAction()
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "proj-1", Title: "Test", Body: "Body"), default);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign, default);
+
+        var body = await _client.GetFromJsonAsync<ActionsShape>($"/api/specs/{spec.Id}/actions");
+
+        Assert.NotNull(body);
+        Assert.False(body.CanApprove);
+        Assert.False(body.CanStartGrooming);
+        Assert.False(body.CanShip);
+        Assert.Contains("Ready for automatic design", body.Reason);
+        Assert.Contains("held Design stage pauses", body.Reason);
+        Assert.Contains("does not mean the Designer is running", body.Reason);
+    }
+
+    [Fact]
     public async Task Actions_DesignedSpec_WaitsForAssets()
     {
         var spec = await _specs.CreateAsync(new NewSpec(
@@ -83,6 +101,7 @@ public class SpecActionsEndpointTests : IDisposable
         var body = await resp.Content.ReadFromJsonAsync<ActionsShape>();
         Assert.False(body!.CanApprove);
         Assert.False(body.CanStartGrooming);
+        Assert.Contains("Asset preparation is the next automatic step", body.Reason);
     }
 
     [Fact]

@@ -120,7 +120,7 @@ public class ProjectClonerTests : IDisposable
     }
 
     [Fact]
-    public async Task SyncAsync_ScaffoldedRepo_ReconcilesWithRemote()
+    public async Task SyncAsync_OriginlessRepo_PreservesLocalCommitUntilExplicitRepair()
     {
         // Simulate the bootstrap's git-init fallback: a local repo
         // with a scaffold commit and no origin, shadowing the remote.
@@ -140,15 +140,13 @@ public class ProjectClonerTests : IDisposable
         RunGit(localPath, "add", ".gitignore");
         RunGit(localPath, "commit", "-q -m scaffold");
 
-        var ok = (await _cloner.SyncAsync(project, github: null)).Ok;
-
-        Assert.True(ok);
-        Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
-
-        // Origin reattached: a second sync takes the ff-only pull path.
-        SeedCommit(_remoteDir, "main", "CHANGELOG.md", "v0.2.0\n", "second");
-        Assert.True((await _cloner.SyncAsync(project, github: null)).Ok);
-        Assert.True(File.Exists(Path.Combine(localPath, "CHANGELOG.md")));
+        var before = File.ReadAllText(Path.Combine(localPath, ".git", "refs", "heads", "main"));
+        var config = await ReadGitConfig(localPath);
+        Assert.False((await _cloner.SyncAsync(project, github: null)).Ok);
+        Assert.Equal(before, File.ReadAllText(Path.Combine(localPath, ".git", "refs", "heads", "main")));
+        Assert.Equal(config, await ReadGitConfig(localPath));
+        Assert.False(File.Exists(Path.Combine(localPath, "README.md")));
+        Assert.Equal(".forge/\n", File.ReadAllText(Path.Combine(localPath, ".gitignore")));
     }
 
     [Fact]
@@ -171,11 +169,9 @@ public class ProjectClonerTests : IDisposable
     }
 
     [Fact]
-    public async Task SyncAsync_ScaffoldedRepo_UsesDetectedBranchWhenStoredMissing()
+    public async Task SyncAsync_OriginlessRepo_DoesNotSilentlyChangeConfiguredBranch()
     {
-        // Registry says "main" (the old guess) but the remote's
-        // default is "trunk": reconcile should detect + align to
-        // trunk and report it in the result.
+        // A missing origin is not authority to replace local commits or infer another branch.
         var trunkRemote = Path.Combine(_tempRoot, "trunk-remote2.git");
         InitBareRepo(trunkRemote, "trunk");
         SeedCommit(trunkRemote, "trunk", "README.md", "# Trunk\n", "initial");
@@ -196,15 +192,13 @@ public class ProjectClonerTests : IDisposable
         RunGit(localPath, "add", ".gitignore");
         RunGit(localPath, "commit", "-q -m scaffold");
 
+        var before = File.ReadAllText(Path.Combine(localPath, ".git", "refs", "heads", "main"));
         var result = await _cloner.SyncAsync(project, github: null);
-
-        Assert.True(result.Ok);
-        Assert.Equal("trunk", result.Branch);
-        Assert.True(File.Exists(Path.Combine(localPath, "README.md")));
-
-        // Pull info stamped: the clone's origin/HEAD now reflects the
-        // remote default.
-        Assert.Equal("trunk", await _cloner.ReadCloneDefaultBranchAsync(localPath));
+        Assert.False(result.Ok);
+        Assert.Equal("main", result.Branch);
+        Assert.Equal(before, File.ReadAllText(Path.Combine(localPath, ".git", "refs", "heads", "main")));
+        Assert.False(File.Exists(Path.Combine(localPath, "README.md")));
+        Assert.Null(await _cloner.ReadCloneDefaultBranchAsync(localPath));
     }
 
     [Fact]
