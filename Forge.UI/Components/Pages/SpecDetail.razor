@@ -376,10 +376,11 @@
             var resp = await Http.PostAsync(url, null);
             if (resp.StatusCode == System.Net.HttpStatusCode.Conflict && !force)
             {
-                // Already groomed — the operator chooses whether to
-                // re-decompose (appends new stories/tasks).
-                _actionError = $"Already groomed: {await resp.Content.ReadAsStringAsync()}";
-                _offerForceGroom = true;
+                var conflict = await resp.Content.ReadFromJsonAsync<JsonElement>();
+                _offerForceGroom = GetProp(conflict, "error") == "spec_already_groomed";
+                _actionError = _offerForceGroom
+                    ? "This specification was already groomed. Re-decomposing may append new planned work."
+                    : "Technical planning is already queued or running, or its state changed. Refresh before taking another action.";
                 return;
             }
             if (!resp.IsSuccessStatusCode)
