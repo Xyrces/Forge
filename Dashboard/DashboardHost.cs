@@ -78,6 +78,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private int _port;
 
     private readonly Agents.InitiativeApprovalService? _initiativeApprovals;
+    private readonly string? _mutationTokenFile;
 
     public DashboardHost(
         DashboardOptions options,
@@ -135,8 +136,10 @@ public sealed class DashboardHost : IAsyncDisposable
         Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null,
         Core.Control.IDurableBudgetStore? budgetStore = null,
         string? budgetDatasetId = null,
-        Agents.InitiativeApprovalService? initiativeApprovals = null)
+        Agents.InitiativeApprovalService? initiativeApprovals = null,
+        string? mutationTokenFile = null)
     {
+        _mutationTokenFile = mutationTokenFile;
         _initiativeApprovals = initiativeApprovals;
         _options = options;
         _headroom = headroom;
@@ -245,7 +248,9 @@ public sealed class DashboardHost : IAsyncDisposable
         // entry; otherwise the legacy Hostname:Port wins.
         var publicBaseUrl = ResolveBaseUrl();
         var localBaseAddress = ResolveLocalBaseAddress();
-        builder.Services.AddForgeUI(new Uri(publicBaseUrl), new Uri(localBaseAddress));
+        var mutationAuthentication = _mutationTokenFile is null ? null
+            : new DashboardMutationAuthentication(await File.ReadAllTextAsync(_mutationTokenFile, cancellationToken));
+        builder.Services.AddForgeUI(new Uri(publicBaseUrl), new Uri(localBaseAddress), mutationAuthentication);
 
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
@@ -303,6 +308,7 @@ public sealed class DashboardHost : IAsyncDisposable
         }
 
  _app = builder.Build();
+        mutationAuthentication?.Protect(_app);
         _app.Urls.Clear();
         // Kestrel already binds the configured endpoints via the
         // ConfigureKestrel calls above. Clearing Urls prevents the

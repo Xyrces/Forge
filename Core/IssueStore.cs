@@ -176,6 +176,13 @@ public interface IIssueStore
     Task<IssueEdge> AddDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
     Task<bool> RemoveDependencyAsync(string blockerId, string blockedId, IssueDepKind kind, CancellationToken ct = default);
     Task<IReadOnlyList<IssueEdge>> DependenciesAsync(string id, CancellationToken ct = default);
+    async Task<IReadOnlyList<IssueEdge>> IncomingDependenciesAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default)
+    {
+        var edges = new List<IssueEdge>();
+        foreach (var id in blockedIds.Distinct(StringComparer.Ordinal))
+            edges.AddRange((await DependenciesAsync(id, ct)).Where(e => e.BlockedId == id && e.Kind == IssueDepKind.Blocks));
+        return edges;
+    }
     /// <summary>
     /// True iff at least one open-blocker (kind=Blocks, blocker status in
     /// {Pending, InProgress, Blocked, Failed}) exists. <c>Completed</c> /
@@ -2615,6 +2622,23 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 CreatedAt: ParseDate(rd.GetString(3))));
         }
         return list;
+    }
+
+    public async Task<IReadOnlyList<IssueEdge>> IncomingDependenciesAsync(IReadOnlyCollection<string> blockedIds, CancellationToken ct = default)
+    {
+        var result = new List<IssueEdge>();
+        await using var conn = await _db.OpenAsync(ct);
+        foreach (var batch in blockedIds.Distinct(StringComparer.Ordinal).Chunk(500))
+        {
+            using var cmd = conn.CreateCommand();
+            var parameters = batch.Select((id, index) => "@id" + index).ToArray();
+            cmd.CommandText = $"SELECT blocker_id,blocked_id,created_at FROM {T("issue_dep")} WHERE kind='blocks' AND blocked_id IN ({string.Join(",", parameters)})";
+            for (var i = 0; i < batch.Length; i++) cmd.AddParam(parameters[i], batch[i]);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                result.Add(new(reader.GetString(0), reader.GetString(1), IssueDepKind.Blocks, ParseDate(reader.GetString(2))));
+        }
+        return result;
     }
 
     public async Task<bool> IsBlockedAsync(string id, CancellationToken ct = default)

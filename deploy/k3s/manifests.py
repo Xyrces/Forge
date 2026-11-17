@@ -6,10 +6,28 @@ def obj(kind, name, **extra):
     return {"apiVersion": "v1", "kind": kind, "metadata": {"name": name}, **extra}
 
 
+def worker_network_policy():
+    # Only public destinations plus the cluster DNS pods. Do not allow entire
+    # cluster/private CIDRs merely to reach DNS: that exposes operator APIs.
+    return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": {"name": "forge-worker-public-egress"}, "spec": {
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "forge-worker"}},
+                "policyTypes": ["Egress"], "egress": [
+                    {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                             "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+                     "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+                    {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": [
+                        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+                        "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+                        "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+                        "224.0.0.0/4", "240.0.0.0/4"]}},
+                            {"ipBlock": {"cidr": "2000::/3", "except": ["2001:db8::/32"]}}]}]}}
+
+
 def foundation(namespace, storage="40Gi", pull_secret=None):
     items = [obj("Namespace", namespace),
              obj("PersistentVolumeClaim", "forge-state", spec={"accessModes": ["ReadWriteOnce"],
-                 "resources": {"requests": {"storage": storage}}})]
+                 "resources": {"requests": {"storage": storage}}}), worker_network_policy()]
     for account in ("controller", "worker", "release", "initialize"):
         service_account = obj("ServiceAccount", "forge-" + account,
                               automountServiceAccountToken=account in ("controller", "release"))

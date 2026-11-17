@@ -252,7 +252,7 @@ public sealed class SprintAssembler
                 // Finish the current objective. Only groomed ad-hoc work with
                 // an actual blocks edge into this sprint may join automatically;
                 // urgency and requeue metadata do not interrupt the sprint.
-                await InjectAdHocAsync(active, projectId, issues, sprints, specs, ct);
+                await InjectPrerequisitesAsync(active, projectId, issues, sprints, specs, ct);
                 await WriteBuildStateAsync(issues, new SprintBuildState(
                     Phase: "running",
                     Reason: heldMembers.Count == 0
@@ -320,16 +320,16 @@ public sealed class SprintAssembler
             return;
         }
 
-        // Follow-up grooming gate (operator model 2026-07-31): the
-        // next sprint does NOT start until the materialized
-        // follow-ups are resolved (groomed or closed by the ad-hoc
-        // groomer pass).
+        var assembled = await AssembleNextAsync(projectId, issues, sprints, specs, ct);
+
+        // Follow-up grooming is visible when no coherent candidate can start: the
+        // unrelated ungroomed follow-ups do not hold ready coherent work.
         var pendingFollowUpRows = (await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct))
             .Where(i => i.GetMetadata("followUpOf") is not null
                 && !string.Equals(i.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase))
             .OrderBy(i => i.CreatedAt)
             .ToList();
-        if (pendingFollowUpRows.Count > 0)
+        if (assembled is null && pendingFollowUpRows.Count > 0)
         {
             var reason = $"Sprint assembly waiting: {pendingFollowUpRows.Count} materialized follow-ups awaiting grooming";
             _logger.LogInformation("{Reason} (project={Project})", reason, projectId);
@@ -362,7 +362,6 @@ public sealed class SprintAssembler
             return;
         }
 
-        var assembled = await AssembleNextAsync(projectId, issues, sprints, specs, ct);
         if (assembled is not null)
         {
             await WriteBuildStateAsync(issues, new SprintBuildState(
@@ -728,7 +727,7 @@ public sealed class SprintAssembler
     /// requeue metadata, and follow-up provenance alone are not an interruption.
     /// Ordinary follow-ups retain their later-sprint materialization policy.
     /// </summary>
-    private async Task InjectAdHocAsync(
+    private async Task InjectPrerequisitesAsync(
         SprintRecord active, string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
         var pending = await issues.ListAsync(new IssueFilter { Status = IssueStatus.Pending }, ct);
@@ -740,9 +739,7 @@ public sealed class SprintAssembler
         foreach (var task in pending)
         {
             if (AgentTaskTypes.IsContainer(task.Type) || task.Type == AgentTaskTypes.PrWatch) continue;
-            if (task.ParentIssueId is not null) continue;   // spec-chain work flows through assembly
             if (memberIds.Contains(task.Id)) continue;
-            if (!string.Equals(task.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)) continue;
 
             if (!blockersOfMembers.Contains(task.Id) || !eligibleIds.Contains(task.Id)) continue;
             const string reason = "unblocks ongoing work";
@@ -750,6 +747,7 @@ public sealed class SprintAssembler
             {
                 var snapshot = await validator.ValidateAsync([task.Id], ct, activating: false);
                 await sprints.AddValidatedPrerequisiteAsync(active.Id, snapshot, ct);
+                memberIds.UnionWith(snapshot.TaskIds);
             }
             catch (InvalidOperationException ex)
             {
@@ -758,7 +756,7 @@ public sealed class SprintAssembler
                 continue;
             }
             _logger.LogInformation(
-                "Sprint {SprintId}: injected ad-hoc task {TaskId} ({Title}) — {Reason}",
+                "Sprint {SprintId}: injected prerequisite task {TaskId} ({Title}) — {Reason}",
                 active.Id, task.Id, task.Title, reason);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
                 task.Id, $"Injected into active sprint '{active.Name}' — {reason}"));
@@ -841,13 +839,11 @@ public sealed class SprintAssembler
     /// <summary>
     /// The assembly candidate pool: Pending, non-container, non-watch,
     /// not already linked to an ACTIVE sprint (never double-stage work
-    /// that's already on a live board), no open blockers (operator
-    /// report 2026-07-31: a task with an OPEN blocker must not
-    /// assemble — without its blocker in the same sprint it sits
-    /// undispatchable forever and the sprint can never complete;
-    /// observed live: task-348 stalled Sprint 15), and either
+    /// that's already on a live board), and either
     /// spec-chained or groomed ad-hoc (no task enters a sprint
-    /// without grooming). Completed-sprint membership is NOT
+    /// without grooming). Prerequisites are validated and included as a
+    /// dependency closure before activation; dispatch readiness is separate.
+    /// Completed-sprint membership is NOT
     /// disqualifying: a sprint only completes when every member is
     /// terminal, so a Pending task whose sole membership is a
     /// Completed sprint is definitionally an operator requeue —
@@ -874,8 +870,6 @@ public sealed class SprintAssembler
                 && !sprinted.Contains(i.Id))
             .ToList();
 
-        var openBlockers = await issues.OpenBlockersAsync(eligible.Select(i => i.Id).ToList(), ct);
-        eligible = eligible.Where(t => !openBlockers.ContainsKey(t.Id)).ToList();
 
         return eligible
             .Where(t => ResolveGroupKey(t, byId) != AdHocGroupName
@@ -976,46 +970,67 @@ public sealed class SprintAssembler
         // FIRST (the group's highest-priority member), then oldest.
         // Ad-hoc work participates in the same ordering — no longer
         // forced behind spec groups.
-        var chosenKey = groupOrder
-            .OrderBy(k => groups[k].Min(t => t.Priority))
-            .ThenBy(k => described[k].CreatedAt)
-            .First();
-        var chosen = groups[chosenKey];
-        var (name, goal, _) = described[chosenKey];
-
-        // Rootless ad-hoc assembly is ALWAYS a solo sprint (highest
-        // priority first, then oldest) — never a bundle. Follow-up
-        // themes pack up to MaxThemeTasks per sprint (priority, then
-        // oldest); the remainder stays eligible for the next sprint.
-        if (chosenKey == AdHocGroupName)
+        var validator = new SprintActivationValidator(issues, sprints, specs, projectId, _gates);
+        // One shared graph/spec read context filters unavailable roots. Avoid
+        // rereading the entire backlog once for each rejected candidate.
+        var validRoots = await validator.PreviewSnapshotsAsync(eligible.Select(t => t.Id), eligible.Count, ct);
+        var candidates = groupOrder.SelectMany(key => key == AdHocGroupName
+            ? groups[key].Select(task => (Key: key, Tasks: new List<IssueRecord> { task }))
+            : new[] { (Key: key, Tasks: groups[key]) })
+            .OrderBy(candidate => candidate.Tasks.Min(t => t.Priority))
+            .ThenBy(candidate => candidate.Key == AdHocGroupName
+                ? candidate.Tasks[0].CreatedAt : described[candidate.Key].CreatedAt);
+        foreach (var candidate in candidates)
         {
-            var single = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First();
-            chosen = new List<IssueRecord> { single };
-            name = single.Title;
-            goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
-                ?? $"Complete {single.Id}: {single.Title}";
-        }
-        else if (chosenKey.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
-            && chosen.Count > MaxThemeTasks)
-        {
-            chosen = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt)
-                .Take(MaxThemeTasks).ToList();
-        }
+            var chosenKey = candidate.Key;
+            var chosen = candidate.Tasks;
+            var (name, goal, _) = described[chosenKey];
 
-        var snapshot = await new SprintActivationValidator(issues, sprints, specs, projectId, _gates)
-            .ValidateAsync(chosen.Select(t => t.Id).ToArray(), ct);
-        var start = DateTime.UtcNow;
-        var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(
-            Name: name, Goal: goal, StartDate: start, EndDate: start.Add(SprintDuration),
-            Status: SprintStatus.Active), snapshot, ct);
+            // Rootless ad-hoc assembly selects one outcome root (highest
+            // priority first, then oldest), plus its necessary prerequisites. Follow-up
+            // themes pack up to MaxThemeTasks per sprint (priority, then
+            // oldest); the remainder stays eligible for the next sprint.
+            if (chosenKey == AdHocGroupName)
+            {
+                var single = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt).First();
+                chosen = new List<IssueRecord> { single };
+                name = single.Title;
+                goal = single.Description is { Length: > 500 } d ? d[..500] : single.Description
+                    ?? $"Complete {single.Id}: {single.Title}";
+            }
+            else if (chosenKey.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)
+                && chosen.Count > MaxThemeTasks)
+            {
+                chosen = chosen.OrderBy(t => t.Priority).ThenBy(t => t.CreatedAt)
+                    .Take(MaxThemeTasks).ToList();
+            }
 
-        _logger.LogInformation(
-            "Sprint {SprintId} assembled + activated: '{Name}' with {Tasks} task(s) (group={Group})",
-            sprint.Id, name, chosen.Count, chosenKey);
-        _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
-            null, $"Sprint '{name}' started with {chosen.Count} task(s)",
-            new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = chosen.Count }));
-        return (sprint.Id, name, chosen.Count);
+            if (chosen.Any(task => !validRoots.ContainsKey(task.Id))) continue;
+
+            SprintActivationSnapshot snapshot;
+            try
+            {
+                snapshot = await validator.ValidateAsync(chosen.Select(t => t.Id).ToArray(), ct);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogInformation(ex, "Sprint candidate {Group} has an unavailable dependency closure; evaluating the next coherent candidate", chosenKey);
+                continue;
+            }
+            var start = DateTime.UtcNow;
+            var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(
+                Name: name, Goal: goal, StartDate: start, EndDate: start.Add(SprintDuration),
+                Status: SprintStatus.Active), snapshot, ct);
+
+            _logger.LogInformation(
+                "Sprint {SprintId} assembled + activated: '{Name}' with {Tasks} task(s) (group={Group})",
+                sprint.Id, name, snapshot.TaskIds.Count, chosenKey);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
+                null, $"Sprint '{name}' started with {snapshot.TaskIds.Count} task(s)",
+                new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = snapshot.TaskIds.Count }));
+            return (sprint.Id, name, snapshot.TaskIds.Count);
+        }
+        return null;
     }
 
     /// <summary>
