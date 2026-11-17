@@ -16,7 +16,7 @@ Grooming uses its existing model call to publish typed `sprintOutcome` metadata:
 
 A sprint is a small independently demonstrable outcome within approved scope. An epic/spec boundary is provenance, not a mandatory sprint boundary: complementary tasks from different approved sources may share a sprint when their explicit criterion mappings describe the same outcome.
 
-**Ten engineering tasks is the configurable ceiling, not a target.** It includes necessary prerequisites and applies uniformly. The selector prefers a small complete delivery unit. A soft preference may add naturally independent, explicitly related units when configured role capacity benefits—for example three ready same-goal tasks for three CoreDev slots. It does not pad to ten, manufacture splits, include unrelated work, or count a sequential chain as parallel capacity. Current occupied slots are not a planning input. Task counts do not estimate reliable effort or authorize spending; the durable budget ledger remains the paid-call authority.
+**Ten engineering tasks is the configurable ceiling, not a target.** It includes necessary prerequisites and applies uniformly. The selector prefers a small complete delivery unit. A soft preference may add naturally independent, explicitly related units up to the project's configured implementation capacity, respecting each role's limit. There is no fixed task-count minimum. It does not pad to ten, manufacture splits, include unrelated work, or count a sequential chain as parallel capacity. Current occupied slots are not a planning input. Task counts do not estimate reliable effort or authorize spending; the durable budget ledger remains the paid-call authority.
 
 `SprintPlanBuilder` reads bounded projections: at most 100 discovery candidates and 100 explicitly same-outcome candidates, followed by targeted dependency/ancestor reads. A keyset cursor advances discovery beyond ineligible old work. Deterministic results are cached by observed candidate, snapshot and configured-capacity inputs. This is an explicit bounded window, not exhaustive optimization of the entire backlog. No additional planner model call is introduced.
 
@@ -26,8 +26,8 @@ Grooming now receives the owning project's current CoreDev and ClientDev
 slot limits on each run, using the same role defaults as execution. Read-only
 QA and Reviewer slots do not count as implementation task capacity, including
 in the selector's soft parallelism score. The prompt describes a soft
-parallel goal: three suitable workers favor three genuinely independent tasks
-when the approved outcome supports them; fewer tasks remain valid. This closes
+parallel goal derived from those configured limits, when the approved outcome
+supports independent work; fewer tasks remain valid. This closes
 the earlier gap where the selector knew capacity but the grooming model did not.
 
 Every executable member must contribute to a genuine `MergedAndVerified`

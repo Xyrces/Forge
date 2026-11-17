@@ -64,7 +64,8 @@ public static class TaskSituation
                     case "AgentRunning" or "ReworkRunning":
                         return new Situation("agent running", "info");
                     case "MergeReady":
-                        return new Situation("approved + CI green · merging", "info");
+                        // Either ReviewApproved or CiGreen can enter this state; the watcher still checks both and the merge gate.
+                        return new Situation("awaiting final merge checks", "info");
                     case "ParkedInfra":
                         return new Situation("parked · base-branch CI red, waits for recovery", "warn");
                     case "PROpen":

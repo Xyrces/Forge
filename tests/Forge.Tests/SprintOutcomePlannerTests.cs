@@ -51,17 +51,19 @@ public sealed class SprintOutcomePlannerTests
         Assert.Contains(result.Snapshot.Plan!.Deferred, d => d.TaskId == b.Id);
         Assert.True(result.Snapshot.Plan.HasValidHash);
     }
-    [Fact]
-    public async Task NaturalIndependentUnitsUseThreeSlotsButSequentialUnitsDoNotCountAsParallel()
+    [Theory]
+    [InlineData(1, 1, 3)]
+    [InlineData(3, 3, 1)]
+    [InlineData(4, 4, 0)]
+    [InlineData(6, 4, 0)]
+    public async Task NaturalIndependentUnitsFollowConfiguredCapacityWithoutPadding(int slots, int selected, int deferred)
     {
         await using var issues = Store(); var scope = await ApprovedSprintFixture.Scope(issues);
         var tasks = new List<IssueRecord>();
         for (var i = 0; i < 4; i++) { var t = await ApprovedSprintFixture.Task(issues); tasks.Add(t); await ApprovedSprintFixture.Bind(issues, scope, [t], criterion: "c" + i); }
-        var result = await Planner(issues, slots: 3).BuildAsync();
-        Assert.Equal(3, result.Snapshot!.TaskIds.Count);
-        Assert.Single(result.Snapshot.Plan!.Deferred);
-        var oneSlot = await Planner(issues, slots: 1).BuildAsync();
-        Assert.Single(oneSlot.Snapshot!.TaskIds);
+        var result = await Planner(issues, slots: slots).BuildAsync();
+        Assert.Equal(selected, result.Snapshot!.TaskIds.Count);
+        Assert.Equal(deferred, result.Snapshot.Plan!.Deferred.Count);
     }
     [Fact]
     public async Task ExpansionKeepsValidatedDeliveryRootWhenRequiredListStartsWithPrerequisite()

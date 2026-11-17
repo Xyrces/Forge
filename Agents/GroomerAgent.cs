@@ -720,7 +720,7 @@ public sealed class GroomerAgent
         foreach (var role in workers)
             sb.AppendLine($"- {role}: {Math.Max(0, Forge.Configuration.DefaultProjectRoles.MaxFor(roles, role))} concurrent workers");
         sb.AppendLine("Soft parallel goal: where the approved outcome naturally supports it, plan genuine independent tasks that can use these workers concurrently.");
-        sb.AppendLine("For example, three suitable available workers favor three genuinely independent tasks, not an artificial three-task minimum.");
+        sb.AppendLine("Derive this soft goal from the configured limits above: keep each implementation role productively occupied where coherent, independent approved work permits it. There is no fixed task-count minimum.");
         sb.AppendLine("Use fewer tasks when that is the coherent solution; never pad work, invent QA work, or remove real prerequisites to fill slots. QA and Reviewer capacity are not implementation capacity.");
         sb.AppendLine("QA verifies an existing PR in the optional watch lane; it is not an extra implementation task to fill a parallel slot. Assign genuine automated test-code changes to CoreDev or ClientDev within their editing territory, not a standalone QA/reviewer task that cannot produce its own merged implementation.");
         sb.AppendLine("Ten engineering tasks including prerequisites is a ceiling, never a fill target. Story/task tool caps still apply; they are maxima, not targets.");
