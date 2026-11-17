@@ -1646,7 +1646,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         }
 
         M040InitiativeApproval.Create(conn, d);
-        M041SprintCompletion.Create(conn, d);
+        if (_db.Profile == ForgeSchemaProfile.Workload) M041SprintCompletion.Create(conn, d);
 
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the

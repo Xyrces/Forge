@@ -6,7 +6,10 @@ public sealed class M041SprintCompletion : ISqlServerMigration
 {
     public int Version => 41;
     public string Name => "sprint-completion";
-    public void Up(DbConnection connection, SqlServerDialect dialect, ForgeSchemaProfile profile) => Create(connection, dialect);
+    public void Up(DbConnection connection, SqlServerDialect dialect, ForgeSchemaProfile profile)
+    {
+        if (profile == ForgeSchemaProfile.Workload) Create(connection, dialect);
+    }
 
     public static void Create(DbConnection connection, ISqlDialect d)
     {

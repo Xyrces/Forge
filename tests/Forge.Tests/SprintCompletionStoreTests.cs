@@ -72,5 +72,12 @@ public sealed class SprintCompletionStoreTests : IDisposable
         await Store.BindDeploymentAsync(receipt.Id, "candidate-one");
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.BindDeploymentAsync(receipt.Id, "candidate-two"));
     }
+    [Fact]
+    public void RegistryMigrationDoesNotTouchWorkloadTables()
+    {
+        using var closed = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=:memory:");
+        new Forge.Core.Db.M041SprintCompletion().Up(closed, new Forge.Core.Db.SqlServerDialect("core"), Forge.Core.Db.ForgeSchemaProfile.Core);
+        Assert.Equal(System.Data.ConnectionState.Closed, closed.State);
+    }
     public void Dispose() => issues.Dispose();
 }
