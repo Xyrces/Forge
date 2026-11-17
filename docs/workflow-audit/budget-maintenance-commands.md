@@ -1,5 +1,7 @@
 # Budget39 maintenance command plan
 
+The supervised execution subsequently completed; see [live qualification](budget-live-qualification.md). This document preserves the reviewed command plan and its unattended-upgrade limitations.
+
 **Prepared only; none of these live commands were executed by this task.** Root/operator owns execution after both immutable image receipts and release approval. This plan restores the bridge on SQL39 first, then uses the normal deployment API to release the budget39 image. It preserves the existing release journal and slot-selection protocol.
 
 ## Inputs and preflight

@@ -1,5 +1,7 @@
 # Schema 39 budget release: qualified bridge plan
 
+Execution is now recorded in [the live qualification report](budget-live-qualification.md). The planning observations below describe the pre-migration baseline; they are not the current deployment status.
+
 Planning only, 2026-11-17. No production code or deployment changes were made for this review. Baseline is `8460dde0742640bb333c4540a255e1b7a3f4b2ce` (schema 38); schema-39 billing changes referenced below are the concurrent, uncommitted budget work. Qualification and release steps below are proposed, not accomplished.
 
 ## Decision
