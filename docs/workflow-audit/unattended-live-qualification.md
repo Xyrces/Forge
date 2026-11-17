@@ -179,3 +179,79 @@ retain their history, and leave actual operator evidence pending. It must
 reject stale previews, ambiguous destinations, prior execution or admission,
 and partial writes. No paid grooming retry or fabricated completion evidence
 is needed. This checkpoint is still a blocked pilot, not end-to-end success.
+
+## Acceptance repair deployed and the real sprint resumed
+
+PR #135 merged as `08402d915b9d276a3d8bc4be706dbb07f6f095ee`; the
+additional serialized-binding bound in PR #136 merged as
+`1bf875097b12b522a746f97aeda84060ab108152`. The released source is
+`b28eeb123d85146ce9d31d5dbeef7b0ea8ca0f13`, qualified by Linux CI
+`44160694581` (2,067 .NET tests, 44 deployment tests and the offline workflow)
+and image run `44160701942`. Its immutable image is
+`ghcr.io/xyrces/forge@sha256:cb2ae1436d7a4920df83b967027e0d9ef3adda99f6bfa6f50f4db41d7d32607b`.
+
+Normal release `deploy-ef05cac8e2484c078ed01d05e837be60` committed in
+51 seconds. Green controller `5fd25361-27ab-47b4-8186-5631bf1bb952`
+became active at epoch 28 on the same schema-41 dataset. The running artifact
+matched the receipt; read-only deployed preflight passed and all three
+spending-table snapshot hashes were unchanged. The managed checkout advanced
+to the PR #136 merge. Sprint admission remained held throughout the release.
+
+The actual live specification UI then previewed and applied the correction.
+Independent readback confirmed all seven criteria and their original scope
+objects were unchanged, both implementation tasks remained Pending, and both
+QA rows were Closed with Cancelled disposition and their original mappings.
+The total set of nine issue IDs was unchanged; no PR/branch or delivery evidence
+was fabricated. Each of the four affected rows gained one audit event and the
+same version-3/run-1 repair reference. The proposal's revision-1 approval hash,
+original approval timestamp, completed ingestion and Groomed v3 specification
+were preserved.
+
+The Flow UI released sprint admission at approximately 19:48 UTC. Forge
+automatically assembled `sprint-7bf2555ec5` with exactly `task-2` and
+`client-1`. Both reached AgentRunning concurrently in separate Kubernetes
+Jobs, one CoreDev and one ClientDev. The live Sprints board showed Running 2,
+Queued 0, and explicitly stated that no completion evidence existed yet.
+This proves real assembly and parallel dispatch after the original intake,
+design and grooming; implementation, review, deployment and final operator
+acceptance were still in progress at this checkpoint.
+
+## Worker phase timeout exposed by the live pilot
+
+The first ClientDev attempt exhausted its bounded plan revisions: the task's
+required documentation destination was outside its role territory, and the
+critic then rejected an alternative location. The next attempt obtained an
+approved plan and filed `task-3` for authorized documentation collation.
+Its early sprint membership is visibility only. Grooming completed at about
+20:01 UTC, and an audited prerequisite amendment is still required before it
+can dispatch; pending visibility is not execution permission.
+
+CoreDev passed its in-session build and full test suite, then passed the
+independent worker build. At approximately 20:03 UTC its outer 15-minute
+deadline expired during independent verification. ClientDev reached the same
+outer deadline at about 20:05 UTC. Neither had published a PR. Read-only
+inspection confirmed the backend's modified/untracked files remained in its
+worktree and the UI's local commit `c4a90ff3b1de08dfc359266673e17ac8b8340f17`
+was preserved. No manual publication or success state was substituted.
+
+The source correction separates the configured model-work deadline from
+independent verification and removes the duplicate automatic full-suite run
+only in distributed workers. Independent exact-tree verification remains
+mandatory, with its existing per-command timeout and Kubernetes attempt
+ceiling. Legacy in-session verification behavior is retained. The timeout
+recovery path also needs fresh failure timestamps and normal lifecycle
+handling instead of leaving a Pending row with stale AgentRunning metadata.
+
+At 20:06 UTC the budget recorded $1.722393 in newer usage estimates plus the
+operator-reported $1.01 historical charge, no outstanding holds or uncertain
+requests, and $22.267607 remaining under the $25 ceiling. Usage-derived amounts
+are estimates, not an assertion of a reconciled billing charge.
+
+The dashboard review also found no UI control for recording the operator
+evidence required by the completion API. A new source-bound observation form
+was exercised against an explicitly synthetic offline completion: the draft
+survived refresh, recording saved the exact note with its hash, the view became
+evidence-satisfied, and another refresh retained that result. This validates
+the control, not the live pilot's visual or running-image acceptance. Long
+sprint goals were also checked at desktop and 390-pixel widths with keyboard
+expansion, retaining the full criteria text.
