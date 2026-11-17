@@ -8,7 +8,7 @@ namespace Forge.Orchestrator;
 /// <summary>
 /// The state-driven PR watch sweep, extracted from OrchestratorAgent
 /// for the message-driven watch pipeline: the SweepTick(watch)
-/// consumer runs <see cref="SweepProjectAsync"/> (15m backstop,
+/// consumer runs <see cref="SweepProjectAsync"/> (one-minute polling,
 /// GitHub truth), and the PrOpened consumer calls
 /// <see cref="TryLaunchBackgroundReviewAsync"/> for the immediate
 /// review fast path. Owns the in-flight review registry and the

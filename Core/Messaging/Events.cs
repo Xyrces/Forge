@@ -197,7 +197,7 @@ public enum SweepKind
 }
 
 /// <summary>
-/// Periodic backstop tick (15m). Triggered work stays correct if every
+/// Periodic truth tick (watch: 1m; planning backstop: 15m). Work stays correct if every
 /// hint event is lost — ticks re-derive everything from DB/GitHub truth.
 /// </summary>
 public sealed record SweepTick : IForgeEvent
