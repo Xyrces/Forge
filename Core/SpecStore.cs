@@ -439,6 +439,11 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var now = DateTime.UtcNow;
         var current = await GetAsync(id, ct)
             ?? throw new InvalidOperationException($"Spec {id} not found");
+        if (status == SpecStatus.Shipped)
+        {
+            if (current.Status == SpecStatus.Shipped) return current; // Historical read/idempotence compatibility only.
+            throw new InvalidOperationException("Delivery must be established by sprint completion and deployment evidence; specifications cannot be manually marked Shipped.");
+        }
         SpecStatusTransitions.EnsureAllowed(current.Status, status);
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();

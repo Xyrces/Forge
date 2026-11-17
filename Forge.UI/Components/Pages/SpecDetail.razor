@@ -125,10 +125,7 @@
                         @(_acting ? "Working…" : "Groom")
                     </button>
                 }
-                @if (ActionFlag("canShip"))
-                {
-                    <button class="btn btn--small btn--primary" @onclick='() => SetStatusAsync("Shipped")' disabled="@_acting">Ship</button>
-                }
+
             </div>
             @if (!string.IsNullOrEmpty(ActionProp("reason")))
             {

@@ -285,23 +285,18 @@ public class DesignHygieneCheckerTests : IDisposable
     {
         // Spec is in Shipped; Designer shouldn't process it.
         var spec = await CreateSpecAsync(HealthyBody, SpecStatus.Draft);
-        // Walk the chain: Draft -> ReadyForDesign -> Designed -> Grooming -> Groomed -> Shipped
-        // (some transitions require valid intermediates; we walk the chain)
-        try
+        // Seed a historical label explicitly: new writes cannot claim delivery without evidence.
+        await using (var connection = await _issues.Db.OpenAsync())
+        using (var command = connection.CreateCommand())
         {
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Designed);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed);
-            await _specs.SetStatusAsync(spec.Id, SpecStatus.Shipped);
+            command.CommandText = "UPDATE spec SET status='Shipped' WHERE id=@id";
+            var parameter = command.CreateParameter(); parameter.ParameterName = "@id"; parameter.Value = spec.Id;
+            command.Parameters.Add(parameter);
+            await command.ExecuteNonQueryAsync();
         }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException($"Walk failed: {ex.GetType().Name}: {ex.Message}", ex);
-        }
+        var historical = await _specs.SetStatusAsync(spec.Id, SpecStatus.Shipped);
+        Assert.Equal(SpecStatus.Shipped, historical.Status);
 
-        // Re-fetch: the local `spec` is stale; the walk advanced its
-        // status. The hygiene checker should still see Shipped.
         var fresh = (await _specs.GetAsync(spec.Id))!;
         Assert.Equal(SpecStatus.Shipped, fresh.Status);
 

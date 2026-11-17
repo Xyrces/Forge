@@ -313,6 +313,8 @@ public static class SpecEndpoints
                 if (op == "set_status" && root.TryGetProperty("status", out var stEl)
                     && Enum.TryParse<SpecStatus>(stEl.GetString() ?? "", ignoreCase: true, out var newStatus))
                 {
+                    if (newStatus == SpecStatus.Shipped)
+                        return Results.Conflict(new { error = "delivery_evidence_required", detail = "Delivery is shown by sprint completion and deployment evidence, not a manual Shipped label." });
                     if (newStatus is SpecStatus.Grooming or SpecStatus.Groomed)
                         return Results.Conflict(new { error = "grooming_owned_transition", detail = "Use grooming or its explicit retry action; completion requires validated decomposition." });
                     var updated = await owned.Value.Specs.SetStatusAsync(id, newStatus, ctx.RequestAborted);
