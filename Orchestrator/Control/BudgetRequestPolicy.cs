@@ -73,24 +73,11 @@ public static class BudgetRequestPolicy
             // Text/function-only Forge pilot. Images and hosted tools need their own reviewed cost bounds.
             if (messages.SelectMany(m => m.Contents).Any(c => c is DataContent or UriContent))
                 throw new InvalidOperationException("Media inputs are not enabled in the Forge-first spending profile.");
-            // This size estimate rejects obviously excessive explicit payloads;
-            // it is NOT the liability bound. RawRepresentation may carry opaque
-            // provider reasoning/history omitted by generic JSON serialization.
-            long explicitInputBytes = 4096;
-            explicitInputBytes += System.Text.Encoding.UTF8.GetByteCount(chatOptions?.Instructions ?? "");
-            if (chatOptions?.ResponseFormat is { } format)
-                explicitInputBytes += JsonSerializer.SerializeToUtf8Bytes(format, format.GetType()).LongLength;
-            foreach (var message in messages)
-                explicitInputBytes += JsonSerializer.SerializeToUtf8Bytes(message).LongLength;
-            foreach (var tool in chatOptions?.Tools ?? [])
-            {
-                if (tool is not AIFunction function)
-                    throw new InvalidOperationException("Hosted tools require an explicit additional spending policy.");
-                explicitInputBytes += JsonSerializer.SerializeToUtf8Bytes(function.JsonSchema).LongLength
-                    + System.Text.Encoding.UTF8.GetByteCount(function.Name + function.Description) + 256;
-            }
-            if (explicitInputBytes > price.MaximumInputTokens)
-                throw new InvalidOperationException("Explicit input exceeds the pilot payload size limit.");
+            // Byte size is a transport concern, not a token estimate. The native
+            // handler bounds the complete serialized body (including opaque replay)
+            // before exact counting; only that count controls token admission.
+            if (chatOptions?.Tools?.Any(tool => tool is not AIFunction) == true)
+                throw new InvalidOperationException("Hosted tools require an explicit additional spending policy.");
             return price;
         }
 

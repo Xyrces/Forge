@@ -55,6 +55,10 @@ internal sealed class ResponsesInputCountingHandler(HttpClient transport, bool o
         "include", "metadata", "safety_identifier", "user", "service_tier", "temperature", "top_p", "top_logprobs",
         "max_tool_calls", "stream_options", "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention"];
 
+    // Operational wire/memory bound, independent of token context and dollars.
+    // Includes SDK-only encrypted replay and JSON escaping. Never estimates tokens.
+    internal const int MaximumRequestBodyBytes = 16 * 1024 * 1024;
+
     internal Func<byte[], CancellationToken, Task<byte[]>>? CountAsync { get; set; }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -67,7 +71,7 @@ internal sealed class ResponsesInputCountingHandler(HttpClient transport, bool o
             || request.RequestUri.Host != "api.openai.com" || !request.RequestUri.IsDefaultPort
             || request.RequestUri.Query.Length != 0 || request.Content is null)
             throw new InvalidOperationException("Unqualified Responses generation endpoint.");
-        var body = await request.Content.ReadAsByteArrayAsync(ct);
+        var body = await ReadBoundedBodyAsync(request.Content, ct);
         var countBody = ProjectCountBody(body, scope, out var outputTokens);
         var counter = CountAsync ?? throw new InvalidOperationException("Responses token counter is unavailable.");
         var counted = await counter(countBody, ct);
@@ -79,6 +83,24 @@ internal sealed class ResponsesInputCountingHandler(HttpClient transport, bool o
         // Freeze what was counted. No subsequent SDK/model serializer can change it.
         ct.ThrowIfCancellationRequested();
         return await ForwardAsync(request, body, ct);
+    }
+
+    internal static async Task<byte[]> ReadBoundedBodyAsync(HttpContent content, CancellationToken ct)
+    {
+        if (content.Headers.ContentLength is > MaximumRequestBodyBytes)
+            throw new InvalidOperationException("Responses request exceeds the 16 MiB serialized payload limit.");
+        await using var source = await content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[16 * 1024];
+        int read;
+        while ((read = await source.ReadAsync(chunk, ct)) != 0)
+        {
+            if (buffer.Length + read > MaximumRequestBodyBytes)
+                throw new InvalidOperationException("Responses request exceeds the 16 MiB serialized payload limit.");
+            await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
+        }
+        ct.ThrowIfCancellationRequested();
+        return buffer.ToArray();
     }
 
     private async Task<HttpResponseMessage> ForwardAsync(HttpRequestMessage original, byte[]? frozenBody, CancellationToken ct)
