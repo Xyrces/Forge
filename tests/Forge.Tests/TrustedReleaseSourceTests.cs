@@ -74,6 +74,8 @@ public sealed class TrustedReleaseSourceTests
         Assert.Equal(Sha, result.Sha);
         Assert.Contains("124", result.Evidence);
         Assert.DoesNotContain(new string('c', 40), result.Evidence);
+        Assert.Equal("2022-11-28", fixture.Api.Requests.Single(r => r.Uri.AbsolutePath.EndsWith("/pulls/124")).ApiVersion);
+        Assert.All(fixture.Api.Requests.Where(r => !r.Uri.AbsolutePath.Contains("/pulls/")), r => Assert.Equal("2026-03-10", r.ApiVersion));
     }
 
     [Theory]
@@ -88,6 +90,23 @@ public sealed class TrustedReleaseSourceTests
         var members = reverse ? new[] { Member(125), Member(124) } : new[] { Member(124), Member(125) };
         var result = await fixture.Source.ObserveMergedFrontierAsync(Project, members, default);
         Assert.Equal(new string('d', 40), result.Sha);
+    }
+
+    [Theory]
+    [InlineData("missing-merge")]
+    [InlineData("null-merge")]
+    [InlineData("invalid-merge")]
+    [InlineData("numeric-merge")]
+    [InlineData("unmerged")]
+    [InlineData("foreign-base")]
+    [InlineData("foreign-repo")]
+    public async Task MissingOrUnqualifiedMergedEvidenceNeverFallsBackToHeadOrBranch(string fault)
+    {
+        using var fixture = new Fixture(fault);
+        var now = DateTime.UtcNow;
+        var member = new IssueRecord("task-1", "1", "task", "done", null, IssueStatus.Completed, 2, null, now, now, now, "{\"prNumber\":124}");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Source.ObserveMergedFrontierAsync(Project, [member], default));
+        Assert.Single(fixture.Api.Requests); // No ancestry/branch fallback without authoritative merge evidence.
     }
 
     private sealed class Fixture : IDisposable
@@ -118,8 +137,19 @@ public sealed class TrustedReleaseSourceTests
         private HttpResponseMessage Respond(HttpRequestMessage request)
         {
             var path = request.RequestUri!.AbsolutePath;
-            if (path.EndsWith("/pulls/124")) return Json(new { merged = true, merge_commit_sha = Sha, merged_at = DateTimeOffset.UnixEpoch,
-                @base = new { @ref = "main", repo = new { full_name = "Xyrces/Forge" } }, head = new { sha = new string('c', 40) } });
+            if (path.EndsWith("/pulls/124"))
+            {
+                var pr = new Dictionary<string, object?> {
+                    ["merged"] = Fault != "unmerged", ["merged_at"] = DateTimeOffset.UnixEpoch,
+                    ["base"] = new { @ref = Fault == "foreign-base" ? "other" : "main", repo = new { full_name = Fault == "foreign-repo" ? "other/Forge" : "Xyrces/Forge" } },
+                    ["head"] = new { sha = new string('c', 40) }
+                };
+                // Reproduce the real API-version-dependent field removal, rather
+                // than a fake that returns the old schema regardless of headers.
+                if (request.Headers.GetValues("X-GitHub-Api-Version").Single() == "2022-11-28" && Fault != "missing-merge")
+                    pr["merge_commit_sha"] = Fault switch { "null-merge" => null, "numeric-merge" => 123, "invalid-merge" => "abcdef", _ => Sha };
+                return Json(pr);
+            }
             if (path.EndsWith("/pulls/125")) return Json(new { merged = true, merge_commit_sha = new string('d', 40), merged_at = DateTimeOffset.UnixEpoch,
                 @base = new { @ref = "main", repo = new { full_name = "Xyrces/Forge" } } });
             if (path.Contains("/compare/")) return Json(new { status = path.EndsWith("..." + new string('d', 40)) ? "ahead" : "behind" });
@@ -155,10 +185,10 @@ public sealed class TrustedReleaseSourceTests
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json") };
     private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
     {
-        public List<(Uri Uri, string? Authorization)> Requests { get; } = [];
+        public List<(Uri Uri, string? Authorization, string? ApiVersion)> Requests { get; } = [];
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Requests.Add((request.RequestUri!, request.Headers.Authorization?.ToString()));
+            Requests.Add((request.RequestUri!, request.Headers.Authorization?.ToString(), request.Headers.TryGetValues("X-GitHub-Api-Version", out var versions) ? versions.Single() : null));
             return Task.FromResult(respond(request));
         }
     }

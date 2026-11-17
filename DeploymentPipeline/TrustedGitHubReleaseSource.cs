@@ -18,6 +18,11 @@ public sealed record TrustedImageReceipt(string SourceSha, string ImageDigest, b
 public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downloads, Func<string, CancellationToken, Task<string?>> token,
     Func<string?> runningRevision) : IRoutineReleaseSource, IDisposable
 {
+    // REST 2026-03-10 removes merge_commit_sha from PR responses. This reader
+    // deliberately uses the supported 2022 contract for observed merged source;
+    // PR head or current branch tip are not substitutes for a merged commit.
+    // https://docs.github.com/en/rest/about-the-rest-api/breaking-changes?apiVersion=2026-03-10
+    private const string MergedPullRequestApiVersion = "2022-11-28";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static bool Sha(string? value) => value is not null && Regex.IsMatch(value, "^[0-9a-f]{40}$");
     public void Dispose() { api.Dispose(); downloads.Dispose(); }
@@ -51,13 +56,15 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
             // Non-code dispositions belong to the completion evaluator, not an invented source SHA.
             if (member.GetMetadata("prNumber") is not { } value) continue;
             if (!int.TryParse(value, out var number) || number <= 0) throw new InvalidOperationException("Invalid merged pull request evidence.");
-            using var document = await GetJson(project.Id, $"repos/{repo}/pulls/{number}", ct);
+            using var document = await GetJson(project.Id, $"repos/{repo}/pulls/{number}", ct, MergedPullRequestApiVersion);
             var pr = document.RootElement;
+            if (!pr.TryGetProperty("merge_commit_sha", out var mergeCommit)
+                || mergeCommit.ValueKind != JsonValueKind.String || !Sha(mergeCommit.GetString()))
+                throw new InvalidOperationException("GitHub merged pull request response lacks a valid full merge commit SHA under the qualified 2022-11-28 contract.");
             if (!pr.GetProperty("merged").GetBoolean() || pr.GetProperty("base").GetProperty("ref").GetString() != project.DefaultBranch ||
-                !string.Equals(pr.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString(), repo, StringComparison.OrdinalIgnoreCase) ||
-                !Sha(pr.GetProperty("merge_commit_sha").GetString()))
+                !string.Equals(pr.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString(), repo, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Task pull request is not merged into the configured repository and branch.");
-            observations.Add((pr.GetProperty("merge_commit_sha").GetString()!, pr.GetProperty("merged_at").GetDateTimeOffset(), number));
+            observations.Add((mergeCommit.GetString()!, pr.GetProperty("merged_at").GetDateTimeOffset(), number));
         }
         if (observations.Count == 0) throw new InvalidOperationException("No merged source frontier is present; non-code completion needs an explicit no-deployment disposition.");
         var frontier = observations[0].Sha;
@@ -172,19 +179,19 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         return null;
     }
 
-    private async Task<JsonDocument> GetJson(string project, string path, CancellationToken ct)
+    private async Task<JsonDocument> GetJson(string project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
     {
-        using var response = await SendApi(project, path, ct);
+        using var response = await SendApi(project, path, ct, apiVersion);
         response.EnsureSuccessStatusCode();
         return JsonDocument.Parse(await ReadBounded(response, ct));
     }
 
-    private async Task<HttpResponseMessage> SendApi(string project, string path, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendApi(string project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri("https://api.github.com/" + path));
         request.Headers.UserAgent.ParseAdd("Forge-Routine-Deployment");
         request.Headers.Accept.ParseAdd("application/vnd.github+json");
-        request.Headers.Add("X-GitHub-Api-Version", "2026-03-10");
+        request.Headers.Add("X-GitHub-Api-Version", apiVersion);
         var value = await token(project, ct);
         if (!string.IsNullOrEmpty(value)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", value);
         return await api.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
