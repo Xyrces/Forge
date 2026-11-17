@@ -19,9 +19,8 @@
     </div>
 
     <div class="page-subtitle page-subtitle--meta">
-        Deployment is decoupled from merging: picking a commit here does not require it to be the tip of any
-        branch. Nothing is redeployed automatically on push -- an operator always chooses the commit and
-        approves the result of the build/test gate (when the project requires one).
+        Enabled routine delivery follows approved sprint outcomes, verified merged source and successful CI.
+        The deploy gate can hold automatic promotion. Manual deployment requests remain available separately.
     </div>
 
     @if (DeployStore.Value.Error is not null)
@@ -112,7 +111,7 @@
                     <tr>
                         <td><span class="project-chip">@d.ProjectId</span></td>
                         <td class="mono" title="@d.CommitSha">@d.CommitSha[..Math.Min(8, d.CommitSha.Length)] @d.CommitSummary</td>
-                        <td><span class="dpill dpill--@d.Status.ToLowerInvariant()">@d.Status</span></td>
+                        <td><span class="dpill dpill--@d.Status.ToLowerInvariant()">@(d.CompletionId is not null && d.Status == "Pending" ? "Awaiting CI" : d.Status)</span></td>
                         <td class="mono">@d.RequestedAt.ToString("yyyy-MM-dd HH:mm")@(d.RequestedBy is null ? "" : $" ({d.RequestedBy})")</td>
                         <td>
                             @if (!string.IsNullOrWhiteSpace(d.BuildLog) || !string.IsNullOrWhiteSpace(d.DeployLog))
@@ -124,7 +123,11 @@
                             }
                         </td>
                         <td>
-                            @if (d.Status is "Pending" or "BuildPassed")
+                            @if (d.CompletionId is not null && d.Status is "Pending" or "BuildPassed")
+                            {
+                                <span>Routine delivery · <a href="/sprints">deployment gate</a></span>
+                            }
+                            @if (d.CompletionId is null && d.Status is "Pending" or "BuildPassed")
                             {
                                 <button class="btn btn--small btn--primary"
                                         @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: false))">Approve</button>

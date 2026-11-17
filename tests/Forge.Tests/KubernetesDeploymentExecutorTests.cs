@@ -19,6 +19,21 @@ public sealed class KubernetesDeploymentExecutorTests
         "deploy-" + new string('c', 32), "forge", Sha, null, status, DateTime.UtcNow, null, null, null, null, null, null);
 
     [Fact]
+    public async Task RoutinePinnedReceiptNeedsNoCatalogAndCannotFallBackWhenMissing()
+    {
+        var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };
+        project.Deployment!.RoutineImageRepository = "registry/forge";
+        var receipt = new TrustedImageReceipt(Sha, Image, true, true, "controller-image.yml", "92", "Xyrces/Forge", "main",
+            "93", "sha256:" + new string('d', 64), Forge.Core.IssueStore.CurrentSchemaVersion, "ci.yml", "91");
+        var handler = new FakeHandler("{}");
+        var executor = new KubernetesDeploymentExecutor(Client(handler));
+        var candidate = Candidate() with { CompletionId = "completion-1", ReceiptJson = JsonSerializer.Serialize(receipt) };
+        Assert.Equal(Image, KubernetesDeploymentExecutor.ResolveImage(await executor.ResolveProfileAsync(project, candidate, default), candidate));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executor.ResolveProfileAsync(project, candidate with { ReceiptJson = null }, default));
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Fact]
     public async Task CatalogIsReadForExactSourceWithoutChangingConfig()
     {
         var project = Project();

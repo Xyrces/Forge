@@ -187,6 +187,19 @@ public static class ForgeComposition
         services.AddSingleton(workflowResolver);
         var stageGates = new StageGates(memoryStore, workflowResolver);
         services.AddSingleton(stageGates);
+        services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
+        services.AddSingleton<Forge.Deploy.IRoutineReleaseSource>(_ => new Forge.Deploy.TrustedGitHubReleaseSource(
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
+            (project, ct) => GitHubTokenResolver.ResolveTokenAsync(null, project, options.GitHub, secretStore, ct),
+            () => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "source-revision"))));
+        services.AddSingleton(provider => new Forge.Deploy.RoutineDeploymentCoordinator(
+            () => projectFactory.KnownProjects.Select(project => projectFactory.Find(project.Id))
+                .Where(context => context is not null).Select(context => new Forge.Deploy.RoutineDeploymentProject(
+                    context!.Options, new Core.Completion.SprintCompletionStore((IssueStore)context.Issues), context.Deployments)).ToArray(),
+            provider.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(),
+            project => (Forge.Deploy.IIndependentDeploymentExecutor)provider.GetRequiredService<Forge.Deploy.DeploymentExecutorFactory>().Create(project)!,
+            stageGates, loggerFactory.CreateLogger<Forge.Deploy.RoutineDeploymentCoordinator>()));
 
         var issuesJsonlPath = Path.Combine(primaryStateDir, "issues.jsonl");
         var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,

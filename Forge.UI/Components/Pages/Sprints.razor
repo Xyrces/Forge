@@ -370,7 +370,7 @@
         .DistinctBy(s => s.Id).ToList();
     private string? _repoUrl;
 
-    private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge" };
+    private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge", "deploy" };
     private Dictionary<string, string> _gates = new();
     private bool _gatesLoading = true;
     private System.Threading.Timer? _gateTimer;

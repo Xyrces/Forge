@@ -1,0 +1,137 @@
+using Forge.Configuration;
+using Forge.Core;
+using Forge.Core.Completion;
+using Forge.Deploy;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace Forge.Tests;
+
+public sealed class RoutineDeploymentTests : IDisposable
+{
+    private readonly IssueStore issues = new(TempRoot.Instance.NewDbPath("routine-deploy"), "forge");
+    private readonly FakeSource source = new();
+    private readonly FakeExecutor executor = new();
+    private SprintCompletionStore Completions => new(issues);
+    private DeploymentStore Deployments => new(issues.Db);
+    private StageGates Gates => new(new MemoryStore(issues.Db));
+    private ProjectOptions Project => new() { Id = "forge", RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main",
+        Deployment = new() { Kind = DeploymentKind.Kubernetes, RoutineEnabled = true } };
+    private RoutineDeploymentCoordinator Coordinator() => new(() => [new(Project, Completions, Deployments)], source,
+        _ => executor, Gates, NullLogger<RoutineDeploymentCoordinator>.Instance);
+    public void Dispose() => issues.Dispose();
+
+    private async Task<SprintCompletionRecord> Complete(bool ready = true)
+    {
+        var task = await issues.CreateAsync(new NewIssue("task", "deliver", Metadata: new Dictionary<string, object> { ["prNumber"] = 1 }));
+        var sprints = new SprintStore(issues);
+        var sprint = await sprints.CreateAsync(new("outcome", "outcome", DateTime.UtcNow, DateTime.UtcNow.AddDays(1)));
+        await sprints.AddIssueAsync(sprint.Id, task.Id);
+        await issues.TransitionAsync(task.Id, IssueStatus.Completed, null);
+        return await Completions.BeginCompletionAsync(sprint.Id, [(await issues.GetAsync(task.Id))!],
+            new(1, "plan-hash", EngineeringOutcome.PendingEvidence, "{}", ready));
+    }
+
+    [Fact]
+    public async Task DelayedCiRecoversSameCandidateAndCompletesWithoutDashboardReads()
+    {
+        var completion = await Complete();
+        source.Available = false;
+        await Coordinator().ReconcileAsync(default);
+        var pending = Assert.Single(await Deployments.ListAsync());
+        Assert.Equal(DeploymentStatus.Pending, pending.Status);
+        Assert.Equal(pending.Id, (await Completions.GetAsync(completion.Id))!.DeploymentCandidateId);
+        Assert.Equal(0, executor.Calls);
+        source.Available = true;
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.Deploying, (await Deployments.GetAsync(pending.Id))!.Status);
+        executor.Result = new(true, "committed");
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.Deployed, (await Deployments.GetAsync(pending.Id))!.Status);
+        Assert.Single(await Deployments.ListAsync());
+    }
+
+    [Fact]
+    public async Task DeployHoldQualifiesButDoesNotApproveAndReleaseResumes()
+    {
+        await Complete(); await Gates.HoldAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.BuildPassed, Assert.Single(await Deployments.ListAsync()).Status);
+        Assert.Equal(0, executor.Calls);
+        await Gates.ReleaseAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(1, executor.Calls);
+    }
+
+    [Fact]
+    public async Task RepeatedCompletionAndCrashBeforeBindingDoNotCreateDuplicateCandidates()
+    {
+        var completion = await Complete();
+        await Completions.RecordSourceAsync(completion.Id, FakeSource.Sha, "{}");
+        var candidate = await Deployments.CreateOrGetRoutineAsync("forge", completion.Id, FakeSource.Sha);
+        Assert.Equal(candidate.Id, (await Deployments.CreateOrGetRoutineAsync("forge", completion.Id, FakeSource.Sha)).Id);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Single(await Deployments.ListAsync());
+        Assert.Equal(candidate.Id, (await Completions.GetAsync(completion.Id))!.DeploymentCandidateId);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Deployments.CreateOrGetRoutineAsync("forge", completion.Id, new string('c', 40)));
+    }
+
+    [Fact]
+    public async Task RollbackIsTerminalAndDoesNotAutomaticallyRetry()
+    {
+        await Complete(); executor.Result = new(false, "rolled-back");
+        await Coordinator().ReconcileAsync(default);
+        var failed = Assert.Single(await Deployments.ListAsync());
+        Assert.Equal(DeploymentStatus.DeployFailed, failed.Status);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(1, executor.Calls);
+        await Deployments.MarkIndependentProgressAsync(failed.Id, new(false, "old pending observation", true));
+        Assert.Equal(DeploymentStatus.DeployFailed, (await Deployments.GetAsync(failed.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task EvidenceNotReadyCannotStartRoutineDelivery()
+    {
+        await Complete(false);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Empty(await Deployments.ListAsync());
+        Assert.Equal(0, source.Observed);
+    }
+
+    [Fact]
+    public async Task PendingQueryFindsOlderApprovedOperationBeyondHistoryLimit()
+    {
+        var old = await Deployments.CreateAsync("forge", FakeSource.Sha, null, "operator");
+        await Deployments.TryApproveAsync(old.Id, "operator");
+        for (var i = 0; i < 101; i++)
+        {
+            var other = await Deployments.CreateAsync("forge", FakeSource.Sha, null, "operator");
+            await Deployments.MarkDeployFailedAsync(other.Id, "terminal history");
+        }
+        Assert.Equal(old.Id, Assert.Single(await Deployments.ListPendingAsync("forge")).Id);
+        executor.Result = new(true, "committed");
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.Deployed, (await Deployments.GetAsync(old.Id))!.Status);
+    }
+
+    private sealed class FakeSource : IRoutineReleaseSource
+    {
+        public const string Sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        public bool Available = true;
+        public int Observed;
+        public Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project, IReadOnlyList<IssueRecord> members, CancellationToken ct)
+        { Observed++; return Task.FromResult((Sha, "{}")); }
+        public Task ValidateForwardAsync(ProjectOptions project, string sha, CancellationToken ct) => Task.CompletedTask;
+        public Task<TrustedImageReceipt?> FindReceiptAsync(ProjectOptions project, string sha, CancellationToken ct) => Task.FromResult(Available
+            ? new TrustedImageReceipt(sha, "ghcr.io/xyrces/forge@sha256:" + new string('b', 64), true, true, "controller-image.yml", "92",
+                "Xyrces/Forge", "main", "93", "sha256:" + new string('d', 64), IssueStore.CurrentSchemaVersion, "ci.yml", "91") : null);
+    }
+    private sealed class FakeExecutor : IIndependentDeploymentExecutor
+    {
+        public int Calls;
+        public DeploymentExecutionResult Result = new(false, "running", true);
+        public Task<DeploymentExecutionResult> ExecuteAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct = default) => throw new InvalidOperationException("Coordinator must use durable progress adoption.");
+        public Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct)
+        { Calls++; return Task.FromResult(Result); }
+    }
+}

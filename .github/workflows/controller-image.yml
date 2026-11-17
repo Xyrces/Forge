@@ -2,7 +2,7 @@ name: Build immutable Forge controller image
 
 on:
   push:
-    branches: [codex/forge-first-k3s]
+    branches: [main, codex/forge-first-k3s]
   workflow_dispatch:
     inputs:
       source_ref:
@@ -95,10 +95,11 @@ jobs:
         run: |
           printf 'Source: `%s`\n\nImage: `%s@%s`\n' "$SOURCE" "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY'
-          import json, os
+          import json, os, pathlib, re
+          schema = int(re.search(r'CurrentSchemaVersion\s*=\s*(\d+)', pathlib.Path('Core/IssueStore.cs').read_text()).group(1))
           with open('forge-image-receipt.json', 'w') as receipt:
               json.dump({'sourceSha': os.environ['SOURCE'], 'imageDigest': os.environ['IMAGE'] + '@' + os.environ['DIGEST'],
-                         'buildPassed': True, 'testPassed': True,
+                         'buildPassed': True, 'testPassed': True, 'schemaVersion': schema,
                          'workflow': 'controller-image.yml', 'workflowRunId': os.environ['GITHUB_RUN_ID']}, receipt)
           PY
       - uses: actions/upload-artifact@v4
