@@ -332,7 +332,7 @@
                                     <strong>@spec.Title</strong>
                                     <span class="pill pill--@spec.Status.ToLowerInvariant()">@spec.Status</span>
                                 </div>
-                                <div class="mono page-subtitle">@spec.Id · v@spec.CurrentVersion</div>
+                                <div class="mono page-subtitle">@spec.Id · v@(spec.CurrentVersion)</div>
                                 @if (!string.IsNullOrWhiteSpace(spec.Body))
                                 {
                                     <pre class="intake-spec-body">@Truncate(spec.Body, 800)</pre>
