@@ -51,11 +51,42 @@ public sealed class GroomingCapacityTests
         Assert.DoesNotContain("reviewer: 2", client.Prompt);
     }
 
+    [Fact]
+    public async Task TerritoryGroundingUsesFreshOwningProjectConfigurationWithoutRegistryFallback()
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("territory-grounding"), "other");
+        var specs = new SpecStore(issues);
+        var client = new CaptureClient();
+        var configured = new Dictionary<string, RoleTerritory>
+        {
+            ["clientdev"] = new(["frontend/", "checks/"], false),
+            ["coredev"] = new(["server/", "evidence/"], true)
+        };
+        var lookedUp = new List<string>();
+        var factory = Factory(issues, specs, client, null, (id, ct) =>
+        {
+            lookedUp.Add(id);
+            return Task.FromResult<IReadOnlyDictionary<string, RoleTerritory>>(configured);
+        });
+        await Run(factory, specs);
+        Assert.Contains("clientdev: allowed path prefixes: frontend/, checks/; repo-root files: not allowed", client.Prompt);
+        Assert.Contains("coredev: allowed path prefixes: server/, evidence/; repo-root files: allowed", client.Prompt);
+        Assert.DoesNotContain("allowed path prefixes: Forge.UI/", client.Prompt);
+        Assert.Contains("not a substitute for an explicitly required repository document", client.Prompt);
+        Assert.Contains("surface the assignment conflict", client.Prompt);
+        configured.Remove("clientdev");
+        await Run(factory, specs);
+        Assert.Contains("clientdev: no project-configured path restriction", client.Prompt);
+        Assert.DoesNotContain("clientdev: allowed path prefixes: frontend/", client.Prompt);
+        Assert.Equal(new[] { "other", "other" }, lookedUp);
+    }
+
     private static GroomerAgentFactory Factory(IssueStore issues, SpecStore specs, CaptureClient client,
-        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? lookup) =>
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? lookup,
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? territories = null) =>
         new(issues, specs, new InMemoryDashboardEventBus(), new ScriptingChatClientFactory(client),
             new LlmConfig(new ProviderConfig("test", "", null, null, "test")), NullLoggerFactory.Instance,
-            roleCapacitiesLookup: lookup);
+            roleCapacitiesLookup: lookup, roleTerritoriesLookup: territories);
 
     private static async Task Run(GroomerAgentFactory factory, SpecStore specs)
     {
