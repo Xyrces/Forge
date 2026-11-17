@@ -105,7 +105,7 @@ public class SpecActionsEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task Actions_GroomedSpec_ShipEnabled()
+    public async Task Actions_GroomedSpecWithPendingWork_CannotClaimDelivery()
     {
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "proj-1", Title: "Test", Body: "Body"), default);
@@ -116,7 +116,14 @@ public class SpecActionsEndpointTests : IDisposable
 
         var resp = await _client.GetAsync($"/api/specs/{spec.Id}/actions");
         var body = await resp.Content.ReadFromJsonAsync<ActionsShape>();
-        Assert.True(body!.CanShip);
+        Assert.False(body!.CanShip);
+        var task = await _issues.CreateAsync(new("task", "Unfinished implementation", ParentId: spec.Id));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _specs.SetStatusAsync(spec.Id, SpecStatus.Shipped));
+        using var denied = await _client.PatchAsJsonAsync($"/api/specs/{spec.Id}", new { op = "set_status", status = "Shipped" });
+        Assert.Equal(HttpStatusCode.Conflict, denied.StatusCode);
+        Assert.Contains("delivery_evidence_required", await denied.Content.ReadAsStringAsync());
+        Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(spec.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(task.Id))!.Status);
     }
 
     [Fact]

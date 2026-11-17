@@ -1,0 +1,176 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+@implements IDisposable
+
+@if (_preview is { } preview)
+{
+    <section class="card acceptance-repair" aria-labelledby="acceptance-repair-title">
+        <h2 id="acceptance-repair-title">Keep operator checks with the delivery outcome</h2>
+        <p>Technical planning put post-deployment observations into separate engineering tasks. Move their acceptance checks to the implementation outcome so the code can deploy before those observations are recorded.</p>
+        <p><strong>@preview.Objective</strong></p>
+        <div class="banner banner--info banner--stacked">
+            <p>The approved scope and every check below stay intact. The old observation tasks will be closed as cancelled planning entries, with their history retained. This does not complete any check, start work, or release a stage hold.</p>
+            <p>No model request is needed for this correction.</p>
+        </div>
+        <h3>Engineering work that stays</h3>
+        <ul>
+            @foreach (var row in preview.TargetRows)
+            {
+                <li><a href="@TaskLink(row.Id)">@row.Id</a> — @row.Title</li>
+            }
+        </ul>
+        <h3>Observation tasks to retire</h3>
+        @foreach (var row in preview.SourceRows)
+        {
+            <details>
+                <summary><a href="@TaskLink(row.Id)">@row.Id</a> — @row.Title</summary>
+                <p class="acceptance-repair__description">@row.Description</p>
+            </details>
+        }
+        <h3>Checks moved to post-deployment acceptance</h3>
+        <ul>
+            @foreach (var criterion in preview.TransferredCriteria)
+            {
+                <li><strong>@criterion.Id</strong>: @criterion.Text <span class="pill">Operator observation required</span></li>
+            }
+        </ul>
+        <details>
+            <summary>Review all acceptance criteria and approved scope</summary>
+            <ul>
+                @foreach (var criterion in preview.Criteria)
+                {
+                    <li><strong>@criterion.Id</strong>: @criterion.Text <span class="pill">@EvidenceLabel(criterion.EvidenceKind)</span>
+                        <blockquote>@criterion.Scope.ApprovedExcerpt</blockquote>
+                    </li>
+                }
+            </ul>
+            <p>Approved initiative revision @preview.Authority.Revision · specification version @preview.SpecVersion</p>
+        </details>
+        <button class="btn btn--primary" disabled="@(_busy || Disabled || _loadedTarget != Target)" @onclick="ApplyAsync">
+            @(_busy ? "Applying correction…" : "Move checks to outcome acceptance")
+        </button>
+    </section>
+}
+@if (_error is not null)
+{
+    <div class="banner banner--error banner--stacked" role="alert">
+        <span>@_error</span>
+        <button class="btn btn--small" disabled="@(_busy || Disabled)" @onclick="ReloadAsync">Review current planning</button>
+    </div>
+}
+
+@code {
+    [Parameter] public string SpecId { get; set; } = "";
+    [Parameter] public string? Project { get; set; }
+    [Parameter] public int SpecVersion { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public EventCallback<bool> BusyChanged { get; set; }
+    [Parameter] public EventCallback Applied { get; set; }
+    private Preview? _preview;
+    private string? _error, _loadedTarget, _requestedTarget;
+    private bool _busy, _disposed;
+    private int _generation;
+    private readonly CancellationTokenSource _disposeCts = new();
+    private string Target => SpecId + "|" + Project + "|" + SpecVersion;
+    private string Query => Project is null ? "" : "?project=" + Uri.EscapeDataString(Project);
+    private string Url => "/api/specs/" + Uri.EscapeDataString(SpecId) + "/operator-checks/repair" + Query;
+    private string TaskLink(string id) => "/tasks/" + Uri.EscapeDataString(id) + Query;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_requestedTarget == Target) return;
+        ++_generation;
+        _preview = null; _loadedTarget = null;
+        if (_busy) { _busy = false; await BusyChanged.InvokeAsync(false); }
+        _requestedTarget = Target;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (_busy || _disposed) return;
+        var target = Target;
+        var generation = ++_generation;
+        _preview = null; _loadedTarget = null; _error = null;
+        try
+        {
+            var result = await Http.GetFromJsonAsync<Availability>(Url, _disposeCts.Token);
+            if (_disposed || target != Target || generation != _generation) return;
+            if (result?.Eligible == true && result.Preview is { } preview
+                && preview.SpecId == SpecId && preview.SpecVersion == SpecVersion
+                && (Project is null || preview.ProjectId == Project))
+            {
+                _preview = preview; _loadedTarget = target;
+            }
+        }
+        catch (OperationCanceledException) when (_disposed) { }
+        catch (Exception)
+        {
+            if (!_disposed && target == Target && generation == _generation)
+                _error = "The post-deployment planning checks could not be loaded. Try again.";
+        }
+    }
+
+    private async Task ApplyAsync()
+    {
+        if (_busy || Disabled || _disposed || _preview is not { } preview || _loadedTarget != Target) return;
+        var target = Target;
+        var generation = _generation;
+        var url = Url;
+        _busy = true; _error = null;
+        await BusyChanged.InvokeAsync(true);
+        var applied = false;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync(url,
+                new { preview.SpecVersion, preview.GroomRunId, preview.PreviewHash }, _disposeCts.Token);
+            if (_disposed || target != Target || generation != _generation) return;
+            // Once a request has been made, require a fresh preview before another attempt.
+            _preview = null; _loadedTarget = null;
+            if (response.IsSuccessStatusCode) applied = true;
+            else _error = response.StatusCode == System.Net.HttpStatusCode.Conflict
+                ? "Planning changed since this preview. Review the current plan before applying a correction."
+                : "The correction could not be confirmed. Review the current plan before trying again.";
+        }
+        catch (OperationCanceledException) when (_disposed) { }
+        catch (Exception)
+        {
+            if (!_disposed && target == Target && generation == _generation)
+            {
+                _preview = null; _loadedTarget = null;
+                _error = "The correction acknowledgement was interrupted. Review the current plan before trying again.";
+            }
+        }
+        finally
+        {
+            if (!_disposed && target == Target && generation == _generation)
+            {
+                _busy = false;
+                await BusyChanged.InvokeAsync(false);
+            }
+        }
+        if (applied && !_disposed && target == Target && generation == _generation) await Applied.InvokeAsync();
+    }
+
+    private static string EvidenceLabel(string kind) => kind switch
+    {
+        "MergedAndVerified" => "Code merged and verified",
+        "DeploymentHealthy" => "Running deployment verified",
+        "OperatorObserved" => "Operator observation required",
+        _ => kind
+    };
+
+    public void Dispose()
+    {
+        _disposed = true; ++_generation;
+        _disposeCts.Cancel(); _disposeCts.Dispose();
+    }
+
+    private sealed record Availability(bool Eligible, Preview? Preview);
+    private sealed record Preview(string ProjectId, string SpecId, int SpecVersion, long GroomRunId, string PreviewHash,
+        Scope Authority, string OutcomeId, string Objective, Row[] SourceRows, Row[] TargetRows,
+        Criterion[] TransferredCriteria, Criterion[] Criteria);
+    private sealed record Row(string Id, string Title, string Description);
+    private sealed record Scope(string ProposalId, int Revision, string Hash, string SpecId, string ApprovedExcerpt);
+    private sealed record Criterion(string Id, string Text, string EvidenceKind, Scope Scope);
+}

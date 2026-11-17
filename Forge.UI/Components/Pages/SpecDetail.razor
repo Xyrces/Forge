@@ -125,10 +125,7 @@
                         @(_acting ? "Working…" : "Groom")
                     </button>
                 }
-                @if (ActionFlag("canShip"))
-                {
-                    <button class="btn btn--small btn--primary" @onclick='() => SetStatusAsync("Shipped")' disabled="@_acting">Ship</button>
-                }
+
             </div>
             @if (!string.IsNullOrEmpty(ActionProp("reason")))
             {
@@ -136,6 +133,12 @@
                 <a href="/flow">View workflow and stage holds in Flow</a>
             }
         </div>
+
+        @if (SpecProp("status") == "Groomed" && int.TryParse(SpecProp("currentVersion"), out var specVersion))
+        {
+            <OperatorAcceptanceRepair @key="ActionTarget" SpecId="@SpecId" Project="@_scopeProject" SpecVersion="@specVersion"
+                Disabled="@_acting" BusyChanged="@(busy => _acting = busy)" Applied="AcceptanceRepairAppliedAsync" />
+        }
 
         <div class="card" style="margin-bottom:14px">
             <h2>Specification</h2>
@@ -160,7 +163,7 @@
                     {
                         <li style="margin:2px 0">
                             <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
-                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
+                            <a href="@TaskLink(task.Id)" class="mono">@task.Id</a>
                             <span>@task.Title</span>
                             @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url)
                             {
@@ -178,7 +181,7 @@
                     {
                         <li>
                             <span class="pill pill--@task.Status.ToLowerInvariant()">@task.Status</span>
-                            <a href="/tasks/@task.Id" class="mono">@task.Id</a>
+                            <a href="@TaskLink(task.Id)" class="mono">@task.Id</a>
                             <span>@task.Title</span>
                             @if (task.PrNumber is not null && PrUrl(task.PrNumber) is { } url2)
                             {
@@ -270,6 +273,12 @@
                 _actionError = "Refinement repair acknowledgement was interrupted. Refresh before requesting another run.";
         }
         finally { if (target == ActionTarget && generation == _loadGeneration) _acting = false; }
+    }
+
+    private async Task AcceptanceRepairAppliedAsync()
+    {
+        _groomingNotice = "Operator checks now belong to the implementation outcome. The old observation tasks are retired; actual post-deployment evidence is still required.";
+        await LoadAsync();
     }
 
     private List<StoryVm> _stories = new();
@@ -432,6 +441,8 @@
 
     private string? PrUrl(string prNumber) =>
         RepositoryLinks.PullRequest(_repoUrl, prNumber);
+
+    private string TaskLink(string id) => "/tasks/" + Uri.EscapeDataString(id) + LensQuery;
 
     private async Task SetStatusAsync(string status)
     {

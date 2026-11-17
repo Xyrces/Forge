@@ -13,6 +13,7 @@ public static class SpecActions
     public static bool CanApprove(SpecStatus status) => status == SpecStatus.Draft;
     public static bool CanStartGrooming(SpecStatus status) =>
         status is SpecStatus.Approved or SpecStatus.AssetReady;
-    public static bool CanShip(SpecStatus status) => status == SpecStatus.Groomed;
+    // Retained for API compatibility; delivery is established by completion evidence, not a manual label.
+    public static bool CanShip(SpecStatus status) => false;
     public static bool CanSendToDesign(SpecStatus status) => status == SpecStatus.Draft;
 }

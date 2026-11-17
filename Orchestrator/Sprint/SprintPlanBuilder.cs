@@ -110,7 +110,10 @@ internal sealed class SprintPlanBuilder(IssueStore issues, ISprintStore sprints,
     {
         var tasks = snapshot.TaskIds.ToHashSet(StringComparer.Ordinal);
         var dependent = (snapshot.Dependencies ?? []).Where(e => tasks.Contains(e.BlockerId)).Select(e => e.BlockedId).ToHashSet(StringComparer.Ordinal);
-        return snapshot.Issues.Where(i => tasks.Contains(i.Id) && !dependent.Contains(i.Id))
+        // Watch-lane QA/review capacity cannot manufacture another independently
+        // implementable task or its required merged publication evidence.
+        return snapshot.Issues.Where(i => tasks.Contains(i.Id) && !dependent.Contains(i.Id)
+                && RoleAgentRegistry.FromTaskType(i.Type) is AgentType.CoreDev or AgentType.ClientDev)
             .GroupBy(i => RoleAgentRegistry.FromTaskType(i.Type).ToString().ToLowerInvariant())
             .Sum(group => Math.Min(group.Count(), Math.Max(0, DefaultProjectRoles.MaxFor(roleCaps is null ? [] : new Dictionary<string,int>(roleCaps), group.Key))));
     }

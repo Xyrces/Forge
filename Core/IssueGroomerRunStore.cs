@@ -46,6 +46,8 @@ public sealed partial class IssueGroomerRunStore
     private string T(string name) => _db.Dialect.Table(name);
 
     public string DbPath => _dbPath;
+    public bool UsesDatabase(IDbConnectionFactory db) => _db.Provider == db.Provider && _db.Qualifier == db.Qualifier
+        && _db.ConnectionString == db.ConnectionString;
 
     public async Task<IssueGroomerRun> StartAsync(string specId, GroomerTriggerKind trigger, CancellationToken ct)
     {

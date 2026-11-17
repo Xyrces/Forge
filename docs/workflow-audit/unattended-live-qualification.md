@@ -151,3 +151,31 @@ history were retained. Before this paid repair started, usage remained
 $1.01 operator-reported prior cost plus $0.075166 newer usage estimates,
 with $23.914834 available and no uncertain requests. This checkpoint proves
 the deployed recovery action; later pipeline stages still require observation.
+
+## Design and grooming reached; observation-only work held
+
+The same approved initiative refined successfully to specification version 3.
+Designer run 5 then succeeded with three design artifacts, and grooming run 1
+finished at approximately 19:00 UTC with two stories and four tasks. These
+were real model runs through the original intake journey, not seeded rows.
+
+Grooming exposed a second defect. `task-2` and `client-1` formed one
+implementation outcome with five pre-deployment criteria. `qa-1` and `qa-2`
+formed a separate outcome containing only two operator-observed criteria;
+their descriptions explicitly required checks after deployment. Such an
+observation-only engineering outcome cannot honestly satisfy the requirement
+that its executable members be merged and verified before it can deploy.
+
+Sprint assembly was held through the Flow UI before any sprint or worker
+started. Read-only inspection confirmed all four tasks remained Pending,
+unassigned, without execution checkpoints, publication, or recorded sprint
+membership. The only dependencies were the two implementation tasks blocking
+each of the two observation rows. Approval identity and scope remained intact.
+
+The correction is being qualified as an explicit, deterministic planning
+repair: transfer the exact operator criteria to the implementation outcome,
+retire the observation-only rows as Closed with a Cancelled disposition,
+retain their history, and leave actual operator evidence pending. It must
+reject stale previews, ambiguous destinations, prior execution or admission,
+and partial writes. No paid grooming retry or fabricated completion evidence
+is needed. This checkpoint is still a blocked pilot, not end-to-end success.

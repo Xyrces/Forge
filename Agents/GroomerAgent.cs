@@ -44,6 +44,7 @@ public sealed class GroomerAgent
     private readonly string? _projectRoot;
     private readonly string? _projectId;
     private readonly Func<string, string?>? _projectRootLookup;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? _roleCapacitiesLookup;
     private readonly string _runId;
 
     public GroomerAgent(
@@ -57,7 +58,8 @@ public sealed class GroomerAgent
         MemoryStore? memory = null,
         string? projectRoot = null,
         string? projectId = null,
-        Func<string, string?>? projectRootLookup = null)
+        Func<string, string?>? projectRootLookup = null,
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null)
     {
         _issues = issues;
         _specs = specs;
@@ -69,6 +71,7 @@ public sealed class GroomerAgent
         _projectRoot = projectRoot;
         _projectId = projectId;
         _projectRootLookup = projectRootLookup;
+        _roleCapacitiesLookup = roleCapacitiesLookup;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
     }
 
@@ -551,8 +554,13 @@ public sealed class GroomerAgent
         criterionIds specifies each task's contribution. evidenceKind is MergedAndVerified (pre-deploy merge + trusted verification),
         DeploymentHealthy (post-deploy controller/runtime qualification), or OperatorObserved (post-deploy operator-led acceptance,
         including visual/browser checks). Never substitute deployment health or merged code for actual visual acceptance.
-        Separate pre-deployment implementation criteria from post-deployment checks so deployment can proceed while
-        operator-observed criteria remain honestly pending; only the operator can record that evidence.
+        Keep pre-deployment implementation and post-deployment acceptance as distinct criteria WITHIN THE SAME delivery outcome.
+        Each engineering task's own criterionIds MUST include a genuine MergedAndVerified criterion; it may also contribute
+        to DeploymentHealthy or OperatorObserved criteria. Attach those later criteria to the implementation delivery members.
+        requiredTaskIds contains actual pre-deployment engineering work, never separate operator-observation-only QA tasks
+        or a second observation-only sprint. Do not invent code changes, PRs, or fake operator evidence to pass this rule.
+        Deployment proceeds after genuine implementation verification; post-deployment acceptance remains honestly pending
+        until actual runtime qualification or operator observation. Only the operator can record operator-observed evidence.
         reason is Delivers, Remediates, or Prerequisite. Every prerequisite needs explicit criterion mapping too.
         For remediation, bind to existing approved acceptance scope; followUpOf alone is not approval.
         Binding JSON: {"version":1,"outcomeId":"stable-goal-id","objective":"useful outcome",
@@ -695,6 +703,20 @@ public sealed class GroomerAgent
     {
         var sb = new StringBuilder();
 
+        var configured = _roleCapacitiesLookup is not null && !string.IsNullOrWhiteSpace(projectId)
+            ? await _roleCapacitiesLookup(projectId, ct)
+            : new Dictionary<string, int>();
+        var roles = new Dictionary<string, int>(configured, StringComparer.OrdinalIgnoreCase);
+        var workers = new[] { "coredev", "clientdev" };
+        sb.AppendLine("## Implementation worker capacity (owning project)");
+        foreach (var role in workers)
+            sb.AppendLine($"- {role}: {Math.Max(0, Forge.Configuration.DefaultProjectRoles.MaxFor(roles, role))} concurrent workers");
+        sb.AppendLine("Soft parallel goal: where the approved outcome naturally supports it, plan genuine independent tasks that can use these workers concurrently.");
+        sb.AppendLine("For example, three suitable available workers favor three genuinely independent tasks, not an artificial three-task minimum.");
+        sb.AppendLine("Use fewer tasks when that is the coherent solution; never pad work, invent QA work, or remove real prerequisites to fill slots. QA and Reviewer capacity are not implementation capacity.");
+        sb.AppendLine("QA verifies an existing PR in the optional watch lane; it is not an extra implementation task to fill a parallel slot. Assign genuine automated test-code changes to CoreDev or ClientDev within their editing territory, not a standalone QA/reviewer task that cannot produce its own merged implementation.");
+        sb.AppendLine("Ten engineering tasks including prerequisites is a ceiling, never a fill target. Story/task tool caps still apply; they are maxima, not targets.");
+        sb.AppendLine();
         sb.AppendLine("## Project vision");
         // Per-project vision wins (vision/<projectId>); the legacy
         // global vision/master is the fallback so single-project

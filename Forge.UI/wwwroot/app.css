@@ -1088,3 +1088,7 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .budget-status__amounts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
 .budget-status__amounts dt { color: var(--on-surface-variant); font-size: 12px; }
 .budget-status__amounts dd { margin: 6px 0 0; font-size: 20px; font-variant-numeric: tabular-nums; }
+/* Reviewable planning corrections preserve long criterion text on narrow screens. */
+.acceptance-repair { margin-bottom: 14px; overflow-wrap: anywhere; }
+.acceptance-repair details { margin-block: 12px; }
+.acceptance-repair__description { white-space: pre-wrap; }
