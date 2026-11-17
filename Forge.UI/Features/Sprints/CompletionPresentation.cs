@@ -18,7 +18,7 @@ public static class CompletionPresentation
         "Decided" => "Applying recorded result",
         "NeedsReview" => "Review needed before retry",
         "Completed" => "Finished",
-        "Abandoned" => "Stopped by operator",
+        "Abandoned" or "Stopped" => "Stopped by operator",
         _ => "Unknown processing state"
     };
     public static string Evidence(string? value) => value switch
@@ -33,6 +33,7 @@ public static class CompletionPresentation
         null => "Not recorded",
         "Pending" => "Awaiting qualification",
         "BuildPassed" => "Qualified; awaiting release",
+        "BuildFailed" => "Qualification failed — review required",
         "Approved" => "Release authorized; not yet started",
         "Deploying" => "Release in progress",
         "Deployed" => "Release healthy",

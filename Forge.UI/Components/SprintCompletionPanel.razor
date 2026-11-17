@@ -26,7 +26,7 @@
     {
         var receipt = _detail.Receipt;
         <dl>
-            <dt>Engineering evidence</dt><dd>@CompletionPresentation.Outcome(receipt.Outcome)</dd>
+            <dt>Engineering evidence</dt><dd>@(receipt.AbandonedAt is null ? CompletionPresentation.Outcome(receipt.Outcome) : "Evidence incomplete — outcome stopped")</dd>
             <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
             <dt>Deployment</dt><dd>@(receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus) : receipt.DeliveryRequired == false ? "Not required for this outcome" : (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
         </dl>
@@ -44,7 +44,7 @@
         }
         @if (receipt.AbandonedAt is not null)
         {
-            <p class="banner banner--warn">Stopped by operator — not delivered. @receipt.AbandonmentReason</p>
+            <p class="banner banner--warn">Stopped by operator at @receipt.AbandonedAt.Value.ToLocalTime().ToString("g") — not delivered. @receipt.AbandonmentReason</p>
         }
         else if (receipt.PlanHash is not null && receipt.Outcome is "Incomplete" or "PendingEvidence")
         {
@@ -71,7 +71,7 @@
                 <p class="page-subtitle">@CompletionPresentation.Evidence(criterion.EvidenceKind)</p>
                 @if (criterion.EvidenceKind == "OperatorObserved")
                 {
-                    <p>@(criterion.ProofReference is null ? "Awaiting explicit operator observation of the exact deployed version." : "Operator observation recorded for this deployed version.")</p>
+                    <p>@(criterion.ProofReference is not null ? "Operator observation recorded for this deployed version." : receipt.AbandonedAt is not null ? "Not verified; this outcome was stopped." : "Awaiting explicit operator observation of the exact deployed version.")</p>
                     @if (criterion.ProofReference is not null) { <p>Evidence: @criterion.ProofReference</p> }
                 }
             </div>
