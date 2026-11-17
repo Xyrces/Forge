@@ -18,6 +18,7 @@ public sealed record SprintPlan(int Version, string ProjectId, string Objective,
     IReadOnlyList<SprintPlanDeferral> Deferred, string InputFingerprint, string Hash)
 {
     public static string ComputeHash(SprintPlan plan) => SprintPlanJson.Hash(plan with { Hash = "" });
+    [System.Text.Json.Serialization.JsonIgnore]
     public bool HasValidHash => Version == 1 && Hash == ComputeHash(this);
 }
 
