@@ -137,6 +137,12 @@
             }
         </div>
 
+        @if (SpecProp("status") == "Groomed" && int.TryParse(SpecProp("currentVersion"), out var specVersion))
+        {
+            <OperatorAcceptanceRepair @key="ActionTarget" SpecId="@SpecId" Project="@_scopeProject" SpecVersion="@specVersion"
+                Disabled="@_acting" BusyChanged="@(busy => _acting = busy)" Applied="AcceptanceRepairAppliedAsync" />
+        }
+
         <div class="card" style="margin-bottom:14px">
             <h2>Specification</h2>
             <div class="md">@((MarkupString)MarkdownRenderer.ToHtml(SpecProp("body")))</div>
@@ -270,6 +276,12 @@
                 _actionError = "Refinement repair acknowledgement was interrupted. Refresh before requesting another run.";
         }
         finally { if (target == ActionTarget && generation == _loadGeneration) _acting = false; }
+    }
+
+    private async Task AcceptanceRepairAppliedAsync()
+    {
+        _groomingNotice = "Operator checks now belong to the implementation outcome. The old observation tasks are retired; actual post-deployment evidence is still required.";
+        await LoadAsync();
     }
 
     private List<StoryVm> _stories = new();

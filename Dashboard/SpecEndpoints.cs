@@ -75,6 +75,9 @@ public static class SpecEndpoints
             return (ctx.Specs, ctx.Issues, ex);
         }
 
+        OperatorAcceptanceRepairEndpoints.MapOperatorAcceptanceRepairEndpoints(app,
+            project => ResolveOwned(project)?.Issues as IssueStore, groomerRuns, logger);
+
         app.MapGet("/api/specs", async (string? project, string? status, CancellationToken ct) =>
         {
             SpecStatus? statusFilter = null;

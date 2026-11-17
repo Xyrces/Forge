@@ -24,6 +24,19 @@ Membership and dispatch readiness are separate. A dependency chain A → B → C
 
 ## Activation and preservation of the current objective
 
+Grooming now receives the owning project's current CoreDev, ClientDev and QA
+slot limits on each run, using the same role defaults as execution. Reviewer
+slots do not count as engineering task capacity. The prompt describes a soft
+parallel goal: three suitable workers favor three genuinely independent tasks
+when the approved outcome supports them; fewer tasks remain valid. This closes
+the earlier gap where the selector knew capacity but the grooming model did not.
+
+Every executable member must contribute to a genuine `MergedAndVerified`
+criterion. Later `DeploymentHealthy` and `OperatorObserved` criteria stay in
+the same implementation outcome; they do not create observation-only
+engineering tasks or require fabricated PRs. Actual later evidence remains
+mandatory after deployment.
+
 `SprintActivationValidator` is shared by automatic selection, proposal commit, generic activation and active membership amendment. Proposal commit accepts the complete recorded membership and canonical objective; it cannot substitute arbitrary task IDs or goal text. `SprintStore` atomically writes memberships and the typed `weights_json.plan` audit while rechecking issue/spec snapshots, dependencies, current approval authority and active-sprint exclusivity. The plan hash binds criteria, members, grooming mappings, deferrals and input fingerprint. Amendments add an audit version rather than overwriting history.
 
 The current sprint keeps its objective. Necessary groomed prerequisites may join after the same approval, closure and transactional checks, including parented or transitive prerequisites. Unrelated P1 work, blocker labels, requeue metadata and a `followUpOf` relationship alone do not justify injection. Ordinary unrelated follow-ups wait for later selection; their mere existence does not globally hold a coherent approved candidate.
