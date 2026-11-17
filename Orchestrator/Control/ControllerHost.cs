@@ -130,8 +130,8 @@ public static class ControllerHost
         command.CommandText = $"SELECT MAX(version) FROM {factory.Dialect.Table("schema_version")}";
         var observed = await command.ExecuteScalarAsync(ct);
         var version = observed is null or DBNull ? 0 : Convert.ToInt32(observed);
-        // Unlike the schema-38 rollback bridge, this release reads M039 evidence
-        // and reconciliation tables. Never inherit the bridge's 38/39 allowance.
+        // Version 42 is also a persisted-format boundary: older plan readers do
+        // not understand ImplementationVerified. Never inherit a bridge allowance.
         if (version != SqlServerMigrations.ExpectedVersion)
             throw new InvalidOperationException("Database schema is outside this release's tested compatibility version.");
         return version;
