@@ -21,6 +21,31 @@ Do not fabricate a failed build receipt or relax application readiness.
 
 ## Controlled failure after old-controller stop
 
+The coordinated live trial on 17 November 2026 used a more deterministic
+configuration fault than the timing-sensitive network-only observer below:
+
+1. Save the inactive control Service selector and candidate deployment data-root
+   setting. Block only that inactive Service before approving the real candidate.
+   This prevents the release Job from qualifying the initial candidate prematurely.
+2. After the candidate Deployment exists, set its `Forgesystem__DataRoot` to
+   `/proc/forge-proof-readonly`. Wait for the replacement candidate pod and verify
+   directly that it is standby/ready with admission closed; retain its UID. The
+   ordinary standby schema/config checks remain in effect.
+3. Restore the candidate control Service selector. The real release Job qualifies
+   standby, drains/deletes the previous controller, then attempts activation.
+   Application composition genuinely fails when creating the data root; the
+   terminal failed status triggers normal rollback immediately.
+4. Observe `old-stopped`, the actual composition exception, `rolling-back`, and
+   `rolled-back`. Verify the previous slot returns with a new pod UID and higher
+   SQL epoch, admission open, and deployment `DeployFailed`. Restore the dormant
+   candidate's data-root setting after rollback, keeping its replica count zero.
+
+This fault changes candidate configuration, not its image or CI receipt. It is an
+operator qualification procedure, not a runtime feature or automatic action.
+Detailed observed evidence is in
+[`docs/revival-review/live-qualification.md`](../../docs/revival-review/live-qualification.md).
+The network-only variant below remains useful but can miss its timing window.
+
 This proof introduces an external control-Service network fault. It changes no
 image, source receipt, SQL permission, or readiness implementation. Coordinate one
 release at a time and retain the Job, journal, pod UIDs and timestamped evidence.
@@ -48,7 +73,7 @@ def api(path, patch=None):
     request = urllib.request.Request(base + path,
         data=None if patch is None else json.dumps(patch).encode(),
         method="GET" if patch is None else "PATCH",
-        headers={"Content-Type": "application/merge-patch+json"})
+        headers={"Content-Type": "application/json" if patch is None else "application/merge-patch+json"})
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
 def pods(slot):
