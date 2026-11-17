@@ -49,4 +49,25 @@ automatic rollback fault was injected during this release.
 This release does not yet implement outcome-based sprint selection, durable
 initiative approval, recoverable completion materialization, or unattended
 schema upgrades. It must not be described as passing the complete user journey.
-The later failure-retention and urgent-work changes require their own release.
+The later failure-retention and urgent-work changes were qualified separately
+below.
+
+## Subsequent sprint safety release
+
+PR #128 merged as `10f430914cb19e5d07975d6223766b08f3ee1a8f`. Exact source
+`7bac4caeef31b3dddfe5fe6a8873defa3b9f32d9` passed 1,837 .NET tests,
+25 release/installer tests and the fake closed-loop check in CI `44101818736`;
+image workflow `44102089119` also passed.
+
+Image `ghcr.io/xyrces/forge@sha256:8d5a595d2482593cbb1395e3c52f41233c6c26848b21776e44697eb48d29cd01`
+was deployed through normal operation `deploy-4c3c69372ebd4a7ebea49ae5fc256af6`.
+Its journal committed, the green controller
+`17596e47-3f9c-45b0-90bc-87926531993a` reported active/ready with admission open,
+and SQL ownership advanced to epoch19. Schema remained39.
+
+Failed work now retains its status regardless of age. Automatic active-sprint
+additions require a technically groomed prerequisite with a current blocks edge
+to unfinished sprint work, rechecked in the membership transaction. Priority,
+blocker labels and requeue metadata alone do not interrupt the sprint. This is a
+narrow correctness repair; parented prerequisite closure and outcome-based
+planning remain outstanding. Existing manual operator actions are unchanged.

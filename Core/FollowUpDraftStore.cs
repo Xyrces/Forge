@@ -192,6 +192,38 @@ public sealed class FollowUpDraftStore
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>Consume one suggestion's source group atomically. Replays preserve the original
+    /// binding/time; a missing or differently consumed source rolls back the entire group.</summary>
+    public async Task SetDispositionBatchAsync(IReadOnlyCollection<long> ids, string disposition,
+        string detail, CancellationToken ct = default)
+    {
+        if (ids.Count is < 1 or > 1000 || ids.Any(id => id <= 0)
+            || string.IsNullOrWhiteSpace(disposition) || string.IsNullOrWhiteSpace(detail))
+            throw new ArgumentException("A bounded source group and disposition binding are required.");
+        await using var connection = await _issues.Db.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        var uniqueIds = ids.Distinct().Order().ToArray();
+        var names = uniqueIds.Select((_, index) => $"@id{index}").ToArray();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // A single bounded update avoids one network round trip per source. A mismatch
+        // rolls back even the valid subset, so partial acknowledgement never commits.
+        command.CommandText = $"""
+            UPDATE {T("followup_draft")}
+            SET disposition=@disposition, disposition_detail=@detail, consumed_at=COALESCE(consumed_at,@now)
+            WHERE id IN ({string.Join(',', names)})
+              AND (consumed_at IS NULL OR (disposition=@disposition AND disposition_detail=@detail))
+            """;
+        Db.DbCommandExtensions.AddParam(command, "@disposition", disposition);
+        Db.DbCommandExtensions.AddParam(command, "@detail", detail);
+        Db.DbCommandExtensions.AddParam(command, "@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        for (var index = 0; index < uniqueIds.Length; index++)
+            Db.DbCommandExtensions.AddParam(command, names[index], uniqueIds[index]);
+        if (await command.ExecuteNonQueryAsync(ct) != uniqueIds.Length)
+            throw new InvalidOperationException("Source draft is missing or already consumed by another disposition.");
+        await transaction.CommitAsync(ct);
+    }
+
     private static FollowUpDraft Map(System.Data.Common.DbDataReader rd) =>
         new(Id: Convert.ToInt64(rd.GetValue(0)),
             SprintId: rd.IsDBNull(1) ? null : rd.GetString(1),

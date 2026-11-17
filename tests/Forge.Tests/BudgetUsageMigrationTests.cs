@@ -27,6 +27,6 @@ public sealed class BudgetUsageMigrationTests
         Assert.Contains("COL_LENGTH", ddl); Assert.Contains("ADD usage_json NVARCHAR(MAX) NULL", ddl);
         Assert.Contains("ADD pricing_basis NVARCHAR(128) NULL", ddl);
         Assert.DoesNotContain("UPDATE", ddl); Assert.DoesNotContain("DELETE", ddl);
-        Assert.Equal(39, SqlServerMigrations.ExpectedVersion);
+        Assert.Contains(SqlServerMigrations.All, migration => migration is M039BudgetUsage && migration.Version == 39);
     }
 }

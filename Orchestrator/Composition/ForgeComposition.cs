@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using Forge.Agents;
 using Forge.AgentTools;
 using Forge.Codebase;
@@ -525,6 +526,12 @@ public static class ForgeComposition
         orchestrator.TaskEscalations = taskModelEscalations;
         services.AddSingleton(orchestrator);
 
+        var initiativeProposals = new InitiativeProposalStore(issues);
+        InitiativeIngestionStore IngestionForProject(string id) => new(
+            projectFactory.Find(id)?.Issues as IssueStore
+                ?? throw new InvalidOperationException($"Unknown initiative project {id}"));
+        var initiativeApprovals = new InitiativeApprovalService(initiativeProposals, IngestionForProject, eventBus);
+        services.AddSingleton(initiativeApprovals);
         var intakeStore = new IntakeStore(issues);
         services.AddSingleton(intakeStore);
         services.AddSingleton<IIntakeStore>(intakeStore);
@@ -565,7 +572,7 @@ public static class ForgeComposition
                 // + vision the intake asks the operator about the tech
                 // stack — facts the codebase already answers.
                 projectRootLookup: ProjectRootLookup,
-                memory: memoryStore));
+                memory: memoryStore, initiatives: initiativeApprovals));
         services.AddSingleton(intakeRegistry);
 
         var specExtractionReader = new SpecExtractionReader(issues);
@@ -582,9 +589,12 @@ public static class ForgeComposition
             roleRegistry, eventBus, skillSource, loggerFactory,
             rolePromptsRoot);
         services.AddSingleton(productAgentFactory);
-        // Self-starts in its ctor (event subscription + worker task).
+        // Program starts and joins this queue only after controller admission is ready.
         var productRefinementQueue = new ProductRefinementQueue(
-            productAgentFactory, routingSpecStore, eventBus,
+            initiativeApprovals, () => projectFactory.KnownProjects.Select(p => p.Id).ToList(),
+            IngestionForProject,
+            id => projectFactory.Find(id)?.Specs ?? throw new InvalidOperationException($"Unknown initiative project {id}"),
+            (project, spec, ct) => productAgentFactory.Create().RefineSpecAsync(spec, project, ct), eventBus,
             loggerFactory.CreateLogger<ProductRefinementQueue>());
         services.AddSingleton(productRefinementQueue);
         var groomerFactory = new GroomerAgentFactory(
@@ -698,7 +708,8 @@ public static class ForgeComposition
                     .HasActiveAsync(options.Controller.DatasetId, projectId, taskId, ct)
                 : null,
             budgetStore: options.Controller.Enabled ? new Core.Control.DurableBudgetStore(registryIssues.Db) : null,
-            budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null));
+            budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
+            initiativeApprovals: initiativeApprovals));
 
         // Schedulers: trigger events kick via the wakeup signals; the
         // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is
@@ -738,7 +749,7 @@ public static class ForgeComposition
             gates: stageGates,
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
-            eventPublisher: eventPublisher));
+            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals));
 
         return services.BuildServiceProvider();
     }

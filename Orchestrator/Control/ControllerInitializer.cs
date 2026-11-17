@@ -12,6 +12,7 @@ public static class ControllerInitializer
     public static async Task<int> RunAsync(AgentOptions options, ILoggerFactory logs, CancellationToken ct = default)
     {
         ControllerHost.Validate(options);
+        ValidateMigrationContract(options.Bootstrap);
         // Validate both configured identities before acquiring a connection or running DDL.
         var reconciliationPermissions = BudgetReconciliationPermissionsSql(
             options.Bootstrap.ControllerPrincipal, options.Bootstrap.WorkerPrincipal);
@@ -35,6 +36,39 @@ public static class ControllerInitializer
                     || reader.GetInt64(2) != checked((long)(options.Budget.LimitUsd * 1_000_000m)))
                     throw new InvalidOperationException("Existing dataset identity or budget differs; no schema changes permitted.");
             }
+        }
+        // This runs under the same exclusive schema lock, before any store can
+        // perform DDL. A completed Job may be adopted/retried only on from/to.
+        await using (var workers = lockConnection.CreateCommand())
+        {
+            workers.CommandText = "IF OBJECT_ID(N'core.worker_attempt',N'U') IS NOT NULL "
+                + ActiveWorkerAttemptsQuery(registryFactory.Dialect) + "; ELSE SELECT 0;";
+            if (Convert.ToInt32(await workers.ExecuteScalarAsync(ct)) != 0)
+                throw new InvalidOperationException("Queued or running worker attempts prohibit schema initialization.");
+        }
+        if (options.Bootstrap.MigrationFromVersion is not null)
+        {
+            await using var preflight = lockConnection.CreateCommand();
+            preflight.CommandText = "SELECT COUNT(*) FROM core.control_dataset WHERE singleton=1 AND dataset_id=@dataset AND budget_limit_microusd=@budget AND owner_instance_id IS NULL;";
+            preflight.AddParam("@dataset", options.Controller.DatasetId);
+            preflight.AddParam("@budget", checked((long)(options.Budget.LimitUsd * 1_000_000m)));
+            if (Convert.ToInt32(await preflight.ExecuteScalarAsync(ct)) != 1)
+                throw new InvalidOperationException("Schema upgrade requires the unchanged initialized dataset and budget without an owner.");
+            preflight.Parameters.Clear();
+            preflight.CommandText = "SELECT COUNT(*) FROM core.project;";
+            if (Convert.ToInt32(await preflight.ExecuteScalarAsync(ct)) != 1)
+                throw new InvalidOperationException("This schema upgrade supports only the registered Forge project.");
+            preflight.CommandText = "SELECT COUNT(*) FROM core.project WHERE id='forge' AND repo_url=@repo AND default_branch=@branch;";
+            preflight.AddParam("@repo", options.Bootstrap.RepoUrl);
+            preflight.AddParam("@branch", options.Bootstrap.DefaultBranch);
+            if (Convert.ToInt32(await preflight.ExecuteScalarAsync(ct)) != 1)
+                throw new InvalidOperationException("Existing Forge project differs from the immutable upgrade profile.");
+            preflight.Parameters.Clear();
+            preflight.CommandText = "SELECT MAX(version) FROM core.schema_version;";
+            var coreVersion = Convert.ToInt32(await preflight.ExecuteScalarAsync(ct));
+            preflight.CommandText = "SELECT MAX(version) FROM proj_forge.schema_version;";
+            var workloadVersion = Convert.ToInt32(await preflight.ExecuteScalarAsync(ct));
+            ValidateMigrationVersions(options.Bootstrap, coreVersion, workloadVersion);
         }
         var registry = new IssueStore(registryFactory);
         var leases = new ControlLeaseStore(registryFactory);
@@ -84,7 +118,8 @@ public static class ControllerInitializer
                 + $"GRANT SELECT,UPDATE ON OBJECT::[core].[budget_lock] TO [{principal}];"
                 + $"REVOKE DELETE,INSERT ON OBJECT::[core].[worker_attempt] FROM [{principal}];"
                 + $"REVOKE DELETE ON OBJECT::[core].[budget_reservation] FROM [{principal}];"
-                + reconciliationPermissions;
+                + reconciliationPermissions
+                + InitiativeWorkerPermissionsSql(principal);
             await grants.ExecuteNonQueryAsync(ct);
         }
         if (!completed) await memory.RememberAsync(completionKey, "complete", ttlDays: null, ct);
@@ -93,6 +128,39 @@ public static class ControllerInitializer
         return 0;
     }
 
+    internal static string ActiveWorkerAttemptsQuery(ISqlDialect dialect)
+        => $"SELECT COUNT(*) FROM {dialect.Table("worker_attempt")} WHERE state IN ('queued','running')";
+
+    internal static void ValidateMigrationContract(BootstrapOptions bootstrap)
+    {
+        if (bootstrap.MigrationFromVersion is null && bootstrap.MigrationToVersion is null) return;
+        if (bootstrap.MigrationFromVersion is not > 0 || bootstrap.MigrationToVersion != SqlServerMigrations.ExpectedVersion
+            || bootstrap.MigrationFromVersion >= bootstrap.MigrationToVersion)
+            throw new InvalidOperationException("Initializer upgrade versions must bind an earlier source to this binary's exact schema version.");
+    }
+
+    internal static void ValidateMigrationVersions(BootstrapOptions bootstrap, int coreVersion, int workloadVersion)
+    {
+        ValidateMigrationContract(bootstrap);
+        if (bootstrap.MigrationFromVersion is null)
+            throw new InvalidOperationException("Upgrade versions are required for schema preflight.");
+        foreach (var version in new[] { coreVersion, workloadVersion })
+            if (version != bootstrap.MigrationFromVersion && version != bootstrap.MigrationToVersion)
+                throw new InvalidOperationException("Registry or Forge workload schema is outside the qualified additive transition.");
+    }
+
+    internal static string InitiativeWorkerPermissionsSql(string workerPrincipal)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(workerPrincipal, "^[a-zA-Z][a-zA-Z0-9_-]{0,127}$"))
+            throw new InvalidOperationException("Worker database principal name is invalid.");
+        // Worker tools may read approved context, but only the controller's
+        // operator-facing approval path may change authority or ingestion receipts.
+        // The existence guard keeps the schema-39 compatibility bridge usable.
+        return string.Concat(new[] { "initiative_proposal", "initiative_revision", "initiative_ingestion", "initiative_lock" }
+            .Select(table => $"IF OBJECT_ID(N'proj_forge.{table}',N'U') IS NOT NULL BEGIN "
+                + $"GRANT SELECT ON OBJECT::[proj_forge].[{table}] TO [{workerPrincipal}];"
+                + $"DENY INSERT,UPDATE,DELETE ON OBJECT::[proj_forge].[{table}] TO [{workerPrincipal}]; END;"));
+    }
     internal static string BudgetReconciliationPermissionsSql(string controllerPrincipal, string workerPrincipal)
     {
         foreach (var principal in new[] { controllerPrincipal, workerPrincipal })

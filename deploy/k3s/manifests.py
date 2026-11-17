@@ -22,6 +22,7 @@ def foundation(namespace, storage="40Gi", pull_secret=None):
             {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get", "list", "watch", "delete"]},
             {"apiGroups": [""], "resources": ["pods", "pods/log"], "verbs": ["get", "list", "watch"]}],
         "release": [
+            {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get"]},
             {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["create", "get", "patch"]},
             {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
             {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "get", "patch"]},
@@ -46,7 +47,9 @@ def foundation(namespace, storage="40Gi", pull_secret=None):
     return items
 
 
-def job(namespace, image, dataset, operation, name, initialize=False):
+def job(namespace, image, dataset, operation, name, initialize=False, migration=None):
+    if migration is not None and not initialize:
+        raise ValueError("migration settings belong only to initializer Jobs")
     env = [{"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
            {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}]
     container = {"name": "operation", "image": validate_image(image), "env": env,
@@ -62,6 +65,9 @@ def job(namespace, image, dataset, operation, name, initialize=False):
             "Bootstrap__RepoUrl": "https://github.com/Xyrces/Forge.git",
             "Bootstrap__WorkerPrincipal": "forge-k3s-worker"}.items():
             env.append({"name": key, "value": value})
+        if migration is not None:
+            env += [{"name": "Bootstrap__MigrationFromVersion", "value": str(migration["fromVersion"])},
+                    {"name": "Bootstrap__MigrationToVersion", "value": str(migration["toVersion"])}]
         env.append({"name": "Db__ConnectionString", "valueFrom": {"secretKeyRef": {
             "name": "forge-initialize-runtime", "key": "sql-connection-string"}}})
         container["volumeMounts"] += [{"name": "state", "mountPath": "/var/lib/forge"},
@@ -73,7 +79,7 @@ def job(namespace, image, dataset, operation, name, initialize=False):
         container["args"] = ["--namespace", namespace, "--image", image, "--dataset", dataset, "--operation", operation]
     return {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": name, "namespace": namespace,
         "labels": {"app": "forge-release", "operation": operation}}, "spec": {
-            "backoffLimit": 0, "activeDeadlineSeconds": 3600,  # Application explicitly reconciles retries.
+            "backoffLimit": 0 if initialize else 3, "activeDeadlineSeconds": 3600,  # New supervisor pods resume the journal; DDL never retries implicitly.
             "template": {"metadata": {"labels": {"app": "forge-release"}}, "spec": {
                 "restartPolicy": "Never", "serviceAccountName": "forge-initialize" if initialize else "forge-release",
                 "automountServiceAccountToken": not initialize,

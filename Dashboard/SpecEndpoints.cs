@@ -28,7 +28,8 @@ public static class SpecEndpoints
         GroomerAgentFactory? groomerFactory = null,
         IssueGroomerRunStore? groomerRuns = null,
         Projects.ProjectContextFactory? projectContexts = null,
-        Forge.Core.IIssueStore? issues = null)
+        Forge.Core.IIssueStore? issues = null,
+        InitiativeApprovalService? initiativeApprovals = null)
     {
         // Multi-project: when ?project= names a registered project and the
         // factory is available, read from THAT project's spec store (spec
@@ -74,7 +75,9 @@ public static class SpecEndpoints
             var resolved = ResolveSpecs(project);
             var columnFilter = ReferenceEquals(resolved, specs) ? project : null;
             var list = await resolved.ListAsync(columnFilter, statusFilter, ct);
-            return Results.Json(list.Select(ToSpecView).ToArray(), DashboardJson.Options);
+            var blocked = resolved is SpecStore concrete
+                ? await concrete.ListRefinementBlockedSpecIdsAsync(ct) : new HashSet<string>();
+            return Results.Json(list.Select(s => ToSpecView(s, blocked.Contains(s.Id))).ToArray(), DashboardJson.Options);
         });
 
         app.MapGet("/api/specs/{id}", async (string id, string? project, CancellationToken ct) =>
@@ -82,9 +85,11 @@ public static class SpecEndpoints
             var owned = ResolveOwned(project);
             if (owned is null) return Results.NotFound(new { error = "project not found", project });
             var spec = await owned.Value.Specs.GetAsync(id, ct);
+            var refinement = owned.Value.Specs is SpecStore concrete
+                ? await concrete.GetInitiativeRefinementAsync(id, ct) : null;
             return spec is null
                 ? Results.NotFound()
-                : Results.Json(ToSpecView(spec), DashboardJson.Options);
+                : Results.Json(ToSpecView(spec, refinement is not null && refinement.RefinementState != "Completed"), DashboardJson.Options);
         });
 
         app.MapGet("/api/specs/{id}/versions", async (string id, string? project, CancellationToken ct) =>
@@ -222,12 +227,29 @@ public static class SpecEndpoints
                 .Distinct()
                 .ToList();
             var allSpecs = new List<SpecRecord>();
-            foreach (var pid in proposed)
+            if (initiativeApprovals is not null)
+            {
+                string? cursor = null;
+                do
+                {
+                    var page = await initiativeApprovals.Proposals.ListAsync(session.ProjectId, ct,
+                        limit: 50, afterId: cursor, sessionId: session.Id);
+                    var owned = projectContexts?.Find(session.ProjectId)?.Specs ?? specs;
+                    foreach (var proposal in page.Where(p => p.SpecId is not null))
+                    {
+                        var spec = await owned.GetAsync(proposal.SpecId!, ct);
+                        if (spec?.ProjectId == session.ProjectId)
+                            allSpecs.Add(spec);
+                    }
+                    cursor = page.Count == 50 ? page[^1].Id : null;
+                } while (cursor is not null);
+            }
+            foreach (var pid in proposed.Distinct())
             {
                 var match = await extractor.ListByParentIssueIdAsync(pid, ct);
-                allSpecs.AddRange(match);
+                allSpecs.AddRange(match.Where(s => s.ProjectId == session.ProjectId));
             }
-            return Results.Json(allSpecs.Select(ToSpecView).ToArray(), DashboardJson.Options);
+            return Results.Json(allSpecs.DistinctBy(s => s.Id).Select(ToSpecView).ToArray(), DashboardJson.Options);
         });
 
         app.MapPost("/api/specs", async (HttpContext ctx) =>
@@ -287,6 +309,10 @@ public static class SpecEndpoints
                 }
                 return Results.BadRequest(new { error = "unknown op (use 'update_body' or 'set_status')" });
             }
+            catch (InitiativeRefinementPendingException ex)
+            {
+                return Results.Conflict(new { error = "initiative_refinement_incomplete", detail = ex.Message });
+            }
             catch (InvalidOperationException ex)
             {
                 return Results.NotFound(new { error = ex.Message });
@@ -313,6 +339,11 @@ public static class SpecEndpoints
                 var spec = await owned.Value.Specs.GetAsync(id, ct);
                 if (spec is null)
                     return Results.NotFound(new { error = "spec_not_found" });
+                var refinement = owned.Value.Specs is SpecStore concreteSpecs
+                    ? await concreteSpecs.GetInitiativeRefinementAsync(id, ct) : null;
+                if (refinement is not null && refinement.RefinementState != "Completed")
+                    return Results.Conflict(new { error = "initiative_refinement_incomplete",
+                        detail = new InitiativeRefinementPendingException(refinement.RefinementState).Message });
                 // AssetReady completes the visual lane; Approved is the
                 // explicit nonvisual path. Groomed requires operator re-decomposition.
                 if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed)
@@ -407,14 +438,18 @@ public static class SpecEndpoints
 
             // Single source of truth: Core.SpecActions (the UI
             // consumes the same rules for its buttons).
-            var canApprove = SpecActions.CanApprove(spec.Status);
-            var canStartGrooming = SpecActions.CanStartGrooming(spec.Status);
-            var canShip = SpecActions.CanShip(spec.Status);
+            var receipt = owned.Value.Specs is SpecStore concrete
+                ? await concrete.GetInitiativeRefinementAsync(id, ct)
+                : null;
+            var refinementBlocked = receipt is not null && receipt.RefinementState != "Completed";
+            var canApprove = !refinementBlocked && SpecActions.CanApprove(spec.Status);
+            var canStartGrooming = !refinementBlocked && SpecActions.CanStartGrooming(spec.Status);
+            var canShip = !refinementBlocked && SpecActions.CanShip(spec.Status);
             // Designer path: a Draft spec can be sent to the Designer
             // agent (Draft -> ReadyForDesign; the DesignerScheduler
             // picks it up automatically and populates the design
             // board).
-            var canSendToDesign = SpecActions.CanSendToDesign(spec.Status);
+            var canSendToDesign = !refinementBlocked && SpecActions.CanSendToDesign(spec.Status);
 
             return Results.Json(new
             {
@@ -422,7 +457,12 @@ public static class SpecEndpoints
                 canStartGrooming,
                 canShip,
                 canSendToDesign,
-                reason = canApprove ? "draft is ready for approval"
+                refinementState = receipt?.RefinementState,
+                initiativeProposalId = receipt?.ProposalId,
+                initiativeRevision = receipt?.Revision,
+                refinementError = receipt?.LastError,
+                reason = refinementBlocked ? $"Initiative already approved; refinement is {receipt!.RefinementState}. Wait for completion or retry failed refinement from Intake Proposals."
+                    : canApprove ? "draft is ready for approval"
                     : canStartGrooming ? "designed/approved specs feed the groomer"
                     : canShip ? "groomer has decomposed into stories/tasks"
                     : $"status {spec.Status} has no available actions",
@@ -456,7 +496,9 @@ public static class SpecEndpoints
         };
     }
 
-    private static object ToSpecView(SpecRecord s) => new
+    private static object ToSpecView(SpecRecord s) => ToSpecView(s, false);
+
+    private static object ToSpecView(SpecRecord s, bool refinementBlocked) => new
     {
         id = s.Id,
         projectId = s.ProjectId,
@@ -471,8 +513,8 @@ public static class SpecEndpoints
         author = s.Author,
         // Server-authoritative action availability (Core.SpecActions)
         // — the UI must not ship its own copy of these rules.
-        canApprove = SpecActions.CanApprove(s.Status),
-        canStartGrooming = SpecActions.CanStartGrooming(s.Status),
+        canApprove = !refinementBlocked && SpecActions.CanApprove(s.Status),
+        canStartGrooming = !refinementBlocked && SpecActions.CanStartGrooming(s.Status),
     };
 
     private static object ToVersionView(SpecVersionRecord v) => new

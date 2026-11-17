@@ -65,7 +65,9 @@ public class DispatchCheckpointTests : IDisposable
 // plan-territory gate; SQL Server chain: M036).
 // v37 = global dataset ownership and durable request budget.
 // v38 = durable worker attempts for restart adoption.
-        Assert.Equal(39, IssueStore.CurrentSchemaVersion);
+// v39 = usage-backed accounting and historical reconciliation.
+// v40 = durable initiative revisions, approval and ingestion.
+        Assert.Equal(40, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

@@ -1291,13 +1291,12 @@ Console.Error.WriteLine(ex.ToString());
                 backgroundLoops.Add(provider.GetRequiredService<Orchestrator.ArtistScheduler>().RunAsync(shutdownCts.Token));
                 backgroundLoops.Add(provider.GetRequiredService<Orchestrator.Sprint.SprintAssembler>().RunAsync(shutdownCts.Token));
 
-                // Self-starting queue: resolving it guarantees the
-                // singleton was constructed (its ctor subscribes the
-                // worker).
-                _ = provider.GetRequiredService<Agents.ProductRefinementQueue>();
-
                 logger.LogInformation("Orchestrator starting");
                 ready?.Invoke();
+                // Durable pending refinement must not claim work before paid
+                // admission opens. Its joined lifetime also fences shutdown.
+                backgroundLoops.Add(provider.GetRequiredService<Agents.ProductRefinementQueue>()
+                    .RunAsync(shutdownCts.Token));
                 await provider.GetRequiredService<OrchestratorAgent>().ExecuteAsync(shutdownCts.Token);
                 return 0;
             }
