@@ -38,7 +38,12 @@ Generate a normal immutable image and source-bound CI receipt. Qualification mus
 
 The budget release retains version39 and requires39. M039 is nullable additive only; no legacy liabilities are retroactively recalculated. Keep the original $25 dataset budget, immutable dataset UUID, controller/worker identity split, release ownership checks, model restrictions, and gate state.
 
-## Minimal safe execution sequence (requires separate authorization)
+## Minimal safe execution sequence
+
+The operator has authorized the spending fix and its necessary deployment work.
+Execution still depends on the image, SQL and ownership proofs below; it does not
+require another confirmation merely because this planning document describes a
+maintenance step.
 
 1. **Qualify both images off-production.** Build/test the bridge on38 and39, and budget binary on39, using an isolated SQL Server/Azure SQL database and fixture data. Qualify rollback from the budget image to the bridge on39. Publish reviewed immutable receipts for both.
 2. **Deploy bridge normally on live DB38.** Use the existing API release, standby qualification, drain, pod-deletion barrier, activation, routing, and journal. Confirm bridge is the active image and record its digest/slot/instance/epoch. Before migration, normal rollback to original38 still works.
