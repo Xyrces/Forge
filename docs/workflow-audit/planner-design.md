@@ -1,133 +1,77 @@
-# Bounded sprint planning design
+# Bounded outcome planning: implemented contract and qualification
 
-Status: design for review, **not implemented**. Baseline is the sprint code at `8460dde` and the seven executable characterization cases in `tests/Forge.Tests/SprintPlanningAuditTests.cs`. Budget implementation is a separate authorized change.
+Status, 2026-11-17: the outcome planner, durable completion, routine-release integration and completion controls are implemented in the unattended-workflow integration source. This is no longer an unimplemented proposal. Offline tests and synthetic dashboard checks support the behaviors described below; the strict schema-41 production cutover and the new UI-originated end-to-end pilot remain qualification work until their actual receipts are recorded. Passing source tests is not a claim that the new planner has delivered the live pilot.
 
-## Operating contract
+The original audit described the code at `8460dde`. Its weaknesses and proposed increments are historical context, summarized at the end. They must not be read as a list of defects still present in the integrated source. See [routine delivery](routine-deployment.md) for release authority and [the earlier performance review](performance.md) for the original read-path findings.
 
-An initiative enters through operator intake. Forge may identify an opportunity, draft a proposal, ask questions, and expand that draft with alternatives, scope, acceptance criteria and dependencies. It must not turn its own suggestion into approved engineering work. Acceptance authorizes the initiative's outcome; subsequent design, grooming, bounded sprint planning, implementation, review and ordinary remediation run autonomously. The operator does not approve each sprint.
+## Approval and scope
 
-A sprint is a small, demonstrable outcome inside already approved scope. It may contain a slice of one spec, complementary tasks from other approved specs, and related remediation. An epic/spec boundary is provenance, not a mandatory sprint boundary. Membership includes the prerequisites needed to deliver the outcome; dependency readiness determines execution order within that membership.
+New initiatives enter through operator Intake. Forge may propose an opportunity, draft alternatives and ask questions, but its suggestions remain drafts until the operator approves the exact latest revision and content hash. Approval authorizes the initiative's outcome; design, grooming, bounded planning, engineering, review and ordinary in-scope remediation then proceed without a separate approval for each sprint.
 
-The active sprint keeps its committed objective. Necessary prerequisites and corrective work may be added through the same validator. Unrelated work, even if high priority, does not silently displace or expand the active objective. An explicit operator interruption is a separate action with a visible disposition for unfinished work.
+`Core/Initiatives/` persists that approval and idempotent project-local ingestion. Refinement must actually update the bound specification before its durable receipt advances. A new-initiative follow-up becomes an Intake proposal, never an automatically approved specification. A task's title, parent relationship, `groomed=true` flag, or a model's assertion that work is remediation cannot create scope authority.
 
-## Reuse the existing contracts
+Grooming uses its existing model call to publish typed `sprintOutcome` metadata: an explicit outcome/objective, complete required member set, observable criteria and evidence kinds, each member's contribution, and exact approved scope references. `SprintOutcomeAuthority` checks the owning project's approved-ingestion revision/hash, completed refinement and intact accepted content. Literal excerpts make the mapping reviewable; text matching does not prove semantic coherence. That judgment remains grooming's responsibility. Missing legacy mappings fail closed and require scope repair.
 
-| Existing contract | Keep | Change |
-| --- | --- | --- |
-| `Agents/IntakeAgent.cs` draft messages and acceptance, `Core/IntakeStore.cs` | Session/project ownership, proposal history, operator acceptance | Persist a durable acceptance identity and approved outcome snapshot; do not rely on matching a system-message string as the authorization record |
-| `SpecRecord` project, parent epic/spec, `CurrentVersion`, body | Project ownership and versioned technical decomposition | Carry the accepted initiative identity through derived specs; technical refinement does not itself require another approval |
-| Task parent chain, `followUpOf`, `blocks`, grooming | Provenance, prerequisite graph, technical readiness | Add structured outcome/acceptance references during grooming; a title match or provenance root alone is not a coherence test |
-| `SprintProposalAuditStore` candidate/selection audit and committed sprint | One proposal/audit identity, explanatory selection | Extend it with typed plan JSON, input revision/fingerprint and validation result; avoid a second competing planner database |
-| `SprintStore`, memberships and status hints | Per-project sprint, tasks and visible goal | Add transactional validated activation and membership amendment; no automatic archiving of another active sprint |
-| `FollowUpDraftStore` source, role, disposition | Drafts and discovery history | Add stable materialization identities and restart-safe create/consume |
-| `IssueStore.ReadyAsync` and role slots | Dependency-ready dispatch within active membership | Do not use runnable-now status to decide whether a prerequisite belongs in the plan |
+## Selection, bounds and parallel work
 
-Current approval records are not strong enough to treat every Groomed spec as proof of operator authorization. In particular, `SprintAssembler.MaterializeFollowUpsAsync` currently handles triage action `epic` by creating a spec and immediately setting Approved. Replace that path: genuine new initiatives become intake proposal drafts; in-scope remediation retains its accepted initiative reference and goes through normal technical grooming. This closes an authorization gap rather than adding another planning approval gate.
+A sprint is a small independently demonstrable outcome within approved scope. An epic/spec boundary is provenance, not a mandatory sprint boundary: complementary tasks from different approved sources may share a sprint when their explicit criterion mappings describe the same outcome.
 
-## Proposed plan representation
+**Ten engineering tasks is the configurable ceiling, not a target.** It includes necessary prerequisites and applies uniformly. The selector prefers a small complete delivery unit. A soft preference may add naturally independent, explicitly related units when configured role capacity benefits—for example three ready same-goal tasks for three CoreDev slots. It does not pad to ten, manufacture splits, include unrelated work, or count a sequential chain as parallel capacity. Current occupied slots are not a planning input. Task counts do not estimate reliable effort or authorize spending; the durable budget ledger remains the paid-call authority.
 
-Extend the existing proposal audit with a versioned `SprintPlan` payload:
+`SprintPlanBuilder` reads bounded projections: at most 100 discovery candidates and 100 explicitly same-outcome candidates, followed by targeted dependency/ancestor reads. A keyset cursor advances discovery beyond ineligible old work. Deterministic results are cached by observed candidate, snapshot and configured-capacity inputs. This is an explicit bounded window, not exhaustive optimization of the entire backlog. No additional planner model call is introduced.
 
-- Project, accepted initiative references, source spec versions and input snapshot fingerprint.
-- One objective and a short list of acceptance criteria, each linked to approved scope and required evidence.
-- Selected engineering task IDs, their criterion mapping, mandatory prerequisite IDs, and inclusion reasons (`delivers`, `prerequisite`, `remediates`).
-- Related candidates deferred from this sprint, with reasons. Deferral is not closure or abandonment.
-- Planning bounds, known role requirements, and any unestimated effort/cost uncertainty.
-- Validation result, blockers, activation identity and resulting sprint ID.
+Membership and dispatch readiness are separate. A dependency chain A → B → C can belong to one sprint while only A is initially runnable. The validator closes over required prerequisites and rejects missing, failed, blocked, cyclic, foreign-project, ungroomed or unapproved necessary work. It never truncates a required delivery unit to fit the ceiling. An oversized unit needs a smaller useful decomposition through grooming. A prerequisite whose declared required partner is absent from its dependency closure is also deferred for correction rather than silently dropping that partner.
 
-Use typed fields rather than another set of task lifecycle flags. Issue lifecycle remains owned by `TaskStateMachine`. Structured planner data is a planning/audit contract, not a replacement state machine. Any schema changes receive their own migration after the current budget migration; do not assign or reuse M039 here.
+## Activation and preservation of the current objective
 
-The initial selector should be deterministic. Reuse grooming to describe bounded delivery slices and criterion links. Rank approved candidate outcomes by existing operator priority and age, then collect their related tasks and prerequisite closure. A later capable-model suggestion may help compare existing outcome candidates, but it cannot create approval, change the backlog, activate a sprint, or bypass validation. This does not require a new general-purpose planning agent.
+`SprintActivationValidator` is shared by automatic selection, proposal commit, generic activation and active membership amendment. Proposal commit accepts the complete recorded membership and canonical objective; it cannot substitute arbitrary task IDs or goal text. `SprintStore` atomically writes memberships and the typed `weights_json.plan` audit while rechecking issue/spec snapshots, dependencies, current approval authority and active-sprint exclusivity. The plan hash binds criteria, members, grooming mappings, deferrals and input fingerprint. Amendments add an audit version rather than overwriting history.
 
-## Selection and activation
+The current sprint keeps its objective. Necessary groomed prerequisites may join after the same approval, closure and transactional checks, including parented or transitive prerequisites. Unrelated P1 work, blocker labels, requeue metadata and a `followUpOf` relationship alone do not justify injection. Ordinary unrelated follow-ups wait for later selection; their mere existence does not globally hold a coherent approved candidate.
 
-1. **Snapshot the owning project's work.** Include approved provenance, groomed tasks, dependencies, existing sprint membership, current task/spec revisions, and relevant remediation. Exclude containers from executable membership. Treat a task with missing or ambiguous authorization as a proposal/grooming problem, not implicitly approved work.
-2. **Choose a candidate outcome.** Use the smallest groomed slice with independently demonstrable acceptance. Search related approved backlog across spec boundaries before committing it. Shared files, matching titles, or available worker slots are hints, not sufficient inclusion reasons.
-3. **Close over prerequisites.** A -> B -> C may all belong to one sprint while only A is runnable. A dependency already delivered is satisfied. An open prerequisite joins the candidate only if it is approved, groomed, owned by this project and not committed to another active sprint. Cycles, missing nodes, failed prerequisites or cross-project prerequisites produce a structured blocker. Do not silently drop B/C or label A alone as completion of the original goal.
-4. **Apply bounds to the whole closure.** The same cap applies to spec work, rootless work and remediation. If closure exceeds the bound, choose a smaller independently useful slice and rewrite its acceptance accordingly. If no such slice exists, show `needs decomposition`; never truncate a dependency chain or activate an oversized group under an unchanged goal.
-5. **Use one validator for every entry point.** Automatic selection, proposal preview/commit, explicit activation, and active-sprint amendments call the same service. Validate ownership, approval provenance, grooming, criterion coverage, dependency closure, cycles, membership conflicts, role availability and bounds. A missing role blocks the affected candidate with a reason; a temporarily full slot only delays execution. Re-read mutable state and the sprint gate at activation rather than trusting a stale preview.
-6. **Activate atomically.** The Core store transaction checks expected active-sprint identity and relevant revisions, writes the plan-to-sprint binding, creates the active sprint and attaches executable memberships together. Reject an existing unfinished active sprint; never archive it as a side effect of activation. Publish a wake hint only after commit. Duplicate activation returns the same sprint. A periodic sweep repairs a lost hint.
+Generic edit/delete routes cannot erase committed audit-backed objectives or required membership. Before claiming engineering work, dispatch checks typed-plan membership, unchanged grooming binding and exact approval authority. Watch lifecycle processing remains exempt. Stage holds are re-read at evaluation; no cross-store atomic gate guarantee is claimed.
 
-The shared Orchestrator validator performs policy and store lookups; the Core transaction performs database invariants only. No model or HTTP calls belong inside the transaction. A stale plan returns a specific conflict and is recomputed automatically, with a bounded retry, rather than being force-committed.
+## Completion, interruption and recovery
 
-Planning bounds are not dollar authorization. The durable request ledger remains the spending authority; role slots remain execution concurrency. Do not invent reliable dollar estimates from task counts or let planning heuristics waive those controls.
+A sprint's terminal task counts do not prove delivery. `IssueResolution` distinguishes Completed work from Closed work with an explicit disposition. Cancellation and ambiguous legacy closure do not satisfy dependencies. An evidenced delivery elsewhere or duplicate of completed work has different semantics. Failed/Blocked work remains unresolved until an explicit allowed operator action; elapsed time does not manufacture success.
 
-## Active work, failures and follow-ups
+`SprintCompletionStore` records the exact committed plan, member/evidence snapshot and durable bookkeeping receipt together with terminal sprint bookkeeping. The receipt distinguishes `Satisfied`, `PendingEvidence`, `Incomplete` and `LegacyTerminalOnly`. Publication evidence is bound to the verified worker result and published PR head; the watcher records an actually observed merge. A successful merge request followed by an incomplete/stale GitHub observation keeps the watch live instead of losing the evidence-recovery path.
 
-Replace `InjectAdHocAsync` with a validated amendment operation. Consider a necessary prerequisite regardless of whether it has a parent. Preserve approval/grooming requirements and the active objective. Record why each addition is necessary and rerun closure/bounds. A discovery that changes the approved outcome becomes an intake draft; if it is essential to the current outcome, show that specific blocked dependency rather than allowing an unrelated initiative to proceed silently.
+Evidence requirements are separate:
 
-Remove the project-wide wait for every ungroomed follow-up. Wait only for the chosen outcome's necessary work. An unrelated documentation finding must not stop a ready approved outcome. Nonblocking related remediation can be grouped with complementary approved backlog at the next planning boundary. Blocking remediation may join the current sprint after grooming and validation.
-
-Disable failure-aging-as-success. Age may trigger triage/escalation, but must not automatically close required work or satisfy dependencies. A Closed task needs an explicit disposition: delivered elsewhere with evidence, duplicate of a delivered task, or scope intentionally removed. Cancellation/abandonment does not satisfy a required criterion. Preserve Failed until an explicit allowed recovery/disposition; do not clear it just to keep the queue moving.
-
-Apply the same distinction in `IssueStore.ReadyAsync`/open-blocker queries: an abandoned or ambiguously closed prerequisite cannot become runnable merely because its status is Closed. Model this as a typed closure disposition and, where needed, a legal lifecycle event; do not add an unrelated planner flag. Legacy Closed records without evidence need an explicit migration/compatibility decision rather than silently being treated as delivered.
-
-Completion becomes a durable, resumable operation:
-
-1. Validate criterion evidence and required task dispositions; terminal-row counts alone are insufficient. Merged code, tests and any required deployment/playtest evidence must match the claimed outcome. Do not invent tests or deployment requirements for unrelated documentation changes.
-2. Atomically record successful completion plus a pending completion-bookkeeping record. A sprint whose outcome failed or was abandoned must not be presented as delivered.
-3. A sweep processes pending bookkeeping for completed sprints independently of whether a sprint just became complete. It materializes/triages relevant drafts and finalizes the completion record.
-4. Give each materialization a stable key derived from project and sorted draft IDs. Creation and draft disposition occur in one database transaction, or through a unique target mapping with resumable phases when issue/spec stores cannot share the operation. Reuse `IssueStore` mutation logic so events and the JSONL mirror remain correct; do not bypass it with raw queue inserts.
-5. Failures retry the unfinished bookkeeping step, not the engineering work. Persist triage decisions before materialization so retries do not ask the model to regroup already-consumed drafts. New-initiative dispositions create draft proposals, never auto-approved specs.
-
-## Minimal implementation sequence and touchpoints
-
-| Increment | Concrete touchpoints | Exit condition |
-| --- | --- | --- |
-| 1. Repair planning invariants | `SprintAssembler.ListEligibleAsync`, `AssembleNextAsync`, `InjectAdHocAsync`; new shared validator; `SprintProposeService.CommitAsync`; `SprintStore` activation transaction; activation endpoints | Membership separates from readiness; all entry points reject ungroomed/stale/held/conflicting activation; no active sprint displacement |
-| 2. Preserve authorization and define outcomes | Intake acceptance and `IntakeStore`; spec/groomer output contracts; proposal audit extension; follow-up triage `epic` branch | Accepted initiative provenance is durable; new initiatives stay drafts; planner can select a bounded slice across approved sources |
-| 3. Make completion truthful and recoverable | `CompletionProgressAsync`, `SweepAgedFailuresAsync`, materializer; `FollowUpDraftStore`; transaction-capable `IssueStore` creation; task close disposition | Failed/abandoned work cannot masquerade as delivery; interrupted materialization resumes without duplicates |
-| 4. Expose and qualify autonomous operation | Existing Sprints/Now planning state; event consumers/backstop; restart and end-to-end tests | UI explains the next outcome and real blocker; approved work plans/runs/reviews/completes without per-sprint approval |
-
-Increment 1 can land correctness repairs while the current grouping remains temporarily conservative. It should not be advertised as full outcome planning until increment 2 is present. Preserve existing runtime integrations, worker verification, paid-call admission and merge/review gates throughout.
-
-## Acceptance cases
-
-| Case | Required result |
+| Requirement | What it establishes |
 | --- | --- |
-| Forge suggests a new feature | Expanded intake draft only; no approved spec or executable task |
-| Operator accepts one initiative | Derived design/grooming/planning proceeds without another sprint approval |
-| A -> B -> C delivers one approved outcome | One sprint contains all three; dispatch runs only ready tasks |
-| Twelve-task spec exceeds the selected bound | Smaller demonstrable slice or `needs decomposition`; no uncapped activation |
-| Related fixes originate from sibling tasks/different approved specs | One outcome may include both, with explicit criterion links |
-| Unrelated ungroomed follow-up exists | Ready independent candidate can activate |
-| Parented approved prerequisite appears during active sprint | Validated amendment adds it; dependent task remains unclaimable until ready |
-| Dependency is unapproved, failed, cyclic, missing or cross-project | Affected outcome blocked with an actionable explanation; no silent prerequisite omission |
-| Proposal API submits arbitrary/ungroomed IDs or gate is held | Same validator rejects it; old sprint unchanged |
-| Two activation attempts race or a stale preview is committed | One activation or idempotent replay; no partial memberships or archived unfinished sprint |
-| Age threshold passes on a failed required task | Still failed/blocked; no completed outcome or unblocked dependency |
-| Operator closes required work as abandoned | Outcome remains unmet or explicitly partial/cancelled; no false success |
-| Crash after completion, after one target creation, or before draft disposition | Restart resumes bookkeeping exactly once; no orphaned/duplicate follow-up |
-| Triage outage | Persisted drafts remain retryable; unrelated approved work is not globally stalled |
-| Late paid budget hold or unavailable required role | Explain the real constraint; do not reset budget, weaken approval or create new initiative work |
+| `MergedAndVerified` | Recorded implementation verification and the matching observed merge |
+| `DeploymentHealthy` | The exact qualified source's successful independent release |
+| `OperatorObserved` | Explicit operator observation of that deployed source, with immutable proof reference/hash and authenticated provenance |
 
-## Settled urgency decision (2026-11-17)
+Engineering evidence can be satisfied before a required routine release finishes. `DeliveryRequired` captures enabled routine-release policy or explicit post-deployment criteria; projects without either are not forced into a nonexistent deployment path. The shared activation barrier checks the necessary bookkeeping and delivery/acceptance facts, not only terminal counts or one success label. `DeploymentStore` remains the release lifecycle authority; the completion receipt binds to it and projects its result. A separate paged backstop recovers a stop after the deployment row became terminal but before completion evidence advanced.
 
-Finish the current sprint unless the operator explicitly interrupts it. Unrelated urgent initiatives or work wait for later selection; priority P1, a blocker label, and requeue metadata alone do not permit automatic injection. Existing groomed ad-hoc prerequisites with an actual blocks edge into active work can join under normal validation. Ordinary follow-ups remain deferred until their existing later-sprint path; a followUpOf relationship alone does not establish necessity. No interruption UI or new manual-action semantics are introduced in this increment. Richer objective-based amendment validation remains proposed planner work.
+Completion reconciliation runs independently of the active-sprint event. Source drafts have durable claims; decisions are saved before targets are materialized. Target creation, source consumption and claim acknowledgement share a transaction. Stable identities recover replay without regrouping or duplicating already-consumed work. Legacy unclaimed proposal sources are reconciled before new completion claims; legacy recovery cannot consume a durable batch's claimed sources. A failed batch does not starve unrelated later batches. Late drafts and multiple bounded batches cannot prematurely mark bookkeeping finished.
 
-## Remaining policy choices
+An interrupted paid triage request becomes review-needed; it is not blindly repeated. The UI explains that the previous request may have completed and another request may incur a charge. Explicit retry is bound to the selected completion. Recorded decisions resume materialization without another model call. Uncertain nonblocking follow-up triage remains visible without inventing evidence that it completed.
 
-The core direction is settled; these are defaults to make explicit rather than reasons to stop the invariant repairs:
+An operator may explicitly stop an unresolved typed terminal outcome with its exact plan identity and a required reason. The immutable interruption preserves the original evidence/outcome and does not claim delivery. It stops future bookkeeping/generation for that outcome. Running triage and a nonterminal independent release cannot be cancelled by pretending they finished: an unstarted release may first be safely rejected, while authorized/running release work must reach its safe result. This completion action is not a generic cancellation mechanism for arbitrary active engineering runs.
 
-- **Initial size limit (settled):** configurable ceiling of 10 engineering tasks including prerequisites, applied uniformly. Unknown effort is visible and encourages smaller slices; task count is not a substitute for effort or spend estimates.
-- **Abandoned outcomes:** propose a distinct cancelled/partial disposition in sprint presentation rather than overloading Completed or silently archiving work. Specify which operator actions may remove a required criterion.
-- **Scope ambiguity:** propose draft/exclude when nonessential, and an explicit blocked decision when essential. No automatic approval of a new initiative because a model calls it remediation.
+## Operator presentation and qualification limits
 
-These defaults require agreement before their product-facing behavior is implemented. The urgency rule above is settled; the remaining design proposals are not implementation authorization.
+The Sprints page separates the task board, engineering evidence, follow-up processing and release state. Historical task boards are read-only; explicit completion review/retry/interruption actions remain available where the server permits them. The collapsed outstanding-outcome overview reads five joined summaries per page, uses sprint names, and can select an off-page historical sprint. Selected batch history is independently bounded. Loading failures show unavailable evidence rather than implying empty history or successful delivery. Routine deployment hold/release remains on the canonical Flow controls.
 
+Qualification must preserve all of these cases:
 
-## Outcome planner implementation contract (2026-11-17)
+- A complete approved chain stays together; dispatch only runs dependency-ready members.
+- A small useful unit is not padded, while natural independent approved work can use configured role capacity.
+- Over-ceiling, stale, ungroomed, foreign or incompletely authorized units fail without partial activation.
+- Activation races have one valid result; stale plan/member changes roll back membership and audit together.
+- Cancelled/unknown Closed work does not unblock a required dependency or become delivered by age.
+- Crash/replay around source claim, decision, target creation, consumption and terminal release projection does not duplicate work or paid generation.
+- Wrong plan/source/criterion proof and unqualified release evidence cannot satisfy acceptance.
+- Interruption racing release binding has one authority winner; it cannot leave an eligible orphan release.
+- Project/sprint switching and failed UI loads cannot display stale evidence as the new selection's result.
 
-The operator settled the numerical policy: **10 is the configurable ceiling, not a target**, and includes all engineering prerequisites. Select a small independently useful delivery unit. A soft preference may add naturally independent, explicitly related units to use configured role capacity (for example three ready same-goal tasks for three CoreDev slots). It never adds unrelated work, fills to ten, manufactures splits, or rewards sequential chains as parallel capacity. Current slot occupancy is not an input.
+The schema-41 rehearsal uses disposable SQL schemas and an old read-compatible bridge before/after additive migration. Until its final source-pinned result and the live cutover are recorded, do not describe those operations as passed. Likewise, synthetic browser proof does not substitute for the live operator's observation of the pilot's exact deployed version. Routine schema-preserving delivery, schema-upgrade coordination and whole-host disaster recovery are distinct claims; this planner work does not qualify the last of them.
 
-Grooming uses its existing model call to publish `sprintOutcome` typed JSON: an explicit outcome identity/objective, complete required member set, observable criteria and evidence kinds, each member's criterion contribution, and exact approved scope references. `bind_outcome` validates project-local approved-ingestion revision/hash and completed refinement against intact accepted content. Literal scope excerpts make the mapping reviewable; the semantic judgment remains grooming's responsibility, not an implication that text matching proves meaning. Missing legacy mappings fail closed rather than creating new approval.
+## Historical design and superseded baseline findings
 
-`SprintPlanBuilder` reads bounded projections (at most 100 discovery candidates plus 100 explicitly same-outcome candidates) and targeted dependency/ancestor rows. Empty discovery pages advance a keyset cursor so ineligible old work does not permanently starve later work. It caches the deterministic selected result by observed candidate/snapshot/capacity inputs; no planner model call or transient slot/budget state participates. The window is explicit: it does not claim exhaustive whole-backlog optimization. Existing unrelated completion bookkeeping scans are separate from these bounded planning inputs.
+At `8460dde`, planning grouped broad spec work, could bypass complete outcome/approval checks, and relied on volatile completion/materialization sequencing. The original design proposed four increments: repair activation invariants; persist approval and outcome mappings; make completion truthful and durable; expose and qualify the autonomous flow. Those source increments now have concrete owners in `Core/Initiatives`, `SprintOutcomeAuthority`, `SprintPlanBuilder`, `SprintActivationValidator`, `SprintStore`, `Core/Completion`, the routine deployment coordinator and the existing dashboard surfaces.
 
-`SprintActivationValidator` is shared by automatic assembly, proposal commit, generic activation and active membership amendments. It rejects incomplete delivery units, missing authority, changed/foreign specifications, ungroomed prerequisites, inconsistent criterion definitions and over-ceiling closures. Proposal commits accept the complete recorded member set and canonical objective, not arbitrary substituted IDs or goal text. A necessary prerequisite whose declared delivery partner is absent from the dependency closure is deferred for correct grooming; it is not silently omitted.
-
-`SprintStore` writes membership and `weights_json.plan` audit together, with the current approval receipt rechecked in the same database transaction. The plan hash binds criteria, members, explicit deferrals and input fingerprint. Amendments append a new audit rather than overwriting historical plans. Stage gates remain evaluation-time checks; there is no unsupported cross-store atomic gate claim. Active generic API edits cannot silently replace the objective or remove required members.
-
-Evidence kinds are deliberately different: `MergedAndVerified` is implementation evidence, `DeploymentHealthy` is runtime deployment qualification, and `OperatorObserved` is actual operator-led acceptance such as browser/visual inspection. The completion/deployment subsystem owns durable evidence and pending-observation state; the planner does not manufacture success. Source implementation and offline tests do not by themselves claim live qualification.
-
-Activation also checks the shared prior-completion barrier inside the membership transaction: unresolved required bookkeeping, delivery or acceptance evidence prevents a new sprint. Committed audit-backed goals, status and membership history cannot be erased through generic PATCH/DELETE routes; completion and explicit stop records own those decisions. Before engineering claims a task, dispatch verifies current typed-plan membership, unchanged grooming binding and exact approval authority. Watch lifecycle processing stays exempt. Legacy active sprints without that evidence report a scope-repair gap instead of dispatching silently.
+The earlier statements that approval was only a conversation-message convention, triage-created epics were auto-approved, durable completion was merely proposed, or no explicit outcome interruption existed described that baseline. They are not current implementation claims. The original 2026-11-17 finish-current decision remains in force: urgency alone never silently replaces the committed objective. Further semantic-model improvements, exhaustive backlog optimization, reliable effort/cost forecasting and whole-host recovery remain outside this implementation; none may weaken approval, verification, budget admission or the release protocol.
