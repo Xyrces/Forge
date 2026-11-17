@@ -5,6 +5,10 @@ namespace Forge.Dashboard.Features.AppShell;
 public static class AppShellReducers
 {
     [ReducerMethod]
+    public static AppShellState OnBuildInfoLoaded(AppShellState state, AppShellActions.BuildInfoLoadedAction action)
+        => state with { BuildInfo = action.BuildInfo };
+
+    [ReducerMethod]
     public static AppShellState OnActiveSprintLoaded(AppShellState state, AppShellActions.ActiveSprintLoadedAction action)
         => state with { ActiveSprintId = action.Id, ActiveSprintName = action.Name };
 

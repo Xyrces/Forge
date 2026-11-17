@@ -5,6 +5,9 @@ namespace Forge.Dashboard.Features.AppShell;
 [FeatureState]
 public sealed record AppShellState
 {
+    /// <summary>Running Forge metadata, never derived from the project lens.</summary>
+    public BuildInfoDto? BuildInfo { get; init; }
+
     public string? ActiveSprintId { get; init; }
     public string? ActiveSprintName { get; init; }
     public string HeartbeatStatus { get; init; } = "unknown";
@@ -32,6 +35,9 @@ public sealed record LiveFeedEntry(DateTime At, string Kind, string? TaskId, str
 
 public static class AppShellActions
 {
+    public sealed record LoadBuildInfoAction();
+    public sealed record BuildInfoLoadedAction(BuildInfoDto? BuildInfo);
+
     public sealed record LoadActiveSprintAction();
     public sealed record ActiveSprintLoadedAction(string? Id, string? Name);
 
