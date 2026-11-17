@@ -53,6 +53,70 @@ public class SprintAssemblerTests : IDisposable
     private Task Tick() => _assembler.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
 
     [Fact]
+    public async Task GroomedSpecPlansWholeDependencyChainButOnlyPrerequisiteIsReady()
+    {
+        var (_, _, tasks) = await SeedGroomedSpecAsync("deliver outcome", 3);
+        await _issues.AddDependencyAsync(tasks[0], tasks[1], IssueDepKind.Blocks);
+        await _issues.AddDependencyAsync(tasks[1], tasks[2], IssueDepKind.Blocks);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.All(tasks, id => Assert.Contains(id, members));
+        Assert.False(await _issues.IsBlockedAsync(tasks[0]));
+        Assert.True(await _issues.IsBlockedAsync(tasks[1]));
+        Assert.True(await _issues.IsBlockedAsync(tasks[2]));
+    }
+
+    [Fact]
+    public async Task UnrelatedUngroomedFollowUpDoesNotHoldCoherentCandidate()
+    {
+        var (_, _, tasks) = await SeedGroomedSpecAsync("ready outcome", 2);
+        var waiting = await _issues.CreateAsync(new NewIssue("task", "unrelated follow-up",
+            Metadata: new Dictionary<string, object> { ["followUpOf"] = "older-work" }));
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.All(tasks, id => Assert.Contains(id, members));
+        Assert.DoesNotContain(waiting.Id, members);
+        Assert.Equal("running", (await ReadBuildStateAsync())!.Phase);
+    }
+
+    [Fact]
+    public async Task UnavailableAdHocClosureDoesNotStarveAnotherCoherentRoot()
+    {
+        var blocked = await _issues.CreateAsync(new NewIssue("task", "blocked high priority", Priority: 1,
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        var missingGroom = await _issues.CreateAsync(new NewIssue("task", "needs grooming"));
+        await _issues.AddDependencyAsync(missingGroom.Id, blocked.Id, IssueDepKind.Blocks);
+        var available = await _issues.CreateAsync(new NewIssue("task", "independent outcome", Priority: 3,
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(available.Id, members);
+        Assert.DoesNotContain(blocked.Id, members);
+        Assert.DoesNotContain(missingGroom.Id, members);
+    }
+
+    [Fact]
+    public async Task NecessaryParentedPrerequisiteAndItsChainJoinCurrentSprint()
+    {
+        var (_, _, current) = await SeedGroomedSpecAsync("current", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var (_, _, prerequisites) = await SeedGroomedSpecAsync("needed infrastructure", 2);
+        await _issues.AddDependencyAsync(prerequisites[0], prerequisites[1], IssueDepKind.Blocks);
+        await _issues.AddDependencyAsync(prerequisites[1], current[0], IssueDepKind.Blocks);
+        var unrelated = await _issues.CreateAsync(new NewIssue("task", "urgent unrelated", Priority: 1,
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await Tick();
+        Assert.Equal(active.Id, (await _sprints.GetActiveAsync())!.Id);
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.All(prerequisites, id => Assert.Contains(id, members));
+        Assert.DoesNotContain(unrelated.Id, members);
+    }
+
+    [Fact]
     public async Task EpicFollowUpTriageCreatesOnlyProposalUntilOperatorApproval()
     {
         var (_, _, tasks) = await SeedGroomedSpecAsync("current", 1);
@@ -1126,9 +1190,7 @@ public class SprintAssemblerTests : IDisposable
     public async Task BuildState_AwaitingGroom_CapturesPendingFollowUps_PublishesOnChangeOnly()
     {
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
-        // A second groomed-spec group so the snapshot can show what's
-        // queued BEHIND the grooming wait.
-        await SeedGroomedSpecAsync("Sprint B", 2);
+
         await Tick();
         foreach (var id in aTasks)
         {
@@ -1147,9 +1209,7 @@ public class SprintAssemblerTests : IDisposable
         var item = Assert.Single(state.PendingGroom);
         Assert.Equal(fup.Id, item.Id);
         Assert.Equal("ungroomed follow-up", item.Title);
-        var group = Assert.Single(state.EligibleGroups);
-        Assert.Equal("Sprint B", group.Name);
-        Assert.Equal(2, group.TaskCount);
+        Assert.Empty(state.EligibleGroups);
 
         // The waiting event fires on the transition into
         // awaiting-groom…

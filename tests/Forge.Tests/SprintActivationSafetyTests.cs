@@ -19,6 +19,55 @@ public sealed class SprintActivationSafetyTests : IDisposable
     public void Dispose() => issues.Dispose();
 
     [Fact]
+    public async Task ProposalBindsAndCommitsEntirePrerequisiteClosure()
+    {
+        var outcome = await TaskRow();
+        var prerequisite = await TaskRow();
+        await issues.AddDependencyAsync(prerequisite.Id, outcome.Id, IssueDepKind.Blocks);
+        var proposer = Proposer();
+        var proposal = await proposer.ProposeAsync(null, null);
+        var candidate = Assert.Single(proposal.Candidates, c => c.TaskId == outcome.Id);
+        Assert.Contains(candidate.Breakdown, line => line.Contains(prerequisite.Id));
+        var sprint = await proposer.CommitAsync(proposal.AuditId, [outcome.Id], null, null, "operator");
+        var members = await Sprints.GetIssueIdsAsync(sprint);
+        Assert.Contains(outcome.Id, members);
+        Assert.Contains(prerequisite.Id, members);
+        Assert.True(await issues.IsBlockedAsync(outcome.Id));
+    }
+
+    [Theory]
+    [InlineData("ungroomed")]
+    [InlineData("failed")]
+    [InlineData("blocked")]
+    [InlineData("cycle")]
+    public async Task InvalidPrerequisiteClosureIsNeverAnEligibleProposal(string reason)
+    {
+        var outcome = await TaskRow();
+        var prerequisite = await TaskRow(reason != "ungroomed");
+        await issues.AddDependencyAsync(prerequisite.Id, outcome.Id, IssueDepKind.Blocks);
+        if (reason == "failed") await issues.TransitionAsync(prerequisite.Id, IssueStatus.Failed, null);
+        if (reason == "blocked") await issues.TransitionAsync(prerequisite.Id, IssueStatus.Blocked, null);
+        if (reason == "cycle") await issues.AddDependencyAsync(outcome.Id, prerequisite.Id, IssueDepKind.Blocks);
+        var proposal = await Proposer().ProposeAsync(null, null);
+        Assert.DoesNotContain(proposal.Candidates, c => c.TaskId == outcome.Id);
+    }
+
+    [Fact]
+    public async Task ChangedSatisfiedPrerequisiteInvalidatesPreview()
+    {
+        var outcome = await TaskRow();
+        var prerequisite = await TaskRow();
+        await issues.TransitionAsync(prerequisite.Id, IssueStatus.Completed, null);
+        await issues.AddDependencyAsync(prerequisite.Id, outcome.Id, IssueDepKind.Blocks);
+        var proposer = Proposer();
+        var proposal = await proposer.ProposeAsync(null, null);
+        await issues.TransitionAsync(prerequisite.Id, IssueStatus.Pending, null);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            proposer.CommitAsync(proposal.AuditId, [outcome.Id], null, null, "operator"));
+        Assert.Empty(await Sprints.ListAsync(false));
+    }
+
+    [Fact]
     public async Task LargeIneligibleBacklogUsesBoundedReadsAndStillFindsEligibleWork()
     {
         var db = new CountingFactory(issues.Db);
@@ -171,6 +220,8 @@ public sealed class SprintActivationSafetyTests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => Sprints.AddValidatedPrerequisiteAsync(sprint.Id, snapshot));
         Assert.DoesNotContain(fixer.Id, await Sprints.GetIssueIdsAsync(sprint.Id));
         // Explicit manual amendments retain their existing authorization semantics.
+        snapshot = await new SprintActivationValidator(issues, Sprints, new SpecStore(issues), "test", null)
+            .ValidateAsync([fixer.Id], default, activating: false);
         await Sprints.AddValidatedIssueAsync(sprint.Id, snapshot);
         Assert.Contains(fixer.Id, await Sprints.GetIssueIdsAsync(sprint.Id));
     }

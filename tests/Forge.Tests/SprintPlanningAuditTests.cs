@@ -43,16 +43,16 @@ public sealed class SprintPlanningAuditTests : IDisposable
         if(followUp is not null) metadata["followUpOf"]=followUp;
         return await issues.CreateAsync(new NewIssue("task",title,Metadata:metadata));
     }
-    [Fact] public async Task DependenciesSplitOneSpecAcrossSprints()
+    [Fact] public async Task DependenciesRemainWithinOneSpecSprint()
     {
         var tasks=await Spec(2);
         await issues.AddDependencyAsync(tasks[0].Id,tasks[1].Id,IssueDepKind.Blocks,default);
         await Tick(); var first=(await sprints.GetActiveAsync())!;
         var members=await sprints.GetIssueIdsAsync(first.Id);
-        Assert.Contains(tasks[0].Id,members); Assert.DoesNotContain(tasks[1].Id,members);
+        Assert.Contains(tasks[0].Id,members); Assert.Contains(tasks[1].Id,members);
         await issues.TransitionAsync(tasks[0].Id,IssueStatus.Completed,null);
         await Tick(); var second=(await sprints.GetActiveAsync())!;
-        Assert.NotEqual(first.Id,second.Id);
+        Assert.Equal(first.Id,second.Id);
         Assert.Contains(tasks[1].Id,await sprints.GetIssueIdsAsync(second.Id));
     }
     [Fact] public async Task SpecTasksAreNotSubjectToFollowUpTenTaskCap()
@@ -70,20 +70,20 @@ public sealed class SprintPlanningAuditTests : IDisposable
         await Tick(); var ids=await sprints.GetIssueIdsAsync((await sprints.GetActiveAsync())!.Id);
         Assert.Single(new[]{a.Id,b.Id}.Where(ids.Contains));
     }
-    [Fact] public async Task UnrelatedUngroomedFollowUpStopsReadySpec()
+    [Fact] public async Task UnrelatedUngroomedFollowUpDoesNotStopReadySpec()
     {
         await Spec(2); await AdHoc("Unrelated docs follow-up","old-root",false);
-        await Tick(); Assert.Null(await sprints.GetActiveAsync());
+        await Tick(); Assert.NotNull(await sprints.GetActiveAsync());
     }
-    [Fact] public async Task LateParentedPrerequisiteCannotJoinActiveSprint()
+    [Fact] public async Task LateParentedPrerequisiteJoinsActiveSprint()
     {
         var first=await Spec(1); await Tick(); var active=(await sprints.GetActiveAsync())!;
         var prerequisite=await Spec(1);
         await issues.AddDependencyAsync(prerequisite[0].Id,first[0].Id,IssueDepKind.Blocks,default);
         await Tick();
         Assert.Equal(active.Id,(await sprints.GetActiveAsync())!.Id);
-        Assert.DoesNotContain(prerequisite[0].Id,await sprints.GetIssueIdsAsync(active.Id));
-        Assert.Empty((await issues.ReadyAsync(100,active.Id)).Where(t=>!AgentTaskTypes.IsContainer(t.Type)));
+        Assert.Contains(prerequisite[0].Id,await sprints.GetIssueIdsAsync(active.Id));
+        Assert.Contains(await issues.ReadyAsync(100,active.Id), t=>t.Id == prerequisite[0].Id);
     }
     [Fact] public async Task CompletionInterruptionLeavesDraftsWithoutRetry()
     {

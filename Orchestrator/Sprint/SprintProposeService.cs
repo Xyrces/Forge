@@ -92,9 +92,15 @@ public sealed class SprintProposeService
             .Select(s => new ProposedCandidate(s.Task.Id, s.Task.Title, s.Score, s.Breakdown))
             .ToArray();
 
-        var fingerprints = await _activation.PreviewFingerprintsAsync(
+        var snapshots = await _activation.PreviewSnapshotsAsync(
             candidates.Select(c => c.TaskId), candidateCount, ct);
-        candidates = candidates.Where(c => fingerprints.ContainsKey(c.TaskId)).ToArray();
+        var fingerprints = snapshots.ToDictionary(p => p.Key, p => SprintActivationValidator.Fingerprint(p.Value));
+        candidates = candidates.Where(c => fingerprints.ContainsKey(c.TaskId)).Select(c => c with
+        {
+            Breakdown = c.Breakdown.Concat(snapshots[c.TaskId].TaskIds.Count > 1
+                ? new[] { "Required prerequisites included: " + string.Join(", ", snapshots[c.TaskId].TaskIds.Where(id => id != c.TaskId)) }
+                : Array.Empty<string>()).ToArray()
+        }).ToArray();
         weights["activationSnapshots"] = fingerprints;
         var selectedTaskIds = candidates.Select(c => c.TaskId).ToArray();
 
@@ -148,7 +154,8 @@ public sealed class SprintProposeService
         if (issueGroups.Any(g => g.Distinct().Count() != 1) || specGroups.Any(g => g.Distinct().Count() != 1))
             throw new InvalidOperationException("Proposal changed during validation; generate a new proposal.");
         var snapshot = new SprintActivationSnapshot(issueGroups.Select(g => g.First()).ToArray(),
-            specGroups.Select(g => g.First()).ToArray(), taskIds, auditId, committedBy);
+            specGroups.Select(g => g.First()).ToArray(), validated.SelectMany(s => s.TaskIds).Distinct().ToArray(), auditId, committedBy,
+            Dependencies: validated.SelectMany(s => s.Dependencies ?? []).Distinct().ToArray());
         if (Gates is not null && await Gates.IsHeldAsync(StageGates.Sprint, ct))
             throw new InvalidOperationException("Sprint assembly is held by the operator.");
         var start = DateTime.UtcNow;
