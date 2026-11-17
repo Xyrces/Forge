@@ -39,7 +39,21 @@ The private screenshot `completion-retry-desktop.jpg` is retained under
 `.portHorizon/validation/intake-preview/` in that integration checkout.
 
 The larger fixture also exposed an overly tall outstanding list and raw
-status names. Subsequent commits reduce that overview to five items,
-collapse it by default, and clarify the labels; those subsequent changes
-require their own browser recheck. This fixture is presentation and recovery
-interaction evidence only, not a real release or acceptance result.
+status names. The corrected overview loads five items and starts collapsed.
+Browser rechecks through `cd68279` confirmed readable sprint names and that
+an uncertain batch is labeled "Review needed before retry" consistently in
+both the overview and selected detail. Selecting its Review button opened
+the exact matching sprint and retained its explicit retry warning.
+
+Browser checks through `d35f343` also exercised an explicit stop: the button
+remained disabled without a reason, and submitting a reason preserved the
+unmet criterion and healthy synthetic release while stating "not delivered"
+and "Stopped by operator". No retry action remained after stopping. At a
+480-pixel viewport the stopped outcome remained readable. The Flow page's
+deploy hold/release control changed its displayed gate state through the
+normal authenticated endpoint; the offline gate was restored open.
+
+Screenshots `completion-review-summary.jpg`, `completion-stopped-narrow.jpg`
+and `deploy-gate-narrow.jpg` are retained beside the earlier evidence. This
+fixture is presentation and recovery interaction evidence only, not a real
+release or acceptance result. It has no schedulers or paid provider access.
