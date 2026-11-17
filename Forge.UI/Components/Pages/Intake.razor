@@ -24,9 +24,15 @@
         </div>
     }
 
-    <InitiativeProposals ProjectId="@ShellStore.Value.CurrentProjectId" ActiveSessionId="@_activeSessionId" Expanded="ExpandProposalSession" Changed="ReloadActive" RefreshVersion="@_proposalVersion" />
+    <nav class="intake-view-tabs" aria-label="Intake views">
+        <button class="btn @(!_showProposals ? "btn--primary" : "")" aria-pressed="@(!_showProposals)" @onclick="() => _showProposals = false">Conversation</button>
+        <button class="btn @(_showProposals ? "btn--primary" : "")" aria-pressed="@_showProposals" @onclick="() => _showProposals = true">Proposals · review and approve</button>
+    </nav>
+    <div hidden="@(!_showProposals)">
+        <InitiativeProposals ProjectId="@ShellStore.Value.CurrentProjectId" ActiveSessionId="@_activeSessionId" Expanded="ExpandProposalSession" Changed="ReloadActive" RefreshVersion="@_proposalVersion" />
+    </div>
 
-    <div class="intake-split">
+    <div class="intake-split" hidden="@_showProposals">
         <aside class="intake-sessions">
             @if (_sessions is null)
             {
@@ -170,7 +176,8 @@
                             <div class="chat-msg__card">
                                 <div class="chat-msg__card-header">Proposal draft</div>
                                 <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
-                                <span class="chat-msg__card-hint">Review the current revision and approval status in Proposals above.</span>
+                                <span class="chat-msg__card-hint">Review the current revision and approval status in Proposals.</span>
+                                <button class="btn btn--link" @onclick="() => _showProposals = true">Review proposals</button>
                             </div>
                         }
                     </div>
@@ -347,6 +354,7 @@
 </div>
 
 @code {
+    private bool _showProposals;
     private int _proposalVersion;
     private List<SessionDto>? _sessions;
     private List<MessageDto>? _messages;
@@ -811,6 +819,7 @@
         await ReloadSessions();
         if (project != ShellStore.Value.CurrentProjectId) return;
         await SetActive(id);
+        _showProposals = false;
     }
 
     private async Task StartNewSession()
@@ -838,6 +847,7 @@
                 if (created is not null)
                 {
                     await SetActive(created.Id);
+                    _showProposals = false;
                 }
             }
             else
