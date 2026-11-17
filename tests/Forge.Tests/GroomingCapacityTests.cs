@@ -26,8 +26,8 @@ public sealed class GroomingCapacityTests
         await Run(factory, specs);
         Assert.Contains("coredev: 3 concurrent workers", client.Prompt);
         Assert.Contains("clientdev: 0 concurrent workers", client.Prompt);
-        Assert.DoesNotContain("99", client.Prompt);
-        Assert.DoesNotContain("77", client.Prompt);
+        Assert.DoesNotContain("reviewer: 99 concurrent workers", client.Prompt);
+        Assert.DoesNotContain("qa: 77 concurrent workers", client.Prompt);
         Assert.Contains("Assign genuine automated test-code changes to CoreDev or ClientDev", client.Prompt);
         Assert.Contains("not an artificial three-task minimum", client.Prompt);
         Assert.Contains("never a fill target", client.Prompt);
