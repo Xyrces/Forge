@@ -118,7 +118,8 @@ public static class ControllerInitializer
                 + $"GRANT SELECT,UPDATE ON OBJECT::[core].[budget_lock] TO [{principal}];"
                 + $"REVOKE DELETE,INSERT ON OBJECT::[core].[worker_attempt] FROM [{principal}];"
                 + $"REVOKE DELETE ON OBJECT::[core].[budget_reservation] FROM [{principal}];"
-                + reconciliationPermissions;
+                + reconciliationPermissions
+                + InitiativeWorkerPermissionsSql(principal);
             await grants.ExecuteNonQueryAsync(ct);
         }
         if (!completed) await memory.RememberAsync(completionKey, "complete", ttlDays: null, ct);
@@ -148,6 +149,18 @@ public static class ControllerInitializer
                 throw new InvalidOperationException("Registry or Forge workload schema is outside the qualified additive transition.");
     }
 
+    internal static string InitiativeWorkerPermissionsSql(string workerPrincipal)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(workerPrincipal, "^[a-zA-Z][a-zA-Z0-9_-]{0,127}$"))
+            throw new InvalidOperationException("Worker database principal name is invalid.");
+        // Worker tools may read approved context, but only the controller's
+        // operator-facing approval path may change authority or ingestion receipts.
+        // The existence guard keeps the schema-39 compatibility bridge usable.
+        return string.Concat(new[] { "initiative_proposal", "initiative_revision", "initiative_ingestion", "initiative_lock" }
+            .Select(table => $"IF OBJECT_ID(N'proj_forge.{table}',N'U') IS NOT NULL BEGIN "
+                + $"GRANT SELECT ON OBJECT::[proj_forge].[{table}] TO [{workerPrincipal}];"
+                + $"DENY INSERT,UPDATE,DELETE ON OBJECT::[proj_forge].[{table}] TO [{workerPrincipal}]; END;"));
+    }
     internal static string BudgetReconciliationPermissionsSql(string controllerPrincipal, string workerPrincipal)
     {
         foreach (var principal in new[] { controllerPrincipal, workerPrincipal })
