@@ -25,7 +25,7 @@ public sealed partial class SprintCompletionStore
     public async Task MarkBookkeepingCompleteAsync(string completionId, CancellationToken ct = default)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed') AND NOT EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", ("@now", Now()), ("@id", completionId));
+        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND abandonment_json IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed') AND NOT EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", ("@now", Now()), ("@id", completionId));
         await command.ExecuteNonQueryAsync(ct);
     }
     public async Task RecordMaterializationFailureAsync(string batchId, string error, CancellationToken ct = default)

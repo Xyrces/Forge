@@ -103,6 +103,8 @@ public sealed class CompletionEvidenceTests : IDisposable
         await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop this scope", "authenticated operator");
         await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop this scope", "authenticated operator");
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.AbandonAsync(receipt.Id, plan.Hash, "Changed reason", "authenticated operator"));
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id); // stale reconciliation cannot overwrite the explicit stop
+        Assert.Equal("Stopped", (await Store.GetAsync(receipt.Id))!.BookkeepingState);
         Assert.Empty(await Store.ListPlanningBlockersAsync());
         Assert.Empty(await Store.ListAwaitingDeploymentAsync());
         Assert.Equal(EngineeringOutcome.PendingEvidence, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
