@@ -1,3 +1,4 @@
+@using Forge.Dashboard.Features.Sprints
 @using System.Net
 @using System.Net.Http.Json
 @using System.Text.Json
@@ -25,9 +26,9 @@
     {
         var receipt = _detail.Receipt;
         <dl>
-            <dt>Engineering evidence</dt><dd>@OutcomeLabel(receipt.Outcome)</dd>
-            <dt>Follow-up processing</dt><dd>@receipt.BookkeepingState</dd>
-            <dt>Deployment</dt><dd>@(receipt.DeploymentStatus ?? (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
+            <dt>Engineering evidence</dt><dd>@CompletionPresentation.Outcome(receipt.Outcome)</dd>
+            <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
+            <dt>Deployment</dt><dd>@(receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus) : (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
         </dl>
         @if (!string.IsNullOrWhiteSpace(receipt.DeliveryNote))
         {
@@ -45,7 +46,7 @@
         {
             <div class="card">
                 <strong>@criterion.Text</strong>
-                <p class="page-subtitle">@criterion.EvidenceKind</p>
+                <p class="page-subtitle">@CompletionPresentation.Evidence(criterion.EvidenceKind)</p>
                 @if (criterion.EvidenceKind == "OperatorObserved")
                 {
                     <p>@(criterion.ProofReference is null ? "Awaiting explicit operator observation of the exact deployed version." : "Operator observation recorded for this deployed version.")</p>
@@ -56,7 +57,7 @@
         @foreach (var batch in _detail.Batches)
         {
             <div class="card">
-                <strong>Follow-up batch · @batch.State</strong>
+                <strong>Follow-up batch · @CompletionPresentation.Processing(batch.State)</strong>
                 @if (!string.IsNullOrWhiteSpace(batch.Error)) { <p>@batch.Error</p> }
                 @if (batch.State == "NeedsReview")
                 {
@@ -67,8 +68,11 @@
         }
         @if (_actionError is not null) { <p class="banner banner--warn" role="alert">@_actionError</p> }
         @if (_notice is not null) { <p role="status">@_notice</p> }
-        <button class="btn" disabled="@(_cursor is null || _retrying)" @onclick="FirstPageAsync">First batch page</button>
-        <button class="btn" disabled="@(_detail.NextCursor is null || _retrying)" @onclick="NextPageAsync">Next batch page</button>
+        @if (_cursor is not null || _detail.NextCursor is not null)
+        {
+            <button class="btn" disabled="@(_cursor is null || _retrying)" @onclick="FirstPageAsync">First batch page</button>
+            <button class="btn" disabled="@(_detail.NextCursor is null || _retrying)" @onclick="NextPageAsync">Next batch page</button>
+        }
     }
 </section>
 
@@ -162,14 +166,6 @@
     }
     private async Task FirstPageAsync() { _cursor = null; await LoadAsync(); }
     private async Task NextPageAsync() { _cursor = _detail?.NextCursor; await LoadAsync(); }
-    private static string OutcomeLabel(string outcome) => outcome switch
-    {
-        "Satisfied" => "Required evidence satisfied",
-        "PendingEvidence" => "Awaiting required evidence",
-        "Incomplete" => "Incomplete — operator attention needed",
-        "LegacyTerminalOnly" => "Legacy terminal counts only — delivery unproven",
-        _ => "Unknown evidence state"
-    };
     public void Dispose() { ++_generation; _request?.Cancel(); _request?.Dispose(); }
     private sealed record CompletionSummary(string Id, string ProjectId, string SprintId, string Outcome,
         string BookkeepingState, bool ReadyForDeployment, string? SourceSha, string? DeploymentCandidateId,
