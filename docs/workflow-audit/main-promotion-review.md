@@ -87,11 +87,27 @@ counts overlap and must not be added together as unique tests.
 
 A broader Windows run passed 2,362 of 2,374 tests. Ten failures require Unix
 shell/file-mode support; two expected the retired unverified no-op completion
-behavior. Those two expectations were corrected and their tests passed. Full
-Linux CI remains required on the final integrated source.
+behavior. Those two expectations were corrected and their tests passed.
+Published repair source `b605214` subsequently passed Linux CI: 2,383 C# tests,
+44 deployment checks and the offline end-to-end harness.
 
-The empty-PR/positive-close entry paths and final rollout qualification are
-still in progress. The promotion remains a draft and is unmerged.
+Both empty-PR paths now preserve a nonterminal acceptance obligation. An exact
+prospective plan permits retirement only after joined worker ownership and
+observed PR closure, then requests fresh verification in a distinct checkout.
+Old strict plans park for an operator decision. Positive prose-only closure
+cannot satisfy a committed typed member. The separate routing review approved
+the source; see [empty-PR verification](../empty-pr-verification.md).
+
+The complete bridge source `7dbd11ba921ae62cad3b24bcc3c86830674c2db4` passed
+[Linux CI](https://github.com/Xyrces/Forge/actions/runs/44198607806): 2,397 C#
+tests, 44 deployment checks and the offline end-to-end harness. This includes
+the routing changes. Strict target restoration received independent source
+review and must pass its own exact-source CI before promotion. At this recorded
+checkpoint, the PR remains a draft, unmerged, and no live cutover has occurred.
+
+After the operator reported workstation interference, local builds and tests
+were stopped, compiler servers and the leftover preview were shut down, and
+heavy work moved to Linux/CI. The rule is now in `AGENTS.md`.
 
 ## Persisted-format compatibility
 
@@ -102,9 +118,20 @@ initializer-owned version boundary without rewriting tables or historical data.
 New-format task, draft-plan, committed-plan, repair, and proof writes require42.
 General metadata operations cannot manufacture or replace trusted proof.
 
-The strict target rejects schema41. Deployment is blocked until a compatible
-41/42 reader bridge is built and qualified, with its actual immutable image
-digest in the upgrade policy. See
+The strict target rejects schema41. The qualified bridge reads41/42, and the
+upgrade policy now pins its actual immutable image. The isolated Azure SQL
+checks proved write rejection before42, canonical proof admission, rollback on
+audit failure, one-event concurrent/idempotent admission and cleanup. Exact-source
+builds of old Y and the bridge verified the41/42/43 reader matrix and the bridge's
+persisted proof reader. The actual completion coordinator kept deployment and
+operator obligations pending. These host SDK10.0.302 source builds are separate
+from the image CI evidence; they are not byte-equivalence claims for deployed
+assemblies. Fixtures used new schemas and a temporary restricted principal,
+without changing production data. The first fixture run failed during pooled
+impersonation; cleanup succeeded, and the isolated fixture rerun disabled pooling.
+
+Live controller replacement and controlled rollback on42 remain separate
+qualification steps. See
 [`implementation-evidence-boundary.md`](../../deploy/k3s/implementation-evidence-boundary.md).
 Source promotion, this qualified upgrade, and the managed project's switch to
 `main` are distinct steps; none is inferred from the others.
