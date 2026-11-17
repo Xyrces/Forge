@@ -18,9 +18,11 @@ public sealed class InitiativeApprovalService(
     public async Task<bool> RetryRefinementAsync(string projectId, string id, int revision, CancellationToken ct = default)
     {
         var proposal = await Proposals.GetAsync(projectId, id, ct);
-        if (proposal?.ApprovedAt is null || proposal.Revision != revision) return false;
+        if (proposal?.ApprovedAt is null || proposal.Revision != revision)
+            return false;
         var retry = await ingestionForProject(projectId).RetryRefinementAsync(id, revision, ct);
-        if (retry) events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.refinement.retry", proposal.SessionId, "Operator requested refinement retry"));
+        if (retry)
+            events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.refinement.retry", proposal.SessionId, "Operator requested refinement retry"));
         return retry;
     }
 
@@ -41,10 +43,14 @@ public sealed class InitiativeApprovalService(
         // the unique epic/spec pair; replay adopts it before acknowledging.
         await Proposals.MarkIngestedAsync(approved.ProjectId, approved.Id, approved.Revision,
             receipt.EpicId, receipt.SpecId, ct);
-        if (approved.EpicId is null) events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.accepted", approved.SessionId,
-            "Approved initiative ingested", new Dictionary<string, object?> {
-                ["projectId"] = approved.ProjectId, ["epicId"] = receipt.EpicId,
-                ["proposalId"] = approved.Id, ["revision"] = approved.Revision
+        if (approved.EpicId is null)
+            events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.accepted", approved.SessionId,
+            "Approved initiative ingested", new Dictionary<string, object?>
+            {
+                ["projectId"] = approved.ProjectId,
+                ["epicId"] = receipt.EpicId,
+                ["proposalId"] = approved.Id,
+                ["revision"] = approved.Revision
             }));
         return receipt;
     }

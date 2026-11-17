@@ -589,7 +589,7 @@ public static class ForgeComposition
             roleRegistry, eventBus, skillSource, loggerFactory,
             rolePromptsRoot);
         services.AddSingleton(productAgentFactory);
-        // Self-starts in its ctor (event subscription + worker task).
+        // Program starts and joins this queue only after controller admission is ready.
         var productRefinementQueue = new ProductRefinementQueue(
             initiativeApprovals, () => projectFactory.KnownProjects.Select(p => p.Id).ToList(),
             IngestionForProject,

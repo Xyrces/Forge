@@ -81,6 +81,8 @@ public class IntakeDashboardTests : IDisposable
         // Mount the same endpoints the real dashboard does.
         IntakeEndpoints.MapIntakeEndpoints(app, _intakeRegistry, _issues, _sprints, _intake,
             NullLogger<DashboardHost>.Instance,_initiatives);
+        SpecEndpoints.MapSpecEndpoints(app, new SpecStore(_issues), new NullSpecExtractionReader(),
+            NullLogger<DashboardHost>.Instance, _intake, initiativeApprovals: _initiatives);
 
         return app;
     }
@@ -229,6 +231,10 @@ public class IntakeDashboardTests : IDisposable
         Assert.Single(await _issues.ListAsync(new IssueFilter()));
         Assert.Single(await new SpecStore(_issues).ListAsync("P",null));
         Assert.Empty(await _sprints.ListAsync(false));
+        var sessionSpecs = await _client.GetAsync($"/api/intake/sessions/{revised.SessionId}/specs");
+        Assert.Equal(HttpStatusCode.OK, sessionSpecs.StatusCode);
+        using var specsJson = JsonDocument.Parse(await sessionSpecs.Content.ReadAsStringAsync());
+        Assert.Single(specsJson.RootElement.EnumerateArray());
     }
 
     [Fact]
@@ -242,6 +248,22 @@ public class IntakeDashboardTests : IDisposable
         Assert.Equal(HttpStatusCode.OK,imported.StatusCode);
         var p=await imported.Content.ReadFromJsonAsync<InitiativeProposal>();
         Assert.NotNull(p);Assert.Null(p.ApprovedAt);Assert.Equal(session.Id,p.SessionId);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter()));
+    }
+
+    [Fact]
+    public async Task PreviouslyAcceptedLegacyDraftCannotBeImportedAgain()
+    {
+        var session = await _intake.CreateAsync("P", "accepted legacy");
+        var message = await _intake.AppendMessageAsync(session.Id, new(
+            IntakeMessageRole.System, "draft", ProposedEpicTitle: "Legacy", ProposedEpicDescription: "scope"));
+        await _intake.AppendMessageAsync(session.Id, new(IntakeMessageRole.System,
+            $"Accepted (proposal message #{message.Id})", ProposedEpicId: "existing-epic"));
+
+        var response = await _client.PostAsync($"/api/intake/sessions/{session.Id}/review-draft/{message.Id}", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Empty(await new InitiativeProposalStore(_issues).ListAsync("P"));
         Assert.Empty(await _issues.ListAsync(new IssueFilter()));
     }
 

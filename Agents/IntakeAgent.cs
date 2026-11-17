@@ -125,6 +125,11 @@ public sealed class IntakeAgent
         if (string.IsNullOrWhiteSpace(userText))
             throw new ArgumentException("userText is required", nameof(userText));
 
+        var ownedSession = await _intakeStore.GetAsync(sessionId, ct)
+            ?? throw new InvalidOperationException("Intake session not found.");
+        if (ownedSession.ProjectId != _projectId)
+            throw new InvalidOperationException("Intake session belongs to another project.");
+
         // Append the user message first so the message is durable even
         // if the LLM call throws. The agent response is appended after.
         var userMsg = await _intakeStore.AppendMessageAsync(sessionId,
@@ -158,9 +163,8 @@ public sealed class IntakeAgent
                 CreateEpicAsync(sessionId, title, description, priority, proposalId, expectedRevision, ct),
             name: "create_epic",
             description: "Propose a new epic for the operator to review. " +
-                         "Use this when the operator's input describes a piece of work " +
-                         "large enough to be a multi-task epic (vs. a single dev task). " +
-                         "The proposal is a DRAFT that lives in this conversation only — " +
+                         "Use this for an operator's new initiative, including a small, clearly scoped change. " +
+                         "The proposal is a durable unapproved DRAFT in Proposals, linked to this conversation — " +
                          "no issue is created and nothing appears on the project board " +
                          "until the operator approves its exact revision. Returns a stable proposal ID " +
                          "and revision, not an issue ID. For changes, pass proposalId and expectedRevision.");
@@ -374,6 +378,10 @@ public sealed class IntakeAgent
             ?? throw new InvalidOperationException("Draft message not found.");
         if (message.ProposedEpicDescription is null || message.ProposedEpicTitle is null)
             throw new InvalidOperationException("This message has no complete legacy draft payload.");
+        if (message.ProposedEpicId is not null || session.Messages.Any(m =>
+            m.Role == IntakeMessageRole.System && m.ProposedEpicId is not null &&
+            m.Content.Contains($"(proposal message #{messageId})", StringComparison.Ordinal)))
+            throw new InvalidOperationException("This legacy draft already links accepted work. Review the existing epic instead of importing it again.");
         return await service.Proposals.CreateAsync(new NewInitiativeProposal(_projectId,
             $"legacy:{sessionId}:{messageId}", "user", message.ProposedEpicTitle,
             message.ProposedEpicDescription, message.ProposedEpicPriority ?? 2,
@@ -407,8 +415,12 @@ public sealed class IntakeAgent
             $"Proposal {proposal.Id} revision {proposal.Revision}: {proposal.Title}\n\n{proposal.Body}\n\nDraft only; explicit operator approval is required.",
             ProposedEpicTitle: proposal.Title), ct);
         _events.Publish(new DashboardEvent(DateTime.UtcNow, "intake.epic.proposed", sessionId,
-            proposal.Id, new Dictionary<string, object?> { ["sessionId"] = sessionId, ["proposalId"] = proposal.Id,
-                ["revision"] = proposal.Revision }));
+            proposal.Id, new Dictionary<string, object?>
+            {
+                ["sessionId"] = sessionId,
+                ["proposalId"] = proposal.Id,
+                ["revision"] = proposal.Revision
+            }));
         return $"proposal {proposal.Id}, revision {proposal.Revision}; draft only, not approved";
     }
 
@@ -420,20 +432,19 @@ public sealed class IntakeAgent
             {projectLine}
 
             Your job: talk to the operator (the human) about what they want
-            to build. Ask clarifying questions. When the operator describes
-            a piece of work that is large enough to be a multi-task epic,
-            call `create_epic(title, description, priority?)` to propose it.
+            to build. Ask clarifying questions when intent or scope is unclear.
+            New initiatives of any size enter through Intake, including a small,
+            clearly scoped change. Call `create_epic(title, description, priority?)`
+            to capture the reviewed scope as a durable draft proposal.
             To revise an existing draft, pass its stable proposalId and exact
             expectedRevision. Never use title similarity as proposal identity.
             Proposal creation and revision NEVER authorize execution; only
             the operator can approve the exact current revision in the UI.
-            Do NOT propose epics for single tasks — those are dev tasks and
-            don't go through intake.
-
-            If the operator is being vague, ask. If they describe a single
-            task, suggest they file a dev task instead of an epic. If they
-            describe an epic, capture the title + description in the tool
-            call and confirm the proposal in your reply.
+            Do not require an artificial multi-task scope. Backlog task creation
+            is for remediation or work already within an approved initiative;
+            it is not a shortcut around approval for a new initiative.
+            Capture the operator's intended outcome, acceptance criteria and
+            boundaries in the proposal and confirm it remains unapproved.
 
             Sequence matters: when you have clarifying questions, call
             `ask_question` and STOP — never call `create_epic` in the

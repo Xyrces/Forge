@@ -84,6 +84,49 @@ public class SprintAssemblerTests : IDisposable
             => Task.FromResult<FollowUpTriageDecision?>(new([new("epic",drafts.Select(d=>d.Id).ToList(),"future initiative","future scope",2,null)]));
     }
 
+    [Fact]
+    public async Task OverlappingTriageSourcesAreRejectedBeforeAnyProposalIsCreated()
+    {
+        var (_,_,tasks)=await SeedGroomedSpecAsync("current",1);
+        await Tick();
+        var active=(await _sprints.GetActiveAsync())!;
+        var drafts=new FollowUpDraftStore(_issues);
+        for(var i=0;i<2;i++) await drafts.FileAsync(new(0,active.Id,tasks[0],"reviewer","finding","scope",2,null,DateTime.UtcNow,null));
+        await _issues.TransitionAsync(tasks[0],IssueStatus.Completed,null);
+        var proposals=new Forge.Core.Initiatives.InitiativeProposalStore(_issues);
+        var assembler=new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),_events,
+            NullLogger<SprintAssembler>.Instance,followUpTriage:new OverlapTriage(),initiativeProposals:proposals);
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>assembler.TickProjectAsync("test",_issues,_sprints,_specs,default));
+        Assert.Empty(await proposals.ListAsync("test"));
+        Assert.Equal(2,(await drafts.ListUnconsumedAsync()).Count);
+    }
+
+    [Fact]
+    public async Task CommittedSuggestionRecoversAllSourcesWithoutRetriagingAfterSprintCompletion()
+    {
+        var drafts=new FollowUpDraftStore(_issues);
+        var ids=new List<long>();
+        for(var i=0;i<2;i++) ids.Add(await drafts.FileAsync(new(0,null,"task-old","reviewer","finding","scope",2,null,DateTime.UtcNow,null)));
+        var proposals=new Forge.Core.Initiatives.InitiativeProposalStore(_issues);
+        var original=await proposals.CreateAsync(new("test","committed-before-crash","forge","original scope","body",
+            SourceJson:System.Text.Json.JsonSerializer.Serialize(new {sourceDraftIds=ids})));
+        var assembler=new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),_events,
+            NullLogger<SprintAssembler>.Instance,followUpTriage:new OverlapTriage(),initiativeProposals:proposals);
+        await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
+        Assert.Empty(await drafts.ListUnconsumedAsync());
+        Assert.Equal(original.Id,Assert.Single(await proposals.ListAsync("test")).Id);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter()));
+        Assert.Empty(await _specs.ListAsync(null,null));
+    }
+
+    private sealed class OverlapTriage : IFollowUpTriage
+    {
+        public Task<FollowUpTriageDecision?> TriageAsync(string projectId,IReadOnlyList<FollowUpDraft> drafts,CancellationToken ct)
+            => Task.FromResult<FollowUpTriageDecision?>(new([
+                new("epic",[drafts[0].Id],"one","scope"),
+                new("epic",drafts.Select(d=>d.Id).ToList(),"two","scope")]));
+    }
+
     private async Task<(string specId, List<string> storyIds, List<string> taskIds)> SeedGroomedSpecAsync(
         string title, int taskCount, string? epicDescription = null)
     {

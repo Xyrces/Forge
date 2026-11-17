@@ -28,7 +28,8 @@ public static class SpecEndpoints
         GroomerAgentFactory? groomerFactory = null,
         IssueGroomerRunStore? groomerRuns = null,
         Projects.ProjectContextFactory? projectContexts = null,
-        Forge.Core.IIssueStore? issues = null)
+        Forge.Core.IIssueStore? issues = null,
+        InitiativeApprovalService? initiativeApprovals = null)
     {
         // Multi-project: when ?project= names a registered project and the
         // factory is available, read from THAT project's spec store (spec
@@ -222,12 +223,29 @@ public static class SpecEndpoints
                 .Distinct()
                 .ToList();
             var allSpecs = new List<SpecRecord>();
-            foreach (var pid in proposed)
+            if (initiativeApprovals is not null)
+            {
+                string? cursor = null;
+                do
+                {
+                    var page = await initiativeApprovals.Proposals.ListAsync(session.ProjectId, ct,
+                        limit: 50, afterId: cursor, sessionId: session.Id);
+                    var owned = projectContexts?.Find(session.ProjectId)?.Specs ?? specs;
+                    foreach (var proposal in page.Where(p => p.SpecId is not null))
+                    {
+                        var spec = await owned.GetAsync(proposal.SpecId!, ct);
+                        if (spec?.ProjectId == session.ProjectId)
+                            allSpecs.Add(spec);
+                    }
+                    cursor = page.Count == 50 ? page[^1].Id : null;
+                } while (cursor is not null);
+            }
+            foreach (var pid in proposed.Distinct())
             {
                 var match = await extractor.ListByParentIssueIdAsync(pid, ct);
-                allSpecs.AddRange(match);
+                allSpecs.AddRange(match.Where(s => s.ProjectId == session.ProjectId));
             }
-            return Results.Json(allSpecs.Select(ToSpecView).ToArray(), DashboardJson.Options);
+            return Results.Json(allSpecs.DistinctBy(s => s.Id).Select(ToSpecView).ToArray(), DashboardJson.Options);
         });
 
         app.MapPost("/api/specs", async (HttpContext ctx) =>

@@ -1,4 +1,5 @@
 @page "/intake"
+@using Forge.Dashboard.Components.Shared
 @inject HttpClient Http
 @inject IHttpClientFactory HttpFactory
 @inject IJSRuntime JS
@@ -22,6 +23,8 @@
             <button class="btn btn--link" @onclick="() => _actionError = null">Dismiss</button>
         </div>
     }
+
+    <InitiativeProposals ProjectId="@ShellStore.Value.CurrentProjectId" ActiveSessionId="@_activeSessionId" Expanded="ExpandProposalSession" Changed="ReloadActive" RefreshVersion="@_proposalVersion" />
 
     <div class="intake-split">
         <aside class="intake-sessions">
@@ -161,23 +164,13 @@
                                 </div>
                             }
                         }
-                        @* Epic proposals render as slim audit cards in the thread; the
-                           Accept ACTION lives in the sidebar's Proposal panel so the
-                           session's completion state is always visible. *@
+                        @* Conversation cards are history; exact revision approval lives in Proposals. *@
                         @if (m.ProposedEpicTitle is not null && m.Role.Equals("Assistant", StringComparison.OrdinalIgnoreCase))
                         {
-                            var cardForMsg = Proposals.FirstOrDefault(c => c.KeyEquals(NormalizeProposalTitle(m.ProposedEpicTitle!)));
                             <div class="chat-msg__card">
-                                <div class="chat-msg__card-header">Proposed Epic</div>
+                                <div class="chat-msg__card-header">Proposal draft</div>
                                 <div class="chat-msg__card-title">@m.ProposedEpicTitle</div>
-                                @if (cardForMsg?.Accepted == true)
-                                {
-                                    <span class="pill pill--primary">Accepted</span>
-                                }
-                                else
-                                {
-                                    <span class="chat-msg__card-hint">Awaiting review — accept in the sidebar →</span>
-                                }
+                                <span class="chat-msg__card-hint">Review the current revision and approval status in Proposals above.</span>
                             </div>
                         }
                     </div>
@@ -206,7 +199,7 @@
                     </div>
                 }
                 <div class="intake-input">
-                    <input class="intake-input__field" @bind="_draft" placeholder="Type your message..."
+                    <input class="intake-input__field" @bind="_draft" @bind:event="oninput" placeholder="Type your message..."
                            @onkeydown="@(async e => { if (e.Key == "Enter" && !_sending) await SendMessage(); })" />
                     <button class="btn btn--primary" @onclick="SendMessage" disabled="@_sending">
                         @(_sending ? "Sending…" : "Send")
@@ -238,7 +231,7 @@
                                    2026-08-14: no board row before accept) — cards are
                                    keyed by normalized title, refinements supersede in
                                    place, and the epic id only exists once accepted. *@
-                                @foreach (var proposal in Proposals)
+                                @foreach (var proposal in Proposals.Where(p => p.Description is not null))
                                 {
                                     <div class="proposal-card">
                                         <div class="proposal-card__title">@proposal.Title</div>
@@ -279,7 +272,7 @@
                                                 Accepting puts the epic on the board: the issue row and a spec draft are created at that moment, then product refinement picks it up. No code is dispatched.
                                             </div>
                                             <button class="btn btn--primary" @onclick="@(() => AcceptEpic(proposal.MessageId))" disabled="@_accepting">
-                                                @(_accepting ? "Accepting…" : "Accept Epic")
+                                                @(_accepting ? "Opening draft…" : "Review legacy draft")
                                             </button>
                                         }
                                     </div>
@@ -328,7 +321,7 @@
                     }
                     else if (_sessionSpecs.Count == 0)
                     {
-                        <p class="page-subtitle">No specs for this session yet — they appear after you accept a proposed epic.</p>
+                        <p class="page-subtitle">No specs for this session yet — they appear after you approve a proposal's exact revision.</p>
                     }
                     else
                     {
@@ -354,6 +347,7 @@
 </div>
 
 @code {
+    private int _proposalVersion;
     private List<SessionDto>? _sessions;
     private List<MessageDto>? _messages;
     private string? _activeSessionId;
@@ -710,20 +704,25 @@
 
     private async Task LoadSessionSpecs()
     {
-        if (_activeSessionId is null) { _sessionSpecs = null; return; }
+        var generation=_readGeneration; var sessionId=_activeSessionId;
+        if(sessionId is null) return;
         try
         {
-            _sessionSpecs = await Http.GetFromJsonAsync<List<SessionSpecDto>>($"/api/intake/sessions/{_activeSessionId}/specs");
+            var specs=await Http.GetFromJsonAsync<List<SessionSpecDto>>($"/api/intake/sessions/{sessionId}/specs",_readCts.Token);
+            if(generation!=_readGeneration) return;
+            _sessionSpecs=specs; RebuildCanvas(); StateHasChanged();
         }
-        catch { _sessionSpecs = new(); }
-        RebuildCanvas();
-        StateHasChanged();
+        catch(OperationCanceledException) when(generation!=_readGeneration) { }
+        catch(Exception ex) { if(generation==_readGeneration) _actionError="Session specs could not be loaded: "+ex.Message; }
     }
 
     private static string Truncate(string s, int max) =>
         string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max] + "…";
 
     private string? _loadedProject;
+    private long _readGeneration;
+    private CancellationTokenSource _readCts = new();
+    private void ResetReads() { ++_readGeneration; _readCts.Cancel(); _readCts.Dispose(); _readCts = new(); }
 
     private void OnShellChanged(object? sender, EventArgs e)
     {
@@ -733,64 +732,85 @@
 
     private async Task ReloadSessions()
     {
+        var projectId = ShellStore.Value.CurrentProjectId;
+        if(projectId != _loadedProject)
+        {
+            ResetReads(); _loadedProject=projectId; _activeSessionId=null;
+            _sessions=null; _messages=null; _sessionSpecs=null; _epicStatuses.Clear();
+            _proposalVersion++; StateHasChanged();
+        }
+        var generation=_readGeneration;
         try
         {
-            var projectId = ShellStore.Value.CurrentProjectId;
-            _loadedProject = projectId;
-            _sessions = await Http.GetFromJsonAsync<List<SessionDto>>(
-                string.IsNullOrEmpty(projectId) ? "/api/intake/sessions"
-                    : $"/api/intake/sessions?project={Uri.EscapeDataString(projectId)}");
-            if (_sessions is { Count: > 0 } && _activeSessionId is null)
-            {
-                await SetActive(_sessions[0].Id);
-            }
-            else
-            {
-                StateHasChanged();
-            }
+            if(projectId is null) return;
+            var sessions=await Http.GetFromJsonAsync<List<SessionDto>>(
+                $"/api/intake/sessions?project={Uri.EscapeDataString(projectId)}",_readCts.Token);
+            if(generation!=_readGeneration) return;
+            _sessions=sessions ?? throw new InvalidOperationException("Session data missing.");
+            if(_sessions.Count>0 && _activeSessionId is null) await SetActive(_sessions[0].Id);
+            else StateHasChanged();
         }
-        catch { _sessions = new(); }
+        catch(OperationCanceledException) when(generation!=_readGeneration) { }
+        catch(Exception ex) { if(generation==_readGeneration) _actionError="Sessions could not be loaded: "+ex.Message; }
     }
 
     private async Task SetActive(string id)
     {
+        if (_sessions?.Any(s => s.Id == id && s.ProjectId == ShellStore.Value.CurrentProjectId) != true) return;
+        ResetReads();
         _activeSessionId = id;
+        _messages = null;
+        _epicStatuses.Clear();
         _sessionSpecs = null;
         _liveActive = false;
         _liveText = "";
         _liveTools.Clear();
+        StateHasChanged();
         await ReloadActive();
     }
 
     private async Task ReloadActive()
     {
-        if (_activeSessionId is null) return;
+        var sessionId=_activeSessionId; var generation=_readGeneration;
+        if(sessionId is null) return;
         try
         {
-            var resp = await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{_activeSessionId}");
-            _messages = resp?.Messages?.ToList() ?? new();
-            // Specs feed both the Spec Drafts tab and the canvas (map +
-            // proposal panel's spec pill) — always load.
+            var resp=await Http.GetFromJsonAsync<SessionDto>($"/api/intake/sessions/{sessionId}",_readCts.Token);
+            if(generation!=_readGeneration) return;
+            if(resp is null || resp.ProjectId != _loadedProject) throw new InvalidOperationException("Session project did not match selection.");
+            _messages=resp.Messages?.ToList() ?? new(); _proposalVersion++;
             await LoadSessionSpecs();
-            await LoadEpicStatuses(resp?.ProjectId);
+            if(generation!=_readGeneration) return;
+            await LoadEpicStatuses(resp.ProjectId);
         }
-        catch { _messages = new(); }
-        StateHasChanged();
+        catch(OperationCanceledException) when(generation!=_readGeneration) { }
+        catch(Exception ex) { if(generation==_readGeneration) _actionError="Conversation could not be loaded: "+ex.Message; }
+        if(generation==_readGeneration) StateHasChanged();
     }
 
     private async Task LoadEpicStatuses(string? projectId)
     {
         if (projectId is null) return;
+        var generation=_readGeneration;
         foreach (var p in Proposals.Where(p => p.EpicId is not null))
         {
             try
             {
                 var issue = await Http.GetFromJsonAsync<TaskDto>(
-                    $"/api/tasks/{p.EpicId}?projectId={projectId}");
+                    $"/api/tasks/{p.EpicId}?projectId={projectId}",_readCts.Token);
+                if(generation!=_readGeneration) return;
                 if (issue is not null) _epicStatuses[p.EpicId!] = issue.Status;
             }
             catch { /* status unknown — proposal renders as awaiting review */ }
         }
+    }
+
+    private async Task ExpandProposalSession(string id)
+    {
+        var project = ShellStore.Value.CurrentProjectId;
+        await ReloadSessions();
+        if (project != ShellStore.Value.CurrentProjectId) return;
+        await SetActive(id);
     }
 
     private async Task StartNewSession()
@@ -835,7 +855,7 @@
         try
         {
             var resp = await Http.PostAsync(
-                $"/api/intake/sessions/{_activeSessionId}/accept-epic/{messageId}", null);
+                $"/api/intake/sessions/{_activeSessionId}/review-draft/{messageId}", null);
             if (resp.IsSuccessStatusCode)
             {
                 _actionError = null;
@@ -846,7 +866,7 @@
             }
             else
             {
-                _actionError = $"Accept failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                _actionError = $"Draft review failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
             }
         }
         catch (Exception ex) { _actionError = ex.Message; }
@@ -976,6 +996,7 @@
 
     public async ValueTask DisposeAsync()
     {
+        ResetReads(); _readCts.Dispose();
         ShellStore.StateChanged -= OnShellChanged;
         if (_streamSubscribed)
         {

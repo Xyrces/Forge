@@ -45,7 +45,10 @@ public static class IntakeEndpoints
             var spec = await JsonSerializer.DeserializeAsync<NewIntakeSessionRequest>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (spec is null || string.IsNullOrWhiteSpace(spec.ProjectId))
-                return Results.BadRequest(new { error = "projectId required" });
+                return Results.BadRequest(new
+                {
+                    error = "projectId required"
+                });
             var agent = intakeRegistry.ForProject(spec.ProjectId);
             var session = await agent.StartSessionAsync(spec.Title, ctx.RequestAborted);
             return Results.Json(ToSessionView(session), DashboardJson.Options, statusCode: 201);
@@ -66,9 +69,13 @@ public static class IntakeEndpoints
             var body = await JsonSerializer.DeserializeAsync<SendMessageRequest>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (body is null || string.IsNullOrWhiteSpace(body.Text))
-                return Results.BadRequest(new { error = "text required" });
+                return Results.BadRequest(new
+                {
+                    error = "text required"
+                });
             var session = await intakeStore.GetAsync(id, ctx.RequestAborted);
-            if (session is null) return Results.NotFound();
+            if (session is null)
+                return Results.NotFound();
             var agent = intakeRegistry.ForProject(session.ProjectId);
             try
             {
@@ -78,7 +85,11 @@ public static class IntakeEndpoints
             catch (Exception ex)
             {
                 logger.LogError(ex, "Intake send-message failed for session {Id}", id);
-                return Results.Json(new { error = ex.Message, sessionId = id },
+                return Results.Json(new
+                {
+                    error = ex.Message,
+                    sessionId = id
+                },
                     DashboardJson.Options, statusCode: 500);
             }
         });
@@ -88,7 +99,8 @@ public static class IntakeEndpoints
             string id, long messageId, CancellationToken ct) =>
         {
             var session = await intakeStore.GetAsync(id, ct);
-            if (session is null) return Results.NotFound();
+            if (session is null)
+                return Results.NotFound();
             var agent = intakeRegistry.ForProject(session.ProjectId);
             try
             {
@@ -97,7 +109,10 @@ public static class IntakeEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.Conflict(new { error = ex.Message });
+                return Results.Conflict(new
+                {
+                    error = ex.Message
+                });
             }
         });
 
@@ -105,49 +120,88 @@ public static class IntakeEndpoints
             string id, long messageId, CancellationToken ct) =>
         {
             var session = await intakeStore.GetAsync(id, ct);
-            if (session is null) return Results.NotFound();
-            try { return Results.Json(await intakeRegistry.ForProject(session.ProjectId).ImportLegacyDraftAsync(id, messageId, ct), DashboardJson.Options); }
+            if (session is null)
+                return Results.NotFound();
+            try
+            {
+                return Results.Json(await intakeRegistry.ForProject(session.ProjectId).ImportLegacyDraftAsync(id, messageId, ct), DashboardJson.Options);
+            }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
         });
 
         app.MapGet("/api/intake/proposals", async (string projectId, string? sessionId, string? cursor, CancellationToken ct) =>
         {
-            if (initiatives is null) return Results.StatusCode(503);
+            if (initiatives is null)
+                return Results.StatusCode(503);
             var page = await initiatives.Proposals.ListAsync(projectId, ct, limit: 20, afterId: cursor, sessionId: sessionId);
-            return Results.Json(new { items = page, nextCursor = page.Count == 20 ? page[^1].Id : null }, DashboardJson.Options);
+            return Results.Json(new
+            {
+                items = page,
+                nextCursor = page.Count == 20 ? page[^1].Id : null
+            }, DashboardJson.Options);
         });
         app.MapGet("/api/intake/proposals/{id}", async (string id, string projectId, CancellationToken ct) =>
         {
-            if (initiatives is null) return Results.StatusCode(503);
+            if (initiatives is null)
+                return Results.StatusCode(503);
             var proposal = await initiatives.Proposals.GetAsync(projectId, id, ct);
-            if (proposal is null) return Results.NotFound();
-            var ingestion = proposal.ApprovedAt is null ? null : await initiatives.ReceiptAsync(projectId,id,proposal.Revision,ct);
-            return Results.Json(new { proposal, ingestion }, DashboardJson.Options);
+            if (proposal is null)
+                return Results.NotFound();
+            var ingestion = proposal.ApprovedAt is null ? null : await initiatives.ReceiptAsync(projectId, id, proposal.Revision, ct);
+            return Results.Json(new
+            {
+                proposal,
+                ingestion
+            }, DashboardJson.Options);
         });
 
         app.MapPost("/api/intake/proposals/{id}/expand", async (string id, string projectId, CancellationToken ct) =>
         {
-            if (initiatives is null) return Results.StatusCode(503);
-            try { return Results.Json(new { sessionId = await initiatives.Proposals.ExpandInIntakeAsync(projectId, id, ct) }); }
+            if (initiatives is null)
+                return Results.StatusCode(503);
+            try
+            {
+                return Results.Json(new
+                {
+                    sessionId = await initiatives.Proposals.ExpandInIntakeAsync(projectId, id, ct)
+                });
+            }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
         });
 
         app.MapPost("/api/intake/proposals/{id}/approve", async (string id, string projectId, ApprovalRequest body, CancellationToken ct) =>
         {
-            if (initiatives is null) return Results.StatusCode(503);
-            if (body.Revision <= 0 || string.IsNullOrWhiteSpace(body.Hash)) return Results.BadRequest(new { error = "Exact revision and content hash required." });
-            try { return Results.Json(await initiatives.ApproveAsync(projectId, id, body.Revision, body.Hash, ct), DashboardJson.Options); }
+            if (initiatives is null)
+                return Results.StatusCode(503);
+            if (body.Revision <= 0 || string.IsNullOrWhiteSpace(body.Hash))
+                return Results.BadRequest(new
+                {
+                    error = "Exact revision and content hash required."
+                });
+            try
+            {
+                return Results.Json(await initiatives.ApproveAsync(projectId, id, body.Revision, body.Hash, ct), DashboardJson.Options);
+            }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
         });
 
         app.MapPost("/api/intake/proposals/{id}/retry-refinement", async (string id, string projectId, ApprovalRequest body, CancellationToken ct) =>
         {
-            if (initiatives is null) return Results.StatusCode(503);
+            if (initiatives is null)
+                return Results.StatusCode(503);
             var proposal = await initiatives.Proposals.GetAsync(projectId, id, ct);
-            if (proposal is null) return Results.NotFound();
-            if (proposal.Hash != body.Hash) return Results.Conflict(new { error = "Proposal content changed; reload before retry." });
+            if (proposal is null)
+                return Results.NotFound();
+            if (proposal.Hash != body.Hash)
+                return Results.Conflict(new
+                {
+                    error = "Proposal content changed; reload before retry."
+                });
             return await initiatives.RetryRefinementAsync(projectId, id, body.Revision, ct)
-                ? Results.Ok() : Results.Conflict(new { error = "Only an explicitly failed refinement may be retried." });
+                ? Results.Ok() : Results.Conflict(new
+                {
+                    error = "Only an explicitly failed refinement may be retried."
+                });
         });
 
         // List recent epics proposed via intake (issue.type='epic', assignee='intake').

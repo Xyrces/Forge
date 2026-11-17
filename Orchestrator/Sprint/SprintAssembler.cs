@@ -237,6 +237,7 @@ public sealed class SprintAssembler
     internal async Task TickProjectAsync(
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
+        await RecoverProposalSourcesAsync(projectId, issues, ct);
         var prevState = await ReadBuildStateAsync(issues, ct);
         // Failed tasks remain open until an explicit operator action. Age is
         // diagnostic information, never evidence of completion or abandonment.
@@ -392,7 +393,7 @@ public sealed class SprintAssembler
             else
             {
                 var reason =
-                    $"No eligible work — {held.HeldGroups} group(s) held by {held.FailedTasks} Failed task(s); " +
+                    $"No eligible work â€” {held.HeldGroups} group(s) held by {held.FailedTasks} Failed task(s); " +
                     "investigate, requeue or explicitly close Failed tasks to unblock; age does not resolve failures";
                 if (prevState?.Phase != "starved"
                     || !(prevState.HeldWork ?? Array.Empty<HeldWorkItem>()).Select(h => h.Id).SequenceEqual(held.Items.Select(h => h.Id)))
@@ -559,6 +560,31 @@ public sealed class SprintAssembler
     /// triage (or when it returns null): plain 1:1. Returns the
     /// number of work items created.
     /// </summary>
+    private async Task RecoverProposalSourcesAsync(string projectId, IIssueStore issues, CancellationToken ct)
+    {
+        if (_initiativeProposals is null) return;
+        var drafts = new FollowUpDraftStore((IssueStore)issues);
+        var pending = await drafts.ListUnconsumedAsync(ct);
+        var recovered = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var chunk in pending.Select(d => d.Id).Chunk(100))
+        {
+            string? cursor = null;
+            while (true)
+            {
+                var bindings = await _initiativeProposals.FindBySourceDraftIdsAsync(projectId, chunk, ct, cursor);
+                foreach (var binding in bindings)
+                {
+                    if (!recovered.Add(binding.Id)) continue;
+                    using var source = System.Text.Json.JsonDocument.Parse(binding.SourceJson);
+                    var ids = source.RootElement.GetProperty("sourceDraftIds").EnumerateArray().Select(i => i.GetInt64()).ToArray();
+                    await drafts.SetDispositionBatchAsync(ids, "proposal", binding.Id, ct);
+                }
+                if (bindings.Count < 100) break;
+                cursor = bindings[^1].Id;
+            }
+        }
+    }
+
     private async Task<int> MaterializeFollowUpsAsync(
         string projectId, IIssueStore issues, ISpecStore specs,
         Core.FollowUpDraftStore draftStore, IReadOnlyList<Core.FollowUpDraft> unconsumed, CancellationToken ct)
@@ -587,6 +613,16 @@ public sealed class SprintAssembler
             }
         }
 
+        // Validate the whole response before creating any disposition: a model
+        // cannot assign one source finding to competing initiative scopes.
+        if (decision is not null)
+        {
+            var known = unconsumed.Select(d => d.Id).ToHashSet();
+            var citations = decision.Items.SelectMany(i => i.SourceDraftIds.Where(known.Contains)).ToList();
+            if (citations.Count != citations.Distinct().Count()
+                || decision.Items.Any(i => i.SourceDraftIds.Count(known.Contains) > 1000))
+                throw new InvalidOperationException("Follow-up triage sources overlap or exceed the supported bound; no dispositions were applied.");
+        }
         var created = 0;
         var cited = new HashSet<long>();
         if (decision is not null)
@@ -637,13 +673,13 @@ public sealed class SprintAssembler
                         var src = sources.Select(id => byId[id]).ToList();
                         var proposals = _initiativeProposals ?? throw new InvalidOperationException("Initiative proposal storage is required for epic suggestions.");
                         var suggestion = await proposals.CreateAsync(new NewInitiativeProposal(
-                            projectId, "followup:" + string.Join(",", sources.Distinct().Order()), "forge",
+                            projectId, "followup:" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                                System.Text.Encoding.UTF8.GetBytes(string.Join(",", sources.Distinct().Order())))), "forge",
                             item.Title ?? $"Follow-up theme from {src.Count} findings",
                             item.Description ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
                             item.Priority ?? src.Min(d => d.Priority),
                             System.Text.Json.JsonSerializer.Serialize(new { sourceDraftIds = sources, findings = src })), ct);
-                        foreach (var id in sources)
-                            await draftStore.SetDispositionAsync(id, "proposal", suggestion.Id, ct);
+                        await draftStore.SetDispositionBatchAsync(sources, "proposal", suggestion.Id, ct);
                         created++;
                         break;
                     }

@@ -98,6 +98,8 @@ public sealed class ProductAgent
             _logger.LogWarning("ProductAgent.RefineSpecAsync: spec {Id} not found", specId);
             return null;
         }
+        if (!string.Equals(current.ProjectId, projectId, StringComparison.Ordinal))
+            throw new InvalidOperationException("Product refinement spec belongs to another project.");
 
         var context = await _projectContext.BuildAsync(projectId, ct);
         var skillContents = _skills is null
@@ -182,11 +184,19 @@ public sealed class ProductAgent
         // actually execute the function and feed the result back.
         chatClient = new ChatClientBuilder(chatClient).UseFunctionInvocation().Build();
 
+        SpecRecord? updatedThisRun = null;
         var updateSpecTool = AIFunctionFactory.Create(
-            ([Description("Spec id (must match the current spec).")] string specIdArg,
+            async ([Description("Spec id (must match the current spec).")] string specIdArg,
              [Description("Full refined spec body in markdown.")] string body,
-             [Description("Author tag for the version. Must start with 'product:'.")] string author) =>
-                UpdateSpecAsync(specIdArg, body, author, ct),
+             [Description("Optional display hint; the server records the canonical product run author.")] string? author = null) =>
+            {
+                if (specIdArg != specId) return "error: update is restricted to the current spec";
+                if (string.IsNullOrWhiteSpace(body)) return "error: body required";
+                if (body.Length > 256_000) return "error: body too large (max 256KB)";
+                var updated = await UpdateSpecAsync(specId, projectId, body, ct);
+                if (updated is not null) updatedThisRun = updated;
+                return updated is null ? "spec_not_found" : $"version={updated.CurrentVersion}";
+            },
             name: "update_spec",
             description: "Replace the spec body with a fully refined version. " +
                          "Pass the full markdown body, not a diff. " +
@@ -219,10 +229,10 @@ public sealed class ProductAgent
         {
             await new PipelineAgentRunner(_logger).RunAsync(
                 agent, new[] { userMessage }, roleLabel: "product", ct: ct);
-            var refreshed = await _specs.GetAsync(specId, ct);
+            var refreshed = updatedThisRun;
             _events.Publish(new DashboardEvent(DateTime.UtcNow,
                 refreshed is null ? "product.run.failed" : "product.run.completed",
-                specId, refreshed is null ? "spec-missing" : $"version={refreshed.CurrentVersion}",
+                specId, refreshed is null ? "no committed refinement from this run" : $"version={refreshed.CurrentVersion}",
                 new Dictionary<string, object?>
                 {
                     ["specId"] = specId,
@@ -250,24 +260,15 @@ public sealed class ProductAgent
     /// size defensively (a runaway LLM could otherwise spew
     /// millions of bytes into a spec_version row).
     /// </summary>
-    private async Task<string> UpdateSpecAsync(
-        string specIdArg, string body, string author, CancellationToken ct)
+    private async Task<SpecRecord?> UpdateSpecAsync(
+        string specId, string projectId, string body, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(specIdArg))
-            return "spec_id_required";
-        if (string.IsNullOrWhiteSpace(body))
-            return "body_required";
-        if (body.Length > 256_000)
-            return "body_too_large (max 256KB)";
-        // Author is allowed to be whatever the agent sends; we
-        // record it verbatim. The system prompt instructs the agent
-        // to use the runId form, but we don't enforce it at the
-        // tool layer so the agent has an escape hatch for debug.
-        var updated = await _specs.UpdateBodyAsync(specIdArg,
-            new UpdateSpecBody(body, string.IsNullOrWhiteSpace(author) ? $"product:{_runId}" : author), ct);
-        return updated is null
-            ? "spec_not_found"
-            : $"version={updated.CurrentVersion}";
+        var current = await _specs.GetAsync(specId, ct);
+        if (current is null) return null;
+        if (current.ProjectId != projectId)
+            throw new InvalidOperationException("Product refinement spec ownership changed.");
+        return await _specs.UpdateBodyAsync(specId,
+            new UpdateSpecBody(body, $"product:{_runId}"), ct);
     }
 
     private string LoadRoleInstructions(string agentName)

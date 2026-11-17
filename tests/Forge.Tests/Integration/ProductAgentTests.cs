@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using System.Threading.Channels;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -33,7 +34,7 @@ public class ProductAgentTests : IDisposable
     public ProductAgentTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("product");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"P");
         _specs = new SpecStore(_issues);
         _skills = new SkillStore(_issues);
         _agents = new AgentStore(_issues);
@@ -80,7 +81,7 @@ public class ProductAgentTests : IDisposable
                     {
                         ["specIdArg"] = created.Id,
                         ["body"] = refined,
-                        ["author"] = "product:test-run",
+                        ["author"] = "model-invented-author",
                     }),
             },
             followUpText: "Done refining.");
@@ -110,7 +111,7 @@ public class ProductAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task RefineSpecAsync_AgentDoesNotCallUpdateSpec_ReturnsOriginal()
+    public async Task RefineSpecAsync_AgentDoesNotCallUpdateSpec_ReturnsNull()
     {
         var created = await _specs.CreateAsync(new NewSpec(
             ProjectId: "P", Title: "T", Body: "draft"));
@@ -121,8 +122,9 @@ public class ProductAgentTests : IDisposable
         var refreshed = await agent.RefineSpecAsync(created.Id, "P", default);
 
         // Spec unchanged. v1 still current.
-        Assert.Equal(1, refreshed!.CurrentVersion);
-        Assert.Equal("draft", refreshed.Body);
+        Assert.Null(refreshed);
+        Assert.Equal("draft",(await _specs.GetAsync(created.Id))!.Body);
+        Assert.DoesNotContain(_events.GetHistorySnapshot(),e=>e.Kind=="product.run.completed");
     }
 
     [Fact]
@@ -145,7 +147,41 @@ public class ProductAgentTests : IDisposable
             followUpText: "Done.");
         var agent = BuildAgent(scripted, runId: "test-run");
         var refreshed = await agent.RefineSpecAsync(created.Id, "P", default);
-        Assert.Equal(1, refreshed!.CurrentVersion); // unchanged
+        Assert.Null(refreshed);
+        Assert.Equal(1,(await _specs.GetAsync(created.Id))!.CurrentVersion); // unchanged
+    }
+
+    [Fact]
+    public async Task RefineSpecAsync_WrongToolSpecCannotMutateAnotherProject()
+    {
+        var current=await _specs.CreateAsync(new("P","current","draft"));
+        var other=await _specs.CreateAsync(new("other","other","untouched"));
+        var client=new ToolCallingChatClient(new[] { new FunctionCallContent("wrong","update_spec",
+            new Dictionary<string,object?> { ["specIdArg"]=other.Id,["body"]="bad change",["author"]="operator" }) },"done");
+        Assert.Null(await BuildAgent(client).RefineSpecAsync(current.Id,"P"));
+        Assert.Equal("untouched",(await _specs.GetAsync(other.Id))!.Body);
+        Assert.Equal(1,(await _specs.GetAsync(current.Id))!.CurrentVersion);
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>BuildAgent(client).RefineSpecAsync(other.Id,"P"));
+    }
+
+    [Fact]
+    public async Task PlainChatDoesNotCompleteDurableRefinement()
+    {
+        var proposals=new InitiativeProposalStore(_issues);
+        var session=await new IntakeStore(_issues).CreateAsync("P","discussion");
+        var proposal=await proposals.CreateAsync(new("P","source","user","scope","draft",SessionId:session.Id));
+        var approved=await proposals.ApproveAsync("P",proposal.Id,proposal.Revision,proposal.Hash,"operator");
+        var ingestion=new InitiativeIngestionStore(_issues);
+        var service=new InitiativeApprovalService(proposals,_=>ingestion,_events);
+        var client=new ScriptedChatClient(new ChatResponse(new ChatMessage(ChatRole.Assistant,"Done without a tool.")));
+        await using var queue=new ProductRefinementQueue(service,()=>["P"],_=>ingestion,_=>_specs,
+            (_,id,ct)=>BuildAgent(client).RefineSpecAsync(id,"P",ct),_events,NullLogger<ProductRefinementQueue>.Instance);
+        _ = queue.RunAsync(CancellationToken.None);
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        InitiativeIngestion? receipt;
+        while((receipt=await ingestion.GetAsync(proposal.Id,1))?.RefinementState!="Failed") await Task.Delay(20,timeout.Token);
+        Assert.Equal(SpecStatus.Draft,(await _specs.GetAsync(receipt.SpecId))!.Status);
+        Assert.DoesNotContain(_events.GetHistorySnapshot(),e=>e.Kind=="product.run.completed");
     }
 
     [Fact]
