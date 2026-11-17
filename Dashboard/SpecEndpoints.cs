@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -493,7 +493,16 @@ public static class SpecEndpoints
                     : canApprove ? "draft is ready for approval"
                     : canStartGrooming ? "designed/approved specs feed the groomer"
                     : canShip ? "groomer has decomposed into stories/tasks"
-                    : $"status {spec.Status} has no available actions",
+                    : spec.Status switch
+                    {
+                        SpecStatus.ReadyForDesign => "Ready for automatic design. A held Design stage pauses this step; check stage holds and progress in Flow. This status does not mean the Designer is running.",
+                        SpecStatus.Designed => "Design is complete. Asset preparation is the next automatic step before technical planning; check progress and stage holds in Flow.",
+                        SpecStatus.NeedsRevision => "This specification needs revision before planning can continue. Review the design feedback and workflow in Flow.",
+                        SpecStatus.Shipped => "This specification is marked shipped. Check its tasks and sprint delivery evidence for the observed implementation outcome.",
+                        SpecStatus.Superseded => "This specification has been superseded and has no automatic next step.",
+                        SpecStatus.Archived => "This specification is archived and has no automatic next step.",
+                        _ => "Check workflow progress and stage holds in Flow.",
+                    },
             });
         });
     }
