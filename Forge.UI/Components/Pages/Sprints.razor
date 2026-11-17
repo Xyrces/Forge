@@ -153,6 +153,8 @@
 
         @if (selected is not null)
         {
+            <SprintCompletionPanel ProjectId="@_loadedProject" SprintId="@selected.Id" RefreshAt="_board.GeneratedAt" />
+
             var members = EnrichMembers(selected);
             var done = _board?.Done ?? 0;
             var total = _board?.Total ?? 0;
