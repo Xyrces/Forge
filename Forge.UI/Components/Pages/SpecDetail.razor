@@ -14,7 +14,7 @@
     <div class="page-header">
         <h1>
             <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo(BackToSpecs))">← Specs</button>
-            @(SpecProp("title") ?? SpecId)
+            @(SpecProp("title") ?? (_notFound ? "Specification not found" : "Specification"))
         </h1>
         <div class="page-header__actions">
             <button class="btn btn--primary" @onclick="LoadAsync" disabled="@_acting">Refresh</button>
@@ -39,7 +39,7 @@
 
     @if (_notFound)
     {
-        <div class="banner banner--info">Specification @SpecId was not found in project @(_scopeProject ?? "the current project"). <a href="@BackToSpecs">Back to Specs</a></div>
+        <div class="banner banner--info banner--stacked"><span>This specification was not found in project @(_scopeProject ?? "the current project").</span><a href="@BackToSpecs">Back to Specs</a></div>
     }
     else if (_loading)
     {
