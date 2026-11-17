@@ -76,5 +76,72 @@ public sealed class SprintDependencyStoreTests : IDisposable
         Assert.Equal("Deliver outcome", (await Sprints.GetActiveAsync())!.Goal);
     }
 
+    [Fact]
+    public async Task ExplicitActivationAtomicallyAddsPreviouslyUnlinkedPrerequisites()
+    {
+        var a = await Row("A"); var b = await Row("B");
+        await issues.AddDependencyAsync(a.Id, b.Id, IssueDepKind.Blocks);
+        var draft = await Sprints.CreateAsync(Sprint() with { Status = SprintStatus.Archived });
+        await Sprints.AddIssueAsync(draft.Id, b.Id);
+        await Sprints.ActivateWithIssuesAsync(draft.Id, await Snapshot(a, b), [b.Id]);
+        Assert.Equal(2, (await Sprints.GetIssueIdsAsync(draft.Id)).Count);
+        Assert.Equal(a.Id, Assert.Single(await issues.ReadyAsync(10, draft.Id)).Id);
+    }
+
+    [Fact]
+    public async Task HistoricalTerminalMemberDoesNotReopenBecauseOfLaterBlocker()
+    {
+        var target = await Row("Current outcome"); var done = await Row("Already delivered");
+        var active = await Sprints.CreateWithIssuesAsync(Sprint(), await Snapshot(target, done));
+        await issues.TransitionAsync(done.Id, IssueStatus.Completed, null);
+        done = (await issues.GetAsync(done.Id))!;
+        var historicalBlocker = await Row("Later failed finding");
+        await issues.TransitionAsync(historicalBlocker.Id, IssueStatus.Failed, null);
+        await issues.AddDependencyAsync(historicalBlocker.Id, done.Id, IssueDepKind.Blocks);
+        var necessary = await Row("Current prerequisite");
+        await issues.AddDependencyAsync(necessary.Id, target.Id, IssueDepKind.Blocks);
+        var combined = await Snapshot(necessary, target, done);
+        await Sprints.AddValidatedPrerequisiteAsync(active.Id, combined with
+        {
+            Issues = [necessary], TaskIds = [necessary.Id], ExistingSprintMembers = [target, done]
+        });
+        Assert.Contains(necessary.Id, await Sprints.GetIssueIdsAsync(active.Id));
+    }
+
+    [Fact]
+    public async Task MissingPrerequisiteRowCannotDisappearThroughInnerJoin()
+    {
+        var a = await Row("A"); var b = await Row("B");
+        await issues.AddDependencyAsync(a.Id, b.Id, IssueDepKind.Blocks);
+        // Deliberate fixture corruption simulates an orphaned imported edge.
+        await using (var conn = await issues.Db.OpenAsync())
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA foreign_keys=OFF; DELETE FROM issue WHERE id=@id;";
+            var p = cmd.CreateParameter(); p.ParameterName = "@id"; p.Value = a.Id; cmd.Parameters.Add(p);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        var snapshot = await Snapshot(b);
+        Assert.Null(Assert.Single(snapshot.Dependencies!).BlockerStatus);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Sprints.CreateWithIssuesAsync(Sprint(), snapshot));
+        Assert.Empty(await Sprints.ListAsync(false));
+    }
+
+    [Theory]
+    [InlineData(IssueStatus.Completed)]
+    [InlineData(IssueStatus.Closed)]
+    public async Task SatisfiedPrerequisiteIsNotMembershipButItsStatusIsRechecked(IssueStatus terminal)
+    {
+        var a = await Row("A"); var b = await Row("B");
+        await issues.AddDependencyAsync(a.Id, b.Id, IssueDepKind.Blocks);
+        await issues.TransitionAsync(a.Id, terminal, null);
+        var snapshot = await Snapshot(b);
+        await issues.TransitionAsync(a.Id, IssueStatus.Pending, null);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Sprints.CreateWithIssuesAsync(Sprint(), snapshot));
+        await issues.TransitionAsync(a.Id, terminal, null);
+        var active = await Sprints.CreateWithIssuesAsync(Sprint(), await Snapshot(b));
+        Assert.Equal(b.Id, Assert.Single(await Sprints.GetIssueIdsAsync(active.Id)));
+    }
+
     public void Dispose() => issues.Dispose();
 }

@@ -56,7 +56,10 @@ public sealed partial class SprintStore
         if (snapshot.Dependencies is not null
             && (snapshot.Dependencies.Count != actual.Count || !actual.ToHashSet().SetEquals(snapshot.Dependencies)))
             throw new InvalidOperationException("Sprint dependency edges or prerequisite states changed during activation.");
-        foreach (var edge in actual)
+        var unfinishedTargets = snapshot.TaskIds.Concat(snapshot.ExistingSprintMembers?
+            .Where(i => i.Status is not (IssueStatus.Completed or IssueStatus.Closed)).Select(i => i.Id) ?? [])
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var edge in actual.Where(e => unfinishedTargets.Contains(e.BlockedId)))
         {
             // Closed retains legacy dependency semantics here; it is not proof of delivery.
             if (edge.BlockerStatus is IssueStatus.Completed or IssueStatus.Closed) continue;
@@ -64,7 +67,7 @@ public sealed partial class SprintStore
                 || snapshot.Dependencies is null || !membership.Contains(edge.BlockerId))
                 throw new InvalidOperationException($"Sprint task {edge.BlockedId} has an unresolved prerequisite {edge.BlockerId}.");
         }
-        var incoming = actual.Where(e => membership.Contains(e.BlockerId)
+        var incoming = actual.Where(e => unfinishedTargets.Contains(e.BlockedId) && membership.Contains(e.BlockerId)
             && e.BlockerStatus is not (IssueStatus.Completed or IssueStatus.Closed))
             .GroupBy(e => e.BlockedId).ToDictionary(g => g.Key, g => g.Select(e => e.BlockerId).ToArray());
         var visiting = new HashSet<string>(StringComparer.Ordinal);
