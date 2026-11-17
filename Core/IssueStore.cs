@@ -221,7 +221,7 @@ public interface IIssueStore
 /// tables + the four core methods. Stays additive to (not replacing) StateStore,
 /// which still owns orchestrator settings + heartbeats.
 /// </summary>
-public sealed class IssueStore : IIssueStore, IAsyncDisposable
+public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 {
     public const int CurrentSchemaVersion = 41;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
