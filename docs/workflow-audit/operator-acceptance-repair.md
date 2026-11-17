@@ -66,3 +66,11 @@ Proof identifiers:
 
 These are recovery qualifications, not evidence that the live initiative has
 finished engineering, deployed its change, or passed operator acceptance.
+
+The same browser session exposed a legacy manual **Ship** action that could
+label a Groomed specification Shipped while every task was still Pending.
+The button is removed and API/store writes reject new Shipped labels.
+Historical rows remain readable; no single sprint is allowed to relabel a
+multi-outcome specification. Sixty-one integrated recovery/specification tests
+passed after this correction, and an actual page reload confirmed the button
+is absent and task links retain their owning project.

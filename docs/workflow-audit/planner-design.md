@@ -22,9 +22,10 @@ A sprint is a small independently demonstrable outcome within approved scope. An
 
 Membership and dispatch readiness are separate. A dependency chain A → B → C can belong to one sprint while only A is initially runnable. The validator closes over required prerequisites and rejects missing, failed, blocked, cyclic, foreign-project, ungroomed or unapproved necessary work. It never truncates a required delivery unit to fit the ceiling. An oversized unit needs a smaller useful decomposition through grooming. A prerequisite whose declared required partner is absent from its dependency closure is also deferred for correction rather than silently dropping that partner.
 
-Grooming now receives the owning project's current CoreDev, ClientDev and QA
-slot limits on each run, using the same role defaults as execution. Reviewer
-slots do not count as engineering task capacity. The prompt describes a soft
+Grooming now receives the owning project's current CoreDev and ClientDev
+slot limits on each run, using the same role defaults as execution. Read-only
+QA and Reviewer slots do not count as implementation task capacity, including
+in the selector's soft parallelism score. The prompt describes a soft
 parallel goal: three suitable workers favor three genuinely independent tasks
 when the approved outcome supports them; fewer tasks remain valid. This closes
 the earlier gap where the selector knew capacity but the grooming model did not.
@@ -34,6 +35,12 @@ criterion. Later `DeploymentHealthy` and `OperatorObserved` criteria stay in
 the same implementation outcome; they do not create observation-only
 engineering tasks or require fabricated PRs. Actual later evidence remains
 mandatory after deployment.
+
+The legacy manual **Ship** action is retired: a specification label cannot
+stand in for implementation or deployment evidence. API and store writes
+reject newly marking a specification Shipped; historical rows remain readable.
+Multi-outcome specifications are not automatically relabelled from one sprint's
+success. Follow completion and deployment evidence for the actual outcome.
 
 ## Activation and preservation of the current objective
 
