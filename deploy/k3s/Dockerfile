@@ -35,4 +35,4 @@ LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
 ENV HOME=/var/lib/forge DOTNET_CLI_HOME=/var/lib/forge DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 ENV GIT_AUTHOR_NAME=Forge GIT_AUTHOR_EMAIL=forge@localhost GIT_COMMITTER_NAME=Forge GIT_COMMITTER_EMAIL=forge@localhost
 USER 10001:10001
-ENTRYPOINT ["dotnet", "/app/Forge.Core.dll"]
+ENTRYPOINT ["/bin/sh", "/app/deploy/k3s/rehearsal/entrypoint.sh"]

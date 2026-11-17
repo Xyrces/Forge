@@ -1,0 +1,14 @@
+# Dedicated schema-upgrade failure rehearsal image
+
+This branch is a disposable qualification artifact and MUST NOT be merged into production. Its only runtime change is the image entrypoint: initialize mode waits a fixed 60 seconds, then executes the unchanged Forge binary; every other entrypoint invocation exits78. The independent release Job supplies its own Python command, so its coordinator is unchanged. No secret values are read or printed by the wrapper. There is no runtime fault flag.
+
+Proposed execution, requiring root approval of the exact CI-qualified immutable image:
+
+1. Hold all workflow gates and confirm zero active workers, unchanged dataset/budget, current schema39, and exact policy bridge digest on the active blue slot. Submit through the existing deployment API with its normal trusted CI receipt. Do not alter shared config or bypass source verification.
+2. Wait for the schema journal's migrating phase and initializer pod's fixed wait marker. Record operation, release Job UID, initializer Job/pod UIDs, both controller replica counts0, no controller pods, and no worker pods. Delete only the current release supervisor pod once. Leave both Jobs and initializer untouched.
+3. Observe a new supervisor pod created by the SAME Job's existing backoffLimit3, takeover by new pod UID, and adoption of the SAME immutable initializer Job/pod. During the initializer's wait/running state no controller may restart. If no replacement appears, stop and report; do not patch a journal or manufacture success.
+4. The initializer executes the real39-to40 migration. Record terminal Complete plus nonexecuting initializer containers, and core/workload versions40. The deliberately unavailable candidate fails readiness. Use the normal600-second coordinator timeout: the current deployment executor has no supported timeout configuration, so do not patch the generated Job to shorten it.
+5. Observe automatic rolling-back then rolled-back. Candidate pods must disappear before the exact qualified bridge restarts/activates on40. Confirm public routeblue, sole controller owner/new epoch, ready/active/admission status, all gates held, no work/model requests, dataset/budget unchanged. The release Job can finish Failed after bounded terminal replay; rolled-back plus restored controller is the expected successful rehearsal outcome.
+6. Submit the real good image through the normal API. Since the observed schema is now40, its policy selects ordinary same-schema release. Never downgrade the database or reuse the failed operation ID.
+
+This exercises supervisor loss during a live initializer's independent lifetime and automatic candidate-failure rollback after successful actual migration. The fixed wait precedes SQL writes, so it does NOT claim a crash during DDL. It also does not exercise an initializer SQL failure; existing scoped SQL and state-machine tests cover separate failure cases. No paid API calls are needed.
