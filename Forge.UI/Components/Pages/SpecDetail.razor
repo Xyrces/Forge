@@ -248,7 +248,15 @@
         _error = null;
         var generation = ++_loadGeneration;
         var target = ActionTarget;
-        if (_loadedSpecTarget != target) { _spec = null; _actions = null; _loadedActionTarget = null; _groomingNotice = null; }
+        if (_loadedSpecTarget != target)
+        {
+            _spec = null;
+            _actions = null;
+            _loadedActionTarget = null;
+            _groomingNotice = null;
+            _actionError = null;
+            _offerForceGroom = false;
+        }
         try
         {
             var tree = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/tree" + LensQuery);
@@ -266,6 +274,8 @@
                 if (generation != _loadGeneration || actionTarget != ActionTarget) return;
                 _actions = actions;
                 _loadedActionTarget = actionTarget;
+                if (_actionError == "Planning controls could not be loaded. Refresh before taking an action.")
+                    _actionError = null;
             }
             catch (Exception)
             {
@@ -367,38 +377,58 @@
 
     private async Task GroomAsync(bool force)
     {
+        if (_acting || _loadedActionTarget != ActionTarget) return;
+        var target = ActionTarget;
+        var actionGeneration = _loadGeneration;
+        var lensQuery = LensQuery;
+        var url = $"/api/specs/{Uri.EscapeDataString(SpecId)}/groom" + lensQuery
+            + (force ? (lensQuery.Length > 0 ? "&" : "?") + "force=true" : "");
         _acting = true;
         _offerForceGroom = false;
+        _actionError = null;
+        _groomingNotice = null;
         try
         {
-            var url = $"/api/specs/{SpecId}/groom" + LensQuery
-                + (force ? (LensQuery.Length > 0 ? "&" : "?") + "force=true" : "");
-            var resp = await Http.PostAsync(url, null);
-            if (resp.StatusCode == System.Net.HttpStatusCode.Conflict && !force)
+            using var response = await Http.PostAsync(url, null, _disposeCts.Token);
+            if (target != ActionTarget || actionGeneration != _loadGeneration) return;
+            if (response.StatusCode == System.Net.HttpStatusCode.Conflict && !force)
             {
-                var conflict = await resp.Content.ReadFromJsonAsync<JsonElement>();
+                var conflict = await response.Content.ReadFromJsonAsync<JsonElement>(_disposeCts.Token);
+                if (target != ActionTarget || actionGeneration != _loadGeneration) return;
                 _offerForceGroom = GetProp(conflict, "error") == "spec_already_groomed";
                 _actionError = _offerForceGroom
                     ? "This specification was already groomed. Re-decomposing may append new planned work."
                     : "Technical planning is already queued or running, or its state changed. Refresh before taking another action.";
                 return;
             }
-            if (!resp.IsSuccessStatusCode)
+            if (response.StatusCode != System.Net.HttpStatusCode.Accepted)
             {
-                _actionError = $"Groom failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                _actionError = "Technical planning was not confirmed queued. Refresh its status before trying again.";
                 return;
             }
-            _actionError = null;
+            _groomingNotice = "Technical planning queued. This is not a completed planning result.";
             await LoadAsync();
-            // The groomer runs in the background; poll so the tree
-            // fills in without leaving the page.
+            if (target != ActionTarget) return;
+            actionGeneration = _loadGeneration;
+            StateHasChanged();
             for (var i = 0; i < 8 && !_disposeCts.IsCancellationRequested; i++)
             {
+                if (target != ActionTarget || actionGeneration != _loadGeneration
+                    || ActionProp("groomingState") is not ("Queued" or "Started")) break;
                 await Task.Delay(TimeSpan.FromSeconds(15), _disposeCts.Token);
+                if (target != ActionTarget || actionGeneration != _loadGeneration) break;
                 await LoadAsync();
+                if (target != ActionTarget) break;
+                actionGeneration = _loadGeneration;
+                StateHasChanged();
             }
         }
-        catch (Exception ex) { _actionError = ex.Message; }
+        catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (target == ActionTarget && actionGeneration == _loadGeneration)
+                _actionError = "Technical planning acknowledgement was interrupted. Refresh its status before issuing another request.";
+        }
         finally { _acting = false; }
     }
 
