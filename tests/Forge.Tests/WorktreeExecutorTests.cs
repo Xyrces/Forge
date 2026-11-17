@@ -206,17 +206,22 @@ public class WorktreeExecutorTests : IDisposable
             "stale reused worktree was not synced to origin/main");
     }
 
-    [Fact]
-    public async Task ReusedWorktree_WithLocalCommits_LeftAlone()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReusedWorktree_WithLocalWork_LeftAlone(bool committed)
     {
         InitRepoWithOrigin();
         var issue = await DispatchOnceAsync();
         var wt = _worktrees.WorktreePathFor(issue.Id);
 
-        // Simulate a died run's partial work: a local-only commit.
+        // A timeout may leave either a local commit or untracked implementation work.
         File.WriteAllText(Path.Combine(wt, "partial.cs"), "local work");
-        Run("git", "add partial.cs", wt);
-        Run("git", "commit -q -m partial", wt);
+        if (committed)
+        {
+            Run("git", "add partial.cs", wt);
+            Run("git", "commit -q -m partial", wt);
+        }
 
         AdvanceOriginMain(_workDir + "-bare.git", "NewFile.cs");
 
@@ -226,8 +231,8 @@ public class WorktreeExecutorTests : IDisposable
             claimed2, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         Assert.True(File.Exists(Path.Combine(wt, "partial.cs")),
-            "local-only work from the died run was wiped");
+            "local work from the died run was wiped");
         Assert.False(File.Exists(Path.Combine(wt, "NewFile.cs")),
-            "worktree with local commits must not be reset to base");
+            "worktree with local work must not be reset to base");
     }
 }

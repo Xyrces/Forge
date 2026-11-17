@@ -35,14 +35,18 @@ public static class WorkerHost
             using var runtime = await BuildRunner(options, assignment, attempts, loggerFactory, runCancellation.Token);
             var context = invocation.Context.ToDictionary(x => x.Key, x => (object)x.Value);
             context["workerAttemptId"] = assignment.Id;
-            var result = await runtime.Runner.RunAsync(invocation.Role, invocation.Prompt, invocation.SessionId, context, runCancellation.Token);
-            if (invocation.Role is AgentType.CoreDev or AgentType.ClientDev)
-            {
-                await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, runCancellation.Token);
-                var receipt = await AgentTools.WorkerVerification.VerifyAsync(assignment.Id, assignment.WorktreePath,
-                    runtime.VerifyCommands, logger, runCancellation.Token);
-                result = result with { Verification = receipt };
-            }
+            var modelMinutes = invocation.Context.TryGetValue("modelTimeoutMinutes", out var configured)
+                ? double.Parse(configured, System.Globalization.CultureInfo.InvariantCulture)
+                : options.Spawner.AgentRunTimeoutMinutes;
+            if (!double.IsFinite(modelMinutes) || modelMinutes < 0)
+                throw new InvalidOperationException("Invalid worker model deadline.");
+            var result = await RunPhasesAsync(runtime.Runner, invocation, context,
+                modelMinutes > 0 ? TimeSpan.FromMinutes(modelMinutes) : null, async token =>
+                {
+                    await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, token);
+                    return await AgentTools.WorkerVerification.VerifyAsync(assignment.Id, assignment.WorktreePath,
+                        runtime.VerifyCommands, logger, token);
+                }, runCancellation.Token);
             await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, runCancellation.Token);
             using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             if (!await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, JsonSerializer.Serialize(result), null, finalize.Token))
@@ -80,6 +84,31 @@ public static class WorkerHost
                 await runCancellation.CancelAsync();
             }
         }
+    }
+
+    /// <summary>The model deadline ends before independent exact-tree verification starts.
+    /// Verification keeps RunVerification's per-command deadline and the Job's overall hard ceiling.</summary>
+    internal static async Task<AgentRunResult> RunPhasesAsync(IAgentRunner runner, WorkerInvocation invocation,
+        IReadOnlyDictionary<string, object> context, TimeSpan? modelTimeout,
+        Func<CancellationToken, Task<VerificationReceipt>> verify, CancellationToken ct)
+    {
+        AgentRunResult result;
+        using (var model = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            if (modelTimeout is { } timeout) model.CancelAfter(timeout);
+            try
+            {
+                result = await runner.RunAsync(invocation.Role, invocation.Prompt, invocation.SessionId, context, model.Token);
+                model.Token.ThrowIfCancellationRequested();
+            }
+            catch (OperationCanceledException) when (model.IsCancellationRequested && !ct.IsCancellationRequested)
+            { throw new TimeoutException($"Worker model phase timed out after {modelTimeout}."); }
+        }
+        ct.ThrowIfCancellationRequested();
+        if (invocation.Role is AgentType.CoreDev or AgentType.ClientDev)
+            result = result with { Verification = await verify(ct) };
+        ct.ThrowIfCancellationRequested();
+        return result;
     }
 
     public static async Task<WorkerRuntime> BuildRunner(AgentOptions options, WorkerAssignment assignment,

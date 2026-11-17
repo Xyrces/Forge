@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Forge.AgentTools;
@@ -181,14 +181,16 @@ public class RunAgentExecutorTests : IDisposable
                 timeoutMinutes: 0.02);
         });
 
-        // After the timeout, the issue should be Pending (for retry)
+        // The orchestrator owns RunDied and retry; the executor preserves status with a fresh failure.
         // and metadata should contain the diagnostic entry.
         var after = await _issues.GetAsync(issue.Id);
         Assert.NotNull(after);
-        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal(IssueStatus.InProgress, after.Status);
         var lastError = after.GetMetadata("lastError");
         Assert.Contains("timed out", lastError, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("true", after.GetMetadata("agentTimeout"));
+        Assert.True(DateTimeOffset.TryParse(after.GetMetadata("lastErrorAt"), out var failedAt));
+        Assert.True(failedAt > DateTimeOffset.UtcNow.AddMinutes(-1));
         Assert.Contains("<timed out", after.GetMetadata("modelResponse"));
     }
 
