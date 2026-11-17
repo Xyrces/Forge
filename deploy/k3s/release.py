@@ -142,6 +142,13 @@ class Release:
             owner = self.kube.get("pods", lock["data"]["pod"])
             if owner and owner["metadata"]["uid"] == lock["data"]["uid"] and owner.get("status", {}).get("phase") not in ("Succeeded", "Failed"):
                 raise RuntimeError("another release pod still owns the lock; refusing takeover")
+            prior_operation = lock["data"].get("operation")
+            if prior_operation != self.operation:
+                if not prior_operation:
+                    raise RuntimeError("release lock omitted operation identity; refusing ambiguous takeover")
+                prior = self.kube.get("configmaps", "forge-release-" + prior_operation)
+                if prior and prior.get("data", {}).get("kind") == "schema-upgrade" and prior["data"].get("phase") not in ("committed", "rolled-back"):
+                    raise RuntimeError("unfinished schema upgrade must be resumed with its original operation id")
             self.kube.patch("configmaps", "forge-release-lock", {
                 "metadata": {"resourceVersion": lock["metadata"]["resourceVersion"]}, "data": data})
         else:
@@ -227,6 +234,8 @@ class Release:
         self.journal = self.kube.get("configmaps", self.journal_name)
         if self.journal:
             data = self.journal["data"]
+            if data.get("kind") == "schema-upgrade":
+                raise RuntimeError("schema-upgrade journal requires its schema supervisor; ordinary release is prohibited")
             if data["image"] != self.image or data["dataset"] != self.dataset:
                 raise RuntimeError("operation id already used for different immutable inputs")
             if data["phase"] == "committed":
