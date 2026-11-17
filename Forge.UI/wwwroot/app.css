@@ -206,7 +206,7 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
 }
 
 /* Narrow screens use a disclosure menu, keeping every navigation link available. */
-.app-navigation-toggle { display: none; }
+.icon-btn.app-navigation-toggle { display: none; }
 @media (max-width: 760px) {
   .app-shell {
     grid-template-columns: minmax(0, 1fr);
@@ -218,7 +218,7 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
     grid-template-rows: auto auto minmax(0, 1fr);
     grid-template-areas: "topbar" "nav" "main";
   }
-  .app-navigation-toggle { display: inline-flex; width: auto; padding: 0 8px; }
+  .icon-btn.app-navigation-toggle { display: inline-flex; width: auto; flex: 0 0 auto; padding: 0 8px; }
   .app-topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
   .app-topbar__search { display: none; }
   .project-switcher { flex: 1; min-width: 0; margin-left: 0; }
