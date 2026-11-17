@@ -45,12 +45,12 @@ public sealed class ControlStoreTests : IDisposable
     }
 
     [Theory]
-    [InlineData(-1)]
-    [InlineData(0)]
-    [InlineData(1)]
-    public async Task StandbyCatalogCheck_IsReadOnlyAndRejectsIncompatibleSchema(int offset)
+    [InlineData(37, false)]
+    [InlineData(38, true)]
+    [InlineData(39, true)]
+    [InlineData(40, false)]
+    public async Task StandbyCatalogCheck_IsReadOnlyAndRejectsIncompatibleSchema(int version, bool compatible)
     {
-        var version = SqlServerMigrations.ExpectedVersion + offset;
         await using (var connection = await _issues.Db.OpenAsync())
         {
             using var command = connection.CreateCommand();
@@ -61,12 +61,29 @@ public sealed class ControlStoreTests : IDisposable
         var factory = new ReadOnlyCatalogFactory(_issues.DbPath);
         await using var runtime = new IssueStore(factory);
         runtime.EnsureSchema();
-        if (offset == 0) await ControllerHost.VerifySchemaAsync(factory, default);
+        if (compatible) Assert.Equal(version, await ControllerHost.VerifySchemaAsync(factory, default));
         else await Assert.ThrowsAsync<InvalidOperationException>(() => ControllerHost.VerifySchemaAsync(factory, default));
         await using var check = await factory.OpenAsync();
         using var read = check.CreateCommand();
         read.CommandText = "SELECT MAX(version) FROM schema_version";
         Assert.Equal(version, Convert.ToInt32(await read.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task BridgeCatalogCheck_RejectsMissingVersionWithoutWriting()
+    {
+        await using (var connection = await _issues.Db.OpenAsync())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM schema_version";
+            await command.ExecuteNonQueryAsync();
+        }
+        var factory = new ReadOnlyCatalogFactory(_issues.DbPath);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ControllerHost.VerifySchemaAsync(factory, default));
+        await using var check = await factory.OpenAsync();
+        using var read = check.CreateCommand();
+        read.CommandText = "SELECT COUNT(*) FROM schema_version";
+        Assert.Equal(0L, Convert.ToInt64(await read.ExecuteScalarAsync()));
     }
 
     [Fact]
