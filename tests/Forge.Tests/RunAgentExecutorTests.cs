@@ -31,6 +31,12 @@ public class RunAgentExecutorTests : IDisposable
         _workDir = TempRoot.Instance.NewDirectory("rae");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
+        // Fresh engineering checkout must fetch a real local remote before any agent work.
+        var bareDir = Path.Combine(_workDir, ".portHorizon", "remote.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(bareDir)!);
+        File.AppendAllText(Path.Combine(_workDir, ".git", "info", "exclude"), "\n/.portHorizon/\n");
+        Run("git", $"clone -q --bare \"{_workDir}\" \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
         _worktrees = new GitWorktreeService(
             new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
@@ -67,7 +73,10 @@ public class RunAgentExecutorTests : IDisposable
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
+        Assert.True(p.ExitCode == 0, $"Fixture command failed: {exe} {args}\n{stdout}\n{stderr}");
     }
 
     private static IAgentRunner RunnerWithScriptedClient()
