@@ -23,7 +23,8 @@ public sealed record SprintActivationSnapshot(
     IReadOnlyList<SprintDependencySnapshot>? Dependencies = null,
     IReadOnlyList<IssueRecord>? ExistingSprintMembers = null);
 
-public sealed record SprintDependencySnapshot(string BlockerId, string BlockedId, IssueStatus? BlockerStatus);
+public sealed record SprintDependencySnapshot(string BlockerId, string BlockedId, IssueStatus? BlockerStatus,
+    string? BlockerMetadataJson = null, bool? BlockerSatisfied = null);
 
 public interface ISprintStore
 {
