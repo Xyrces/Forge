@@ -8,7 +8,7 @@ namespace Forge.Orchestrator;
 /// <summary>
 /// P3.5: scheduled Groomer. Wakes up every <c>Interval</c> and
 /// dispatches the GroomerAgent against any Approved specs that
-/// haven't been groomed recently (or whose last groom failed).
+/// have not been groomed recently. Interrupted or failed attempts require explicit retry.
 /// Each run writes a row to <c>issue_groomer_run</c> with
 /// trigger=<c>scheduled</c>.
 ///
@@ -40,6 +40,8 @@ public sealed class ScheduledGroomer
     private readonly StageGates? _gates;
     private readonly Projects.ProjectContextFactory? _projectContexts;
     private readonly WakeupSignal? _wakeup;
+    private readonly Dictionary<long, PendingFinalization> _pendingFinalizations = [];
+    private sealed record PendingFinalization(GroomerRunStatus Status, string Error, TimeSpan Duration);
 
     /// <summary>Max ad-hoc tasks groomed per tick (LLM cost bound).</summary>
     internal const int MaxTaskGroomsPerTick = 3;
@@ -137,6 +139,9 @@ public sealed class ScheduledGroomer
 
     public async Task TickAsync(CancellationToken ct)
     {
+        // A gate pauses generation, not acknowledgement of already-finished work.
+        await FlushFinalizationsAsync(ct);
+        if (_pendingFinalizations.Count != 0) return;
         if (_gates is not null && await _gates.IsHeldAsync(StageGates.Groom, ct))
         {
             _logger.LogInformation("ScheduledGroomer: held by operator gate; skipping tick");
@@ -152,6 +157,7 @@ public sealed class ScheduledGroomer
                 continue;
             }
             await RunOneAsync(queuedSpec, queued.Trigger, ct, queued);
+            if (_pendingFinalizations.Count != 0) return;
         }
 
         IReadOnlyList<SpecRecord> candidates;
@@ -182,6 +188,7 @@ public sealed class ScheduledGroomer
             try
             {
                 await RunOneAsync(spec, GroomerTriggerKind.Scheduled, ct);
+                if (_pendingFinalizations.Count != 0) return;
             }
             catch (Exception ex)
             {
@@ -295,7 +302,7 @@ public sealed class ScheduledGroomer
 
     /// <summary>
     /// Heuristic: groom a spec at most every <c>Interval</c>, or
-    /// immediately if the last run failed. Cheap query: <c>SELECT
+    /// only after an explicit retry for failed/uncertain runs. Cheap query: <c>SELECT
     /// ts FROM issue_groomer_run WHERE spec_id = $id ORDER BY ts
     /// DESC LIMIT 1</c>.
     /// </summary>
@@ -304,7 +311,8 @@ public sealed class ScheduledGroomer
         var recent = await _runStore.ListAsync(specId: spec.Id, limit: 1, ct);
         if (recent.Count == 0) return true;
         var last = recent[0];
-        if (last.Status == GroomerRunStatus.Failed) return true;
+        if (last.Status is GroomerRunStatus.Failed or GroomerRunStatus.NeedsReview
+            or GroomerRunStatus.Started or GroomerRunStatus.Queued) return false;
         return DateTime.UtcNow - last.Ts >= _interval;
     }
 
@@ -343,14 +351,32 @@ public sealed class ScheduledGroomer
         catch (Exception ex)
         {
             var duration = DateTime.UtcNow - startedAt;
-            using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            await _runStore.FinishAsync(
-                run.Id, ex is OperationCanceledException ? GroomerRunStatus.NeedsReview : GroomerRunStatus.Failed,
-                storiesProduced: 0, tasksProduced: 0,
-                error: $"{ex.GetType().Name}: {ex.Message}",
-                duration: duration,
-                ct: finalize.Token);
+            _pendingFinalizations[run.Id] = new(
+                ex is OperationCanceledException ? GroomerRunStatus.NeedsReview : GroomerRunStatus.Failed,
+                $"{ex.GetType().Name}: {ex.Message}", duration);
+            await FlushFinalizationsAsync(CancellationToken.None);
             _logger.LogWarning(ex, "ScheduledGroomer: spec {SpecId} failed in {Ms}ms", spec.Id, duration.TotalMilliseconds);
         }
     }
+
+    private async Task FlushFinalizationsAsync(CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        foreach (var (runId, pending) in _pendingFinalizations.ToArray())
+        {
+            try
+            {
+                await _runStore.FinishAsync(runId, pending.Status, 0, 0,
+                    pending.Error, pending.Duration, deadline.Token);
+                _pendingFinalizations.Remove(runId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Grooming run {RunId} finished but its acknowledgement is pending; next tick retries database persistence only", runId);
+                return;
+            }
+        }
+    }
+
 }
