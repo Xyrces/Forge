@@ -55,7 +55,11 @@
         <div class="page-subtitle">Error: @_error</div>
         <button class="btn" @onclick="ShowActiveAsync">Show active sprint</button>
     }
-    else if (_board?.Sprint is null)
+    else if (_board is null)
+    {
+        <div class="page-subtitle">@(ShellStore.Value.CurrentProjectId is null ? "Waiting for a project selection…" : "Loading sprints…")</div>
+    }
+    else if (_board.Sprint is null)
     {
         @* Sprint flow: there is intentionally NO create button — the
            SprintAssembler builds each sprint automatically when the
@@ -162,7 +166,7 @@
                         @(selected.StartDate?.ToString("MMM d") ?? "")
                         @(selected.EndDate is not null ? $" → {selected.EndDate.Value:MMM d}" : "")
                     </span>
-                    <span class="mono">@done/@total tasks · @pct%</span>
+                    <span class="mono">@done/@total tasks completed or closed · @pct%</span>
                 </div>
             @if (!string.IsNullOrEmpty(selected.Goal))
             {
@@ -414,7 +418,7 @@
         new("Running", c => Bucket(c) == "running"),
         new("Review", c => Bucket(c) == "review"),
         new("Needs you", c => Bucket(c) is "failed" or "blocked"),
-        new("Done", c => Bucket(c) == "done"),
+        new("Completed / closed", c => Bucket(c) == "done"),
     };
 
     private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts, IReadOnlyList<string>? BlockedBy, string? Situation, string? SituationTone, bool Active, string? Role, int Priority, bool IsBlocked, bool Boosted, long BlockerCount);
