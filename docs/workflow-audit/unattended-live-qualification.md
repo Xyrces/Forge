@@ -126,3 +126,28 @@ approval and version history, bind to the exact current version and latest
 failed validation run, preserve the diagnostics durably, and refuse when
 downstream work has begun. Neither a hand-edited live spec nor a replacement
 initiative qualifies this recovery path.
+
+## Guarded repair deployed and requested
+
+PR #133 merged as `8c29f524bb389178716c562a78bda5e6af9875dd`. Source
+`d1b8a6ba548c1230bc96b7edf53c673b0d94f880` passed Linux CI and image
+qualification, plus the separate Azure SQL recovery checks described in
+`spec-hygiene-repair.md`. Its immutable image is
+`ghcr.io/xyrces/forge@sha256:20eab8d5d1355aad2c0e74f8f6fd5e879ff1d433f8280623536e24a432cc5d2a`.
+
+Normal operation `deploy-d3dc023bb77c4db481f86b158069aa02` committed.
+Blue controller `281623ef-21e3-4833-8190-232324a3cc61` became active and
+ready at epoch 27, retaining schema 41 and the dataset. The running artifact
+matched the image receipt; the managed checkout automatically advanced to
+the PR #133 merge. Read-only preflight passed, spending-table hashes were
+unchanged, and the approved pilot remained ReadyForDesign v2 with completed
+refinement before the explicit recovery action.
+
+At 18:41:50 UTC the operator-side browser clicked **Refine again** on the
+original live specification. The UI then showed Draft v2 and refinement
+Pending, explained that no second initiative approval was needed, and
+removed the retry control. The original proposal, epic, body and version
+history were retained. Before this paid repair started, usage remained
+$1.01 operator-reported prior cost plus $0.075166 newer usage estimates,
+with $23.914834 available and no uncertain requests. This checkpoint proves
+the deployed recovery action; later pipeline stages still require observation.
