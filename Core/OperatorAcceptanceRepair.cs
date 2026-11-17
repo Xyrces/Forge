@@ -67,6 +67,8 @@ public sealed class OperatorAcceptanceRepair(IssueStore issues)
         }
         var preview = await BuildAsync(connection, tx, specId, request.SpecVersion, request.GroomRunId, ct);
         if (preview.PreviewHash != request.PreviewHash) throw new InvalidOperationException("Repair preview changed; reload before applying.");
+        await ImplementationEvidenceFormat.ValidateJsonAsync(connection, tx, issues.Db.Dialect,
+            SprintPlanJson.Serialize(preview.TargetBindings), ct);
         var receipt = new OperatorAcceptanceRepairReceipt(preview, actor, DateTime.UtcNow);
         foreach (var target in preview.TargetRows)
             await issues.ApplyOperatorAcceptanceRepairAsync(connection, tx, target, new Dictionary<string, object>

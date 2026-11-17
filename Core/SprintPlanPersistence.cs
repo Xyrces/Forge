@@ -20,6 +20,8 @@ public sealed partial class SprintStore
         // Structural-only snapshots remain for internal migration/test callers. All production
         // activation routes obtain a plan from the shared approved-scope validator.
         if (snapshot.Plan is not { } plan) return;
+        await ImplementationEvidenceFormat.ValidateJsonAsync(connection, transaction, _issues.Db.Dialect,
+            SprintPlanJson.Serialize(plan), ct);
         if (!plan.HasValidHash || plan.ProjectId != _issues.ProjectId || plan.Criteria.Count == 0
             || plan.Members.Select(m => m.TaskId).Distinct().Count() != plan.Members.Count
             || !plan.Members.Select(m => m.TaskId).Order(StringComparer.Ordinal).SequenceEqual(

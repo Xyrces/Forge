@@ -1978,12 +1978,14 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 
     internal async Task<IssueRecord> CreateInTransactionAsync(DbConnection conn, DbTransaction tx, NewIssue spec, CancellationToken ct)
     {
+        ImplementationEvidenceFormat.RejectReservedProofKeys(spec.Metadata?.Keys);
         // Per-type monotonic short_id; transaction keeps it race-safe.
         var shortId = await NextShortIdAsync(conn, tx, spec.Type);
         var shortIdStr = shortId.ToString();
         var id = $"{spec.Type}-{shortIdStr}";
         var now = DateTime.UtcNow;
         var metadataJson = SerializeMetadata(spec.Metadata);
+        await ImplementationEvidenceFormat.ValidateJsonAsync(conn, tx, _db.Dialect, metadataJson, ct);
 
         await using (var cmd = conn.CreateCommand())
         {
@@ -2188,6 +2190,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
     /// <summary>Grooming metadata never changes status or revives a concurrently parked task.</summary>
     public async Task MergePendingMetadataAsync(string id, IDictionary<string, object> additions, CancellationToken ct = default)
     {
+        ImplementationEvidenceFormat.RejectReservedProofKeys(additions.Keys);
         await using var conn = await _db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         string metadata;
@@ -2201,6 +2204,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
                 throw new InvalidOperationException("Only pending work can receive grooming metadata.");
             metadata = MergeAndSerializeMetadata(reader.GetString(1), additions);
         }
+        await ImplementationEvidenceFormat.ValidateJsonAsync(conn, tx, _db.Dialect, metadata, ct);
         if (additions.ContainsKey(SprintPlanJson.MetadataKey)
             || additions.TryGetValue("groomed", out var groomed) && string.Equals(groomed?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
             await new ActivePrerequisiteGrooming(this).ValidateMetadataAsync(conn, tx, id, metadata, ct);
@@ -2226,6 +2230,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 
         var now = DateTime.UtcNow;
         var isTerminal = to is IssueStatus.Completed or IssueStatus.Failed or IssueStatus.Blocked or IssueStatus.Closed;
+        ImplementationEvidenceFormat.RejectReservedProofKeys(metadata?.Keys);
         var current = await GetAsync(id, ct)
             ?? throw new InvalidOperationException($"Issue {id} not found");
 
@@ -2242,6 +2247,9 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
             ? MergeAndSerializeMetadata(current.MetadataJson, metadata)
             : current.MetadataJson;
 
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        await ImplementationEvidenceFormat.ValidateJsonAsync(conn, tx, _db.Dialect, metadataJson, ct);
+
         await using (var cmd = conn.CreateCommand())
         {
             // Terminal transitions clear the dispatch_checkpoint so
@@ -2256,6 +2264,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
             // operator can't trust what the board says is held
             // (operator 2026-08-01: task-9/12/13 Failed for hours
             // still showing assignee=forge).
+            cmd.Transaction = tx;
             cmd.CommandText = isTerminal
                 ? $"""UPDATE {T("issue")} SET status=@to, updated_at=@now, closed_at=@now, metadata_json=@meta, dispatch_checkpoint=NULL, checkpoint_at=NULL, assignee=NULL WHERE id=@id"""
                 : to != IssueStatus.InProgress
@@ -2268,8 +2277,9 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
-        await InsertEventAsync(conn, null, id, "status_change",
+        await InsertEventAsync(conn, tx, id, "status_change",
             $"{current.Status}->{to}{(error is null ? "" : $" err={error}")}", ct);
+        await tx.CommitAsync(ct);
         await PublishLifecycleTransitionAsync(current, metadataJson, ct);
         await PublishFailureSignalAsync(current, to, error, metadataJson, ct);
         return (await GetAsync(id, ct))!;

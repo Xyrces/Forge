@@ -39,6 +39,7 @@ public sealed partial class IssueStore
             ["groomed"] = false, ["groomedAt"] = null!, ["groomNote"] = null!, ["groomRunId"] = null!,
             ["regroomReason"] = request.Reason
         });
+        await ImplementationEvidenceFormat.ValidateJsonAsync(connection, tx, Db.Dialect, metadata, ct);
         using var update = connection.CreateCommand(); update.Transaction = tx;
         update.CommandText = $"UPDATE {T("issue")} SET metadata_json=@meta,updated_at=@now WHERE id=@id AND status='Pending' AND assignee IS NULL AND parent_issue_id IS NULL AND dispatch_checkpoint IS NULL AND updated_at=@expected AND metadata_json=@old";
         update.AddParam("@meta", metadata); update.AddParam("@now", DateFormatTime(requestedAt.UtcDateTime));

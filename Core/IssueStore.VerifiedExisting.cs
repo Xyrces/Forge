@@ -27,6 +27,7 @@ public sealed partial class IssueStore
         }
         if (current.Status == IssueStatus.Completed && current.GetMetadata(ExistingImplementationEvidence.MetadataKey) == serialized)
             return; // Exact replay does not rewrite historical evidence or emit another event.
+        await ImplementationEvidenceFormat.RequireAsync(connection, tx, Db.Dialect, ct);
         if (current.Status != IssueStatus.InProgress || current.UpdatedAt != expectedUpdatedAt || current.MetadataJson != expectedMetadataJson)
             throw new InvalidOperationException("Task changed during independent existing-implementation verification.");
         using var audit = connection.CreateCommand(); audit.Transaction = tx;

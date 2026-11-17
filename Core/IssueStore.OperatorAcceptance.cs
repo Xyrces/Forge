@@ -11,6 +11,7 @@ public sealed partial class IssueStore
         IssueRecord expected, IDictionary<string, object> additions, bool retire, string actor, CancellationToken ct)
     {
         var metadata = MergeAndSerializeMetadata(expected.MetadataJson, additions);
+        await ImplementationEvidenceFormat.ValidateJsonAsync(connection, transaction, Db.Dialect, metadata, ct);
         var now = DateFormatTime(DateTime.UtcNow);
         using var command = connection.CreateCommand(); command.Transaction = transaction;
         command.CommandText = retire

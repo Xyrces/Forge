@@ -35,6 +35,16 @@ public sealed class VerifiedExistingImplementationTests
     }
 
     [Fact]
+    public async Task CanonicalAdmissionCannotPersistNewEvidenceBeforeFormatUpgrade()
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("existing-format"), "project");
+        var (task, _, _, evidence) = await Seed(issues);
+        await ImplementationFormatWriteTests.Stamp41(issues);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => issues.CompleteVerifiedExistingAsync(task.Id, task.UpdatedAt, task.MetadataJson, evidence));
+        Assert.Equal(task, await issues.GetAsync(task.Id));
+    }
+
+    [Fact]
     public async Task CanonicalAdmissionPreservesPlanAndCompletesWithoutInventingPullRequest()
     {
         await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("existing-proof"), "project");
