@@ -52,6 +52,38 @@ public class SprintAssemblerTests : IDisposable
 
     private Task Tick() => _assembler.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
 
+    [Fact]
+    public async Task EpicFollowUpTriageCreatesOnlyProposalUntilOperatorApproval()
+    {
+        var (_, _, tasks) = await SeedGroomedSpecAsync("current", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var drafts = new FollowUpDraftStore(_issues);
+        for (var i=0;i<2;i++) await drafts.FileAsync(new(0,active.Id,tasks[0],"reviewer",$"finding{i}","future scope",2,null,DateTime.UtcNow,null));
+        var beforeIssues=(await _issues.ListAsync(new IssueFilter())).Count;
+        var beforeSpecs=(await _specs.ListAsync(null,null)).Count;
+        await _issues.TransitionAsync(tasks[0],IssueStatus.Completed,null);
+        var proposals=new Forge.Core.Initiatives.InitiativeProposalStore(_issues);
+        var assembler=new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),_events,
+            NullLogger<SprintAssembler>.Instance,followUpTriage:new EpicSuggestionTriage(),initiativeProposals:proposals);
+        await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
+        await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
+        var suggestion=Assert.Single(await proposals.ListAsync("test"));
+        Assert.Equal("forge",suggestion.Origin); Assert.Null(suggestion.ApprovedAt);
+        Assert.Equal(beforeIssues,(await _issues.ListAsync(new IssueFilter())).Count);
+        Assert.Equal(beforeSpecs,(await _specs.ListAsync(null,null)).Count);
+        Assert.Empty(await drafts.ListUnconsumedAsync());
+        var session=await proposals.ExpandInIntakeAsync("test",suggestion.Id);
+        Assert.Equal(session,await proposals.ExpandInIntakeAsync("test",suggestion.Id));
+        Assert.Equal(beforeIssues,(await _issues.ListAsync(new IssueFilter())).Count);
+    }
+
+    private sealed class EpicSuggestionTriage : IFollowUpTriage
+    {
+        public Task<FollowUpTriageDecision?> TriageAsync(string projectId,IReadOnlyList<FollowUpDraft> drafts,CancellationToken ct)
+            => Task.FromResult<FollowUpTriageDecision?>(new([new("epic",drafts.Select(d=>d.Id).ToList(),"future initiative","future scope",2,null)]));
+    }
+
     private async Task<(string specId, List<string> storyIds, List<string> taskIds)> SeedGroomedSpecAsync(
         string title, int taskCount, string? epicDescription = null)
     {

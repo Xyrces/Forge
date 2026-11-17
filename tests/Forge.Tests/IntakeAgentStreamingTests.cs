@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.AI;
@@ -29,7 +30,7 @@ public class IntakeAgentStreamingTests : IDisposable
     public IntakeAgentStreamingTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("intake-stream");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"proj");
         _intake = new IntakeStore(_issues);
         _sprints = new SprintStore(_issues);
         _bus = new CapturingBus(_events);
@@ -50,7 +51,11 @@ public class IntakeAgentStreamingTests : IDisposable
         config: new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
         roles: new RoleAgentRegistry(),
         events: _bus,
-        logger: NullLogger<IntakeAgent>.Instance);
+        logger: NullLogger<IntakeAgent>.Instance, initiatives: Approval());
+
+    private InitiativeProposalStore Proposals => new(_issues);
+    private InitiativeApprovalService Approval()=>new(Proposals,_=>new InitiativeIngestionStore(_issues),_bus);
+    private async Task<InitiativeProposal> Latest()=> (await Proposals.GetAsync("proj",(await Proposals.ListAsync("proj")).Last().Id))!;
 
     [Fact]
     public async Task SendUserMessage_StreamsDeltas_ConcatEqualsPersistedAssistantMessage()
@@ -145,8 +150,8 @@ public class IntakeAgentStreamingTests : IDisposable
         // The proposal is a session draft — NO issue row exists until
         // the operator accepts (operator rule 2026-08-14).
         Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
-        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
-        Assert.Equal("ASB transport", draft.ProposedEpicTitle);
+        var draft = await Latest();
+        Assert.Equal("ASB transport", draft.Title);
         var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
         Assert.Equal("Proposed \"ASB transport\" — review the draft and accept when ready.", assistant.Content);
         Assert.Equal("ASB transport", assistant.ProposedEpicTitle);
@@ -166,162 +171,71 @@ public class IntakeAgentStreamingTests : IDisposable
     }
 
     [Fact]
-    public async Task Accept_DraftProposal_CreatesEpicRow_Idempotent()
+    public async Task ExactRevisionApproval_CreatesEpicIdempotently()
     {
-        // Operator rule 2026-08-14: the epic row + board presence are
-        // created AT ACCEPT, from the draft payload — not at proposal.
-        var client = new TurnScriptedClient()
-            .Turn(FunctionCall("create_epic", "call_1",
-                ("title", "ASB transport"), ("description", "first draft"), ("priority", 1)))
-            .Turn(Text("proposed"));
-        var agent = NewAgent(client);
-        var session = await agent.StartSessionAsync("t", default);
-
-        var proposed = await agent.SendUserMessageAsync(session.Id, "add asb", default);
-        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
-
-        var draftMsg = proposed.Messages.Single(m => m.ProposedEpicDescription is not null);
-        var issue = await agent.AcceptProposedEpicAsync(session.Id, draftMsg.Id, default);
-
-        Assert.Equal("epic", issue.Type);
-        Assert.Equal("ASB transport", issue.Title);
-        Assert.Equal("first draft", issue.Description);
-        Assert.Equal(1, issue.Priority);
-
-        // The accept message carries the epic id + the source proposal
-        // reference (the idempotence key); a second accept returns the
-        // same epic instead of creating a duplicate.
-        var after = await agent.GetSessionAsync(session.Id, default);
-        Assert.Contains(after!.Messages, m =>
-            m.Role == IntakeMessageRole.System
-            && m.ProposedEpicId == issue.Id
-            && m.Content.Contains($"Operator accepted epic {issue.Id}:")
-            && m.Content.Contains($"(proposal message #{draftMsg.Id})"));
-        var again = await agent.AcceptProposedEpicAsync(session.Id, draftMsg.Id, default);
-        Assert.Equal(issue.Id, again.Id);
-        Assert.Single(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
+        var client=new TurnScriptedClient().Turn(FunctionCall("create_epic","call1",("title","scope"),("description","body"),("priority",1))).Turn(Text("draft"));
+        var agent=NewAgent(client);var session=await agent.StartSessionAsync("t");
+        await agent.SendUserMessageAsync(session.Id,"propose");
+        var draft=await Latest(); Assert.Empty(await _issues.ListAsync(new IssueFilter()));
+        var first=await Approval().ApproveAsync("proj",draft.Id,draft.Revision,draft.Hash);
+        var again=await Approval().ApproveAsync("proj",draft.Id,draft.Revision,draft.Hash);
+        Assert.Equal(first,again);Assert.Single(await _issues.ListAsync(new IssueFilter()));
+        Assert.Equal("body",(await _issues.GetAsync(first.EpicId))!.Description);
     }
 
     [Fact]
-    public async Task SendUserMessage_NonConsecutiveDuplicateTitle_RefinesMatchingProposal()
+    public async Task SameTitleDoesNotSilentlyBindIndependentProposals()
     {
-        // Live incident 2026-08-14: after creating children 3-5 the
-        // model re-fired child 2's create_epic; the latest-proposal
-        // check missed it and a duplicate epic row landed. The match
-        // scans every unaccepted draft by title and supersedes it.
-        var client = new TurnScriptedClient()
-            .Turn(FunctionCall("create_epic", "call_1",
-                ("title", "P1-1: Fix the harness"), ("description", "child 1"), ("priority", 1)),
-                  FunctionCall("create_epic", "call_2",
-                ("title", "P1-2: Guard the consumer"), ("description", "child 2"), ("priority", 1)),
-                  FunctionCall("create_epic", "call_3",
-                ("title", "P1-1: Fix the harness"), ("description", "child 1 refined"), ("priority", 1)))
-            .Turn(Text("done"));
-        var agent = NewAgent(client);
-        var session = await agent.StartSessionAsync("t", default);
-
-        var updated = await agent.SendUserMessageAsync(session.Id, "go", default);
-
-        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
-        var drafts = updated.Messages.Where(m => m.ProposedEpicDescription is not null).ToList();
-        Assert.Equal(3, drafts.Count);
-        var p11 = drafts.Where(d => d.ProposedEpicTitle == "P1-1: Fix the harness").ToList();
-        Assert.Equal(2, p11.Count); // original + superseding refinement
-        Assert.Equal("child 1 refined", p11.MaxBy(d => d.Id)!.ProposedEpicDescription);
+        var client=new TurnScriptedClient().Turn(
+            FunctionCall("create_epic","call1",("title","same"),("description","one")),
+            FunctionCall("create_epic","call2",("title","same"),("description","two"))).Turn(Text("drafts"));
+        var agent=NewAgent(client);var session=await agent.StartSessionAsync("t");
+        await agent.SendUserMessageAsync(session.Id,"discuss");
+        var proposals=await Proposals.ListAsync("proj"); Assert.Equal(2,proposals.Count);
+        Assert.All(proposals,p=>Assert.Null(p.ApprovedAt)); Assert.Empty(await _issues.ListAsync(new IssueFilter()));
     }
 
     [Fact]
-    public async Task SendUserMessage_DistinctTitles_OneTurn_CreatesSeparateDrafts()
+    public async Task DistinctTitlesCreateIndependentDurableDrafts()
     {
-        // Live incident 2026-08-14: a parent + children turn collapsed
-        // into ONE epic — the refine-in-place guard (added for the
-        // identical-titles duplicate storm) rewrote epic-8 four times
-        // and the five children were never created. Refinement is
-        // title-scoped: clearly different titles are new drafts.
-        var client = new TurnScriptedClient()
-            .Turn(FunctionCall("create_epic", "call_1",
-                ("title", "Transport reliability bundle"), ("description", "parent"), ("priority", 2)),
-                  FunctionCall("create_epic", "call_2",
-                ("title", "P1-1: Fix the contract test harness"), ("description", "child 1"), ("priority", 1)),
-                  FunctionCall("create_epic", "call_3",
-                ("title", "P1-2: Guard ConsumeAsync re-enumeration"), ("description", "child 2"), ("priority", 1)))
-            .Turn(Text("created the parent and both children"));
-        var agent = NewAgent(client);
-        var session = await agent.StartSessionAsync("t", default);
-
-        var updated = await agent.SendUserMessageAsync(session.Id, "go ahead", default);
-
-        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
-        var drafts = updated.Messages.Where(m => m.ProposedEpicDescription is not null).ToList();
-        Assert.Equal(3, drafts.Count);
-        Assert.Contains(drafts, d => d.ProposedEpicTitle == "Transport reliability bundle");
-        Assert.Contains(drafts, d => d.ProposedEpicTitle == "P1-1: Fix the contract test harness");
-        Assert.Contains(drafts, d => d.ProposedEpicTitle == "P1-2: Guard ConsumeAsync re-enumeration");
+        var client=new TurnScriptedClient().Turn(
+            FunctionCall("create_epic","call1",("title","parent"),("description","one")),
+            FunctionCall("create_epic","call2",("title","child"),("description","two"))).Turn(Text("drafts"));
+        var agent=NewAgent(client);var session=await agent.StartSessionAsync("t");
+        await agent.SendUserMessageAsync(session.Id,"discuss");
+        var proposals=await Proposals.ListAsync("proj"); Assert.Equal(2,proposals.Count);
+        Assert.Contains(proposals,p=>p.Title=="parent");Assert.Contains(proposals,p=>p.Title=="child");
+        Assert.Empty(await _issues.ListAsync(new IssueFilter()));
     }
 
     [Fact]
-    public async Task SendUserMessage_SecondCreateEpic_RefinesExistingProposal_InsteadOfDuplicating()
+    public async Task ExplicitStableIdRevisionSupersedesDraftAndRejectsOldApproval()
     {
-        // Live incident 2026-08-12: one turn fired create_epic 3× and
-        // three identical epics (epic-5/6/7) landed in the backlog.
-        // Same-title re-calls supersede the draft; nothing hits the
-        // issue store before accept.
-        var client = new TurnScriptedClient()
-            .Turn(FunctionCall("create_epic", "call_1",
-                ("title", "ASB transport"), ("description", "first draft"), ("priority", 2)),
-                  FunctionCall("create_epic", "call_2",
-                ("title", "ASB transport (refined)"), ("description", "refined draft"), ("priority", 2)))
-            .Turn(Text("proposed"));
-        var agent = NewAgent(client);
-        var session = await agent.StartSessionAsync("t", default);
-
-        var updated = await agent.SendUserMessageAsync(session.Id, "add asb", default);
-
-        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
-        var drafts = updated.Messages.Where(m => m.ProposedEpicDescription is not null).ToList();
-        Assert.Equal(2, drafts.Count); // original + superseding refinement
-        var latest = drafts.MaxBy(d => d.Id)!;
-        Assert.Equal("ASB transport (refined)", latest.ProposedEpicTitle);
-        Assert.Equal("refined draft", latest.ProposedEpicDescription);
-        Assert.Contains(updated.Messages, m =>
-            m.Role == IntakeMessageRole.System && m.Content == "Updated epic proposal: ASB transport (refined)");
-        var assistant = updated.Messages.Last(m => m.Role == IntakeMessageRole.Assistant);
-        Assert.Equal("ASB transport (refined)", assistant.ProposedEpicTitle);
-
-        // Accepting the latest draft creates ONE epic with the refined content.
-        var issue = await agent.AcceptProposedEpicAsync(session.Id, latest.Id, default);
-        Assert.Equal("ASB transport (refined)", issue.Title);
-        Assert.Equal("refined draft", issue.Description);
+        var session=await _intake.CreateAsync("proj","discussion");
+        var initial=await Proposals.CreateAsync(new("proj","source","user","initial","old body",SessionId:session.Id));
+        var client=new TurnScriptedClient().Turn(FunctionCall("create_epic","call1",("title","renamed"),("description","new body"),
+            ("proposalId",initial.Id),("expectedRevision",initial.Revision))).Turn(Text("revised"));
+        await NewAgent(client).SendUserMessageAsync(session.Id,"change scope");
+        var current=(await Proposals.GetAsync("proj",initial.Id))!;
+        Assert.Equal(2,current.Revision);Assert.Equal("new body",current.Body);
+        Assert.Single(await Proposals.ListAsync("proj"));
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>Approval().ApproveAsync("proj",initial.Id,initial.Revision,initial.Hash));
+        Assert.Empty(await _issues.ListAsync(new IssueFilter()));
+        await Approval().ApproveAsync("proj",current.Id,current.Revision,current.Hash);
+        Assert.Single(await _issues.ListAsync(new IssueFilter()));
     }
 
     [Fact]
-    public async Task SendUserMessage_CreateEpicAfterAccept_StartsNewProposalSlot()
+    public async Task ModelCannotReviseAnApprovedProposal()
     {
-        var client = new TurnScriptedClient()
-            .Turn(FunctionCall("create_epic", "call_1",
-                ("title", "First epic"), ("description", "d1"), ("priority", 2)))
-            .Turn(Text("proposed"))
-            .Turn(FunctionCall("create_epic", "call_2",
-                ("title", "Second epic"), ("description", "d2"), ("priority", 2)))
-            .Turn(Text("proposed again"));
-        var agent = NewAgent(client);
-        var session = await agent.StartSessionAsync("t", default);
-
-        var first = await agent.SendUserMessageAsync(session.Id, "first", default);
-        var firstDraft = first.Messages.Single(m => m.ProposedEpicDescription is not null);
-        var firstEpic = await agent.AcceptProposedEpicAsync(session.Id, firstDraft.Id, default);
-
-        var second = await agent.SendUserMessageAsync(session.Id, "second", default);
-        var secondDraft = second.Messages
-            .Where(m => m.ProposedEpicDescription is not null)
-            .MaxBy(m => m.Id)!;
-        var secondEpic = await agent.AcceptProposedEpicAsync(session.Id, secondDraft.Id, default);
-
-        var epics = (await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default)).ToList();
-        Assert.Equal(2, epics.Count);
-        Assert.NotEqual(firstEpic.Id, secondEpic.Id);
-        Assert.Equal("First epic", firstEpic.Title);
-        Assert.Equal("Second epic", secondEpic.Title);
+        var session=await _intake.CreateAsync("proj","discussion");
+        var initial=await Proposals.CreateAsync(new("proj","source","user","scope","approved body",SessionId:session.Id));
+        await Approval().ApproveAsync("proj",initial.Id,initial.Revision,initial.Hash);
+        var client=new TurnScriptedClient().Turn(FunctionCall("create_epic","call1",("title","scope"),("description","changed"),
+            ("proposalId",initial.Id),("expectedRevision",initial.Revision))).Turn(Text("unable"));
+        await NewAgent(client).SendUserMessageAsync(session.Id,"change");
+        var current=(await Proposals.GetAsync("proj",initial.Id))!;
+        Assert.Equal(initial.Revision,current.Revision);Assert.Equal("approved body",current.Body);
     }
 
     private static AIContent FunctionCall(string name, string callId, params (string Key, object Value)[] args)

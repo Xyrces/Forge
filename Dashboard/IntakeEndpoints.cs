@@ -20,7 +20,8 @@ public static class IntakeEndpoints
         IIssueStore issues,
         ISprintStore sprints,
         IIntakeStore intakeStore,
-        ILogger logger)
+        ILogger logger,
+        InitiativeApprovalService? initiatives = null)
     {
         // List intake sessions (optionally scoped to one project —
         // the dashboard's intake page is project-scoped like every
@@ -96,8 +97,57 @@ public static class IntakeEndpoints
             }
             catch (InvalidOperationException ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return Results.Conflict(new { error = ex.Message });
             }
+        });
+
+        app.MapPost("/api/intake/sessions/{id}/review-draft/{messageId:long}", async (
+            string id, long messageId, CancellationToken ct) =>
+        {
+            var session = await intakeStore.GetAsync(id, ct);
+            if (session is null) return Results.NotFound();
+            try { return Results.Json(await intakeRegistry.ForProject(session.ProjectId).ImportLegacyDraftAsync(id, messageId, ct), DashboardJson.Options); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        app.MapGet("/api/intake/proposals", async (string projectId, string? sessionId, string? cursor, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            var page = await initiatives.Proposals.ListAsync(projectId, ct, limit: 20, afterId: cursor, sessionId: sessionId);
+            return Results.Json(new { items = page, nextCursor = page.Count == 20 ? page[^1].Id : null }, DashboardJson.Options);
+        });
+        app.MapGet("/api/intake/proposals/{id}", async (string id, string projectId, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            var proposal = await initiatives.Proposals.GetAsync(projectId, id, ct);
+            if (proposal is null) return Results.NotFound();
+            var ingestion = proposal.ApprovedAt is null ? null : await initiatives.ReceiptAsync(projectId,id,proposal.Revision,ct);
+            return Results.Json(new { proposal, ingestion }, DashboardJson.Options);
+        });
+
+        app.MapPost("/api/intake/proposals/{id}/expand", async (string id, string projectId, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            try { return Results.Json(new { sessionId = await initiatives.Proposals.ExpandInIntakeAsync(projectId, id, ct) }); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        app.MapPost("/api/intake/proposals/{id}/approve", async (string id, string projectId, ApprovalRequest body, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            if (body.Revision <= 0 || string.IsNullOrWhiteSpace(body.Hash)) return Results.BadRequest(new { error = "Exact revision and content hash required." });
+            try { return Results.Json(await initiatives.ApproveAsync(projectId, id, body.Revision, body.Hash, ct), DashboardJson.Options); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
+        app.MapPost("/api/intake/proposals/{id}/retry-refinement", async (string id, string projectId, ApprovalRequest body, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            var proposal = await initiatives.Proposals.GetAsync(projectId, id, ct);
+            if (proposal is null) return Results.NotFound();
+            if (proposal.Hash != body.Hash) return Results.Conflict(new { error = "Proposal content changed; reload before retry." });
+            return await initiatives.RetryRefinementAsync(projectId, id, body.Revision, ct)
+                ? Results.Ok() : Results.Conflict(new { error = "Only an explicitly failed refinement may be retried." });
         });
 
         // List recent epics proposed via intake (issue.type='epic', assignee='intake').
@@ -153,4 +203,5 @@ public static class IntakeEndpoints
 
     private sealed record NewIntakeSessionRequest(string ProjectId, string? Title);
     private sealed record SendMessageRequest(string Text);
+    private sealed record ApprovalRequest(int Revision, string Hash);
 }

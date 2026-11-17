@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Forge.Core;
@@ -69,8 +70,10 @@ public sealed class SprintAssembler
         WakeupSignal? wakeup = null,
         Core.Messaging.IEventPublisher? eventPublisher = null,
         // Compatibility only: elapsed time never clears Failed work.
-        TimeSpan? failureAgingWindow = null)
+        TimeSpan? failureAgingWindow = null,
+        InitiativeProposalStore? initiativeProposals = null)
     {
+        _initiativeProposals = initiativeProposals;
         _projects = projects;
         _events = events;
         _logger = logger;
@@ -81,6 +84,7 @@ public sealed class SprintAssembler
         _eventPublisher = eventPublisher;
     }
 
+    private readonly InitiativeProposalStore? _initiativeProposals;
     private readonly Core.IFollowUpTriage? _followUpTriage;
     private readonly WakeupSignal? _wakeup;
     private readonly Core.Messaging.IEventPublisher? _eventPublisher;
@@ -631,16 +635,15 @@ public sealed class SprintAssembler
                     case "epic":
                     {
                         var src = sources.Select(id => byId[id]).ToList();
-                        var spec = await specs.CreateAsync(new Core.NewSpec(
-                            ProjectId: projectId,
-                            Title: item.Title ?? $"Follow-up theme from {src.Count} findings",
-                            Body: item.Description
-                                ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}"))), ct);
-                        await specs.SetStatusAsync(spec.Id, Core.SpecStatus.Approved, ct);
+                        var proposals = _initiativeProposals ?? throw new InvalidOperationException("Initiative proposal storage is required for epic suggestions.");
+                        var suggestion = await proposals.CreateAsync(new NewInitiativeProposal(
+                            projectId, "followup:" + string.Join(",", sources.Distinct().Order()), "forge",
+                            item.Title ?? $"Follow-up theme from {src.Count} findings",
+                            item.Description ?? string.Join("\n\n---\n\n", src.Select(d => $"[draft {d.Id}] {d.Description}")),
+                            item.Priority ?? src.Min(d => d.Priority),
+                            System.Text.Json.JsonSerializer.Serialize(new { sourceDraftIds = sources, findings = src })), ct);
                         foreach (var id in sources)
-                        {
-                            await draftStore.SetDispositionAsync(id, "epic", spec.Id, ct);
-                        }
+                            await draftStore.SetDispositionAsync(id, "proposal", suggestion.Id, ct);
                         created++;
                         break;
                     }

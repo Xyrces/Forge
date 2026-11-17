@@ -1,124 +1,129 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Forge.Core;
+using Forge.Core.Initiatives;
 using Forge.Dashboard;
 using Forge.Specs;
 
 namespace Forge.Agents;
 
-/// <summary>
-/// Background queue that watches the dashboard event bus for
-/// <c>intake.epic.accepted</c> events and runs a
-/// <see cref="ProductAgent.RefineSpecAsync"/> on each accepted
-/// spec. Fire-and-forget: the operator's accept-click returns
-/// immediately, the refinement happens on a worker thread.
-///
-/// <para>
-/// <see cref="IDashboardEventBus"/> is in-process only (no SSE
-/// out of band needed for the producer-consumer wiring). The
-/// SSE stream stays for the dashboard's UI.
-/// </para>
-///
-/// <para>
-/// The queue is bounded so a runaway operator can't fill memory.
-/// If full, the event is logged and dropped — the spec stays
-/// unrefined; the operator can re-accept after a moment.
-/// </para>
-/// </summary>
+/// <summary>Durable approval/ingestion/refinement reconciliation; events only reduce wake-up latency.</summary>
 public sealed class ProductRefinementQueue : IAsyncDisposable
 {
-    private readonly ProductAgentFactory _factory;
-    private readonly ISpecStore _specs;
+    private readonly InitiativeApprovalService _approvals;
+    private readonly Func<IReadOnlyList<string>> _projectIds;
+    private readonly Func<string, InitiativeIngestionStore> _ingestion;
+    private readonly Func<string, ISpecStore> _specs;
+    private readonly Func<string, string, CancellationToken, Task<SpecRecord?>> _refine;
     private readonly ILogger<ProductRefinementQueue> _logger;
-    private readonly Task _worker;
     private readonly CancellationTokenSource _cts = new();
+    private readonly Channel<bool> _wake = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
+    private readonly Task _worker;
+    private readonly Task _events;
+    private readonly HashSet<string> _recovered = new(StringComparer.OrdinalIgnoreCase);
 
-    public ProductRefinementQueue(
-        ProductAgentFactory factory,
-        ISpecStore specs,
-        IDashboardEventBus bus,
-        ILogger<ProductRefinementQueue> logger)
+    public ProductRefinementQueue(InitiativeApprovalService approvals, Func<IReadOnlyList<string>> projectIds,
+        Func<string, InitiativeIngestionStore> ingestion, Func<string, ISpecStore> specs,
+        Func<string, string, CancellationToken, Task<SpecRecord?>> refine,
+        IDashboardEventBus bus, ILogger<ProductRefinementQueue> logger)
     {
-        _factory = factory;
-        _specs = specs;
-        _logger = logger;
-        // Subscribe to the bus; the bus returns a ChannelReader that
-        // gets every published event (past + future, with the bus
-        // pre-loading history for late subscribers).
-        var reader = bus.Subscribe();
-        _worker = Task.Run(() => DrainAsync(reader, _cts.Token));
+        _approvals=approvals; _projectIds=projectIds; _ingestion=ingestion; _specs=specs; _refine=refine; _logger=logger;
+        _events = WatchAsync(bus.Subscribe(), _cts.Token);
+        _worker = RunAsync(_cts.Token);
     }
 
-    public int PendingCount => 0; // The bus's channel has no Count API; coarse metric is fine.
-
-    private async Task DrainAsync(ChannelReader<DashboardEvent> reader, CancellationToken ct)
+    public int PendingCount => 0;
+    private async Task WatchAsync(ChannelReader<DashboardEvent> reader, CancellationToken ct)
+    {
+        try { await foreach(var ev in reader.ReadAllAsync(ct))
+            if(ev.Kind == "intake.epic.accepted" || ev.Kind == "intake.refinement.retry") _wake.Writer.TryWrite(true); }
+        catch(OperationCanceledException) when(ct.IsCancellationRequested) { }
+    }
+    private async Task RunAsync(CancellationToken ct)
     {
         try
         {
-            await foreach (var ev in reader.ReadAllAsync(ct))
+            while(!ct.IsCancellationRequested)
             {
-                if (ev.Kind != "intake.epic.accepted") continue;
-                if (ev.Data is null) continue;
-                if (!ev.Data.TryGetValue("epicId", out var epicIdObj) || epicIdObj is null) continue;
-                var epicId = epicIdObj.ToString();
-                // Issue ids are per-store sequences: the spec lookup
-                // MUST be scoped to the accepting project (carried on
-                // the event since 2026-08-09) or an epic-N collision
-                // refines another project's spec (observed live:
-                // talaria's accepted epic-2 resolved to porthorizon's
-                // Epic-B spec). Events without a project id (pre-fix
-                // history replays) are skipped, never guessed.
-                if (!ev.Data.TryGetValue("projectId", out var projectIdObj) || projectIdObj is null)
-                {
-                    _logger.LogWarning(
-                        "ProductRefinementQueue: intake.epic.accepted for {Epic} carries no projectId; skipping (pre-2026-08-09 event shape)", epicId);
-                    continue;
-                }
-                var projectId = projectIdObj.ToString();
-                try
-                {
-                    // Look up the spec for this epic WITHIN the
-                    // accepting project's store; IntakeAgent creates it
-                    // with parent_issue_id = epicId. We need the spec
-                    // id AND the project id to call the agent.
-                    var specs = await _specs.ListAsync(projectId: projectId, status: null, ct);
-                    var spec = specs.FirstOrDefault(s => s.ParentIssueId == epicId);
-                    if (spec is null)
-                    {
-                        _logger.LogWarning("ProductRefinementQueue: no spec for epic {Epic}", epicId);
-                        continue;
-                    }
-                    var agent = _factory.Create();
-                    var refined = await agent.RefineSpecAsync(spec.Id, spec.ProjectId, ct);
-                    // P2.a: hand off to the Designer. After Product
-                    // finishes, the spec is at Draft (per the design
-                    // doc). Transition to ReadyForDesign so the
-                    // Designer scheduler picks it up.
-                    if (refined is not null)
-                    {
-                        try
-                        {
-                            await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign, ct);
-                        }
-                        catch (InvalidOperationException ex)
-                        {
-                            _logger.LogWarning(ex, "ProductRefinementQueue: could not transition {Spec} to ReadyForDesign", spec.Id);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "ProductRefinementQueue: refine failed for {Epic}", epicId);
-                }
+                await ReconcileAsync(ct);
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var hint = _wake.Reader.ReadAsync(wait.Token).AsTask();
+                var timer = Task.Delay(TimeSpan.FromSeconds(30),wait.Token);
+                await Task.WhenAny(hint,timer);
+                await wait.CancelAsync();
+                try { await Task.WhenAll(hint,timer); }
+                catch(OperationCanceledException) when(wait.IsCancellationRequested) { }
             }
         }
-        catch (OperationCanceledException) { /* shutdown */ }
+        catch(OperationCanceledException) when(ct.IsCancellationRequested) { }
     }
-
+    internal async Task ReconcileAsync(CancellationToken ct)
+    {
+        foreach(var project in _projectIds())
+        {
+            try
+            {
+                var target = _ingestion(project);
+                // Exclusive controller startup only. An interrupted paid call
+                // is uncertain, not permission to spend again automatically.
+                if(!_recovered.Contains(project)) { await target.RecoverRunningAsync(ct); _recovered.Add(project); }
+                string? approvalCursor = null;
+                while(true)
+                {
+                    var approvedPage = await _approvals.Proposals.ListApprovedAsync(project,ct,afterId:approvalCursor);
+                    foreach(var summary in approvedPage)
+                    {
+                        // Acknowledged ingestion does not need to be recreated or
+                        // republished on every reconciliation tick.
+                        if(summary.EpicId is null)
+                        {
+                            var proposal = await _approvals.Proposals.GetAsync(project,summary.Id,ct)
+                                ?? throw new InvalidOperationException("Approved proposal disappeared.");
+                            await _approvals.IngestApprovedAsync(proposal,ct);
+                        }
+                    }
+                    if(approvedPage.Count < 50) break;
+                    approvalCursor=approvedPage[^1].Id;
+                }
+                string? refinementCursor = null;
+                while(true)
+                {
+                var pending = await target.ListPendingRefinementAsync(ct,afterId:refinementCursor);
+                foreach(var receipt in pending)
+                {
+                    if(!await target.TryBeginRefinementAsync(receipt.ProposalId,receipt.Revision,ct)) continue;
+                    try
+                    {
+                        var spec = await _specs(project).GetAsync(receipt.SpecId,ct)
+                            ?? throw new InvalidOperationException("Approved initiative spec is missing.");
+                        if(spec.Status == SpecStatus.Draft)
+                        {
+                            var result = await _refine(project,receipt.SpecId,ct);
+                            if(result is null) throw new InvalidOperationException("Product refinement did not commit a spec update; explicit retry is required.");
+                        }
+                        if(!await target.CompleteRefinementAsync(receipt.ProposalId,receipt.Revision,ct))
+                            throw new InvalidOperationException("Refinement completion could not be committed.");
+                    }
+                    catch(OperationCanceledException) when(ct.IsCancellationRequested) { throw; }
+                    catch(Exception ex)
+                    {
+                        _logger.LogError(ex,"Initiative refinement failed for {Proposal}",receipt.ProposalId);
+                        await target.RecordRefinementFailureAsync(receipt.ProposalId,receipt.Revision,
+                            "Refinement failed; inspect the run and explicitly retry. " + ex.GetType().Name,ct);
+                    }
+                }
+                if(pending.Count < 50) break;
+                refinementCursor=pending[^1].ProposalId;
+                }
+            }
+            catch(OperationCanceledException) when(ct.IsCancellationRequested) { throw; }
+            catch(Exception ex) { _logger.LogError(ex,"Initiative reconciliation failed for {Project}",project); }
+        }
+    }
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
-        try { await _worker.ConfigureAwait(false); } catch { }
+        await _cts.CancelAsync();
+        await Task.WhenAll(_worker,_events);
         _cts.Dispose();
     }
 }

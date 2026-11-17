@@ -1,4 +1,5 @@
-﻿using System.Net;
+using Forge.Core.Initiatives;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -24,6 +25,7 @@ namespace Forge.Tests.Integration;
 /// </summary>
 public class IntakeDashboardTests : IDisposable
 {
+    private readonly InitiativeApprovalService _initiatives;
     private readonly string _dbPath;
     private readonly IssueStore _issues;
     private readonly SprintStore _sprints;
@@ -36,10 +38,11 @@ public class IntakeDashboardTests : IDisposable
     public IntakeDashboardTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("intake-api");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"P");
         _sprints = new SprintStore(_issues);
         _intake = new IntakeStore(_issues);
         _events = new InMemoryDashboardEventBus();
+        _initiatives = new(new InitiativeProposalStore(_issues),_=>new InitiativeIngestionStore(_issues),_events);
 
         var scripted = new ScriptedChatClient(
             new ChatResponse(new ChatMessage(ChatRole.Assistant, "Hi.")));
@@ -48,7 +51,7 @@ public class IntakeDashboardTests : IDisposable
                 projectId, _intake, _issues, _sprints,
                 new StubFactory(scripted),
                 new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
-                new RoleAgentRegistry(), _events, NullLogger<IntakeAgent>.Instance));
+                new RoleAgentRegistry(), _events, NullLogger<IntakeAgent>.Instance, initiatives:_initiatives));
 
         _host = BuildHost();
         _host.Start();
@@ -77,7 +80,7 @@ public class IntakeDashboardTests : IDisposable
 
         // Mount the same endpoints the real dashboard does.
         IntakeEndpoints.MapIntakeEndpoints(app, _intakeRegistry, _issues, _sprints, _intake,
-            NullLogger<DashboardHost>.Instance);
+            NullLogger<DashboardHost>.Instance,_initiatives);
 
         return app;
     }
@@ -174,7 +177,7 @@ public class IntakeDashboardTests : IDisposable
     }
 
     [Fact]
-    public async Task AcceptEpic_NotAProposal_Returns400()
+    public async Task LegacyAccept_RequiresDurableRevisionReview()
     {
         var created = await _client.PostAsJsonAsync("/api/intake/sessions",
             new { projectId = "P", title = "t" });
@@ -186,7 +189,60 @@ public class IntakeDashboardTests : IDisposable
         var assistantMsgId = refreshed.GetProperty("messages")[1].GetProperty("id").GetInt64();
 
         var resp = await _client.PostAsync($"/api/intake/sessions/{id}/accept-epic/{assistantMsgId}", null);
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task ProposalListIsBoundedSummaryAndExpandCreatesNoWork()
+    {
+        for(var i=0;i<23;i++) await _initiatives.Proposals.CreateAsync(new("P",$"finding{i}","forge",$"Suggestion{i}","private full body"));
+        var page=await _client.GetFromJsonAsync<JsonElement>("/api/intake/proposals?projectId=P");
+        Assert.Equal(20,page.GetProperty("items").GetArrayLength());
+        Assert.False(page.GetProperty("items")[0].TryGetProperty("body",out _));
+        var id=page.GetProperty("items")[0].GetProperty("id").GetString();
+        var cursor=page.GetProperty("nextCursor").GetString();
+        var next=await _client.GetFromJsonAsync<JsonElement>($"/api/intake/proposals?projectId=P&cursor={cursor}");
+        Assert.Equal(3,next.GetProperty("items").GetArrayLength());
+        var one=await _client.PostAsync($"/api/intake/proposals/{id}/expand?projectId=P",null);
+        var two=await _client.PostAsync($"/api/intake/proposals/{id}/expand?projectId=P",null);
+        Assert.Equal(await one.Content.ReadAsStringAsync(),await two.Content.ReadAsStringAsync());
+        Assert.Single(await _intake.ListAsync());
+        Assert.Empty(await _issues.ListAsync(new IssueFilter()));
+        Assert.Empty(await new SpecStore(_issues).ListAsync(null,null));
+        Assert.Empty(await _sprints.ListAsync(false));
+        Assert.Equal(HttpStatusCode.NotFound,(await _client.GetAsync($"/api/intake/proposals/{id}?projectId=other")).StatusCode);
+    }
+
+    [Fact]
+    public async Task ApprovalRejectsStaleRevisionAndRepeatedCurrentRequestAdoptsSameOutcome()
+    {
+        var p=await _initiatives.Proposals.CreateAsync(new("P","source","forge","old","scope"));
+        await _client.PostAsync($"/api/intake/proposals/{p.Id}/expand?projectId=P",null);
+        var revised=await _initiatives.Proposals.ReviseAsync("P",p.Id,1,"new","new scope",2);
+        var stale=await _client.PostAsJsonAsync($"/api/intake/proposals/{p.Id}/approve?projectId=P",new {revision=1,hash=p.Hash});
+        Assert.Equal(HttpStatusCode.Conflict,stale.StatusCode);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter()));
+        var first=await _client.PostAsJsonAsync($"/api/intake/proposals/{p.Id}/approve?projectId=P",new {revised.Revision,revised.Hash});
+        var second=await _client.PostAsJsonAsync($"/api/intake/proposals/{p.Id}/approve?projectId=P",new {revised.Revision,revised.Hash});
+        Assert.Equal(HttpStatusCode.OK,first.StatusCode);Assert.Equal(HttpStatusCode.OK,second.StatusCode);
+        Assert.Equal(await first.Content.ReadAsStringAsync(),await second.Content.ReadAsStringAsync());
+        Assert.Single(await _issues.ListAsync(new IssueFilter()));
+        Assert.Single(await new SpecStore(_issues).ListAsync("P",null));
+        Assert.Empty(await _sprints.ListAsync(false));
+    }
+
+    [Fact]
+    public async Task LegacyDraftImportRequiresSeparateRevisionApproval()
+    {
+        var session=await _intake.CreateAsync("P","legacy");
+        var msg=await _intake.AppendMessageAsync(session.Id,new(IntakeMessageRole.System,"draft",ProposedEpicTitle:"Legacy",ProposedEpicDescription:"scope"));
+        var old=await _client.PostAsync($"/api/intake/sessions/{session.Id}/accept-epic/{msg.Id}",null);
+        Assert.Equal(HttpStatusCode.Conflict,old.StatusCode);
+        var imported=await _client.PostAsync($"/api/intake/sessions/{session.Id}/review-draft/{msg.Id}",null);
+        Assert.Equal(HttpStatusCode.OK,imported.StatusCode);
+        var p=await imported.Content.ReadFromJsonAsync<InitiativeProposal>();
+        Assert.NotNull(p);Assert.Null(p.ApprovedAt);Assert.Equal(session.Id,p.SessionId);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter()));
     }
 
     private sealed class StubFactory : IChatClientFactory

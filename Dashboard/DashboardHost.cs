@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -77,6 +77,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private WebApplication? _app;
     private int _port;
 
+    private readonly Agents.InitiativeApprovalService? _initiativeApprovals;
+
     public DashboardHost(
         DashboardOptions options,
         HeadroomOptions headroom,
@@ -132,8 +134,10 @@ public sealed class DashboardHost : IAsyncDisposable
         Talaria.Core.Abstractions.ITransport? transport = null,
         Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null,
         Core.Control.IDurableBudgetStore? budgetStore = null,
-        string? budgetDatasetId = null)
+        string? budgetDatasetId = null,
+        Agents.InitiativeApprovalService? initiativeApprovals = null)
     {
+        _initiativeApprovals = initiativeApprovals;
         _options = options;
         _headroom = headroom;
         _issues = issues;
@@ -487,7 +491,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_intakeRegistry is not null)
         {
-            IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
+            IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger, _initiativeApprovals);
         }
 
         SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues);
