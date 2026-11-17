@@ -26,7 +26,7 @@ public static class ControllerHost
                 throw new InvalidOperationException("Distributed check requires SQL Server and a stable dataset UUID.");
             var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema,
                 ForgeSchemaProfile.Core, initializeSchema: false);
-            await VerifySchemaAsync(registry, ct);
+            var registryVersion = await VerifySchemaAsync(registry, ct);
             if (await new ControlLeaseStore(registry).ReadAsync(options.Controller.DatasetId, ct) is null)
                 throw new InvalidOperationException("Configured dataset is not initialized in this database.");
             await using var issues = new IssueStore(registry);
@@ -53,7 +53,7 @@ public static class ControllerHost
                 if (!probe.Success) throw new InvalidOperationException(probe.Detail);
                 logger.LogInformation("{Detail}", probe.Detail);
             }
-            logger.LogInformation("Read-only check passed: schema {Schema}, dataset {Dataset}, {Count} projects; no model generation", IssueStore.CurrentSchemaVersion, options.Controller.DatasetId, registered.Count);
+            logger.LogInformation("Read-only check passed: registry schema {Schema}, dataset {Dataset}, {Count} projects; no model generation", registryVersion, options.Controller.DatasetId, registered.Count);
             return 0;
         }
         catch (Exception ex)
@@ -123,13 +123,18 @@ public static class ControllerHost
         return 0;
     }
 
-    public static async Task VerifySchemaAsync(IDbConnectionFactory factory, CancellationToken ct)
+    public static async Task<int> VerifySchemaAsync(IDbConnectionFactory factory, CancellationToken ct)
     {
         await using var connection = await factory.OpenAsync(ct);
         await using var command = connection.CreateCommand();
         command.CommandText = $"SELECT MAX(version) FROM {factory.Dialect.Table("schema_version")}";
-        if (Convert.ToInt32(await command.ExecuteScalarAsync(ct)) != SqlServerMigrations.ExpectedVersion)
+        var observed = await command.ExecuteScalarAsync(ct);
+        var version = observed is null or DBNull ? 0 : Convert.ToInt32(observed);
+        // Unlike the schema-38 rollback bridge, this release reads M039 evidence
+        // and reconciliation tables. Never inherit the bridge's 38/39 allowance.
+        if (version != SqlServerMigrations.ExpectedVersion)
             throw new InvalidOperationException("Database schema is outside this release's tested compatibility version.");
+        return version;
     }
 
     public static void Validate(AgentOptions options)

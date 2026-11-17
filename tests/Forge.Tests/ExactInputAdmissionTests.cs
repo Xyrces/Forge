@@ -34,6 +34,46 @@ public sealed class ExactInputAdmissionTests
             new("openai", "gpt-6.1-sol", AgentType.CoreDev, "forge", 100), owner ?? (_ => Task.CompletedTask));
 
     [Theory]
+    [InlineData(false, false, .0011)]
+    [InlineData(true, false, .0011)]
+    [InlineData(false, true, .0005)]
+    [InlineData(true, true, .0005)]
+    public async Task NativeOptionalWriteFieldsProduceTruthfullyClassifiedSettlement(bool stream, bool zeroWrites, decimal expected)
+    {
+        var ledger = new Ledger(); var handler = new Wire(ledger) { Stream = stream,
+            ResponseBody = Response.Replace("\"model\":", "\"service_tier\":\"default\",\"model\":")
+                .Replace("\"cached_tokens\":0", "\"cached_tokens\":800" + (zeroWrites ? ",\"cache_write_tokens\":0" : "")) };
+        using var http = new HttpClient(handler); using var native = Native(http); using var client = Budget(native, ledger);
+        if (stream) { await foreach (var update in client.GetStreamingResponseAsync([new(ChatRole.User, "test")])) { } }
+        else await client.GetResponseAsync([new(ChatRole.User, "test")]);
+        Assert.Equal(expected, Assert.Single(ledger.Settled));
+        Assert.EndsWith(zeroWrites ? ":usage-estimate" : ":cache-aware-upper-bound", Assert.Single(ledger.Bases));
+    }
+
+    [Theory]
+    [InlineData(false, "completed")]
+    [InlineData(true, "completed")]
+    [InlineData(false, "incomplete")]
+    [InlineData(true, "incomplete")]
+    public async Task NativeUsagePreservesUnknownCacheWriteFieldsAndSettlesBothPaths(bool stream, string status)
+    {
+        var ledger = new Ledger();
+        var handler = new Wire(ledger) { Stream = stream, EventType = "response." + status, ResponseBody = Response
+            .Replace("\"status\":\"completed\"", "\"status\":\"" + status + "\"")
+            .Replace("\"model\":", "\"service_tier\":\"default\",\"model\":")
+            .Replace("\"cached_tokens\":0", "\"cached_tokens\":800,\"cache_write_tokens\":150,\"cache_write_tokens_details\":{\"ttl_30m_tokens\":100,\"ttl_12h_tokens\":50}") };
+        using var http = new HttpClient(handler); using var native = Native(http); using var client = Budget(native, ledger);
+        if (stream) { await foreach (var update in client.GetStreamingResponseAsync([new(ChatRole.User, "test")])) { } }
+        else await client.GetResponseAsync([new(ChatRole.User, "test")]);
+        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
+        Assert.Equal(.0007m, Assert.Single(ledger.Settled));
+        var evidence = Assert.Single(ledger.Evidence);
+        Assert.Contains("ttl_12h_tokens", evidence);
+        Assert.DoesNotContain("opaque-reasoning", evidence);
+        Assert.DoesNotContain("output_text", evidence);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task FinalNativeBodyIsCountedIncludingReplayAndSchemaBeforeSingleGeneration(bool stream)
@@ -170,6 +210,8 @@ public sealed class ExactInputAdmissionTests
     private sealed class Wire(Ledger ledger) : HttpMessageHandler
     {
         public string? Failure;
+        public string ResponseBody = Response;
+        public string EventType = "response.completed";
         public bool Stream;
         public bool Interleave;
         private readonly TaskCompletionSource _bothCounting = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -210,7 +252,7 @@ public sealed class ExactInputAdmissionTests
             using var generation = JsonDocument.Parse(body);
             var streaming = Stream || (generation.RootElement.TryGetProperty("stream", out var streamingFlag) && streamingFlag.GetBoolean());
             return new(HttpStatusCode.OK) { Content = new StringContent(streaming
-                ? "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":" + Response + "}\n\n" : Response,
+                ? "data: {\"type\":\"" + EventType + "\",\"sequence_number\":1,\"response\":" + ResponseBody + "}\n\n" : ResponseBody,
                 Encoding.UTF8, streaming ? "text/event-stream" : "application/json") };
         }
     }
@@ -220,6 +262,11 @@ public sealed class ExactInputAdmissionTests
         public List<BudgetReservationRequest> Reservations = [];
         public List<decimal?> Settled = [];
         public List<string> Events = [];
+        public List<string> Evidence = [];
+        public List<string> Bases = [];
+        public Task<bool> CompleteWithUsageAsync(string datasetId, string requestId, decimal? costUsd, string? usageJson, string pricingBasis, CancellationToken ct = default)
+        { lock (Bases) Bases.Add(pricingBasis); if (usageJson is not null) lock (Evidence) Evidence.Add(usageJson); return CompleteAsync(datasetId, requestId, costUsd, ct); }
+
         public Task<BudgetReservationResult> ReserveAsync(BudgetReservationRequest request, CancellationToken ct = default)
         { lock (Events) Events.Add("reserve"); lock (Reservations) Reservations.Add(request); return Task.FromResult(new BudgetReservationResult(true, true, null, null)); }
         public Task<bool> CompleteAsync(string datasetId, string requestId, decimal? actualCostUsd, CancellationToken ct = default)

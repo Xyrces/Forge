@@ -1019,3 +1019,12 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .triage-health__value { font-family: var(--font-mono); font-size: 12px; width: 28px; text-align: right; }
 .sparkline { display: inline-flex; align-items: flex-end; gap: 2px; height: 18px; margin-top: auto; align-self: flex-end; }
 .sparkline > i { display: block; width: 4px; background: var(--primary); border-radius: 1px; opacity: .8; }
+
+/* Shared spending summary: estimates, historical amounts and request holds remain distinct. */
+.budget-status { margin-bottom: 20px; }
+.budget-status__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.budget-status__header h2 { margin: 0; font-size: 16px; }
+.budget-status p { color: var(--on-surface-variant); font-size: 13px; }
+.budget-status__amounts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+.budget-status__amounts dt { color: var(--on-surface-variant); font-size: 12px; }
+.budget-status__amounts dd { margin: 6px 0 0; font-size: 20px; font-variant-numeric: tabular-nums; }

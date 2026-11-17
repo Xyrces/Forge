@@ -18,12 +18,18 @@ public static class DeploymentsReducers
 
     [ReducerMethod]
     public static DeploymentsState OnLoadCommits(DeploymentsState state, DeploymentsActions.LoadCommitsAction action) =>
-        state with { CommitsForProjectId = action.ProjectId, CommitsLoading = true, Commits = Array.Empty<CommitRow>() };
+        state with { CommitsForProjectId = action.ProjectId, CommitsLoading = true, CommitsError = null, Commits = Array.Empty<CommitRow>() };
 
     [ReducerMethod]
     public static DeploymentsState OnCommitsLoaded(DeploymentsState state, DeploymentsActions.CommitsLoadedAction action) =>
         action.ProjectId == state.CommitsForProjectId
-            ? state with { Commits = action.Commits, CommitsLoading = false }
+            ? state with { Commits = action.Commits, CommitsLoading = false, CommitsError = null }
+            : state;
+
+    [ReducerMethod]
+    public static DeploymentsState OnCommitsLoadFailed(DeploymentsState state, DeploymentsActions.CommitsLoadFailedAction action) =>
+        action.ProjectId == state.CommitsForProjectId
+            ? state with { CommitsLoading = false, CommitsError = action.Error }
             : state;
 
     [ReducerMethod]

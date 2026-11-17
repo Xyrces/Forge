@@ -12,6 +12,9 @@ public static class ControllerInitializer
     public static async Task<int> RunAsync(AgentOptions options, ILoggerFactory logs, CancellationToken ct = default)
     {
         ControllerHost.Validate(options);
+        // Validate both configured identities before acquiring a connection or running DDL.
+        var reconciliationPermissions = BudgetReconciliationPermissionsSql(
+            options.Bootstrap.ControllerPrincipal, options.Bootstrap.WorkerPrincipal);
         if (options.Bootstrap.ProjectId != "forge")
             throw new InvalidOperationException("The initial installer bootstraps only the Forge project.");
         var registryFactory = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema, ForgeSchemaProfile.Core);
@@ -80,12 +83,30 @@ public static class ControllerInitializer
                 + $"GRANT SELECT,INSERT,UPDATE ON OBJECT::[core].[budget_reservation] TO [{principal}];"
                 + $"GRANT SELECT,UPDATE ON OBJECT::[core].[budget_lock] TO [{principal}];"
                 + $"REVOKE DELETE,INSERT ON OBJECT::[core].[worker_attempt] FROM [{principal}];"
-                + $"REVOKE DELETE ON OBJECT::[core].[budget_reservation] FROM [{principal}];";
+                + $"REVOKE DELETE ON OBJECT::[core].[budget_reservation] FROM [{principal}];"
+                + reconciliationPermissions;
             await grants.ExecuteNonQueryAsync(ct);
         }
         if (!completed) await memory.RememberAsync(completionKey, "complete", ttlDays: null, ct);
         logs.CreateLogger("Forge.Initialize").LogInformation("Initialized dataset {Dataset}; project Forge, SQL schema {Version}; no dispatch started.",
             options.Controller.DatasetId, SqlServerMigrations.ExpectedVersion);
         return 0;
+    }
+
+    internal static string BudgetReconciliationPermissionsSql(string controllerPrincipal, string workerPrincipal)
+    {
+        foreach (var principal in new[] { controllerPrincipal, workerPrincipal })
+            if (!System.Text.RegularExpressions.Regex.IsMatch(principal, "^[a-zA-Z][a-zA-Z0-9_-]{0,127}$"))
+                throw new InvalidOperationException("Explicit controller and worker database principal names are required and must be valid SQL identifiers.");
+        if (string.Equals(controllerPrincipal, workerPrincipal, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Controller and worker database identities must be distinct.");
+
+        // Object DENY overrides existing schema-level DML grants. REVOKE alone
+        // would leave inherited runtime writes enabled. Only the initializer's
+        // separate operator connection may append this accounting evidence.
+        return string.Concat(new[] { controllerPrincipal, workerPrincipal }.SelectMany(principal =>
+            new[] { "budget_reconciliation", "budget_reconciliation_request" }.Select(table =>
+                $"GRANT SELECT ON OBJECT::[core].[{table}] TO [{principal}];"
+                + $"DENY INSERT,UPDATE,DELETE ON OBJECT::[core].[{table}] TO [{principal}];")));
     }
 }

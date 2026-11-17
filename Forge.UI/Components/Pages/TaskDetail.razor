@@ -1,3 +1,4 @@
+@using Forge.Dashboard.Services
 @page "/tasks/{TaskId}"
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject HttpClient Http
@@ -441,14 +442,16 @@
                 _runs = runs.OrderByDescending(r => r.FinishedAt ?? r.LastActivityAt ?? r.StartedAt).ToList();
             }
             catch { /* runs are additive — never break the task page */ }
-            if (_repoUrl is null && !string.IsNullOrEmpty(projectId))
+            _repoUrl = null;
+            if (!string.IsNullOrEmpty(projectId))
             {
                 var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
                 foreach (var p in projects.EnumerateArray())
                 {
                     if (string.Equals(Prop(p, "id"), projectId, StringComparison.OrdinalIgnoreCase))
                     {
-                        _repoUrl = Prop(p, "repoUrl")?.TrimEnd('/');
+                        if (projectId == (Project ?? ShellStore.Value.CurrentProjectId))
+                            _repoUrl = RepositoryLinks.WebUrl(Prop(p, "repoUrl"));
                         break;
                     }
                 }
@@ -531,7 +534,7 @@
     }
 
     private string? PrUrl(string prNumber) =>
-        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+        RepositoryLinks.PullRequest(_repoUrl, prNumber);
 
     private static string TriageTone(string action) => action switch
     {

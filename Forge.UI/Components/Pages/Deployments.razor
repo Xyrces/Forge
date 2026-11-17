@@ -28,6 +28,10 @@
     {
         <div class="banner banner--error">
             Failed to load deployments: @DeployStore.Value.Error
+            @if (DeployStore.Value.LastFetchedAt is { } lastFetched)
+            {
+                <span>Showing the last successful update from @lastFetched.ToLocalTime().ToString("g").</span>
+            }
         </div>
     }
 
@@ -64,6 +68,10 @@
                     }
                 </select>
             }
+            @if (DeployStore.Value.CommitsForProjectId == _selectedProjectId && DeployStore.Value.CommitsError is { } commitsError)
+            {
+                <span class="banner banner--error">Commit history could not be loaded: @commitsError</span>
+            }
 
             <button class="btn btn--primary"
                     disabled="@(string.IsNullOrEmpty(_selectedProjectId) || string.IsNullOrEmpty(_selectedCommitSha))"
@@ -81,11 +89,11 @@
     {
         <div class="page-subtitle">Loading…</div>
     }
-    else if (DeployStore.Value.Candidates.Count == 0)
+    else if (DeployStore.Value.Candidates.Count == 0 && DeployStore.Value.Error is null && DeployStore.Value.LastFetchedAt is not null)
     {
         <div class="page-subtitle">No deployment candidates yet.</div>
     }
-    else
+    else if (DeployStore.Value.Candidates.Count > 0)
     {
         <table class="data-grid">
             <thead>

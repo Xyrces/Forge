@@ -696,7 +696,9 @@ public static class ForgeComposition
             hasActiveWorker: options.Worker.Enabled
                 ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
                     .HasActiveAsync(options.Controller.DatasetId, projectId, taskId, ct)
-                : null));
+                : null,
+            budgetStore: options.Controller.Enabled ? new Core.Control.DurableBudgetStore(registryIssues.Db) : null,
+            budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null));
 
         // Schedulers: trigger events kick via the wakeup signals; the
         // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is

@@ -66,6 +66,8 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
     private readonly Func<string, string, CancellationToken, Task<bool>>? _hasActiveWorker;
+    private readonly Core.Control.IDurableBudgetStore? _budgetStore;
+    private readonly string? _budgetDatasetId;
     private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
     private readonly Forge.Core.Messaging.IEventPublisher? _eventPublisher;
     private readonly Talaria.Core.Abstractions.ITransport? _transport;
@@ -128,7 +130,9 @@ public sealed class DashboardHost : IAsyncDisposable
         Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null,
         Forge.Core.Messaging.IEventPublisher? eventPublisher = null,
         Talaria.Core.Abstractions.ITransport? transport = null,
-        Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null)
+        Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null,
+        Core.Control.IDurableBudgetStore? budgetStore = null,
+        string? budgetDatasetId = null)
     {
         _options = options;
         _headroom = headroom;
@@ -180,6 +184,8 @@ public sealed class DashboardHost : IAsyncDisposable
         _modelRateLimits = modelRateLimits;
         _gitHubForProject = gitHubForProject;
         _hasActiveWorker = hasActiveWorker;
+        _budgetStore = budgetStore;
+        _budgetDatasetId = budgetDatasetId;
         _providerApiKeys = providerApiKeys;
         _eventPublisher = eventPublisher;
         _transport = transport;
@@ -519,6 +525,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
             _memory, _projectFactory);
         NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory, _agentRuns, _projectFactory);
+        BudgetEndpoints.MapBudgetEndpoints(_app, _budgetStore, _budgetDatasetId, _logger);
         if (_agentRuns is not null)
         {
             AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory);

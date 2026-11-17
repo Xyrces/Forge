@@ -1,3 +1,4 @@
+@using Forge.Dashboard.Services
 @page "/specs/{SpecId}"
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject HttpClient Http
@@ -220,30 +221,20 @@
             _groomRuns = tree.GetProperty("groomRuns").EnumerateArray().Select(GroomRunVm.From).ToList();
             try { _actions = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/actions" + LensQuery); }
             catch { _actions = null; }
-            if (_repoUrl is null)
+            var projectId = Project ?? ShellStore.Value.CurrentProjectId;
+            _repoUrl = null;
+            if (!string.IsNullOrEmpty(projectId))
             {
-                // PR links derive from the registered project's repo —
-                // never hardcoded.
-                var projectId = ShellStore.Value.CurrentProjectId;
-                if (!string.IsNullOrEmpty(projectId))
-                {
-                    var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
-                    foreach (var p in projects.EnumerateArray())
-                    {
-                        if (string.Equals(GetProp(p, "id"), projectId, StringComparison.OrdinalIgnoreCase))
-                        {
-                            _repoUrl = GetProp(p, "repoUrl")?.TrimEnd('/');
-                            break;
-                        }
-                    }
-                }
+                var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
+                if (projectId == (Project ?? ShellStore.Value.CurrentProjectId))
+                    _repoUrl = RepositoryLinks.ForProject(projects, projectId);
             }
         }
         catch (Exception ex) { _error = ex.Message; }
     }
 
     private string? PrUrl(string prNumber) =>
-        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+        RepositoryLinks.PullRequest(_repoUrl, prNumber);
 
     private async Task SetStatusAsync(string status)
     {

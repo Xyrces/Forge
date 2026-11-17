@@ -18,6 +18,51 @@ public sealed class ControlStoreTests : IDisposable
     public void Dispose() => _issues.Dispose();
 
     [Fact]
+    public async Task SnapshotSeparatesLegacyConservativeAndUsageEstimatesFromHolds()
+    {
+        await Leases.InitializeDatasetAsync("dataset", 25m);
+        await Budget.ReserveAsync(Request("old")); await Budget.CompleteAsync("dataset", "old", .5m);
+        await Budget.ReserveAsync(Request("new"));
+        await Budget.CompleteWithUsageAsync("dataset", "new", .01m, "{}", "qualified:usage-estimate");
+        await Budget.ReserveAsync(Request("hold")); await Budget.CompleteAsync("dataset", "hold", null);
+        var snapshot = (await Budget.ReadAsync("dataset"))!;
+        Assert.Equal(.51m, snapshot.SpentUsd); Assert.Equal(.01m, snapshot.UsageEstimatedUsd);
+        Assert.Equal(.5m, snapshot.ConservativeSettledUsd); Assert.Equal(1m, snapshot.OutstandingUsd);
+        Assert.Equal(1, snapshot.UncertainRequestCount);
+    }
+
+    [Fact]
+    public async Task UncertainReplayKeepsEvidenceAndCannotReplaceIt()
+    {
+        await Leases.InitializeDatasetAsync("dataset", 25m);
+        await Budget.ReserveAsync(Request("uncertain"));
+        await Budget.CompleteWithUsageAsync("dataset", "uncertain", null, "{\"usage\":null}", "unknown-v1");
+        await Budget.CompleteAsync("dataset", "uncertain", null);
+        var existing = (await Budget.ReserveAsync(Request("uncertain"))).Reservation!;
+        Assert.Equal("{\"usage\":null}", existing.UsageJson);
+        Assert.Equal("unknown-v1", existing.PricingBasis);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Budget.CompleteWithUsageAsync("dataset", "uncertain", null, "{}", "other"));
+        Assert.Equal(1m, (await Budget.ReadAsync("dataset"))!.OutstandingUsd);
+    }
+
+    [Fact]
+    public async Task UsageSettlementIsDurableAndCannotRepriceCompletedHistory()
+    {
+        await Leases.InitializeDatasetAsync("dataset", 25m);
+        await Budget.ReserveAsync(Request("usage"));
+        Assert.True(await Budget.CompleteWithUsageAsync("dataset", "usage", .01m, "{\"usage\":{}}", "tariff-v1"));
+        await using var connection = await _issues.Db.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT usage_json,pricing_basis FROM budget_reservation WHERE request_id='usage'";
+        using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync()); Assert.Equal("{\"usage\":{}}", reader.GetString(0)); Assert.Equal("tariff-v1", reader.GetString(1));
+        await reader.DisposeAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Budget.CompleteWithUsageAsync("dataset", "usage", .005m, "{}", "tariff-v2"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Budget.CompleteWithUsageAsync("dataset", "usage", .01m, "{}", "tariff-v2"));
+        Assert.Equal(.01m, (await Budget.ReadAsync("dataset"))!.SpentUsd);
+    }
+
+    [Fact]
     public async Task RuntimeFactory_DoesNotAttemptSchemaDdl()
     {
         // No server exists here: constructing and ensuring a runtime store

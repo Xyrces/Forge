@@ -18,6 +18,7 @@ public sealed record DeploymentsState
     public string? CommitsForProjectId { get; init; }
     public IReadOnlyList<CommitRow> Commits { get; init; } = Array.Empty<CommitRow>();
     public bool CommitsLoading { get; init; }
+    public string? CommitsError { get; init; }
 
     public string? ActionError { get; init; }
     public InFlightWarning? PendingInFlightWarning { get; init; }
@@ -49,6 +50,7 @@ public static class DeploymentsActions
 
     public sealed record LoadCommitsAction(string ProjectId);
     public sealed record CommitsLoadedAction(string ProjectId, IReadOnlyList<CommitRow> Commits);
+    public sealed record CommitsLoadFailedAction(string ProjectId, string Error);
 
     public sealed record RequestDeploymentAction(string ProjectId, string CommitSha, string? RequestedBy);
     public sealed record RequestDeploymentFailedAction(string Error);
@@ -71,14 +73,14 @@ public sealed class DeploymentsClient
     {
         var url = projectId is null ? "/api/deployments/" : $"/api/deployments/?projectId={Uri.EscapeDataString(projectId)}";
         var rows = await _http.GetFromJsonAsync<List<DeploymentRow>>(url, ct);
-        return rows ?? new List<DeploymentRow>();
+        return rows ?? throw new InvalidDataException("Deployment history returned no data.");
     }
 
     public async Task<IReadOnlyList<CommitRow>> ListCommitsAsync(string projectId, CancellationToken ct)
     {
         var rows = await _http.GetFromJsonAsync<List<CommitRow>>(
             $"/api/deployments/commits?projectId={Uri.EscapeDataString(projectId)}&limit=25", ct);
-        return rows ?? new List<CommitRow>();
+        return rows ?? throw new InvalidDataException("Commit history returned no data.");
     }
 
     public async Task RequestAsync(string projectId, string commitSha, string? requestedBy, CancellationToken ct)

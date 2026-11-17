@@ -1,8 +1,10 @@
+@using Forge.Dashboard.Services
 @page "/sprints"
 @inject IState<Forge.Dashboard.Features.View.ViewState> ViewStore
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject Fluxor.IDispatcher Dispatch
 @inject HttpClient Http
+@inject ILogger<Sprints> Logger
 @inject NavigationManager Nav
 @inject Forge.Dashboard.Services.DashboardEventStream Events
 @using System.Net.Http.Json
@@ -27,10 +29,11 @@
         <span class="page-subtitle" style="margin-right:4px">Stage gates:</span>
         @foreach (var stage in _gateStages)
         {
-            var held = _gates.TryGetValue(stage, out var s) && s == "hold";
+            var label = GatePresentation.Label(_gates, stage, _gatesLoading);
+            var held = label == "held";
             <span class="chip @(held ? "chip--active" : "")"
-                  title="@(held ? $"Held — {stage} transitions are paused." : $"Open — {stage} runs automatically.")">
-                @stage: @(held ? "held" : "open")
+                  title="@(held ? $"Held — {stage} transitions are paused." : label == "open" ? $"Open — {stage} runs automatically." : "Gate status has not been confirmed.")">
+                @stage: @label
             </span>
         }
         <a href="/flow?mode=edit" class="page-subtitle">Edit on the Flow page →</a>
@@ -337,6 +340,7 @@
 
     private static readonly string[] _gateStages = { "design", "groom", "sprint", "merge" };
     private Dictionary<string, string> _gates = new();
+    private bool _gatesLoading = true;
     private System.Threading.Timer? _gateTimer;
 
     private async Task LoadGatesAsync()
@@ -346,7 +350,12 @@
             _gates = await Http.GetFromJsonAsync<Dictionary<string, string>>("/api/gates") ?? new();
             StateHasChanged();
         }
-        catch { /* gates endpoint absent on older backends */ }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Stage gate status could not be loaded");
+            _gates = new();
+        }
+        finally { _gatesLoading = false; StateHasChanged(); }
     }
 
     private sealed record Column(string Title, Func<Card, bool> Match);
@@ -578,7 +587,7 @@
     }
 
     private string? PrUrl(string prNumber) =>
-        _repoUrl is null ? null : $"{_repoUrl}/pull/{prNumber}";
+        RepositoryLinks.PullRequest(_repoUrl, prNumber);
 
     private static string Dates(ViewSprint s)
     {
@@ -601,7 +610,8 @@
                 if (p.TryGetProperty("id", out var id) && string.Equals(id.GetString(), projectId, StringComparison.OrdinalIgnoreCase)
                     && p.TryGetProperty("repoUrl", out var url))
                 {
-                    _repoUrl = url.GetString()?.TrimEnd('/');
+                    if (projectId == ShellStore.Value.CurrentProjectId)
+                        _repoUrl = RepositoryLinks.WebUrl(url.GetString());
                     break;
                 }
             }
