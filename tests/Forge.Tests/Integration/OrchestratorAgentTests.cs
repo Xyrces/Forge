@@ -398,10 +398,11 @@ public sealed class OrchestratorAgentTests : IDisposable
         // premium model's quota problem must not cool the normal one,
         // and a later escalated task waits on the escalated cooldown.
         var runner = new EscalatedOnlyRateLimitedRunner();
+        var slots = new Forge.Orchestrator.Slots.SlotTable();
         var markers = BuildMarkers();
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
-        var orch = BuildOrchestrator(runner);
+        var orch = BuildOrchestrator(runner, slots);
         BindMafWithEscalation(orch, markers);
 
         var esc = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-429", Description: "x"));
@@ -422,7 +423,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         await WaitForAsync(async () =>
         {
             if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            return (await _issues.GetAsync(normal.Id))!.Status is IssueStatus.InProgress or IssueStatus.Completed;
+            // Amendment snapshots include current members. Wait for the normal run's
+            // final metadata writes and slot release instead of racing its InProgress row.
+            return (await _issues.GetAsync(normal.Id))!.Status == IssueStatus.Completed
+                && slots.InFlight("test", "coredev") == 0;
         }, TimeSpan.FromSeconds(15));
 
         // A SECOND escalated task is held by the escalated-model
@@ -430,8 +434,9 @@ public sealed class OrchestratorAgentTests : IDisposable
         // key is the escalated model).
         var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-waits", Description: "x",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        await AddApprovedMemberAsync(sprintId, esc2.Id);
+        // Install the routing marker before membership admission can wake dispatch.
         await markers.WriteAsync("test", esc2.Id, "escalate 2");
+        await AddApprovedMemberAsync(sprintId, esc2.Id);
         await Task.Delay(2500);
         Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
 
