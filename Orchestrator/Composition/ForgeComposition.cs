@@ -692,7 +692,11 @@ public static class ForgeComposition
             gitHubForProject: GitHubForProject,
             providerApiKeys: providerKeyResolver,
             eventPublisher: sp.GetRequiredService<IEventPublisher>(),
-            transport: sp.GetRequiredService<ITransport>()));
+            transport: sp.GetRequiredService<ITransport>(),
+            hasActiveWorker: options.Worker.Enabled
+                ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
+                    .HasActiveAsync(options.Controller.DatasetId, projectId, taskId, ct)
+                : null));
 
         // Schedulers: trigger events kick via the wakeup signals; the
         // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is

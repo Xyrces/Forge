@@ -25,6 +25,8 @@ public class TaskEndpointsTests : IDisposable
     private readonly AgentMessageBus _bus;
     private readonly IHost _host;
     private readonly HttpClient _client;
+    private readonly CloseCapturingGitHub _github = new();
+    private bool _workerActive;
 
     public TaskEndpointsTests()
     {
@@ -44,7 +46,8 @@ public class TaskEndpointsTests : IDisposable
         var app = builder.Build();
         TaskEndpoints.MapTaskEndpoints(app, _issues, _bus, null, NullLogger<DashboardHost>.Instance,
             lifecycle: new TaskStateMachine(writeAuthority: true, NullLogger<TaskStateMachine>.Instance),
-            gitHubForProject: _ => new CloseCapturingGitHub());
+            gitHubForProject: _ => _github,
+            hasActiveWorker: (_, _, _) => Task.FromResult(_workerActive));
         _host = app;
         _host.Start();
         _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_host.GetPort()}/") };
@@ -384,9 +387,128 @@ public class TaskEndpointsTests : IDisposable
         Assert.Equal(769, CloseCapturingGitHub.LastClosedPr);
     }
 
+    private async Task<IssueRecord> FailedForAdoption()
+    {
+        var task = await _issues.CreateAsync(new NewIssue(Type: "coredev", Title: "Published work", Metadata: new Dictionary<string, object>
+        {
+            ["prNumber"] = 124, ["branch"] = "agent/task", ["state"] = "StalledRework", ["reviewSha"] = "head", ["reviewVerdict"] = "approved",
+            ["stateViolation"] = "Dispatching+CiGreen", ["reworkAttempts"] = 2,
+        }));
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "historical failure");
+        return (await _issues.GetAsync(task.Id))!;
+    }
+
+    [Fact]
+    public async Task AdoptPr_RestoresTaskWatchAndPreservesReviewAndFailureHistory()
+    {
+        var task = await FailedForAdoption();
+        var response = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/adopt-pr",
+            new { prNumber = 124, branch = "agent/task", expectedHeadSha = "head" });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var adopted = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.InProgress, adopted.Status);
+        Assert.Equal(DispatchCheckpoint.PrOpened, adopted.DispatchCheckpoint);
+        Assert.Equal("PROpen", adopted.GetMetadata("state"));
+        Assert.Equal("OperatorAdoptPr", adopted.GetMetadata("lastEvent"));
+        Assert.Equal("head", adopted.GetMetadata("reviewSha"));
+        Assert.Equal("approved", adopted.GetMetadata("reviewVerdict"));
+        Assert.Equal("Dispatching+CiGreen", adopted.GetMetadata("stateViolation"));
+        Assert.Equal("2", adopted.GetMetadata("reworkAttempts"));
+        Assert.Single(await _issues.ListAsync(new IssueFilter()));
+        Assert.Contains(await _issues.ListEventsAsync(task.Id), e => e.Kind == "operator.adopt_pr");
+    }
+
+    [Fact]
+    public async Task AdoptPr_UnboundOrphanCannotInheritHistoricalApproval()
+    {
+        var task = await FailedForAdoption();
+        await _issues.TransitionAsync(task.Id, IssueStatus.Failed, null,
+            new Dictionary<string, object> { ["prNumber"] = null!, ["branch"] = null! });
+        var response = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/adopt-pr",
+            new { prNumber = 124, branch = "agent/task", expectedHeadSha = "head" });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var adopted = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(adopted.GetMetadata("reviewSha"));
+        Assert.Null(adopted.GetMetadata("reviewVerdict"));
+        Assert.Contains("approved", adopted.GetMetadata("operatorAdoptedPriorReview"));
+    }
+
+    [Theory]
+    [InlineData("branch")]
+    [InlineData("repository")]
+    [InlineData("closed")]
+    [InlineData("merged")]
+    [InlineData("head")]
+    [InlineData("worker")]
+    [InlineData("run")]
+    [InlineData("pending")]
+    public async Task AdoptPr_RejectsUnverifiedOrBusyWorkWithoutMutation(string problem)
+    {
+        var task = await FailedForAdoption();
+        _github.Problem = problem;
+        _workerActive = problem == "worker";
+        if (problem == "run") await new AgentRunStore(_issues.Db).StartAsync("active", task.Id, "CoreDev", "model");
+        if (problem == "pending") await _issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null);
+        var before = await _issues.GetAsync(task.Id);
+        var response = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/adopt-pr",
+            new { prNumber = 124, branch = "agent/task", expectedHeadSha = problem == "head" ? "wrong" : "head" });
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(before, await _issues.GetAsync(task.Id));
+        Assert.Single(await _issues.ListAsync(new IssueFilter()));
+    }
+
+    [Theory]
+    [InlineData("pr")]
+    [InlineData("branch")]
+    [InlineData("worktree")]
+    public async Task AdoptPr_CannotRebindExistingWork(string changed)
+    {
+        var task = await FailedForAdoption();
+        var response = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/adopt-pr",
+            new { prNumber = changed == "pr" ? 125 : 124, branch = changed == "branch" ? "different" : "agent/task",
+                worktreePath = changed == "worktree" ? "/arbitrary/path" : null, expectedHeadSha = "head" });
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(task, await _issues.GetAsync(task.Id));
+    }
+
+    [Fact]
+    public async Task AdoptPr_UnknownProjectDoesNotFallBackToPrimary()
+    {
+        var task = await FailedForAdoption();
+        var response = await _client.PostAsJsonAsync($"/api/tasks/{task.Id}/adopt-pr?projectId=other",
+            new { prNumber = 124, branch = "agent/task" });
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(task, await _issues.GetAsync(task.Id));
+    }
+
+    [Theory]
+    [InlineData(TaskLifecycleState.Failed, true)]
+    [InlineData(TaskLifecycleState.StalledRework, true)]
+    [InlineData(TaskLifecycleState.BlockedOperator, true)]
+    [InlineData(TaskLifecycleState.Merged, false)]
+    [InlineData(TaskLifecycleState.Completed, false)]
+    [InlineData(TaskLifecycleState.Closed, false)]
+    public void OperatorAdoption_IsAnExplicitLegalEvent(TaskLifecycleState from, bool legal) =>
+        Assert.Equal(legal, TaskStateMachine.IsLegal(TaskEvent.OperatorAdoptPr, from, TaskLifecycleState.PROpen));
+
     private sealed class CloseCapturingGitHub : GitHubService
     {
         public static int? LastClosedPr;
+        public string? Problem;
+        public override Task<Octokit.PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
+        {
+            static void Set(object target, string name, object value) => target.GetType().GetProperty(name)!.SetValue(target, value);
+            var repository = new Octokit.Repository();
+            Set(repository, "FullName", Problem == "repository" ? "other/repo" : "o/r");
+            var head = new Octokit.GitReference(null!, null!, null!, Problem == "branch" ? "other" : "agent/task", "head", null!, repository);
+            var basis = new Octokit.GitReference(null!, null!, null!, "main", "base", null!, repository);
+            var pr = new Octokit.PullRequest(number);
+            Set(pr, "Head", head); Set(pr, "Base", basis); Set(pr, "HtmlUrl", "https://github.com/o/r/pull/124");
+            Set(pr, "State", new Octokit.StringEnum<Octokit.ItemState>(Problem == "closed" ? Octokit.ItemState.Closed : Octokit.ItemState.Open));
+            if (Problem == "merged") Set(pr, "MergedAt", DateTimeOffset.UtcNow);
+            return Task.FromResult(pr);
+        }
+
         public CloseCapturingGitHub() : base("o", "r") { }
         public override Task<Octokit.PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
         {

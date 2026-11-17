@@ -30,6 +30,7 @@ public sealed class PublishedRunLifecycleTests
     }
 
     [Theory]
+    [InlineData(DispatchCheckpoint.PrOpened, TaskLifecycleState.ReworkQueued, IssueStatus.InProgress, true)]
     [InlineData(DispatchCheckpoint.WorktreeAcquired, TaskLifecycleState.AgentRunning, IssueStatus.InProgress, true)]
     [InlineData(DispatchCheckpoint.AgentCompleted, TaskLifecycleState.AgentRunning, IssueStatus.InProgress, true)]
     [InlineData(DispatchCheckpoint.PushDone, TaskLifecycleState.AgentRunning, IssueStatus.InProgress, false)]

@@ -65,6 +65,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasActiveWorker;
     private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
     private readonly Forge.Core.Messaging.IEventPublisher? _eventPublisher;
     private readonly Talaria.Core.Abstractions.ITransport? _transport;
@@ -126,7 +127,8 @@ public sealed class DashboardHost : IAsyncDisposable
         Func<string, GitHubService?>? gitHubForProject = null,
         Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null,
         Forge.Core.Messaging.IEventPublisher? eventPublisher = null,
-        Talaria.Core.Abstractions.ITransport? transport = null)
+        Talaria.Core.Abstractions.ITransport? transport = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null)
     {
         _options = options;
         _headroom = headroom;
@@ -177,6 +179,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _lifecycle = lifecycle;
         _modelRateLimits = modelRateLimits;
         _gitHubForProject = gitHubForProject;
+        _hasActiveWorker = hasActiveWorker;
         _providerApiKeys = providerApiKeys;
         _eventPublisher = eventPublisher;
         _transport = transport;
@@ -574,7 +577,7 @@ if (_groomerRuns is not null)
 
             TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
                 _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
-                _lifecycle, _gitHubForProject);
+                _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker);
         }
 
         _app.MapBuildInfoEndpoint();

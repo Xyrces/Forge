@@ -31,6 +31,7 @@ public enum TaskEvent
     OperatorBlocked,
     OperatorClosed,
     WatchResumed,
+    OperatorAdoptPr,
 }
 
 /// <summary>
@@ -223,6 +224,9 @@ public sealed class TaskStateMachine
         // stateViolation on the first auto-resume).
         Add(TaskEvent.WatchResumed, TaskLifecycleState.PROpen,
             TaskLifecycleState.BlockedOperator, TaskLifecycleState.PROpen);
+        // Only an explicit operator command with a verified open PR may revive failed work.
+        Add(TaskEvent.OperatorAdoptPr, TaskLifecycleState.PROpen,
+            working.Append(TaskLifecycleState.Failed).Append(TaskLifecycleState.BlockedOperator).ToArray());
         return t;
     }
 

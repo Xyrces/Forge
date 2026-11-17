@@ -13,6 +13,15 @@ public sealed record WorkerAssignment(string Id, string DatasetId, string Adopti
 public sealed class WorkerAttemptStore(IDbConnectionFactory db)
 {
     private string Table => db.Dialect.Table("worker_attempt");
+    public async Task<bool> HasActiveAsync(string datasetId, string projectId, string taskId, CancellationToken ct = default)
+    {
+        await using var connection = await db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM {Table} WHERE dataset_id=@dataset AND project_id=@project AND task_id=@task AND state IN ('queued','running')";
+        Add(command, "@dataset", datasetId); Add(command, "@project", projectId); Add(command, "@task", taskId);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct)) != 0;
+    }
+
     public async Task<WorkerAssignment> CreateOrGetAsync(WorkerAssignment assignment, CancellationToken ct = default)
     {
         await using var connection = await db.OpenAsync(ct);

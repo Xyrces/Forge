@@ -24,6 +24,21 @@ public sealed class WorkerAttemptTests : IDisposable
     private static WorkerAssignment Assignment() => new("id", "dataset", "key", "forge", "task", "CoreDev", "dispatch", "abc", "/var/lib/forge/worktree", "{}", "token");
 
     [Fact]
+    public async Task ActiveLookupIsScopedAndCancellationRemainsActiveUntilWorkerFinishes()
+    {
+        await _store.CreateOrGetAsync(Assignment());
+        Assert.True(await _store.HasActiveAsync("dataset", "forge", "task"));
+        Assert.False(await _store.HasActiveAsync("other", "forge", "task"));
+        Assert.False(await _store.HasActiveAsync("dataset", "other", "task"));
+        Assert.False(await _store.HasActiveAsync("dataset", "forge", "other"));
+        await _store.ClaimAsync("id", "pod");
+        await _store.RequestCancellationAsync("id");
+        Assert.True(await _store.HasActiveAsync("dataset", "forge", "task"));
+        await _store.CompleteAsync("id", "pod", "token", null, "cancelled");
+        Assert.False(await _store.HasActiveAsync("dataset", "forge", "task"));
+    }
+
+    [Fact]
     public async Task DuplicatePodCannotClaimOrPublishAndCancellationRevokesAdmission()
     {
         await _store.CreateOrGetAsync(Assignment());

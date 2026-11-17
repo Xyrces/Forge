@@ -232,8 +232,8 @@ public class StartupRecoveryTests : IDisposable
             var d = _recovery.Classify(PrIssue(meta, DispatchCheckpoint.WorktreeAcquired));
             Assert.Equal(RecoveryAction.Replay, d.Action);
 
-            // The real live shape: the checkpoint stays PrOpened
-            // across rework rounds (same PR) — that path re-queues too.
+            // ReworkFired is recorded before Transition(Pending). A crash in
+            // that gap leaves the prior publication checkpoint but owes rework.
             var d2 = _recovery.Classify(PrIssue(meta, DispatchCheckpoint.PrOpened));
             Assert.Equal(RecoveryAction.Replay, d2.Action);
         }
@@ -249,6 +249,71 @@ public class StartupRecoveryTests : IDisposable
         var d = _recovery.Classify(PrIssue(
             """{"prNumber":"758"}""", DispatchCheckpoint.PrOpened));
         Assert.Equal(RecoveryAction.LeftAlone, d.Action);
+    }
+
+    [Theory]
+    [InlineData(DispatchCheckpoint.PrOpened, "AgentRunning")]
+    [InlineData(DispatchCheckpoint.PushDone, "ReworkRunning")]
+    [InlineData(DispatchCheckpoint.PrOpened, null)]
+    public async Task RunAsync_PublishedRoundSurvivesBootWithoutRedispatch(
+        DispatchCheckpoint checkpoint, string? state)
+    {
+        var metadata = new Dictionary<string, object>
+        { ["prNumber"] = 124, ["reviewSha"] = "published-head", ["reviewVerdict"] = "Approve" };
+        if (state is not null) metadata["state"] = state;
+        var issue = await _issues.CreateAsync(new NewIssue("task", "published", Metadata: metadata));
+        await _issues.ClaimAsync(issue.Id, "coredev");
+        await _issues.SetCheckpointAsync(issue.Id, checkpoint);
+        var recovery = new StartupRecovery(_issues, _reports, _worktrees, _gitHub, _events,
+            NullLogger<StartupRecovery>.Instance,
+            lifecycle: new TaskStateMachine(true, NullLogger.Instance));
+        Assert.Equal(RecoveryAction.LeftAlone, recovery.Classify((await _issues.GetAsync(issue.Id))!).Action);
+
+        var reportId = await recovery.RunAsync();
+
+        var after = (await _issues.GetAsync(issue.Id))!;
+        Assert.Equal(IssueStatus.InProgress, after.Status);
+        Assert.Equal(checkpoint, after.DispatchCheckpoint);
+        Assert.Equal(0, after.RecoveryAttempts);
+        Assert.Equal("published-head", after.GetMetadata("reviewSha"));
+        Assert.Null(after.GetMetadata("stateViolation"));
+        if (state is not null)
+        {
+            Assert.Equal("PROpen", after.GetMetadata("state"));
+            Assert.Equal("RunCompletedDiff", after.GetMetadata("lastEvent"));
+        }
+        Assert.Equal(0, _gitHub.CallCount);
+        var report = (await _reports.GetAsync(reportId))!;
+        Assert.Equal("left_alone", Assert.Single(JsonSerializer.Deserialize<List<RecoveryActionRecord>>(report.ActionsJson)!).Action);
+    }
+
+    [Theory]
+    [InlineData(DispatchCheckpoint.Claimed)]
+    [InlineData(DispatchCheckpoint.WorktreeAcquired)]
+    [InlineData(DispatchCheckpoint.PrOpened)]
+    public async Task RunAsync_IncompleteReworkWithExistingPrStillRequeues(DispatchCheckpoint checkpoint)
+    {
+        var issue = await _issues.CreateAsync(new NewIssue("task", "unfinished rework", Metadata: new Dictionary<string, object>
+        {
+            ["prNumber"] = 124, ["state"] = checkpoint == DispatchCheckpoint.PrOpened ? "ReworkQueued" : "ReworkRunning",
+            ["reworkForSha"] = "published-head",
+            ["dispatchId"] = "original-attempt", ["worktreePath"] = _workDir,
+        }));
+        await _issues.ClaimAsync(issue.Id, "coredev");
+        await _issues.SetCheckpointAsync(issue.Id, checkpoint);
+        var recovery = new StartupRecovery(_issues, _reports, _worktrees, _gitHub, _events,
+            NullLogger<StartupRecovery>.Instance,
+            lifecycle: new TaskStateMachine(true, NullLogger.Instance));
+
+        await recovery.RunAsync();
+
+        var after = (await _issues.GetAsync(issue.Id))!;
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal("RunDied", after.GetMetadata("lastEvent"));
+        Assert.Null(after.GetMetadata("stateViolation"));
+        if (checkpoint == DispatchCheckpoint.WorktreeAcquired)
+            Assert.Equal("original-attempt", after.GetMetadata("resumeDispatchId"));
+        Assert.Equal(0, _gitHub.CallCount);
     }
 
     [Fact]

@@ -221,7 +221,10 @@ public sealed class StartupRecovery
         issueCts.CancelAfter(TimeSpan.FromSeconds(60));
         try
         {
-            // Classify first — pure function over metadata + worktree.
+            // Publication may commit before the prior process records completion.
+            // Reconcile it before classifying a published run as dead.
+            issue = await PublishedRunLifecycle.ReconcileAsync(
+                ctx.Issues, _lifecycle, issue, issueCts.Token);
             var decision = Classify(issue);
             switch (decision.Action)
             {
@@ -401,6 +404,18 @@ public sealed class StartupRecovery
         var branch = issue.GetMetadata("branch") ?? $"agent/{issue.Id}";
         var prNumber = issue.GetMetadata("prNumber");
 
+        var state = issue.GetMetadata("state");
+        // Claim resets the checkpoint for every engineering round. A current
+        // published checkpoint plus an existing PR therefore belongs to the
+        // watcher even if the completion event was lost at process shutdown.
+        // This also keeps dry-run classification consistent with live recovery.
+        if (int.TryParse(prNumber, out var publishedPr) && publishedPr > 0
+            && issue.DispatchCheckpoint is >= DispatchCheckpoint.PushDone
+            && (state is null or nameof(TaskLifecycleState.AgentRunning)
+                or nameof(TaskLifecycleState.ReworkRunning) or nameof(TaskLifecycleState.Dispatching)
+                || Core.OrphanedClaimReaper.IsWatchOwnedPhase(state)))
+            return new RecoveryDecision(RecoveryAction.LeftAlone, "published run; watcher owns the existing PR");
+
         // Already has a PR AND is in a watch-owned (PR-phase) state —
         // leave alone; the watch path is independent of the workflow.
         // A prNumber task in an ENGINEERING-owed state (ReworkQueued
@@ -409,7 +424,6 @@ public sealed class StartupRecovery
         // 2026-07-31: task-360/361/362/364 orphaned InProgress +
         // ReworkQueued, "left alone" at every boot while nothing
         // re-dispatched them).
-        var state = issue.GetMetadata("state");
         if (!string.IsNullOrEmpty(prNumber) && int.TryParse(prNumber, out _)
             && Core.OrphanedClaimReaper.IsWatchOwnedPhase(state))
         {

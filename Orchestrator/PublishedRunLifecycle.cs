@@ -32,7 +32,7 @@ internal static class PublishedRunLifecycle
             || !int.TryParse(current.GetMetadata("prNumber"), out var number) || number <= 0
             || !Enum.TryParse<TaskLifecycleState>(current.GetMetadata("state"), out var state)
             || state is not (TaskLifecycleState.AgentRunning or TaskLifecycleState.ReworkRunning
-                or TaskLifecycleState.Dispatching or TaskLifecycleState.ReworkQueued))
+                or TaskLifecycleState.Dispatching))
             return current;
 
         // Claim clears the prior dispatch's checkpoint. PushDone plus a PR
