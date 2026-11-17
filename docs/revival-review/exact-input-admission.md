@@ -40,3 +40,21 @@ buffered/SSE settlement, counter failures/cancellation, ownership changes and
 single-send behavior and interleaved buffered/SSE scope isolation. These tests
 use offline fakes; separately performed host checks belong in
 [live qualification](live-qualification.md).
+
+## Serialized payload and token limits are different units
+
+The native admission transport bounds the **final SDK generation body to 16 MiB**
+(including JSON escaping, tool schemas and encrypted reasoning replay), reading
+unknown-length bodies with a bounded buffer. This is a separate operational
+wire/memory limit, not a token estimate or additional spending authorization.
+Bodies within that limit still require the exact native input-token count.
+Counter errors or unavailable/malformed counts fail closed; there is no estimated
+count fallback. The qualified 922,000 input-token limit, 1,050,000 total context,
+output bound, per-request ceiling and durable $25 pilot ledger remain unchanged.
+
+This replaces the erroneous comparison of generic serialized UTF-8 **bytes** to
+`MaximumInputTokens`, which could reject an otherwise valid resumed conversation
+before its native count was requested. Large UTF-8 buffered/streaming fixtures
+now exercise count -> reservation -> generation, while oversized native bodies,
+actual excess token counts, cancelled counters and unknown outcomes retain their
+existing fail-closed behavior. No historical ledger rows are repriced or reset.

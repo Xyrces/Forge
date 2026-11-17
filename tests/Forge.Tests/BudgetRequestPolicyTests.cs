@@ -177,23 +177,22 @@ public sealed class BudgetRequestPolicyTests
     }
 
     [Fact]
-    public async Task InstructionsCountTowardInputCeiling()
+    public async Task LargeInstructionsUseCountedTokensRatherThanSerializedBytes()
     {
         var ledger = new Ledger(); var transport = new Transport(ledger);
         using var client = Client(Options(), ledger, transport);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync(Input(), new() { Instructions = new string('x', 1050000) }));
-        Assert.Empty(ledger.Reservations);
+        await client.GetResponseAsync(Input(), new() { Instructions = new string('x', 1050000) });
+        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
     }
 
     [Fact]
-    public async Task StructuredResponseSchemaCountsTowardInputCeiling()
+    public async Task LargeStructuredSchemaUsesCountedTokensRatherThanSerializedBytes()
     {
         var ledger = new Ledger(); var transport = new Transport(ledger);
         using var client = Client(Options(), ledger, transport);
         var schema = JsonSerializer.SerializeToElement(new { type = "object", description = new string('x', 1050000) });
-        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync(Input(), new() {
-            ResponseFormat = ChatResponseFormat.ForJsonSchema(schema) }));
-        Assert.Empty(ledger.Reservations);
+        await client.GetResponseAsync(Input(), new() { ResponseFormat = ChatResponseFormat.ForJsonSchema(schema) });
+        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
     }
 
     [Fact]

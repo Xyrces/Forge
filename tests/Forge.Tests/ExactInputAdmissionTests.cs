@@ -34,6 +34,51 @@ public sealed class ExactInputAdmissionTests
             new("openai", "gpt-6.1-sol", AgentType.CoreDev, "forge", 100), owner ?? (_ => Task.CompletedTask));
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LargeUtf8PayloadUsesExactNativeCountBeforeReservation(bool stream)
+    {
+        var ledger = new Ledger(); var handler = new Wire(ledger);
+        using var http = new HttpClient(handler); using var native = Native(http); using var client = Budget(native, ledger);
+        var input = new[] { new ChatMessage(ChatRole.User, new string('界', 400_000)) };
+        if (stream) { await foreach (var update in client.GetStreamingResponseAsync(input)) { } }
+        else await client.GetResponseAsync(input);
+        Assert.True(Encoding.UTF8.GetByteCount(Assert.Single(handler.Counted)) > BudgetRequestPolicy.QualifiedContextTokens);
+        Assert.Single(handler.Generated);
+        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
+        Assert.Equal(new[] { "count", "reserve", "generate" }, ledger.Events);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OversizedFinalNativeBodyNeverCountsReservesOrGenerates(bool stream)
+    {
+        var ledger = new Ledger(); var handler = new Wire(ledger);
+        using var http = new HttpClient(handler); using var native = Native(http); using var client = Budget(native, ledger);
+        var input = new[] { new ChatMessage(ChatRole.User, new string('x', ResponsesInputCountingHandler.MaximumRequestBodyBytes)) };
+        if (stream) await Assert.ThrowsAnyAsync<Exception>(async () => { await foreach (var update in client.GetStreamingResponseAsync(input)) { } });
+        else await Assert.ThrowsAnyAsync<Exception>(() => client.GetResponseAsync(input));
+        Assert.Empty(handler.Counted); Assert.Empty(handler.Generated); Assert.Empty(ledger.Reservations);
+    }
+
+    private sealed class UnknownLengthStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override bool CanSeek => false;
+    }
+
+    [Fact]
+    public async Task UnknownLengthPayloadIsBoundedAndCancellationNeverReturnsBody()
+    {
+        using var content = new StreamContent(new UnknownLengthStream(new byte[ResponsesInputCountingHandler.MaximumRequestBodyBytes + 1]));
+        Assert.Null(content.Headers.ContentLength);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ResponsesInputCountingHandler.ReadBoundedBodyAsync(content, default));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        using var small = new ByteArrayContent([1, 2, 3]);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ResponsesInputCountingHandler.ReadBoundedBodyAsync(small, cancelled.Token));
+    }
+
+    [Theory]
     [InlineData(false, false, .0011)]
     [InlineData(true, false, .0011)]
     [InlineData(false, true, .0005)]
@@ -120,6 +165,7 @@ public sealed class ExactInputAdmissionTests
     [InlineData("malformed")]
     [InlineData("negative")]
     [InlineData("too-large")]
+    [InlineData("input-limit")]
     [InlineData("output-does-not-fit")]
     [InlineData("wrong-object")]
     public async Task CounterFailuresNeverReserveOrGenerate(string failure)
@@ -236,6 +282,7 @@ public sealed class ExactInputAdmissionTests
                 if (Failure == "cancel") throw new OperationCanceledException();
                 if (Failure == "server-error") return new(HttpStatusCode.InternalServerError) { Content = new StringContent("{}") };
                 var result = Failure switch { "malformed" => "{}", "negative" => "{\"object\":\"response.input_tokens\",\"input_tokens\":-1}",
+                    "input-limit" => "{\"object\":\"response.input_tokens\",\"input_tokens\":922001}",
                     "too-large" => "{\"object\":\"response.input_tokens\",\"input_tokens\":1050001}",
                     "output-does-not-fit" => "{\"object\":\"response.input_tokens\",\"input_tokens\":1050000}",
                     "wrong-object" => "{\"object\":\"response\",\"input_tokens\":1000}",
