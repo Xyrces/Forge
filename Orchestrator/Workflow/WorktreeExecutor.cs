@@ -78,7 +78,9 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
         // the executor's push of the metadata branch failed with
         // "src refspec does not match any", halting the workflow).
         var resolvedBranch = input.Branch ?? $"agent/{GitRefNames.Sanitize(input.Issue.Id)}";
-        var worktreePath = await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct, branchOverride: resolvedBranch);
+        var worktreePath = reused
+            ? await worktrees.CreateAsync(input.Issue.Id, defaultBranch, ct, branchOverride: resolvedBranch)
+            : await worktrees.CreateFreshAsync(input.Issue.Id, defaultBranch, ct, branchOverride: resolvedBranch);
         // P4 Stage A: advance the dispatch checkpoint BEFORE we
         // touch metadata. If we crash between CreateAsync and the
         // TransitionAsync below, the recoverer sees

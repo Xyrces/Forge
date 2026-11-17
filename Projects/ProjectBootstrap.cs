@@ -121,19 +121,22 @@ public sealed class ProjectBootstrap
             }
         }
 
-        if (hasRepoUrl && Directory.Exists(Path.Combine(rootPath, ".git")))
+        var managedPath = Path.GetFullPath(ForgesystemPaths.ProjectDir(_dataRoot, project.Id));
+        if (hasRepoUrl && !clonedFromRemote && Directory.Exists(Path.Combine(rootPath, ".git"))
+            && string.Equals(Path.GetFullPath(rootPath), managedPath,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
         {
-            // Scaffolded repo (an earlier clone failed and the git-init
-            // fallback ran): reconcile with the remote so a fixed PAT
-            // self-heals on boot. Only call sync when origin is
-            // actually missing — a healthy clone needs nothing here.
-            if (ProbeGit(rootPath, "remote get-url origin") != 0)
+            ProjectSyncResult refreshed;
+            try { refreshed = _cloner.SyncAsync(project, _github, CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (Exception ex)
             {
-                var healed = _cloner.SyncAsync(project, _github, CancellationToken.None)
-                    .GetAwaiter().GetResult();
-                _logger?.LogInformation(
-                    "Project '{Id}': scaffold reconcile {Result}", project.Id, healed.Ok ? "succeeded" : "failed (see warnings)");
+                _logger?.LogWarning(ex, "Project '{Id}': source refresh failed; planning/dispatch remain guarded", project.Id);
+                refreshed = new ProjectSyncResult(false, project.DefaultBranch);
             }
+            if (!refreshed.Ok)
+                _logger?.LogWarning("Project '{Id}': managed checkout could not refresh. Dashboard remains available; planning and new engineering runs require successful source refresh", project.Id);
+            else
+                _logger?.LogInformation("Project '{Id}': managed checkout refreshed", project.Id);
         }
 
         var stateDir = isOperatorManaged
