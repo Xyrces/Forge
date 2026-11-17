@@ -226,22 +226,43 @@ public sealed class KubernetesWorkerJobs(HttpClient http, WorkerOptions options)
     public static HttpClient CreateInClusterClient()
     {
         const string root = "/var/run/secrets/kubernetes.io/serviceaccount/";
-        var certificate = X509Certificate2.CreateFromPemFile(root + "ca.crt");
-        var handler = new HttpClientHandler();
-        handler.ServerCertificateCustomValidationCallback = (_, server, _, errors) =>
-        {
-            if (server is null || (errors & System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch) != 0) return false;
-            using var chain = new X509Chain();
-            chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-            chain.ChainPolicy.CustomTrustStore.Add(certificate);
-            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-            return chain.Build(server);
-        };
+        var handler = CreateClusterTlsHandler(root + "ca.crt");
         var host = Environment.GetEnvironmentVariable("KUBERNETES_SERVICE_HOST") ?? "kubernetes.default.svc";
         var port = Environment.GetEnvironmentVariable("KUBERNETES_SERVICE_PORT_HTTPS") ?? "443";
         var client = new HttpClient(new RotatingTokenHandler(root + "token", handler)) { BaseAddress = new Uri($"https://{host}:{port}/") };
         return client;
     }
+
+    internal static HttpClientHandler CreateClusterTlsHandler(string certificatePath)
+        => new ClusterTlsHandler(certificatePath);
+
+    private sealed class ClusterTlsHandler : HttpClientHandler
+    {
+        private readonly X509Certificate2 _certificate;
+
+        public ClusterTlsHandler(string certificatePath)
+        {
+            // Kubernetes mounts a public CA certificate, never its private key.
+            _certificate = X509CertificateLoader.LoadCertificateFromFile(certificatePath);
+            ServerCertificateCustomValidationCallback = (_, server, _, errors) =>
+            {
+                if (server is null || (errors & (System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch
+                    | System.Net.Security.SslPolicyErrors.RemoteCertificateNotAvailable)) != 0) return false;
+                using var chain = new X509Chain();
+                chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                chain.ChainPolicy.CustomTrustStore.Add(_certificate);
+                chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                return chain.Build(server);
+            };
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing) _certificate.Dispose();
+        }
+    }
+
     private sealed class RotatingTokenHandler(string path, HttpMessageHandler inner) : DelegatingHandler(inner)
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)

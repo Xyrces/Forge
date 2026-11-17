@@ -197,8 +197,12 @@ class Release:
         self.owned()
         action_id = self.operation + ("-rollback-" if rollback else "-activate-") + instance
         self.controllers.call(slot, "activate", action_id, expected_previous_owner=owner)
-        self.wait(lambda: self.status(slot).get("mode") == "active" and self.status(slot).get("ready") is True,
-                  "controller activation timed out")
+        def activated():
+            observed = self.status(slot)
+            if observed.get("mode") == "failed":
+                raise RuntimeError("controller reported failed activation")
+            return observed.get("mode") == "active" and observed.get("ready") is True
+        self.wait(activated, "controller activation timed out")
 
     def route(self, slot):
         self.owned()

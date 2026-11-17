@@ -77,6 +77,7 @@ class FakeControllers:
     def __init__(self, kube):
         self.kube = kube
         self.fail_activate = set()
+        self.failed_after_activate = set()
         self.not_ready = set()
         self.busy = False
         self.lease_owner = None
@@ -85,7 +86,7 @@ class FakeControllers:
     def call(self, slot, action, operation, expected_previous_owner=None):
         if action == "status":
             state = self.kube.states.get(slot)
-            return {"ready": slot not in self.not_ready and state != "stopped", "mode": state,
+            return {"ready": slot not in self.not_ready and state not in ("stopped", "failed"), "mode": state,
                     "instanceId": "instance-" + slot, "leaseOwner": self.lease_owner,
                     "admissionOpen": state == "active", "activeRuns": 1 if self.busy else 0}
         self.kube.events.append((action, slot))
@@ -96,7 +97,7 @@ class FakeControllers:
             other = "green" if slot == "blue" else "blue"
             if self.kube.states.get(other) in ("active", "draining"):
                 raise AssertionError("two active controllers")
-            self.kube.states[slot] = "active"
+            self.kube.states[slot] = "failed" if slot in self.failed_after_activate else "active"
         if action == "drain":
             self.kube.states[slot] = "draining"
         return {}
@@ -135,6 +136,19 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             release.run()
         self.assertNotIn(("activate", "green"), kube.events)
+
+    def test_observed_failed_activation_rolls_back_without_waiting_for_timeout(self):
+        release, kube, controllers = self.make()
+        controllers.failed_after_activate.add("green")
+        def unexpected_delay(_):
+            self.fail("terminal failed activation must not wait for the polling timeout")
+        release.sleep = unexpected_delay
+        with self.assertRaisesRegex(RuntimeError, "reported failed activation"):
+            release.run()
+        self.assertLess(kube.events.index(("scale", "green", 0)), kube.events.index(("activate", "blue")))
+        self.assertEqual("active", kube.states["blue"])
+        self.assertEqual("blue", kube.get("services", "forge")["spec"]["selector"]["slot"])
+        self.assertEqual("rolled-back", kube.get("configmaps", release.journal_name)["data"]["phase"])
 
     def test_first_install_failure_routes_no_controller(self):
         release, kube, controllers = self.make(previous="")
