@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -65,6 +65,9 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasActiveWorker;
+    private readonly Core.Control.IDurableBudgetStore? _budgetStore;
+    private readonly string? _budgetDatasetId;
     private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
     private readonly Forge.Core.Messaging.IEventPublisher? _eventPublisher;
     private readonly Talaria.Core.Abstractions.ITransport? _transport;
@@ -73,6 +76,9 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ILogger<DashboardHost> _logger;
     private WebApplication? _app;
     private int _port;
+
+    private readonly Agents.InitiativeApprovalService? _initiativeApprovals;
+    private readonly string? _mutationTokenFile;
 
     public DashboardHost(
         DashboardOptions options,
@@ -126,8 +132,15 @@ public sealed class DashboardHost : IAsyncDisposable
         Func<string, GitHubService?>? gitHubForProject = null,
         Forge.Agents.ProviderApiKeyResolver? providerApiKeys = null,
         Forge.Core.Messaging.IEventPublisher? eventPublisher = null,
-        Talaria.Core.Abstractions.ITransport? transport = null)
+        Talaria.Core.Abstractions.ITransport? transport = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null,
+        Core.Control.IDurableBudgetStore? budgetStore = null,
+        string? budgetDatasetId = null,
+        Agents.InitiativeApprovalService? initiativeApprovals = null,
+        string? mutationTokenFile = null)
     {
+        _mutationTokenFile = mutationTokenFile;
+        _initiativeApprovals = initiativeApprovals;
         _options = options;
         _headroom = headroom;
         _issues = issues;
@@ -177,6 +190,9 @@ public sealed class DashboardHost : IAsyncDisposable
         _lifecycle = lifecycle;
         _modelRateLimits = modelRateLimits;
         _gitHubForProject = gitHubForProject;
+        _hasActiveWorker = hasActiveWorker;
+        _budgetStore = budgetStore;
+        _budgetDatasetId = budgetDatasetId;
         _providerApiKeys = providerApiKeys;
         _eventPublisher = eventPublisher;
         _transport = transport;
@@ -232,7 +248,9 @@ public sealed class DashboardHost : IAsyncDisposable
         // entry; otherwise the legacy Hostname:Port wins.
         var publicBaseUrl = ResolveBaseUrl();
         var localBaseAddress = ResolveLocalBaseAddress();
-        builder.Services.AddForgeUI(new Uri(publicBaseUrl), new Uri(localBaseAddress));
+        var mutationAuthentication = _mutationTokenFile is null ? null
+            : new DashboardMutationAuthentication(await File.ReadAllTextAsync(_mutationTokenFile, cancellationToken));
+        builder.Services.AddForgeUI(new Uri(publicBaseUrl), new Uri(localBaseAddress), mutationAuthentication);
 
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);
@@ -290,6 +308,7 @@ public sealed class DashboardHost : IAsyncDisposable
         }
 
  _app = builder.Build();
+        mutationAuthentication?.Protect(_app);
         _app.Urls.Clear();
         // Kestrel already binds the configured endpoints via the
         // ConfigureKestrel calls above. Clearing Urls prevents the
@@ -441,7 +460,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             }
         });
 
-        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory);
+        DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory,
+            _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _sprintPropose?.Planning);
 
         if (_projectFactory is not null && _slots is not null)
         {
@@ -477,10 +497,10 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_intakeRegistry is not null)
         {
-            IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger);
+            IntakeEndpoints.MapIntakeEndpoints(_app, _intakeRegistry, _issues, _sprints, _intakeStore, _logger, _initiativeApprovals);
         }
 
-        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues);
+        SpecEndpoints.MapSpecEndpoints(_app, _specs, _extractorOverride ?? new NullSpecExtractionReader(), _logger, _intakeStore, _groomerFactory, _groomerRuns, _projectFactory, _issues, _initiativeApprovals, _eventPublisher, _designerRuns);
 
         if (_memory is not null)
         {
@@ -505,7 +525,8 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         if (_memory is not null)
         {
             GateEndpoints.MapGateEndpoints(_app,
-                new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _logger);
+                new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _logger,
+                _eventPublisher, _projectStore);
             RunGateCatalogEndpoints.MapRunGateCatalogEndpoints(_app, _gateOptions ?? new GateOptions(), _memory, _logger);
             WorkflowEndpoints.MapWorkflowEndpoints(_app, _memory, _bus, _logger);
         }
@@ -515,6 +536,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
             _memory, _projectFactory);
         NowEndpoints.MapNowEndpoints(_app, _issues, _specs, _sprints, _memory, _agentRuns, _projectFactory);
+        BudgetEndpoints.MapBudgetEndpoints(_app, _budgetStore, _budgetDatasetId, _logger);
         if (_agentRuns is not null)
         {
             AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory);
@@ -524,6 +546,9 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             _providerApiKeys);
         QueueEndpoints.MapQueueEndpoints(_app, _issues, _sprints, _projectFactory,
             _slots, _llmConfig, _roleModelOverrides, _modelRateLimits);
+        SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
+        var runningRevision = new RunningRevisionReader(_logger);
+        CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory, runningRevision.ReadAsync);
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)
@@ -573,10 +598,10 @@ if (_groomerRuns is not null)
 
             TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
                 _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
-                _lifecycle, _gitHubForProject);
+                _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker);
         }
 
-        _app.MapBuildInfoEndpoint();
+        _app.MapBuildInfoEndpoint(runningRevision);
 
         _app.MapGet("/api/agents", () =>
         {

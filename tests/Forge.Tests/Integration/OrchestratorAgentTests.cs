@@ -51,10 +51,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         Directory.CreateDirectory(_workDir);
         Directory.CreateDirectory(_dataRoot);
 
-        InitRepo(_workDir);
+        InitRepo(_workDir, Path.Combine(_dataRoot, "origin.git"));
 
         _dbPath = Path.Combine(_dataRoot, "issues.db");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"test");
         _projectStore = new ProjectStore(_issues);
 
         _worktrees = new GitWorktreeService(
@@ -97,36 +97,45 @@ public sealed class OrchestratorAgentTests : IDisposable
     /// the ACTIVE sprint. Tests that expect a dispatch must activate
     /// a sprint containing the task first.
     /// </summary>
+    private SprintScopeReference? _approvedScope;
+    private async Task BindApprovedTaskAsync(string id)
+    {
+        _approvedScope ??= await ApprovedSprintFixture.Scope(_issues);
+        var issue = (await _issues.GetAsync(id))!;
+        await _issues.MergePendingMetadataAsync(id,new Dictionary<string,object>{["groomed"]=true});
+        await ApprovedSprintFixture.Bind(_issues,_approvedScope,[issue]);
+    }
     private async Task<string> ActivateSprintWithAsync(params string[] issueIds)
     {
-        var sprint = await _bundle.Sprints.CreateAsync(new Core.NewSprint(
-            Name: "test sprint", Goal: "g",
-            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(1),
-            Status: Core.SprintStatus.Active));
-        foreach (var id in issueIds)
-        {
-            await _bundle.Sprints.AddIssueAsync(sprint.Id, id);
-            // The real assembler only adds groomed work; the dispatch
-            // loop refuses ungroomed parentless members (operator rule
-            // 2026-07-23/31). Mirror the invariant here.
-            var issue = await _issues.GetAsync(id);
-            if (issue is not null && issue.ParentIssueId is null
-                && issue.GetMetadata("groomed") is null)
-            {
-                var meta = new Dictionary<string, object>();
-                if (!string.IsNullOrWhiteSpace(issue.MetadataJson))
-                {
-                    using var doc = System.Text.Json.JsonDocument.Parse(issue.MetadataJson);
-                    foreach (var p in doc.RootElement.EnumerateObject())
-                    {
-                        meta[p.Name] = p.Value.GetRawText();
-                    }
-                }
-                meta["groomed"] = "true";
-                await _issues.TransitionAsync(id, issue.Status, error: null, metadata: meta);
-            }
-        }
-        return sprint.Id;
+        foreach (var id in issueIds) await BindApprovedTaskAsync(id);
+        var snapshot = await new SprintActivationValidator(_issues,_bundle.Sprints,new SpecStore(_issues),"test",null)
+            .ValidateAsync(issueIds,default);
+        return (await _bundle.Sprints.CreateWithIssuesAsync(new("test","test",DateTime.UtcNow,DateTime.UtcNow.AddDays(1)),snapshot)).Id;
+    }
+    private async Task AddApprovedMemberAsync(string sprintId,string id)
+    {
+        await BindApprovedTaskAsync(id);
+        var snapshot = await new SprintActivationValidator(_issues,_bundle.Sprints,new SpecStore(_issues),"test",null)
+            .ValidateAsync([id],default,activating:false);
+        await _bundle.Sprints.AddValidatedIssueAsync(sprintId,snapshot);
+    }
+    private async Task<Result> DispatchApprovedAsync(OrchestratorAgent orch,IssueRecord issue,CancellationToken ct)
+    {
+        if (await _bundle.Sprints.GetActiveAsync(ct) is not { } active) await ActivateSprintWithAsync(issue.Id);
+        else if (!(await _bundle.Sprints.GetIssueIdsAsync(active.Id,ct)).Contains(issue.Id)) await AddApprovedMemberAsync(active.Id,issue.Id);
+        return await orch.DispatchSingleTaskAsync((await _issues.GetAsync(issue.Id,ct))!,_bundle,ct);
+    }
+
+    [Fact]
+    public async Task LegacyActiveSprintCannotClaimOrRunWithoutApprovedOutcomeEvidence()
+    {
+        var task = await _issues.CreateAsync(new NewIssue("dev","Legacy task",Metadata:new Dictionary<string,object>{["groomed"]=true}));
+        var sprint = await _bundle.Sprints.CreateAsync(new("Legacy","Legacy",DateTime.UtcNow,DateTime.UtcNow.AddDays(1)));
+        await _bundle.Sprints.AddIssueAsync(sprint.Id,task.Id);
+        var result = await BuildOrchestrator(new ScriptedRunner("must not execute")).DispatchSingleTaskAsync(task,_bundle,default);
+        Assert.False(result.Success); Assert.Contains("scope-gap",result.Message);
+        Assert.Equal(IssueStatus.Pending,(await _issues.GetAsync(task.Id))!.Status);
+        Assert.Null((await _issues.GetAsync(task.Id))!.DispatchCheckpoint);
     }
 
     public void Dispose()
@@ -136,19 +145,19 @@ public sealed class OrchestratorAgentTests : IDisposable
         try { Directory.Delete(_dataRoot, recursive: true); } catch { }
     }
 
-    private Forge.Orchestrator.WatchSweepService BuildSweepService(IAgentRunner runner)
+    private Forge.Orchestrator.WatchSweepService BuildSweepService(IAgentRunner runner, TaskStateMachine? lifecycle = null)
         => new Forge.Orchestrator.WatchSweepService(
             runner,
             llmConfig: null,
             modelOverrides: null,
             new Core.ModelRateLimitTracker(),
-            lifecycle: null,
+            lifecycle: lifecycle,
             workflow: null,
             _events,
             NullLoggerFactory.Instance,
             NullLogger<Forge.Orchestrator.WatchSweepService>.Instance);
 
-    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null)
+    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null, WakeupSignal? wakeup = null)
         => new OrchestratorAgent(
             _projectStore,
             new StubBundleFactory(_bundle),
@@ -160,7 +169,7 @@ public sealed class OrchestratorAgentTests : IDisposable
                 NullLogger<InProcessDispatcher>.Instance),
             _events,
             NullLogger<OrchestratorAgent>.Instance,
-            slots: slots);
+            slots: slots, wakeup: wakeup);
 
     private async Task RunWorkflowInProcess(IAgentRunner runner, IssueRecord issue, CancellationToken ct)
     {
@@ -258,7 +267,7 @@ public sealed class OrchestratorAgentTests : IDisposable
             Type: DevTaskType, Title: "escalated work", Description: "x"));
         await markers.WriteAsync("test", issue.Id, "capability-bound: sound plans rejected");
 
-        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        var result = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
 
         Assert.True(result.Success, $"expected success, got: {result.Message}");
         // Single-shot: the marker is gone after ONE dispatch.
@@ -284,7 +293,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(
             Type: DevTaskType, Title: "escalated then normal", Description: "x"));
         await markers.WriteAsync("test", issue.Id, "first run escalated");
-        var first = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        var first = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
         Assert.True(first.Success, $"first dispatch: {first.Message}");
 
         // Requeue without a marker: the next dispatch must run NORMAL
@@ -292,7 +301,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null,
             new Dictionary<string, object> { ["reworkForSha"] = null! });
         var requeued = (await _issues.GetAsync(issue.Id))!;
-        var second = await orch.DispatchSingleTaskAsync(requeued, _bundle, CancellationToken.None);
+        var second = await DispatchApprovedAsync(orch, requeued, CancellationToken.None);
         Assert.True(second.Success, $"second dispatch: {second.Message}");
         var after = (await _issues.GetAsync(issue.Id))!;
         Assert.Null(after.GetMetadata("modelEscalated"));
@@ -312,16 +321,15 @@ public sealed class OrchestratorAgentTests : IDisposable
         BindMafWithEscalation(orch, markers);
 
         var issue = await _issues.CreateAsync(new NewIssue(
-            Type: DevTaskType, Title: "completed before dispatch", Description: "x"));
-        var first = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
-        Assert.True(first.Success, $"setup dispatch: {first.Message}");
-        var completed = (await _issues.GetAsync(issue.Id))!;
-        Assert.Equal(IssueStatus.Completed, completed.Status);
+            Type: DevTaskType, Title: "operator closed before dispatch", Description: "x"));
+        await ActivateSprintWithAsync(issue.Id);
+        var completed = await _issues.TransitionAsync(issue.Id, IssueStatus.Closed, "operator closed before claim");
+        Assert.Equal(IssueStatus.Closed, completed.Status);
 
         // The escalation lands AFTER the task is already terminal;
         // the late dispatch is refused at the claim.
         await markers.WriteAsync("test", issue.Id, "escalate");
-        var result = await orch.DispatchSingleTaskAsync(completed, _bundle, CancellationToken.None);
+        var result = await DispatchApprovedAsync(orch, completed, CancellationToken.None);
 
         Assert.False(result.Success);
         Assert.Equal("already-claimed", result.Message);
@@ -389,10 +397,11 @@ public sealed class OrchestratorAgentTests : IDisposable
         // premium model's quota problem must not cool the normal one,
         // and a later escalated task waits on the escalated cooldown.
         var runner = new EscalatedOnlyRateLimitedRunner();
+        var slots = new Forge.Orchestrator.Slots.SlotTable();
         var markers = BuildMarkers();
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
-        var orch = BuildOrchestrator(runner);
+        var orch = BuildOrchestrator(runner, slots);
         BindMafWithEscalation(orch, markers);
 
         var esc = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-429", Description: "x"));
@@ -409,20 +418,30 @@ public sealed class OrchestratorAgentTests : IDisposable
         // model — it claims immediately on the normal model.
         var normal = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "normal", Description: "x",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        await _bundle.Sprints.AddIssueAsync(sprintId, normal.Id);
+        await AddApprovedMemberAsync(sprintId, normal.Id);
         await WaitForAsync(async () =>
         {
             if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            return (await _issues.GetAsync(normal.Id))!.Status is IssueStatus.InProgress or IssueStatus.Completed;
+            // Amendment snapshots include current members. Wait for the normal run's
+            // final metadata writes and slot release instead of racing its InProgress row.
+            var normalAfter = (await _issues.GetAsync(normal.Id))!;
+            // The scripted no-op has no independent acceptance proof. Its bounded
+            // no-progress outcome still proves the normal model was not cooled.
+            return normalAfter.Status != IssueStatus.InProgress && normalAfter.GetMetadata("noProgressAttempts") is not null
+                && normalAfter.GetMetadata("modelResponse") is not null && slots.InFlight("test", "coredev") == 0;
         }, TimeSpan.FromSeconds(15));
+
+        // Keep this test about model cooldown, not subsequent no-progress retries.
+        await _issues.TransitionAsync(normal.Id, IssueStatus.Blocked, "fixture operator parks unverified no-op");
 
         // A SECOND escalated task is held by the escalated-model
         // cooldown (the marker is still unconsumed, so its cooldown
         // key is the escalated model).
         var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-waits", Description: "x",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        await _bundle.Sprints.AddIssueAsync(sprintId, esc2.Id);
+        // Install the routing marker before membership admission can wake dispatch.
         await markers.WriteAsync("test", esc2.Id, "escalate 2");
+        await AddApprovedMemberAsync(sprintId, esc2.Id);
         await Task.Delay(2500);
         Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
 
@@ -486,7 +505,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         // per-model lets it claim immediately.
         var ui = await _issues.CreateAsync(new NewIssue(Type: "ui", Title: "ui task", Description: "x",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        await _bundle.Sprints.AddIssueAsync(sprintId, ui.Id);
+        await AddApprovedMemberAsync(sprintId, ui.Id);
 
         await WaitForAsync(async () =>
         {
@@ -516,6 +535,31 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task DispatchSingleTask_FreshDataset_StampsIsolatedBranchBeforeWorkflow()
+    {
+        var orch = BuildOrchestrator(new ScriptedRunner("NO_CHANGES_NEEDED"));
+        BindMaf(orch);
+        orch.BindOptions(new AgentOptions { Controller = new ControllerOptions { Enabled = true, DatasetId = "fresh-dataset" } });
+        var issue = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "Fresh task"));
+
+        var result = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        var after = (await _issues.GetAsync(issue.Id))!;
+        var branch = DispatchBranch.Resolve(null, "fresh-dataset", _bundle.Project.Id, issue.Id);
+        Assert.Equal(branch, after.GetMetadata("branch"));
+        Assert.Equal(branch, RunGitCaptureSha(after.GetMetadata("worktreePath")!, "branch --show-current"));
+    }
+
+    [Fact]
+    public void DistributedDispatch_RejectsMissingDatasetAtOptionsBinding()
+    {
+        var orch = BuildOrchestrator(new ScriptedRunner("NO_CHANGES_NEEDED"));
+        Assert.Throws<InvalidOperationException>(() => orch.BindOptions(
+            new AgentOptions { Controller = new ControllerOptions { Enabled = true } }));
+    }
+
+    [Fact]
     public async Task DispatchSingleTask_MafPath_NoOpBranch_CapturesModelResponse()
     {
         const string scripted = "I'll add a feature but make no edits. NO_CHANGES_NEEDED";
@@ -525,11 +569,12 @@ public sealed class OrchestratorAgentTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(
             Type: DevTaskType, Title: "Add a feature", Description: "Please do the thing"));
 
-        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        var result = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
 
         Assert.True(result.Success, $"expected success, got: {result.Message}");
         var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
-        Assert.Equal(IssueStatus.Completed, after.Status);
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
         Assert.Equal(scripted, after.GetMetadata("modelResponse"));
     }
 
@@ -552,11 +597,12 @@ public sealed class OrchestratorAgentTests : IDisposable
                 ["lastErrorAt"] = DateTimeOffset.UtcNow.AddHours(-6).ToString("O"),
             }));
 
-        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        var result = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
 
         Assert.True(result.Success, $"expected success, got: {result.Message}");
         var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
-        Assert.Equal(IssueStatus.Completed, after.Status);
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
         Assert.True(string.IsNullOrEmpty(after.GetMetadata("lastError")));
     }
 
@@ -569,11 +615,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(
             Type: DevTaskType, Title: "x", Description: "y"));
 
-        var first = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
-        Assert.True(first.Success);
-
-        var issueRefresh = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
-        var second = await orch.DispatchSingleTaskAsync(issueRefresh, _bundle, CancellationToken.None);
+        await ActivateSprintWithAsync(issue.Id);
+        var claimed = await _issues.ClaimAsync(issue.Id, "another-worker");
+        Assert.NotNull(claimed);
+        var second = await DispatchApprovedAsync(orch, claimed!, CancellationToken.None);
         Assert.False(second.Success);
         Assert.Equal("already-claimed", second.Message);
     }
@@ -590,7 +635,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(
             Type: DevTaskType, Title: "x", Description: "y"));
 
-        await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        await DispatchApprovedAsync(orch, issue, CancellationToken.None);
 
         Assert.NotNull(capture.LastPrompt);
         Assert.Contains("Don't forget the README.", capture.LastPrompt!, StringComparison.Ordinal);
@@ -719,6 +764,30 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task DispatchCycle_UngroomedPrerequisiteMember_DoesNotRun()
+    {
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        var runner = new CapturingRunner("ok. NO_CHANGES_NEEDED");
+        var orch = BuildOrchestrator(runner);
+        BindMaf(orch);
+        var current = await _issues.CreateAsync(new NewIssue(DevTaskType, "current work"));
+        var sprintId = await ActivateSprintWithAsync(current.Id);
+        var prerequisite = await _issues.CreateAsync(new NewIssue(DevTaskType, "ungroomed actual blocker", Priority: 1));
+        await _issues.AddDependencyAsync(prerequisite.Id, current.Id, IssueDepKind.Blocks);
+        // FollowUpTool can attach a genuine blocker at birth for visibility;
+        // membership and urgency must not bypass the dispatch grooming guard.
+        await _bundle.Sprints.AddIssueAsync(sprintId, prerequisite.Id);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        try { await orch.ExecuteAsync(cts.Token); }
+        catch (OperationCanceledException) { /* bounded observation */ }
+        Assert.Null(runner.LastPrompt);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(prerequisite.Id))!.Status);
+        Assert.Null((await _issues.GetAsync(prerequisite.Id))!.Assignee);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(current.Id))!.Status);
+    }
+
+    [Fact]
     public async Task DispatchCycle_TaskOutsideActiveSprint_StaysPending()
     {
         // Sprint flow: with a sprint active, only its members
@@ -748,7 +817,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.Null(outAfter.Assignee);
     }
 
-    private static void InitRepo(string path)
+    private static void InitRepo(string path, string originPath)
     {
         RunGit(path, "init", "-q -b main");
         RunGit(path, "config", "user.email a@b");
@@ -756,9 +825,17 @@ public sealed class OrchestratorAgentTests : IDisposable
         File.WriteAllText(Path.Combine(path, "README.md"), "# Test\n");
         RunGit(path, "add", "README.md");
         RunGit(path, "commit", "-q -m initial");
+        // A real local remote exercises fresh-fetch admission without network access.
+        // Keep it inside the existing fixture data directory for normal cleanup.
+        RunGitArguments(path, "init", "-q", "--bare", originPath);
+        RunGitArguments(path, "remote", "add", "origin", originPath);
+        RunGit(path, "push", "-u origin main");
     }
 
     private static void RunGit(string cwd, string verb, string args)
+        => RunGitArguments(cwd, [verb, .. args.Split(' ')]);
+
+    private static void RunGitArguments(string cwd, params string[] arguments)
     {
         var psi = new ProcessStartInfo
         {
@@ -770,14 +847,76 @@ public sealed class OrchestratorAgentTests : IDisposable
             CreateNoWindow = true,
         };
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
-        psi.ArgumentList.Add(verb);
-        foreach (var part in args.Split(' ')) psi.ArgumentList.Add(part);
+        foreach (var argument in arguments) psi.ArgumentList.Add(argument);
         using var p = Process.Start(psi)!;
         p.WaitForExit(60_000);
         if (p.ExitCode != 0)
         {
             var err = p.StandardError.ReadToEnd();
-            throw new InvalidOperationException($"git {verb} {args} (cwd={cwd}) failed: {err}");
+            throw new InvalidOperationException($"git {string.Join(' ', arguments)} (cwd={cwd}) failed: {err}");
+        }
+    }
+
+    [Fact]
+    public async Task DispatchCycle_InadmissibleFirstBlockerCannotStarveSingleRoleSlotOrSelfWake()
+    {
+        await _projectStore.UpsertAsync(new NewProject("test", "Test", _workDir, "main"));
+        _bundle.Project.Roles["coredev"] = 1;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runner = new RecordingBlockingRunner(gate);
+        var slots = new Forge.Orchestrator.Slots.SlotTable();
+        var wakeup = new WakeupSignal();
+        var orch = BuildOrchestrator(runner, slots, wakeup);
+        BindMaf(orch);
+        var eligible = await _issues.CreateAsync(new NewIssue("dev", "Eligible implementation"));
+        var blockedMember = await _issues.CreateAsync(new NewIssue("client", "Blocked sibling"));
+        var sprint = await ActivateSprintWithAsync(eligible.Id, blockedMember.Id);
+        var visibility = await _issues.CreateAsync(new NewIssue("dev", "Unplanned prerequisite", Metadata:
+            new Dictionary<string, object> { ["groomed"] = true }));
+        await _issues.AddDependencyAsync(visibility.Id, blockedMember.Id, IssueDepKind.Blocks);
+        await _bundle.Sprints.AddIssueAsync(sprint, visibility.Id);
+        var ready = await _issues.ReadyAsync(0);
+        Assert.True(ready.ToList().FindIndex(x => x.Id == visibility.Id) < ready.ToList().FindIndex(x => x.Id == eligible.Id));
+
+        // Invoke one real cycle; leave the eligible run blocked so slot accounting
+        // and the absence of an ineligible-dispatch completion signal are observable.
+        var cycle = typeof(OrchestratorAgent).GetMethod("DispatchCycleAsync",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            await (Task)cycle.Invoke(orch, [stop.Token])!;
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(eligible.Id, runner.TaskId);
+            Assert.Equal(1, slots.InFlight("test", "coredev"));
+            Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(visibility.Id))!.Status);
+            Assert.Null((await _issues.GetAsync(visibility.Id))!.DispatchCheckpoint);
+            Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(blockedMember.Id))!.Status);
+            using var noWake = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await wakeup.WaitAsync(noWake.Token));
+        }
+        finally
+        {
+            gate.TrySetResult();
+            await WaitForAsync(() => Task.FromResult(slots.InFlight("test", "coredev") == 0), TimeSpan.FromSeconds(10));
+        }
+        Assert.Equal(1, runner.Calls);
+        Assert.Equal(0, slots.InFlight("test", "coredev"));
+    }
+
+    private sealed class RecordingBlockingRunner(TaskCompletionSource gate) : IAgentRunner
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string? TaskId { get; private set; }
+        public int Calls { get; private set; }
+        public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            Calls++;
+            TaskId = context!["issueId"].ToString();
+            Started.TrySetResult();
+            await gate.Task.WaitAsync(ct);
+            return new("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1));
         }
     }
 
@@ -984,10 +1123,6 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         // Set up a remote with a PR branch that matches the dispatch convention.
         var taskId = issue.Id; // The workflow branch will be "agent/{issue.Id}"
-        var bareDir = Path.Combine(Path.GetTempPath(), "ph-orch-remote-" + Guid.NewGuid().ToString("N"));
-        RunGit(Path.GetTempPath(), "init", "-q --bare " + bareDir);
-        RunGit(_workDir, "remote", "add origin " + bareDir);
-        RunGit(_workDir, "push", "-u origin main");
         var branch = "agent/" + taskId;
         RunGit(_workDir, "checkout", "-b " + branch);
         File.WriteAllText(Path.Combine(_workDir, "rework-content.txt"), "from-remote-pr-head");
@@ -1001,6 +1136,11 @@ public sealed class OrchestratorAgentTests : IDisposable
         var mainSha = RunGitCaptureSha(_workDir, "rev-parse main");
         Assert.NotEqual(remoteSha, mainSha);
 
+        // A rework round has a prior checkout; creating a new worktree must
+        // not reset an existing task branch. Seed that prior round at main.
+        var priorWorktree = await _worktrees.CreateAsync(taskId, "main", branchOverride: branch);
+        Assert.Equal(mainSha, RunGitCaptureSha(priorWorktree, "rev-parse HEAD"));
+
         // Now set the rework metadata on the issue.
         await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null, new Dictionary<string, object>
         {
@@ -1009,7 +1149,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         });
 
         // Dispatch.
-        var result = await orch.DispatchSingleTaskAsync(issue, _bundle, CancellationToken.None);
+        var result = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
         Assert.True(result.Success, $"expected success, got: {result.Message}");
 
         // Verify: after the workflow completes, the worktree
@@ -1057,6 +1197,51 @@ public sealed class OrchestratorAgentTests : IDisposable
             await _gate.Task;
             return new AgentRunResult("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1));
         }
+    }
+
+    [Fact]
+    public async Task ExhaustedRetry_PreservesDirtyWorktreeForOperatorRequeue()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "preserve failed work"));
+        var path = await _worktrees.CreateAsync(issue.Id, "main", CancellationToken.None);
+        var edited = Path.Combine(path, "unfinished.cs");
+        await File.WriteAllTextAsync(edited, "// useful local work awaiting verification");
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null,
+            new Dictionary<string, object> { ["retryCount"] = 1, ["worktreePath"] = path });
+        var pending = (await _issues.GetAsync(issue.Id))!;
+
+        var result = await DispatchApprovedAsync(BuildOrchestrator(new BudgetDeniedRunner()), pending, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(issue.Id))!.Status);
+        Assert.True(Directory.Exists(path), "Exhausted retries must not delete recoverable local work.");
+        Assert.Equal("// useful local work awaiting verification", await File.ReadAllTextAsync(edited));
+    }
+
+    [Fact]
+    public async Task WatchFastPath_ReconcilesPublishedLegacyRunBeforeReviewDeduplication()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue("dev", "published legacy run",
+            Metadata: new Dictionary<string, object>
+            {
+                ["state"] = "AgentRunning", ["prNumber"] = 124,
+                ["reviewStartedAt"] = DateTime.UtcNow.ToString("O")
+            }));
+        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, null);
+        await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened);
+        var sweep = BuildSweepService(new BudgetDeniedRunner(), new TaskStateMachine(true, NullLogger.Instance));
+        await sweep.TryLaunchBackgroundReviewAsync(issue, _bundle, default);
+        var after = (await _issues.GetAsync(issue.Id))!;
+        Assert.Equal("PROpen", after.GetMetadata("state"));
+        Assert.Equal("RunCompletedDiff", after.GetMetadata("lastEvent"));
+        Assert.Null(after.GetMetadata("stateViolation"));
+    }
+
+    private sealed class BudgetDeniedRunner : IAgentRunner
+    {
+        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+            => throw new InvalidOperationException("Model request denied by durable budget admission: budget_exhausted");
     }
 
     private sealed class ScriptedRunner : IAgentRunner

@@ -60,6 +60,21 @@ else if (_working is not null)
         }
     </div>
 
+    <div class="card">
+        <strong>Routine deployment</strong>
+        <p class="page-subtitle">Hold prevents a qualified release from starting. A release already running continues to a safe result. This gate is independent of workflow step attachments.</p>
+        @if (_gateStates.TryGetValue("deploy", out var deploymentGate))
+        {
+            var deploymentHeld = deploymentGate == "hold";
+            <span class="pill @(deploymentHeld ? "pill--warn" : "pill--outline")">@(deploymentHeld ? "Held" : "Open")</span>
+            <button class="btn" disabled="@_busy" @onclick="@(() => ToggleGateHoldAsync("deploy", deploymentHeld))">@(deploymentHeld ? "Release deployment" : "Hold deployment")</button>
+        }
+        else
+        {
+            <span class="page-subtitle">Deployment gate status is unavailable. Reload before changing it.</span>
+        }
+    </div>
+
     @if (_error is not null)
     {
         <div class="banner banner--error">@_error</div>

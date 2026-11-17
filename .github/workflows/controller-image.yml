@@ -1,0 +1,111 @@
+name: Build immutable Forge controller image
+
+on:
+  push:
+    branches: [main, codex/forge-first-k3s]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Reviewed commit or branch to package
+        required: true
+        default: main
+      sdk_image:
+        description: Pinned .NET 10 SDK image (registry/name@sha256:digest)
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Resolve immutable build inputs
+        id: inputs
+        env:
+          SDK_IMAGE: ${{ inputs.sdk_image || vars.FORGE_SDK_IMAGE }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          value = os.environ['SDK_IMAGE']
+          if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}', value):
+              raise SystemExit('SDK image must be digest pinned')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('image=ghcr.io/' + os.environ['REPOSITORY'].lower() + '\n')
+              output.write('sdk=' + value + '\n')
+          PY
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Test release protocol
+        run: python3 -m unittest discover -s tests/deployment -v
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare build-only NuGet credential file
+        env:
+          PACKAGES_USER: ${{ github.actor }}
+          PACKAGES_PAT: ${{ secrets.PACKAGES_PAT }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, xml.etree.ElementTree as ET
+          if not os.environ['PACKAGES_PAT']:
+              raise SystemExit('PACKAGES_PAT is required for private Talaria dependencies')
+          root = ET.parse('nuget.config')
+          for item in root.findall('.//github-xyrces/add'):
+              if item.attrib['key'] == 'Username': item.set('value', os.environ['PACKAGES_USER'])
+              if item.attrib['key'] == 'ClearTextPassword': item.set('value', os.environ['PACKAGES_PAT'])
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'forge-nuget.config'
+          root.write(path, encoding='utf-8', xml_declaration=True)
+          path.chmod(0o600)
+          PY
+      - name: Build and publish exact source image
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/k3s/Dockerfile
+          platforms: linux/amd64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ steps.inputs.outputs.image }}:sha-${{ steps.inputs.outputs.sha }}
+          build-args: |
+            SDK_IMAGE=${{ steps.inputs.outputs.sdk }}
+            SOURCE_REVISION=${{ steps.inputs.outputs.sha }}
+          secret-files: |
+            nuget_config=${{ runner.temp }}/forge-nuget.config
+      - name: Record immutable deployment input
+        env:
+          IMAGE: ${{ steps.inputs.outputs.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          SOURCE: ${{ steps.inputs.outputs.sha }}
+        run: |
+          printf 'Source: `%s`\n\nImage: `%s@%s`\n' "$SOURCE" "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          schema = int(re.search(r'CurrentSchemaVersion\s*=\s*(\d+)', pathlib.Path('Core/IssueStore.cs').read_text()).group(1))
+          with open('forge-image-receipt.json', 'w') as receipt:
+              json.dump({'sourceSha': os.environ['SOURCE'], 'imageDigest': os.environ['IMAGE'] + '@' + os.environ['DIGEST'],
+                         'buildPassed': True, 'testPassed': True, 'schemaVersion': schema,
+                         'workflow': 'controller-image.yml', 'workflowRunId': os.environ['GITHUB_RUN_ID']}, receipt)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forge-image-receipt
+          path: forge-image-receipt.json
+      - name: Remove build credential file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/forge-nuget.config"

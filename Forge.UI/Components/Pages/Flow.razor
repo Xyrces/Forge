@@ -1,3 +1,5 @@
+@using Forge.Dashboard.Services
+@inject ILogger<Flow> Logger
 @page "/flow"
 @inject HttpClient Http
 @inject NavigationManager Nav
@@ -13,7 +15,7 @@
         <div class="page-header__meta">
             @if (_fleet is not null && !EditMode)
             {
-                <span>@_fleet.Nodes.Sum(n => n.Count) items in flight · refreshed @_lastFetch?.ToString("HH:mm:ss")</span>
+                <span>@_fleet.Activity.InFlight active tasks · @_fleet.Activity.Completed completed · @_fleet.Activity.Closed closed · refreshed @_lastFetch?.ToString("HH:mm:ss")</span>
             }
         </div>
         <div class="page-header__actions">
@@ -325,21 +327,26 @@
 
     private async Task LoadRepoUrlAsync()
     {
+        var projectId = ShellStore.Value.CurrentProjectId;
+        _repoUrl = null;
+        if (string.IsNullOrEmpty(projectId)) return;
         try
         {
-            using var doc = await Http.GetFromJsonAsync<System.Text.Json.JsonDocument>("/api/projects/");
-            var first = doc?.RootElement.EnumerateArray().FirstOrDefault();
-            if (first is { } p && p.TryGetProperty("repoUrl", out var ru))
+            var projects = await Http.GetFromJsonAsync<System.Text.Json.JsonElement>("/api/projects/");
+            if (projectId == ShellStore.Value.CurrentProjectId)
             {
-                _repoUrl = ru.GetString()?.TrimEnd('/');
+                _repoUrl = RepositoryLinks.ForProject(projects, projectId);
+                StateHasChanged();
             }
         }
-        catch { /* PR links degrade to plain text */ }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Repository links could not be loaded for {ProjectId}", projectId);
+            if (projectId == ShellStore.Value.CurrentProjectId) _repoUrl = null;
+        }
     }
 
-    private string? PrUrl(string prNumber)
-        => _repoUrl is not null && int.TryParse(prNumber, out var n)
-            ? $"{_repoUrl}/pull/{n}" : null;
+    private string? PrUrl(string prNumber) => RepositoryLinks.PullRequest(_repoUrl, prNumber);
 
     private void ToggleVisit(int idx)
         => _expandedVisit = _expandedVisit == idx ? null : idx;
@@ -382,6 +389,7 @@
                 _fleet = null;
                 _journey = null;
                 _fleetProject = ShellStore.Value.CurrentProjectId;
+                await LoadRepoUrlAsync();
             }
             _fleet = await Http.GetFromJsonAsync<FleetDto>("/api/flow" + LensQuery);
             _lastFetch = DateTime.Now;
@@ -499,7 +507,8 @@
 
     private sealed record FleetDto(
         string[] Lanes, List<NodeDto> Nodes, List<EdgeDto> Edges, string? ActiveSprintId,
-        List<IssueSampleDto> AllIssues, LayoutPayload? Layout, Dictionary<string, bool>? GateStates);
+        List<IssueSampleDto> AllIssues, LayoutPayload? Layout, Dictionary<string, bool>? GateStates, ActivityDto Activity);
+    private sealed record ActivityDto(int InFlight, int Completed, int Closed);
     private sealed class LayoutPayload
     {
         public double Width { get; set; }

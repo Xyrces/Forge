@@ -215,9 +215,7 @@ public class OpenAICompatibleChatClientFactoryTests
     [Fact]
     public void Create_CachesByProviderAndModel()
     {
-        // Two calls with the same provider+model should return the same
-        // cached client instance; calls with different models should
-        // return different instances.
+        // Sessions own separate wrappers but borrow the same cached transport.
         var provider = new ProviderConfig(
             Name: LlmProviders.KiloGateway,
             BaseUrl: "http://127.0.0.1:4096",
@@ -229,13 +227,14 @@ public class OpenAICompatibleChatClientFactoryTests
 
         var client1 = factory.Create(configA, AgentType.CoreDev);
         var client2 = factory.Create(configA, AgentType.CoreDev);
-        Assert.Same(client1, client2);
+        Assert.NotSame(client1, client2);
+        Assert.Same(client1.GetService(typeof(OpenAI.Chat.ChatClient)), client2.GetService(typeof(OpenAI.Chat.ChatClient)));
 
         // Different default model -> different cache key.
         var providerB = provider with { DefaultModel = "model-b" };
         var configB = new LlmConfig(providerB);
         var client3 = factory.Create(configB, AgentType.CoreDev);
-        Assert.NotSame(client1, client3);
+        Assert.NotSame(client1.GetService(typeof(OpenAI.Chat.ChatClient)), client3.GetService(typeof(OpenAI.Chat.ChatClient)));
     }
 
     [Fact]

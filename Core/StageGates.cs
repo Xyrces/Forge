@@ -21,7 +21,8 @@ public sealed class StageGates
     public const string Groom = "groom";
     public const string Sprint = "sprint";
     public const string Merge = "merge";
-    public static readonly string[] All = { Design, Groom, Sprint, Merge };
+    public const string Deploy = "deploy";
+    public static readonly string[] All = { Design, Groom, Sprint, Merge, Deploy };
 
     private const string HoldValue = "hold";
     private const string OpenValue = "open";
@@ -46,7 +47,7 @@ public sealed class StageGates
         // DISABLED — holds on it have no effect. The built-in default
         // attaches every gate at its current step, so default
         // behavior is unchanged.
-        if (_workflow is not null)
+        if (_workflow is not null && stage != Deploy)
         {
             var definition = await _workflow.ResolveAsync(ct);
             var attached = definition.Steps.Any(s => s.Enabled

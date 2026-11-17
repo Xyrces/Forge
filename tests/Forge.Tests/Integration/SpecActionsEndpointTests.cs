@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using Microsoft.AspNetCore.Builder;
@@ -72,7 +72,25 @@ public class SpecActionsEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task Actions_DesignedSpec_GroomEnabled()
+    public async Task Actions_ReadyForDesign_ExplainsAutomaticStepAndPossibleHoldWithoutEnablingManualAction()
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(
+            ProjectId: "proj-1", Title: "Test", Body: "Body"), default);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign, default);
+
+        var body = await _client.GetFromJsonAsync<ActionsShape>($"/api/specs/{spec.Id}/actions");
+
+        Assert.NotNull(body);
+        Assert.False(body.CanApprove);
+        Assert.False(body.CanStartGrooming);
+        Assert.False(body.CanShip);
+        Assert.Contains("Ready for automatic design", body.Reason);
+        Assert.Contains("held Design stage pauses", body.Reason);
+        Assert.Contains("does not mean the Designer is running", body.Reason);
+    }
+
+    [Fact]
+    public async Task Actions_DesignedSpec_WaitsForAssets()
     {
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "proj-1", Title: "Test", Body: "Body"), default);
@@ -82,11 +100,12 @@ public class SpecActionsEndpointTests : IDisposable
         var resp = await _client.GetAsync($"/api/specs/{spec.Id}/actions");
         var body = await resp.Content.ReadFromJsonAsync<ActionsShape>();
         Assert.False(body!.CanApprove);
-        Assert.True(body.CanStartGrooming);
+        Assert.False(body.CanStartGrooming);
+        Assert.Contains("Asset preparation is the next automatic step", body.Reason);
     }
 
     [Fact]
-    public async Task Actions_GroomedSpec_ShipEnabled()
+    public async Task Actions_GroomedSpecWithPendingWork_CannotClaimDelivery()
     {
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "proj-1", Title: "Test", Body: "Body"), default);
@@ -97,7 +116,14 @@ public class SpecActionsEndpointTests : IDisposable
 
         var resp = await _client.GetAsync($"/api/specs/{spec.Id}/actions");
         var body = await resp.Content.ReadFromJsonAsync<ActionsShape>();
-        Assert.True(body!.CanShip);
+        Assert.False(body!.CanShip);
+        var task = await _issues.CreateAsync(new("task", "Unfinished implementation", ParentId: spec.Id));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _specs.SetStatusAsync(spec.Id, SpecStatus.Shipped));
+        using var denied = await _client.PatchAsJsonAsync($"/api/specs/{spec.Id}", new { op = "set_status", status = "Shipped" });
+        Assert.Equal(HttpStatusCode.Conflict, denied.StatusCode);
+        Assert.Contains("delivery_evidence_required", await denied.Content.ReadAsStringAsync());
+        Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(spec.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(task.Id))!.Status);
     }
 
     [Fact]

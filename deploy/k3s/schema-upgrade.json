@@ -1,0 +1,5 @@
+{
+  "fromVersion": 41,
+  "toVersion": 42,
+  "rollbackImage": "ghcr.io/xyrces/forge@sha256:2aaee461fc8ce4aa97516ad2c8c576500a6fc5f448022ee19fbc06b728fe8508"
+}

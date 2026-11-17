@@ -20,8 +20,13 @@ namespace Forge.Dashboard;
 
 public static class UIExtensions
 {
-    public static IServiceCollection AddForgeUI(this IServiceCollection services, Uri publicBaseAddress, Uri localBaseAddress)
+    public static IServiceCollection AddForgeUI(this IServiceCollection services, Uri publicBaseAddress, Uri localBaseAddress,
+        DashboardMutationAuthentication? mutationAuthentication = null)
     {
+        if (mutationAuthentication is not null)
+            services.ConfigureAll<Microsoft.Extensions.Http.HttpClientFactoryOptions>(options =>
+                options.HttpMessageHandlerBuilderActions.Add(builder =>
+                    builder.AdditionalHandlers.Add(mutationAuthentication.CreateHandler(localBaseAddress))));
         var uiAssembly = typeof(App).Assembly;
         services.AddRazorComponents()
             .AddInteractiveServerComponents();

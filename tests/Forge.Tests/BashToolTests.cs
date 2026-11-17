@@ -99,13 +99,10 @@ public class BashToolTests : IDisposable
     {
         var tool = new BashTool(_cwd, defaultTimeout: TimeSpan.FromSeconds(2),
             logger: NullLogger<BashTool>.Instance);
-        // P4 CI: `ping -n 10 127.0.0.1` is Windows-only. Use the
-        // cross-platform equivalent: `ping 127.0.0.1 -c 10` (Linux)
-        // or `ping -n 10 127.0.0.1` (Windows). Both run for ~10s
-        // and timeout in 2s.
+        // POSIX sleep needs no network utility in a minimal worker image.
         var cmd = OperatingSystem.IsWindows()
             ? "ping -n 10 127.0.0.1"
-            : "ping 127.0.0.1 -c 10";
+            : "sleep 10";
         var result = await tool.Bash(cmd, timeoutSeconds: 2);
         Assert.Contains("exit=-1", result);
         Assert.Contains("timed out", result);
@@ -132,9 +129,11 @@ public class BashToolTests : IDisposable
             ["FORGE_SECRET_TEST_KEY"] = "s3cret-value",
         };
         var tool = new BashTool(_cwd, logger: NullLogger<BashTool>.Instance, envVars: env);
-        var result = await tool.Bash("echo ref=$FORGE_SECRET_TEST_KEY");
+        var result = await tool.Bash("test \"$FORGE_SECRET_TEST_KEY\" = 's3cret-value' && echo injected; echo ref=$FORGE_SECRET_TEST_KEY");
         Assert.Contains("exit=0", result);
-        Assert.Contains("ref=s3cret-value", result);
+        Assert.Contains("injected", result);
+        Assert.Contains("ref=[REDACTED]", result);
+        Assert.DoesNotContain("s3cret-value", result);
     }
 
     [Fact]

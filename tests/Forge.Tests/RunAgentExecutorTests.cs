@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Forge.AgentTools;
@@ -31,6 +31,12 @@ public class RunAgentExecutorTests : IDisposable
         _workDir = TempRoot.Instance.NewDirectory("rae");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
+        // Fresh engineering checkout must fetch a real local remote before any agent work.
+        var bareDir = Path.Combine(_workDir, ".portHorizon", "remote.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(bareDir)!);
+        File.AppendAllText(Path.Combine(_workDir, ".git", "info", "exclude"), "\n/.portHorizon/\n");
+        Run("git", $"clone -q --bare \"{_workDir}\" \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
         _worktrees = new GitWorktreeService(
             new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
@@ -67,7 +73,10 @@ public class RunAgentExecutorTests : IDisposable
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
+        Assert.True(p.ExitCode == 0, $"Fixture command failed: {exe} {args}\n{stdout}\n{stderr}");
     }
 
     private static IAgentRunner RunnerWithScriptedClient()
@@ -172,14 +181,16 @@ public class RunAgentExecutorTests : IDisposable
                 timeoutMinutes: 0.02);
         });
 
-        // After the timeout, the issue should be Pending (for retry)
+        // The orchestrator owns RunDied and retry; the executor preserves status with a fresh failure.
         // and metadata should contain the diagnostic entry.
         var after = await _issues.GetAsync(issue.Id);
         Assert.NotNull(after);
-        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal(IssueStatus.InProgress, after.Status);
         var lastError = after.GetMetadata("lastError");
         Assert.Contains("timed out", lastError, StringComparison.OrdinalIgnoreCase);
         Assert.Equal("true", after.GetMetadata("agentTimeout"));
+        Assert.True(DateTimeOffset.TryParse(after.GetMetadata("lastErrorAt"), out var failedAt));
+        Assert.True(failedAt > DateTimeOffset.UtcNow.AddMinutes(-1));
         Assert.Contains("<timed out", after.GetMetadata("modelResponse"));
     }
 

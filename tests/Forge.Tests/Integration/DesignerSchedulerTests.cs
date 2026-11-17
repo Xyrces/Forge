@@ -284,6 +284,44 @@ public class DesignerSchedulerTests : IDisposable
     }
 
     [Fact]
+    public async Task Tick_RepairedSpecDoesNotInheritFailedInputCooldown()
+    {
+        var spec = await CreateReadySpecAsync("Repair wakes design");
+        var failed = await _designerRuns.StartAsync(spec.Id, DesignerTriggerKind.Scheduled);
+        await _designerRuns.FinishAsync(failed.Id, DesignerRunStatus.HygieneFailed, null, null,
+            "{}", "Previous input failed validation", TimeSpan.Zero);
+        var success = new DesignerSuccessScript(spec.Id);
+        var scheduler = new DesignerScheduler(_specs, NewDesignerFactory(success), _designerRuns, _events,
+            NullLogger<DesignerScheduler>.Instance, interval: TimeSpan.FromMinutes(15));
+
+        // Unchanged failed input must retain the spiral guard.
+        await scheduler.TickAsync(default);
+        Assert.Equal(0, success.CallCount);
+        Assert.Single(await _designerRuns.ListAsync(spec.Id));
+
+        // A model can repeat the current status before failing. That updates
+        // UpdatedAt but does not repair input and must not defeat the guard.
+        while (DateTime.UtcNow <= failed.Ts.AddMilliseconds(1)) await Task.Delay(1);
+        var statusOnly = await _specs.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
+        Assert.True(statusOnly.UpdatedAt > failed.Ts);
+        Assert.Equal(spec.CurrentVersion, statusOnly.CurrentVersion);
+        Assert.Equal(spec.CurrentVersionCreatedAt, statusOnly.CurrentVersionCreatedAt);
+        await scheduler.TickAsync(default);
+        Assert.Equal(0, success.CallCount);
+        Assert.Single(await _designerRuns.ListAsync(spec.Id));
+
+        // Versioned repair is newer than the persisted run timestamp. The event
+        // tick can now proceed without sleeping through the old cooldown.
+        while (DateTime.UtcNow <= failed.Ts.AddMilliseconds(1)) await Task.Delay(1);
+        var repaired = await _specs.UpdateBodyAsync(spec.Id, new UpdateSpecBody(spec.Body + "\n## Notes\nCorrected input", "product:repair"));
+        Assert.True(repaired.CurrentVersionCreatedAt > failed.Ts);
+        await scheduler.TickAsync(default);
+        Assert.True(success.CallCount > 0);
+        Assert.Equal(SpecStatus.Designed, (await _specs.GetAsync(spec.Id))!.Status);
+        Assert.Equal(2, (await _designerRuns.ListAsync(spec.Id)).Count);
+    }
+
+    [Fact]
     public async Task Tick_OnlyGroomsReadyForDesignSpecs_NotOtherStatuses()
     {
         // Specs in Draft, NeedsRevision, Designed, Approved should NOT

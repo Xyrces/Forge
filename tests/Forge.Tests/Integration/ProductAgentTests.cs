@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using System.Threading.Channels;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -33,7 +34,7 @@ public class ProductAgentTests : IDisposable
     public ProductAgentTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("product");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"P");
         _specs = new SpecStore(_issues);
         _skills = new SkillStore(_issues);
         _agents = new AgentStore(_issues);
@@ -61,6 +62,75 @@ public class ProductAgentTests : IDisposable
             NullLogger<ProductAgent>.Instance, runId: runId);
     }
 
+    [Theory]
+    [InlineData("epic")]
+    [InlineData("missing")]
+    [InlineData("foreign")]
+    [InlineData("self")]
+    [InlineData("cycle")]
+    public async Task InvalidDependencyDoesNotPersistOrComplete(string kind)
+    {
+        var current = await _specs.CreateAsync(new NewSpec("P", "Approved title", "approved scope", ParentIssueId: "epic-1"));
+        var target = kind switch
+        {
+            "epic" => "epic-1",
+            "missing" => "spec-missing",
+            "self" => current.Id,
+            "foreign" => (await _specs.CreateAsync(new NewSpec("Other", "Foreign", "body"))).Id,
+            _ => (await _specs.CreateAsync(new NewSpec("P", "Cycle", $"## Dependencies\n- depends_on {current.Id}"))).Id
+        };
+        var client = new DependencyRepairClient([UpdateCall(current.Id, $"## Dependencies\n- related {target}")]);
+        Assert.Null(await BuildAgent(client).RefineSpecAsync(current.Id, "P"));
+        var after = (await _specs.GetAsync(current.Id))!;
+        Assert.Equal(current, after);
+        Assert.Single(await _specs.ListVersionsAsync(current.Id));
+        Assert.Contains(client.ToolResults, result => result.Contains("error:", StringComparison.Ordinal));
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), item => item.Kind == "product.run.completed");
+    }
+
+    [Fact]
+    public async Task InvalidIssueDependencyCanBeRepairedInSameRunWithoutSavingBadVersion()
+    {
+        var current = await _specs.CreateAsync(new NewSpec("P", "Approved title", "approved scope", ParentIssueId: "epic-1"));
+        var dependency = await _specs.CreateAsync(new NewSpec("P", "Existing spec", "body"));
+        var corrected = $"## Summary\nApproved scope refined.\n## Dependencies\n- depends_on {dependency.Id}\n## Notes\nParent issue: epic-1";
+        var client = new DependencyRepairClient([
+            UpdateCall(current.Id, "## Dependencies\n- related epic-1"),
+            UpdateCall(current.Id, corrected)]);
+        var result = await BuildAgent(client).RefineSpecAsync(current.Id, "P");
+        Assert.NotNull(result);
+        Assert.Equal(2, result.CurrentVersion);
+        Assert.Equal(corrected, result.Body);
+        Assert.Equal(current.Title, result.Title);
+        Assert.Equal(current.ParentIssueId, result.ParentIssueId);
+        Assert.Equal(current.Status, result.Status);
+        Assert.Equal("product:test-run", result.Author);
+        Assert.Equal(2, (await _specs.ListVersionsAsync(current.Id)).Count);
+        Assert.Contains(client.ToolResults, text => text.Contains("epic-1") && text.Contains("Notes"));
+    }
+
+    private static FunctionCallContent UpdateCall(string id, string body) => new(Guid.NewGuid().ToString("N"), "update_spec",
+        new Dictionary<string, object?> { ["specIdArg"] = id, ["body"] = body });
+
+    private sealed class DependencyRepairClient(FunctionCallContent[] calls) : IChatClient
+    {
+        private int _index;
+        public List<string> ToolResults { get; } = [];
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            ToolResults.AddRange(messages.SelectMany(message => message.Contents).OfType<FunctionResultContent>()
+                .Select(result => result.Result?.ToString() ?? ""));
+            var message = _index < calls.Length
+                ? new ChatMessage(ChatRole.Assistant, new AIContent[] { calls[_index++] })
+                : new ChatMessage(ChatRole.Assistant, "Finished.");
+            return Task.FromResult(new ChatResponse(message));
+        }
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("This offline fixture exercises buffered Product calls only.");
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
     [Fact]
     public async Task RefineSpecAsync_AgentCallsUpdateSpec_BodyReplacedAndVersionBumped()
     {
@@ -80,7 +150,7 @@ public class ProductAgentTests : IDisposable
                     {
                         ["specIdArg"] = created.Id,
                         ["body"] = refined,
-                        ["author"] = "product:test-run",
+                        ["author"] = "model-invented-author",
                     }),
             },
             followUpText: "Done refining.");
@@ -110,7 +180,7 @@ public class ProductAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task RefineSpecAsync_AgentDoesNotCallUpdateSpec_ReturnsOriginal()
+    public async Task RefineSpecAsync_AgentDoesNotCallUpdateSpec_ReturnsNull()
     {
         var created = await _specs.CreateAsync(new NewSpec(
             ProjectId: "P", Title: "T", Body: "draft"));
@@ -121,8 +191,9 @@ public class ProductAgentTests : IDisposable
         var refreshed = await agent.RefineSpecAsync(created.Id, "P", default);
 
         // Spec unchanged. v1 still current.
-        Assert.Equal(1, refreshed!.CurrentVersion);
-        Assert.Equal("draft", refreshed.Body);
+        Assert.Null(refreshed);
+        Assert.Equal("draft",(await _specs.GetAsync(created.Id))!.Body);
+        Assert.DoesNotContain(_events.GetHistorySnapshot(),e=>e.Kind=="product.run.completed");
     }
 
     [Fact]
@@ -145,7 +216,41 @@ public class ProductAgentTests : IDisposable
             followUpText: "Done.");
         var agent = BuildAgent(scripted, runId: "test-run");
         var refreshed = await agent.RefineSpecAsync(created.Id, "P", default);
-        Assert.Equal(1, refreshed!.CurrentVersion); // unchanged
+        Assert.Null(refreshed);
+        Assert.Equal(1,(await _specs.GetAsync(created.Id))!.CurrentVersion); // unchanged
+    }
+
+    [Fact]
+    public async Task RefineSpecAsync_WrongToolSpecCannotMutateAnotherProject()
+    {
+        var current=await _specs.CreateAsync(new("P","current","draft"));
+        var other=await _specs.CreateAsync(new("other","other","untouched"));
+        var client=new ToolCallingChatClient(new[] { new FunctionCallContent("wrong","update_spec",
+            new Dictionary<string,object?> { ["specIdArg"]=other.Id,["body"]="bad change",["author"]="operator" }) },"done");
+        Assert.Null(await BuildAgent(client).RefineSpecAsync(current.Id,"P"));
+        Assert.Equal("untouched",(await _specs.GetAsync(other.Id))!.Body);
+        Assert.Equal(1,(await _specs.GetAsync(current.Id))!.CurrentVersion);
+        await Assert.ThrowsAsync<InvalidOperationException>(()=>BuildAgent(client).RefineSpecAsync(other.Id,"P"));
+    }
+
+    [Fact]
+    public async Task PlainChatDoesNotCompleteDurableRefinement()
+    {
+        var proposals=new InitiativeProposalStore(_issues);
+        var session=await new IntakeStore(_issues).CreateAsync("P","discussion");
+        var proposal=await proposals.CreateAsync(new("P","source","user","scope","draft",SessionId:session.Id));
+        var approved=await proposals.ApproveAsync("P",proposal.Id,proposal.Revision,proposal.Hash,"operator");
+        var ingestion=new InitiativeIngestionStore(_issues);
+        var service=new InitiativeApprovalService(proposals,_=>ingestion,_events);
+        var client=new ScriptedChatClient(new ChatResponse(new ChatMessage(ChatRole.Assistant,"Done without a tool.")));
+        await using var queue=new ProductRefinementQueue(service,()=>["P"],_=>ingestion,_=>_specs,
+            (_,id,ct)=>BuildAgent(client).RefineSpecAsync(id,"P",ct),_events,NullLogger<ProductRefinementQueue>.Instance);
+        _ = queue.RunAsync(CancellationToken.None);
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        InitiativeIngestion? receipt;
+        while((receipt=await ingestion.GetAsync(proposal.Id,1))?.RefinementState!="Failed") await Task.Delay(20,timeout.Token);
+        Assert.Equal(SpecStatus.Draft,(await _specs.GetAsync(receipt.SpecId))!.Status);
+        Assert.DoesNotContain(_events.GetHistorySnapshot(),e=>e.Kind=="product.run.completed");
     }
 
     [Fact]
@@ -156,127 +261,6 @@ public class ProductAgentTests : IDisposable
         var agent = BuildAgent(scripted);
         var refreshed = await agent.RefineSpecAsync("spec-missing", "P", default);
         Assert.Null(refreshed);
-    }
-}
-
-public class ProductRefinementQueueTests : IDisposable
-{
-    private readonly string _dbPath;
-    private readonly IssueStore _issues;
-    private readonly SpecStore _specs;
-    private readonly IAgentStore _agents;
-    private readonly SkillStore _skills;
-    private readonly InMemoryDashboardEventBus _events;
-
-    public ProductRefinementQueueTests()
-    {
-        _dbPath = TempRoot.Instance.NewDbPath("queue");
-        _issues = new IssueStore(_dbPath);
-        _specs = new SpecStore(_issues);
-        _skills = new SkillStore(_issues);
-        _agents = new AgentStore(_issues);
-        _events = new InMemoryDashboardEventBus();
-    }
-
-    public void Dispose()
-    {
-        try { _issues.Dispose(); } catch { }
-        try { File.Delete(_dbPath); } catch { }
-    }
-
-    [Fact]
-    public async Task Queue_ReceivesAcceptedEpicEvent_RunsRefinement()
-    {
-        // Seed: an issue + spec with parent_issue_id.
-        var issue = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "T", Description: "x"));
-        var spec = await _specs.CreateAsync(new NewSpec(
-            ProjectId: "P", Title: "T", Body: "draft",
-            ParentIssueId: issue.Id));
-
-        // Build a real factory + a scripted chat client.
-        var projectContext = new InMemoryProjectContextSource(
-            new ProjectContext("P", "", Array.Empty<CodeSnippet>(),
-                Array.Empty<IssueRecord>(), Array.Empty<SpecRecord>(),
-                Array.Empty<SkillRecord>()));
-        var scripted = new ScriptedChatClient();
-        scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Done.")));
-        var factory = new ScriptingChatClientFactory(scripted);
-
-        var agentFactory = new ProductAgentFactory(
-            _specs, _issues, projectContext, factory,
-            new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
-            new RoleAgentRegistry(), _events, null,
-            NullLoggerFactory.Instance, rolePromptsRoot: "");
-
-        await using var queue = new ProductRefinementQueue(
-            agentFactory, _specs, _events,
-            NullLogger<ProductRefinementQueue>.Instance);
-
-        // Publish the accepted-epic event the way IntakeAgent does.
-        _events.Publish(new DashboardEvent(
-            DateTime.UtcNow, "intake.epic.accepted", "session-x", "epic accepted",
-            new Dictionary<string, object?>
-            {
-                ["epicId"] = issue.Id,
-                ["sessionId"] = "session-x",
-                ["projectId"] = "P",
-            }));
-
-        // Wait for the worker to process. The agent emits
-        // run.started + run.completed events when it finishes.
-        var deadline = DateTime.UtcNow.AddSeconds(3);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (_events.GetHistorySnapshot().Any(e => e.Kind == "product.run.completed"))
-                break;
-            await Task.Delay(50);
-        }
-
-        var history = _events.GetHistorySnapshot();
-        Assert.Contains(history, e => e.Kind == "product.run.started");
-        Assert.Contains(history, e => e.Kind == "product.run.completed");
-    }
-
-    [Fact]
-    public async Task Queue_EventWithoutProjectId_IsSkipped()
-    {
-        // 2026-08-09: issue ids are per-store sequences — a fan-out
-        // spec lookup by parent_issue_id refined the WRONG project's
-        // spec (talaria's epic-2 → porthorizon's Epic-B spec). Events
-        // without a project id (pre-fix history replays) must be
-        // skipped, never guessed.
-        var issue = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "T", Description: "x"));
-        await _specs.CreateAsync(new NewSpec(
-            ProjectId: "P", Title: "T", Body: "draft",
-            ParentIssueId: issue.Id));
-
-        var projectContext = new InMemoryProjectContextSource(
-            new ProjectContext("P", "", Array.Empty<CodeSnippet>(),
-                Array.Empty<IssueRecord>(), Array.Empty<SpecRecord>(),
-                Array.Empty<SkillRecord>()));
-        var scripted = new ScriptedChatClient();
-        scripted.Enqueue(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Done.")));
-        var agentFactory = new ProductAgentFactory(
-            _specs, _issues, projectContext, new ScriptingChatClientFactory(scripted),
-            new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
-            new RoleAgentRegistry(), _events, null,
-            NullLoggerFactory.Instance, rolePromptsRoot: "");
-
-        await using var queue = new ProductRefinementQueue(
-            agentFactory, _specs, _events,
-            NullLogger<ProductRefinementQueue>.Instance);
-
-        _events.Publish(new DashboardEvent(
-            DateTime.UtcNow, "intake.epic.accepted", "session-x", "epic accepted",
-            new Dictionary<string, object?>
-            {
-                ["epicId"] = issue.Id,
-                ["sessionId"] = "session-x",
-            }));
-
-        await Task.Delay(400);
-
-        Assert.DoesNotContain(_events.GetHistorySnapshot(), e => e.Kind == "product.run.started");
     }
 }
 

@@ -51,7 +51,11 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
         CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        var weightsJson = JsonSerializer.Serialize(weights);
+        await ImplementationEvidenceFormat.ValidateJsonAsync(conn, tx, _db.Dialect, weightsJson, ct);
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
             ? $"""
                 INSERT INTO {T("sprint_proposal_audit")}(
@@ -71,7 +75,7 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
         cmd.AddParam("@theme", (object?)theme ?? DBNull.Value);
         cmd.AddParam("@goal", (object?)goal ?? DBNull.Value);
         cmd.AddParam("@weights",
-            JsonSerializer.Serialize(weights));
+            weightsJson);
         cmd.AddParam("@cands",
             JsonSerializer.Serialize(candidates.Select(c => new
             {
@@ -83,13 +87,24 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
         cmd.AddParam("@sel",
             JsonSerializer.Serialize(selectedTaskIds));
         var id = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
+        await tx.CommitAsync(ct);
         return id;
     }
 
     public async Task MarkCommittedAsync(long id, string sprintId, string committedBy, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        using (var read = conn.CreateCommand())
+        {
+            read.Transaction = tx;
+            read.CommandText = $"SELECT weights_json FROM {T("sprint_proposal_audit")} WHERE id=@id";
+            read.AddParam("@id", id);
+            if (await read.ExecuteScalarAsync(ct) is string weights)
+                await ImplementationEvidenceFormat.ValidateJsonAsync(conn, tx, _db.Dialect, weights, ct);
+        }
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = $"""
             UPDATE {T("sprint_proposal_audit")}
             SET committed_sprint_id = @sid, committed_by = @who
@@ -99,6 +114,7 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
         cmd.AddParam("@who", committedBy);
         cmd.AddParam("@id", id);
         await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
     }
 
     public async Task<IReadOnlyList<SprintProposalAuditRecord>> ListAsync(int limit = 50, CancellationToken ct = default)
@@ -136,6 +152,15 @@ public sealed class SprintProposalAuditStore : IAsyncDisposable
         cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
+    }
+
+    public async Task<SprintPlan?> GetPlanForSprintAsync(string sprintId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {_db.Dialect.Top(1)}weights_json FROM {T("sprint_proposal_audit")} WHERE committed_sprint_id=@id ORDER BY id DESC{_db.Dialect.Limit(1)}";
+        cmd.AddParam("@id", sprintId);
+        return await cmd.ExecuteScalarAsync(ct) is string json ? SprintPlanJson.ReadAuditPlan(json) : null;
     }
 
     private static SprintProposalAuditRecord Read(DbDataReader rd) => new(

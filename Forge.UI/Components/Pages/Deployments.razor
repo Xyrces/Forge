@@ -19,15 +19,18 @@
     </div>
 
     <div class="page-subtitle page-subtitle--meta">
-        Deployment is decoupled from merging: picking a commit here does not require it to be the tip of any
-        branch. Nothing is redeployed automatically on push -- an operator always chooses the commit and
-        approves the result of the build/test gate (when the project requires one).
+        Enabled routine delivery follows approved sprint outcomes, verified merged source and successful CI.
+        The deploy gate can hold automatic promotion. Manual deployment requests remain available separately.
     </div>
 
     @if (DeployStore.Value.Error is not null)
     {
         <div class="banner banner--error">
             Failed to load deployments: @DeployStore.Value.Error
+            @if (DeployStore.Value.LastFetchedAt is { } lastFetched)
+            {
+                <span>Showing the last successful update from @lastFetched.ToLocalTime().ToString("g").</span>
+            }
         </div>
     }
 
@@ -64,6 +67,10 @@
                     }
                 </select>
             }
+            @if (DeployStore.Value.CommitsForProjectId == _selectedProjectId && DeployStore.Value.CommitsError is { } commitsError)
+            {
+                <span class="banner banner--error">Commit history could not be loaded: @commitsError</span>
+            }
 
             <button class="btn btn--primary"
                     disabled="@(string.IsNullOrEmpty(_selectedProjectId) || string.IsNullOrEmpty(_selectedCommitSha))"
@@ -81,11 +88,11 @@
     {
         <div class="page-subtitle">Loading…</div>
     }
-    else if (DeployStore.Value.Candidates.Count == 0)
+    else if (DeployStore.Value.Candidates.Count == 0 && DeployStore.Value.Error is null && DeployStore.Value.LastFetchedAt is not null)
     {
         <div class="page-subtitle">No deployment candidates yet.</div>
     }
-    else
+    else if (DeployStore.Value.Candidates.Count > 0)
     {
         <table class="data-grid">
             <thead>
@@ -104,7 +111,7 @@
                     <tr>
                         <td><span class="project-chip">@d.ProjectId</span></td>
                         <td class="mono" title="@d.CommitSha">@d.CommitSha[..Math.Min(8, d.CommitSha.Length)] @d.CommitSummary</td>
-                        <td><span class="dpill dpill--@d.Status.ToLowerInvariant()">@d.Status</span></td>
+                        <td><span class="dpill dpill--@d.Status.ToLowerInvariant()">@(d.CompletionId is not null && d.Status == "Pending" ? "Awaiting CI" : d.Status)</span></td>
                         <td class="mono">@d.RequestedAt.ToString("yyyy-MM-dd HH:mm")@(d.RequestedBy is null ? "" : $" ({d.RequestedBy})")</td>
                         <td>
                             @if (!string.IsNullOrWhiteSpace(d.BuildLog) || !string.IsNullOrWhiteSpace(d.DeployLog))
@@ -116,7 +123,13 @@
                             }
                         </td>
                         <td>
-                            @if (d.Status is "Pending" or "BuildPassed")
+                            @if (d.CompletionId is not null && d.Status is "Pending" or "BuildPassed")
+                            {
+                                <span>Routine delivery · <a href="/sprints">deployment gate</a></span>
+                                <button class="btn btn--small btn--danger"
+                                        @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id, d.ProjectId)))">Reject unstarted release</button>
+                            }
+                            @if (d.CompletionId is null && d.Status is "Pending" or "BuildPassed")
                             {
                                 <button class="btn btn--small btn--primary"
                                         @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: false))">Approve</button>

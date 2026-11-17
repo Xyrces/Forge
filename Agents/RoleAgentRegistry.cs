@@ -1,4 +1,4 @@
-﻿using Forge.Core;
+using Forge.Core;
 
 namespace Forge.Agents;
 
@@ -74,6 +74,12 @@ public sealed class RoleAgentRegistry
             return (t.Prefixes, t.AllowsRootFiles);
         return (Array.Empty<string>(), false);
     }
+
+    /// <summary>Describe the resolved gate boundary without inventing a Forge-shaped fallback.</summary>
+    public static string DescribeTerritory(string role, IReadOnlyList<string> prefixes, bool allowsRootFiles)
+        => prefixes.Count == 0 && !allowsRootFiles
+            ? $"- {role}: no project-configured path restriction; role instructions and architecture boundaries still apply."
+            : $"- {role}: allowed path prefixes: {string.Join(", ", prefixes)}; repo-root files: {(allowsRootFiles ? "allowed" : "not allowed")}.";
 
     /// <summary>
     /// Get a role by its agent name. Returns null when no role

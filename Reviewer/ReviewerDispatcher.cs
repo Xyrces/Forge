@@ -95,6 +95,19 @@ public sealed class ReviewerDispatcher
         IssueRecord task, CancellationToken cancellationToken = default,
         Func<PullRequest, string>? headShaOverride = null)
     {
+        var gate = ReviewWorkerAttempt.Gate(_projectId, task.Id, AgentType.Reviewer);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            task = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+            return await ReviewCoreAsync(task, cancellationToken, headShaOverride);
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<ReviewOutcome?> ReviewCoreAsync(IssueRecord task, CancellationToken cancellationToken,
+        Func<PullRequest, string>? headShaOverride)
+    {
         var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
         {
@@ -175,7 +188,11 @@ public sealed class ReviewerDispatcher
         }
         // Fresh refs so `git show <sha>` / `git diff origin/<base>...<sha>`
         // resolve even when the checkout lags the head (external push).
-        await TryFetchAsync(worktreePath, cancellationToken);
+        var prepared = await ReviewWorkerAttempt.BeginAsync(_agentRunner, _issues, task, AgentType.Reviewer,
+            _projectId, headSha, cancellationToken);
+        task = prepared.Task;
+        if (prepared.Existing is null) await TryFetchAsync(worktreePath, cancellationToken);
+        else worktreePath = prepared.Existing.WorktreePath;
 
         // Re-review resume: a prior verdict at an EARLIER head means
         // this round scopes to the incremental diff (what the rework
@@ -275,6 +292,7 @@ public sealed class ReviewerDispatcher
             {
                 runnerContext["reviewDiff"] = diff;
             }
+            ReviewWorkerAttempt.Bind(prepared.Existing?.Context, task, AgentType.Reviewer, headSha, runnerContext);
             // Bounded call: the reviewer runs inside the watch sweep,
             // which shares the orchestrator's main loop — an
             // unbounded LLM hang (SDK retries × 5-min network
@@ -289,6 +307,11 @@ public sealed class ReviewerDispatcher
                 AgentType.Reviewer, prompt, sessionId: null, context: runnerContext, ct: timeoutCts.Token);
             (verdict, body) = ParseReviewerOutput(result.Text);
         }
+        catch (OperationCanceledException) when (_agentRunner is IReviewWorkerLifecycle)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return null; // Controller wait detached; keep the same durable attempt for adoption.
+        }
         catch (Exception ex)
         {
             // No silent approvals: an unavailable reviewer is an
@@ -299,6 +322,10 @@ public sealed class ReviewerDispatcher
             body = "";
             error = $"{ex.GetType().Name}: {ex.Message}";
         }
+
+        var consumed = await ReviewWorkerAttempt.ConsumedAsync(_agentRunner, task, AgentType.Reviewer, _projectId, cancellationToken);
+        if (_agentRunner is IReviewWorkerLifecycle && consumed is null)
+            return null; // Uncertain/in-flight worker is not a completed review attempt.
 
         // Audit trail on GitHub (comments are allowed on own PRs;
         // only formal reviews are identity-restricted).
@@ -341,6 +368,7 @@ public sealed class ReviewerDispatcher
         // only — JSON null is the delete idiom).
         await UpdateWatchMetadataAsync(task, m =>
         {
+            m["reviewWorkerConsumed"] = consumed!;
             m["reviewSha"] = headSha;
             m["reviewVerdict"] = verdict.ToString();
             m["reviewNotes"] = body.Length > 2000 ? body[..2000] : body;

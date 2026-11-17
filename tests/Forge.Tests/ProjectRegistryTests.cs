@@ -29,6 +29,25 @@ public class ProjectRegistryLoaderTests : IDisposable
     }
 
     [Fact]
+    public async Task LoadAsync_PreservesVerificationTerritoryAndFeaturePolicy()
+    {
+        await _store.UpsertAsync(new NewProject("forge", "Forge", "https://example.invalid/forge.git", "main"));
+        await _store.UpdateVerifyCommandsAsync("forge", new[] { "custom verification" });
+        await _store.UpdateTerritoriesAsync("forge", new Dictionary<string, RoleTerritory>
+        {
+            ["coredev"] = new RoleTerritory(new List<string> { "src/" }, false),
+        });
+        await _store.UpdateTriageAsync("forge", true);
+        await _store.UpdateQaAsync("forge", true, new[] { "scenes/" });
+        var options = Assert.Single(await ProjectRegistryLoader.LoadAsync(_store));
+        Assert.Equal(new[] { "custom verification" }, options.VerifyCommands);
+        Assert.Equal("src/", Assert.Single(options.Territories["coredev"].Prefixes));
+        Assert.True(options.TriageEnabled);
+        Assert.True(options.QaEnabled);
+        Assert.Equal(new[] { "scenes/" }, options.QaVisualPaths);
+    }
+
+    [Fact]
     public async Task LoadAsync_ReadsOnlyFromSqlite()
     {
         // SQLite is the sole source of truth. appsettings.json

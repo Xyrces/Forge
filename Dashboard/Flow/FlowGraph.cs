@@ -20,6 +20,16 @@ namespace Forge.Dashboard.Flow;
 /// </summary>
 public static class FlowGraph
 {
+    public sealed record ActivitySummary(int InFlight, int Completed, int Closed);
+
+    /// <summary>Count engineering status facts, excluding containers and watch plumbing.</summary>
+    public static ActivitySummary Summarize(IEnumerable<IssueRecord> issues)
+    {
+        var work = issues.Where(i => i.Type != AgentTaskTypes.PrWatch && !AgentTaskTypes.IsContainer(i.Type)).ToArray();
+        return new(work.Count(i => i.Status == IssueStatus.InProgress),
+            work.Count(i => i.Status == IssueStatus.Completed), work.Count(i => i.Status == IssueStatus.Closed));
+    }
+
     /// <summary>
     /// Classify a spec into its planning-lane node, or null when the
     /// spec has left planning (Groomed and beyond — its tasks carry
@@ -58,6 +68,9 @@ public static class FlowGraph
         {
             return null;
         }
+
+        // A terminal store outcome wins over historical intermediate lifecycle metadata.
+        if (issue.Status is IssueStatus.Completed or IssueStatus.Closed) return "done";
 
         var recorded = issue.GetMetadata("state");
         if (recorded is not null)

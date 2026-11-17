@@ -1,0 +1,243 @@
+@using Forge.Dashboard.Features.Sprints
+@using System.Net
+@using System.Net.Http.Json
+@using System.Text.Json
+@inject HttpClient Http
+@inject ILogger<SprintCompletionPanel> Logger
+@implements IDisposable
+
+<section class="card" aria-label="Sprint evidence and delivery">
+    <strong>Sprint evidence and delivery</strong>
+    <p class="page-subtitle">Terminal task counts do not prove an outcome was delivered.</p>
+    @if (_loading && _detail is null)
+    {
+        <p role="status">Loading completion evidence…</p>
+    }
+    else if (_error is not null && _detail is null)
+    {
+        <p class="banner banner--warn" role="alert">@_error</p>
+        <button class="btn" @onclick="LoadAsync">Retry loading evidence</button>
+    }
+    else if (_detail is null)
+    {
+        <p class="page-subtitle">No completion evidence has been recorded for this sprint yet.</p>
+    }
+    else
+    {
+        var receipt = _detail.Receipt;
+        @if (_error is not null)
+        {
+            <p class="banner banner--warn" role="alert">@_error The last loaded evidence is shown below.</p>
+            <button class="btn" @onclick="LoadAsync">Retry loading evidence</button>
+        }
+        <dl>
+            <dt>Engineering evidence</dt><dd>@(receipt.AbandonedAt is null ? CompletionPresentation.Outcome(receipt.Outcome) : "Evidence incomplete — outcome stopped")</dd>
+            <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
+            <dt>Deployment</dt><dd>@(receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus) : receipt.DeliveryRequired == false ? "Not required for this outcome" : (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
+        </dl>
+        @if (!string.IsNullOrWhiteSpace(receipt.DeliveryNote))
+        {
+            <p class="banner banner--info">@receipt.DeliveryNote</p>
+        }
+        @if (receipt.DeploymentCandidateId is not null)
+        {
+            <a href="@($"/deployments?project={Uri.EscapeDataString(ProjectId!)}")">View deployment</a>
+        }
+        @if (receipt.SourceSha is not null)
+        {
+            <p class="page-subtitle">Qualified source: <code>@receipt.SourceSha</code></p>
+        }
+        @if (receipt.AbandonedAt is not null)
+        {
+            <p class="banner banner--warn">Stopped by operator at @receipt.AbandonedAt.Value.ToLocalTime().ToString("g") — not delivered. @receipt.AbandonmentReason</p>
+        }
+        else if (receipt.PlanHash is not null && receipt.Outcome is "Incomplete" or "PendingEvidence")
+        {
+            <details class="card">
+                <summary>Stop this incomplete outcome</summary>
+                <p>This records an explicit interruption with your reason. It does not mark the work delivered or qualify a release.</p>
+                @if (receipt.DeploymentCandidateId is not null && receipt.DeploymentStatus is not ("Deployed" or "DeployFailed" or "BuildFailed" or "Rejected"))
+                {
+                    <p>Reject an unstarted release on the Deployments page first. If a release is already authorized or running, wait for its safe result before stopping this outcome.</p>
+                    <a href="@($"/deployments?project={Uri.EscapeDataString(ProjectId!)}")">Review linked deployment</a>
+                }
+                else
+                {
+                    <label for="completion-stop-reason">Reason for stopping</label>
+                    <textarea id="completion-stop-reason" maxlength="2000" @bind="_stopReason" @bind:event="oninput"></textarea>
+                    <button class="btn btn--danger" disabled="@(_retrying || string.IsNullOrWhiteSpace(_stopReason))" @onclick="StopOutcomeAsync">Stop outcome without marking it delivered</button>
+                }
+            </details>
+        }
+        @foreach (var criterion in _detail.Criteria)
+        {
+            <div class="card">
+                <strong>@criterion.Text</strong>
+                <p class="page-subtitle">@CompletionPresentation.Evidence(criterion.EvidenceKind)</p>
+                @if (criterion.EvidenceKind == "ImplementationVerified")
+                {
+                    <p class="page-subtitle">Merged changes or existing code must have independent verification and review against this requirement at a recorded revision.</p>
+                }
+                @if (criterion.EvidenceKind == "OperatorObserved")
+                {
+                    <p>@(criterion.ProofReference is not null ? "Operator observation recorded for this deployed version." : receipt.AbandonedAt is not null ? "Not verified; this outcome was stopped." : "Awaiting explicit operator observation of the exact deployed version.")</p>
+                    @if (criterion.ProofReference is not null) { <p>Evidence: @criterion.ProofReference</p> }
+                    else if (receipt.AbandonedAt is null && receipt.ReadyForDeployment && receipt.DeploymentStatus == "Deployed"
+                        && receipt.PlanHash is not null && receipt.SourceSha is not null && receipt.DeploymentCandidateId is not null
+                        && ProjectId is not null && SprintId is not null)
+                    {
+                        <OperatorObservation @key="(ProjectId, SprintId, receipt.PlanHash, receipt.SourceSha, receipt.DeploymentCandidateId, criterion.Id)"
+                            ProjectId="@ProjectId" SprintId="@SprintId" PlanHash="@receipt.PlanHash"
+                            SourceSha="@receipt.SourceSha" DeploymentId="@receipt.DeploymentCandidateId"
+                            CriterionId="@criterion.Id" Enabled="@(_error is null && !_loading)" OnRecorded="LoadAsync" />
+                    }
+                }
+            </div>
+        }
+        @foreach (var batch in _detail.Batches)
+        {
+            <div class="card">
+                <strong>Follow-up batch · @CompletionPresentation.Processing(batch.State)</strong>
+                @if (!string.IsNullOrWhiteSpace(batch.Error)) { <p>@batch.Error</p> }
+                @if (batch.State == "NeedsReview" && receipt.AbandonedAt is null)
+                {
+                    <p>The previous model request may have finished and incurred a charge. Review its result before explicitly starting another request.</p>
+                    <button class="btn" disabled="@_retrying" @onclick="() => RetryAsync(batch.Id)">Retry follow-up processing (may incur a charge)</button>
+                }
+            </div>
+        }
+        @if (_actionError is not null) { <p class="banner banner--warn" role="alert">@_actionError</p> }
+        @if (_notice is not null) { <p role="status">@_notice</p> }
+        @if (_cursor is not null || _detail.NextCursor is not null)
+        {
+            <button class="btn" disabled="@(_cursor is null || _retrying)" @onclick="FirstPageAsync">First batch page</button>
+            <button class="btn" disabled="@(_detail.NextCursor is null || _retrying)" @onclick="NextPageAsync">Next batch page</button>
+        }
+    }
+</section>
+
+@code {
+    [Parameter] public string? ProjectId { get; set; }
+    [Parameter] public string? SprintId { get; set; }
+    [Parameter] public DateTime RefreshAt { get; set; }
+    private string? _identity, _cursor, _error, _actionError, _notice;
+    private string _stopReason = "";
+    private DateTime _refreshAt;
+    private CompletionDetail? _detail;
+    private CancellationTokenSource? _request;
+    private int _generation;
+    private bool _loading, _retrying;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var identity = ProjectId + "/" + SprintId;
+        if (_identity == identity && _refreshAt == RefreshAt) return;
+        if (_identity != identity)
+        {
+            _identity = identity;
+            _cursor = null;
+            _detail = null;
+            _notice = null;
+            _actionError = null;
+            _stopReason = "";
+        }
+        _refreshAt = RefreshAt;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _request?.Cancel();
+        _request?.Dispose();
+        _request = new();
+        var token = _request.Token;
+        var generation = ++_generation;
+        _loading = true;
+        _error = null;
+        if (ProjectId is null || SprintId is null) { _detail = null; _loading = false; return; }
+        var url = $"/api/sprints/{Uri.EscapeDataString(SprintId)}/completion?projectId={Uri.EscapeDataString(ProjectId)}";
+        if (_cursor is not null) url += "&cursor=" + Uri.EscapeDataString(_cursor);
+        try
+        {
+            using var response = await Http.GetAsync(url, token);
+            CompletionDetail? detail = null;
+            if (response.StatusCode != HttpStatusCode.NotFound)
+            {
+                response.EnsureSuccessStatusCode();
+                detail = await response.Content.ReadFromJsonAsync<CompletionDetail>(cancellationToken: token)
+                    ?? throw new JsonException("Missing completion evidence.");
+                if (detail.Receipt is null || detail.Batches is null || detail.Criteria is null || detail.Receipt.ProjectId != ProjectId || detail.Receipt.SprintId != SprintId ||
+                    string.IsNullOrWhiteSpace(detail.Receipt.Outcome) || string.IsNullOrWhiteSpace(detail.Receipt.BookkeepingState) ||
+                    detail.Batches.Any(b => string.IsNullOrWhiteSpace(b.Id) || string.IsNullOrWhiteSpace(b.State)))
+                    throw new JsonException("Completion evidence does not match the selection.");
+            }
+            if (generation == _generation) _detail = detail;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load sprint completion evidence");
+            if (generation == _generation) _error = "Completion evidence is unavailable. No delivery result can be inferred from this load failure.";
+        }
+        finally { if (generation == _generation) _loading = false; }
+    }
+
+    private async Task RetryAsync(string batchId)
+    {
+        if (_retrying || ProjectId is null || SprintId is null) return;
+        var generation = _generation;
+        var token = _request?.Token ?? CancellationToken.None;
+        _retrying = true;
+        _actionError = null;
+        _notice = null;
+        try
+        {
+            using var response = await Http.PostAsync($"/api/sprints/{Uri.EscapeDataString(SprintId)}/completion/triage/{Uri.EscapeDataString(batchId)}/retry?projectId={Uri.EscapeDataString(ProjectId)}", null, token);
+            response.EnsureSuccessStatusCode();
+            if (generation != _generation) return;
+            _notice = "Explicit retry queued. A new model request may be charged.";
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not request follow-up processing retry");
+            if (generation == _generation) _actionError = "Retry was not confirmed. Reload the evidence before trying again.";
+        }
+        finally { _retrying = false; }
+    }
+    private async Task StopOutcomeAsync()
+    {
+        if (_retrying || ProjectId is null || SprintId is null || _detail?.Receipt.PlanHash is not { } planHash
+            || string.IsNullOrWhiteSpace(_stopReason)) return;
+        var generation = _generation;
+        var token = _request?.Token ?? CancellationToken.None;
+        _retrying = true; _actionError = null; _notice = null;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync($"/api/sprints/{Uri.EscapeDataString(SprintId)}/completion/abandon?projectId={Uri.EscapeDataString(ProjectId)}",
+                new { planHash, reason = _stopReason.Trim() }, token);
+            response.EnsureSuccessStatusCode();
+            if (generation != _generation) return;
+            _notice = "Explicit interruption recorded. The outcome has not been marked delivered.";
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not record completion interruption");
+            if (generation == _generation) _actionError = "Interruption was not confirmed. Reload evidence and check the linked release before trying again.";
+        }
+        finally { _retrying = false; }
+    }
+    private async Task FirstPageAsync() { _cursor = null; await LoadAsync(); }
+    private async Task NextPageAsync() { _cursor = _detail?.NextCursor; await LoadAsync(); }
+    public void Dispose() { ++_generation; _request?.Cancel(); _request?.Dispose(); }
+    private sealed record CompletionSummary(string Id, string ProjectId, string SprintId, string Outcome,
+        string BookkeepingState, bool ReadyForDeployment, string? SourceSha, string? DeploymentCandidateId,
+        string? DeploymentStatus, string? DeliveryNote, string? PlanHash, string? SprintName = null,
+        string? AbandonmentReason = null, DateTimeOffset? AbandonedAt = null, bool? DeliveryRequired = null);
+    private sealed record CompletionBatch(string Id, string State, string? Error);
+    private sealed record CompletionCriterion(string Id, string Text, string EvidenceKind, string? ProofReference, string? OperatorIdentity);
+    private sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatch> Batches, string? NextCursor, IReadOnlyList<CompletionCriterion> Criteria);
+}

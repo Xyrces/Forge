@@ -27,6 +27,7 @@ public enum ForgeSchemaProfile
 /// </summary>
 public interface IDbConnectionFactory
 {
+    bool InitializeSchema => true;
     ForgeDbProvider Provider { get; }
     ISqlDialect Dialect { get; }
 
@@ -88,8 +89,9 @@ public sealed class SqlServerConnectionFactory : IDbConnectionFactory
 {
     private readonly SqlRetryLogicBaseProvider _retry;
 
-    public SqlServerConnectionFactory(string connectionString, string qualifier, ForgeSchemaProfile profile = ForgeSchemaProfile.Workload)
+    public SqlServerConnectionFactory(string connectionString, string qualifier, ForgeSchemaProfile profile = ForgeSchemaProfile.Workload, bool initializeSchema = true)
     {
+        InitializeSchema = initializeSchema;
         ConnectionString = connectionString;
         Dialect = new SqlServerDialect(qualifier);
         Profile = profile;
@@ -107,6 +109,7 @@ public sealed class SqlServerConnectionFactory : IDbConnectionFactory
     }
 
     public ForgeDbProvider Provider => ForgeDbProvider.SqlServer;
+    public bool InitializeSchema { get; }
     public ISqlDialect Dialect { get; }
     public ForgeSchemaProfile Profile { get; }
     public string ConnectionString { get; }
@@ -136,8 +139,8 @@ public static class ForgeDb
     public static IDbConnectionFactory Sqlite(string connectionString)
         => new SqliteConnectionFactory(connectionString);
 
-    public static IDbConnectionFactory SqlServer(string connectionString, string qualifier, ForgeSchemaProfile profile = ForgeSchemaProfile.Workload)
-        => new SqlServerConnectionFactory(connectionString, qualifier, profile);
+    public static IDbConnectionFactory SqlServer(string connectionString, string qualifier, ForgeSchemaProfile profile = ForgeSchemaProfile.Workload, bool initializeSchema = true)
+        => new SqlServerConnectionFactory(connectionString, qualifier, profile, initializeSchema);
 
     /// <summary>Schema name for a registered project's tables.</summary>
     public static string SchemaForProject(string projectId) => $"proj_{projectId}";
@@ -152,9 +155,9 @@ public static class ForgeDb
     /// project's file (the historical registry anchor location).
     /// </summary>
     public static IDbConnectionFactory ForRegistry(
-        bool isSqlServer, string connectionString, string defaultSqlitePath)
+        bool isSqlServer, string connectionString, string defaultSqlitePath, bool initializeSchema = true)
         => isSqlServer
-            ? SqlServer(connectionString, RegistrySchema, ForgeSchemaProfile.Core)
+            ? SqlServer(connectionString, RegistrySchema, ForgeSchemaProfile.Core, initializeSchema)
             : Sqlite(new SqliteConnectionStringBuilder
             {
                 DataSource = defaultSqlitePath,
@@ -171,9 +174,9 @@ public static class ForgeDb
     /// file (IssueStore's canonical builder settings).
     /// </summary>
     public static IDbConnectionFactory ForProject(
-        bool isSqlServer, string connectionString, string projectId, string sqlitePath)
+        bool isSqlServer, string connectionString, string projectId, string sqlitePath, bool initializeSchema = true)
         => isSqlServer
-            ? SqlServer(connectionString, SchemaForProject(projectId), ForgeSchemaProfile.Workload)
+            ? SqlServer(connectionString, SchemaForProject(projectId), ForgeSchemaProfile.Workload, initializeSchema)
             : Sqlite(new SqliteConnectionStringBuilder
             {
                 DataSource = sqlitePath,

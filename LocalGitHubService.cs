@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Diagnostics;
 using Octokit;
@@ -28,15 +28,10 @@ namespace Forge;
 /// </para>
 ///
 /// <para>
-/// <b>Scope:</b> the harness verifies "the orchestrator opened
-/// the right PR with the right diff". It does NOT verify the
-/// PRWatcher verdict loop (PR merge + branch delete + final
-/// issue Completed transition). That flow still uses the real
-/// GitHubService call sites; the harness short-circuits the
-/// merge step to keep the test bounded. Stage B's webhook-driven
-/// PR merge signal will close that gap; until then the
-/// integration test surface is "PR was opened correctly",
-/// which is the operator's primary acceptance criterion.
+/// <b>Scope:</b> engineering dispatch and PRWatcher lifecycle against a
+/// simulated local GitHub service. Approval and CI are supplied by the
+/// harness. Merge observation models a fast-forward at the accepted head;
+/// it does not assert that a real GitHub merge or CI service ran.
 /// </para>
 /// </remarks>
 public sealed class LocalGitHubService : GitHubService
@@ -92,12 +87,16 @@ public sealed class LocalGitHubService : GitHubService
         return _prStore.CreatePr(title, body, headBranch, baseBranch, sha);
     }
 
-    public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
     {
         // P4 e2e-harness C2: when the PRWatcher reaches the
         // GreenAndApproved verdict, the orchestrator's
         // CommitPushPrExecutor merges the PR. We record the
         // merge in the PR's state so the harness can assert.
+        if (expectedHeadSha is not null
+            && (!_prStore.PrInfo.TryGetValue(prNumber, out var info)
+                || _prStore.GetBranchSha(info.HeadBranch) != expectedHeadSha))
+            return Task.FromResult(false);
         _prStore.MarkMerged(prNumber);
         return Task.FromResult(true);
     }
@@ -208,7 +207,7 @@ public sealed class LocalPrStore
     private readonly ConcurrentDictionary<string, string> _branchShas = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> _branchShaWaiters = new();
     private readonly ConcurrentDictionary<string, CommitState> _commitStates = new();
-    private readonly ConcurrentDictionary<int, bool> _mergedFlags = new();
+    private readonly ConcurrentDictionary<int, (string HeadSha, DateTimeOffset MergedAt)> _merges = new();
     private int _nextPrNumber = 1;
 
     public ICollection<PullRequest> AllPrs => _prs.Values;
@@ -243,7 +242,10 @@ public sealed class LocalPrStore
     /// </summary>
     public void MarkMerged(int prNumber)
     {
-        _mergedFlags[prNumber] = true;
+        if (!PrInfo.TryGetValue(prNumber, out var info))
+            throw new InvalidOperationException($"PR #{prNumber} not found");
+        var head = GetBranchSha(info.HeadBranch) ?? info.HeadSha;
+        _merges.TryAdd(prNumber, (head, DateTimeOffset.UtcNow));
     }
 
     /// <summary>
@@ -251,7 +253,7 @@ public sealed class LocalPrStore
     /// <see cref="LocalGitHubService.MergePullRequestAsync"/>.
     /// </summary>
     public bool WasMerged(int prNumber)
-        => _mergedFlags.TryGetValue(prNumber, out var v) && v;
+        => _merges.ContainsKey(prNumber);
 
     public void RegisterPushedBranch(string branch, string sha)
     {
@@ -300,7 +302,24 @@ public sealed class LocalPrStore
 
     public PullRequest GetPr(int number)
     {
-        if (!_prs.TryGetValue(number, out var pr)) throw new InvalidOperationException($"PR #{number} not found");
+        if (!_prs.ContainsKey(number) || !PrInfo.TryGetValue(number, out var info))
+            throw new InvalidOperationException($"PR #{number} not found");
+        var merged = _merges.TryGetValue(number, out var merge);
+        var head = merged ? merge.HeadSha : GetBranchSha(info.HeadBranch) ?? info.HeadSha;
+        // Octokit models have nonpublic setters. Populate a fresh fake API response;
+        // previously the side-channel merge flag never appeared in this observation.
+        var pr = new PullRequest(number);
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Title))!.SetValue(pr, info.Title);
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Body))!.SetValue(pr, info.Body);
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Head))!.SetValue(pr,
+            new GitReference(null!, null!, null!, info.HeadBranch, head, null!, null!));
+        typeof(PullRequest).GetProperty(nameof(PullRequest.Base))!.SetValue(pr,
+            new GitReference(null!, null!, null!, info.BaseBranch, GetBranchSha(info.BaseBranch) ?? "", null!, null!));
+        if (merged)
+        {
+            typeof(PullRequest).GetProperty(nameof(PullRequest.MergedAt))!.SetValue(pr, merge.MergedAt);
+            typeof(PullRequest).GetProperty(nameof(PullRequest.MergeCommitSha))!.SetValue(pr, merge.HeadSha);
+        }
         return pr;
     }
 }

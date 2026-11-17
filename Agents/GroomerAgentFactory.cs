@@ -19,7 +19,10 @@ public sealed class GroomerAgentFactory
     private readonly MemoryStore? _memory;
     private readonly string? _projectRoot;
     private readonly Func<string, string?>? _projectRootLookup;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? _roleCapacitiesLookup;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? _roleTerritoriesLookup;
     private readonly Func<string, IIssueStore?>? _issueStoreLookup;
+    private readonly Func<string, CancellationToken, Task>? _refreshContext;
 
     public GroomerAgentFactory(
         IIssueStore issues,
@@ -41,7 +44,10 @@ public sealed class GroomerAgentFactory
         // primary project's sprint lane, where it gets dispatched
         // against the wrong repo (porthorizon stories → Forge PRs
         // #66/#67). Unknown/null project → the default store.
-        Func<string, IIssueStore?>? issueStoreLookup = null)
+        Func<string, IIssueStore?>? issueStoreLookup = null,
+        Func<string, CancellationToken, Task>? refreshContext = null,
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null,
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? roleTerritoriesLookup = null)
     {
         _issues = issues;
         _specs = specs;
@@ -52,7 +58,19 @@ public sealed class GroomerAgentFactory
         _memory = memory;
         _projectRoot = projectRoot;
         _projectRootLookup = projectRootLookup;
+        _roleCapacitiesLookup = roleCapacitiesLookup;
+        _roleTerritoriesLookup = roleTerritoriesLookup;
         _issueStoreLookup = issueStoreLookup;
+        _refreshContext = refreshContext;
+    }
+
+    /// <summary>Refresh planning context before claiming a paid attempt. Failure leaves the run unclaimed.</summary>
+    public Task RefreshContextAsync(string? projectId, CancellationToken ct = default)
+    {
+        if (_refreshContext is null) return Task.CompletedTask;
+        if (string.IsNullOrWhiteSpace(projectId))
+            throw new InvalidOperationException("A registered project is required to refresh grooming context.");
+        return _refreshContext(projectId, ct);
     }
 
     public GroomerAgent Create(string? runId = null, string? projectId = null)
@@ -65,6 +83,6 @@ public sealed class GroomerAgentFactory
         return new(issues, _specs, _events, _chatClientFactory, _config,
             _loggerFactory.CreateLogger<GroomerAgent>(),
             runId: runId, memory: _memory, projectRoot: _projectRoot,
-            projectId: projectId, projectRootLookup: _projectRootLookup);
+            projectId: projectId, projectRootLookup: _projectRootLookup, roleCapacitiesLookup: _roleCapacitiesLookup, roleTerritoriesLookup: _roleTerritoriesLookup);
     }
 }

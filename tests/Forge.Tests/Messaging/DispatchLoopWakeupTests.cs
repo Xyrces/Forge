@@ -44,7 +44,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         InitRepo(_workDir);
 
         _dbPath = Path.Combine(_dataRoot, "issues.db");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath,"test");
         _projectStore = new ProjectStore(_issues);
 
         _worktrees = new GitWorktreeService(
@@ -75,6 +75,13 @@ public sealed class DispatchLoopWakeupTests : IDisposable
             logger: NullLogger<ProjectDispatchBundle>.Instance);
     }
 
+    private async Task ActivateApprovedAsync(IssueRecord task)
+    {
+        var scope=await ApprovedSprintFixture.Scope(_issues);await ApprovedSprintFixture.Bind(_issues,scope,[task]);
+        var snapshot=await new SprintActivationValidator(_issues,_bundle.Sprints,new SpecStore(_issues),"test",null).ValidateAsync([task.Id],default);
+        await _bundle.Sprints.CreateWithIssuesAsync(new("test","test",DateTime.UtcNow,DateTime.UtcNow.AddDays(1)),snapshot);
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_workDir, recursive: true); } catch { }
@@ -85,6 +92,23 @@ public sealed class DispatchLoopWakeupTests : IDisposable
     {
         public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
             => Task.FromResult(new AgentRunResult(response, null, 1, 1, TimeSpan.FromMilliseconds(1)));
+    }
+
+    private sealed class DrainingRunner : IAgentRunner
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowExit { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            using var registration = ct.Register(() => CancellationObserved.TrySetResult());
+            Started.TrySetResult();
+            await AllowExit.Task;
+            ct.ThrowIfCancellationRequested();
+            return new AgentRunResult("NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.Zero);
+        }
     }
 
     private sealed class StubBundleFactory(ProjectDispatchBundle bundle) : IProjectDispatchBundleFactory
@@ -156,11 +180,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         var task = await _issues.CreateAsync(new NewIssue(
             Type: "dev", Title: "late work", Description: "enqueued after the loop parked",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        var sprint = await _bundle.Sprints.CreateAsync(new NewSprint(
-            Name: "sprint", Goal: "g",
-            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(1),
-            Status: SprintStatus.Active));
-        await _bundle.Sprints.AddIssueAsync(sprint.Id, task.Id);
+        await ActivateApprovedAsync(task);
 
         // The kick (production: TaskEnqueuedConsumer on the bus).
         _wakeup.Signal();
@@ -181,17 +201,48 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         Assert.NotEqual(IssueStatus.Pending, after.Status);
     }
 
-    private static void InitRepo(string path)
+    [Fact]
+    public async Task Shutdown_DoesNotReturnUntilLocalDispatchHasDrained()
     {
-        RunGit(path, "init", "-q -b main");
-        RunGit(path, "config", "user.email a@b");
-        RunGit(path, "config", "user.name a");
-        File.WriteAllText(Path.Combine(path, "README.md"), "# Test\n");
-        RunGit(path, "add", "README.md");
-        RunGit(path, "commit", "-q -m initial");
+        await _projectStore.UpsertAsync(new NewProject("test", "Test", _workDir, "main"));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "dev", Title: "drain work",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await ActivateApprovedAsync(task);
+        var runner = new DrainingRunner();
+        using var stop = new CancellationTokenSource();
+        var loop = BuildOrchestrator(runner).ExecuteAsync(stop.Token);
+        try
+        {
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            stop.Cancel();
+            await runner.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(loop.IsCompleted);
+        }
+        finally
+        {
+            stop.Cancel();
+            runner.AllowExit.TrySetResult();
+            try { await loop.WaitAsync(TimeSpan.FromSeconds(20)); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        }
     }
 
-    private static void RunGit(string cwd, string verb, string args)
+    private static void InitRepo(string path)
+    {
+        RunGit(path, "init", "-q", "-b", "main");
+        RunGit(path, "config", "user.email", "a@b");
+        RunGit(path, "config", "user.name", "a");
+        File.WriteAllText(Path.Combine(path, "README.md"), "# Test\n");
+        RunGit(path, "add", "README.md");
+        RunGit(path, "commit", "-q", "-m", "initial");
+        var origin = Path.Combine(path, ".portHorizon", "fixture-origin.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(origin)!);
+        RunGit(path, "init", "--bare", "-q", origin);
+        RunGit(path, "remote", "add", "origin", origin);
+        RunGit(path, "push", "-q", "-u", "origin", "main");
+    }
+
+    private static void RunGit(string cwd, string verb, params string[] args)
     {
         var psi = new ProcessStartInfo
         {
@@ -204,7 +255,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         };
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
         psi.ArgumentList.Add(verb);
-        foreach (var part in args.Split(' ')) psi.ArgumentList.Add(part);
+        foreach (var part in args) psi.ArgumentList.Add(part);
         using var p = Process.Start(psi)!;
         p.WaitForExit(60_000);
         if (p.ExitCode != 0)

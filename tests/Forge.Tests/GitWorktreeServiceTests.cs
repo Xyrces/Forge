@@ -87,6 +87,45 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task CancelledFreshCheckoutDoesNotCreateWorktree()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _service.CreateFreshAsync("cancelled", "main", cancellation.Token));
+        Assert.False(Directory.Exists(_service.WorktreePathFor("cancelled")));
+    }
+
+    [Fact]
+    public async Task FreshCheckoutFetchesRemoteWithoutMovingLocalBase()
+    {
+        var old = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        var other = Path.Combine(_workDir, "upstream");
+        Assert.Equal(0, RunGit(_workDir, $"clone -q {_bareDir} {other}"));
+        RunGit(other, "config user.email test@example.com");
+        RunGit(other, "config user.name Test");
+        File.WriteAllText(Path.Combine(other, "fresh.txt"), "latest");
+        RunGit(other, "add fresh.txt"); RunGit(other, "commit -qm latest");
+        RunGit(other, "push -q origin main");
+        var expected = RunGitForResult(other, "rev-parse HEAD").Stdout;
+        var path = await _service.CreateFreshAsync("fresh", "main");
+        Assert.Equal(expected, RunGitForResult(path, "rev-parse HEAD").Stdout);
+        Assert.Equal(old, RunGitForResult(_workDir, "rev-parse HEAD").Stdout);
+    }
+
+    [Fact]
+    public async Task FreshCheckoutRefusesFailedFetchAndPreservesOrphanBranch()
+    {
+        RunGit(_workDir, "branch agent/orphan");
+        var before = RunGitForResult(_workDir, "rev-parse agent/orphan").Stdout;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.CreateFreshAsync("orphan", "main"));
+        Assert.Equal(before, RunGitForResult(_workDir, "rev-parse agent/orphan").Stdout);
+        Assert.False(Directory.Exists(_service.WorktreePathFor("orphan")));
+        RunGit(_workDir, "remote remove origin");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.CreateFreshAsync("unavailable", "main"));
+        Assert.False(Directory.Exists(_service.WorktreePathFor("unavailable")));
+    }
+
+    [Fact]
     public async Task DiffAndAheadCount_StaleLocalMain_DoNotFalsePositive()
     {
         // Regression (porthorizon task-7, 2026-07-29): the worktree's

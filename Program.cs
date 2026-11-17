@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.Systemd;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
 using Forge.AgentTools;
@@ -67,6 +68,26 @@ public static class Program
         });
         var logger = loggerFactory.CreateLogger("Forge");
 
+        if (options.Controller.Enabled)
+        {
+            if (mode == CliMode.Check)
+                return await Orchestrator.Control.ControllerHost.CheckAsync(options, loggerFactory);
+            Orchestrator.Control.ControllerHost.Validate(options);
+            if (mode != CliMode.Run && mode != CliMode.Check)
+                throw new InvalidOperationException("Distributed runtime operations are selected by Controller.Mode.");
+            if (options.Controller.Mode.Equals("initialize", StringComparison.OrdinalIgnoreCase))
+                return await Orchestrator.Control.ControllerInitializer.RunAsync(options, loggerFactory);
+            if (options.Controller.Mode.Equals("worker", StringComparison.OrdinalIgnoreCase))
+                return await RunWorkerWithSignalsAsync(options, loggerFactory);
+            if (!options.Controller.Mode.Equals("standby", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Controller.Mode must be initialize, standby, or worker.");
+            return await Orchestrator.Control.ControllerHost.RunAsync(options, loggerFactory, async (ready, admission, ct) =>
+            {
+                var code = await RunOrchestratorAsync(options, loggerFactory, logger, ct, ready, admission);
+                if (code != 0) throw new InvalidOperationException($"Forge runtime stopped with exit code {code}.");
+            });
+        }
+
         if (mode == CliMode.Status)
             return await PrintStatusAsync(options, loggerFactory);
 
@@ -111,6 +132,27 @@ if (mode == CliMode.DashboardOnly)
     private static bool IsSystemdService()
     {
         return !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INVOCATION_ID"));
+    }
+
+    private static async Task<int> RunWorkerWithSignalsAsync(AgentOptions options, ILoggerFactory loggerFactory)
+    {
+        using var stop = new CancellationTokenSource();
+        ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; stop.Cancel(); };
+        Console.CancelKeyPress += cancel;
+        using var terminate = OperatingSystem.IsWindows() ? null : System.Runtime.InteropServices.PosixSignalRegistration.Create(
+            System.Runtime.InteropServices.PosixSignal.SIGTERM, context => { context.Cancel = true; stop.Cancel(); });
+        using var interrupt = OperatingSystem.IsWindows() ? null : System.Runtime.InteropServices.PosixSignalRegistration.Create(
+            System.Runtime.InteropServices.PosixSignal.SIGINT, context => { context.Cancel = true; stop.Cancel(); });
+        try { return await Orchestrator.Workers.WorkerHost.RunAsync(options, loggerFactory, stop.Token); }
+        finally { Console.CancelKeyPress -= cancel; }
+    }
+
+    internal static IDataProtectionProvider CreateSecretProtection(AgentOptions options)
+    {
+        if (!options.Controller.Enabled) return DataProtectionProvider.Create("forge.secrets");
+        Directory.CreateDirectory(options.Controller.KeyringPath);
+        return DataProtectionProvider.Create(new DirectoryInfo(options.Controller.KeyringPath),
+            builder => builder.SetApplicationName("forge.secrets"));
     }
 
     // Wraps RunOrchestratorAsync in a minimal generic Host so systemd
@@ -319,11 +361,11 @@ if (mode == CliMode.DashboardOnly)
         var primaryDbPath = ForgesystemPaths.IssuesDb(dataRoot, "default");
         Directory.CreateDirectory(Path.GetDirectoryName(primaryDbPath)!);
         var primaryStore = new Core.IssueStore(
-            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDbPath));
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDbPath, options.Db.AutoMigrate));
         var projectStore = new Core.ProjectStore(primaryStore);
         var secretStore = new Core.SecretStore(
             primaryStore,
-            Microsoft.AspNetCore.DataProtection.DataProtectionProvider.Create("forge.secrets"),
+            CreateSecretProtection(options),
             loggerFactory.CreateLogger<Core.SecretStore>());
 
         var cloner = new Projects.ProjectCloner(dataRoot, null);
@@ -499,7 +541,7 @@ if (mode == CliMode.DashboardOnly)
     /// IssueStore construction against a schema creates it and all tables.
     /// </summary>
     internal static Core.Db.IDbConnectionFactory FactoryFor(DbOptions db, string projectId, string sqlitePath)
-        => Core.Db.ForgeDb.ForProject(db.IsSqlServer, db.ConnectionString, projectId, sqlitePath);
+        => Core.Db.ForgeDb.ForProject(db.IsSqlServer, db.ConnectionString, projectId, sqlitePath, db.AutoMigrate);
 
     private static async Task<int> RunDashboardOnlyAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger)
@@ -510,14 +552,14 @@ if (mode == CliMode.DashboardOnly)
             : throw new InvalidOperationException("At least one project is required to run the dashboard.");
         var issues = new IssueStore(FactoryFor(options.Db, dashboardOnlyProjects[0].Id, defaultDb));
         var registryIssues = new IssueStore(
-            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, defaultDb));
+            Core.Db.ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, defaultDb, options.Db.AutoMigrate));
         var agents = new AgentStore(registryIssues);
         var skills = new SkillStore(registryIssues);
         var sprints = new SprintStore(issues);
         var messageBus = new AgentMessageBus();
         var eventBus = new InMemoryDashboardEventBus();
         var dashboardOnlyFactory = new ProjectContextFactory(projectStore, dataRoot, dbByProject,
-            (pid, path) => FactoryFor(options.Db, pid, path));
+            (pid, path) => FactoryFor(options.Db, pid, path), deploymentProfiles: options.Deployments);
         var dashboardOnlySlots = new SlotTable();
         var _roleFiller = new[] { "coredev", "clientdev", "reviewer", "intake", "designer", "artist", "groomer", "orchestrator", "triage" };
         foreach (var pp in dashboardOnlyProjects)
@@ -795,13 +837,13 @@ Console.Error.WriteLine(ex.ToString());
             var dbLabel = issues.Db.Provider == ForgeDbProvider.SqlServer
                 ? $"sqlserver ({issues.Db.Qualifier}, {sw.ElapsedMilliseconds}ms)"
                 : "sqlite";
-            if (actualSchema == expectedSchema)
+            if (Core.Db.RuntimeSchemaCompatibility.CanRead(actualSchema))
             {
-                Console.WriteLine($"  [ok] db provider={dbLabel} schema v{actualSchema} (current)");
+                Console.WriteLine($"  [ok] db provider={dbLabel} schema v{actualSchema} (read-compatible; initializer target v{expectedSchema})");
             }
             else
             {
-                failures.Add($"db schema v{actualSchema} but current is v{expectedSchema} (run orchestrator once to migrate)");
+                failures.Add($"db schema v{actualSchema} is outside this runtime's read compatibility (initializer target v{expectedSchema}); use the explicit qualified migration procedure");
             }
             _ = probe;
         }
@@ -873,35 +915,16 @@ Console.Error.WriteLine(ex.ToString());
             }
             else
             {
-                // Ping the gateway with a minimal chat completion.
                 try
                 {
-                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                    http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", provider.ApiKey);
-                    var resp = await http.PostAsJsonAsync(
-                        provider.BaseUrl.TrimEnd('/') + "/v1/chat/completions",
-                        new
-                        {
-                            model = provider.DefaultModel,
-                            messages = new[] { new { role = "user", content = "ping" } },
-                            max_tokens = 4,
-                        });
-                    if (resp.IsSuccessStatusCode)
-                    {
-                        Console.WriteLine($"  [ok] kilo gateway reachable at {provider.BaseUrl} (model={provider.DefaultModel})");
-                    }
-                    else if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-                    {
-                        failures.Add($"kilo gateway auth failed (HTTP 401) — apiKey expired or invalid");
-                    }
-                    else
-                    {
-                        failures.Add($"kilo gateway returned HTTP {(int)resp.StatusCode} — {resp.ReasonPhrase}");
-                    }
+                    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                    var probe = await ModelCatalogProbe.CheckAsync(http, provider, provider.DefaultModel);
+                    if (probe.Success) Console.WriteLine("  [ok] " + probe.Detail);
+                    else failures.Add(probe.Detail);
                 }
                 catch (Exception ex)
                 {
-                    failures.Add($"kilo gateway unreachable: {ex.GetType().Name}: {ex.Message}");
+                    failures.Add($"Model metadata probe failed: {ex.GetType().Name}: {ex.Message}");
                 }
             }
         }
@@ -1136,13 +1159,14 @@ Console.Error.WriteLine(ex.ToString());
     /// </summary>
     private static async Task<int> RunOrchestratorAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger,
-        CancellationToken externalStop = default)
+        CancellationToken externalStop = default, Action? ready = null,
+        Func<CancellationToken, Task>? admission = null)
     {
         ServiceProvider provider;
         try
         {
             provider = await Forge.Orchestrator.Composition.ForgeComposition.BuildAsync(
-                options, loggerFactory, externalStop);
+                options, loggerFactory, externalStop, admission);
         }
         catch (Forge.Orchestrator.Composition.NoProjectsRegisteredException)
         {
@@ -1159,19 +1183,23 @@ Console.Error.WriteLine(ex.ToString());
             // means a stop request tears the orchestrator down through
             // the exact same path as Ctrl+C.
             using var shutdownCts = CancellationTokenSource.CreateLinkedTokenSource(externalStop);
-            Console.CancelKeyPress += (_, e) =>
+            ConsoleCancelEventHandler cancelHandler = (_, e) =>
             {
                 logger.LogWarning("SIGINT received; cancelling...");
                 e.Cancel = true;
                 shutdownCts.Cancel();
             };
-            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            EventHandler exitHandler = (_, _) =>
             {
                 logger.LogWarning("Process exit; cancelling");
-                try { shutdownCts.Cancel(); } catch { }
+                shutdownCts.Cancel();
             };
+            Console.CancelKeyPress += cancelHandler;
+            AppDomain.CurrentDomain.ProcessExit += exitHandler;
 
             var dashboard = provider.GetRequiredService<DashboardHost>();
+            var backgroundLoops = new List<Task>();
+            var backgroundServices = new List<Microsoft.Extensions.Hosting.IHostedService>();
             try
             {
                 logger.LogInformation("Starting dashboard");
@@ -1219,7 +1247,8 @@ Console.Error.WriteLine(ex.ToString());
                 {
                     var providerNames = provider.GetRequiredService<Agents.LlmConfig>()
                         .Providers.Select(p => p.Name).ToArray();
-                    _ = Task.Run(async () =>
+                    backgroundLoops.Add(RefreshKeysAsync());
+                    async Task RefreshKeysAsync()
                     {
                         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
                         try
@@ -1228,12 +1257,14 @@ Console.Error.WriteLine(ex.ToString());
                                 await keyResolver.RefreshAsync(providerNames, shutdownCts.Token);
                         }
                         catch (OperationCanceledException) { }
-                    });
+                    }
                 }
 
                 // JSONL mirror is a fire-and-forget background task; it
                 // cancels itself when shutdownCts fires.
-                _ = provider.GetRequiredService<IssuesJsonlMirror>().StartAsync(shutdownCts.Token);
+                var mirror = provider.GetRequiredService<IssuesJsonlMirror>();
+                backgroundServices.Add(mirror);
+                await mirror.StartAsync(shutdownCts.Token);
 
                 // Messaging: event consumers first, then the 15m
                 // backstop tick publisher. BackgroundService.StartAsync
@@ -1245,22 +1276,29 @@ Console.Error.WriteLine(ex.ToString());
                 // marker — the composition root registers every
                 // consumer under it, so an omitted start is impossible.
                 foreach (var consumer in provider.GetServices<Messaging.IEventConsumerService>())
+                {
+                    backgroundServices.Add(consumer);
                     await consumer.StartAsync(shutdownCts.Token);
-                await provider.GetRequiredService<Messaging.SweepTickPublisher>().StartAsync(shutdownCts.Token);
+                }
+                var publisher = provider.GetRequiredService<Messaging.SweepTickPublisher>();
+                backgroundServices.Add(publisher);
+                await publisher.StartAsync(shutdownCts.Token);
 
                 // Schedulers (fire-and-forget; they cancel on shutdown).
-                _ = provider.GetRequiredService<Orchestrator.ScheduledGroomer>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.ScheduledWatchdog>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.DesignerScheduler>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.ArtistScheduler>().RunAsync(shutdownCts.Token);
-                _ = provider.GetRequiredService<Orchestrator.Sprint.SprintAssembler>().RunAsync(shutdownCts.Token);
-
-                // Self-starting queue: resolving it guarantees the
-                // singleton was constructed (its ctor subscribes the
-                // worker).
-                _ = provider.GetRequiredService<Agents.ProductRefinementQueue>();
+                backgroundLoops.Add(provider.GetRequiredService<Orchestrator.ScheduledGroomer>().RunAsync(shutdownCts.Token));
+                backgroundLoops.Add(provider.GetRequiredService<Orchestrator.ScheduledWatchdog>().RunAsync(shutdownCts.Token));
+                backgroundLoops.Add(provider.GetRequiredService<Orchestrator.DesignerScheduler>().RunAsync(shutdownCts.Token));
+                backgroundLoops.Add(provider.GetRequiredService<Orchestrator.ArtistScheduler>().RunAsync(shutdownCts.Token));
 
                 logger.LogInformation("Orchestrator starting");
+                ready?.Invoke();
+                backgroundLoops.Add(provider.GetRequiredService<Orchestrator.Sprint.SprintAssembler>().RunAsync(shutdownCts.Token));
+                // Durable pending refinement must not claim work before paid
+                // admission opens. Its joined lifetime also fences shutdown.
+                backgroundLoops.Add(provider.GetRequiredService<Agents.ProductRefinementQueue>()
+                    .RunAsync(shutdownCts.Token));
+                backgroundLoops.Add(provider.GetRequiredService<Forge.Deploy.RoutineDeploymentCoordinator>()
+                    .RunAsync(shutdownCts.Token));
                 await provider.GetRequiredService<OrchestratorAgent>().ExecuteAsync(shutdownCts.Token);
                 return 0;
             }
@@ -1272,23 +1310,37 @@ Console.Error.WriteLine(ex.ToString());
             catch (Exception ex)
             {
                 logger.LogCritical(ex, "Orchestrator crashed");
-                try { await dashboard.StopAsync(); } catch { }
-                // Die for real: a logged crash that leaves the process
-                // alive is a zombie systemd never restarts (observed
-                // live 2026-07-30).
-                Environment.Exit(1);
+                // Return failure through the controller/systemd host after all local work drains.
                 return 1;
             }
             finally
             {
-                try { await dashboard.StopAsync(); } catch { }
+                shutdownCts.Cancel();
+                Console.CancelKeyPress -= cancelHandler;
+                AppDomain.CurrentDomain.ProcessExit -= exitHandler;
+                try { await dashboard.StopAsync(); }
+                catch (Exception ex) { logger.LogWarning(ex, "Dashboard shutdown failed"); }
+                foreach (var service in backgroundServices.AsEnumerable().Reverse())
+                {
+                    try { await service.StopAsync(CancellationToken.None); }
+                    catch (Exception ex) { logger.LogError(ex, "Background service shutdown failed"); }
+                }
+                // Message consumers no longer admit new watches. Join review/QA
+                // waits and their follow-on callbacks before returning ownership.
+                await provider.GetRequiredService<Orchestrator.WatchSweepService>().StopAsync();
+                foreach (var loop in backgroundLoops)
+                {
+                    try { await loop; }
+                    catch (OperationCanceledException) when (shutdownCts.IsCancellationRequested) { }
+                    catch (Exception ex) { logger.LogError(ex, "Background loop stopped with an error"); }
+                }
                 try
                 {
                     var stateStore = provider.GetRequiredService<StateStore>();
                     var s = await stateStore.LoadStateAsync();
                     await stateStore.SaveStateAsync(s);
                 }
-                catch { }
+                catch (Exception ex) { logger.LogWarning(ex, "Final state checkpoint failed"); }
             }
         }
     }

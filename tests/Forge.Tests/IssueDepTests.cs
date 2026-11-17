@@ -191,13 +191,15 @@ public class IssueDepTests : IDisposable
     }
 
     [Fact]
-    public async Task IsBlocked_BlockerClosed_ReturnsFalse()
+    public async Task IsBlocked_BlockerClosedWithoutDeliveryEvidence_RemainsBlocked()
     {
         var blocker = await CreateTaskAsync("blocker");
         var blocked = await CreateTaskAsync("blocked");
         await _store.AddDependencyAsync(blocker.Id, blocked.Id, IssueDepKind.Blocks);
         await _store.ClaimAsync(blocker.Id, "agent");
         await _store.TransitionAsync(blocker.Id, IssueStatus.Closed, error: null);
+        Assert.True(await _store.IsBlockedAsync(blocked.Id));
+        await _store.CloseWithDispositionAsync(blocker.Id, new(CloseDispositionKind.DeliveredElsewhere, "Implemented separately", "merged change evidence"));
         Assert.False(await _store.IsBlockedAsync(blocked.Id));
     }
 

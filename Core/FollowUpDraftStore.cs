@@ -87,7 +87,7 @@ public sealed class FollowUpDraftStore
 
     /// <summary>All unconsumed drafts, oldest first (materialization
     /// candidates at sprint completion).</summary>
-    public async Task<IReadOnlyList<FollowUpDraft>> ListUnconsumedAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<FollowUpDraft>> ListUnconsumedAsync(CancellationToken ct = default, bool excludeCompletionClaims = false)
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -95,6 +95,7 @@ public sealed class FollowUpDraftStore
             SELECT id, sprint_id, source_issue_id, source_role, title, description, priority, blocks_issue_id, task_type, created_at, consumed_at, disposition, disposition_detail
             FROM {T("followup_draft")}
             WHERE consumed_at IS NULL
+            {(excludeCompletionClaims ? $"AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id={T("followup_draft")}.id)" : "")}
             ORDER BY id
             """;
         var list = new List<FollowUpDraft>();
@@ -190,6 +191,45 @@ public sealed class FollowUpDraftStore
         Add(px + "d", disposition); Add(px + "dd", detail);
         Add(px + "now", DateTime.UtcNow.ToString(IssueStore.DateFormat)); Add(px + "id", id);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Consume one suggestion's source group atomically. Replays preserve the original
+    /// binding/time; a missing or differently consumed source rolls back the entire group.</summary>
+    public async Task SetDispositionBatchAsync(IReadOnlyCollection<long> ids, string disposition,
+        string detail, CancellationToken ct = default)
+    {
+        if (ids.Count is < 1 or > 1000 || ids.Any(id => id <= 0)
+            || string.IsNullOrWhiteSpace(disposition) || string.IsNullOrWhiteSpace(detail))
+            throw new ArgumentException("A bounded source group and disposition binding are required.");
+        await using var connection = await _issues.Db.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        using (var fence = connection.CreateCommand())
+        {
+            fence.Transaction = transaction;
+            fence.CommandText = $"UPDATE {T("completion_lock")} SET value=value WHERE id=1";
+            if (await fence.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Completion ownership lock unavailable.");
+        }
+        var uniqueIds = ids.Distinct().Order().ToArray();
+        var names = uniqueIds.Select((_, index) => $"@id{index}").ToArray();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // A single bounded update avoids one network round trip per source. A mismatch
+        // rolls back even the valid subset, so partial acknowledgement never commits.
+        command.CommandText = $"""
+            UPDATE {T("followup_draft")}
+            SET disposition=@disposition, disposition_detail=@detail, consumed_at=COALESCE(consumed_at,@now)
+            WHERE id IN ({string.Join(',', names)})
+              AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id={T("followup_draft")}.id)
+              AND (consumed_at IS NULL OR (disposition=@disposition AND disposition_detail=@detail))
+            """;
+        Db.DbCommandExtensions.AddParam(command, "@disposition", disposition);
+        Db.DbCommandExtensions.AddParam(command, "@detail", detail);
+        Db.DbCommandExtensions.AddParam(command, "@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        for (var index = 0; index < uniqueIds.Length; index++)
+            Db.DbCommandExtensions.AddParam(command, names[index], uniqueIds[index]);
+        if (await command.ExecuteNonQueryAsync(ct) != uniqueIds.Length)
+            throw new InvalidOperationException("Source draft is missing or already consumed by another disposition.");
+        await transaction.CommitAsync(ct);
     }
 
     private static FollowUpDraft Map(System.Data.Common.DbDataReader rd) =>

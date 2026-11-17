@@ -19,6 +19,22 @@ namespace Forge.Tests.Integration;
 public class MafAgentRunnerSkillsTests
 {
     [Fact]
+    public async Task ExistingImplementationReviewUsesExplicitStructuredAcceptanceInstructions()
+    {
+        var scripted = new ScriptedChatClient(new ChatResponse(new ChatMessage(ChatRole.Assistant, "{}")));
+        var factory = new ScriptingFactory(scripted);
+        var runner = new MafAgentRunner(factory,
+            new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
+            new RoleAgentRegistry(), NullLogger<MafAgentRunner>.Instance,
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("existing-review-prompt"));
+        await runner.RunAsync(AgentType.Reviewer, "exact request", null, new Dictionary<string, object>
+        { ["workerAttemptId"] = "independent-worker", ["existingImplementationReview"] = "true" }, default);
+        Assert.Contains("strict JSON response contract", factory.LastInstructions);
+        Assert.Contains("every listed criterion needs concrete evidence", factory.LastInstructions);
+        Assert.Contains("read-only and architecture rules still apply", factory.LastInstructions);
+    }
+
+    [Fact]
     public async Task RunAsync_NoSkillSource_BehaviorUnchanged()
     {
         // No skills source => the agent instructions match the legacy

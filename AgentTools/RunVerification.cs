@@ -43,16 +43,8 @@ public static class RunVerification
             }
             if (exitCode != 0)
             {
-                // Flaky-test self-heal (observed live 2026-08-08:
-                // porthorizon task-601 stalled Failed/StalledRework
-                // because the known-flaky MaterialReservationSystemTests
-                // died under the full suite — a failure the task's diff
-                // could not cause and no rework round could fix; the
-                // bounce feedback actively misinstructs the agent).
-                // A test that passes in isolation failed via full-suite
-                // interference, not via the diff — quarantine it and let
-                // the gate pass. Still failing in isolation = real
-                // failure, bounce as before.
+                // Isolation is diagnostic only: ordering/shared-state regressions can
+                // be introduced by this diff and disappear when run alone.
                 if (IsDotnetTestCommand(command)
                     && ExtractFailedTests(output) is { Count: > 0 } failedTests
                     && failedTests.Count <= MaxFlakyRetryTests)
@@ -60,21 +52,20 @@ public static class RunVerification
                     var filter = string.Join("|", failedTests.Select(t => "FullyQualifiedName=" + t));
                     var retryCommand = command + " --filter \"" + filter + "\"";
                     logger.LogWarning(
-                        "Verification({Dir}): '{Command}' failed with {Count} test failure(s) — re-running in isolation before bouncing (flaky-test quarantine)",
+                        "Verification({Dir}): '{Command}' failed with {Count} test failure(s) — re-running in isolation for diagnostic context",
                         workDir, command, failedTests.Count);
                     var (retryExit, _, retryTimedOut) = await RunCommandAsync(
                         workDir, retryCommand, timeout ?? DefaultTimeout, ct);
                     if (!retryTimedOut && retryExit == 0)
                     {
                         flakyPasses.Add(
-                            $"`{command}`: {failedTests.Count} test(s) failed under the full suite but PASSED in isolation (quarantined as flaky — not caused by this diff): {string.Join(", ", failedTests)}");
+                            $"`{command}`: {failedTests.Count} test(s) passed in isolation; full-suite failure remains blocking: {string.Join(", ", failedTests)}");
                         logger.LogWarning(
-                            "Verification({Dir}): {Count} failed test(s) passed in isolation — quarantined as flaky, gate passes: {Tests}",
+                            "Verification({Dir}): {Count} tests passed in isolation; full-suite failure remains blocking: {Tests}",
                             workDir, failedTests.Count, string.Join(", ", failedTests));
-                        continue;
                     }
-                    logger.LogWarning(
-                        "Verification({Dir}): isolated re-run still failing — real failure, not flake", workDir);
+                    else logger.LogWarning(
+                        "Verification({Dir}): isolated re-run also failed", workDir);
                 }
                 var tail = Tail(output, 1500);
                 failures.Add($"`{command}` exited {exitCode}:\n{tail}");
@@ -140,6 +131,7 @@ public static class RunVerification
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        var redactor = new ToolSecretRedactor(psi.Environment);
         using var process = Process.Start(psi)!;
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
@@ -150,15 +142,16 @@ public static class RunVerification
         try
         {
             await process.WaitForExitAsync(linked.Token);
+            await Task.WhenAll(outTask, errTask).WaitAsync(linked.Token);
         }
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch { }
             if (ct.IsCancellationRequested) throw;
-            return (-1, stdout.ToString(), TimedOut: true);
+            return (-1, redactor.Redact(stdout.ToString()), TimedOut: true);
         }
         await Task.WhenAll(outTask, errTask);
-        return (process.ExitCode, stdout + "\n" + stderr, TimedOut: false);
+        return (process.ExitCode, redactor.Redact(stdout + "\n" + stderr), TimedOut: false);
     }
 
     private static async Task PumpAsync(StreamReader reader, StringBuilder into)

@@ -45,6 +45,17 @@ public sealed record DeploymentOptions
     public string? PublishProject { get; set; }
     public string? ReleasesRoot { get; set; }
     public string? CurrentLinkPath { get; set; }
+
+    // Operator-reviewed CI receipt catalog. Never resolve a mutable tag at deployment time.
+    public Dictionary<string, string> KubernetesImages { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    // Optional operator-managed, append-only source SHA -> digest ConfigMap; read per approval/reconciliation.
+    public string? KubernetesImageCatalog { get; set; }
+    public string KubernetesNamespace { get; set; } = "forge";
+    public string? KubernetesDatasetId { get; set; }
+    public bool RoutineEnabled { get; set; }
+    public string RoutineWorkflow { get; set; } = "controller-image.yml";
+    public string RoutineValidationWorkflow { get; set; } = "ci.yml";
+    public string RoutineImageRepository { get; set; } = "ghcr.io/xyrces/forge";
 }
 
 public enum DeploymentKind
@@ -52,4 +63,5 @@ public enum DeploymentKind
     None,
     Script,
     SelfHostedSystemdService,
+    Kubernetes,
 }

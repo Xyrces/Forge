@@ -1,9 +1,11 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Forge.Agents;
 using Forge.Core;
+using Forge.Core.Messaging;
+using Forge.Core.Initiatives;
 
 namespace Forge.Dashboard;
 
@@ -17,6 +19,10 @@ namespace Forge.Dashboard;
 /// what's there.
 /// </para>
 /// </summary>
+public sealed record SpecHygieneRepairRequest(string ProposalId, int Revision, string Hash, int SpecVersion, long DesignRunId);
+
+public sealed record GroomingRetryRequest(long? ExpectedRunId);
+
 public static class SpecEndpoints
 {
     public static void MapSpecEndpoints(
@@ -28,8 +34,16 @@ public static class SpecEndpoints
         GroomerAgentFactory? groomerFactory = null,
         IssueGroomerRunStore? groomerRuns = null,
         Projects.ProjectContextFactory? projectContexts = null,
-        Forge.Core.IIssueStore? issues = null)
+        Forge.Core.IIssueStore? issues = null,
+        InitiativeApprovalService? initiativeApprovals = null,
+        IEventPublisher? eventPublisher = null,
+        DesignerRunStore? designerRuns = null)
     {
+        bool HasLocalDesignEvidence(IIssueStore? candidate) => candidate is IssueStore target && issues is IssueStore primary
+            && target.ProjectId == primary.ProjectId && target.Db.Provider == primary.Db.Provider
+            && target.Db.Qualifier == primary.Db.Qualifier && target.Db.ConnectionString == primary.Db.ConnectionString
+            && designerRuns is not null && designerRuns.UsesDatabase(target.Db);
+
         // Multi-project: when ?project= names a registered project and the
         // factory is available, read from THAT project's spec store (spec
         // rows live in the per-project issues sqlite file). Absent param
@@ -61,6 +75,9 @@ public static class SpecEndpoints
             return (ctx.Specs, ctx.Issues, ex);
         }
 
+        OperatorAcceptanceRepairEndpoints.MapOperatorAcceptanceRepairEndpoints(app,
+            project => ResolveOwned(project)?.Issues as IssueStore, groomerRuns, logger);
+
         app.MapGet("/api/specs", async (string? project, string? status, CancellationToken ct) =>
         {
             SpecStatus? statusFilter = null;
@@ -74,7 +91,9 @@ public static class SpecEndpoints
             var resolved = ResolveSpecs(project);
             var columnFilter = ReferenceEquals(resolved, specs) ? project : null;
             var list = await resolved.ListAsync(columnFilter, statusFilter, ct);
-            return Results.Json(list.Select(ToSpecView).ToArray(), DashboardJson.Options);
+            var blocked = resolved is SpecStore concrete
+                ? await concrete.ListRefinementBlockedSpecIdsAsync(ct) : new HashSet<string>();
+            return Results.Json(list.Select(s => ToSpecView(s, blocked.Contains(s.Id))).ToArray(), DashboardJson.Options);
         });
 
         app.MapGet("/api/specs/{id}", async (string id, string? project, CancellationToken ct) =>
@@ -82,9 +101,11 @@ public static class SpecEndpoints
             var owned = ResolveOwned(project);
             if (owned is null) return Results.NotFound(new { error = "project not found", project });
             var spec = await owned.Value.Specs.GetAsync(id, ct);
+            var refinement = owned.Value.Specs is SpecStore concrete
+                ? await concrete.GetInitiativeRefinementAsync(id, ct) : null;
             return spec is null
                 ? Results.NotFound()
-                : Results.Json(ToSpecView(spec), DashboardJson.Options);
+                : Results.Json(ToSpecView(spec, refinement is not null && refinement.RefinementState != "Completed"), DashboardJson.Options);
         });
 
         app.MapGet("/api/specs/{id}/versions", async (string id, string? project, CancellationToken ct) =>
@@ -222,12 +243,29 @@ public static class SpecEndpoints
                 .Distinct()
                 .ToList();
             var allSpecs = new List<SpecRecord>();
-            foreach (var pid in proposed)
+            if (initiativeApprovals is not null)
+            {
+                string? cursor = null;
+                do
+                {
+                    var page = await initiativeApprovals.Proposals.ListAsync(session.ProjectId, ct,
+                        limit: 50, afterId: cursor, sessionId: session.Id);
+                    var owned = projectContexts?.Find(session.ProjectId)?.Specs ?? specs;
+                    foreach (var proposal in page.Where(p => p.SpecId is not null))
+                    {
+                        var spec = await owned.GetAsync(proposal.SpecId!, ct);
+                        if (spec?.ProjectId == session.ProjectId)
+                            allSpecs.Add(spec);
+                    }
+                    cursor = page.Count == 50 ? page[^1].Id : null;
+                } while (cursor is not null);
+            }
+            foreach (var pid in proposed.Distinct())
             {
                 var match = await extractor.ListByParentIssueIdAsync(pid, ct);
-                allSpecs.AddRange(match);
+                allSpecs.AddRange(match.Where(s => s.ProjectId == session.ProjectId));
             }
-            return Results.Json(allSpecs.Select(ToSpecView).ToArray(), DashboardJson.Options);
+            return Results.Json(allSpecs.DistinctBy(s => s.Id).Select(ToSpecView).ToArray(), DashboardJson.Options);
         });
 
         app.MapPost("/api/specs", async (HttpContext ctx) =>
@@ -275,6 +313,10 @@ public static class SpecEndpoints
                 if (op == "set_status" && root.TryGetProperty("status", out var stEl)
                     && Enum.TryParse<SpecStatus>(stEl.GetString() ?? "", ignoreCase: true, out var newStatus))
                 {
+                    if (newStatus == SpecStatus.Shipped)
+                        return Results.Conflict(new { error = "delivery_evidence_required", detail = "Delivery is shown by sprint completion and deployment evidence, not a manual Shipped label." });
+                    if (newStatus is SpecStatus.Grooming or SpecStatus.Groomed)
+                        return Results.Conflict(new { error = "grooming_owned_transition", detail = "Use grooming or its explicit retry action; completion requires validated decomposition." });
                     var updated = await owned.Value.Specs.SetStatusAsync(id, newStatus, ctx.RequestAborted);
                     return Results.Json(ToSpecView(updated), DashboardJson.Options);
                 }
@@ -286,6 +328,10 @@ public static class SpecEndpoints
                     return Results.Json(ToSpecView(updated), DashboardJson.Options);
                 }
                 return Results.BadRequest(new { error = "unknown op (use 'update_body' or 'set_status')" });
+            }
+            catch (InitiativeRefinementPendingException ex)
+            {
+                return Results.Conflict(new { error = "initiative_refinement_incomplete", detail = ex.Message });
             }
             catch (InvalidOperationException ex)
             {
@@ -311,21 +357,21 @@ public static class SpecEndpoints
                 var owned = ResolveOwned(project);
                 if (owned is null) return Results.NotFound(new { error = "project not found", project });
                 var spec = await owned.Value.Specs.GetAsync(id, ct);
-                if (spec is null)
+                if (spec is null || project is not null && spec.ProjectId != project)
                     return Results.NotFound(new { error = "spec_not_found" });
-                // P2.a: the manual groom endpoint now accepts any of
-                // the "ready to groom" statuses: Designed (Designer
-                // approved), Approved (operator non-visual fast-path),
-                // Groomed (operator re-decompose).
-                if (spec.Status is not (SpecStatus.Designed
-                    or SpecStatus.AssetReady
-                    or SpecStatus.Approved
-                    or SpecStatus.Groomed))
+                var refinement = owned.Value.Specs is SpecStore concreteSpecs
+                    ? await concreteSpecs.GetInitiativeRefinementAsync(id, ct) : null;
+                if (refinement is not null && refinement.RefinementState != "Completed")
+                    return Results.Conflict(new { error = "initiative_refinement_incomplete",
+                        detail = new InitiativeRefinementPendingException(refinement.RefinementState).Message });
+                // AssetReady completes the visual lane; Approved is the
+                // explicit nonvisual path. Groomed requires operator re-decomposition.
+                if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed)
                 {
                     return Results.BadRequest(new
                     {
                         error = "spec_not_groomable",
-                        detail = $"spec status is {spec.Status}; expected Designed | AssetReady | Approved | Groomed"
+                        detail = $"spec status is {spec.Status}; expected AssetReady | Approved | Groomed"
                     });
                 }
 
@@ -355,47 +401,59 @@ public static class SpecEndpoints
                     }
                 }
 
-                // Fire-and-forget on a background task. The HTTP
-                // request returns immediately so the UI can refresh
-                // and watch the event stream. The manual run is
-                // recorded in issue_groomer_run (P3.5) so the
-                // dashboard's Groomer timeline can show it.
-                var agent = groomerFactory.Create(projectId: spec.ProjectId);
-                var runs = groomerRuns;
-                _ = Task.Run(async () =>
+                if (groomerRuns is null) return Results.Problem("Durable grooming run storage is unavailable.", statusCode: 503);
+                try
                 {
-                    var run = runs is not null
-                        ? await runs.StartAsync(id, GroomerTriggerKind.Manual, CancellationToken.None)
-                        : null;
-                    var startedAt = DateTime.UtcNow;
-                    try
-                    {
-                        var result = await agent.GroomAsync(id);
-                        if (runs is not null && run is not null)
-                        {
-                            await runs.FinishAsync(run.Id, GroomerRunStatus.Succeeded,
-                                storiesProduced: result?.StoryIds.Count ?? 0,
-                                tasksProduced: result?.TaskIds.Count ?? 0,
-                                error: null,
-                                duration: DateTime.UtcNow - startedAt,
-                                ct: CancellationToken.None);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (runs is not null && run is not null)
-                        {
-                            await runs.FinishAsync(run.Id, GroomerRunStatus.Failed,
-                                storiesProduced: 0, tasksProduced: 0,
-                                error: $"{ex.GetType().Name}: {ex.Message}",
-                                duration: DateTime.UtcNow - startedAt,
-                                ct: CancellationToken.None);
-                        }
-                        logger.LogWarning(ex, "Background groom failed for spec {Id}", id);
-                    }
-                });
-                return Results.Accepted($"/api/specs/{id}", new { status = "started" });
+                    var runId = await groomerRuns.QueueAsync(id, retry: false, ct: ct);
+                    await WakeGroomerAsync(spec.ProjectId, ct);
+                    return Results.Accepted($"/api/specs/{id}", new { status = "queued", runId });
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.Conflict(new { error = "grooming_in_progress", detail = ex.Message });
+                }
             });
+        }
+
+
+        if (groomerFactory is not null && groomerRuns is not null)
+        {
+            app.MapPost("/api/specs/{id}/groom/retry", async (string id, string? project, GroomingRetryRequest request, CancellationToken ct) =>
+            {
+                var owned = ResolveOwned(project);
+                if (owned is null) return Results.NotFound(new { error = "project_not_found" });
+                var spec = await owned.Value.Specs.GetAsync(id, ct);
+                if (spec is null || project is not null && spec.ProjectId != project) return Results.NotFound(new { error = "spec_not_found" });
+                if (spec.Status != SpecStatus.Grooming && !SpecActions.CanStartGrooming(spec.Status))
+                    return Results.Conflict(new { error = "grooming_retry_unavailable", detail = "Only interrupted Grooming can use safe resume." });
+                var receipt = owned.Value.Specs is SpecStore concrete ? await concrete.GetInitiativeRefinementAsync(id, ct) : null;
+                if (receipt is not null && receipt.RefinementState != "Completed")
+                    return Results.Conflict(new { error = "initiative_refinement_incomplete" });
+                try
+                {
+                    var runId = await groomerRuns.QueueAsync(id, retry: true, expectedRunId: request.ExpectedRunId, ct: ct);
+                    await WakeGroomerAsync(spec.ProjectId, ct);
+                    return Results.Accepted($"/api/specs/{id}", new { status = "queued", runId });
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.Conflict(new { error = "grooming_retry_unavailable", detail = ex.Message });
+                }
+            });
+        }
+
+        async Task WakeGroomerAsync(string projectId, CancellationToken ct)
+        {
+            if (eventPublisher is null) return;
+            using var notify = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            notify.CancelAfter(TimeSpan.FromSeconds(5));
+            var now = DateTimeOffset.UtcNow;
+            try
+            {
+                await eventPublisher.PublishAsync(new SweepTick { MessageId = SweepTick.IdFor(SweepKind.Groom, projectId, now),
+                    ProjectId = projectId, Kind = SweepKind.Groom, TickAt = now }, notify.Token);
+            }
+            catch (Exception ex) { logger.LogWarning(ex, "Grooming run queued but wakeup failed; scheduler backstop will recover"); }
         }
 
         // P6 Stage 4: action-state machine for the Specs matrix action
@@ -403,6 +461,24 @@ public static class SpecEndpoints
         // (Approve only on Draft, Start Grooming only on Approved |
         // Designed, etc.) so the UI doesn't ship its own copy of the
         // state machine.
+        app.MapPost("/api/specs/{id}/refine-again", async (string id, string? project, SpecHygieneRepairRequest request, CancellationToken ct) =>
+        {
+            var owned = ResolveOwned(project);
+            if (owned is null) return Results.NotFound();
+            var spec = await owned.Value.Specs.GetAsync(id, ct);
+            if (spec is null) return Results.NotFound();
+            // Designer evidence is currently primary-store owned; never bind another project's same spec ID.
+            if (initiativeApprovals is null || designerRuns is null || owned.Value.Issues is not IssueStore target
+                || !HasLocalDesignEvidence(target)) return Results.Conflict(new { error = "Design repair is not configured for this owning project store." });
+            try
+            {
+                return await initiativeApprovals.RepairHygieneAsync(spec.ProjectId, request.ProposalId, request.Revision, request.Hash,
+                    new HygieneRepairRequest(id, request.SpecVersion, request.DesignRunId), ct)
+                    ? Results.Accepted() : Results.Conflict(new { error = "Repair evidence changed or downstream work exists. Reload and review the latest design result." });
+            }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+
         app.MapGet("/api/specs/{id}/actions", async (string id, string? project, CancellationToken ct) =>
         {
             var owned = ResolveOwned(project);
@@ -412,25 +488,69 @@ public static class SpecEndpoints
 
             // Single source of truth: Core.SpecActions (the UI
             // consumes the same rules for its buttons).
-            var canApprove = SpecActions.CanApprove(spec.Status);
-            var canStartGrooming = SpecActions.CanStartGrooming(spec.Status);
-            var canShip = SpecActions.CanShip(spec.Status);
+            var receipt = owned.Value.Specs is SpecStore concrete
+                ? await concrete.GetInitiativeRefinementAsync(id, ct)
+                : null;
+            var refinementBlocked = receipt is not null && receipt.RefinementState != "Completed";
+            var design = designerRuns is not null && HasLocalDesignEvidence(owned.Value.Issues)
+                ? (await designerRuns.ListAsync(spec.Id, 1, ct)).FirstOrDefault() : null;
+            var designFailure = design?.Status == DesignerRunStatus.HygieneFailed && design.Ts >= spec.UpdatedAt;
+            var proposal = receipt is not null && initiativeApprovals is not null
+                ? await initiativeApprovals.Proposals.GetAsync(spec.ProjectId, receipt.ProposalId, ct) : null;
+            var canRepair = designFailure && receipt?.RefinementState == "Completed" && proposal?.ApprovedAt is not null
+                && owned.Value.Issues is IssueStore repairStore && HasLocalDesignEvidence(repairStore)
+                && await new InitiativeIngestionStore(repairStore).CanRepairHygieneAsync(receipt.ProposalId, receipt.Revision, proposal.Hash,
+                    new HygieneRepairRequest(spec.Id, spec.CurrentVersion, design!.Id), ct);
+            var canApprove = !refinementBlocked && SpecActions.CanApprove(spec.Status);
+            var latestGroom = groomerRuns is null ? null : (await groomerRuns.ListAsync(id, 1, ct)).FirstOrDefault();
+            var groomingActive = latestGroom?.Status is GroomerRunStatus.Started or GroomerRunStatus.Queued;
+            var groomingRetryAvailable = !refinementBlocked && (spec.Status == SpecStatus.Grooming || SpecActions.CanStartGrooming(spec.Status) && latestGroom?.Status is GroomerRunStatus.Failed or GroomerRunStatus.NeedsReview) && !groomingActive
+                && (latestGroom is null || latestGroom.Status is GroomerRunStatus.Failed or GroomerRunStatus.NeedsReview);
+            var canStartGrooming = !refinementBlocked && !groomingActive && !groomingRetryAvailable && SpecActions.CanStartGrooming(spec.Status);
+            var canShip = !refinementBlocked && SpecActions.CanShip(spec.Status);
             // Designer path: a Draft spec can be sent to the Designer
             // agent (Draft -> ReadyForDesign; the DesignerScheduler
             // picks it up automatically and populates the design
             // board).
-            var canSendToDesign = SpecActions.CanSendToDesign(spec.Status);
+            var canSendToDesign = !refinementBlocked && SpecActions.CanSendToDesign(spec.Status);
 
             return Results.Json(new
             {
+                designState = design?.Status.ToString(),
+                designError = designFailure ? design!.Error : null,
+                designHygieneReport = designFailure ? design!.HygieneReportJson : null,
+                designRunId = design?.Id,
+                canRepairHygiene = canRepair,
+                initiativeHash = proposal?.Hash,
                 canApprove,
                 canStartGrooming,
                 canShip,
                 canSendToDesign,
-                reason = canApprove ? "draft is ready for approval"
+                groomingState = latestGroom?.Status.ToString(),
+                groomingRetryAvailable,
+                groomingRetryReason = groomingRetryAvailable ? latestGroom?.Error ?? "Grooming was interrupted; review and explicitly resume its preserved Pending decomposition." : null,
+                groomingRunId = latestGroom?.Id,
+                refinementState = receipt?.RefinementState,
+                initiativeProposalId = receipt?.ProposalId,
+                initiativeRevision = receipt?.Revision,
+                refinementError = receipt?.LastError,
+                reason = refinementBlocked ? $"Initiative already approved; refinement is {receipt!.RefinementState}. Wait for completion or retry failed refinement from Intake Proposals."
+                    : designFailure ? "Design validation found issues in this specification before any Designer model call. Review the diagnostics in Design; an explicit refinement repair may be needed."
+                    : groomingActive ? "Technical planning is queued or running; existing planned work is retained."
+                    : groomingRetryAvailable ? "Review the interrupted attempt, then explicitly retry to resume its planned work."
+                    : canApprove ? "draft is ready for approval"
                     : canStartGrooming ? "designed/approved specs feed the groomer"
                     : canShip ? "groomer has decomposed into stories/tasks"
-                    : $"status {spec.Status} has no available actions",
+                    : spec.Status switch
+                    {
+                        SpecStatus.ReadyForDesign => "Ready for automatic design. A held Design stage pauses this step; check stage holds and progress in Flow. This status does not mean the Designer is running.",
+                        SpecStatus.Designed => "Design is complete. Asset preparation is the next automatic step before technical planning; check progress and stage holds in Flow.",
+                        SpecStatus.NeedsRevision => "This specification needs revision before planning can continue. Review the design feedback and workflow in Flow.",
+                        SpecStatus.Shipped => "This specification is marked shipped. Check its tasks and sprint delivery evidence for the observed implementation outcome.",
+                        SpecStatus.Superseded => "This specification has been superseded and has no automatic next step.",
+                        SpecStatus.Archived => "This specification is archived and has no automatic next step.",
+                        _ => "Check workflow progress and stage holds in Flow.",
+                    },
             });
         });
     }
@@ -461,7 +581,9 @@ public static class SpecEndpoints
         };
     }
 
-    private static object ToSpecView(SpecRecord s) => new
+    private static object ToSpecView(SpecRecord s) => ToSpecView(s, false);
+
+    private static object ToSpecView(SpecRecord s, bool refinementBlocked) => new
     {
         id = s.Id,
         projectId = s.ProjectId,
@@ -476,8 +598,8 @@ public static class SpecEndpoints
         author = s.Author,
         // Server-authoritative action availability (Core.SpecActions)
         // — the UI must not ship its own copy of these rules.
-        canApprove = SpecActions.CanApprove(s.Status),
-        canStartGrooming = SpecActions.CanStartGrooming(s.Status),
+        canApprove = !refinementBlocked && SpecActions.CanApprove(s.Status),
+        canStartGrooming = !refinementBlocked && SpecActions.CanStartGrooming(s.Status),
     };
 
     private static object ToVersionView(SpecVersionRecord v) => new

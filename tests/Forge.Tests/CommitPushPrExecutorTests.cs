@@ -34,6 +34,12 @@ public class CommitPushPrExecutorTests : IDisposable
         _workDir = TempRoot.Instance.NewDirectory("cppr");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
+        // Fresh engineering checkout must fetch a real local remote before any agent work.
+        var bareDir = Path.Combine(_workDir, ".portHorizon", "remote.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(bareDir)!);
+        File.AppendAllText(Path.Combine(_workDir, ".git", "info", "exclude"), "\n/.portHorizon/\n");
+        Run("git", $"clone -q --bare \"{_workDir}\" \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
         _worktrees = new GitWorktreeService(
             new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
@@ -70,7 +76,10 @@ public class CommitPushPrExecutorTests : IDisposable
             CreateNoWindow = true,
         };
         using var p = Process.Start(psi)!;
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
+        Assert.True(p.ExitCode == 0, $"Fixture command failed: {exe} {args}\n{stdout}\n{stderr}");
     }
 
     /// <summary>
@@ -109,10 +118,6 @@ public class CommitPushPrExecutorTests : IDisposable
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
 
@@ -130,6 +135,43 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task WorkerReceipt_AllowsPublicationWithoutExecutingVerificationInController()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "receipt"));
+        var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+        string[] commands = ["this-verification-command-must-never-run-in-controller"];
+        // Simulate the trusted host's typed receipt; this command would fail if the controller executed it.
+        var receipt = new VerificationReceipt("attempt", await WorkerVerification.TreeAsync(worktree.WorktreePath!, default),
+            WorkerVerification.CommandsHash(commands), DateTimeOffset.UtcNow);
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "model text is not evidence", null, receipt, true);
+        var result = await CommitPushPrExecutor.HandleAsync(agent, _issues, _worktrees,
+            new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events, new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")), NullLogger.Instance, null, commands);
+        Assert.Equal(42, result.PrNumber);
+        var published = (await _issues.GetAsync(issue.Id))!;
+        var evidence = System.Text.Json.JsonSerializer.Deserialize<Forge.Core.Completion.TrustedPublicationEvidence>(published.GetMetadata("trustedPublication")!)!;
+        Assert.Equal(issue.Id, evidence.TaskId);
+        Assert.Equal(published.GetMetadata("branchSha"), evidence.PublishedHeadSha);
+        Assert.Equal(receipt, evidence.Verification);
+    }
+
+    [Fact]
+    public async Task WorkerExecutionWithoutReceiptCannotCommitOrPublish()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "missing receipt"));
+        var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "tests passed", null, null, true);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await CommitPushPrExecutor.HandleAsync(agent,
+            _issues, _worktrees, new StubGitHub(), _events, new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")), NullLogger.Instance, null, []));
+        Assert.Equal(0, await _worktrees.GetAheadCountAsync(worktree.WorktreePath!, "main"));
+    }
+
+    [Fact]
     public async Task SelfCommittedBranch_IsNotTreatedAsNoDiff()
     {
         // Regression (observed live 2026-07-24, task-155): an agent
@@ -144,10 +186,6 @@ public class CommitPushPrExecutorTests : IDisposable
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         // Bare remote so PushAsync has somewhere to land the branch.
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         // Simulate the agent self-committing in the worktree (bash).
         var wtPath = worktree.WorktreePath!;
@@ -176,7 +214,7 @@ public class CommitPushPrExecutorTests : IDisposable
 
 
     [Fact]
-    public async Task NoDiff_ExplicitNoOpMarker_TransitionsToCompleted()
+    public async Task NoDiff_ExplicitNoOpMarkerWithoutIndependentEvidence_DoesNotComplete()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var claimed = await ClaimExecutor.HandleAsync(
@@ -196,7 +234,8 @@ public class CommitPushPrExecutorTests : IDisposable
 
         Assert.Equal(PrResult.NoDiff, result.Result);
         var after = await _issues.GetAsync(issue.Id);
-        Assert.Equal(IssueStatus.Completed, after!.Status);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
     }
 
     [Fact]
@@ -363,10 +402,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         var wtPath = worktree.WorktreePath!;
         Run("git", "config user.email test@test", wtPath);
         Run("git", "config user.name Test", wtPath);
@@ -397,10 +432,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         var wtPath = worktree.WorktreePath!;
         Run("git", "config user.email test@test", wtPath);
         Run("git", "config user.name Test", wtPath);
@@ -445,10 +476,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
         var wtPath = worktree.WorktreePath!;
         Run("git", "config user.email test@test", wtPath);
         Run("git", "config user.name Test", wtPath);
@@ -496,7 +523,7 @@ public class CommitPushPrExecutorTests : IDisposable
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.Pending, after!.Status);
         Assert.Contains("no diff", after.GetMetadata("reworkReason"));
-        Assert.Contains("produced NO changes", after.GetMetadata("reworkContext"));
+        Assert.Contains("produced no changes", after.GetMetadata("reworkContext"), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -539,10 +566,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
 
@@ -572,10 +595,6 @@ public class CommitPushPrExecutorTests : IDisposable
             issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
         var worktree = await WorktreeExecutor.HandleAsync(
             claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
-        var bareDir = Path.Combine(_workDir, "remote.git");
-        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
-        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
-        Run("git", "push -q -u origin main", _workDir);
 
         File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
 
@@ -590,6 +609,31 @@ public class CommitPushPrExecutorTests : IDisposable
         Assert.Equal(42, result.PrNumber);
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(DispatchCheckpoint.PrOpened, after!.DispatchCheckpoint);
+    }
+
+    [Fact]
+    public async Task Publication_ReportsRunCompletionBeforeReviewCallback()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x",
+            Metadata: new Dictionary<string, object> { ["state"] = "AgentRunning" }));
+        var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main",
+            NullLogger<WorktreeExecutor>.Instance, default);
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+        var callbackObserved = false;
+        await CommitPushPrExecutor.HandleAsync(new AgentCompleted(worktree, AgentResult.Ok, "done", null),
+            _issues, _worktrees, new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events,
+            new NoOpMemoryExtractor(), new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger.Instance, null, verifyCommands: [],
+            onPrOpened: (published, _) =>
+            {
+                Assert.Equal("PROpen", published.GetMetadata("state"));
+                Assert.Equal("RunCompletedDiff", published.GetMetadata("lastEvent"));
+                Assert.Null(published.GetMetadata("stateViolation"));
+                callbackObserved = true;
+                return Task.CompletedTask;
+            }, lifecycle: new TaskStateMachine(true, NullLogger.Instance));
+        Assert.True(callbackObserved);
     }
 
     [Fact]

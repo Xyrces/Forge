@@ -9,8 +9,19 @@ using static Octokit.PullRequestReviewState;
 
 namespace Forge.Reviewer;
 
-public sealed class PRWatcher
+public sealed partial class PRWatcher
 {
+    private static bool HasMergeEvidence(PullRequest pr) => pr.Merged
+        && !string.IsNullOrWhiteSpace(pr.MergeCommitSha) && !string.IsNullOrWhiteSpace(pr.Head?.Sha);
+
+    private static Dictionary<string, object> MergeEvidence(string taskId, PullRequest pr)
+    {
+        var observed = pr.Merged && !string.IsNullOrWhiteSpace(pr.MergeCommitSha) && !string.IsNullOrWhiteSpace(pr.Head?.Sha)
+            ? System.Text.Json.JsonSerializer.Serialize(new Core.Completion.ObservedMergeEvidence(
+                taskId, pr.Number, pr.Head.Sha, pr.MergeCommitSha, DateTimeOffset.UtcNow))
+            : null;
+        return new Dictionary<string, object> { ["observedMerge"] = observed! };
+    }
     /// <summary>Grace window for a consumed rework round to move the
     /// PR head before the round is treated as stalled (no-op
     /// completion or a died run). Must exceed the agent run timeout
@@ -46,6 +57,9 @@ public sealed class PRWatcher
     /// requires qaVerdict=pass at the current head, and a fail verdict
     /// at the head requeues a rework round with the QA notes.</summary>
     private readonly bool _qaEnabled;
+    private readonly Func<string, CancellationToken, Task<bool>>? _hasDurableWorker;
+    private readonly Func<string, CancellationToken, Task<bool>>? _joinTaskWorkers;
+    private readonly string? _projectId;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -60,7 +74,10 @@ public sealed class PRWatcher
         Forge.Core.TaskStateMachine? lifecycle = null,
         AgentRunStore? runs = null,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
-        bool qaEnabled = false)
+        bool qaEnabled = false,
+        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null,
+        Func<string, CancellationToken, Task<bool>>? joinTaskWorkers = null,
+        string? projectId = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -75,6 +92,9 @@ public sealed class PRWatcher
         _runs = runs;
         _workflow = workflow;
         _qaEnabled = qaEnabled;
+        _hasDurableWorker = hasDurableWorker;
+        _joinTaskWorkers = joinTaskWorkers;
+        _projectId = projectId;
     }
 
     /// <summary>
@@ -108,7 +128,7 @@ public sealed class PRWatcher
     /// stale window is anchored to the watch issue's CreatedAt, so it
     /// stays stable no matter which sweep picks the watch up.
     /// </summary>
-    public async Task<WatchPollOutcome> PollWatchedTaskAsync(
+    private async Task<WatchPollOutcome> PollWatchedTaskCoreAsync(
         IssueRecord task,
         CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
@@ -136,6 +156,8 @@ public sealed class PRWatcher
         // fire would resurrect a CLOSED task to Pending. Re-read:
         // the caller's record can be stale by minutes.
         var freshTask = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+        if (freshTask.GetMetadata("prNumber") != prText) return WatchPollOutcome.Pending;
+        task = freshTask;
         if (freshTask.Status is IssueStatus.Closed or IssueStatus.Completed)
         {
             _logger.LogInformation(
@@ -156,7 +178,7 @@ public sealed class PRWatcher
         if (freshTask.Status == IssueStatus.Failed)
         {
             var prFailed = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
-            if (!prFailed.Merged)
+            if (!HasMergeEvidence(prFailed))
             {
                 return WatchPollOutcome.Pending;
             }
@@ -166,7 +188,7 @@ public sealed class PRWatcher
             await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
             await _issues.TransitionAsync(taskId, IssueStatus.Completed,
-                "PR merged externally after the breaker tripped", ct: cancellationToken);
+                "PR merged externally after the breaker tripped", MergeEvidence(taskId, prFailed), cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally after failure; task completed"));
@@ -195,41 +217,25 @@ public sealed class PRWatcher
         // watch polls forever on CI+reviews of a dead PR.
         if (pr.Merged)
         {
+            if (!HasMergeEvidence(pr))
+            {
+                _logger.LogWarning("PR #{PrNumber} merge observation is incomplete; retaining watch", prNumber);
+                return WatchPollOutcome.Pending;
+            }
             _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
             await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, MergeEvidence(taskId, pr), cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally; task completed"));
             return WatchPollOutcome.Merged;
         }
 
-        // Empty-diff guard: the branch carries NOTHING its base doesn't
-        // already have — the objective landed on main via other work
-        // (observed live 2026-08-13: porthorizon task-393's branch was
-        // tree-identical to main after sibling tasks 666/512/599/408
-        // delivered it — the reviewer correctly kept requesting
-        // changes on an empty PR, rework rounds CANNOT fix "already
-        // done", and the sprint stuck behind the breaker trip). Merge
-        // is meaningless and rework unfixable: close the PR, complete
-        // the task as superseded.
+        // No diff is a verification request, never proof that the objective was delivered.
         var changedFiles = changedFilesOverride?.Invoke(pr) ?? pr.ChangedFiles;
         if (changedFiles == 0)
-        {
-            _logger.LogInformation(
-                "PR #{PrNumber} (task {TaskId}) has an empty diff against its base — the objective is already on main; closing as superseded",
-                prNumber, taskId);
-            await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
-            await _gitHub.ClosePullRequestAsync(prNumber, cancellationToken);
-            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-            await _issues.TransitionAsync(taskId, IssueStatus.Completed,
-                "superseded: PR diff is empty — the objective is already on main via other work", ct: cancellationToken);
-            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                taskId, $"PR #{prNumber} closed as superseded (empty diff); task completed"));
-            return WatchPollOutcome.Merged;
-        }
+            return await RetireEmptyPrForVerificationAsync(task, pr, cancellationToken);
         // P4 e2e-harness seam: tests can return the SHA
         // directly without going through Octokit's
         // PullRequest.Head (which has a private setter).
@@ -404,6 +410,8 @@ public sealed class PRWatcher
                         return WatchPollOutcome.Pending;
                     }
                 }
+                if (_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
+                    return WatchPollOutcome.Pending;
                 var enteredRaw = guardTask?.GetMetadata("stateEnteredAt");
                 var enteredAt = DateTimeOffset.TryParse(enteredRaw, out var ts)
                     ? ts.UtcDateTime : guardTask?.UpdatedAt ?? DateTime.MinValue;
@@ -470,12 +478,18 @@ public sealed class PRWatcher
                 _logger.LogInformation("PR #{PrNumber}: merge held by operator gate", prNumber);
                 return WatchPollOutcome.Pending;
             }
-            var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
+            var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
             if (merged)
             {
+                var observedMerged = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+                if (!HasMergeEvidence(observedMerged))
+                {
+                    _logger.LogWarning("PR #{PrNumber} merge accepted but not yet fully observed; retaining watch", prNumber);
+                    return WatchPollOutcome.Pending;
+                }
                 await ReportAsync(Forge.Core.TaskEvent.Merged);
                 await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, ct: cancellationToken);
+                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, MergeEvidence(taskId, observedMerged), cancellationToken);
                 await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
                 _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                     taskId, $"PR #{prNumber} merged and branch deleted"));
@@ -727,7 +741,7 @@ public sealed class PRWatcher
     /// the transient reviewer-unavailable resume.
     /// Returns the resumed task, or null when the gate fails.
     /// </summary>
-    public async Task<IssueRecord?> TryResumeMergeableBlockedAsync(
+    private async Task<IssueRecord?> TryResumeMergeableBlockedCoreAsync(
         IssueRecord task, CancellationToken cancellationToken = default,
         Func<PullRequest, string>? headShaOverride = null,
         Func<PullRequest, bool?>? mergeableOverride = null,
@@ -759,32 +773,16 @@ public sealed class PRWatcher
         // says otherwise.
         try
         {
-            if (pr.State.Value != ItemState.Open) return null;
+            if (pr.State.Value != ItemState.Open && (pr.Merged || pr.ChangedFiles != 0)) return null;
         }
         catch (ArgumentException) { /* unset on test fakes — treat as open */ }
         var sha = headShaOverride?.Invoke(pr) ?? pr.Head.Sha;
         var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
 
-        // Empty-diff supersedes a Blocked watch too: the task can never
-        // become approvable (there is nothing to land), so the
-        // resume gate below would hold it forever (observed live
-        // 2026-08-13: porthorizon task-393 parked Blocked/Failed with
-        // PR #939 open and tree-identical to main).
-        if (pr.ChangedFiles == 0)
+        if (!pr.Merged && pr.ChangedFiles == 0)
         {
-            _logger.LogInformation(
-                "Blocked task {Id}: PR #{PrNumber} has an empty diff — closing as superseded",
-                task.Id, prNumber);
-            await ReportLifecycleAsync(task, Forge.Core.TaskEvent.ExternallyMerged, cancellationToken);
-            await _gitHub.ClosePullRequestAsync(prNumber, cancellationToken);
-            var branch = task.GetMetadata("branch") ?? $"agent/{task.Id}";
-            await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-            await _issues.TransitionAsync(task.Id, IssueStatus.Completed,
-                "superseded: PR diff is empty — the objective is already on main via other work", ct: cancellationToken);
-            await TryRemoveWorktreeAsync(task.GetMetadata("worktreePath"), cancellationToken);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                task.Id, $"PR #{prNumber} closed as superseded (empty diff); task completed"));
-            return await _issues.GetAsync(task.Id, cancellationToken);
+            await RetireEmptyPrForVerificationAsync(task, pr, cancellationToken);
+            return null; // The normal sprint dispatcher owns any queued verification; never resume review of a retired PR.
         }
         if (mergeable != true) return null;
 
@@ -870,7 +868,10 @@ public sealed class PRWatcher
             .Where(r => r.TaskId is not null)
             .Select(r => r.TaskId!)
             .ToHashSet(StringComparer.Ordinal);
-        return claimed.Any(t => activeTaskIds.Contains(t.Id));
+        foreach (var task in claimed)
+            if (activeTaskIds.Contains(task.Id)
+                || (_hasDurableWorker is not null && await _hasDurableWorker(task.Id, ct))) return true;
+        return false;
     }
 
     /// <summary>Phase 2 shadow-authority helper: report an observed

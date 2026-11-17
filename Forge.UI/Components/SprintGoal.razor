@@ -1,0 +1,18 @@
+@if (!string.IsNullOrWhiteSpace(Goal))
+{
+    @if (Goal.Length > 240 || Goal.Contains('\n'))
+    {
+        <details class="sprint-goal">
+            <summary>Full sprint goal and acceptance criteria</summary>
+            <div class="sprint-hero__goal sprint-goal__text">@Goal</div>
+        </details>
+    }
+    else
+    {
+        <div class="sprint-hero__goal sprint-goal__text">@Goal</div>
+    }
+}
+
+@code {
+    [Parameter] public string? Goal { get; set; }
+}

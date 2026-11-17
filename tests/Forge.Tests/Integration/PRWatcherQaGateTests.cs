@@ -15,7 +15,7 @@ namespace Forge.Tests.Integration;
 /// </summary>
 public class PRWatcherQaGateTests : IDisposable
 {
-    private const string Head = "abc123qa";
+    private static readonly string Head = new('a', 40);
 
     private readonly string _workDir;
     private readonly string _dbPath;
@@ -47,6 +47,12 @@ public class PRWatcherQaGateTests : IDisposable
             var pr = new PullRequest(number);
             typeof(PullRequest).GetProperty(nameof(PullRequest.ChangedFiles))!
                 .SetValue(pr, 1);
+            if (MergeCalls > 0)
+            {
+                typeof(PullRequest).GetProperty(nameof(PullRequest.MergedAt))!.SetValue(pr, DateTimeOffset.UtcNow);
+                typeof(PullRequest).GetProperty(nameof(PullRequest.MergeCommitSha))!.SetValue(pr, new string('b', 40));
+                typeof(PullRequest).GetProperty(nameof(PullRequest.Head))!.SetValue(pr, new GitReference(null!, null!, null!, "agent/task", Head, null!, null!));
+            }
             return Task.FromResult(pr);
         }
         public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
@@ -57,7 +63,8 @@ public class PRWatcherQaGateTests : IDisposable
             => Task.FromResult("main-head-sha");
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult((IReadOnlyList<PullRequestReview>)new List<PullRequestReview>());
-        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+        public override Task<bool> DeleteBranchAsync(string branch, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
         {
             MergeCalls++;
             return Task.FromResult(true);

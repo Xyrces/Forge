@@ -11,6 +11,8 @@ public sealed record AgentOptions
     public SpawnerOptions Spawner { get; set; } = new();
     public DashboardOptions Dashboard { get; set; } = new();
     public LlmOptions Llm { get; set; } = new();
+    // Trusted operator release profiles; project identity remains DB-owned.
+    public Dictionary<string, DeploymentOptions> Deployments { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public VisionOptions Vision { get; set; } = new();
     /// <summary>
     /// Quality-gate configuration (ordered gate names per
@@ -18,6 +20,7 @@ public sealed record AgentOptions
     /// this config; built-in defaults apply when both are empty.
     /// </summary>
     public GateOptions Gates { get; set; } = new();
+    public SprintPlanningOptions SprintPlanning { get; set; } = new();
     /// <summary>
     /// Lifecycle state machine (Phase 2). WriteAuthority=false
     /// (default): shadow mode — illegal transitions logged as
@@ -46,6 +49,10 @@ public sealed record AgentOptions
     /// target (Entra auth, no secrets). See <see cref="DbOptions"/>.
     /// </summary>
     public DbOptions Db { get; set; } = new();
+    public ControllerOptions Controller { get; set; } = new();
+    public WorkerOptions Worker { get; set; } = new();
+    public BootstrapOptions Bootstrap { get; set; } = new();
+    public BudgetOptions Budget { get; set; } = new();
     /// <summary>
     /// P4 Stage B — runtime selection. "InProcess" (default)
     /// uses Microsoft.Agents.AI.Workflows InProcessExecution;
@@ -267,14 +274,11 @@ public sealed record OrchestratorOptions
         "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None";
 
     /// <summary>
-    /// Days a task may sit Failed with no operator action before the
-    /// sprint assembler auto-closes it as abandoned (operator
-    /// direction 2026-08-18: "fix this permanently" — a backlog held
-    /// hostage by ancient failures starved sprint assembly silently).
-    /// Fresh failures are never touched (the no-auto-clear rule
-    /// protects active investigation). 0/null disables the sweep.
+    /// Legacy configuration accepted for backward compatibility only. Failed
+    /// tasks are never auto-closed by age; operator triage is required.
     /// </summary>
-    public int? FailureAgingDays { get; set; } = 7;
+    public int? FailureAgingDays { get; set; }
+
 }
 
 public sealed record LlmOptions
@@ -319,6 +323,8 @@ public sealed record LlmOptions
 
 public sealed record LlmProviderOptions
 {
+    public string? ProjectId { get; set; }
+    public string? ReasoningEffort { get; set; }
     public string Name { get; set; } = string.Empty;
     public string BaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;

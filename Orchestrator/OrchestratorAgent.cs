@@ -23,6 +23,7 @@ public sealed class OrchestratorAgent : IAgent
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ConcurrentDictionary<string, ProjectDispatchBundle> _bundles = new();
     private SpawnerOptions _spawnerOptions = new();
+    private string? _branchDatasetId;
     private readonly Slots.SlotTable _slots;
     private readonly int _maxRetryCount;
     // GitHub rate-limit cooldown for the PR-watch path. When Octokit
@@ -61,6 +62,7 @@ public sealed class OrchestratorAgent : IAgent
     // claims when its role has a free slot), so e.g. 2 coredevs can
     // work two unblocked tasks while a clientdev slot stays open.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
+    private readonly List<Task> _runningDispatches = [];
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -144,6 +146,13 @@ public sealed class OrchestratorAgent : IAgent
             Status = AgentStatus.Error;
             throw;
         }
+        finally
+        {
+            // Ownership is not released while a local publication callback is still running.
+            // Worker Jobs detach on controller cancellation and are adopted by the next owner.
+            await Task.WhenAll(_runningDispatches);
+            _runningDispatches.Clear();
+        }
     }
 
     /// <summary>
@@ -190,7 +199,7 @@ public sealed class OrchestratorAgent : IAgent
         foreach (var record in projectRecords)
         {
             if (cancellationToken.IsCancellationRequested) return;
-            var bundle = GetOrCreateBundle(ProjectRecordToOptions(record));
+            var bundle = GetOrCreateBundle(record.ToProjectOptions(string.Empty));
             if (bundle is null) continue;
 
             try
@@ -269,6 +278,11 @@ public sealed class OrchestratorAgent : IAgent
                 // that role's tasks — other roles keep claiming.
                 foreach (var dev in claimable)
                 {
+                    // An inadmissible visibility-only prerequisite must not take the
+                    // role's last slot ahead of an eligible sibling. The dispatch
+                    // method repeats this check before claim to fence later changes.
+                    if (await CheckSprintAdmissionAsync(dev, bundle, cancellationToken) is not null)
+                        continue;
                     var role = ResolveRoleName(dev.Type);
                     // Triage model escalation (phase 3): a task
                     // carrying an unconsumed marker acquires ONLY its
@@ -308,7 +322,9 @@ public sealed class OrchestratorAgent : IAgent
                         await slot.DisposeAsync();
                         continue;
                     }
-                    _ = Task.Run(async () =>
+                    _runningDispatches.RemoveAll(task => task.IsCompleted);
+                    _runningDispatches.Add(RunDispatchAsync());
+                    async Task RunDispatchAsync()
                     {
                         await using (slot)
                         {
@@ -327,7 +343,7 @@ public sealed class OrchestratorAgent : IAgent
                                 _wakeup?.Signal();
                             }
                         }
-                    }, cancellationToken);
+                    }
                 }
             }
             catch (Exception ex)
@@ -354,16 +370,6 @@ public sealed class OrchestratorAgent : IAgent
             }
         });
     }
-
-    private static ProjectOptions ProjectRecordToOptions(ProjectRecord r) => new()
-    {
-        Id = r.Id,
-        Name = r.Name,
-        RepoUrl = r.RepoUrl,
-        DefaultBranch = r.DefaultBranch,
-        Root = string.Empty,
-        Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
-    };
 
     private static bool IsLlmRateLimited(Exception ex)
     {
@@ -426,11 +432,30 @@ public sealed class OrchestratorAgent : IAgent
     }
 
 
+    private async Task<string?> CheckSprintAdmissionAsync(IssueRecord issue,
+        ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    {
+        var scopeGap = bundle.IssueStore is IssueStore owned
+            ? await SprintDispatchGuard.CheckAsync(owned, bundle.Sprints, bundle.Project.Id, issue.Id, cancellationToken)
+            : "Engineering requires an owning project store with approved sprint evidence.";
+        if (scopeGap is not null)
+        {
+            _logger.LogWarning("Engineering dispatch held for {Task}: {ScopeGap}", issue.Id, scopeGap);
+            _events.Publish(new DashboardEvent(DateTime.UtcNow, "dispatch.scope-gap", issue.Id, scopeGap));
+            return scopeGap;
+        }
+        return null;
+    }
+
     public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
         // Concurrency is owned by the caller: the dispatch loop holds
         // a per-role SlotTable slot for the whole run.
         var startedAt = DateTime.UtcNow;
+        if (await bundle.IssueStore.GetAsync(issue.Id, cancellationToken) is not { Status: IssueStatus.Pending })
+            return new Result(false, "already-claimed");
+        if (await CheckSprintAdmissionAsync(issue, bundle, cancellationToken) is { } scopeGap)
+            return new Result(false, "sprint-scope-gap: " + scopeGap);
         try
         {
             // P3 (final wiring): dispatch is now driven by the MAF
@@ -447,7 +472,8 @@ public sealed class OrchestratorAgent : IAgent
             // Persisted on the issue (the workflow input carries it
             // to RunAgentExecutor → the agent_run row) and scoped
             // onto every log line this dispatch writes.
-            var dispatchId = "d-" + Guid.NewGuid().ToString("N")[..8];
+            var dispatchId = issue.GetMetadata("resumeDispatchId") is { Length: > 0 } resumed
+                ? resumed : "d-" + Guid.NewGuid().ToString("N")[..8];
             {
                 var claimedMeta = new Dictionary<string, object>();
                 var existingMeta = (await bundle.IssueStore.GetAsync(issue.Id, cancellationToken))?.MetadataJson;
@@ -468,6 +494,9 @@ public sealed class OrchestratorAgent : IAgent
                     }
                 }
                 claimedMeta["dispatchId"] = dispatchId;
+                claimedMeta["branch"] = Workflow.DispatchBranch.Resolve(
+                    claimedMeta.TryGetValue("branch", out var existingBranch) ? existingBranch as string : null,
+                    _branchDatasetId, bundle.Project.Id, issue.Id);
                 await bundle.IssueStore.TransitionAsync(issue.Id, issue.Status, error: null, metadata: claimedMeta, ct: cancellationToken);
             }
             using var dispatchScope = _logger.BeginScope("DispatchId={DispatchId}", dispatchId);
@@ -668,7 +697,7 @@ public sealed class OrchestratorAgent : IAgent
                 preClaimed.Id, (DateTime.UtcNow - startedAt).TotalMilliseconds, after?.Status, prNumber);
             if (!string.IsNullOrEmpty(prNumber))
             {
-                await ReportLifecycleAsync(after ?? preClaimed, Core.TaskEvent.PrOpened, bundle, cancellationToken);
+                await PublishedRunLifecycle.ReconcileAsync(bundle.IssueStore, _lifecycle, after ?? preClaimed, cancellationToken);
                 return new Result(true, $"PR #{prNumber} opened");
             }
             if (after?.Status == IssueStatus.Completed)
@@ -711,6 +740,9 @@ public sealed class OrchestratorAgent : IAgent
     internal void BindOptions(AgentOptions options)
     {
         _spawnerOptions = options.Spawner;
+        if (options.Controller.Enabled && string.IsNullOrWhiteSpace(options.Controller.DatasetId))
+            throw new InvalidOperationException("Distributed dispatch requires a dataset identity for branch isolation.");
+        _branchDatasetId = options.Controller.Enabled ? options.Controller.DatasetId : null;
         // Provider+model map for per-model 429 cooldowns. Only names
         // are used (cooldown keys) — secret resolution stays with the
         // real chat-client factory. Invalid/absent config degrades to
@@ -860,10 +892,15 @@ public sealed class OrchestratorAgent : IAgent
 
     private async Task HandleFailureAsync(IssueRecord issue, Exception ex, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
+        if ((await bundle.IssueStore.GetAsync(issue.Id, cancellationToken))?.Status == IssueStatus.Blocked)
+        {
+            _logger.LogWarning("Issue {Id} is blocked; preserving worktree and refusing automatic retry", issue.Id);
+            return;
+        }
+
         var retryCount = 0;
         var prev = issue.GetMetadata("retryCount");
         if (prev is not null && int.TryParse(prev, out var r)) retryCount = r;
-        var worktreePath = issue.GetMetadata("worktreePath");
 
         if (retryCount < _maxRetryCount)
         {
@@ -877,11 +914,11 @@ public sealed class OrchestratorAgent : IAgent
         else
         {
             await SafeTransitionAsync(issue.Id, IssueStatus.Failed, ex.Message, bundle, cancellationToken);
-            if (!string.IsNullOrEmpty(worktreePath))
-            {
-                try { await bundle.Worktrees.RemoveAsync(issue.Id, cancellationToken); }
-                catch (Exception wx) { _logger.LogWarning(wx, "Worktree removal failed"); }
-            }
+            // Failed work is recoverable evidence, not disposable scratch.
+            // A provider/budget outage can happen after useful uncommitted
+            // edits. Preserve the checkout for the sanctioned operator requeue;
+            // successful completion retains its existing cleanup behavior.
+            _logger.LogWarning("Issue {Id} exhausted retries; preserving its worktree for operator recovery", issue.Id);
         }
     }
 

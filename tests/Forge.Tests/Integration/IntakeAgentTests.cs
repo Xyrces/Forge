@@ -1,3 +1,4 @@
+using Forge.Core.Initiatives;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Forge.Agents;
@@ -24,7 +25,7 @@ public class IntakeAgentTests : IDisposable
     public IntakeAgentTests()
     {
         _dbPath = TempRoot.Instance.NewDbPath("intake-agent");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, "PortHorizon");
         _sprints = new SprintStore(_issues);
         _intake = new IntakeStore(_issues);
         _events = new InMemoryDashboardEventBus();
@@ -45,7 +46,11 @@ public class IntakeAgentTests : IDisposable
             new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
             new RoleAgentRegistry(),
             _events,
-            NullLogger<IntakeAgent>.Instance);
+            NullLogger<IntakeAgent>.Instance, initiatives: Approval());
+
+    private InitiativeApprovalService Approval() => new(new InitiativeProposalStore(_issues), _ => new InitiativeIngestionStore(_issues), _events);
+    private async Task<InitiativeProposal> Draft() => (await new InitiativeProposalStore(_issues).GetAsync("PortHorizon",
+        (await new InitiativeProposalStore(_issues).ListAsync("PortHorizon")).Single().Id))!;
 
     [Fact]
     public async Task SendUserMessage_InjectsRepoBrief_IntoInstructions()
@@ -137,19 +142,13 @@ public class IntakeAgentTests : IDisposable
         Assert.Null(assistantMsg.ProposedEpicId);
         Assert.Equal("Refactor the auth flow", assistantMsg.ProposedEpicTitle);
 
-        // The draft carries the full payload; the issue store is EMPTY.
-        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
-        Assert.Equal("Refactor the auth flow", draft.ProposedEpicTitle);
-        Assert.Equal("Migrate to the new claims API and remove the legacy session table.", draft.ProposedEpicDescription);
-        Assert.Equal(3, draft.ProposedEpicPriority);
-        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee = "intake" }, default));
-
-        // Accepting the draft creates the issue from the payload.
-        var issue = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
-        Assert.Equal("epic", issue.Type);
-        Assert.Equal("Refactor the auth flow", issue.Title);
-        Assert.Equal("intake", issue.Assignee);
-        Assert.Equal(3, issue.Priority);
+        var draft = await Draft();
+        Assert.Equal("Migrate to the new claims API and remove the legacy session table.",draft.Body);
+        Assert.Equal(3,draft.Priority);
+        Assert.Empty(await _issues.ListAsync(new IssueFilter { Assignee="intake" }));
+        var receipt=await Approval().ApproveAsync("PortHorizon",draft.Id,draft.Revision,draft.Hash);
+        var issue=(await _issues.GetAsync(receipt.EpicId))!;
+        Assert.Equal("epic",issue.Type); Assert.Equal(draft.Title,issue.Title); Assert.Equal(3,issue.Priority);
 
         // The dashboard event log shows proposed-accept lifecycle.
         var snapshot = _events.GetHistorySnapshot();
@@ -160,155 +159,41 @@ public class IntakeAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task AcceptProposedEpic_CrossStoreIdCollision_StillCreatesSpec()
+    public async Task Approval_CrossStoreIdCollision_StillCreatesOwnedSpec()
     {
-        // 2026-08-09 live bug: issue ids are per-store sequences, so
-        // talaria's epic-2 collided with porthorizon's epic-2. The
-        // accept path's dedupe probe fanned out across ALL stores by
-        // parent_issue_id, matched porthorizon's spec, and SKIPPED
-        // creating talaria's spec — the project never entered the
-        // pipeline. The probe must be scoped to the session's project.
-        var otherDb = TempRoot.Instance.NewDbPath("intake-other");
-        var otherIssues = new IssueStore(otherDb);
-        try
-        {
-            var otherEpic = await otherIssues.CreateAsync(new NewIssue(Type: "epic", Title: "other project epic"));
-            var otherSpecs = new SpecStore(otherIssues);
-            await otherSpecs.CreateAsync(new NewSpec(
-                ProjectId: "porthorizon", Title: "other project spec",
-                Body: "body", Author: "test", ParentIssueId: otherEpic.Id));
-
-            var mySpecs = new SpecStore(_issues);
-            var routing = new ProjectRoutingSpecStore(
-                mySpecs,
-                findByProject: pid => pid == "talaria" ? mySpecs : pid == "porthorizon" ? otherSpecs : null,
-                allProjectStores: () => new ISpecStore[] { mySpecs, otherSpecs });
-
-            // The accepted epic's id must equal the other store's spec
-            // parent for the collision to bite: both stores mint
-            // epic-1 as their first row.
-            Assert.Equal("epic-1", otherEpic.Id);
-            var scripted = new ToolCallingChatClient(
-                functionCalls: new[]
-                {
-                    new FunctionCallContent("call_1", "create_epic",
-                        new Dictionary<string, object?>
-                        {
-                            ["title"] = "talaria launch hardening",
-                            ["description"] = "scrub + license",
-                            ["priority"] = 2,
-                        }),
-                },
-                followUpText: "Proposed.");
-            var agent = new IntakeAgent("talaria", _intake, _issues, _sprints,
-                new ScriptingFactory(scripted),
-                new LlmConfig(new ProviderConfig("test", "", null, null, "test-model")),
-                new RoleAgentRegistry(), _events, NullLogger<IntakeAgent>.Instance,
-                specs: routing);
-
-            var session = await agent.StartSessionAsync("launch", default);
-            var updated = await agent.SendUserMessageAsync(session.Id, "harden the repo", default);
-            var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
-
-            // Accept creates THIS store's first issue row (epic-1) —
-            // the same id as the other store's spec parent, which is
-            // exactly the collision the scoped probe must survive.
-            var acceptedEpic = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
-            Assert.Equal("epic-1", acceptedEpic.Id);
-
-            var mine = await mySpecs.ListAsync(null, null, default);
-            Assert.Contains(mine, s => s.ParentIssueId == "epic-1" && s.ProjectId == "talaria");
-
-            // The accept event carries the project so the refinement
-            // queue can scope its own lookup the same way.
-            var accepted = _events.GetHistorySnapshot()
-                .Last(e => e.Kind == "intake.epic.accepted");
-            Assert.Equal("talaria", accepted.Data?["projectId"]?.ToString());
-        }
-        finally
-        {
-            try { otherIssues.Dispose(); } catch { }
-            try { File.Delete(otherDb); } catch { }
-        }
+        await using var other=new IssueStore(TempRoot.Instance.NewDbPath("other"),"other");
+        var otherEpic=await other.CreateAsync(new NewIssue("epic","other"));
+        var store=new InitiativeProposalStore(_issues);
+        var session=await _intake.CreateAsync("PortHorizon","owned");
+        var draft=await store.CreateAsync(new("PortHorizon","source","user","owned","scope",SessionId:session.Id));
+        var receipt=await Approval().ApproveAsync("PortHorizon",draft.Id,draft.Revision,draft.Hash);
+        Assert.Equal(otherEpic.Id,receipt.EpicId);
+        Assert.Equal("PortHorizon",(await new SpecStore(_issues).GetAsync(receipt.SpecId))!.ProjectId);
+        Assert.Empty(await new SpecStore(other).ListAsync(null,null));
+        Assert.Equal("PortHorizon",_events.GetHistorySnapshot().Last(e=>e.Kind=="intake.epic.accepted").Data!["projectId"]);
     }
 
     [Fact]
-    public async Task AcceptProposedEpic_BindsToActiveSprint()
+    public async Task Approval_DoesNotExpandActiveSprint()
     {
-        // Set up: active sprint + scripted tool call.
-        var sprint = await _sprints.CreateAsync(new NewSprint(
-            Name: "Sprint 1", Goal: "Ship the intake path",
-            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(14)), default);
-        await _sprints.SetActiveAsync(sprint.Id, default);
-
-        var scripted = new ToolCallingChatClient(
-            functionCalls: new[]
-            {
-                new FunctionCallContent("call_1", "create_epic",
-                    new Dictionary<string, object?>
-                    {
-                        ["title"] = "Add a settings tab",
-                        ["description"] = "Operators want to edit skills from the UI.",
-                        ["priority"] = 2,
-                    }),
-            },
-            followUpText: "Proposed.");
-        var agent = BuildAgent(scripted);
-
-        var session = await agent.StartSessionAsync("Settings", default);
-        var updated = await agent.SendUserMessageAsync(session.Id, "settings tab", default);
-        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
-
-        // Accept — creates the epic row and binds it to the sprint.
-        var accepted = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
-        Assert.Equal("Add a settings tab", accepted.Title);
-
-        // The sprint now contains the epic.
-        var ids = await _sprints.GetIssueIdsAsync(sprint.Id, default);
-        Assert.Contains(accepted.Id, ids);
-
-        // The session has a system message recording the acceptance.
-        var refreshed = await _intake.GetAsync(session.Id, default);
-        Assert.Contains(refreshed!.Messages, m =>
-            m.Role == IntakeMessageRole.System &&
-            m.Content.Contains("Operator accepted epic", StringComparison.Ordinal) &&
-            m.Content.Contains(sprint.Id, StringComparison.Ordinal));
-
-        // Dashboard event log shows the accept.
-        var snapshot = _events.GetHistorySnapshot();
-        Assert.Contains(snapshot, e => e.Kind == "intake.epic.accepted");
+        var sprint=await _sprints.CreateAsync(new("Current objective","finish it",DateTime.UtcNow,DateTime.UtcNow.AddDays(1)));
+        var session=await _intake.CreateAsync("PortHorizon","new initiative");
+        var draft=await new InitiativeProposalStore(_issues).CreateAsync(new("PortHorizon","source","user","new","scope",SessionId:session.Id));
+        var receipt=await Approval().ApproveAsync("PortHorizon",draft.Id,draft.Revision,draft.Hash);
+        Assert.Empty(await _sprints.GetIssueIdsAsync(sprint.Id));
+        Assert.Equal(sprint.Id,(await _sprints.GetActiveAsync())!.Id);
+        Assert.Equal(SpecStatus.Draft,(await new SpecStore(_issues).GetAsync(receipt.SpecId))!.Status);
     }
 
     [Fact]
-    public async Task AcceptProposedEpic_NoActiveSprint_StillAccepts()
+    public async Task Approval_WithoutActiveSprint_IsIdempotent()
     {
-        // No active sprint; accept must still record the system message
-        // and not crash.
-        var scripted = new ToolCallingChatClient(
-            functionCalls: new[]
-            {
-                new FunctionCallContent("call_1", "create_epic",
-                    new Dictionary<string, object?>
-                    {
-                        ["title"] = "Doc sweep",
-                        ["description"] = "Walk the docs and fix stale links.",
-                        ["priority"] = 1,
-                    }),
-            },
-            followUpText: "Proposed.");
-        var agent = BuildAgent(scripted);
-
-        var session = await agent.StartSessionAsync(null, default);
-        var updated = await agent.SendUserMessageAsync(session.Id, "sweep docs", default);
-        var draft = updated.Messages.Single(m => m.ProposedEpicDescription is not null);
-
-        var accepted = await agent.AcceptProposedEpicAsync(session.Id, draft.Id, default);
-        Assert.Equal("Doc sweep", accepted.Title);
-
-        var refreshed = await _intake.GetAsync(session.Id, default);
-        Assert.Contains(refreshed!.Messages, m =>
-            m.Role == IntakeMessageRole.System &&
-            m.Content.Contains("no active sprint", StringComparison.Ordinal));
+        var session=await _intake.CreateAsync("PortHorizon","new initiative");
+        var draft=await new InitiativeProposalStore(_issues).CreateAsync(new("PortHorizon","source","user","new","scope",SessionId:session.Id));
+        var one=await Approval().ApproveAsync("PortHorizon",draft.Id,draft.Revision,draft.Hash);
+        var two=await Approval().ApproveAsync("PortHorizon",draft.Id,draft.Revision,draft.Hash);
+        Assert.Equal(one.EpicId,two.EpicId); Assert.Equal(one.SpecId,two.SpecId);
+        Assert.Single(await _issues.ListAsync(new IssueFilter()));
     }
 
     [Fact]

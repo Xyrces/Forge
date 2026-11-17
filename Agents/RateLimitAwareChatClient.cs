@@ -1,4 +1,5 @@
 using Microsoft.Extensions.AI;
+using System.Runtime.CompilerServices;
 using Forge.Core;
 
 namespace Forge.Agents;
@@ -69,7 +70,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
     private readonly string _provider;
     private readonly string _model;
     private readonly ModelRateLimitTracker _tracker;
-    private readonly SemaphoreSlim _permit;
+    private readonly SemaphoreSlim? _permit;
     private readonly ProviderPacer? _pacer;
     private readonly bool _sharedQuota;
     private readonly int _overloadRetries;
@@ -84,7 +85,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
 
     public RateLimitAwareChatClient(
         IChatClient inner, string provider, string model,
-        ModelRateLimitTracker tracker, SemaphoreSlim permit,
+        ModelRateLimitTracker tracker, SemaphoreSlim? permit,
         bool sharedQuota = false, int overloadRetries = 3,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
         ProviderPacer? pacer = null)
@@ -113,7 +114,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
                 $"until {coolingUntil.Value:HH:mm:ss} UTC (request suppressed client-side)");
         }
 
-        await _permit.WaitAsync(cancellationToken);
+        if (_permit is not null) await _permit.WaitAsync(cancellationToken);
         var held = true;
         try
         {
@@ -167,7 +168,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
                         var wait = OverloadWait(overloadRetry, retryAfter);
                         _tracker.RecordRateLimit(_provider, _model, wait);
                         overloadRetry++;
-                        _permit.Release();
+                        _permit?.Release();
                         held = false;
                         try
                         {
@@ -175,7 +176,7 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
                         }
                         finally
                         {
-                            await _permit.WaitAsync(cancellationToken);
+                            if (_permit is not null) await _permit.WaitAsync(cancellationToken);
                             held = true;
                         }
                         continue;
@@ -200,8 +201,39 @@ internal sealed class RateLimitAwareChatClient : DelegatingChatClient
         }
         finally
         {
-            if (held) _permit.Release();
+            if (held) _permit?.Release();
         }
+    }
+
+    public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (_tracker.CoolingDownUntil(_provider, _model) is { } until)
+            throw new InvalidOperationException($"429 Too Many Requests: {_provider}/{_model} cooling until {until:O}");
+        if (_permit is not null) await _permit.WaitAsync(cancellationToken);
+        try
+        {
+            if (_pacer is not null) await _pacer.WaitAsync(cancellationToken);
+            await using var stream = InnerClient.GetStreamingResponseAsync(messages, options, cancellationToken)
+                .GetAsyncEnumerator(cancellationToken);
+            while (true)
+            {
+                bool available;
+                try { available = await stream.MoveNextAsync(); }
+                catch (Exception ex) when (Is429(ex, out var retryAfter, out var kind))
+                {
+                    if (kind == RateLimitKind.AccountQuota) _tracker.RecordAccountQuota(_provider, retryAfter);
+                    else if (kind == RateLimitKind.Quota && _sharedQuota) _tracker.RecordProviderRateLimit(_provider, retryAfter);
+                    else _tracker.RecordRateLimit(_provider, _model, retryAfter);
+                    // Never replay a stream: previously delivered tool calls may already have executed.
+                    throw;
+                }
+                if (!available) yield break;
+                yield return stream.Current;
+            }
+        }
+        finally { _permit?.Release(); }
     }
 
     private static TimeSpan OverloadWait(int attempt, TimeSpan? retryAfter)

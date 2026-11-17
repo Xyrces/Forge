@@ -1,0 +1,285 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+@implements IDisposable
+
+<section class="card initiative-proposals">
+    <div class="initiative-proposals__toolbar">
+        <h2>Proposals</h2>
+        <button class="btn" disabled="@_busy" @onclick="RefreshAsync">Refresh proposals</button>
+    </div>
+    <p class="page-subtitle">Suggestions are drafts. Expand them in Intake, review the exact proposal, then explicitly approve planning work.</p>
+    <div class="initiative-proposals__filters" role="group" aria-label="Proposal scope">
+        <button class="chip @(!_sessionOnly ? "chip--active" : "")" aria-pressed="@(!_sessionOnly)" disabled="@_busy" @onclick="() => FilterSessionAsync(false)">All project proposals</button>
+        <button class="chip @(_sessionOnly ? "chip--active" : "")" aria-pressed="@_sessionOnly" disabled="@(_busy || ActiveSessionId is null)" @onclick="() => FilterSessionAsync(true)">This conversation</button>
+    </div>
+    @if (_error is not null) { <p class="banner banner--error">@_error</p> }
+    @if (_loading) { <p>Loading proposals…</p> }
+    else if (_page is null) { <p>Select a project to load proposals.</p> }
+    else
+    {
+        @if (_page.Items.Count == 0) { <p>No proposals on this page.</p> }
+        <div class="initiative-proposals__list">
+            @foreach (var item in _page.Items)
+            {
+                <button class="initiative-proposal-choice @(_selectedId == item.Id ? "initiative-proposal-choice--selected" : "")"
+                        aria-pressed="@(_selectedId == item.Id)" aria-controls="initiative-proposal-detail" @onclick="() => SelectAsync(item.Id)">
+                    <span class="initiative-proposal-choice__title">@item.Title</span>
+                    <span class="initiative-proposal-choice__meta">
+                        <span class="pill pill--@(item.ApprovedAt is null ? "draft" : "approved")">@(item.ApprovedAt is null ? "Draft" : "Approved")</span>
+                        <span>Revision @item.Revision</span>
+                        @if (item.SessionId == ActiveSessionId && ActiveSessionId is not null) { <span>This conversation</span> }
+                    </span>
+                </button>
+            }
+        </div>
+        @if (_pages.Count > 0 || _page.NextCursor is not null)
+        {
+            <div class="initiative-proposals__filters" aria-label="Proposal pages">
+                <button class="btn" disabled="@(_pages.Count == 0)" @onclick="PreviousAsync">Previous proposals</button>
+                <button class="btn" disabled="@(_page.NextCursor is null)" @onclick="NextAsync">More proposals</button>
+            </div>
+        }
+    }
+    @if (_detailLoading) { <p>Loading selected proposal…</p> }
+    @if (_detail is { } detail)
+    {
+        <section id="initiative-proposal-detail" class="initiative-proposals__detail" aria-label="Selected proposal">
+        <h3>@detail.Proposal.Title</h3>
+        <p class="page-subtitle">Revision @detail.Proposal.Revision · @(detail.Proposal.Origin == "user" ? "From Intake" : "Suggested by Forge")</p>
+        <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(detail.Proposal.Body ?? ""))</div>
+        <details><summary>Reference details</summary><p class="mono">@detail.Proposal.Id</p><pre>@detail.Proposal.SourceJson</pre></details>
+        @if (detail.Proposal.ApprovedAt is null)
+        {
+            <button class="btn" disabled="@_busy" @onclick="ExpandAsync">Expand in Intake</button>
+            @if (detail.Proposal.SessionId == ActiveSessionId && ActiveSessionId is not null)
+            {
+                <p>Approval authorizes planning for this exact revision. It does not add this initiative to the current sprint.</p>
+                <button class="btn btn--primary" disabled="@_busy" @onclick="ApproveAsync">Approve revision @detail.Proposal.Revision</button>
+            }
+        }
+        else
+        {
+            <p>Approved @detail.Proposal.ApprovedAt?.ToLocalTime().ToString("g") · @detail.Proposal.ApprovedBy</p>
+            @if (detail.Ingestion is null) { <p>Approval recorded. Ingestion pending recovery; no duplicate approval is needed.</p> }
+            else
+            {
+                <p><a href="@($"/tasks/{Uri.EscapeDataString(detail.Ingestion.EpicId)}?project={Uri.EscapeDataString(ProjectId ?? string.Empty)}")">Epic @detail.Ingestion.EpicId</a> · <a href="@($"/specs/{Uri.EscapeDataString(detail.Ingestion.SpecId)}?project={Uri.EscapeDataString(ProjectId ?? string.Empty)}")">Spec @detail.Ingestion.SpecId</a> · Refinement: @detail.Ingestion.RefinementState</p>
+                @if (detail.Ingestion.RefinementState == "Failed")
+                {
+                    <p class="banner banner--warn">@detail.Ingestion.LastError Previous requests may have incurred cost. Retry may make another paid request.</p>
+                    <button class="btn" disabled="@_busy" @onclick="RetryAsync">Retry refinement</button>
+                }
+            }
+        }
+        </section>
+    }
+</section>
+
+@code
+{
+    [Parameter]
+    public string? ProjectId
+    {
+        get; set;
+    }
+    [Parameter]
+    public string? ActiveSessionId
+    {
+        get; set;
+    }
+    [Parameter]
+    public EventCallback<string> Expanded
+    {
+        get; set;
+    }
+    [Parameter]
+    public EventCallback Changed { get; set; }
+    [Parameter]
+    public int RefreshVersion
+    {
+        get; set;
+    }
+    private int _loadedVersion = -1;
+    private string? _loadedSession;
+    private bool _sessionOnly;
+    private string? _loadedProject, _cursor, _selectedId, _error;
+    private readonly Stack<string?> _pages = new();
+    private CancellationTokenSource _cts = new();
+    private long _generation;
+    private bool _loading, _detailLoading, _busy, _disposed;
+    private ProposalPage? _page;
+    private ProposalDetail? _detail;
+    private System.Threading.Timer? _refreshTimer;
+    public sealed record Proposal(string Id, string ProjectId, int Revision, string Hash, string Title,
+        string Origin, string? SessionId, DateTime? ApprovedAt, string? ApprovedBy,
+        string? EpicId, string? SpecId, string? Body = null, string? SourceJson = null);
+    public sealed record ProposalPage(List<Proposal> Items, string? NextCursor);
+    public sealed record Ingestion(string EpicId, string SpecId, string RefinementState, string? LastError);
+    public sealed record ProposalDetail(Proposal Proposal, Ingestion? Ingestion);
+    protected override void OnInitialized()
+    {
+        // Only selected approved progress is polled; draft approval content
+        // changes through an explicit refresh or the conversation update.
+        _refreshTimer = new(_ => InvokeAsync(async () =>
+        {
+            if (!_disposed && !_busy && !_loading && !_detailLoading && _detail?.Proposal.ApprovedAt is not null && _selectedId is { } id)
+                await SelectAsync(id);
+        }), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+    }
+    private async Task RefreshAsync()
+    {
+        await LoadAsync();
+        if (_selectedId is { } id)
+            await SelectAsync(id);
+    }
+    protected override async Task OnParametersSetAsync()
+    {
+        if (ProjectId == _loadedProject && RefreshVersion == _loadedVersion && ActiveSessionId == _loadedSession)
+            return;
+        _loadedVersion = RefreshVersion;
+        if (ProjectId != _loadedProject || (_sessionOnly && ActiveSessionId != _loadedSession))
+        {
+            _cursor = null;
+            _pages.Clear();
+            _page = null;
+            _detail = null;
+            _selectedId = null;
+        }
+        _loadedProject = ProjectId;
+        _loadedSession = ActiveSessionId;
+        if (ActiveSessionId is null)
+            _sessionOnly = false;
+        await LoadAsync();
+        if (_selectedId is { } id)
+            await SelectAsync(id);
+    }
+    private long Begin()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+        _cts = new();
+        _loading = false;
+        _detailLoading = false;
+        return ++_generation;
+    }
+    private string Query => "projectId=" + Uri.EscapeDataString(ProjectId ?? "");
+    private async Task FilterSessionAsync(bool sessionOnly)
+    {
+        _sessionOnly = sessionOnly && ActiveSessionId is not null;
+        _cursor = null;
+        _pages.Clear();
+        _page = null;
+        _detail = null;
+        _selectedId = null;
+        await LoadAsync();
+    }
+    private async Task LoadAsync()
+    {
+        var generation = Begin();
+        _loading = true;
+        _error = null;
+        try
+        {
+            if (ProjectId is null)
+                return;
+            var page = await Http.GetFromJsonAsync<ProposalPage>("/api/intake/proposals?" + Query
+                + (_sessionOnly ? "&sessionId=" + Uri.EscapeDataString(ActiveSessionId!) : "")
+                + (_cursor is null ? "" : "&cursor=" + Uri.EscapeDataString(_cursor)), _cts.Token);
+            if (generation == _generation)
+                _page = page ?? throw new InvalidOperationException("No proposal data returned.");
+        }
+        catch (OperationCanceledException) when (generation != _generation) { }
+        catch (Exception ex) { if (generation == _generation) _error = "Proposals could not be loaded: " + ex.Message; }
+        finally { if (generation == _generation) _loading = false; }
+    }
+    private async Task SelectAsync(string id)
+    {
+        var generation = Begin();
+        _selectedId = id;
+        _detail = null;
+        _detailLoading = true;
+        _error = null;
+        try
+        {
+            var detail = await Http.GetFromJsonAsync<ProposalDetail>($"/api/intake/proposals/{Uri.EscapeDataString(id)}?" + Query, _cts.Token);
+            if (generation == _generation)
+                _detail = detail ?? throw new InvalidOperationException("No proposal detail returned.");
+        }
+        catch (OperationCanceledException) when (generation != _generation) { }
+        catch (Exception ex) { if (generation == _generation) _error = "Proposal could not be loaded: " + ex.Message; }
+        finally { if (generation == _generation) _detailLoading = false; }
+    }
+    private async Task ExpandAsync()
+    {
+        if (_detail is null)
+            return;
+        var generation = _generation;
+        var project = ProjectId;
+        var proposalId = _detail.Proposal.Id;
+        _busy = true;
+        try
+        {
+            var response = await Http.PostAsync($"/api/intake/proposals/{_detail.Proposal.Id}/expand?" + Query, null, _cts.Token);
+            response.EnsureSuccessStatusCode();
+            var expanded = await response.Content.ReadFromJsonAsync<ExpandedSession>(cancellationToken: _cts.Token);
+            if (generation == _generation && expanded is not null)
+            {
+                await Expanded.InvokeAsync(expanded.SessionId);
+                if (project == ProjectId && _selectedId == proposalId)
+                    await SelectAsync(proposalId);
+            }
+        }
+        catch (OperationCanceledException) when (generation != _generation) { }
+        catch (Exception ex) { if (generation == _generation) _error = "Expand failed: " + ex.Message; }
+        finally { _busy = false; }
+    }
+    private Task ApproveAsync() => ActAsync("approve");
+    private Task RetryAsync() => ActAsync("retry-refinement");
+    private async Task ActAsync(string action)
+    {
+        if (_detail is null)
+            return;
+        var proposal = _detail.Proposal;
+        var generation = _generation;
+        _busy = true;
+        try
+        {
+            var response = await Http.PostAsJsonAsync($"/api/intake/proposals/{proposal.Id}/{action}?" + Query, new
+            {
+                proposal.Revision,
+                proposal.Hash
+            }, _cts.Token);
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException(await response.Content.ReadAsStringAsync());
+            if (generation == _generation)
+            {
+                await RefreshAsync();
+                if (proposal.ProjectId == ProjectId)
+                    await Changed.InvokeAsync();
+            }
+        }
+        catch (OperationCanceledException) when (generation != _generation) { }
+        catch (Exception ex) { if (generation == _generation) _error = "Action failed; review the current proposal: " + ex.Message; }
+        finally { _busy = false; }
+    }
+    private async Task NextAsync()
+    {
+        _pages.Push(_cursor);
+        _cursor = _page?.NextCursor;
+        await LoadAsync();
+    }
+    private async Task PreviousAsync()
+    {
+        _cursor = _pages.Pop();
+        await LoadAsync();
+    }
+    private sealed record ExpandedSession(string SessionId);
+    public void Dispose()
+    {
+        _disposed = true;
+        _refreshTimer?.Dispose();
+        ++_generation;
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+}

@@ -12,7 +12,7 @@ namespace Forge.Deploy;
 // IssueStore construction against a given db path (which every project
 // already does at startup) guarantees this table exists before a
 // DeploymentStore touches it.
-public sealed class DeploymentStore
+public sealed partial class DeploymentStore
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
@@ -194,14 +194,14 @@ public sealed class DeploymentStore
     private string SelectColumns => $"""
         SELECT id, project_id, commit_sha, commit_summary, status,
                requested_at, requested_by, build_log, approved_at,
-               approved_by, deployed_at, deploy_log
+               approved_by, deployed_at, deploy_log, completion_id, receipt_json
         FROM {T("deployment")}
         """;
 
     private string SelectColumnsTop => $"""
         SELECT {_db.Dialect.TopParam("@limit")}id, project_id, commit_sha, commit_summary, status,
                requested_at, requested_by, build_log, approved_at,
-               approved_by, deployed_at, deploy_log
+               approved_by, deployed_at, deploy_log, completion_id, receipt_json
         FROM {T("deployment")}
         """;
 
@@ -217,9 +217,12 @@ public sealed class DeploymentStore
         ApprovedAt: rd.IsDBNull(8) ? null : DateTime.Parse(rd.GetString(8)),
         ApprovedBy: rd.IsDBNull(9) ? null : rd.GetString(9),
         DeployedAt: rd.IsDBNull(10) ? null : DateTime.Parse(rd.GetString(10)),
-        DeployLog: rd.IsDBNull(11) ? null : rd.GetString(11));
+        DeployLog: rd.IsDBNull(11) ? null : rd.GetString(11),
+        CompletionId: rd.IsDBNull(12) ? null : rd.GetString(12),
+        ReceiptJson: rd.IsDBNull(13) ? null : rd.GetString(13));
 }
 
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<DeploymentStatus>))]
 public enum DeploymentStatus
 {
     Pending,
@@ -245,4 +248,6 @@ public sealed record DeploymentCandidate(
     DateTime? ApprovedAt,
     string? ApprovedBy,
     DateTime? DeployedAt,
-    string? DeployLog);
+    string? DeployLog,
+    string? CompletionId = null,
+    string? ReceiptJson = null);

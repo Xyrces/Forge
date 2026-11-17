@@ -68,11 +68,26 @@ public class TaskSituationTests
         Assert.Contains("CI red", s.Text);
     }
 
-    [Fact]
-    public void InProgressMergeReady_ShowsMerging()
+    [Theory]
+    [InlineData(TaskEvent.ReviewApproved)]
+    [InlineData(TaskEvent.CiGreen)]
+    public async System.Threading.Tasks.Task MergeReadyFromOneObservedGate_DoesNotClaimBothPassed(TaskEvent observed)
     {
-        var s = TaskSituation.Describe(Task(IssueStatus.InProgress, ("state", "MergeReady")));
-        Assert.Contains("merging", s.Text);
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("merge-situation"));
+        var issue = await issues.CreateAsync(new NewIssue("task", "Await merge checks",
+            Metadata: new Dictionary<string, object> { ["state"] = "PROpen", ["prNumber"] = "139" }));
+        await issues.TransitionAsync(issue.Id, IssueStatus.InProgress, null);
+        issue = (await issues.GetAsync(issue.Id))!;
+        var machine = new TaskStateMachine(true, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        await machine.ReportAsync(issues, issue, observed, null, false, CancellationToken.None);
+        var after = (await issues.GetAsync(issue.Id))!;
+        Assert.Equal("MergeReady", after.GetMetadata("state"));
+        Assert.Equal(observed.ToString(), after.GetMetadata("lastEvent"));
+        Assert.Null(after.GetMetadata("stateViolation"));
+        var situation = TaskSituation.Describe(after);
+        Assert.Equal("awaiting final merge checks", situation.Text);
+        Assert.Equal("info", situation.Tone);
     }
 
     [Fact]

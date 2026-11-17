@@ -14,5 +14,8 @@ public sealed class DbOptions
     /// <summary>SQL Server connection string (ignored for sqlite).</summary>
     public string ConnectionString { get; set; } = "";
 
+    /// <summary>Disabled in controllers/workers; the independent initialization job owns DDL.</summary>
+    public bool AutoMigrate { get; set; } = true;
+
     public bool IsSqlServer => string.Equals(Provider, "sqlserver", StringComparison.OrdinalIgnoreCase);
 }

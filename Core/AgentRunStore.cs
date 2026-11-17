@@ -226,39 +226,37 @@ public sealed class AgentRunStore : IDisposable
     /// <summary>
     /// Fail 'running' rows whose heartbeat went stale (or ALL running
     /// rows when <paramref name="staleBefore"/> is null — service
-    /// startup: no run can survive a process restart). A zombie row
+    /// startup, excluding independently owned durable workers). A zombie row
     /// is not just a UI lie on the board ("active" sessions for dead
     /// runs — observed live 2026-08-01: 4 reviewer rows, up to 9h
     /// old) — it also BLOCKS the orphan-claim reaper, which treats
     /// an active run row as proof the task's claim is alive.
     /// Returns the ids of the rows closed.
     /// </summary>
-    public async Task<IReadOnlyList<string>> FailZombieRunsAsync(DateTime? staleBefore, string reason, CancellationToken ct = default)
+    public async Task<IReadOnlyList<string>> FailZombieRunsAsync(DateTime? staleBefore, string reason,
+        CancellationToken ct = default,
+        Func<AgentRunRecord, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        var ids = new List<string>();
-        await using (var sel = conn.CreateCommand())
+        var closed = new List<string>();
+        foreach (var run in await ListActiveAsync(ct))
         {
-            sel.CommandText = staleBefore is null
-                ? $"SELECT id FROM {T("agent_run")} WHERE status = 'running'"
-                : $"""SELECT id FROM {T("agent_run")} WHERE status = 'running' AND COALESCE(last_activity_at, started_at) < @stale""";
-            if (staleBefore is not null)
-                sel.AddParam("@stale", staleBefore.Value.ToString(DateFormat));
-            await using var rd = await sel.ExecuteReaderAsync(ct);
-            while (await rd.ReadAsync(ct)) ids.Add(rd.GetString(0));
+            if (staleBefore is not null && (run.LastActivityAt ?? run.StartedAt) >= staleBefore) continue;
+            // Worker ownership outlives controller processes and model heartbeats.
+            // Lookup failures propagate: uncertainty must never authorize reaping.
+            if (hasDurableWorker is not null && await hasDurableWorker(run, ct)) continue;
+            await using var conn = await _db.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                UPDATE {T("agent_run")} SET status = 'failed', finished_at = @now, error = @err
+                WHERE id = @id AND status = 'running'
+                """ + (staleBefore is null ? "" : " AND COALESCE(last_activity_at, started_at) < @stale");
+            cmd.AddParam("@id", run.Id);
+            cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+            cmd.AddParam("@err", reason);
+            if (staleBefore is not null) cmd.AddParam("@stale", staleBefore.Value.ToString(DateFormat));
+            if (await cmd.ExecuteNonQueryAsync(ct) == 1) closed.Add(run.Id);
         }
-        if (ids.Count == 0) return ids;
-        await using var cmd = conn.CreateCommand();
-        var names = ids.Select((_, i) => $"@id{i}").ToArray();
-        cmd.CommandText = $"""
-            UPDATE {T("agent_run")} SET status = 'failed', finished_at = @now, error = @err
-            WHERE id IN ({string.Join(",", names)})
-            """;
-        cmd.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
-        cmd.AddParam("@err", reason);
-        for (var i = 0; i < ids.Count; i++) cmd.AddParam(names[i], ids[i]);
-        await cmd.ExecuteNonQueryAsync(ct);
-        return ids;
+        return closed;
     }
 
     public async Task<IReadOnlyList<AgentRunRecord>> ListRecentAsync(int limit = 50, string? taskId = null, string? role = null, CancellationToken ct = default, string? projectId = null)

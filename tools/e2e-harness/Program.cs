@@ -8,6 +8,7 @@ using Forge.AgentTools;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Core.Initiatives;
 using Forge.Dashboard;
 using Forge.Orchestrator;
 using Forge.Projects;
@@ -17,8 +18,9 @@ namespace Forge.Tools.E2E;
 
 /// <summary>
 /// E2E harness — proves the orchestrator can take a spec and
-/// open a PR with the right code on a fresh local repo. No
-/// GitHub token, no real network calls. Runs in-process so the
+/// open a PR with the right code on a fresh local repo. The
+/// default fake-agent mode needs no GitHub token or model calls.
+/// Runs in-process so the
 /// harness has direct access to the LocalGitHubService's
 /// PR store for assertions.
 ///
@@ -30,9 +32,9 @@ namespace Forge.Tools.E2E;
 ///   <item>Wire up the orchestrator's components with a
 ///   <see cref="LocalGitHubService"/> pointed at the bare
 ///   remote.</item>
-///   <item>Enqueue a task directly via the
-///   <see cref="OrchestratorAgent"/> (no intake path; that's
-///   covered by IntakeAgentTests).</item>
+///   <item>Create an explicitly approved synthetic initiative, bind its
+///   engineering task to an accepted outcome, and commit the validated sprint
+///   through the ordinary planning service. This does not exercise Intake UI.</item>
 ///   <item>Wait for the orchestrator to dispatch the task +
 ///   run the engineering workflow + open the PR.</item>
 ///   <item>Assert the PR exists + the diff contains the
@@ -46,7 +48,7 @@ namespace Forge.Tools.E2E;
 /// </para>
 ///
 /// <para>
-/// Bypasses the LLM (M3) by writing the file changes directly
+/// Bypasses the LLM by writing the file changes directly
 /// to the worktree during a custom <see cref="FakeAgentRunner"/>.
 /// This keeps the harness fast (a few seconds) and
 /// deterministic — we're verifying the orchestrator's wiring,
@@ -99,7 +101,7 @@ public static class Program
         // 2. Build the LocalGitHubService + wire up
         // orchestrator components.
         var dbPath = Path.Combine(workspaceRoot, "issues.db");
-        var issues = new IssueStore(dbPath);
+        var issues = new IssueStore(dbPath, "harness");
         var designArtifacts = new DesignArtifactStore(dbPath);
         var designerRuns = new DesignerRunStore(dbPath);
         var artOutputs = new ArtOutputStore(dbPath);
@@ -287,25 +289,33 @@ if (useRealLlm)
             eventBus,
             NullLogger<OrchestratorAgent>.Instance);
 
-        // 5. Skip the design + artist + groomer stages by
-        // creating a "groomed" task directly. The orchestrator
-        // will pick it up + dispatch.
+        // 5. This engineering-only harness supplies synthetic approval and
+        // grooming through the real stores, then uses the production planner.
+        // It never bypasses sprint or approved-scope dispatch admission.
+        var proposals = new InitiativeProposalStore(issues);
+        var proposal = await proposals.CreateAsync(new("harness", "calculator-fixture", "forge",
+            "Calculator addition", specBody, 2));
+        await proposals.ExpandInIntakeAsync("harness", proposal.Id);
+        proposal = await proposals.ApproveAsync("harness", proposal.Id, proposal.Revision, proposal.Hash, "offline harness operator");
+        var ingestion = new InitiativeIngestionStore(issues);
+        var approved = await ingestion.IngestAsync(proposal);
+        if (!await ingestion.TryBeginRefinementAsync(proposal.Id, proposal.Revision))
+            throw new InvalidOperationException("Could not begin synthetic refinement.");
+        await ingestion.CompleteRefinementAsync(proposal.Id, proposal.Revision);
+        var scope = new SprintScopeReference(approved.SpecId, proposal.Id, proposal.Revision, proposal.Hash, specBody);
         var task = await issues.CreateAsync(new NewIssue(
             Type: "task",
             Title: "Add Calculator with Add method + xUnit test",
             Description: specBody,
-            Priority: 2));
-        // Walk to ReadyForDesign → Designed → AssetReady → ReadyForGroom
-        // → Groomed (the orchestrator's Groomer agent picks up
-        // Groomed tasks; we short-circuit by claiming + setting
-        // status to Completed manually). For the harness we
-        // only need the engineering dispatch to fire; we
-        // pre-stage the task at ReadyForDesign + pretend
-        // Designer + Artist + Groomer ran (no design artifacts,
-        // no art outputs — engineering dispatch ignores those
-        // for tasks with no spec).
-        await issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null);
-        // Bypass the Groomer: skip directly to Pending for dispatch.
+            Priority: 2,
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await new SprintOutcomeAuthority(issues).BindAsync(task.Id, new(1, "calculator-addition",
+            "Calculator adds two integers with a regression test",
+            [new("addition", "Calculator Add(2, 3) returns 5 and its regression test exists", SprintEvidenceKind.MergedAndVerified, scope)],
+            [task.Id], ["addition"], SprintMemberReason.Delivers, scope));
+        var planner = new SprintProposeService(issues, sprints, new DeterministicScorer(), new SprintProposalAuditStore(issues.Db));
+        var plan = await planner.ProposeAsync(null, null);
+        await planner.CommitAsync(plan.AuditId, plan.SelectedTaskIds, null, null, "offline harness operator");
 
         // 6. Run a single dispatch cycle. The orchestrator will
         // claim the task + run the engineering workflow +
@@ -405,8 +415,9 @@ if (useRealLlm)
         // empty-diff supersede guard would read 0 and close EVERY
         // harness PR as superseded; compute the real count from the
         // bare remote (broke the closed loop 2026-08-14).
+        using var watchDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var watchResult = await prWatcher.ProcessWatchedTaskAsync(
-            watchTask, CancellationToken.None,
+            watchTask, watchDeadline.Token,
             reviewsOverride: _ => new[] { Octokit.PullRequestReviewState.Approved },
             headShaOverride: _ => headSha,
             changedFilesOverride: p => CountChangedFiles(gitHub, p.Number));
@@ -418,9 +429,16 @@ if (useRealLlm)
         {
             errors.Add("PR was not merged (LocalGitHubService.MergePullRequestAsync never returned true)");
         }
+        if (watchResult != 0) errors.Add($"Watcher did not complete successfully: {watchResult}");
         var finalTask = (await issues.GetAsync(task.Id))!;
         if (finalTask.Status != IssueStatus.Completed)
             errors.Add($"original task is {finalTask.Status}, expected Completed");
+        var mergeJson = finalTask.GetMetadata("observedMerge");
+        var mergeEvidence = string.IsNullOrWhiteSpace(mergeJson) ? null
+            : JsonSerializer.Deserialize<Forge.Core.Completion.ObservedMergeEvidence>(mergeJson);
+        if (mergeEvidence is null || mergeEvidence.TaskId != task.Id || mergeEvidence.PullRequestNumber != pr.Number
+            || mergeEvidence.HeadSha != headSha || mergeEvidence.MergeSha != headSha)
+            errors.Add("Completed task lacks the exact accepted-head simulated merge observation");
         if (finalTask.GetMetadata("prNumber") != pr.Number.ToString())
             errors.Add($"original task has prNumber={finalTask.GetMetadata("prNumber")}, expected {pr.Number}");
 

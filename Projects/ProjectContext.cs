@@ -109,6 +109,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     private readonly Func<string, string, Core.Db.IDbConnectionFactory>? _dbResolver;
     private readonly Core.Messaging.IEventPublisher? _events;
     private readonly ILogger _logger;
+    private readonly IReadOnlyDictionary<string, DeploymentOptions> _deploymentProfiles;
     private readonly ConcurrentDictionary<string, ProjectContext> _cache = new();
     private bool _disposed;
 
@@ -118,8 +119,9 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         IReadOnlyDictionary<string, string>? issuesDbByProject = null,
         Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
         Core.Messaging.IEventPublisher? events = null,
-        ILogger? logger = null)
-        : this(projects, store: null, dataRoot: null, issuesDbByProject, dbResolver, events, logger)
+        ILogger? logger = null,
+        IReadOnlyDictionary<string, DeploymentOptions>? deploymentProfiles = null)
+        : this(projects, store: null, dataRoot: null, issuesDbByProject, dbResolver, events, logger, deploymentProfiles)
     {
     }
 
@@ -130,8 +132,9 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         IReadOnlyDictionary<string, string>? issuesDbByProject = null,
         Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
         Core.Messaging.IEventPublisher? events = null,
-        ILogger? logger = null)
-        : this(projects: null, store: store, dataRoot: dataRoot, issuesDbByProject, dbResolver, events, logger)
+        ILogger? logger = null,
+        IReadOnlyDictionary<string, DeploymentOptions>? deploymentProfiles = null)
+        : this(projects: null, store: store, dataRoot: dataRoot, issuesDbByProject, dbResolver, events, logger, deploymentProfiles)
     {
     }
 
@@ -142,7 +145,8 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         IReadOnlyDictionary<string, string>? issuesDbByProject,
         Func<string, string, Core.Db.IDbConnectionFactory>? dbResolver = null,
         Core.Messaging.IEventPublisher? events = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        IReadOnlyDictionary<string, DeploymentOptions>? deploymentProfiles = null)
     {
         if (projects is null && store is null)
             throw new ArgumentException("Either projects (static) or store (live) must be supplied.");
@@ -154,6 +158,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         _dbResolver = dbResolver;
         _events = events;
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        _deploymentProfiles = deploymentProfiles ?? new Dictionary<string, DeploymentOptions>();
     }
 
     /// <summary>Root: the clone path recorded at registration
@@ -163,6 +168,13 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         !string.IsNullOrWhiteSpace(r.LocalPath)
             ? r.LocalPath!
             : ForgesystemPaths.ProjectDir(_dataRoot, r.Id);
+
+    private ProjectOptions MapOptions(ProjectRecord record)
+    {
+        var options = record.ToProjectOptions(RootFor(record));
+        if (_deploymentProfiles.TryGetValue(record.Id, out var profile)) options.Deployment = profile;
+        return options;
+    }
 
     public IReadOnlyList<ProjectOptions> KnownProjects
     {
@@ -178,7 +190,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
                 .GetAwaiter().GetResult();
             var list = new List<ProjectOptions>(rows.Count);
             foreach (var r in rows)
-                list.Add(r.ToProjectOptions(RootFor(r)));
+                list.Add(MapOptions(r));
             return list;
         }
     }
@@ -242,7 +254,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
             var record = _store!.GetAsync(projectId, CancellationToken.None)
                 .GetAwaiter().GetResult();
             // Deleted mid-flight (or unknown): keep the cached context.
-            if (record is not null) ctx.RefreshOptions(record.ToProjectOptions(RootFor(record)));
+            if (record is not null) ctx.RefreshOptions(MapOptions(record));
         }
         catch (Exception ex)
         {

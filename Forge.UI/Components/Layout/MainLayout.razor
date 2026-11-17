@@ -5,10 +5,19 @@
 
 @code {
     private System.Threading.Timer? _heartbeatTimer;
+    private bool _navigationOpen;
+
+    private void CloseNavigation() => _navigationOpen = false;
+
+    private void OnShellKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") CloseNavigation();
+    }
 
     protected override void OnInitialized()
     {
         ShellState.StateChanged += OnShellStateChanged;
+        Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadBuildInfoAction());
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadProjectsAction());
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadActiveSprintAction());
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.PollHeartbeatAction());
@@ -35,8 +44,13 @@
     }
 }
 
-<div class="app-shell">
+<div class="app-shell @(_navigationOpen ? "app-shell--navigation-open" : "")" @onkeydown="OnShellKeyDown">
     <header class="app-topbar">
+        <button type="button" class="icon-btn app-navigation-toggle"
+                aria-label="Toggle navigation" aria-expanded="@(_navigationOpen ? "true" : "false")"
+                aria-controls="app-navigation" @onclick="() => _navigationOpen = !_navigationOpen">
+            Menu
+        </button>
         <div class="app-topbar__brand">Forge</div>
         @if (ShellState.Value.Projects.Count > 0)
         {
@@ -56,6 +70,7 @@
             <input type="text" placeholder="Search issues, specs, memory... (⌘K)" disabled />
         </div>
         <div class="app-topbar__right">
+            <BuildRevision BuildInfo="@ShellState.Value.BuildInfo" />
             @if (ShellState.Value.ActiveSprintName is not null)
             {
                 <span class="pill pill--primary">@ShellState.Value.ActiveSprintName</span>
@@ -69,8 +84,8 @@
         </div>
     </header>
 
-    <nav class="app-nav">
-        <NavMenu />
+    <nav id="app-navigation" class="app-nav" aria-label="Main navigation">
+        <NavMenu OnNavigate="CloseNavigation" />
     </nav>
 
     <main class="app-main">

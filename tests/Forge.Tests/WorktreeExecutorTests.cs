@@ -24,6 +24,7 @@ public class WorktreeExecutorTests : IDisposable
         _workDir = TempRoot.Instance.NewDirectory("wtexec");
         Directory.CreateDirectory(_workDir);
         InitRepo(_workDir);
+        InitRepoWithOrigin();
         _issues = new IssueStore(Path.Combine(_workDir, ".portHorizon", "state", "issues.db"));
         _worktrees = new GitWorktreeService(
             new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".portHorizon/worktrees", DefaultBranch = "main" },
@@ -34,6 +35,7 @@ public class WorktreeExecutorTests : IDisposable
     {
         _issues.Dispose();
         try { Directory.Delete(_workDir, recursive: true); } catch { }
+        try { Directory.Delete(_workDir + "-bare.git", recursive: true); } catch { }
     }
 
     private static void InitRepo(string dir)
@@ -116,6 +118,7 @@ public class WorktreeExecutorTests : IDisposable
         // Re-root the fixture repo with a bare origin so fetches and
         // origin/main refs work.
         var bare = _workDir + "-bare.git";
+        if (Directory.Exists(bare)) return bare;
         Run("git", $"clone --bare {_workDir} {bare}", _workDir);
         Run("git", "remote add origin " + bare, _workDir);
         Run("git", "fetch origin", _workDir);
@@ -146,7 +149,41 @@ public class WorktreeExecutorTests : IDisposable
         Run("git", "add " + fileName, tmp);
         Run("git", "commit -q -m advance", tmp);
         Run("git", "push -q origin main", tmp);
+        foreach (var file in Directory.EnumerateFiles(tmp, "*", SearchOption.AllDirectories))
+            File.SetAttributes(file, FileAttributes.Normal);
         Directory.Delete(tmp, recursive: true);
+    }
+
+    [Fact]
+    public async Task ReusedWorktree_UncommittedRecoveredEdits_ArePreserved()
+    {
+        InitRepoWithOrigin();
+        var issue = await DispatchOnceAsync();
+        var wt = _worktrees.WorktreePathFor(issue.Id);
+        await File.WriteAllTextAsync(Path.Combine(wt, "README.md"), "recovered edits");
+        await File.WriteAllTextAsync(Path.Combine(wt, "new.txt"), "untracked work");
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null);
+        var claimed = await ClaimExecutor.HandleAsync((await _issues.GetAsync(issue.Id))!,
+            _issues, NullLogger<ClaimExecutor>.Instance, default);
+        await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger.Instance, default);
+        Assert.Equal("recovered edits", await File.ReadAllTextAsync(Path.Combine(wt, "README.md")));
+        Assert.Equal("untracked work", await File.ReadAllTextAsync(Path.Combine(wt, "new.txt")));
+    }
+
+    [Fact]
+    public async Task AdoptingWorker_DoesNotResetEvenCleanCheckout()
+    {
+        InitRepoWithOrigin();
+        var issue = await DispatchOnceAsync();
+        var wt = _worktrees.WorktreePathFor(issue.Id);
+        AdvanceOriginMain(_workDir + "-bare.git", "NewFile.cs");
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null,
+            metadata: new Dictionary<string, object> { ["dispatchId"] = "d-existing", ["resumeDispatchId"] = "d-existing" });
+        var claimed = await ClaimExecutor.HandleAsync((await _issues.GetAsync(issue.Id))!,
+            _issues, NullLogger<ClaimExecutor>.Instance, default);
+        await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger.Instance, default);
+        Assert.False(File.Exists(Path.Combine(wt, "NewFile.cs")));
+        Assert.Null((await _issues.GetAsync(issue.Id))!.GetMetadata("resumeDispatchId"));
     }
 
     [Fact]
@@ -169,17 +206,22 @@ public class WorktreeExecutorTests : IDisposable
             "stale reused worktree was not synced to origin/main");
     }
 
-    [Fact]
-    public async Task ReusedWorktree_WithLocalCommits_LeftAlone()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReusedWorktree_WithLocalWork_LeftAlone(bool committed)
     {
         InitRepoWithOrigin();
         var issue = await DispatchOnceAsync();
         var wt = _worktrees.WorktreePathFor(issue.Id);
 
-        // Simulate a died run's partial work: a local-only commit.
+        // A timeout may leave either a local commit or untracked implementation work.
         File.WriteAllText(Path.Combine(wt, "partial.cs"), "local work");
-        Run("git", "add partial.cs", wt);
-        Run("git", "commit -q -m partial", wt);
+        if (committed)
+        {
+            Run("git", "add partial.cs", wt);
+            Run("git", "commit -q -m partial", wt);
+        }
 
         AdvanceOriginMain(_workDir + "-bare.git", "NewFile.cs");
 
@@ -189,8 +231,8 @@ public class WorktreeExecutorTests : IDisposable
             claimed2, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
 
         Assert.True(File.Exists(Path.Combine(wt, "partial.cs")),
-            "local-only work from the died run was wiped");
+            "local work from the died run was wiped");
         Assert.False(File.Exists(Path.Combine(wt, "NewFile.cs")),
-            "worktree with local commits must not be reset to base");
+            "worktree with local work must not be reset to base");
     }
 }

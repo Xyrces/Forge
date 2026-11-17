@@ -92,6 +92,12 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
         var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
+        if (!string.IsNullOrWhiteSpace(issue.GetMetadata("existingVerificationRequest")))
+            prompt += "\n\nThe former PR was closed unmerged because it contained no changes. That is not acceptance evidence. " +
+                "This fresh configured-base checkout must be checked against the same approved task criteria. " +
+                "Do not manufacture edits to create a diff. If the approved implementation already exists, run the required checks, " +
+                "explain the concrete evidence, and request NO_CHANGES_NEEDED. Independent verification and review still decide acceptance; " +
+                "deployment and operator observations remain separate obligations.";
         // Rework loop: a task requeued by the PRWatcher carries the
         // failure context (CI failure or reviewer notes) — surface it
         // prominently so the agent fixes THAT, not re-explores.
@@ -143,7 +149,9 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         AgentRunResult result;
         CancellationToken effectiveCt = ct;
         CancellationTokenSource? timeoutCts = null;
-        if (timeoutMinutes > 0)
+        // Distributed workers enforce the model deadline in-pod; waiting also includes
+        // independent verification, which must not inherit an expired model timer.
+        if (timeoutMinutes > 0 && runner is not Workers.KubernetesAgentRunner)
         {
             timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
@@ -162,6 +170,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["projectId"] = projectId ?? string.Empty,
                 ["planFastPath"] = planFastPath ? "true" : "false",
             };
+            if (runner is Workers.KubernetesAgentRunner)
+                context["modelTimeoutMinutes"] = timeoutMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
             // Dispatch correlation id (v30): stamped on the issue by
             // OrchestratorAgent at claim; the runner writes it onto
             // the agent_run row so journal + run + task all join on
@@ -272,10 +282,20 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 meta["lastError"] = timeoutMsg;
                 meta["modelResponse"] = $"<timed out after {timeoutMinutes}m>";
                 meta["agentTimeout"] = "true";
-                await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                meta["lastErrorAt"] = DateTime.UtcNow.ToString("O");
+                // Preserve the running state until the orchestrator records RunDied and applies retry policy.
+                await issues.TransitionAsync(issue.Id, cur.Status,
                     error: timeoutMsg, metadata: meta, ct: ct);
             }
             throw new TimeoutException(timeoutMsg);
+        }
+        catch (Workers.WorkerExecutionUncertainException ex)
+        {
+            var blocked = await issues.GetAsync(issue.Id, ct) ?? issue;
+            if (lifecycle is not null)
+                await lifecycle.ReportAsync(issues, blocked, Core.TaskEvent.OperatorBlocked, watch: null, hasActiveDevRun: false, ct);
+            await issues.TransitionAsync(issue.Id, IssueStatus.Blocked, ex.Message, ct: ct);
+            throw;
         }
         catch (Exception ex)
         {
@@ -324,7 +344,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["sessionId"] = result.SessionId ?? "",
                 ["elapsedMs"] = result.Elapsed.TotalMilliseconds,
             }));
-        return new AgentCompleted(input, AgentResult.Ok, result.Text ?? string.Empty, result.SessionId);
+        return new AgentCompleted(input, AgentResult.Ok, result.Text ?? string.Empty, result.SessionId,
+            result.Verification, runner is Workers.KubernetesAgentRunner);
     }
 
     private static async Task RecordModelResponseAsync(
@@ -418,7 +439,10 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             only if — you conclude the task genuinely requires no code
             changes (already implemented, verification-only), end your
             final message with the exact marker NO_CHANGES_NEEDED plus
-            a one-sentence justification. A run that produces no diff
+            concrete implementation and test evidence. This marker requests independent
+            verification; it is not completion or acceptance evidence. Only an approved
+            ImplementationVerified criterion can use the existing-code path. Strict
+            MergedAndVerified criteria still require their merged-PR evidence. A run that produces no diff
             without that marker is treated as a failed attempt and
             re-queued (circuit breaker applies).
             """;
@@ -506,4 +530,6 @@ public sealed record AgentCompleted(
     WorktreeReady Worktree,
     AgentResult Result,
     string Text,
-    string? SessionId);
+    string? SessionId,
+    VerificationReceipt? Verification = null,
+    bool RequiresWorkerVerification = false);

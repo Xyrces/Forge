@@ -31,7 +31,45 @@ public sealed class GitWorktreeService
     public string WorktreePathFor(string taskId)
         => Path.Combine(WorktreeRoot, Sanitize(taskId));
 
-    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null)
+    /// <summary>New engineering runs start from an observed remote commit, never a stale local branch.</summary>
+    public async Task<string> CreateFreshAsync(string taskId, string baseBranch, CancellationToken ct = default, string? branchOverride = null)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        ct = timeout.Token;
+        if (Directory.Exists(WorktreePathFor(taskId)))
+            throw new InvalidOperationException("Existing work requires the explicit reuse path.");
+        if (string.IsNullOrWhiteSpace(baseBranch) || baseBranch.Contains('"') || baseBranch.Contains('\\')
+            || baseBranch.Any(char.IsWhiteSpace) || baseBranch.StartsWith('-'))
+            throw new InvalidOperationException("Invalid configured base branch.");
+        var valid = await RunGitInAsync(WorkspaceRoot, "", ct, ["check-ref-format", "refs/heads/" + baseBranch]);
+        if (valid.ExitCode != 0) throw new InvalidOperationException("Invalid configured base branch.");
+        var localRef = "refs/forge/fresh/" + Guid.NewGuid().ToString("N");
+        try
+        {
+            var fetch = await RunGitInAsync(WorkspaceRoot, "", ct, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", $"+refs/heads/{baseBranch}:{localRef}"]);
+            if (fetch.ExitCode != 0)
+                throw new InvalidOperationException("Cannot fetch the configured base branch; refusing stale engineering checkout.");
+            var observed = await RunGitInAsync(WorkspaceRoot, "", ct, ["rev-parse", "--verify", localRef + "^{commit}"]);
+            var sha = observed.Stdout.Trim();
+            if (observed.ExitCode != 0 || !System.Text.RegularExpressions.Regex.IsMatch(sha, "^[0-9a-f]{40}$"))
+                throw new InvalidOperationException("Fetched base is not a verified commit.");
+            return await CreateAsync(taskId, sha, ct, branchOverride, preserveExistingBranch: true);
+        }
+        finally
+        {
+            try
+            {
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var deleted = await RunGitInAsync(WorkspaceRoot, "", cleanup.Token, ["update-ref", "-d", localRef]);
+                if (deleted.ExitCode != 0) _logger.LogWarning("Could not remove temporary source ref for {TaskId}", taskId);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "Temporary source ref cleanup failed for {TaskId}", taskId); }
+        }
+
+    }
+
+    public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null, bool preserveExistingBranch = false)
     {
         // The worktree branch must equal the branch the rest of the
         // pipeline uses (claim metadata -> prompt -> CommitPushPr push
@@ -91,8 +129,11 @@ public sealed class GitWorktreeService
             return worktreePath;
         }
 
-        var args = $"worktree add -B \"{branch}\" \"{worktreePath}\" \"{baseBranch}\"";
-        var result = await RunGitAsync(args, cancellationToken);
+        var createFlag = preserveExistingBranch ? "-b" : "-B";
+        var args = $"worktree add {createFlag} \"{branch}\" \"{worktreePath}\" \"{baseBranch}\"";
+        var result = preserveExistingBranch
+            ? await RunGitInAsync(WorkspaceRoot, "", cancellationToken, ["worktree", "add", "-b", branch, worktreePath, baseBranch])
+            : await RunGitAsync(args, cancellationToken);
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"git worktree add failed (exit={result.ExitCode}): {result.Stderr}");
 
@@ -372,6 +413,15 @@ public sealed class GitWorktreeService
         return result.Stdout.Trim();
     }
 
+    public async Task<string> GetCommitTreeShaAsync(string worktreePath, string commitSha, CancellationToken ct = default)
+    {
+        if (commitSha.Length != 40 || commitSha.Any(c => !char.IsAsciiHexDigit(c)))
+            throw new ArgumentException("An exact commit SHA is required.", nameof(commitSha));
+        var result = await RunGitInAsync(worktreePath, "", ct, ["rev-parse", "--verify", commitSha + "^{tree}"]);
+        if (result.ExitCode != 0) throw new InvalidOperationException("Could not resolve the verified commit tree.");
+        return result.Stdout.Trim();
+    }
+
     public async Task<string> GetHeadShaAsync(string worktreePath, CancellationToken cancellationToken = default)
     {
         var result = await RunGitInAsync(worktreePath, "rev-parse HEAD", cancellationToken);
@@ -516,12 +566,12 @@ public sealed class GitWorktreeService
     private async Task<GitResult> RunGitAsync(string arguments, CancellationToken cancellationToken)
         => await RunGitInAsync(WorkspaceRoot, arguments, cancellationToken);
 
-    private async Task<GitResult> RunGitInAsync(string workingDir, string arguments, CancellationToken cancellationToken)
+    private async Task<GitResult> RunGitInAsync(string workingDir, string arguments, CancellationToken cancellationToken, IReadOnlyList<string>? argumentList = null)
     {
         var psi = new ProcessStartInfo
         {
             FileName = "git",
-            Arguments = arguments,
+            Arguments = argumentList is null ? arguments : string.Empty,
             WorkingDirectory = workingDir,
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -530,6 +580,8 @@ public sealed class GitWorktreeService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        if (argumentList is not null)
+            foreach (var argument in argumentList) psi.ArgumentList.Add(argument);
         // Authenticate via env var so the git credential helper doesn't
         // try to prompt on stdin (which hangs in non-interactive
         // contexts like the SCM). GCM and libsecret ignore this, but
@@ -545,9 +597,16 @@ public sealed class GitWorktreeService
 
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start git process");
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderrTask = proc.StandardError.ReadToEndAsync(cancellationToken);
-        await proc.WaitForExitAsync(cancellationToken);
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        try { await proc.WaitForExitAsync(cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            if (!proc.HasExited) proc.Kill(entireProcessTree: true);
+            await proc.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(stdoutTask, stderrTask);
+            throw;
+        }
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
         return new GitResult(proc.ExitCode, stdout, stderr);

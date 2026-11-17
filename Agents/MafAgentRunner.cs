@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
@@ -149,6 +149,7 @@ public async Task<AgentRunResult> RunAsync(
         CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
+        var isWorker = !string.IsNullOrWhiteSpace(ResolveContextString(context, "workerAttemptId"));
         var projectId = ResolveContextString(context, "projectId");
         if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
         // The run registry row belongs to the OWNING project's schema:
@@ -167,6 +168,9 @@ public async Task<AgentRunResult> RunAsync(
             skillInstructions,
             BuildSprintBlock(context),
             memoryInstructions,
+            isWorker ? WorkerPublicationPolicy.Instructions : string.Empty,
+            isWorker && role == AgentType.Reviewer && ResolveContextString(context, "existingImplementationReview") == "true"
+                ? ExistingImplementationReviewPolicy.Instructions : string.Empty,
         }.Where(s => !string.IsNullOrEmpty(s)));
         // P1 fix: instructions go to the agent's instructions: parameter,
         // NOT into the user message. The user prompt is the operator's
@@ -231,7 +235,8 @@ public async Task<AgentRunResult> RunAsync(
             }
 
             tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv,
-                mutationsAllowed: mutationsAllowed, mutationRefusalMessage: mutationRefusalMessage).AsAIFunction());
+                mutationsAllowed: mutationsAllowed, mutationRefusalMessage: mutationRefusalMessage,
+                publicationForbidden: isWorker).AsAIFunction());
         }
 
         // Reviewer drill-in: the dispatcher hands the FULL diff via
@@ -478,7 +483,10 @@ public async Task<AgentRunResult> RunAsync(
             // as the backstop for whatever survives.
             var worktreePath = ResolveWorktreePath(context);
             var verifyCommands = ResolveVerifyCommands(projectId, worktreePath);
+            // Distributed workers run the same full gate once, independently in WorkerHost.
+            // Legacy in-process runs retain their in-session correction loop.
             if (gateState?.PlanApproved == true
+                && string.IsNullOrEmpty(ResolveContextString(context, "workerAttemptId"))
                 && worktreePath is not null
                 && verifyCommands is { Count: > 0 })
             {
@@ -509,8 +517,11 @@ public async Task<AgentRunResult> RunAsync(
                         "Fix the failures below and iterate — verification runs again when you finish. " +
                         "Do not weaken tests to make them pass; fix the cause.\n\n" +
                         string.Join("\n\n", verify.Failures));
-                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
                     transcriptMessages.Add(feedback);
+                    // Preserve the verification diagnosis even if admission or
+                    // the provider fails before the corrective response arrives.
+                    await HeartbeatAsync(runStore, runId, transcriptMessages);
+                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
                     transcriptMessages.AddRange(response.Messages);
                     await HeartbeatAsync(runStore, runId, transcriptMessages);
                 }
@@ -1069,6 +1080,9 @@ public async Task<AgentRunResult> RunAsync(
         var env = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var meta in stored)
         {
+            // Runtime credentials are never tool environment variables.
+            if (_config.Providers.Any(p => string.Equals(meta.Kind, SecretKinds.ForProvider(p.Name), StringComparison.OrdinalIgnoreCase))
+                || meta.Kind.Contains("connection_string", StringComparison.OrdinalIgnoreCase)) continue;
             string? plaintext;
             try
             {
