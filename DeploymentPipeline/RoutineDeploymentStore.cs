@@ -69,7 +69,7 @@ public sealed partial class DeploymentStore
             cmd => { cmd.AddParam("@id", id); cmd.AddParam("@note", note); }, ct);
 
     public Task MarkIndependentProgressAsync(string id, DeploymentExecutionResult progress, CancellationToken ct = default) =>
-        progress.StillInProgress
+        progress.AdmissionHeld ? Task.CompletedTask : progress.StillInProgress
             ? ExecAsync($"UPDATE {T("deployment")} SET status='Deploying' WHERE id=@id AND status='Approved'",
                 cmd => cmd.AddParam("@id", id), ct)
             : ExecAsync($"UPDATE {T("deployment")} SET status=@status,deploy_log=@log,deployed_at=@at WHERE id=@id AND status IN ('Approved','Deploying')",

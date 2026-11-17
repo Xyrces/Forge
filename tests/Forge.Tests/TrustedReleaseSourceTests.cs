@@ -76,6 +76,20 @@ public sealed class TrustedReleaseSourceTests
         Assert.DoesNotContain(new string('c', 40), result.Evidence);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EqualMergeTimestampsChooseFrontierByAncestryInEitherOrder(bool reverse)
+    {
+        using var fixture = new Fixture("tied-merges");
+        var now = DateTime.UtcNow;
+        IssueRecord Member(int pr) => new("task-" + pr, "1", "task", "done", null, IssueStatus.Completed, 2, null,
+            now, now, now, "{\"prNumber\":" + pr + "}");
+        var members = reverse ? new[] { Member(125), Member(124) } : new[] { Member(124), Member(125) };
+        var result = await fixture.Source.ObserveMergedFrontierAsync(Project, members, default);
+        Assert.Equal(new string('d', 40), result.Sha);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string? Fault;
@@ -104,8 +118,12 @@ public sealed class TrustedReleaseSourceTests
         private HttpResponseMessage Respond(HttpRequestMessage request)
         {
             var path = request.RequestUri!.AbsolutePath;
-            if (path.EndsWith("/pulls/124")) return Json(new { merged = true, merge_commit_sha = Sha, merged_at = DateTimeOffset.UtcNow,
+            if (path.EndsWith("/pulls/124")) return Json(new { merged = true, merge_commit_sha = Sha, merged_at = DateTimeOffset.UnixEpoch,
                 @base = new { @ref = "main", repo = new { full_name = "Xyrces/Forge" } }, head = new { sha = new string('c', 40) } });
+            if (path.EndsWith("/pulls/125")) return Json(new { merged = true, merge_commit_sha = new string('d', 40), merged_at = DateTimeOffset.UnixEpoch,
+                @base = new { @ref = "main", repo = new { full_name = "Xyrces/Forge" } } });
+            if (path.Contains("/compare/")) return Json(new { status = path.EndsWith("..." + new string('d', 40)) ? "ahead" : "behind" });
+            if (Fault == "tied-merges" && path.EndsWith("/branches/main")) return Json(new { commit = new { sha = new string('d', 40) } });
             if (path.EndsWith("/branches/main")) return Json(new { commit = new { sha = Sha } });
             if (path.EndsWith("/ci.yml")) return Json(new { id = 1, path = ".github/workflows/ci.yml" });
             if (path.EndsWith("/controller-image.yml")) return Json(new { id = 2, path = ".github/workflows/controller-image.yml" });

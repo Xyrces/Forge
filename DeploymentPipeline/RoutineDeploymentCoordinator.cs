@@ -15,7 +15,7 @@ public interface IRoutineReleaseSource
 
 public interface IIndependentDeploymentExecutor : IDeploymentExecutor
 {
-    Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct);
+    Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct, Func<CancellationToken, Task<bool>>? canStart = null);
 }
 
 public sealed record RoutineDeploymentProject(ProjectOptions Options, SprintCompletionStore Completions, DeploymentStore Deployments);
@@ -134,7 +134,7 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
         }
         if (candidate.Status is not (DeploymentStatus.Approved or DeploymentStatus.Deploying)) return;
         var release = executor(project.Options);
-        var progress = await release.ReadProgressAsync(project.Options, candidate, ct);
+        var progress = await release.ReadProgressAsync(project.Options, candidate, ct, async token => !await gates.IsHeldAsync(StageGates.Deploy, token));
         await project.Deployments.MarkIndependentProgressAsync(candidate.Id, progress, ct);
     }
 }

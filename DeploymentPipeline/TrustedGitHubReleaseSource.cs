@@ -60,7 +60,16 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
             observations.Add((pr.GetProperty("merge_commit_sha").GetString()!, pr.GetProperty("merged_at").GetDateTimeOffset(), number));
         }
         if (observations.Count == 0) throw new InvalidOperationException("No merged source frontier is present; non-code completion needs an explicit no-deployment disposition.");
-        var frontier = observations.OrderByDescending(o => o.At).First().Sha;
+        var frontier = observations[0].Sha;
+        foreach (var observation in observations.Skip(1))
+        {
+            if (frontier == observation.Sha) continue;
+            using var comparison = await GetJson(project.Id, $"repos/{repo}/compare/{frontier}...{observation.Sha}", ct);
+            var relation = comparison.RootElement.GetProperty("status").GetString();
+            if (relation == "ahead") frontier = observation.Sha;
+            else if (relation is not ("behind" or "identical"))
+                throw new InvalidOperationException("Merged source commits do not form one verified ancestry frontier.");
+        }
         foreach (var observation in observations)
             await RequireAncestor(project, repo, observation.Sha, frontier, ct);
         using var branch = await GetJson(project.Id, $"repos/{repo}/branches/{Uri.EscapeDataString(project.DefaultBranch)}", ct);

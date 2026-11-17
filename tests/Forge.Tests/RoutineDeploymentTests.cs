@@ -64,6 +64,26 @@ public sealed class RoutineDeploymentTests : IDisposable
     }
 
     [Fact]
+    public async Task RestartAfterApprovalHonorsNewHoldUntilJobExists()
+    {
+        await Complete();
+        await Gates.HoldAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        var candidate = Assert.Single(await Deployments.ListAsync());
+        await Deployments.TryApproveAsync(candidate.Id, "policy before controller stop");
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.Approved, (await Deployments.GetAsync(candidate.Id))!.Status);
+        Assert.Equal(0, executor.Calls);
+        await Gates.ReleaseAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(1, executor.Calls);
+        await Gates.HoldAsync(StageGates.Deploy);
+        executor.Result = new(true, "committed");
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.Deployed, (await Deployments.GetAsync(candidate.Id))!.Status);
+    }
+
+    [Fact]
     public async Task RepeatedCompletionAndCrashBeforeBindingDoNotCreateDuplicateCandidates()
     {
         var completion = await Complete();
@@ -129,9 +149,15 @@ public sealed class RoutineDeploymentTests : IDisposable
     private sealed class FakeExecutor : IIndependentDeploymentExecutor
     {
         public int Calls;
+        private bool started;
         public DeploymentExecutionResult Result = new(false, "running", true);
         public Task<DeploymentExecutionResult> ExecuteAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct = default) => throw new InvalidOperationException("Coordinator must use durable progress adoption.");
-        public Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct)
-        { Calls++; return Task.FromResult(Result); }
+        public async Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct, Func<CancellationToken, Task<bool>>? canStart = null)
+        {
+            if (!started && (canStart is null || !await canStart(ct))) return new(false, "held", true, true);
+            started = true;
+            Calls++;
+            return Result;
+        }
     }
 }

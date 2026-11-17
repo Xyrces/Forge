@@ -92,7 +92,7 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
         return new(false, "Independent release Job accepted; durable progress is available in the deployment list.", true);
     }
 
-    public async Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct)
+    public async Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct, Func<CancellationToken, Task<bool>>? canStart = null)
     {
         project = await ResolveProfileAsync(project, candidate, ct);
         var image = ResolveImage(project, candidate);
@@ -102,6 +102,8 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
             using var jobResponse = await http.GetAsync($"apis/batch/v1/namespaces/{project.Deployment.KubernetesNamespace}/jobs/forge-release-{candidate.Id}", ct);
             if (jobResponse.StatusCode == HttpStatusCode.NotFound)
             {
+                if (canStart is null || !await canStart(ct))
+                    return new(false, "Release has not started; awaiting deployment admission.", true, AdmissionHeld: true);
                 // The SQL approval may have committed just before its controller stopped. Deterministic Job name makes retry safe.
                 return await ExecuteAsync(project, candidate with { Status = DeploymentStatus.BuildPassed }, ct);
             }
