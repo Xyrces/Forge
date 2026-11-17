@@ -68,7 +68,7 @@ public class DispatchCheckpointTests : IDisposable
 // v39 = usage-backed accounting and historical reconciliation.
 // v40 = durable initiative revisions, approval and ingestion.
 // v41 = durable sprint completion, triage and acceptance evidence.
-        Assert.Equal(41, IssueStore.CurrentSchemaVersion);
+        Assert.Equal(42, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]
