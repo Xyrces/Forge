@@ -34,10 +34,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         ILogger<CommitPushPrExecutor> logger,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
         IReadOnlyList<string>? verifyCommands = null,
-        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null,
+        TaskStateMachine? lifecycle = null)
         : base(
             "commit-push-pr",
-            ExecutorFaultGuard.Wrap<AgentCompleted, PrOpened>("commit-push-pr", logger, (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened)),
+            ExecutorFaultGuard.Wrap<AgentCompleted, PrOpened>("commit-push-pr", logger, (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened, lifecycle)),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -68,7 +69,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         Forge.Core.Workflow.WorkflowResolver? workflow,
         IReadOnlyList<string>? verifyCommands = null,
         CancellationToken ct = default,
-        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null,
+        TaskStateMachine? lifecycle = null)
     {
         if (input.Result == AgentResult.Skipped)
         {
@@ -487,6 +489,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             return m;
         }, ct);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
+        await PublishedRunLifecycle.ReconcileAsync(issues, lifecycle, issue, ct);
         events.Publish(new DashboardEvent(
             DateTime.UtcNow, DashboardEventKind.PrOpened, issue.Id,
             $"PR #{pr.Number} -> {branch}",

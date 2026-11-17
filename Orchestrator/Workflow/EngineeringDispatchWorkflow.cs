@@ -64,7 +64,7 @@ public sealed class EngineeringDispatchWorkflow
             nullFactory.CreateLogger<RunAgentExecutor>(), projectId, sprints, timeoutMinutes, lifecycle);
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
             memoryExtractor, extractionStore,
-            nullFactory.CreateLogger<CommitPushPrExecutor>(), workflow, verifyCommands, onPrOpened);
+            nullFactory.CreateLogger<CommitPushPrExecutor>(), workflow, verifyCommands, onPrOpened, lifecycle);
         _enqueueWatch = new EnqueueWatchExecutor(issues,
             nullFactory.CreateLogger<EnqueueWatchExecutor>());
         _logger = logger;

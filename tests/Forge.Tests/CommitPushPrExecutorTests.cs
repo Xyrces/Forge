@@ -629,6 +629,35 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task Publication_ReportsRunCompletionBeforeReviewCallback()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x",
+            Metadata: new Dictionary<string, object> { ["state"] = "AgentRunning" }));
+        var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main",
+            NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+        var callbackObserved = false;
+        await CommitPushPrExecutor.HandleAsync(new AgentCompleted(worktree, AgentResult.Ok, "done", null),
+            _issues, _worktrees, new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events,
+            new NoOpMemoryExtractor(), new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")),
+            NullLogger.Instance, null, verifyCommands: [],
+            onPrOpened: (published, _) =>
+            {
+                Assert.Equal("PROpen", published.GetMetadata("state"));
+                Assert.Equal("RunCompletedDiff", published.GetMetadata("lastEvent"));
+                Assert.Null(published.GetMetadata("stateViolation"));
+                callbackObserved = true;
+                return Task.CompletedTask;
+            }, lifecycle: new TaskStateMachine(true, NullLogger.Instance));
+        Assert.True(callbackObserved);
+    }
+
+    [Fact]
     public void DefaultVerification_DotnetRepo_BuildsAndTests()
     {
         File.WriteAllText(Path.Combine(_workDir, "X.csproj"), "<Project />");

@@ -673,7 +673,7 @@ public sealed class OrchestratorAgent : IAgent
                 preClaimed.Id, (DateTime.UtcNow - startedAt).TotalMilliseconds, after?.Status, prNumber);
             if (!string.IsNullOrEmpty(prNumber))
             {
-                await ReportLifecycleAsync(after ?? preClaimed, Core.TaskEvent.PrOpened, bundle, cancellationToken);
+                await PublishedRunLifecycle.ReconcileAsync(bundle.IssueStore, _lifecycle, after ?? preClaimed, cancellationToken);
                 return new Result(true, $"PR #{prNumber} opened");
             }
             if (after?.Status == IssueStatus.Completed)

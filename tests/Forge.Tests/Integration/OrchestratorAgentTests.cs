@@ -136,13 +136,13 @@ public sealed class OrchestratorAgentTests : IDisposable
         try { Directory.Delete(_dataRoot, recursive: true); } catch { }
     }
 
-    private Forge.Orchestrator.WatchSweepService BuildSweepService(IAgentRunner runner)
+    private Forge.Orchestrator.WatchSweepService BuildSweepService(IAgentRunner runner, TaskStateMachine? lifecycle = null)
         => new Forge.Orchestrator.WatchSweepService(
             runner,
             llmConfig: null,
             modelOverrides: null,
             new Core.ModelRateLimitTracker(),
-            lifecycle: null,
+            lifecycle: lifecycle,
             workflow: null,
             _events,
             NullLoggerFactory.Instance,
@@ -1102,6 +1102,25 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(issue.Id))!.Status);
         Assert.True(Directory.Exists(path), "Exhausted retries must not delete recoverable local work.");
         Assert.Equal("// useful local work awaiting verification", await File.ReadAllTextAsync(edited));
+    }
+
+    [Fact]
+    public async Task WatchFastPath_ReconcilesPublishedLegacyRunBeforeReviewDeduplication()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue("dev", "published legacy run",
+            Metadata: new Dictionary<string, object>
+            {
+                ["state"] = "AgentRunning", ["prNumber"] = 124,
+                ["reviewStartedAt"] = DateTime.UtcNow.ToString("O")
+            }));
+        await _issues.TransitionAsync(issue.Id, IssueStatus.InProgress, null);
+        await _issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened);
+        var sweep = BuildSweepService(new BudgetDeniedRunner(), new TaskStateMachine(true, NullLogger.Instance));
+        await sweep.TryLaunchBackgroundReviewAsync(issue, _bundle, default);
+        var after = (await _issues.GetAsync(issue.Id))!;
+        Assert.Equal("PROpen", after.GetMetadata("state"));
+        Assert.Equal("RunCompletedDiff", after.GetMetadata("lastEvent"));
+        Assert.Null(after.GetMetadata("stateViolation"));
     }
 
     private sealed class BudgetDeniedRunner : IAgentRunner

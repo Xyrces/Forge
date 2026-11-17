@@ -146,7 +146,7 @@ public sealed class WatchSweepService
                 // back; ANY other Blocked task gets the mergeable gate
                 // check — if the blockage cleared externally, the watch
                 // resumes and merges without an operator roundtrip.
-                var polled = watched;
+                var polled = await PublishedRunLifecycle.ReconcileAsync(bundle.IssueStore, _lifecycle, watched, cancellationToken);
                 if (watched.Status == IssueStatus.Blocked)
                 {
                     IssueRecord? resumed = IsAutoResumableBlock(watched)
@@ -281,6 +281,7 @@ public sealed class WatchSweepService
     public async Task TryLaunchBackgroundReviewAsync(
         IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
+        task = await PublishedRunLifecycle.ReconcileAsync(bundle.IssueStore, _lifecycle, task, cancellationToken);
         var reviewEnabled = _workflow is null
             || Core.Workflow.WorkflowExtensions.IsStepEnabled(
                 await _workflow.ResolveAsync(cancellationToken), "review");
