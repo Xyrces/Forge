@@ -132,7 +132,7 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
             ?? throw new InvalidOperationException("Review worker assignment is unreadable.");
         if (invocation.Role != role || invocation.Context.GetValueOrDefault("sourceSha") != assignment.SourceSha)
             throw new InvalidOperationException("Review worker assignment identity mismatch.");
-        return new(terminal, assignment.WorktreePath, invocation.Context);
+        return new(terminal, assignment.WorktreePath, invocation.Context, assignment.Id);
     }
 
     public async Task CancelDispatchAsync(AgentType role, string projectId, string taskId, string dispatchId, CancellationToken ct)

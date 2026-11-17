@@ -357,6 +357,8 @@ public static class ForgeComposition
         services.AddSingleton(lifecycle);
 
         // P4 Stage B — pick the workflow runtime based on appsettings.json.
+        var slots = Program.BuildSlotTable(knownProjects);
+        services.AddSingleton(slots);
         IWorkflowDispatcher dispatcher;
         if (string.Equals(options.Orchestrator.Execution, "Durable", StringComparison.OrdinalIgnoreCase))
         {
@@ -370,7 +372,8 @@ public static class ForgeComposition
                 timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
                 lifecycle: lifecycle,
                 workflow: workflowResolver,
-                verifyCommands: primary.VerifyCommands)
+                verifyCommands: primary.VerifyCommands,
+                sprints: new SprintStore(issues), reviewSlots: slots)
                 .Build();
             var durableServices = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -404,6 +407,7 @@ public static class ForgeComposition
                         lifecycle: lifecycle,
                         workflow: workflowResolver,
                         verifyCommands: bundle.Project.VerifyCommands,
+                        reviewSlots: slots,
                         // Message-driven review trigger: publish
                         // PrOpened — the PrOpenedConsumer launches the
                         // background review on the pushed head while CI
@@ -524,8 +528,6 @@ public static class ForgeComposition
             }
         }
 
-        var slots = Program.BuildSlotTable(knownProjects);
-        services.AddSingleton(slots);
         var orchestrator = new OrchestratorAgent(
             projectStore,
             dispatchBundleFactory,

@@ -321,11 +321,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         BindMafWithEscalation(orch, markers);
 
         var issue = await _issues.CreateAsync(new NewIssue(
-            Type: DevTaskType, Title: "completed before dispatch", Description: "x"));
-        var first = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
-        Assert.True(first.Success, $"setup dispatch: {first.Message}");
-        var completed = (await _issues.GetAsync(issue.Id))!;
-        Assert.Equal(IssueStatus.Completed, completed.Status);
+            Type: DevTaskType, Title: "operator closed before dispatch", Description: "x"));
+        await ActivateSprintWithAsync(issue.Id);
+        var completed = await _issues.TransitionAsync(issue.Id, IssueStatus.Closed, "operator closed before claim");
+        Assert.Equal(IssueStatus.Closed, completed.Status);
 
         // The escalation lands AFTER the task is already terminal;
         // the late dispatch is refused at the claim.
@@ -425,9 +424,15 @@ public sealed class OrchestratorAgentTests : IDisposable
             if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
             // Amendment snapshots include current members. Wait for the normal run's
             // final metadata writes and slot release instead of racing its InProgress row.
-            return (await _issues.GetAsync(normal.Id))!.Status == IssueStatus.Completed
-                && slots.InFlight("test", "coredev") == 0;
+            var normalAfter = (await _issues.GetAsync(normal.Id))!;
+            // The scripted no-op has no independent acceptance proof. Its bounded
+            // no-progress outcome still proves the normal model was not cooled.
+            return normalAfter.Status != IssueStatus.InProgress && normalAfter.GetMetadata("noProgressAttempts") is not null
+                && normalAfter.GetMetadata("modelResponse") is not null && slots.InFlight("test", "coredev") == 0;
         }, TimeSpan.FromSeconds(15));
+
+        // Keep this test about model cooldown, not subsequent no-progress retries.
+        await _issues.TransitionAsync(normal.Id, IssueStatus.Blocked, "fixture operator parks unverified no-op");
 
         // A SECOND escalated task is held by the escalated-model
         // cooldown (the marker is still unconsumed, so its cooldown
@@ -568,7 +573,8 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         Assert.True(result.Success, $"expected success, got: {result.Message}");
         var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
-        Assert.Equal(IssueStatus.Completed, after.Status);
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
         Assert.Equal(scripted, after.GetMetadata("modelResponse"));
     }
 
@@ -595,7 +601,8 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         Assert.True(result.Success, $"expected success, got: {result.Message}");
         var after = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
-        Assert.Equal(IssueStatus.Completed, after.Status);
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
         Assert.True(string.IsNullOrEmpty(after.GetMetadata("lastError")));
     }
 
@@ -608,11 +615,10 @@ public sealed class OrchestratorAgentTests : IDisposable
         var issue = await _issues.CreateAsync(new NewIssue(
             Type: DevTaskType, Title: "x", Description: "y"));
 
-        var first = await DispatchApprovedAsync(orch, issue, CancellationToken.None);
-        Assert.True(first.Success);
-
-        var issueRefresh = (await _issues.GetAsync(issue.Id, CancellationToken.None))!;
-        var second = await DispatchApprovedAsync(orch, issueRefresh, CancellationToken.None);
+        await ActivateSprintWithAsync(issue.Id);
+        var claimed = await _issues.ClaimAsync(issue.Id, "another-worker");
+        Assert.NotNull(claimed);
+        var second = await DispatchApprovedAsync(orch, claimed!, CancellationToken.None);
         Assert.False(second.Success);
         Assert.Equal("already-claimed", second.Message);
     }

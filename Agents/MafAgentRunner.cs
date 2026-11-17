@@ -169,6 +169,8 @@ public async Task<AgentRunResult> RunAsync(
             BuildSprintBlock(context),
             memoryInstructions,
             isWorker ? WorkerPublicationPolicy.Instructions : string.Empty,
+            isWorker && role == AgentType.Reviewer && ResolveContextString(context, "existingImplementationReview") == "true"
+                ? ExistingImplementationReviewPolicy.Instructions : string.Empty,
         }.Where(s => !string.IsNullOrEmpty(s)));
         // P1 fix: instructions go to the agent's instructions: parameter,
         // NOT into the user message. The user prompt is the operator's

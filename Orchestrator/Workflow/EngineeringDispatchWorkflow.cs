@@ -50,7 +50,8 @@ public sealed class EngineeringDispatchWorkflow
         Core.TaskStateMachine? lifecycle = null,
         Core.Workflow.WorkflowResolver? workflow = null,
         IReadOnlyList<string>? verifyCommands = null,
-        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null)
+        Func<IssueRecord, CancellationToken, Task>? onPrOpened = null,
+        Slots.SlotTable? reviewSlots = null)
     {
         // Executor loggers: production passes the real factory so
         // executor diagnostics (checkpoint advances, push/PR steps)
@@ -62,9 +63,14 @@ public sealed class EngineeringDispatchWorkflow
         _runAgent = new RunAgentExecutor(issues, agentRunner, roleRegistry,
             drainMessageBus, events, designArtifacts, artOutputs,
             nullFactory.CreateLogger<RunAgentExecutor>(), projectId, sprints, timeoutMinutes, lifecycle);
+        ExistingImplementationVerifier? existingVerifier = issues is IssueStore concrete && sprints is not null
+            && reviewSlots is not null && !string.IsNullOrWhiteSpace(projectId)
+            ? new(concrete, sprints, worktrees, gitHub, agentRunner, reviewSlots, projectId, workspaceOptions.DefaultBranch)
+            : null;
         _commitPushPr = new CommitPushPrExecutor(issues, worktrees, gitHub, events,
             memoryExtractor, extractionStore,
-            nullFactory.CreateLogger<CommitPushPrExecutor>(), workflow, verifyCommands, onPrOpened, lifecycle);
+            nullFactory.CreateLogger<CommitPushPrExecutor>(), workflow, verifyCommands, onPrOpened, lifecycle,
+            existingVerifier is null ? null : existingVerifier.TryCompleteAsync);
         _enqueueWatch = new EnqueueWatchExecutor(issues,
             nullFactory.CreateLogger<EnqueueWatchExecutor>());
         _logger = logger;

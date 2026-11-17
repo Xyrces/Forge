@@ -413,6 +413,15 @@ public sealed class GitWorktreeService
         return result.Stdout.Trim();
     }
 
+    public async Task<string> GetCommitTreeShaAsync(string worktreePath, string commitSha, CancellationToken ct = default)
+    {
+        if (commitSha.Length != 40 || commitSha.Any(c => !char.IsAsciiHexDigit(c)))
+            throw new ArgumentException("An exact commit SHA is required.", nameof(commitSha));
+        var result = await RunGitInAsync(worktreePath, "", ct, ["rev-parse", "--verify", commitSha + "^{tree}"]);
+        if (result.ExitCode != 0) throw new InvalidOperationException("Could not resolve the verified commit tree.");
+        return result.Stdout.Trim();
+    }
+
     public async Task<string> GetHeadShaAsync(string worktreePath, CancellationToken cancellationToken = default)
     {
         var result = await RunGitInAsync(worktreePath, "rev-parse HEAD", cancellationToken);

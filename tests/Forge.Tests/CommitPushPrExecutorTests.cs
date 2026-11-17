@@ -214,7 +214,7 @@ public class CommitPushPrExecutorTests : IDisposable
 
 
     [Fact]
-    public async Task NoDiff_ExplicitNoOpMarker_TransitionsToCompleted()
+    public async Task NoDiff_ExplicitNoOpMarkerWithoutIndependentEvidence_DoesNotComplete()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var claimed = await ClaimExecutor.HandleAsync(
@@ -234,7 +234,8 @@ public class CommitPushPrExecutorTests : IDisposable
 
         Assert.Equal(PrResult.NoDiff, result.Result);
         var after = await _issues.GetAsync(issue.Id);
-        Assert.Equal(IssueStatus.Completed, after!.Status);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
     }
 
     [Fact]
@@ -522,7 +523,7 @@ public class CommitPushPrExecutorTests : IDisposable
         var after = await _issues.GetAsync(issue.Id);
         Assert.Equal(IssueStatus.Pending, after!.Status);
         Assert.Contains("no diff", after.GetMetadata("reworkReason"));
-        Assert.Contains("produced NO changes", after.GetMetadata("reworkContext"));
+        Assert.Contains("produced no changes", after.GetMetadata("reworkContext"), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

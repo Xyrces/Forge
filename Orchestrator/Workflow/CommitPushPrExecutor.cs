@@ -35,10 +35,11 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
         IReadOnlyList<string>? verifyCommands = null,
         Func<IssueRecord, CancellationToken, Task>? onPrOpened = null,
-        TaskStateMachine? lifecycle = null)
+        TaskStateMachine? lifecycle = null,
+        Func<AgentCompleted, IReadOnlyList<string>, CancellationToken, Task<bool>>? verifyExisting = null)
         : base(
             "commit-push-pr",
-            ExecutorFaultGuard.Wrap<AgentCompleted, PrOpened>("commit-push-pr", logger, (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened, lifecycle)),
+            ExecutorFaultGuard.Wrap<AgentCompleted, PrOpened>("commit-push-pr", logger, (input, ctx, ct) => HandleAsync(input, issues, worktrees, gitHub, events, memoryExtractor, extractionStore, logger, workflow, verifyCommands, ct, onPrOpened, lifecycle, verifyExisting)),
             null,
             new[] { typeof(AgentCompleted) },
             new[] { typeof(PrOpened) })
@@ -70,7 +71,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         IReadOnlyList<string>? verifyCommands = null,
         CancellationToken ct = default,
         Func<IssueRecord, CancellationToken, Task>? onPrOpened = null,
-        TaskStateMachine? lifecycle = null)
+        TaskStateMachine? lifecycle = null,
+        Func<AgentCompleted, IReadOnlyList<string>, CancellationToken, Task<bool>>? verifyExisting = null)
     {
         if (input.Result == AgentResult.Skipped)
         {
@@ -142,9 +144,9 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 return new PrOpened(input, PrResult.NoDiff, 0, null);
             }
 
-            // A no-diff run is only a legitimate completion when the
-            // agent EXPLICITLY concluded no changes were needed (the
-            // prompt's completion contract). Anything else — iteration-
+            // An explicit no-diff assertion requests independent acceptance;
+            // it is never sufficient proof. The typed plan and trusted worker
+            // plus reviewer evidence must qualify the existing code. Anything else — iteration-
             // cap truncation, stuck-in-exploration loops — is a failed
             // attempt: requeue with a circuit breaker. (Observed live:
             // all six tasks of a sprint hollow-completed when the MAF
@@ -173,7 +175,26 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 noDiffOutcome = Forge.Core.Workflow.WorkflowPolicyReader.GetString(
                     definition, Forge.Core.Workflow.WorkflowPolicies.NoDiffOutcome, "completed");
             }
-            if (!explicitNoOp || string.Equals(noDiffOutcome, "rework", StringComparison.Ordinal))
+            var independentlyVerified = false;
+            if (explicitNoOp && !string.Equals(noDiffOutcome, "rework", StringComparison.Ordinal) && verifyExisting is not null)
+            {
+                try { independentlyVerified = await verifyExisting(input, commands, ct); }
+                catch (Workers.WorkerExecutionUncertainException ex)
+                {
+                    var blocked = await issues.GetAsync(issue.Id, ct) ?? issue;
+                    if (blocked.Status == IssueStatus.InProgress)
+                    {
+                        if (lifecycle is not null)
+                            await lifecycle.ReportAsync(issues, blocked, TaskEvent.OperatorBlocked, watch: null, hasActiveDevRun: false, ct);
+                        await issues.TransitionAsync(issue.Id, IssueStatus.Blocked, ex.Message, ct: ct);
+                    }
+                    logger.LogWarning(ex, "Independent reviewer ownership is uncertain for {Id}; preserving checkout and blocking automatic retry", issue.Id);
+                    events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.TaskTransition, issue.Id,
+                        "Independent reviewer ownership uncertain; operator reconciliation required"));
+                    return new PrOpened(input, PrResult.Skipped, 0, null);
+                }
+            }
+            if (!independentlyVerified)
             {
                 var attempts = int.TryParse(current?.GetMetadata("noProgressAttempts"), out var n) ? n + 1 : 1;
                 if (attempts >= MaxNoProgressAttempts)
@@ -191,7 +212,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 {
                     await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
                         explicitNoOp
-                            ? $"NO_CHANGES_NEEDED rejected by workflow policy noDiffOutcome=rework (attempt {attempts})"
+                            ? $"NO_CHANGES_NEEDED lacks accepted independent evidence or is rejected by policy (attempt {attempts})"
                             : $"no diff without NO_CHANGES_NEEDED (attempt {attempts})",
                         new Dictionary<string, object>
                         {
@@ -201,11 +222,16 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                             // Rework required" so the agent does the
                             // work instead of idling again.
                             ["reworkReason"] = explicitNoOp
-                                ? $"NO_CHANGES_NEEDED rejected by policy (attempt {attempts})"
+                                ? $"NO_CHANGES_NEEDED requires accepted independent evidence (attempt {attempts})"
                                 : $"no diff produced (attempt {attempts})",
-                            ["reworkContext"] = "Your previous attempt produced NO changes — the task requires a real code change. " +
-                                "Do the work: make the edits, run the tests, commit. If you genuinely believe nothing is needed, " +
-                                "explain why in detail in your final response.\n\nLast response tail:\n" + Truncate(input.Text ?? "", 1500),
+                            ["reworkContext"] = (explicitNoOp
+                                ? "Your no-change assertion lacks accepted independent evidence or the workflow policy requires rework. " +
+                                  "Do not invent code changes merely to produce a diff. Explain the exact existing implementation and checks. " +
+                                  "Only a prospectively approved ImplementationVerified criterion permits the independent existing-code path; " +
+                                  "strict merged-PR criteria cannot be silently reinterpreted. Surface a scope/evidence mismatch for the operator. "
+                                : "Your previous attempt produced no changes and no explicit verification request. Complete the approved work " +
+                                  "or explain why existing implementation satisfies it and request independent verification. ") +
+                                "\n\nLast response tail:\n" + Truncate(input.Text ?? "", 1500),
                         }, ct);
                     events.Publish(new DashboardEvent(
                         DateTime.UtcNow, DashboardEventKind.TaskTransition,
@@ -215,19 +241,13 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 }
                 return new PrOpened(input, PrResult.NoDiff, 0, null);
             }
-            logger.LogInformation(
-                "Issue {Id}: agent explicitly concluded NO_CHANGES_NEEDED. Marking Completed.", issue.Id);
-            await issues.TransitionAsync(issue.Id, IssueStatus.Completed,
-                "no changes needed (agent verified)", ct: ct);
-            await UpdateMetadataAsync(issues, issue.Id, m =>
-            {
-                m["lastError"] = null!;
-                m["lastErrorAt"] = null!;
-                return m;
-            }, ct);
+            logger.LogInformation("Issue {Id}: existing implementation independently verified at the approved source", issue.Id);
+            if (lifecycle is not null && await issues.GetAsync(issue.Id, ct) is { Status: IssueStatus.Completed } completed)
+                await lifecycle.ReportAsync(issues, completed, TaskEvent.RunCompletedNoDiff,
+                    watch: null, hasActiveDevRun: false, ct);
             events.Publish(new DashboardEvent(
                 DateTime.UtcNow, DashboardEventKind.TaskTransition,
-                issue.Id, "Completed (verified no-op)",
+                issue.Id, "Completed (independently verified existing implementation)",
                 new Dictionary<string, object?>
                 {
                     ["response"] = Truncate(input.Text ?? "", 400),

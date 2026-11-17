@@ -8,4 +8,4 @@ public interface IReviewWorkerLifecycle
     Task<bool> HasUntrackedReviewWorkerAsync(Core.AgentType role, string projectId, string taskId, CancellationToken ct);
 }
 
-public sealed record ReviewWorkerState(bool Terminal, string WorktreePath, IReadOnlyDictionary<string, string> Context);
+public sealed record ReviewWorkerState(bool Terminal, string WorktreePath, IReadOnlyDictionary<string, string> Context, string? AttemptId = null);

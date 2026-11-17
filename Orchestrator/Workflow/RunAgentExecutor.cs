@@ -433,7 +433,10 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             only if — you conclude the task genuinely requires no code
             changes (already implemented, verification-only), end your
             final message with the exact marker NO_CHANGES_NEEDED plus
-            a one-sentence justification. A run that produces no diff
+            concrete implementation and test evidence. This marker requests independent
+            verification; it is not completion or acceptance evidence. Only an approved
+            ImplementationVerified criterion can use the existing-code path. Strict
+            MergedAndVerified criteria still require their merged-PR evidence. A run that produces no diff
             without that marker is treated as a failed attempt and
             re-queued (circuit breaker applies).
             """;
