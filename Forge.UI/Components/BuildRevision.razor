@@ -1,0 +1,28 @@
+@if (Revision is { } revision)
+{
+    <details class="build-revision">
+        <summary aria-label="Forge revision @(revision[..7]); show full source revision">
+            Forge revision: <code>@revision[..7]</code>
+        </summary>
+        <div class="build-revision__details">
+            <span>Full source revision</span>
+            <code class="build-revision__sha">@revision</code>
+            <a href="@BuildInfo!.CommitUrl">View Forge commit</a>
+        </div>
+    </details>
+}
+else
+{
+    <span class="build-revision">Forge revision: <span>Unavailable</span></span>
+}
+
+@code {
+    [Parameter] public BuildInfoDto? BuildInfo { get; set; }
+
+    // Fail closed for absent/older or inconsistent responses. Never infer identity
+    // from version, project, checkout or another metadata source, nor invent a link.
+    private string? Revision => BuildInfo?.SourceRevision is { Length: 40 } revision
+        && revision.All(char.IsAsciiHexDigit)
+        && BuildInfo.CommitUrl == $"https://github.com/Xyrces/Forge/commit/{revision}"
+            ? revision : null;
+}

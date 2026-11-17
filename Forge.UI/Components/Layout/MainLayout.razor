@@ -17,6 +17,7 @@
     protected override void OnInitialized()
     {
         ShellState.StateChanged += OnShellStateChanged;
+        Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadBuildInfoAction());
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadProjectsAction());
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.LoadActiveSprintAction());
         Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.PollHeartbeatAction());
@@ -69,6 +70,7 @@
             <input type="text" placeholder="Search issues, specs, memory... (⌘K)" disabled />
         </div>
         <div class="app-topbar__right">
+            <BuildRevision BuildInfo="@ShellState.Value.BuildInfo" />
             @if (ShellState.Value.ActiveSprintName is not null)
             {
                 <span class="pill pill--primary">@ShellState.Value.ActiveSprintName</span>

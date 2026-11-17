@@ -98,8 +98,8 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
 
 .app-shell {
   display: grid;
-  grid-template-columns: 240px 1fr;
-  grid-template-rows: 48px 1fr;
+  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-rows: minmax(48px, auto) minmax(0, 1fr);
   grid-template-areas: "topbar topbar" "nav main";
   height: 100vh;
   background: var(--bg);
@@ -107,8 +107,8 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
 
 .app-topbar {
   grid-area: topbar;
-  display: flex; align-items: center; gap: 16px;
-  padding: 0 16px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px;
+  padding: 8px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--outline);
 }
@@ -124,7 +124,7 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
   border-radius: var(--radius-sm); color: var(--primary);
   font-size: 11px; font-weight: 800;
 }
-.app-topbar__search { flex: 1; display: flex; justify-content: center; }
+.app-topbar__search { flex: 1; min-width: 0; display: flex; justify-content: center; }
 
 /* Project switcher — the global "what am I looking at" lens. */
 .project-switcher {
@@ -162,14 +162,28 @@ code, .mono, .code { font-family: var(--font-mono); font-size: 12px; }
 .intake-module { display: flex; justify-content: space-between; gap: 8px; padding: 4px 8px; background: var(--surface-1); border-radius: var(--radius-sm); font-size: 11px; }
 .intake-memory-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; margin-bottom: 6px; background: var(--surface-1); border-radius: var(--radius-sm); font-size: 11px; }
 .app-topbar__search input {
-  width: 360px; height: 28px;
+  width: 360px; max-width: 100%; min-width: 0; height: 28px;
   background: var(--surface-1); border: 1px solid var(--outline);
   border-radius: var(--radius-md);
   padding: 0 12px; color: var(--on-surface);
   font-family: var(--font-sans); font-size: 12px;
 }
 .app-topbar__search input:focus { outline: none; border-color: var(--primary); }
-.app-topbar__right { display: flex; align-items: center; gap: 12px; }
+.app-topbar__right { display: flex; align-items: center; flex-wrap: wrap; min-width: 0; gap: 12px; }
+
+/* Running Forge identity is global, not part of the project switcher. */
+.build-revision { max-width: 100%; font-size: 12px; color: var(--on-surface); }
+.build-revision summary { cursor: pointer; white-space: nowrap; }
+.build-revision summary:focus-visible,
+.build-revision a:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.build-revision__details {
+  /* Stay in flow when expanded so details cannot cover the page or leave the viewport. */
+  width: min(26rem, calc(100vw - 24px)); max-width: 100%; margin-top: 8px; padding: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--surface-1); border: 1px solid var(--outline);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-2);
+}
+.build-revision__sha { overflow-wrap: anywhere; user-select: text; }
 
 .app-nav {
   grid-area: nav;

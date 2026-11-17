@@ -20,6 +20,13 @@ public sealed class AppShellEffects
     }
 
     [EffectMethod]
+    public async Task HandleLoadBuildInfo(AppShellActions.LoadBuildInfoAction action, IDispatcher dispatcher)
+    {
+        var buildInfo = await _client.GetBuildInfoAsync(CancellationToken.None);
+        dispatcher.Dispatch(new AppShellActions.BuildInfoLoadedAction(buildInfo));
+    }
+
+    [EffectMethod]
     public async Task HandleLoadActiveSprint(AppShellActions.LoadActiveSprintAction action, IDispatcher dispatcher)
     {
         var sprint = await _client.GetActiveSprintAsync(_state.Value.CurrentProjectId, CancellationToken.None);
