@@ -434,8 +434,8 @@ public class GroomerRoutingTests : IDisposable
     {
         _dir = TempRoot.Instance.NewDirectory("groomroute");
         Directory.CreateDirectory(_dir);
-        _defaultStore = new IssueStore(Path.Combine(_dir, "default.db"));
-        _projectStore = new IssueStore(Path.Combine(_dir, "proj.db"));
+        _defaultStore = new IssueStore(Path.Combine(_dir, "default.db"), "forge");
+        _projectStore = new IssueStore(Path.Combine(_dir, "proj.db"), "porthorizon");
         // The spec store is shared (primary-backed) in production —
         // specs carry project_id, issues are per-project.
         _specs = new SpecStore(_defaultStore);
@@ -486,7 +486,7 @@ public class GroomerRoutingTests : IDisposable
     }
 
     [Fact]
-    public async Task GroomAsync_UnknownProject_FallsBackToDefaultStore()
+    public async Task GroomAsync_UnknownProject_RejectsFallbackWithoutWritingForeignWork()
     {
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "ghost", Title: "T", Body: "## Acceptance criteria\n- [ ] x\n"));
@@ -508,11 +508,9 @@ public class GroomerRoutingTests : IDisposable
             issueStoreLookup: _ => null);
 
         var agent = factory.Create(projectId: spec.ProjectId);
-        var result = await agent.GroomAsync(spec.Id, default);
-
-        Assert.NotNull(result);
-        var inDefault = await _defaultStore.ListAsync(new IssueFilter { Type = "story" }, default);
-        Assert.Single(inDefault);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => agent.GroomAsync(spec.Id, default));
+        Assert.Empty(await _defaultStore.ListAsync(new IssueFilter { Type = "story" }));
+        Assert.Empty(await _projectStore.ListAsync(new IssueFilter { Type = "story" }));
     }
 }
 
