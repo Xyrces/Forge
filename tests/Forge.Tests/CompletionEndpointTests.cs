@@ -54,6 +54,7 @@ public sealed class CompletionEndpointTests : IAsyncLifetime
     {
         var detail = await client.GetFromJsonAsync<CompletionDetail>($"api/sprints/{receipt.SprintId}/completion?projectId=project");
         Assert.Equal("LegacyTerminalOnly", detail!.Receipt.Outcome);
+        Assert.Equal("NeedsReview", detail.Receipt.BookkeepingState);
         Assert.False(detail.Receipt.ReadyForDeployment);
         Assert.Equal("NeedsReview", Assert.Single(detail.Batches).State);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"api/sprints/{receipt.SprintId}/completion?projectId=other")).StatusCode);

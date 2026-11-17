@@ -18,7 +18,7 @@ public sealed partial class SprintCompletionStore
         var c = T("sprint_completion");
         await using var connection = await issues.Db.OpenAsync(ct);
         using var command = Command(connection, null,
-            $"SELECT {d.Top(take)}{c}.id,{c}.project_id,{c}.sprint_id,{c}.outcome,{c}.bookkeeping_state,{c}.ready_for_deployment,{c}.source_sha,{c}.deployment_candidate_id,dep.status,{c}.delivery_note,{c}.plan_hash,s.name,{c}.abandonment_json,{c}.delivery_required FROM {c} LEFT JOIN {T("sprint")} s ON s.id={c}.sprint_id LEFT JOIN {T("deployment")} dep ON dep.id={c}.deployment_candidate_id AND dep.completion_id={c}.id WHERE "
+            $"SELECT {d.Top(take)}{c}.id,{c}.project_id,{c}.sprint_id,{c}.outcome,CASE WHEN {c}.abandonment_json IS NULL AND EXISTS(SELECT 1 FROM {T("completion_triage")} review WHERE review.completion_id={c}.id AND review.state='NeedsReview') THEN 'NeedsReview' ELSE {c}.bookkeeping_state END,{c}.ready_for_deployment,{c}.source_sha,{c}.deployment_candidate_id,dep.status,{c}.delivery_note,{c}.plan_hash,s.name,{c}.abandonment_json,{c}.delivery_required FROM {c} LEFT JOIN {T("sprint")} s ON s.id={c}.sprint_id LEFT JOIN {T("deployment")} dep ON dep.id={c}.deployment_candidate_id AND dep.completion_id={c}.id WHERE "
             + (waitingOnly ? CompletionPlanningBarrier.Predicate(d, includeLegacyIncomplete: true) : "1=1")
             + (afterId is null ? "" : $" AND {c}.id>@after")
             + (completionId is null ? "" : $" AND {c}.id=@id")
