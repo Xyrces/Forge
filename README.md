@@ -1,5 +1,7 @@
 # Forge
 
+The Forge-first restart targets **K3s with embedded etcd, Azure SQL, and OpenAI Responses**. The new deployment path is in [the K3s runbook](deploy/k3s/README.md); the prior architecture review is under [docs/revival-review](docs/revival-review/). The historical systemd and SQLite instructions below remain for legacy development modes. They are not the new production installation procedure. TimeLoop remains deferred until installation, self-deployment, and rollback are qualified.
+
 A long-lived .NET 10 orchestrator that drives AI coding agents against any registered git project. Forge owns the task queue, sprint assembly, git worktrees, the GitHub PR lifecycle, and the review-gated merge — **the model owns the code.**
 
 Forge is project-agnostic. Projects live in a DB-backed registry (the `project` table) and are added through the dashboard or the API — there is no hardcoded target repo in the codebase. Forge now builds itself: the `forge` project is registered like any other and its tasks dispatch against this repo.

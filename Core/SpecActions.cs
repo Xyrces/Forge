@@ -12,7 +12,7 @@ public static class SpecActions
 {
     public static bool CanApprove(SpecStatus status) => status == SpecStatus.Draft;
     public static bool CanStartGrooming(SpecStatus status) =>
-        status is SpecStatus.Approved or SpecStatus.Designed or SpecStatus.AssetReady;
+        status is SpecStatus.Approved or SpecStatus.AssetReady;
     public static bool CanShip(SpecStatus status) => status == SpecStatus.Groomed;
     public static bool CanSendToDesign(SpecStatus status) => status == SpecStatus.Draft;
 }

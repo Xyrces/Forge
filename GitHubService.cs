@@ -114,10 +114,10 @@ public class GitHubService
             new PullRequestUpdate { State = ItemState.Closed });
     }
 
-    public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
     {        try
         {
-            var merge = new MergePullRequest();
+            var merge = new MergePullRequest { Sha = expectedHeadSha };
             var result = await _client.PullRequest.Merge(_owner, _repo, prNumber, merge);
             return result.Merged;
         }
@@ -135,25 +135,21 @@ public class GitHubService
         var checkRuns = await _client.Check.Run.GetAllForReference(_owner, _repo, sha);
         if (checkRuns.TotalCount > 0)
         {
-            var runs = checkRuns.CheckRuns;
-            if (runs.Any(r => r.Status.Value is not CheckStatus.Completed))
-            {
-                return CommitState.Pending;
-            }
-            // Cancelled / Neutral / Skipped are acceptable (a
-            // cancelled run is usually superseded by a newer push,
-            // which has its own runs on the new head).
-            if (runs.Any(r => r.Conclusion?.Value
-                    is CheckConclusion.Failure
-                    or CheckConclusion.TimedOut
-                    or CheckConclusion.ActionRequired))
-            {
-                return CommitState.Failure;
-            }
-            return CommitState.Success;
+            return ClassifyCheckRuns(checkRuns.CheckRuns.Select(r => (r.Status.Value, r.Conclusion?.Value)));
         }
         var response = await _client.Repository.Status.GetCombined(_owner, _repo, sha);
         return response.State.Value;
+    }
+
+    internal static CommitState ClassifyCheckRuns(IEnumerable<(CheckStatus Status, CheckConclusion? Conclusion)> checks)
+    {
+        var runs = checks.ToList();
+        if (runs.Count == 0 || runs.Any(r => r.Status != CheckStatus.Completed))
+            return CommitState.Pending;
+        // Only explicit acceptable conclusions can release the merge gate.
+        // Cancelled (even when another head superseded it) never proves this head passed.
+        return runs.All(r => r.Conclusion is CheckConclusion.Success or CheckConclusion.Neutral or CheckConclusion.Skipped)
+            ? CommitState.Success : CommitState.Failure;
     }
 
     /// <summary>How many CI SIGNALS exist for a commit (check runs,

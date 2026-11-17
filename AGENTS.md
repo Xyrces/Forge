@@ -4,6 +4,16 @@ Rulebook for any agent (kilo or otherwise) working on this repository. Loaded au
 
 For a narrative overview see `README.md` and `docs/system-flow.md`. This file is the rule layer, not the narrative layer — keep it short and pointed.
 
+## Forge-first K3s restart
+
+- New production uses Azure SQL and K3s embedded etcd. SQLite remains only for legacy development/tests. Follow `deploy/k3s/README.md`; do not reinstall the retired systemd service.
+- Only the explicit initializer runs DDL. Controller and worker database identities must not acquire DDL rights. Standby and `--check` are read-only until explicit activation.
+- SQL dataset identity and ownership fence the controller. Drain and join local work, then prove the previous controller pods have stopped before transferring ownership. Worker attempts are durable, uniquely claimed, and adopted across controller replacement.
+- Deployment accepts immutable image digests bound to reviewed source and CI build/test receipts. The independent release Job owns promotion/rollback; the retiring controller must not supervise its own replacement.
+- Engineering code and verification run in worker Jobs. Controller publication must validate a structured verification receipt against the exact Git tree and command set; model prose is not verification evidence.
+- Every paid model request needs an atomic Azure SQL budget reservation before HTTP. Unknown outcomes retain their liability. Do not enable unqualified models, hidden retries, hosted tools, or change pricing assumptions to evade the pilot ceiling.
+- The dashboard has no login protection. Keep it cluster-internal and use a loopback port-forward over SSH until authentication is implemented.
+
 ## Critical `.kilo` directory distinction
 
 There are two completely different `.kilo` directory trees in this repo. Confusing them breaks both:

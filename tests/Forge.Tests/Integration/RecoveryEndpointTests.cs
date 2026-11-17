@@ -206,16 +206,18 @@ public class RecoveryEndpointTests : IDisposable
     [Fact]
     public async Task PostRun_RunsRecoveryAndReturnsReportId()
     {
-        await SeedAsync(DispatchCheckpoint.PushDone);
-        await SeedAsync(DispatchCheckpoint.AgentCompleted);
+        var pushed = await SeedAsync(DispatchCheckpoint.PushDone);
+        var agentDone = await SeedAsync(DispatchCheckpoint.AgentCompleted);
         var resp = await _client.PostAsync("/api/recovery/run", content: null);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var payload = await resp.Content.ReadFromJsonAsync<JsonElement>();
         Assert.True(payload.GetProperty("reportId").GetInt64() > 0);
         var summary = payload.GetProperty("summary");
         Assert.Equal(2, summary.GetProperty("issuesScanned").GetInt32());
-        Assert.Equal(2, summary.GetProperty("issuesReplayed").GetInt32());
-        Assert.Equal(2, _gitHub.CallCount);
+        Assert.Equal(0, summary.GetProperty("issuesReplayed").GetInt32());
+        Assert.Equal(0, _gitHub.CallCount);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(pushed))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(agentDone))!.Status);
     }
 
     [Fact]

@@ -130,6 +130,42 @@ public class CommitPushPrExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task WorkerReceipt_AllowsPublicationWithoutExecutingVerificationInController()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "receipt"));
+        var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var bareDir = Path.Combine(_workDir, "remote.git");
+        Run("git", $"init -q --bare \"{bareDir}\"", _workDir);
+        Run("git", $"remote add origin \"{bareDir}\"", _workDir);
+        Run("git", "push -q -u origin main", _workDir);
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+        string[] commands = ["this-verification-command-must-never-run-in-controller"];
+        // Simulate the trusted host's typed receipt; this command would fail if the controller executed it.
+        var receipt = new VerificationReceipt("attempt", await WorkerVerification.TreeAsync(worktree.WorktreePath!, default),
+            WorkerVerification.CommandsHash(commands), DateTimeOffset.UtcNow);
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "model text is not evidence", null, receipt, true);
+        var result = await CommitPushPrExecutor.HandleAsync(agent, _issues, _worktrees,
+            new StubGitHub { OpenPrForBranch = new PullRequest(42) }, _events, new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")), NullLogger.Instance, null, commands);
+        Assert.Equal(42, result.PrNumber);
+    }
+
+    [Fact]
+    public async Task WorkerExecutionWithoutReceiptCannotCommitOrPublish()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "missing receipt"));
+        var claimed = await ClaimExecutor.HandleAsync(issue, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        File.WriteAllText(Path.Combine(worktree.WorktreePath!, "New.cs"), "class New {}");
+        var agent = new AgentCompleted(worktree, AgentResult.Ok, "tests passed", null, null, true);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await CommitPushPrExecutor.HandleAsync(agent,
+            _issues, _worktrees, new StubGitHub(), _events, new NoOpMemoryExtractor(),
+            new MemoryExtractionStore(Path.Combine(_workDir, "extraction.db")), NullLogger.Instance, null, []));
+        Assert.Equal(0, await _worktrees.GetAheadCountAsync(worktree.WorktreePath!, "main"));
+    }
+
+    [Fact]
     public async Task SelfCommittedBranch_IsNotTreatedAsNoDiff()
     {
         // Regression (observed live 2026-07-24, task-155): an agent

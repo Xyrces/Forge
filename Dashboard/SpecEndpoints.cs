@@ -313,19 +313,14 @@ public static class SpecEndpoints
                 var spec = await owned.Value.Specs.GetAsync(id, ct);
                 if (spec is null)
                     return Results.NotFound(new { error = "spec_not_found" });
-                // P2.a: the manual groom endpoint now accepts any of
-                // the "ready to groom" statuses: Designed (Designer
-                // approved), Approved (operator non-visual fast-path),
-                // Groomed (operator re-decompose).
-                if (spec.Status is not (SpecStatus.Designed
-                    or SpecStatus.AssetReady
-                    or SpecStatus.Approved
-                    or SpecStatus.Groomed))
+                // AssetReady completes the visual lane; Approved is the
+                // explicit nonvisual path. Groomed requires operator re-decomposition.
+                if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed)
                 {
                     return Results.BadRequest(new
                     {
                         error = "spec_not_groomable",
-                        detail = $"spec status is {spec.Status}; expected Designed | AssetReady | Approved | Groomed"
+                        detail = $"spec status is {spec.Status}; expected AssetReady | Approved | Groomed"
                     });
                 }
 

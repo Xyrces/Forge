@@ -1189,6 +1189,15 @@ public sealed class SprintAssembler
         {
             if (key == AdHocGroupName || key.StartsWith(FollowUpThemePrefix, StringComparison.Ordinal)) continue;
             var groupSpec = await specs.GetAsync(key, ct);
+            if (groupSpec is null || groupSpec.Status != SpecStatus.Groomed)
+            {
+                logger.LogInformation("SprintAssembler: spec {SpecId} is not groomed; withholding {Count} task(s)",
+                    key, groups[key].Count);
+                groups.Remove(key);
+                groupOrder.Remove(key);
+                dropped++;
+                continue;
+            }
             if (groupSpec is not null
                 && !string.Equals(groupSpec.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
             {

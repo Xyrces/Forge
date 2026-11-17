@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Compaction;
@@ -1069,6 +1069,9 @@ public async Task<AgentRunResult> RunAsync(
         var env = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var meta in stored)
         {
+            // Runtime credentials are never tool environment variables.
+            if (_config.Providers.Any(p => string.Equals(meta.Kind, SecretKinds.ForProvider(p.Name), StringComparison.OrdinalIgnoreCase))
+                || meta.Kind.Contains("connection_string", StringComparison.OrdinalIgnoreCase)) continue;
             string? plaintext;
             try
             {

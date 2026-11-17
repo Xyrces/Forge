@@ -86,30 +86,20 @@ public sealed class GroomerAgent
             _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} not found", specId);
             return null;
         }
-        // P2.a: the Groomer gate widens. Specs in Designed
-        // (Designer approved) or Approved (operator-marked
-        // non-visual) or Groomed (operator re-decompose) all
-        // enter the Groomer. Specs in NeedsRevision / Draft /
-        // ReadyForDesign / Shipped / Superseded / Archived are
-        // rejected.
-        if (spec.Status is not (SpecStatus.Designed
-            or SpecStatus.AssetReady
-            or SpecStatus.Approved
-            or SpecStatus.Groomed))
+        // Visual work must finish the artist stage first. Approved is
+        // the explicit nonvisual bypass; Groomed is an operator re-decomposition.
+        if (!SpecActions.CanStartGrooming(spec.Status) && spec.Status != SpecStatus.Groomed)
         {
-            _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} status={Status} (expected Designed | AssetReady | Approved | Groomed)",
+            _logger.LogWarning("GroomerAgent.GroomAsync: spec {Id} status={Status} (expected AssetReady | Approved | Groomed)",
                 specId, spec.Status);
             return null;
         }
 
-        // Entry transition into the grooming state so the terminal
-        // set_spec_status("Groomed") call is a legal move
-        // (Approved|Designed|AssetReady -> Grooming -> Groomed;
-        // re-decompose from Groomed is idempotent per the machine).
-        if (spec.Status is not SpecStatus.Groomed)
-        {
-            await _specs.SetStatusAsync(specId, SpecStatus.Grooming, ct);
-        }
+        // Hide all tasks, including an explicit re-decomposition, until
+        // the run has finished creating tasks and dependency edges.
+        if (spec.Status == SpecStatus.Groomed)
+            await _specs.SetStatusAsync(specId, SpecStatus.Approved, ct);
+        await _specs.SetStatusAsync(specId, SpecStatus.Grooming, ct);
 
         var createdStoryIds = new List<string>();
         var createdTaskIds = new List<string>();
@@ -178,9 +168,17 @@ public sealed class GroomerAgent
             description: "Create a task issue linked to the story AND the spec. " +
                          "Returns the new task's issue id.");
 
+        var completionRequested = false;
         var setStatusTool = AIFunctionFactory.Create(
             ([Description("Status: 'Draft', 'Approved', 'Groomed', 'Superseded', or 'Archived'.")] string status) =>
-                SetStatusAsync(specId, status, ct),
+            {
+                if (string.Equals(status, "Groomed", StringComparison.OrdinalIgnoreCase))
+                {
+                    completionRequested = true;
+                    return Task.FromResult("Groomed requested; publication waits until this run finishes.");
+                }
+                return SetStatusAsync(specId, status, ct);
+            },
             name: "set_spec_status",
             description: "Move the spec to a new status. Use 'Groomed' " +
                          "after all stories + tasks are created.");
@@ -227,9 +225,17 @@ public sealed class GroomerAgent
 
         try
         {
-            await new PipelineAgentRunner(_logger).RunAsync(
-                agent, new[] { userMessage }, roleLabel: "groomer", ct: ct);
+            var outcome = await new PipelineAgentRunner(_logger).RunAsync(
+                agent, new[] { userMessage }, roleLabel: "groomer",
+                requiredToolName: "set_spec_status",
+                contractNudgePrompt: "Finish by calling set_spec_status: Groomed after decomposition, or Draft/Superseded/Archived when the spec cannot proceed.", ct: ct);
+            if (outcome.BudgetExhausted)
+                throw new InvalidOperationException("Groomer exhausted its completion budget; partial tasks remain ineligible.");
+            if (completionRequested)
+                await _specs.SetStatusAsync(specId, SpecStatus.Groomed, ct);
             var refreshed = await _specs.GetAsync(specId, ct);
+            if (refreshed?.Status == SpecStatus.Grooming)
+                throw new InvalidOperationException("Groomer ended without a committed completion decision; partial tasks remain ineligible.");
             _events.Publish(new DashboardEvent(DateTime.UtcNow,
                 "groomer.run.completed", specId,
                 $"status={refreshed?.Status} stories={createdStoryIds.Count} tasks={createdTaskIds.Count}",

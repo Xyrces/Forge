@@ -8,9 +8,6 @@ public static class OptionsLoader
     {
         var builder = new ConfigurationBuilder();
 
-        if (configPath is not null && File.Exists(configPath))
-            builder.AddJsonFile(configPath, optional: true, reloadOnChange: false);
-
         // Resolve appsettings.json against the current working directory,
         // not the host's base directory. AddJsonFile's default base
         // directory is the AppContext.BaseDirectory (the bin/ folder when
@@ -19,6 +16,8 @@ public static class OptionsLoader
         // path so the file is found regardless of how the host is launched.
         var appsettingsPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
         builder.AddJsonFile(appsettingsPath, optional: true, reloadOnChange: false);
+        if (configPath is not null)
+            builder.AddJsonFile(Path.GetFullPath(configPath), optional: false, reloadOnChange: false);
         builder.AddEnvironmentVariables();
 
         var config = builder.Build();
@@ -46,13 +45,17 @@ public static class OptionsLoader
         {
             var existing = options.Llm.Providers.ToList();
             var idx = existing.FindIndex(p => string.Equals(p.Name, llmProviderName, StringComparison.OrdinalIgnoreCase));
-            var newProvider = new LlmProviderOptions
+            var template = idx >= 0 ? existing[idx] : new LlmProviderOptions();
+            var newProvider = template with
             {
                 Name = llmProviderName,
-                BaseUrl = !string.IsNullOrEmpty(llmBaseUrl) ? llmBaseUrl : "http://127.0.0.1:4096",
+                BaseUrl = !string.IsNullOrEmpty(llmBaseUrl) ? llmBaseUrl : (string.IsNullOrEmpty(template.BaseUrl) ? "http://127.0.0.1:4096" : template.BaseUrl),
                 ApiKey = llmApiKey,
-                OrgId = Environment.GetEnvironmentVariable("LLM_ORG_ID") ?? string.Empty,
-                DefaultModel = !string.IsNullOrEmpty(llmModel) ? llmModel : "stub-model",
+                Api = Environment.GetEnvironmentVariable("LLM_API") ?? template.Api,
+                ProjectId = Environment.GetEnvironmentVariable("LLM_PROJECT_ID") ?? template.ProjectId,
+                ReasoningEffort = Environment.GetEnvironmentVariable("LLM_REASONING_EFFORT") ?? template.ReasoningEffort,
+                OrgId = Environment.GetEnvironmentVariable("LLM_ORG_ID") ?? template.OrgId,
+                DefaultModel = !string.IsNullOrEmpty(llmModel) ? llmModel : (string.IsNullOrEmpty(template.DefaultModel) ? "stub-model" : template.DefaultModel),
             };
             if (idx >= 0) existing[idx] = newProvider;
             else existing.Add(newProvider);

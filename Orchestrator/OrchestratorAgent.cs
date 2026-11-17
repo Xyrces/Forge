@@ -61,6 +61,7 @@ public sealed class OrchestratorAgent : IAgent
     // claims when its role has a free slot), so e.g. 2 coredevs can
     // work two unblocked tasks while a clientdev slot stays open.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _inFlight = new(StringComparer.Ordinal);
+    private readonly List<Task> _runningDispatches = [];
 
     public string Id => "orchestrator";
     public string Name => "OrchestratorAgent";
@@ -144,6 +145,13 @@ public sealed class OrchestratorAgent : IAgent
             Status = AgentStatus.Error;
             throw;
         }
+        finally
+        {
+            // Ownership is not released while a local publication callback is still running.
+            // Worker Jobs detach on controller cancellation and are adopted by the next owner.
+            await Task.WhenAll(_runningDispatches);
+            _runningDispatches.Clear();
+        }
     }
 
     /// <summary>
@@ -190,7 +198,7 @@ public sealed class OrchestratorAgent : IAgent
         foreach (var record in projectRecords)
         {
             if (cancellationToken.IsCancellationRequested) return;
-            var bundle = GetOrCreateBundle(ProjectRecordToOptions(record));
+            var bundle = GetOrCreateBundle(record.ToProjectOptions(string.Empty));
             if (bundle is null) continue;
 
             try
@@ -308,7 +316,9 @@ public sealed class OrchestratorAgent : IAgent
                         await slot.DisposeAsync();
                         continue;
                     }
-                    _ = Task.Run(async () =>
+                    _runningDispatches.RemoveAll(task => task.IsCompleted);
+                    _runningDispatches.Add(RunDispatchAsync());
+                    async Task RunDispatchAsync()
                     {
                         await using (slot)
                         {
@@ -327,7 +337,7 @@ public sealed class OrchestratorAgent : IAgent
                                 _wakeup?.Signal();
                             }
                         }
-                    }, cancellationToken);
+                    }
                 }
             }
             catch (Exception ex)
@@ -354,16 +364,6 @@ public sealed class OrchestratorAgent : IAgent
             }
         });
     }
-
-    private static ProjectOptions ProjectRecordToOptions(ProjectRecord r) => new()
-    {
-        Id = r.Id,
-        Name = r.Name,
-        RepoUrl = r.RepoUrl,
-        DefaultBranch = r.DefaultBranch,
-        Root = string.Empty,
-        Roles = new Dictionary<string, int>(r.Roles, StringComparer.OrdinalIgnoreCase),
-    };
 
     private static bool IsLlmRateLimited(Exception ex)
     {
@@ -447,7 +447,8 @@ public sealed class OrchestratorAgent : IAgent
             // Persisted on the issue (the workflow input carries it
             // to RunAgentExecutor → the agent_run row) and scoped
             // onto every log line this dispatch writes.
-            var dispatchId = "d-" + Guid.NewGuid().ToString("N")[..8];
+            var dispatchId = issue.GetMetadata("resumeDispatchId") is { Length: > 0 } resumed
+                ? resumed : "d-" + Guid.NewGuid().ToString("N")[..8];
             {
                 var claimedMeta = new Dictionary<string, object>();
                 var existingMeta = (await bundle.IssueStore.GetAsync(issue.Id, cancellationToken))?.MetadataJson;
@@ -860,6 +861,12 @@ public sealed class OrchestratorAgent : IAgent
 
     private async Task HandleFailureAsync(IssueRecord issue, Exception ex, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
+        if ((await bundle.IssueStore.GetAsync(issue.Id, cancellationToken))?.Status == IssueStatus.Blocked)
+        {
+            _logger.LogWarning("Issue {Id} is blocked; preserving worktree and refusing automatic retry", issue.Id);
+            return;
+        }
+
         var retryCount = 0;
         var prev = issue.GetMetadata("retryCount");
         if (prev is not null && int.TryParse(prev, out var r)) retryCount = r;

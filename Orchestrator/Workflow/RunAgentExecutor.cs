@@ -264,6 +264,26 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true && !ct.IsCancellationRequested)
         {
             var timeoutMsg = $"Agent run timed out after {timeoutMinutes} minute(s)";
+            if (runner is Workers.KubernetesAgentRunner workers)
+            {
+                try
+                {
+                    using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                    var current = await issues.GetAsync(issue.Id, termination.Token);
+                    var dispatchId = current?.GetMetadata("dispatchId")
+                        ?? throw new InvalidOperationException("Timed-out worker has no dispatch identity.");
+                    await workers.CancelDispatchAsync(role, projectId ?? string.Empty, issue.Id, dispatchId, termination.Token);
+                }
+                catch (Exception terminationError)
+                {
+                    var blocked = await issues.GetAsync(issue.Id, ct) ?? issue;
+                    if (lifecycle is not null)
+                        await lifecycle.ReportAsync(issues, blocked, Core.TaskEvent.OperatorBlocked, watch: null, hasActiveDevRun: false, ct);
+                    await issues.TransitionAsync(issue.Id, IssueStatus.Blocked,
+                        "Worker termination not confirmed; inspect Job before retry: " + terminationError.Message, ct: ct);
+                    throw new InvalidOperationException("Worker termination not confirmed; task blocked to preserve its worktree.", terminationError);
+                }
+            }
             logger.LogWarning("RunAgent({Id}): {Msg}", issue.Id, timeoutMsg);
             var cur = await issues.GetAsync(issue.Id, ct);
             if (cur is not null)
@@ -276,6 +296,14 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                     error: timeoutMsg, metadata: meta, ct: ct);
             }
             throw new TimeoutException(timeoutMsg);
+        }
+        catch (Workers.WorkerExecutionUncertainException ex)
+        {
+            var blocked = await issues.GetAsync(issue.Id, ct) ?? issue;
+            if (lifecycle is not null)
+                await lifecycle.ReportAsync(issues, blocked, Core.TaskEvent.OperatorBlocked, watch: null, hasActiveDevRun: false, ct);
+            await issues.TransitionAsync(issue.Id, IssueStatus.Blocked, ex.Message, ct: ct);
+            throw;
         }
         catch (Exception ex)
         {
@@ -324,7 +352,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["sessionId"] = result.SessionId ?? "",
                 ["elapsedMs"] = result.Elapsed.TotalMilliseconds,
             }));
-        return new AgentCompleted(input, AgentResult.Ok, result.Text ?? string.Empty, result.SessionId);
+        return new AgentCompleted(input, AgentResult.Ok, result.Text ?? string.Empty, result.SessionId,
+            result.Verification, runner is Workers.KubernetesAgentRunner);
     }
 
     private static async Task RecordModelResponseAsync(
@@ -506,4 +535,6 @@ public sealed record AgentCompleted(
     WorktreeReady Worktree,
     AgentResult Result,
     string Text,
-    string? SessionId);
+    string? SessionId,
+    VerificationReceipt? Verification = null,
+    bool RequiresWorkerVerification = false);

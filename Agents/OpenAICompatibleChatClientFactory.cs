@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
 using OpenAI;
 using Forge.Core;
@@ -66,6 +67,8 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
     /// the totals via <c>GET /api/cost/stats</c>.
     /// </summary>
     public CostTracker? CostTracker { get; set; }
+
+    public Func<LlmRequestContext, IChatClient, IChatClient>? RequestPolicy { get; set; }
 
     /// <summary>
     /// Live per-role model overrides (dashboard Agents page). When a
@@ -149,13 +152,10 @@ public sealed class OpenAICompatibleChatClientFactory : IChatClientFactory, IDis
             // forward requests.
             provider = provider with { BaseUrl = HeadroomProxyBaseUrl };
         }
-        var inner = GetOrCreate(provider, model, ThinkingBudgetFor(role));
-        if (CostTracker is null) return inner;
-        // Per-session wrapper: forwards UsageDetails into the
-        // shared CostTracker. The inner client is cached so
-        // multiple sessions share one OpenAI client; per-session
-        // wrappers are cheap (just a delegator).
-        return new UsageTrackingChatClient(inner, CostTracker, role);
+        IChatClient inner = new BorrowedChatClient(GetOrCreate(provider, model, ThinkingBudgetFor(role)));
+        if (RequestPolicy is { } policy)
+            inner = policy(new(provider.Name, model, role, projectId, provider.MaxOutputTokens ?? 8192), inner);
+        return CostTracker is null ? inner : new UsageTrackingChatClient(inner, CostTracker, role);
     }
 
 /// <summary>
@@ -180,7 +180,32 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
         _tracker.Record(response.Usage, roleHint: _role);
         return response;
     }
+    public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (var update in InnerClient.GetStreamingResponseAsync(messages, options, cancellationToken))
+        {
+            foreach (var usage in update.Contents.OfType<UsageContent>())
+                _tracker.Record(usage.Details, roleHint: _role);
+            yield return update;
+        }
+    }
 }
+    /// <summary>Explicit, potentially billable preflight through the same admission and request policy as agent calls.</summary>
+    public async Task<ChatResponse> ProbeAsync(LlmConfig config, AgentType role, string? projectId = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var client = Create(config, role, projectId);
+        return await client.GetResponseAsync([new(ChatRole.User, "Reply with OK.")],
+            new ChatOptions { MaxOutputTokens = 256 }, cancellationToken);
+    }
+
+    private sealed class BorrowedChatClient(IChatClient inner) : DelegatingChatClient(inner)
+    {
+        protected override void Dispose(bool disposing) { }
+    }
+
     public static OpenAICompatibleChatClientFactory? TryFromEnv(string defaultBaseUrl = "http://127.0.0.1:4096")
     {
         var apiKey = Environment.GetEnvironmentVariable("LLM_API_KEY");
@@ -241,24 +266,26 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
         // scheme likewise (a provider edit must not reuse a client
         // built with the old header).
         var key = provider.Name + "|" + model + "|" + keyHash + "|" + (thinkingBudgetTokens?.ToString() ?? "-")
-            + "|" + (provider.Auth ?? "-");
+            + "|" + (provider.Auth ?? "-") + "|" + provider.BaseUrl + "|" + provider.Api
+            + "|" + provider.OrgId + "|" + provider.ProjectId + "|" + provider.MaxOutputTokens + "|" + provider.ReasoningEffort;
         return _cache.GetOrAdd(key, _ => WrapForRateLimits(Build(provider, model, thinkingBudgetTokens), provider, model));
     }
 
     private IChatClient WrapForRateLimits(IChatClient inner, ProviderConfig provider, string model)
     {
         if (RateLimits is null && MaxConcurrentRequests <= 0) return inner;
-        var permit = _permits.GetOrAdd(provider.Name,
-            _ => new SemaphoreSlim(Math.Max(1, MaxConcurrentRequests)));
+        var permit = MaxConcurrentRequests > 0
+            ? _permits.GetOrAdd(provider.Name, _ => new SemaphoreSlim(MaxConcurrentRequests))
+            : null;
         var pacer = MinRequestInterval > TimeSpan.Zero
             ? _pacers.GetOrAdd(provider.Name, _ => new ProviderPacer(MinRequestInterval))
             : null;
         return new RateLimitAwareChatClient(inner, provider.Name, model,
             RateLimits ?? new Core.ModelRateLimitTracker(), permit,
-            provider.SharedQuota, OverloadRetryCount, pacer: pacer);
+            provider.SharedQuota, string.Equals(provider.Api, "responses", StringComparison.OrdinalIgnoreCase) ? 0 : OverloadRetryCount, pacer: pacer);
     }
 
-    private static IChatClient Build(ProviderConfig provider, string model, int? thinkingBudgetTokens = null)
+    internal static IChatClient Build(ProviderConfig provider, string model, int? thinkingBudgetTokens = null, HttpClient? httpClient = null)
     {
         if (string.Equals(provider.Api, "anthropic", StringComparison.OrdinalIgnoreCase))
         {
@@ -281,18 +308,21 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
             // then surfaces as a malformed <threw:> response.
             NetworkTimeout = TimeSpan.FromMinutes(5),
         };
-        if (!string.IsNullOrEmpty(provider.OrgId))
-        {
-            // OpenAI SDK doesn't have a direct OrgId setter; we drop it
-            // into the default header via the options.
-            // Real OpenAI SDK 2.1+ uses OpenAIClientOptions.OrganizationId,
-            // but in 2.1.0-beta it's via the AddHeader equivalent.
-            // For beta, we just skip org; can be added when stable.
-        }
+        options.OrganizationId = provider.OrgId;
+        options.ProjectId = provider.ProjectId;
+        // Retries belong to Forge policy: hidden SDK retries bypass durable admission.
+        options.RetryPolicy = new System.ClientModel.Primitives.ClientRetryPolicy(0);
+        if (httpClient is not null)
+            options.Transport = new System.ClientModel.Primitives.HttpClientPipelineTransport(httpClient);
         var apiKeyCredential = new System.ClientModel.ApiKeyCredential(provider.ApiKey ?? string.Empty);
         var openAIClient = new OpenAIClient(apiKeyCredential, options);
-        var chatClient = openAIClient.GetChatClient(model);
-        return chatClient.AsIChatClient();
+        if (string.Equals(provider.Api, "responses", StringComparison.OrdinalIgnoreCase))
+        {
+#pragma warning disable OPENAI001
+            return new ResponsesRequestChatClient(openAIClient.GetResponsesClient().AsIChatClient(model), provider, model);
+#pragma warning restore OPENAI001
+        }
+        return openAIClient.GetChatClient(model).AsIChatClient();
     }
 
     public void Dispose()

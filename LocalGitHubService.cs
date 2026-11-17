@@ -92,12 +92,16 @@ public sealed class LocalGitHubService : GitHubService
         return _prStore.CreatePr(title, body, headBranch, baseBranch, sha);
     }
 
-    public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+    public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
     {
         // P4 e2e-harness C2: when the PRWatcher reaches the
         // GreenAndApproved verdict, the orchestrator's
         // CommitPushPrExecutor merges the PR. We record the
         // merge in the PR's state so the harness can assert.
+        if (expectedHeadSha is not null
+            && (!_prStore.PrInfo.TryGetValue(prNumber, out var info)
+                || _prStore.GetBranchSha(info.HeadBranch) != expectedHeadSha))
+            return Task.FromResult(false);
         _prStore.MarkMerged(prNumber);
         return Task.FromResult(true);
     }

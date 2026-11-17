@@ -470,7 +470,7 @@ public sealed class PRWatcher
                 _logger.LogInformation("PR #{PrNumber}: merge held by operator gate", prNumber);
                 return WatchPollOutcome.Pending;
             }
-            var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken);
+            var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
             if (merged)
             {
                 await ReportAsync(Forge.Core.TaskEvent.Merged);

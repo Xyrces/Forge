@@ -44,6 +44,7 @@ public class PRWatcherReworkTests : IDisposable
         public IReadOnlyList<string> FailedChecks = Array.Empty<string>();
         public bool MergeResult = true;
         public int MergeCalls;
+        public string? ExpectedMergeSha;
         public List<PullRequestReview> Reviews = new();
         public FakeGitHub() : base("o", "r", null) { }
         public int CloseCalls;
@@ -77,9 +78,10 @@ public class PRWatcherReworkTests : IDisposable
             => Task.FromResult(FailedChecks);
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult((IReadOnlyList<PullRequestReview>)Reviews);
-        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
         {
             MergeCalls++;
+            ExpectedMergeSha = expectedHeadSha;
             return Task.FromResult(MergeResult);
         }
         public override Task<bool> DeleteBranchAsync(string branch, CancellationToken cancellationToken = default)
@@ -307,6 +309,7 @@ public class PRWatcherReworkTests : IDisposable
             headShaOverride: _ => "abc123");
 
         Assert.Equal(PRWatcher.WatchPollOutcome.Merged, released);
+        Assert.Equal("abc123", gh.ExpectedMergeSha);
         Assert.Equal(1, gh.MergeCalls);
         Assert.Equal(IssueStatus.Completed, (await _issues.GetAsync(task.Id))!.Status);
     }

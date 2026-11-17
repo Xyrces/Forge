@@ -72,7 +72,7 @@ public class SpecActionsEndpointTests : IDisposable
     }
 
     [Fact]
-    public async Task Actions_DesignedSpec_GroomEnabled()
+    public async Task Actions_DesignedSpec_WaitsForAssets()
     {
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "proj-1", Title: "Test", Body: "Body"), default);
@@ -82,7 +82,7 @@ public class SpecActionsEndpointTests : IDisposable
         var resp = await _client.GetAsync($"/api/specs/{spec.Id}/actions");
         var body = await resp.Content.ReadFromJsonAsync<ActionsShape>();
         Assert.False(body!.CanApprove);
-        Assert.True(body.CanStartGrooming);
+        Assert.False(body.CanStartGrooming);
     }
 
     [Fact]

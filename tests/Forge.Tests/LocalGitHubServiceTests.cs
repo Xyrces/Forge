@@ -6,6 +6,29 @@ namespace Forge.Tests;
 public sealed class LocalGitHubServiceTests
 {
     [Fact]
+    public async Task Merge_AfterRework_RequiresCurrentBranchHead()
+    {
+        var svc = new LocalGitHubService("/tmp/fake-remote", "owner", "repo");
+        svc.RegisterPushedBranch("agent/rework", "original-head");
+        var pr = await svc.CreatePullRequestAsync("title", "body", "agent/rework");
+        svc.RegisterPushedBranch("agent/rework", "reworked-head");
+        Assert.False(await svc.MergePullRequestAsync(pr.Number, expectedHeadSha: "original-head"));
+        Assert.NotNull(await svc.GetOpenPullRequestForBranchAsync("agent/rework"));
+        Assert.True(await svc.MergePullRequestAsync(pr.Number, expectedHeadSha: "reworked-head"));
+    }
+
+    [Fact]
+    public async Task Merge_RejectsHeadDifferentFromVerifiedSha()
+    {
+        var svc = new LocalGitHubService("/tmp/fake-remote", "owner", "repo");
+        svc.RegisterPushedBranch("agent/task-1", "new-head");
+        var pr = await svc.CreatePullRequestAsync("title", "body", "agent/task-1");
+        Assert.False(await svc.MergePullRequestAsync(pr.Number, expectedHeadSha: "reviewed-head"));
+        Assert.NotNull(await svc.GetOpenPullRequestForBranchAsync("agent/task-1"));
+        Assert.True(await svc.MergePullRequestAsync(pr.Number, expectedHeadSha: "new-head"));
+    }
+
+    [Fact]
     public async Task GetOpenPullRequestForBranchAsync_ReturnsOpenPr()
     {
         // Arrange

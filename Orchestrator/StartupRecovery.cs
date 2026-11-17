@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Octokit;
 using Forge.AgentTools;
@@ -336,38 +336,24 @@ public sealed class StartupRecovery
                     // re-claims it — but the loop only claims Pending
                     // issues, so those orphans sat forever.)
                     await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
-                        $"recovery: orphaned at {issue.DispatchCheckpoint?.ToDbValue()} by restart; re-queued", ct: ct);
+                        $"recovery: orphaned at {issue.DispatchCheckpoint?.ToDbValue()} by restart; re-queued", metadata: ResumeDispatchMetadata(issue), ct: ct);
                     _events.Publish(RecoveryEvent(issue.Id, "requeued",
                         $"{issue.DispatchCheckpoint?.ToDbValue()}; transitioned to Pending for re-dispatch"));
                     return new RecoveryActionRecord(issue.Id, before, before, "requeued",
                         "worktree_acquired; transitioned to Pending for re-dispatch");
 
                 case DispatchCheckpoint.AgentCompleted:
-                    // Commit + push + PR.
-                    await CommitAndPushAsync(issue, worktreePath!, branch, ctx, ct);
-                    await TryOpenPrAsync(issue, branch, ctx, ct);
-                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
-                    _events.Publish(RecoveryEvent(issue.Id, "replay", "agent_completed -> pr_opened"));
-                    return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
-
                 case DispatchCheckpoint.CommitDone:
-                    _logger.LogInformation("Recovery({Id}): CommitDone step - pushing", issue.Id);
-                    await ctx.Worktrees.PushAsync(worktreePath!, branch, ct);
-                    _logger.LogInformation("Recovery({Id}): push OK - opening PR", issue.Id);
-                    await TryOpenPrAsync(issue, branch, ctx, ct);
-                    _logger.LogInformation("Recovery({Id}): PR OK", issue.Id);
-                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
-                    _events.Publish(RecoveryEvent(issue.Id, "replay", "commit_done -> pr_opened"));
-                    return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
-
                 case DispatchCheckpoint.PushDone:
-                    await TryOpenPrAsync(issue, branch, ctx, ct);
-                    await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PrOpened, ct);
-                    await ctx.Issues.IncrementRecoveryAttemptsAsync(issue.Id, ct);
-                    _events.Publish(RecoveryEvent(issue.Id, "replay", "push_done -> pr_opened"));
-                    return new RecoveryActionRecord(issue.Id, before, DispatchCheckpoint.PrOpened.ToDbValue(), "replay", null);
+                    // Checkpoints record progress, not a current verification receipt.
+                    // Resume through the normal pipeline so verification, no-diff handling
+                    // and existing-PR reconciliation cannot be bypassed by a restart.
+                    await ctx.Issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                        $"recovery: {before}; re-queued for verified dispatch", metadata: ResumeDispatchMetadata(issue), ct: ct);
+                    await CoerceTerminalStateAsync(issue, ctx, ct);
+                    _events.Publish(RecoveryEvent(issue.Id, "requeued",
+                        $"{before}; verification required before publication"));
+                    return new RecoveryActionRecord(issue.Id, before, before, "requeued", null);
 
                 case DispatchCheckpoint.PrOpened:
                     // Engineering-owed rework round whose run died
@@ -395,6 +381,11 @@ public sealed class StartupRecovery
             return new RecoveryActionRecord(issue.Id, before, before, "failed", ex.Message);
         }
     }
+
+    private static Dictionary<string, object>? ResumeDispatchMetadata(IssueRecord issue) =>
+        issue.GetMetadata("dispatchId") is { Length: > 0 } dispatchId
+            ? new() { ["resumeDispatchId"] = dispatchId }
+            : null;
 
     /// <summary>
     /// Pure classification function: given an issue's checkpoint
@@ -490,49 +481,6 @@ public sealed class StartupRecovery
             default:
                 return new RecoveryDecision(RecoveryAction.Failed, $"unknown checkpoint {issue.DispatchCheckpoint}");
         }
-    }
-
-    private async Task CommitAndPushAsync(
-        IssueRecord issue, string worktreePath, string branch, ProjectRecoveryContext ctx, CancellationToken ct)
-    {
-        var commit = await ctx.Worktrees.CommitAllAsync(
-            worktreePath, $"Task({issue.Id}): {issue.Title}", ct);
-        if (!commit.HasChanges)
-        {
-            _logger.LogInformation("Recovery({Id}): no changes to commit on {Branch}", issue.Id, branch);
-        }
-        else
-        {
-            _logger.LogInformation("Recovery({Id}): committed on {Branch}", issue.Id, branch);
-        }
-        await ctx.Worktrees.PushAsync(worktreePath, branch, ct);
-        var headSha = await ctx.Worktrees.GetHeadShaAsync(worktreePath, ct);
-        await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
-        await ctx.Issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.PushDone, ct);
-        // Record branchSha so the dispatch loop's PR step can pick it up.
-        await ctx.Issues.TransitionAsync(issue.Id, issue.Status, error: null,
-            metadata: new Dictionary<string, object> { ["branchSha"] = headSha }, ct: ct);
-    }
-
-    private async Task TryOpenPrAsync(IssueRecord issue, string branch, ProjectRecoveryContext ctx, CancellationToken ct)
-    {
-        var pr = await ctx.GitHub.CreatePullRequestAsync(
-            title: PrText.Title(issue),
-            body: PrText.Body(issue, headSha: null, modelText: null,
-                note: "recovered by StartupRecovery after a crash"),
-            headBranch: branch,
-            baseBranch: ctx.DefaultBranch ?? "main",
-            cancellationToken: ct);
-        await ctx.Issues.TransitionAsync(issue.Id, issue.Status, error: null,
-            metadata: new Dictionary<string, object>
-            {
-                ["prNumber"] = pr.Number,
-                ["prOpenedAt"] = DateTime.UtcNow.ToString("O"),
-            }, ct: ct);
-        _logger.LogInformation("Recovery({Id}): opened PR #{Pr}", issue.Id, pr.Number);
-
-        // No watch row: the state-driven sweep discovers watched
-        // tasks by their prNumber metadata (written above).
     }
 
     private async Task TryRemoveWorktreeAsync(IssueRecord issue, ProjectRecoveryContext ctx, CancellationToken ct)

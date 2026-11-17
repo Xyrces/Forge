@@ -70,7 +70,29 @@ public class SprintAssemblerTests : IDisposable
             storyIds.Add(story.Id);
             taskIds.Add(task.Id);
         }
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, default);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, default);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
         return (spec.Id, storyIds, taskIds);
+    }
+
+    [Fact]
+    public async Task PartialGrooming_WithholdsTasksUntilSpecCompletes()
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(ProjectId: "test", Title: "partial", Body: "body"));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, default);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, default);
+        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "story", ParentId: spec.Id));
+        var first = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "first", ParentId: story.Id));
+        await Tick();
+        Assert.Null(await _sprints.GetActiveAsync());
+        var second = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "second", ParentId: story.Id));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
+        await Tick();
+        var active = Assert.IsType<SprintRecord>(await _sprints.GetActiveAsync());
+        var members = await _sprints.GetIssueIdsAsync(active.Id);
+        Assert.Contains(first.Id, members);
+        Assert.Contains(second.Id, members);
     }
 
     [Fact]

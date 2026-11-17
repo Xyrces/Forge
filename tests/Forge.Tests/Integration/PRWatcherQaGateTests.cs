@@ -57,7 +57,7 @@ public class PRWatcherQaGateTests : IDisposable
             => Task.FromResult("main-head-sha");
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult((IReadOnlyList<PullRequestReview>)new List<PullRequestReview>());
-        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)
+        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
         {
             MergeCalls++;
             return Task.FromResult(true);

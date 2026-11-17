@@ -2,9 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/forge-first-k3s]
   pull_request:
-    branches: [main]
+    branches: [main, codex/forge-first-k3s]
 
 # Cancel superseded PR runs to save CI minutes.
 concurrency:
@@ -57,10 +57,11 @@ jobs:
         run: dotnet build Forge.sln --no-restore --configuration Release
 
       - name: Test
-        # The 2 RealLlmIntegrationTests are expected to skip on CI
-        # because the kilo JWT isn't in env. The remaining 402 tests
-        # should pass. Fail the job if any real test fails.
-        run: dotnet test Forge.sln --no-build --configuration Release --logger "console;verbosity=normal"
+        # Ordinary PR validation never invokes paid provider/media tests.
+        run: dotnet test Forge.sln --no-build --configuration Release --logger "console;verbosity=normal" --filter 'FullyQualifiedName!~RealLlmIntegrationTests&FullyQualifiedName!~MafAgentRunnerLiveTests&FullyQualifiedName!~MeshyLiveSmokeTests'
+
+      - name: Test release and installer protocol
+        run: python3 -m unittest discover -s tests/deployment -v
 
       - name: Run e2e harness
         # The harness spins up a fresh local repo, runs the

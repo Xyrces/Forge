@@ -146,7 +146,41 @@ public class WorktreeExecutorTests : IDisposable
         Run("git", "add " + fileName, tmp);
         Run("git", "commit -q -m advance", tmp);
         Run("git", "push -q origin main", tmp);
+        foreach (var file in Directory.EnumerateFiles(tmp, "*", SearchOption.AllDirectories))
+            File.SetAttributes(file, FileAttributes.Normal);
         Directory.Delete(tmp, recursive: true);
+    }
+
+    [Fact]
+    public async Task ReusedWorktree_UncommittedRecoveredEdits_ArePreserved()
+    {
+        InitRepoWithOrigin();
+        var issue = await DispatchOnceAsync();
+        var wt = _worktrees.WorktreePathFor(issue.Id);
+        await File.WriteAllTextAsync(Path.Combine(wt, "README.md"), "recovered edits");
+        await File.WriteAllTextAsync(Path.Combine(wt, "new.txt"), "untracked work");
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null);
+        var claimed = await ClaimExecutor.HandleAsync((await _issues.GetAsync(issue.Id))!,
+            _issues, NullLogger<ClaimExecutor>.Instance, default);
+        await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger.Instance, default);
+        Assert.Equal("recovered edits", await File.ReadAllTextAsync(Path.Combine(wt, "README.md")));
+        Assert.Equal("untracked work", await File.ReadAllTextAsync(Path.Combine(wt, "new.txt")));
+    }
+
+    [Fact]
+    public async Task AdoptingWorker_DoesNotResetEvenCleanCheckout()
+    {
+        InitRepoWithOrigin();
+        var issue = await DispatchOnceAsync();
+        var wt = _worktrees.WorktreePathFor(issue.Id);
+        AdvanceOriginMain(_workDir + "-bare.git", "NewFile.cs");
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null,
+            metadata: new Dictionary<string, object> { ["dispatchId"] = "d-existing", ["resumeDispatchId"] = "d-existing" });
+        var claimed = await ClaimExecutor.HandleAsync((await _issues.GetAsync(issue.Id))!,
+            _issues, NullLogger<ClaimExecutor>.Instance, default);
+        await WorktreeExecutor.HandleAsync(claimed, _issues, _worktrees, "main", NullLogger.Instance, default);
+        Assert.False(File.Exists(Path.Combine(wt, "NewFile.cs")));
+        Assert.Null((await _issues.GetAsync(issue.Id))!.GetMetadata("resumeDispatchId"));
     }
 
     [Fact]

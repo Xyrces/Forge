@@ -11,6 +11,8 @@ public sealed record AgentOptions
     public SpawnerOptions Spawner { get; set; } = new();
     public DashboardOptions Dashboard { get; set; } = new();
     public LlmOptions Llm { get; set; } = new();
+    // Trusted operator release profiles; project identity remains DB-owned.
+    public Dictionary<string, DeploymentOptions> Deployments { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public VisionOptions Vision { get; set; } = new();
     /// <summary>
     /// Quality-gate configuration (ordered gate names per
@@ -46,6 +48,10 @@ public sealed record AgentOptions
     /// target (Entra auth, no secrets). See <see cref="DbOptions"/>.
     /// </summary>
     public DbOptions Db { get; set; } = new();
+    public ControllerOptions Controller { get; set; } = new();
+    public WorkerOptions Worker { get; set; } = new();
+    public BootstrapOptions Bootstrap { get; set; } = new();
+    public BudgetOptions Budget { get; set; } = new();
     /// <summary>
     /// P4 Stage B — runtime selection. "InProcess" (default)
     /// uses Microsoft.Agents.AI.Workflows InProcessExecution;
@@ -319,6 +325,8 @@ public sealed record LlmOptions
 
 public sealed record LlmProviderOptions
 {
+    public string? ProjectId { get; set; }
+    public string? ReasoningEffort { get; set; }
     public string Name { get; set; } = string.Empty;
     public string BaseUrl { get; set; } = string.Empty;
     public string ApiKey { get; set; } = string.Empty;

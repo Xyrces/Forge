@@ -1,0 +1,130 @@
+using System.Text.Json;
+using Forge.Agents;
+using Forge.Configuration;
+using Forge.Core;
+using Forge.Core.Db;
+using Forge.Core.Execution;
+using Microsoft.Extensions.Logging;
+
+namespace Forge.Orchestrator.Workers;
+
+/// <summary>A worker builds only one project's agent dependencies; it never bootstraps or starts schedulers.</summary>
+public static class WorkerHost
+{
+    public static async Task<int> RunAsync(AgentOptions options, ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        if (!options.Db.IsSqlServer) throw new InvalidOperationException("Workers require Azure SQL state.");
+        var worker = options.Worker;
+        if (string.IsNullOrWhiteSpace(worker.AttemptId) || string.IsNullOrWhiteSpace(worker.PodUid))
+            throw new InvalidOperationException("Worker attempt and pod UID are required.");
+        var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema, ForgeSchemaProfile.Core, initializeSchema: false);
+        var attempts = new WorkerAttemptStore(registry);
+        var assignment = await attempts.GetAsync(worker.AttemptId, ct) ?? throw new InvalidOperationException("Unknown worker attempt.");
+        if (assignment.DatasetId != options.Controller.DatasetId) throw new InvalidOperationException("Worker dataset mismatch.");
+        if (!await attempts.ClaimAsync(assignment.Id, worker.PodUid, ct)) return 0; // duplicate pod is inert
+        using var runCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var monitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var logger = loggerFactory.CreateLogger("Forge.Worker");
+        var monitor = MonitorAsync();
+        try
+        {
+            var invocation = JsonSerializer.Deserialize<WorkerInvocation>(assignment.AssignmentJson)
+                ?? throw new InvalidOperationException("Invalid worker assignment.");
+            if (!string.Equals(await KubernetesAgentRunner.ReadHeadAsync(assignment.WorktreePath, runCancellation.Token), assignment.SourceSha, StringComparison.Ordinal))
+                throw new InvalidOperationException("Worker source changed before pod execution.");
+            using var runtime = await BuildRunner(options, assignment, attempts, loggerFactory, runCancellation.Token);
+            var context = invocation.Context.ToDictionary(x => x.Key, x => (object)x.Value);
+            context["workerAttemptId"] = assignment.Id;
+            var result = await runtime.Runner.RunAsync(invocation.Role, invocation.Prompt, invocation.SessionId, context, runCancellation.Token);
+            if (invocation.Role is AgentType.CoreDev or AgentType.ClientDev)
+            {
+                await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, runCancellation.Token);
+                var receipt = await AgentTools.WorkerVerification.VerifyAsync(assignment.Id, assignment.WorktreePath,
+                    runtime.VerifyCommands, logger, runCancellation.Token);
+                result = result with { Verification = receipt };
+            }
+            await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, runCancellation.Token);
+            using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            if (!await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, JsonSerializer.Serialize(result), null, finalize.Token))
+                throw new InvalidOperationException("Worker result publication lost ownership.");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Worker attempt {Attempt} failed", assignment.Id);
+            using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, null,
+                ex is OperationCanceledException ? "cancelled" : ex.Message, finalize.Token);
+            return 1;
+        }
+        finally
+        {
+            await monitorCancellation.CancelAsync();
+            await monitor;
+        }
+
+        async Task MonitorAsync()
+        {
+            try
+            {
+                while (true)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), monitorCancellation.Token);
+                    await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, monitorCancellation.Token);
+                }
+            }
+            catch (OperationCanceledException) when (monitorCancellation.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Worker ownership monitor stopped; cancelling tools and model requests");
+                await runCancellation.CancelAsync();
+            }
+        }
+    }
+
+    public static async Task<WorkerRuntime> BuildRunner(AgentOptions options, WorkerAssignment assignment,
+        WorkerAttemptStore attempts, ILoggerFactory logs, CancellationToken ct)
+    {
+        var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema, ForgeSchemaProfile.Core, initializeSchema: false);
+        var registryIssues = new IssueStore(registry);
+        var projects = new ProjectStore(registryIssues);
+        var project = await projects.GetAsync(assignment.ProjectId, ct) ?? throw new InvalidOperationException("Worker project is not registered.");
+        if (string.IsNullOrEmpty(project.LocalPath)) throw new InvalidOperationException("Worker project has no clone path.");
+        var workload = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id), initializeSchema: false);
+        var issues = new IssueStore(workload, project.Id);
+        var memory = new MemoryStore(workload);
+        var secrets = new SecretStore(registryIssues, Program.CreateSecretProtection(options), logs.CreateLogger<SecretStore>());
+        var config = LlmConfigAdapter.FromOptions(options.Llm);
+        var overrides = new RoleModelOverrides(memory);
+        await overrides.LoadAsync(ct);
+        var keys = new ProviderApiKeyResolver(secrets, _ => Task.FromResult<IReadOnlyList<string>>([project.Id]), logs.CreateLogger<ProviderApiKeyResolver>());
+        await keys.RefreshAsync(config.Providers.Select(p => p.Name), ct);
+        var factory = new OpenAICompatibleChatClientFactory
+        {
+            Overrides = overrides, KeyResolver = keys, RateLimits = new ModelRateLimitTracker(),
+            MaxConcurrentRequests = options.Llm.MaxConcurrentRequests,
+            OverloadRetryCount = 0, MinRequestInterval = TimeSpan.FromMilliseconds(options.Llm.MinRequestIntervalMs),
+            RequestPolicy = Control.BudgetRequestPolicy.Create(options, registry,
+                token => attempts.EnsureOwnerAsync(assignment.Id, options.Worker.PodUid, assignment.AttemptToken, token))
+        };
+        var roles = new RoleAgentRegistry();
+        var artifacts = new DesignArtifactStore(workload);
+        var runner = new MafAgentRunner(factory, config, roles, logs.CreateLogger<MafAgentRunner>(),
+            skills: new SqliteSkillSource(new SkillStore(registryIssues), roles),
+            rolePromptsRoot: RolePromptRoot.Resolve(project.LocalPath),
+            projectRootLookup: id => id == project.Id ? project.LocalPath : null,
+            projectTerritoryLookup: id => id == project.Id ? project.Territories : null,
+            verifyCommandsLookup: id => id == project.Id ? project.VerifyCommands : null,
+            memory: memory, handoffs: new ContextHandoffStore(workload), designArtifacts: () => artifacts,
+            specs: () => new SpecStore(issues, designArtifacts: artifacts), artOutputs: () => new ArtOutputStore(workload),
+            secrets: secrets, issues: issues, runs: new AgentRunStore(workload), modelOverrides: overrides, gates: options.Gates);
+        return new(runner, factory, project.VerifyCommands ?? AgentTools.RunVerification.DefaultCommands(assignment.WorktreePath));
+    }
+}
+
+public sealed class WorkerRuntime(IAgentRunner runner, IDisposable owner, IReadOnlyList<string> verifyCommands) : IDisposable
+{
+    public IAgentRunner Runner { get; } = runner;
+    public IReadOnlyList<string> VerifyCommands { get; } = verifyCommands;
+    public void Dispose() => owner.Dispose();
+}

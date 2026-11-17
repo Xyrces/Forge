@@ -87,6 +87,23 @@ public sealed class DispatchLoopWakeupTests : IDisposable
             => Task.FromResult(new AgentRunResult(response, null, 1, 1, TimeSpan.FromMilliseconds(1)));
     }
 
+    private sealed class DrainingRunner : IAgentRunner
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowExit { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        {
+            using var registration = ct.Register(() => CancellationObserved.TrySetResult());
+            Started.TrySetResult();
+            await AllowExit.Task;
+            ct.ThrowIfCancellationRequested();
+            return new AgentRunResult("NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.Zero);
+        }
+    }
+
     private sealed class StubBundleFactory(ProjectDispatchBundle bundle) : IProjectDispatchBundleFactory
     {
         public ProjectDispatchBundle Build(ProjectOptions project) => bundle;
@@ -179,6 +196,34 @@ public sealed class DispatchLoopWakeupTests : IDisposable
 
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.NotEqual(IssueStatus.Pending, after.Status);
+    }
+
+    [Fact]
+    public async Task Shutdown_DoesNotReturnUntilLocalDispatchHasDrained()
+    {
+        await _projectStore.UpsertAsync(new NewProject("test", "Test", _workDir, "main"));
+        var task = await _issues.CreateAsync(new NewIssue(Type: "dev", Title: "drain work",
+            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        var sprint = await _bundle.Sprints.CreateAsync(new NewSprint(Name: "drain sprint", Goal: "g",
+            StartDate: DateTime.UtcNow, EndDate: DateTime.UtcNow.AddDays(1), Status: SprintStatus.Active));
+        await _bundle.Sprints.AddIssueAsync(sprint.Id, task.Id);
+        var runner = new DrainingRunner();
+        using var stop = new CancellationTokenSource();
+        var loop = BuildOrchestrator(runner).ExecuteAsync(stop.Token);
+        try
+        {
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            stop.Cancel();
+            await runner.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(loop.IsCompleted);
+        }
+        finally
+        {
+            stop.Cancel();
+            runner.AllowExit.TrySetResult();
+            try { await loop.WaitAsync(TimeSpan.FromSeconds(20)); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        }
     }
 
     private static void InitRepo(string path)

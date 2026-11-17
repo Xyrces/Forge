@@ -216,7 +216,7 @@ public interface IIssueStore
 /// </summary>
 public sealed class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 36;
+    public const int CurrentSchemaVersion = 38;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -274,6 +274,7 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
 
     private void InitializeSchema()
     {
+        if (!_db.InitializeSchema) return;
         if (_db.Provider == ForgeDbProvider.SqlServer)
         {
             InitializeSchemaSqlServer();
@@ -1014,6 +1015,12 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
         // client-scope work died at the plan-territory gate (live:
         // porthorizon task-752).
         ApplyV36FollowUpDraftTaskType(conn);
+        Control.ControlSchema.Create(conn, SqliteDialect.Instance);
+        using (var workers = conn.CreateCommand())
+        {
+            workers.CommandText = M038WorkerAttempts.SqliteDdl;
+            workers.ExecuteNonQuery();
+        }
 
         // Stamp AFTER migrations, as its own statement: the batch's
         // INSERT OR IGNORE does not reliably take effect on existing
@@ -1617,6 +1624,15 @@ public sealed class IssueStore : IIssueStore, IAsyncDisposable
                 CREATE INDEX ix_failure_triage_signature ON {{d.Table("failure_triage")}}(signature, failed_at);
             """;
             cmdTriage.ExecuteNonQuery();
+        }
+
+        // Global coordination tables belong only to the registry schema.
+        if (_db.Profile == ForgeSchemaProfile.Core)
+        {
+            Control.ControlSchema.Create(conn, d);
+            using var workers = Ddl();
+            workers.CommandText = M038WorkerAttempts.SqlServerDdl(q);
+            workers.ExecuteNonQuery();
         }
 
         // Ordered migrations for EXISTING databases (a schema just

@@ -47,6 +47,8 @@ public static class SqlServerMigrations
         new M034IntakeMessageProposalPayload(),
         new M035FailureTriage(),
         new M036FollowUpDraftTaskType(),
+        new M037ControlPlane(),
+        new M038WorkerAttempts(),
     };
 
     public static int ExpectedVersion =>

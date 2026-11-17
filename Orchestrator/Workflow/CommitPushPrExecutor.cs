@@ -77,6 +77,10 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         var issue = input.Worktree.Claim.Issue;
         var branch = input.Worktree.Claim.Branch ?? $"agent/{issue.Id}";
         var worktreePath = input.Worktree.WorktreePath!;
+        var commands = verifyCommands ?? AgentTools.RunVerification.DefaultCommands(worktreePath);
+        if (input.RequiresWorkerVerification && (input.Verification is null
+            || !await WorkerVerification.MatchesAsync(input.Verification, worktreePath, commands, ct)))
+            throw new InvalidOperationException("Worker verification receipt is missing or source/commands changed; no controller build or publication permitted.");
 
         // Operator-park guard: a park (Blocked) can land while the run
         // is still in flight. The finishing run must not push, open a
@@ -244,7 +248,6 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         // bounces the task back to the agent with the output — no PR
         // churn, no watch round; GitHub CI stays the safety net.
         // verifyCommands: null = auto-detect (dotnet), empty = disabled.
-        var commands = verifyCommands ?? AgentTools.RunVerification.DefaultCommands(worktreePath);
         if (hygieneViolations.Count > 0 || commands.Count > 0)
         {
             AgentTools.RunVerification.Result verification;
@@ -255,6 +258,12 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
                 logger.LogWarning("CommitPushPr({Id}): pre-push hygiene violations: {Violations}", issue.Id, string.Join("; ", hygieneViolations));
                 verification = new AgentTools.RunVerification.Result(false,
                     hygieneViolations.Select(v => "pre-push hygiene check failed (junk/oversized files added to the branch):\n" + v).ToList());
+            }
+            else if (input.RequiresWorkerVerification)
+            {
+                verification = await WorkerVerification.MatchesAsync(input.Verification!, worktreePath, commands, ct)
+                    ? new AgentTools.RunVerification.Result(true, [])
+                    : new AgentTools.RunVerification.Result(false, ["Source changed since trusted worker verification."]);
             }
             else
             {
@@ -378,6 +387,8 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         // crash after the PR is recorded.
         logger.LogInformation("CommitPushPr({Id}): setting CommitDone", issue.Id);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
+        if (input.RequiresWorkerVerification && !await WorkerVerification.MatchesAsync(input.Verification!, worktreePath, commands, ct))
+            throw new InvalidOperationException("Source changed after verified commit; publication refused.");
         logger.LogInformation("CommitPushPr({Id}): calling PushAsync", issue.Id);
         try
         {

@@ -1,4 +1,4 @@
-﻿namespace Forge.Agents;
+namespace Forge.Agents;
 
 /// <summary>
 /// What <see cref="IAgentRunner.RunAsync"/> returns. Captures the response
@@ -21,5 +21,6 @@ public sealed record AgentRunResult(
     string? SessionId,
     long InputTokens,
     long OutputTokens,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed,
+    Core.VerificationReceipt? Verification = null);
 

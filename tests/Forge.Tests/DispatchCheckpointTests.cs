@@ -63,7 +63,9 @@ public class DispatchCheckpointTests : IDisposable
 // materialized task to the right role (live 2026-08-23: porthorizon
 // task-752, a client task born type='task', hollow-closed at the
 // plan-territory gate; SQL Server chain: M036).
-        Assert.Equal(36, IssueStore.CurrentSchemaVersion);
+// v37 = global dataset ownership and durable request budget.
+// v38 = durable worker attempts for restart adoption.
+        Assert.Equal(38, IssueStore.CurrentSchemaVersion);
     }
 
     [Fact]

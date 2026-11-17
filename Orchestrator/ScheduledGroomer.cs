@@ -146,7 +146,7 @@ public sealed class ScheduledGroomer
         {
             // P2.a / P2.b: pull all specs and filter in C#. The
             // candidate set is the "ready to groom" statuses:
-            // Designed (Designer approved), AssetReady, Approved
+            // AssetReady (art completed), Approved
             // (operator fast-path). Groomed is deliberately NOT
             // auto-groomed: grooming appends stories/tasks, so a
             // terminal spec in the candidate set gets re-decomposed
@@ -155,9 +155,7 @@ public sealed class ScheduledGroomer
             // Intentional re-decomposition goes through the manual
             // endpoint with ?force=true.
             var all = await _specs.ListForPipelineSweepAsync(status: null, ct);
-            candidates = all.Where(s => s.Status is SpecStatus.Designed
-                or SpecStatus.AssetReady
-                or SpecStatus.Approved).ToList();
+            candidates = all.Where(s => SpecActions.CanStartGrooming(s.Status)).ToList();
         }
         catch (Exception ex)
         {

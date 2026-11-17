@@ -103,9 +103,17 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
             // skip the sync and create from the default branch.
             // Conflict rework rounds stay unchanged — the agent merges
             // origin/main itself per the rework prompt.
+            var resumeId = issue.GetMetadata("resumeDispatchId");
+            var adoptingWorker = !string.IsNullOrEmpty(resumeId) && resumeId == issue.GetMetadata("dispatchId");
+            if (adoptingWorker)
+            {
+                // A surviving pod may be editing this checkout. Never sync/reset it while adopting its attempt.
+                currentMetadata["resumeDispatchId"] = null!;
+                logger.LogInformation("Adopting dispatch {Dispatch} for {Id}; preserving worker checkout", resumeId, issue.Id);
+            }
             var prNumber = issue.GetMetadata("prNumber");
             var reworkAttempts = issue.GetMetadata("reworkAttempts");
-            if (!string.IsNullOrEmpty(prNumber) && int.TryParse(reworkAttempts, out var reworkCount) && reworkCount > 0)
+            if (!adoptingWorker && !string.IsNullOrEmpty(prNumber) && int.TryParse(reworkAttempts, out var reworkCount) && reworkCount > 0)
             {
                 var remoteRef = $"origin/{branch}";
                 logger.LogInformation(
@@ -127,7 +135,7 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                     throw;
                 }
             }
-            else if (reused)
+            else if (reused && !adoptingWorker)
             {
                 // Stale-reuse sync (no PR): a re-dispatched task whose
                 // earlier run died before opening a PR. If the
@@ -137,7 +145,8 @@ public sealed class WorktreeExecutor : FunctionExecutor<ClaimedIssue, WorktreeRe
                 // for the agent to continue from.
                 var ahead = await worktrees.CountCommitsAheadAsync(
                     worktreePath, $"origin/{defaultBranch}", ct);
-                if (ahead == 0)
+                var dirty = await worktrees.ListDirtyFilesAsync(worktreePath, ct);
+                if (ahead == 0 && !dirty.Any(file => !file.Ignored))
                 {
                     logger.LogInformation(
                         "Stale worktree reuse for {Id} (no local commits) — syncing to origin/{Base}",

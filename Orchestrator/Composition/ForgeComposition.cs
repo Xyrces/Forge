@@ -45,7 +45,8 @@ public sealed record ForgeProjectBootstrap(
 public static class ForgeComposition
 {
     public static async Task<ServiceProvider> BuildAsync(
-        AgentOptions options, ILoggerFactory loggerFactory, CancellationToken ct = default)
+        AgentOptions options, ILoggerFactory loggerFactory, CancellationToken ct = default,
+        Func<CancellationToken, Task>? admission = null)
     {
         var (knownProjects, orchDbByProject, orchDataRoot, projectStore, cloner, secretStore) =
             Program.BuildProjectBootstrap(options, loggerFactory);
@@ -95,7 +96,7 @@ public static class ForgeComposition
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TaskEnqueuedConsumer>());
         var projectFactory = new ProjectContextFactory(projectStore, orchDataRoot, orchDbByProject,
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
-            events: eventPublisher);
+            events: eventPublisher, deploymentProfiles: options.Deployments);
         services.AddSingleton(projectFactory);
         string? ProjectRootLookup(string projectId) =>
             projectFactory.KnownProjects
@@ -116,7 +117,7 @@ public static class ForgeComposition
         services.AddSingleton(issues);
         services.AddSingleton<IIssueStore>(issues);
         var registryIssues = new IssueStore(
-            ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDb));
+            ForgeDb.ForRegistry(options.Db.IsSqlServer, options.Db.ConnectionString, primaryDb, options.Db.AutoMigrate));
         var agents = new AgentStore(registryIssues);
         services.AddSingleton(agents);
         services.AddSingleton<IAgentStore>(agents);
@@ -248,6 +249,9 @@ public static class ForgeComposition
         ProviderApiKeyResolver? providerKeyResolver = null;
         if (chatClientFactory is OpenAICompatibleChatClientFactory openAiFactory)
         {
+            if (options.Controller.Enabled)
+                openAiFactory.RequestPolicy = Control.BudgetRequestPolicy.Create(options,
+                    registryIssues.Db, admission ?? (_ => throw new InvalidOperationException("Controller admission guard is required.")));
             openAiFactory.Overrides = roleModelOverrides;
             openAiFactory.RateLimits = modelRateLimits;
             openAiFactory.MaxConcurrentRequests = options.Llm.MaxConcurrentRequests;
@@ -286,7 +290,7 @@ public static class ForgeComposition
         services.AddSingleton(specStoreRef);
 
         MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
-        var agentRunner = new MafAgentRunner(
+        var localAgentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
             loggerFactory.CreateLogger<MafAgentRunner>(),
             skills: skillSource,
@@ -317,7 +321,18 @@ public static class ForgeComposition
                 : projectFactory.Find(pid)?.Issues,
             modelOverrides: roleModelOverrides,
             gates: options.Gates);
-        services.AddSingleton(agentRunner);
+        IAgentRunner agentRunner = localAgentRunner;
+        if (options.Worker.Enabled)
+        {
+            if (!options.Controller.Enabled || !options.Db.IsSqlServer || admission is null)
+                throw new InvalidOperationException("Kubernetes workers require the SQL-backed controller admission guard.");
+            var kubeClient = Workers.KubernetesWorkerJobs.CreateInClusterClient();
+            services.AddSingleton(kubeClient);
+            agentRunner = new Workers.KubernetesAgentRunner(
+                new Core.Execution.WorkerAttemptStore(registryIssues.Db),
+                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission);
+        }
+        services.AddSingleton(localAgentRunner);
         services.AddSingleton<IAgentRunner>(agentRunner);
         var eventBus = new InMemoryDashboardEventBus();
         services.AddSingleton(eventBus);
@@ -372,6 +387,7 @@ public static class ForgeComposition
                         loggerFactory: loggerFactory,
                         sprints: bundle.Sprints,
                         timeoutMinutes: options.Spawner.AgentRunTimeoutMinutes,
+                        lifecycle: lifecycle,
                         workflow: workflowResolver,
                         verifyCommands: bundle.Project.VerifyCommands,
                         // Message-driven review trigger: publish

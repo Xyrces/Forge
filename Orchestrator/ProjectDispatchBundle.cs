@@ -224,7 +224,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         var dbPath = ForgesystemPaths.IssuesDb(_dataRoot, project.Id);
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         var issueStore = new IssueStore(
-            Core.Db.ForgeDb.ForProject(_options.Db.IsSqlServer, _options.Db.ConnectionString, project.Id, dbPath),
+            Core.Db.ForgeDb.ForProject(_options.Db.IsSqlServer, _options.Db.ConnectionString, project.Id, dbPath, _options.Db.AutoMigrate),
             project.Id, _eventPublisher);
         var agents = new AgentStore(issueStore);
         var sprints = new SprintStore(issueStore);

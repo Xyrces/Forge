@@ -273,31 +273,24 @@ public class StartupRecoveryTests : IDisposable
         Assert.Contains("missing", d.Reason);
     }
 
-    [Fact]
-    public async Task Replay_AgentCompleted_CommitsPushesOpensPr()
+    [Theory]
+    [InlineData(DispatchCheckpoint.AgentCompleted)]
+    [InlineData(DispatchCheckpoint.CommitDone)]
+    [InlineData(DispatchCheckpoint.PushDone)]
+    public async Task Replay_UnverifiedPublication_RequeuesWithoutRemoteEffects(DispatchCheckpoint checkpoint)
     {
-        var id = await SeedIssueAsync(DispatchCheckpoint.AgentCompleted);
+        var id = await SeedIssueAsync(checkpoint);
         var issue = (await _issues.GetAsync(id))!;
         var action = await _recovery.ReplayAsync(issue);
-        Assert.Equal("replay", action.Action);
-        Assert.Equal("pr_opened", action.AfterCheckpoint);
-        // StubGitHub saw a CreatePullRequestAsync call.
-        Assert.Equal(1, _gitHub.CallCount);
-        // Issue state advanced to pr_opened with prNumber.
+        Assert.Equal("requeued", action.Action);
+        Assert.Equal(checkpoint.ToDbValue(), action.AfterCheckpoint);
+        Assert.Equal(0, _gitHub.CallCount);
         var after = (await _issues.GetAsync(id))!;
-        Assert.Equal(DispatchCheckpoint.PrOpened, after.DispatchCheckpoint);
-        Assert.Equal(999, int.Parse(after.GetMetadata("prNumber")!));
-        Assert.Equal(1, after.RecoveryAttempts);
-    }
-
-    [Fact]
-    public async Task Replay_PushDone_OpensPrOnly()
-    {
-        var id = await SeedIssueAsync(DispatchCheckpoint.PushDone);
-        var issue = (await _issues.GetAsync(id))!;
-        var action = await _recovery.ReplayAsync(issue);
-        Assert.Equal("replay", action.Action);
-        Assert.Equal(1, _gitHub.CallCount);
+        Assert.Equal(IssueStatus.Pending, after.Status);
+        Assert.Equal(checkpoint, after.DispatchCheckpoint);
+        Assert.Null(after.GetMetadata("prNumber"));
+        Assert.Equal(issue.GetMetadata("branch"), after.GetMetadata("branch"));
+        Assert.True(Directory.Exists(after.GetMetadata("worktreePath")));
     }
 
     [Fact]
@@ -399,8 +392,8 @@ public class StartupRecoveryTests : IDisposable
         //  1. claimed (just claimed, no worktree yet) -> requeued to Pending
         //  2. worktree_acquired (worktree exists) -> requeued to Pending
         //  3. worktree_acquired (worktree missing) -> failed
-        //  4. agent_completed -> replay -> pr_opened
-        //  5. push_done -> replay -> pr_opened
+        //  4. agent_completed -> verified redispatch
+        //  5. push_done -> verified redispatch
         //  6. pr_opened with prNumber -> left alone
         var claimedOnly = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "claimed"));
         await _issues.ClaimAsync(claimedOnly.Id, "forge");
@@ -421,12 +414,12 @@ public class StartupRecoveryTests : IDisposable
         var report = (await _reports.GetAsync(reportId))!;
 
         Assert.Equal(6, report.IssuesScanned);
-        Assert.Equal(2, report.IssuesReplayed);     // agent_done + push_done
+        Assert.Equal(0, report.IssuesReplayed);     // publication must pass normal verification
         // wt_missing is left_alone (recoveryAttempts < MaxAttempts -> retry).
         // A separate test (Replay_FailsAfterMaxAttempts) covers the
         // hard-fail transition when recoveryAttempts >= MaxAttempts.
         Assert.Equal(0, report.IssuesFailed);
-        Assert.Equal(4, report.IssuesScanned - report.IssuesReplayed - report.IssuesFailed);  // 4 left_alone
+        Assert.Equal(6, report.IssuesScanned - report.IssuesReplayed - report.IssuesFailed);
 
         var actions = JsonSerializer.Deserialize<List<RecoveryActionRecord>>(report.ActionsJson)!;
         Assert.Equal(6, actions.Count);
@@ -441,15 +434,13 @@ public class StartupRecoveryTests : IDisposable
         // wt_missing is left_alone (recoveryAttempts < MaxAttempts -> retry).
         Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(wtMissing))!.Status);
         Assert.Equal(1, (await _issues.GetAsync(wtMissing))!.RecoveryAttempts);
-        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(agentDone))!.Status);
-        Assert.Equal(DispatchCheckpoint.PrOpened, (await _issues.GetAsync(agentDone))!.DispatchCheckpoint);
-        Assert.Equal(DispatchCheckpoint.PrOpened, (await _issues.GetAsync(pushDone))!.DispatchCheckpoint);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(agentDone))!.Status);
+        Assert.Equal(DispatchCheckpoint.AgentCompleted, (await _issues.GetAsync(agentDone))!.DispatchCheckpoint);
+        Assert.Equal(DispatchCheckpoint.PushDone, (await _issues.GetAsync(pushDone))!.DispatchCheckpoint);
         Assert.Equal(DispatchCheckpoint.PrOpened, (await _issues.GetAsync(prOpened))!.DispatchCheckpoint);
 
-        // GitHub saw 3 PR creations: 1 from the seed for the
-        // prOpened fixture, plus 1 each from the recoverer for
-        // agent_done and push_done.
-        Assert.Equal(3, _gitHub.CallCount);
+        // Recovery never publishes; the only PR was created by the fixture.
+        Assert.Equal(1, _gitHub.CallCount); // only the seeded existing PR
     }
 
     [Fact]
@@ -461,6 +452,6 @@ public class StartupRecoveryTests : IDisposable
         var evts = _events.GetHistorySnapshot().Where(e => e.Kind == DashboardEventKind.RecoveryAction).ToList();
         Assert.NotEmpty(evts);
         Assert.Equal(id, evts[0].TaskId);
-        Assert.Equal("replay", evts[0].Data?["action"]?.ToString());
+        Assert.Equal("requeued", evts[0].Data?["action"]?.ToString());
     }
 }

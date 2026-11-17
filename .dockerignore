@@ -1,0 +1,15 @@
+.git
+.portHorizon
+.forge
+.worktrees
+**/bin
+**/obj
+appsettings.json
+**/*.env
+**/*.pfx
+**/*credentials*
+**/*secret*.json
+**/nuget.*.config
+**/__pycache__
+**/*.log
+docs/revival-review

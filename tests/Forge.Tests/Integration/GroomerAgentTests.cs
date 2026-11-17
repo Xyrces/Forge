@@ -33,6 +33,42 @@ public class GroomerAgentTests : IDisposable
         try { File.Delete(_dbPath); } catch { }
     }
 
+    private sealed class ObserveAfterToolClient(IChatClient inner, Func<Task> observe) : DelegatingChatClient(inner)
+    {
+        private int _calls;
+        public override async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            if (_calls++ > 0) await observe();
+            return await base.GetResponseAsync(messages, options, cancellationToken);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GroomedRequest_IsNotPublishedUntilRunFinishes(bool failAfterTool)
+    {
+        var spec = await _specs.CreateAsync(new NewSpec(ProjectId: "P", Title: "T", Body: "body"));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved);
+        var observed = false;
+        var client = new ObserveAfterToolClient(new MultiToolCallingChatClient(new[]
+        {
+            new FunctionCallContent("done", "set_spec_status", new Dictionary<string, object?> { ["status"] = "Groomed" }),
+        }, "Done."), async () =>
+        {
+            observed = true;
+            Assert.Equal(SpecStatus.Grooming, (await _specs.GetAsync(spec.Id))!.Status);
+            if (failAfterTool) throw new InvalidOperationException("interrupted after requesting completion");
+        });
+        if (failAfterTool)
+            await Assert.ThrowsAnyAsync<Exception>(() => BuildAgent(client).GroomAsync(spec.Id));
+        else
+            await BuildAgent(client).GroomAsync(spec.Id);
+        Assert.True(observed);
+        Assert.Equal(failAfterTool ? SpecStatus.Grooming : SpecStatus.Groomed, (await _specs.GetAsync(spec.Id))!.Status);
+    }
+
     private GroomerAgent BuildAgent(IChatClient client)
     {
         var factory = new ScriptingChatClientFactory(client);
@@ -480,6 +516,13 @@ public class SprintAssemblerGuardTests : IDisposable
     {
         var foreignSpec = await _specs.CreateAsync(new NewSpec(ProjectId: "porthorizon", Title: "F", Body: "b"));
         var ownSpec = await _specs.CreateAsync(new NewSpec(ProjectId: "forge", Title: "O", Body: "b"));
+
+        foreach (var spec in new[] { foreignSpec, ownSpec })
+        {
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, default);
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, default);
+            await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
+        }
 
         var groups = new Dictionary<string, List<IssueRecord>>(StringComparer.Ordinal)
         {

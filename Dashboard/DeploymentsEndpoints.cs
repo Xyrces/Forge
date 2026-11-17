@@ -48,12 +48,13 @@ public static class DeploymentsEndpoints
     }
 
     private static async Task<IResult> ListAsync(
-        string? projectId, ProjectContextFactory factory, CancellationToken ct)
+        string? projectId, ProjectContextFactory factory, DeploymentExecutorFactory executors, ILoggerFactory loggerFactory, CancellationToken ct)
     {
         if (!string.IsNullOrWhiteSpace(projectId))
         {
             var ctx = factory.Find(projectId);
             if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
+            await ReconcileKubernetesAsync(ctx, executors, loggerFactory, ct);
             return Results.Ok(await ctx.Deployments.ListAsync(projectId, ct: ct));
         }
 
@@ -62,9 +63,35 @@ public static class DeploymentsEndpoints
         {
             var ctx = factory.Find(p.Id);
             if (ctx is null) continue;
+            await ReconcileKubernetesAsync(ctx, executors, loggerFactory, ct);
             all.AddRange(await ctx.Deployments.ListAsync(p.Id, ct: ct));
         }
         return Results.Ok(all.OrderByDescending(d => d.RequestedAt).ToList());
+    }
+
+    private static async Task ReconcileKubernetesAsync(ProjectContext ctx, DeploymentExecutorFactory executors,
+        ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        if (ctx.Options.Deployment?.Kind != DeploymentKind.Kubernetes) return;
+        try
+        {
+            var executor = (KubernetesDeploymentExecutor)executors.Create(ctx.Options)!;
+            foreach (var candidate in await ctx.Deployments.ListAsync(ctx.Options.Id, ct: ct))
+            {
+                if (candidate.Status is not (DeploymentStatus.Approved or DeploymentStatus.Deploying)) continue;
+                if (candidate.Status == DeploymentStatus.Approved)
+                    await ctx.Deployments.SetStatusAsync(candidate.Id, DeploymentStatus.Deploying, ct);
+                var progress = await executor.ReadProgressAsync(ctx.Options, candidate, ct);
+                if (progress.StillInProgress) continue;
+                if (progress.Success) await ctx.Deployments.MarkDeployedAsync(candidate.Id, progress.Log, ct);
+                else await ctx.Deployments.MarkDeployFailedAsync(candidate.Id, progress.Log, ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            loggerFactory.CreateLogger("DeploymentReconciliation").LogWarning(ex,
+                "Could not reconcile Kubernetes release for {Project}; leaving deployment pending", ctx.Options.Id);
+        }
     }
 
     private static async Task<IResult> ListCommitsAsync(
@@ -90,7 +117,8 @@ public static class DeploymentsEndpoints
     private static readonly Regex CommitShaPattern = new("^[0-9a-fA-F]{7,40}$", RegexOptions.Compiled);
 
     private static async Task<IResult> CreateAsync(
-        CreateDeploymentRequest? body, ProjectContextFactory factory, ILoggerFactory loggerFactory, CancellationToken ct)
+        CreateDeploymentRequest? body, ProjectContextFactory factory, ILoggerFactory loggerFactory,
+        DeploymentExecutorFactory executors, CancellationToken ct)
     {
         if (body is null || string.IsNullOrWhiteSpace(body.ProjectId) || string.IsNullOrWhiteSpace(body.CommitSha))
             return Results.BadRequest(new { error = "projectId and commitSha are required" });
@@ -103,6 +131,24 @@ public static class DeploymentsEndpoints
 
         var summary = await GetCommitSummaryAsync(ctx.Options.Root, body.CommitSha, ct);
         var candidate = await ctx.Deployments.CreateAsync(body.ProjectId, body.CommitSha, summary, body.RequestedBy, ct);
+
+        if (ctx.Options.Deployment?.Kind == DeploymentKind.Kubernetes)
+        {
+            // Repository MSBuild/test execution belongs to reviewed CI, never to the live controller.
+            try
+            {
+                await ((KubernetesDeploymentExecutor)executors.Create(ctx.Options)!).ResolveProfileAsync(ctx.Options, candidate, ct);
+                await ctx.Deployments.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildPassed,
+                    "Build/test passed in the explicitly registered controller-image CI receipt for this exact source and image.", ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                loggerFactory.CreateLogger("DeploymentQualification").LogWarning(ex, "CI receipt qualification failed for {Candidate}", candidate.Id);
+                await ctx.Deployments.AppendBuildLogAsync(candidate.Id, DeploymentStatus.BuildFailed,
+                    "No valid reviewed CI build/test receipt is available for this exact source. Register the successful receipt and request a new candidate.", ct);
+            }
+            return Results.Ok(await ctx.Deployments.GetAsync(candidate.Id, ct));
+        }
 
         // The build/test gate can take minutes; run it off the request
         // thread and let the operator poll GET /api/deployments for
@@ -126,6 +172,13 @@ public static class DeploymentsEndpoints
             return Results.BadRequest(new { error = $"cannot approve a deployment in status {candidate.Status}" });
 
         var project = ownerCtx.Options;
+        if (project.Deployment?.Kind == DeploymentKind.Kubernetes)
+        {
+            if (candidate.Status != DeploymentStatus.BuildPassed)
+                return Results.BadRequest(new { error = "Kubernetes deployment requires BuildPassed." });
+            try { await ((KubernetesDeploymentExecutor)executors.Create(project)!).ResolveProfileAsync(project, candidate, ct); }
+            catch (InvalidOperationException ex) { return Results.BadRequest(new { error = ex.Message }); }
+        }
         var force = body?.Force ?? false;
 
         // Redeploying Forge itself bounces the ONE process running the
@@ -169,9 +222,7 @@ public static class DeploymentsEndpoints
 
         if (result.StillInProgress)
         {
-            // Reserved for future executors that hand off to an
-            // external job runner. Today all executors are
-            // synchronous (Script, SelfHostedSystemdService).
+            // Kubernetes hands off to an independent Job; the replacement controller reconciles its journal.
             return Results.Ok(new { id, status = "Deploying", message = result.Log });
         }
 
