@@ -79,19 +79,51 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         }
         foreach (var observation in observations)
             await RequireAncestor(project, repo, observation.Sha, frontier, ct);
+        var running = runningRevision()?.Trim();
+        if (!Sha(running))
+            throw new InvalidOperationException("Running controller source revision is unavailable; routine deployment cannot prove forward ancestry.");
         using var branch = await GetJson(project.Id, $"repos/{repo}/branches/{Uri.EscapeDataString(project.DefaultBranch)}", ct);
-        await RequireAncestor(project, repo, frontier, branch.RootElement.GetProperty("commit").GetProperty("sha").GetString()!, ct);
-        return (frontier, JsonSerializer.Serialize(new { repository = repo, branch = project.DefaultBranch,
+        var branchTip = branch.RootElement.GetProperty("commit").GetProperty("sha").GetString()!;
+        await RequireAncestor(project, repo, frontier, branchTip, ct);
+
+        // Prefer the minimal member frontier. A repaired controller may instead
+        // require a shared descendant to avoid rolling its repair back. Only the
+        // configured branch can supply that candidate; unavailable ancestry is
+        // an error, never permission to select a different source.
+        var selected = frontier;
+        var reason = "member-frontier";
+        if (!await IsAncestorAsync(project, repo, running!, frontier, ct))
+        {
+            await RequireAncestor(project, repo, running!, branchTip, ct);
+            foreach (var observation in observations)
+                await RequireAncestor(project, repo, observation.Sha, branchTip, ct);
+            selected = branchTip;
+            reason = "running-source-forward-recovery";
+        }
+        return (selected, JsonSerializer.Serialize(new { repository = repo, branch = project.DefaultBranch,
+            memberFrontier = frontier, runningSource = running, selectedSource = selected, selectionReason = reason,
             merged = observations.Select(o => new { pullRequest = o.Pr, sourceSha = o.Sha, mergedAt = o.At }) }, Json));
     }
 
     private async Task RequireAncestor(ProjectOptions project, string repo, string ancestor, string descendant, CancellationToken ct)
     {
+        if (!await IsAncestorAsync(project, repo, ancestor, descendant, ct))
+            throw new InvalidOperationException("Selected release source does not contain the required source ancestry.");
+    }
+
+    private async Task<bool> IsAncestorAsync(ProjectOptions project, string repo, string ancestor, string descendant, CancellationToken ct)
+    {
         if (!Sha(ancestor) || !Sha(descendant)) throw new InvalidOperationException("Merged source evidence requires full commit identities.");
-        if (ancestor == descendant) return;
+        if (ancestor == descendant) return true;
         using var comparison = await GetJson(project.Id, $"repos/{repo}/compare/{ancestor}...{descendant}", ct);
-        if (comparison.RootElement.GetProperty("status").GetString() is not ("ahead" or "identical"))
-            throw new InvalidOperationException("Merged source frontier does not contain every completed pull request.");
+        if (!comparison.RootElement.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String)
+            throw new InvalidOperationException("GitHub ancestry evidence is missing.");
+        return status.GetString() switch
+        {
+            "ahead" or "identical" => true,
+            "behind" or "diverged" => false,
+            _ => throw new InvalidOperationException("GitHub ancestry evidence has an unrecognized status.")
+        };
     }
 
     public async Task<TrustedImageReceipt?> FindReceiptAsync(ProjectOptions project, string sha, CancellationToken ct)
