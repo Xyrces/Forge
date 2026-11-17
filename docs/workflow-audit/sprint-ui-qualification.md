@@ -57,3 +57,20 @@ Screenshots `completion-review-summary.jpg`, `completion-stopped-narrow.jpg`
 and `deploy-gate-narrow.jpg` are retained beside the earlier evidence. This
 fixture is presentation and recovery interaction evidence only, not a real
 release or acceptance result. It has no schedulers or paid provider access.
+
+## Technical planning admission and interrupted recovery
+
+The same offline DashboardHost fixture through `33d5613` exercised the normal
+Groom action and the explicit retry of an interrupted grooming run. Normal
+admission immediately displayed "Technical planning: Queued", removed the
+duplicate action, and stated that queue admission is not completed planning.
+The existing zero-story decomposition remained unchanged until execution.
+
+The interrupted fixture retained its existing pending story and task after
+retry. Reloading showed the queued retry and the earlier interrupted attempt
+in history, with a readable explicit-retry label. Browser testing exposed a
+contradictory "no available actions" explanation and raw status names; the
+recheck confirmed the corrected explanation and history labels. Screenshots
+`grooming-normal-queued.jpg` and `grooming-retry-queued.jpg` are retained in
+the private fixture directory. No scheduler or model ran in this UI fixture;
+actual SQL concurrency and recovery are covered by the separate storage report.

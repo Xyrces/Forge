@@ -68,7 +68,7 @@ Qualification must preserve all of these cases:
 - Interruption racing release binding has one authority winner; it cannot leave an eligible orphan release.
 - Project/sprint switching and failed UI loads cannot display stale evidence as the new selection's result.
 
-The schema-41 rehearsal uses disposable SQL schemas and an old read-compatible bridge before/after additive migration. Until its final source-pinned result and the live cutover are recorded, do not describe those operations as passed. Likewise, synthetic browser proof does not substitute for the live operator's observation of the pilot's exact deployed version. Routine schema-preserving delivery, schema-upgrade coordination and whole-host disaster recovery are distinct claims; this planner work does not qualify the last of them.
+The [schema-41 rehearsal](completion-sql-qualification.md) passed with disposable Azure SQL schemas and the old read-compatible bridge before/after additive migration, including the integrated grooming recovery checks. The live cutover remains separate qualification. Synthetic browser proof does not substitute for the live operator's observation of the pilot's exact deployed version. Routine schema-preserving delivery, schema-upgrade coordination and whole-host disaster recovery are distinct claims; this planner work does not qualify the last of them.
 
 ## Historical design and superseded baseline findings
 
