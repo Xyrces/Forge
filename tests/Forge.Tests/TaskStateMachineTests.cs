@@ -251,37 +251,29 @@ public class TaskStateMachineTests : IDisposable
             }
             else if (from == TaskLifecycleState.BlockedOperator)
             {
-                // Operator-terminal, with TWO exceptions: WatchResumed
-                // nudges a transiently-blocked watch
-                // (blockedKind=reviewer-unavailable) back to PROpen
-                // once the reviewer model recovers, and OperatorClosed
-                // retires the task outright (operator decisions are
-                // legal from operator-owned states by definition —
-                // the close-obsolete path, 2026-08-01). Everything
-                // else still requires the operator requeue.
+                // Explicit operator requeue/close/adoption are allowed; adoption
+                // requires a verified open PR. WatchResumed only nudges a
+                // transient reviewer-unavailable watch after model recovery.
                 var exits = events.Where(evt => ProbeTo(evt, from)).ToList();
-                Assert.True(exits.Count == 3
+                Assert.True(exits.Count == 4
                         && exits.Contains(TaskEvent.OperatorRequeue)
                         && exits.Contains(TaskEvent.WatchResumed)
-                        && exits.Contains(TaskEvent.OperatorClosed),
-                    $"{from} must exit only via OperatorRequeue, WatchResumed, or OperatorClosed, has [{string.Join(",", exits)}]");
+                        && exits.Contains(TaskEvent.OperatorClosed)
+                        && exits.Contains(TaskEvent.OperatorAdoptPr),
+                    $"{from} must exit only via OperatorRequeue, WatchResumed, OperatorClosed, or OperatorAdoptPr, has [{string.Join(",", exits)}]");
             }
             else if (from == TaskLifecycleState.Failed)
             {
-                // Failed: three ways out — the operator requeue, the
-                // operator's close-obsolete, and an EXTERNAL MERGE
-                // (2026-08-13, deliberate contract change: the work
-                // landed on main after the breaker tripped — porthorizon
-                // task-408's PR #940 — and leaving the row Failed while
-                // the code ships serves nobody; a merge is outside
-                // ground truth, not a resurrection). Automation still
-                // cannot REOPEN or revive a Failed task.
+                // Only explicit operator requeue/close/adoption or an observed
+                // external merge can leave Failed. Adoption requires a verified
+                // open PR; automation still cannot reopen failed work.
                 var exits = events.Where(evt => ProbeTo(evt, from)).ToList();
-                Assert.True(exits.Count == 3
+                Assert.True(exits.Count == 4
                         && exits.Contains(TaskEvent.OperatorRequeue)
                         && exits.Contains(TaskEvent.OperatorClosed)
-                        && exits.Contains(TaskEvent.ExternallyMerged),
-                    $"{from} must exit only via OperatorRequeue, OperatorClosed, or ExternallyMerged, has [{string.Join(",", exits)}]");
+                        && exits.Contains(TaskEvent.ExternallyMerged)
+                        && exits.Contains(TaskEvent.OperatorAdoptPr),
+                    $"{from} must exit only via OperatorRequeue, OperatorClosed, ExternallyMerged, or OperatorAdoptPr, has [{string.Join(",", exits)}]");
             }
             else
             {
