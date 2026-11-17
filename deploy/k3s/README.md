@@ -179,6 +179,16 @@ unmerged branch to package itself. That trigger requires repository variable
 `FORGE_SDK_IMAGE` set to a reviewed SDK digest, plus `PACKAGES_PAT` for private
 NuGet dependencies. No push or workflow execution is performed by these files.
 
+An integration-branch deployment does not promote its source into `main`.
+Before closing a restart or migration, open and qualify a promotion PR into the
+repository's default branch, preserving commit ancestry with a merge commit.
+Then align the registered project's default branch, bootstrap configuration,
+and clean managed checkout through a drained controller replacement. A registry
+update alone neither switches an existing checkout nor refreshes cached dispatch
+bundles. Keep the promotion and the operational branch cutover visible as
+separate completion steps. See
+[`main-promotion-review.md`](../../docs/workflow-audit/main-promotion-review.md).
+
 Deployment-list polling reconciles the external journal into SQL after a
 controller replacement. Approved work whose Job creation was interrupted is
 submitted using its deterministic Job name. `committed` means deployed;

@@ -148,12 +148,13 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         await workflow.RunAsync(issue, CancellationToken.None);
 
         var after = await _issues.GetAsync(issue.Id);
-        Assert.Equal(IssueStatus.Completed, after!.Status);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
         Assert.NotNull(after.GetMetadata("worktreePath"));
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
     }
 
     [Fact]
-    public async Task Workflow_NoDiffShortCircuits()
+    public async Task Workflow_UnverifiedNoDiffRequeuesWithoutClaimingDelivery()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));
         var workflow = new EngineeringDispatchWorkflow(
@@ -177,7 +178,9 @@ public class EngineeringDispatchWorkflowTests : IDisposable
         await workflow.RunAsync(issue, CancellationToken.None);
 
         var after = await _issues.GetAsync(issue.Id);
-        Assert.Equal(IssueStatus.Completed, after!.Status);
+        Assert.Equal(IssueStatus.Pending, after!.Status);
+        Assert.Equal("1", after.GetMetadata("noProgressAttempts"));
+        Assert.Null(after.GetMetadata("trustedExistingImplementation"));
         Assert.Null(after.GetMetadata("prNumber"));
     }
 }

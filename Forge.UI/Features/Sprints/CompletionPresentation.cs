@@ -24,6 +24,7 @@ public static class CompletionPresentation
     public static string Evidence(string? value) => value switch
     {
         "MergedAndVerified" => "Merged work with recorded verification",
+        "ImplementationVerified" => "Implementation independently verified and reviewed",
         "DeploymentHealthy" => "Healthy deployment",
         "OperatorObserved" => "Explicit operator observation",
         _ => "Unknown evidence requirement"

@@ -74,6 +74,10 @@
             <div class="card">
                 <strong>@criterion.Text</strong>
                 <p class="page-subtitle">@CompletionPresentation.Evidence(criterion.EvidenceKind)</p>
+                @if (criterion.EvidenceKind == "ImplementationVerified")
+                {
+                    <p class="page-subtitle">Merged changes or existing code must have independent verification and review against this requirement at a recorded revision.</p>
+                }
                 @if (criterion.EvidenceKind == "OperatorObserved")
                 {
                     <p>@(criterion.ProofReference is not null ? "Operator observation recorded for this deployed version." : receipt.AbandonedAt is not null ? "Not verified; this outcome was stopped." : "Awaiting explicit operator observation of the exact deployed version.")</p>
