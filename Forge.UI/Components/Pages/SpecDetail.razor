@@ -69,6 +69,22 @@
                     }
                 </div>
             }
+            @if (ActionProp("groomingState") is { } groomingState || ActionFlag("groomingRetryAvailable"))
+            {
+                <div class="banner banner--info">
+                    <strong>Technical planning: @GroomingLabel(ActionProp("groomingState"))</strong>
+                    @if (!string.IsNullOrWhiteSpace(ActionProp("groomingRetryReason")))
+                    {
+                        <p>@ActionProp("groomingRetryReason")</p>
+                    }
+                    @if (ActionFlag("groomingRetryAvailable"))
+                    {
+                        <p>The previous model request may have finished and incurred a charge. This explicit retry safely resumes the same specification; another request may incur a charge.</p>
+                        <button class="btn btn--small btn--primary" disabled="@(_acting || _loadedActionTarget != ActionTarget)" @onclick="RetryGroomingAsync">Retry interrupted technical planning</button>
+                    }
+                </div>
+            }
+            @if (_groomingNotice is not null) { <p role="status">@_groomingNotice</p> }
             <div style="display:flex; gap:8px; margin-top:10px">
                 @if (ActionFlag("canApprove"))
                 {
@@ -191,10 +207,13 @@
     private string? _actionError;
     private bool _acting;
     private bool _offerForceGroom;
+    private string? _loadedActionTarget, _loadedSpecTarget, _groomingNotice;
+    private int _loadGeneration;
+    private string ActionTarget => SpecId + "|" + LensQuery;
 
     private string StatusCss => SpecProp("status")?.ToLowerInvariant() ?? "unknown";
 
-    protected override async Task OnInitializedAsync()
+    protected override async Task OnParametersSetAsync()
     {
         await LoadAsync();
     }
@@ -227,25 +246,43 @@
     private async Task LoadAsync()
     {
         _error = null;
+        var generation = ++_loadGeneration;
+        var target = ActionTarget;
+        if (_loadedSpecTarget != target) { _spec = null; _actions = null; _loadedActionTarget = null; _groomingNotice = null; }
         try
         {
             var tree = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/tree" + LensQuery);
+            if (generation != _loadGeneration || target != ActionTarget) return;
             _spec = tree.GetProperty("spec");
+            _loadedSpecTarget = target;
             _stories = tree.GetProperty("stories").EnumerateArray().Select(StoryVm.From).ToList();
             _orphanTasks = tree.GetProperty("orphanTasks").EnumerateArray().Select(TaskVm.From).ToList();
             _groomRuns = tree.GetProperty("groomRuns").EnumerateArray().Select(GroomRunVm.From).ToList();
-            try { _actions = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/actions" + LensQuery); }
-            catch { _actions = null; }
+            var actionTarget = ActionTarget;
+            _loadedActionTarget = null;
+            try
+            {
+                var actions = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/actions" + LensQuery);
+                if (generation != _loadGeneration || actionTarget != ActionTarget) return;
+                _actions = actions;
+                _loadedActionTarget = actionTarget;
+            }
+            catch (Exception)
+            {
+                if (generation != _loadGeneration || target != ActionTarget) return;
+                _actions = null;
+                _actionError = "Planning controls could not be loaded. Refresh before taking an action.";
+            }
             var projectId = Project ?? ShellStore.Value.CurrentProjectId;
             _repoUrl = null;
             if (!string.IsNullOrEmpty(projectId))
             {
                 var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
-                if (projectId == (Project ?? ShellStore.Value.CurrentProjectId))
+                if (generation == _loadGeneration && target == ActionTarget && projectId == (Project ?? ShellStore.Value.CurrentProjectId))
                     _repoUrl = RepositoryLinks.ForProject(projects, projectId);
             }
         }
-        catch (Exception ex) { _error = ex.Message; }
+        catch (Exception ex) { if (generation == _loadGeneration && target == ActionTarget) _error = ex.Message; }
     }
 
     private string? PrUrl(string prNumber) =>
@@ -275,6 +312,57 @@
     {
         _disposeCts.Cancel();
         _disposeCts.Dispose();
+    }
+
+    private static string GroomingLabel(string? state) => state switch
+    {
+        "Queued" => "Queued",
+        "Started" => "In progress",
+        "Failed" => "Stopped after an error",
+        "NeedsReview" => "Interrupted — explicit retry required",
+        "Completed" or "Success" => "Finished",
+        null => "Interrupted state requires review",
+        _ => "Status unavailable"
+    };
+
+    private async Task RetryGroomingAsync()
+    {
+        if (_acting || !ActionFlag("groomingRetryAvailable") || _loadedActionTarget != ActionTarget) return;
+        var target = ActionTarget;
+        var actionGeneration = _loadGeneration;
+        var url = $"/api/specs/{Uri.EscapeDataString(SpecId)}/groom/retry" + LensQuery;
+        long? expectedRunId = long.TryParse(ActionProp("groomingRunId"), out var runId) ? runId : null;
+        _acting = true; _offerForceGroom = false; _actionError = null; _groomingNotice = null;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync(url, new { expectedRunId }, _disposeCts.Token);
+            if (target != ActionTarget || actionGeneration != _loadGeneration) return;
+            if (response.StatusCode != System.Net.HttpStatusCode.Accepted)
+            {
+                _actionError = response.StatusCode == System.Net.HttpStatusCode.Conflict
+                    ? "Technical planning changed since this page loaded. Refresh its status before retrying. No replacement attempt was confirmed."
+                    : "The retry was not accepted. Refresh the planning status before trying again.";
+                await LoadAsync();
+                return;
+            }
+            _groomingNotice = "Safe retry queued. Existing planned work is retained; this is not a completed planning result.";
+            await LoadAsync();
+            StateHasChanged();
+            for (var i = 0; i < 8 && !_disposeCts.IsCancellationRequested && target == ActionTarget; i++)
+            {
+                if (ActionProp("groomingState") is not ("Queued" or "Started")) break;
+                await Task.Delay(TimeSpan.FromSeconds(15), _disposeCts.Token);
+                if (target != ActionTarget) break;
+                await LoadAsync();
+                StateHasChanged();
+            }
+        }
+        catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (target == ActionTarget) _actionError = "Retry acknowledgement was interrupted. Refresh the planning status before issuing another request.";
+        }
+        finally { _acting = false; }
     }
 
     private async Task GroomAsync(bool force)
