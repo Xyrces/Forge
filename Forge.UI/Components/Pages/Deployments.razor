@@ -126,6 +126,8 @@
                             @if (d.CompletionId is not null && d.Status is "Pending" or "BuildPassed")
                             {
                                 <span>Routine delivery · <a href="/sprints">deployment gate</a></span>
+                                <button class="btn btn--small btn--danger"
+                                        @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id, d.ProjectId)))">Reject unstarted release</button>
                             }
                             @if (d.CompletionId is null && d.Status is "Pending" or "BuildPassed")
                             {
