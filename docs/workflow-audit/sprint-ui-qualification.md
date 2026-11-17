@@ -74,3 +74,21 @@ recheck confirmed the corrected explanation and history labels. Screenshots
 `grooming-normal-queued.jpg` and `grooming-retry-queued.jpg` are retained in
 the private fixture directory. No scheduler or model ran in this UI fixture;
 actual SQL concurrency and recovery are covered by the separate storage report.
+
+## Readable specifications and automatic-stage explanations
+
+The live pilot's refined specification exposed raw Markdown and a generic
+"no available actions" explanation while waiting for automatic design.
+Source through `b4ceb8d` replaces the raw text block with the existing
+HTML-disabled Markdown renderer and explains the next stage, including the
+effect of a hold, with a link to the Flow controls. Action eligibility is
+unchanged.
+
+The actual long specification body was copied into an isolated, explicitly
+labeled offline fixture. Browser checks at1280×900 and480×850 showed readable
+headings, paragraphs, acceptance criteria and the automatic-stage explanation;
+the narrow layout kept the content within the viewport. Screenshots
+`readable-spec-desktop.jpg` and `readable-spec-narrow.jpg` are retained in
+the private preview directory. The Mermaid block remains readable fenced
+source; this check does not claim an interactive diagram renderer. No
+scheduler, provider call or production data mutation occurred in the preview.
