@@ -43,6 +43,8 @@ If a class needs to read `IOptions<X>` AND write `IssueStore` AND make HTTP call
 
 ## Conventions (from `CONTRIBUTING.md`)
 
+- **Keep the operator's Windows workstation responsive.** Run builds, tests and other sustained heavy work on the Linux SSH host or CI, not this PC. Coordinate host load with other agents before starting heavy work; use the shared build lock and agreed concurrency limits. Local lightweight source edits, Git operations and read-only inspection are fine.
+
 - `TreatWarningsAsErrors=true` on the main project. Clean build required. Test project allows warnings.
 - `LangVersion=14`, `<Nullable>enable</Nullable>`. Use `string?` for nullable params.
 - Tests: xUnit + FluentAssertions-light. **No Moq, no NSubstitute.** Hand-roll typed fakes.

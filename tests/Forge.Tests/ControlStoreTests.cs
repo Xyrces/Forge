@@ -106,7 +106,7 @@ public sealed class ControlStoreTests : IDisposable
         var factory = new ReadOnlyCatalogFactory(_issues.DbPath);
         await using var runtime = new IssueStore(factory);
         runtime.EnsureSchema();
-        if (version is 41 or 42) await ControllerHost.VerifySchemaAsync(factory, default);
+        if (offset == 0) await ControllerHost.VerifySchemaAsync(factory, default);
         else await Assert.ThrowsAsync<InvalidOperationException>(() => ControllerHost.VerifySchemaAsync(factory, default));
         await using var check = await factory.OpenAsync();
         using var read = check.CreateCommand();

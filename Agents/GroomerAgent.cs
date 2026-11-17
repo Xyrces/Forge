@@ -559,7 +559,7 @@ public sealed class GroomerAgent
         that use configured role capacities, but one or two coherent tasks is valid; never pad or split artificially.
         Tasks in one complete delivery unit share outcomeId, objective, criteria and complete requiredTaskIds.
         Use a common outcomeId/objective across related approved specifications only with explicit semantic justification.
-        criterionIds specifies each task's contribution. This maintenance bridge emits MergedAndVerified for new implementation criteria. ImplementationVerified is available only after the explicit format42 upgrade; do not create new mappings of that kind on41. Preserve every existing criterion kind and never weaken a requirement for a new merged PR. Other kinds are
+        criterionIds specifies each task's contribution. Default implementation evidenceKind is ImplementationVerified (either a verified merged change or independently verified and reviewed existing implementation at an exact revision). Use MergedAndVerified when approved acceptance explicitly requires a new merged PR; never weaken that requirement. Other kinds are
         DeploymentHealthy (post-deploy controller/runtime qualification), or OperatorObserved (post-deploy operator-led acceptance,
         including visual/browser checks). Never substitute deployment health or merged code for actual visual acceptance.
         Keep pre-deployment implementation and post-deployment acceptance as distinct criteria WITHIN THE SAME delivery outcome.
@@ -572,7 +572,7 @@ public sealed class GroomerAgent
         reason is Delivers, Remediates, or Prerequisite. Every prerequisite needs explicit criterion mapping too.
         For remediation, bind to existing approved acceptance scope; followUpOf alone is not approval.
         Binding JSON: {"version":1,"outcomeId":"stable-goal-id","objective":"useful outcome",
-          "criteria":[{"id":"criterion-id","text":"observable acceptance","evidenceKind":"MergedAndVerified",
+          "criteria":[{"id":"criterion-id","text":"observable acceptance","evidenceKind":"ImplementationVerified",
             "scope":{"specId":"...","proposalId":"...","revision":1,"hash":"...","approvedExcerpt":"literal approved text"}}],
           "requiredTaskIds":["all tasks required for this unit"],"criterionIds":["criterion-id"],"reason":"Delivers",
           "authority":{"specId":"...","proposalId":"...","revision":1,"hash":"...","approvedExcerpt":"literal approved text"}}

@@ -15,12 +15,17 @@ no automatic migration on activation and no database downgrade on rollback.
 
 ## Publication is not deployment qualification
 
-The existing `schema-upgrade.json` still contains the previous 40→41 policy and
-its old bridge digest. **It is not a policy for this release.** Do not substitute
-an arbitrary or fabricated digest. Before publishing a deployable 42 image,
-replace it with `{fromVersion:41,toVersion:42,rollbackImage:<qualified digest>}`
-using an independently built and tested bridge below. Until then the old policy
-cannot migrate 41 to 42; strict candidate readiness fails closed.
+`schema-upgrade.json` pins the 41→42 transition to the exact bridge B image
+`ghcr.io/xyrces/forge@sha256:2aaee461fc8ce4aa97516ad2c8c576500a6fc5f448022ee19fbc06b728fe8508`.
+The old 40→41 bridge is not suitable for this transition. Qualification receipts
+and their scope are recorded in [the bridge history](format42-maintenance-bridge.md).
+Pinning a digest is not itself permission to migrate production.
+
+Read compatibility and write-guard qualification must precede pinning the bridge
+digest in the deployable policy. The controlled real release/rollback exercise is
+a later rollout qualification step; neither source review nor isolated SQL
+results establish that it has happened. Do not declare the cutover complete until
+the actual supervised rollout and required rollback observation are recorded.
 
 ## Required bridge source and artifact
 
