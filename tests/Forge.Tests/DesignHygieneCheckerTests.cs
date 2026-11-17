@@ -73,6 +73,38 @@ public class DesignHygieneCheckerTests : IDisposable
 
     private DesignHygieneChecker NewChecker() => new(_specs, _graphCache, _graphBuilder, _workDir);
 
+    [Fact]
+    public async Task LivePilotRejectsEpicAsSpecDependency_ButRecognizesPopulatedPathTouches()
+    {
+        var epic = await _issues.CreateAsync(new NewIssue("epic", "Running Forge revision"));
+        var spec = await CreateSpecAsync($"""
+            ## Acceptance criteria
+            - [ ] Read only /app/source-revision and preserve build-info compatibility.
+            ## Touches
+            - `Dashboard/`
+                - Add or adapt the shared artifact reader.
+            - `Forge.UI/Components/` shared dashboard shell/layout
+                - Render global revision independently of project selection.
+            ## Dependencies
+            - related {epic.Id} — Existing initiative for globally displaying the running Forge source revision.
+            """);
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.Contains(report.Findings, f => f.Rule == "broken_dep_chain");
+        Assert.DoesNotContain(report.Findings, f => f.Rule == "no_touches");
+        Assert.Contains(report.Findings, f => f.Rule == "touches_not_module_mapped" && f.Severity == HygieneSeverity.Warning);
+        Assert.False(report.Passed);
+    }
+
+    [Fact]
+    public async Task DependencyCannotResolveToAnotherProjectsSpec()
+    {
+        var other = await _specs.CreateAsync(new NewSpec("other", "Other spec", ""));
+        var spec = await CreateSpecAsync($"## Acceptance criteria\n- [ ] Works\n## Dependencies\n- depends_on {other.Id}");
+        var report = await NewChecker().CheckAsync(spec);
+        Assert.Contains(report.Findings, f => f.Rule == "broken_dep_chain");
+        Assert.False(report.Passed);
+    }
+
     private async Task<SpecRecord> CreateSpecAsync(string body, SpecStatus status = SpecStatus.ReadyForDesign)
     {
         var spec = await _specs.CreateAsync(new NewSpec("P", "Test", body));

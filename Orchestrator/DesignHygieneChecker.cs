@@ -114,18 +114,17 @@ public sealed class DesignHygieneChecker
                 "Add a ## Acceptance criteria section with at least one checkboxed bullet, e.g. `- [ ] player can load a level`."));
         }
 
-        // 3. broken_dep_chain — spec's ## Dependencies references a
-        //    spec_id that doesn't exist in SpecStore.
+        // Dependencies are specification references, never issue/epic links.
         foreach (var dep in extracted.Deps)
         {
             if (string.IsNullOrWhiteSpace(dep.TargetSpecId)) continue;
             var target = await _specs.GetAsync(dep.TargetSpecId, ct);
-            if (target is null)
+            if (target is null || target.ProjectId != spec.ProjectId)
             {
                 findings.Add(new HygieneFinding(
                     "broken_dep_chain", HygieneSeverity.Error,
-                    $"## Dependencies references spec '{dep.TargetSpecId}' ({dep.Kind}) but no such spec exists.",
-                    "Fix or remove the dependency; the spec_id is wrong."));
+                    $"## Dependencies references spec '{dep.TargetSpecId}' ({dep.Kind}) but no such spec exists in project '{spec.ProjectId}'.",
+                    "Use an existing same-project specification ID; issue/epic references belong in Notes, not Dependencies."));
             }
         }
 
@@ -164,12 +163,29 @@ public sealed class DesignHygieneChecker
         // 6. no_touches — soft warning, not all specs touch modules
         //    (e.g. a CI build spec). Many legitimate specs have
         //    empty Touches.
-        if (extracted.Touches.Count == 0)
+        // Path-based/nested markdown touches are useful context even when they are
+        // not csproj module identifiers understood by the module extractor.
+        var touchesContent = FindSection(spec.Body, "Touches") ?? "";
+        var populatedTouches = touchesContent.Split('\n').Any(line =>
+        {
+            var text = line.Trim();
+            return (text.StartsWith("- ") || text.StartsWith("* ") || text.StartsWith("+ "))
+                && !string.IsNullOrWhiteSpace(text[2..]);
+        });
+        if (extracted.Touches.Count == 0 && !populatedTouches)
         {
             findings.Add(new HygieneFinding(
                 "no_touches", HygieneSeverity.Warning,
                 "## Touches is empty. Engineering won't know which modules to update.",
                 "List the modules this spec affects. If it's truly a no-touch spec (e.g. CI), ignore."));
+        }
+
+        else if (extracted.Touches.Count == 0)
+        {
+            findings.Add(new HygieneFinding(
+                "touches_not_module_mapped", HygieneSeverity.Warning,
+                "## Touches contains descriptive/path entries; they have not been validated as codebase module IDs.",
+                "Keep useful path context, or add exact module identifiers when module graph validation is needed."));
         }
 
         // 7. duplicate_epic_in_active_sprint — another spec with
@@ -299,7 +315,7 @@ public sealed class DesignHygieneChecker
                 return;
             }
             var target = await _specs.GetAsync(id, ct);
-            if (target is null) continue;  // already flagged by broken_dep_chain
+            if (target is null || target.ProjectId != spec.ProjectId) continue; // missing/cross-project direct references are rejected above
             var sub = new SpecBodyExtractor().Extract(target.Body);
             foreach (var d in sub.Deps)
             {
