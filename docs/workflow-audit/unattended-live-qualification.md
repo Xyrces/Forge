@@ -302,3 +302,191 @@ An offline browser requested technical review for a synthetic task, displayed th
 queued confirmation, and removed the action after refresh. This demonstrates the
 recovery control only: no model scheduler runs in that preview and the live
 `task-3` still needs the deployed correction and an explicit request.
+
+## Running revision: client-1 offline evidence and task-3 handoff
+
+This append collates the available post-implementation worker evidence for
+`client-1` under the existing sprint `offline-build` criterion. It does not add
+scope, authorize deployment, or satisfy `operator-browser` or
+`running-image-comparison`. Those two **OperatorObserved criteria remain
+Pending**. The historical live observations above concern earlier releases and
+must not be reused as acceptance of this running-revision feature.
+
+### Worker results — retained UI implementation, not operator acceptance
+
+The retained client implementation is local commit
+`c4a90ff3b1de08dfc359266673e17ac8b8340f17`, tree
+`bb323accab62bafec1998c14a611f96b1ddfafa5`, from client worker run
+`ce6b5fd846d4`. The local `issues.jsonl` viewer's `client-1.reworkContext`
+(updated 2026-11-17 at 20:46:14.835) records **95/95 targeted checks and 84/84
+revision checks**, followed by the worker timeout. Its `modelResponse` is
+`<timed out after 15m>`, not a completed verification receipt. These are
+attributed prior-run results from the recovery summary, not a newly obtained
+successful client completion summary. Their full original command set is not
+available in that summary; the counts may overlap and must not be added.
+The viewer is historical corroboration, not queue or completion authority.
+
+To supply reproducible build/component/client/state evidence rather than infer
+success from that summary, task-3 independently checked the **exact retained
+client snapshot**, exported with `git archive` into its own ignored
+`.test-temp/task-3-client-validation/source/` fixture. No active sibling worktree
+or tracked UI source was changed. On 2026-11-17 with SDK **10.0.404**, these
+commands ran in the exported snapshot, using only the local package cache for
+restore (no GitHub/package-server requests):
+
+```sh
+dotnet clean Forge.Core/Forge.Core.csproj --configuration Release --nologo
+dotnet restore tests/Forge.Tests/Forge.Tests.csproj --source /var/lib/forge/.nuget/packages -p:NuGetAudit=false --nologo
+dotnet build Forge.Core/Forge.Core.csproj --configuration Release --no-restore --nologo
+dotnet test tests/Forge.Tests/Forge.Tests.csproj --configuration Release --no-restore --nologo --filter 'FullyQualifiedName~BuildRevisionPresentationTests|FullyQualifiedName~BuildInfoEndpointTests|FullyQualifiedName~AppShellEndpointsTests' --logger 'trx;LogFileName=client-qualification.trx' --results-directory ../logs
+```
+
+Task-3 worker summary of actual results:
+
+| Check | Observed offline result | Scope/limit |
+|---|---|---|
+| Clean application build, including Forge.UI Razor compilation | Passed; 0 warnings, 0 errors | Retained client snapshot only, not combined sibling branches |
+| `BuildRevisionPresentationTests` | 84 passed | Static component rendering, fake HTTP client and shell state/effects/reducers; no browser |
+| `AppShellEndpointsTests` | 5 passed | Isolated local HTTP fixtures |
+| `BuildInfoEndpointTests` | 1 passed | Legacy version/framework compatibility case on this snapshot, **not** task-2's new revision HTTP coverage |
+| Focused total (20:53:36–20:53:39 UTC) | 90 passed, 0 failed, 0 skipped | Not a full-suite run; compilation emitted existing test-project/analyzer warnings, including NU1510 |
+
+The local logs and TRX are in task-3's ignored
+`.test-temp/task-3-client-validation/logs/`; the per-class counts above come
+from TRX result records, including theory cases. These are worker checks, not
+trusted publication receipts or durable private operator evidence.
+
+The 84 revision cases check the first seven characters, the full validated SHA,
+exact Forge commit link, labeled native `details`/`summary` and anchor semantics
+(no hover-only details or custom tab-order override), and `Unavailable` without
+a disclosure/link for missing, legacy, inconsistent or failed metadata. They
+exercise the real shared `MainLayout` at all discovered routed URIs in valid and
+unavailable states with no selected project; page bodies are placeholders, so
+this is shell/route coverage, not page-load or browser-layout acceptance.
+Fake-client cases cover additive `sourceRevision`/`commitUrl` deserialization,
+existing version/framework fields, request failures and caller cancellation.
+State/effect/reducer cases select and switch Forge/another project and return
+to no project: short/full SHA and commit target stay unchanged, metadata is
+requested once without a project parameter, and project data cannot supply a
+fallback revision. Static semantics do not prove actual keyboard or screen
+readability; those observations remain operator-only below.
+
+### Backend contract and remaining verification boundary
+
+The sibling task-2 [backend contract](running-revision-api.md), inspected at
+local commit `43c75dc5354d53e7683c736053b1857207135e98`, defines the additive
+nullable JSON fields **`sourceRevision`** and **`commitUrl`** alongside unchanged
+`informationalVersion` and `framework`. Its document is supplied by task-2's
+separate change; this task does not create a duplicate or copy its backend code.
+The contract URL is exactly
+`https://github.com/Xyrces/Forge/commit/<full-sha>` using the full validated
+40-character hexadecimal SHA from **only `/app/source-revision`**. Missing,
+invalid or unreadable content returns HTTP 200 with both fields explicitly
+null. `Unavailable` is UI text, never an API revision or inferred identity.
+
+The task-2 worker report records a clean application/Razor build (0 warnings,
+0 errors) and **67/67** focused reader/HTTP/completion/dashboard-contract tests,
+including injected read failures, explicit nulls and project-independent API
+responses. These are attributed backend worker results, not tests rerun on the
+client snapshot or an integrated application. Refer to that report for its
+commands and limitations; do not add overlapping test totals across reports.
+
+**Still pending:** a successful final client worker/independent exact-tree
+verification receipt, combined UI/backend/current-base build and relevant tests,
+controller-managed publication and current-head review/CI. Subsequent client
+changes require results for their actual final source; this retained-snapshot
+record must not be relabeled as that verification. Task-3 supplies the authorized
+documentation collation without blocking or duplicating parallel UI coding.
+Worker-host independent verification and controller publication remain separate
+from these in-session checks. No worker installed a browser, accessed the live
+operator dashboard, performed a deployment, changed release automation, or
+recorded operator acceptance for this handoff.
+
+### Operator browser qualification — Pending (operator records only)
+
+After **normally approved deployment**, the operator should record actual
+observations here and retain supporting receipts/screenshots under the existing
+private `.portHorizon/validation/` location in the integration worktree. This
+procedure is not deployment approval and does not request a release-policy or
+automation change. Only the operator may record OperatorObserved acceptance via
+the normal evidence workflow; worker prose, synthetic fixtures and these empty
+templates do not satisfy it.
+
+For every observation record: operator identity, UTC time, actual browser/version,
+viewport width **and height** in CSS pixels, zoom, route, project-selection state,
+deployed workload/image/digest and qualified receipt reference, actions taken,
+expected/actual result, and private evidence reference. Suggested test viewports
+are **1440 × 900** desktop and **390 × 844** narrow; these are proposed widths,
+**not measurements or observations**. Record the actual widths used (and any
+additional failing width), rather than copying the suggestions as results.
+
+| Operator scenario — repeat at desktop and narrow widths | Required actual observation | Result/evidence |
+|---|---|---|
+| Readability and shared placement | Short SHA is the first seven characters, readable without obscuring navigation/actions; expanded full SHA/link fit or wrap without clipping/overlap | Pending — no operator record |
+| Labeled keyboard full-SHA access | Tab/Shift+Tab reaches the labeled revision summary with visible focus; Enter/Space opens/closes it; full 40-character SHA is available without hovering; link is keyboard reachable | Pending — no operator record |
+| Exact commit link access | Inspect the actual href and use the link by keyboard; it is exactly `https://github.com/Xyrces/Forge/commit/<full-sha>` with that full SHA, not a short SHA, branch, project URL or query-modified target | Pending — no operator record |
+| Dashboard routes / no-project state | Visit the deployed route inventory, including `/`, `/tasks`, `/specs`, `/sprints`, `/flow`, `/projects` and project overview; shared revision remains available across navigation and with no project selected/configured | Pending — no operator record |
+| Project selection and switching | From no project, select Forge, switch to another project, then back; capture unchanged short/full SHA, commit target and API `sourceRevision`/`commitUrl`; arrange no-project coverage safely, without deleting production projects | Pending — no operator record |
+| Unavailable state | Using the operator-approved safe arrangement below, `Unavailable` is readable and there is **no revision link** or stale full-SHA disclosure to tab to; no inferred version/project/checkout revision | Pending — no operator record |
+
+For unavailable/no-project observations, first agree a safe isolated preview or
+non-serving qualification instance and record its identity and exact arrangement
+separately from the real deployed-image comparison. The operator may arrange
+an absent/invalid/unreadable artifact or an explicit-null API response there;
+record which case was actually used. Do **not** remove/edit `/app/source-revision`
+in the serving workload, change its release configuration, delete real projects,
+or deploy a deliberately broken image to manufacture a screenshot. Use the
+normal approved access path; do not expose the unauthenticated dashboard. Workers
+must not open a browser or the live dashboard to perform this procedure. If no
+safe arrangement is approved/available, keep the scenario Pending. An isolated
+preview can qualify unavailable presentation, not the deployed image's identity;
+restore/close the arrangement and record that cleanup before concluding it.
+
+### Operator running-image / receipt comparison — Pending
+
+Only after normal release approval and deployment, identify the **actual serving
+workload**, namespace, pod UID, container name and running image ID/immutable
+digest, observation time, and the matching qualified build receipt (identifier,
+location/hash, packaged source SHA and image digest). Use the receipt's packaged
+source identity, which need not be a squash merge or PR-head SHA. Tie dashboard
+and API observations to that same workload/image; identify all serving replicas
+or use an operator-approved instance-specific observation path to avoid comparing
+one replica's artifact to another's response. A mixed or unresolved identity
+remains Pending, not a pass.
+
+| Operator evidence field | Actual value / private evidence reference |
+|---|---|
+| Operator and UTC observation time | Pending |
+| Actual serving workload / namespace / pod UID / container | Pending |
+| Actual running image ID and immutable `sha256:` digest | Pending |
+| Qualified build receipt ID / location / hash and matching image digest | Pending |
+| Dashboard expanded full SHA (not seven-character display) | Pending |
+| `/api/meta/buildinfo` full `sourceRevision` | Pending |
+| `/api/meta/buildinfo` exact `commitUrl` and dashboard link href | Pending |
+| `/app/source-revision` read **inside that actual running image/container**; retain raw output and trimmed full SHA | Pending |
+| Qualified receipt packaged source full SHA | Pending |
+| Four full SHAs equal; API URL and dashboard href both exactly the Forge prefix plus that SHA | Pending |
+| Browser scenario/viewport evidence and operator's recorded decision | Pending |
+
+The operator must compare **all four full SHAs**: dashboard details, API
+`sourceRevision`, the running image's `/app/source-revision`, and qualified build
+receipt. All four must agree, and the API `commitUrl` and actual dashboard href
+must both be exactly `https://github.com/Xyrces/Forge/commit/<that-full-sha>`.
+Record the comparison and receipt with the browser evidence in this existing
+evidence location. Do not substitute a checkout, PR head, image tag alone,
+healthy rollout, historical artifact match, merged tests or offline worker checks.
+A mismatch/unavailable reading is a recorded finding, never permission to infer
+or fabricate a match. No actual running-image comparison or feature browser
+observations were supplied to this task: **operator-browser: Pending;
+running-image-comparison: Pending** until the operator supplies real evidence.
+
+### Task-3 documentation checks
+
+`git diff --check` passed. A local Python check confirmed the entire pre-existing
+report remained an unchanged prefix; only this report has a tracked diff; worker
+counts match the retained-snapshot TRX (84 + 5 + 1 = 90); and the handoff contains
+the required pending statuses, viewport/keyboard/unavailable scenarios, four-way
+identity fields and exact API field/URL/artifact spellings. The backend contract
+link target was verified in task-2's source above; it is not yet present on this
+task's base and requires normal sibling integration. These documentation checks
+are separate from both the retained UI checks and all pending operator evidence.
