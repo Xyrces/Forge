@@ -452,6 +452,10 @@ public sealed class GroomerAgent
         }
 
         var grounding = await BuildGroundingBlockAsync(projectId: _projectId, ct, excludeIssueId: issue.Id);
+        if (_issues is IssueStore owningStore && await new ActivePrerequisiteGrooming(owningStore).ReadPlanAsync(issue.Id, ct) is { } activePlan)
+            grounding += "\n## Exact committed acceptance for this active-sprint prerequisite\n"
+                + SprintPlanJson.Serialize(new { activePlan.Hash, activePlan.Objective, activePlan.Criteria, activePlan.Members })
+                + "\nBind only existing criterion IDs with their exact text, evidence kind and scope. Do not add a duplicate handoff criterion or expand the active outcome. Map necessary implementation to existing MergedAndVerified acceptance. Keep operator observations pending. Required task IDs may reference this task and committed members only. If the task cannot satisfy this existing scope, leave it ungroomed and explain the conflict.\n";
         var runProjectId = _projectId;
 
         var approveTool = AIFunctionFactory.Create(
@@ -510,6 +514,7 @@ public sealed class GroomerAgent
             ```
             {issue.Description ?? "(none)"}
             ```
+            Operator re-groom reason: {issue.GetMetadata("regroomReason") ?? "(none)"}
             Filed by: {issue.GetMetadata("source") ?? "operator"}{(followUpOf is not null ? $" — follow-up of {followUpOf}" : "")}
             """);
 

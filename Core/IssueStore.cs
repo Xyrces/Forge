@@ -2200,6 +2200,9 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
                 throw new InvalidOperationException("Only pending work can receive grooming metadata.");
             metadata = MergeAndSerializeMetadata(reader.GetString(1), additions);
         }
+        if (additions.ContainsKey(SprintPlanJson.MetadataKey)
+            || additions.TryGetValue("groomed", out var groomed) && string.Equals(groomed?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
+            await new ActivePrerequisiteGrooming(this).ValidateMetadataAsync(conn, tx, id, metadata, ct);
         using (var write = conn.CreateCommand())
         {
             write.Transaction = tx;
