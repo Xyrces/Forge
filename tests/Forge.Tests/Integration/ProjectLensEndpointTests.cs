@@ -80,6 +80,7 @@ public class ProjectLensEndpointTests : IDisposable
         DashboardEndpoints.MapP1Endpoints(app, _issues, agents, skills, _sprints, bus, logger, _factory);
         TaskEndpoints.MapTaskEndpoints(app, _issues, bus, null, logger, _factory, _sprints);
         AgentRunEndpoints.MapAgentRunEndpoints(app, new AgentRunStore(alphaDb), _factory);
+        SprintReadEndpoints.MapSprintReadEndpoints(app, _issues, _factory);
         _host = app;
         _host.Start();
         _client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{_host.GetPort()}/") };
@@ -95,6 +96,28 @@ public class ProjectLensEndpointTests : IDisposable
     }
 
     private Forge.Projects.ProjectContext Beta => _factory.Find("beta")!;
+
+    [Fact]
+    public async Task SprintBoardUsesSelectedProjectAndReturnsOnlyItsBoundedCardContract()
+    {
+        var alpha = await _issues.CreateAsync(new NewIssue("task", "alpha title"));
+        var beta = await Beta.Issues.CreateAsync(new NewIssue("task", "beta title", Description: "private full description",
+            Metadata: new Dictionary<string, object> { ["state"] = "PROpen", ["prNumber"] = "12", ["transcript"] = "private large transcript" }));
+        Assert.Equal(alpha.Id, beta.Id);
+        var sprint = await Beta.Sprints.CreateAsync(new("Beta", "Goal", DateTime.UtcNow, DateTime.UtcNow));
+        await Beta.Sprints.AddIssueAsync(sprint.Id, beta.Id);
+        var response = await _client.GetFromJsonAsync<Forge.Dashboard.Features.Sprints.SprintBoardResponse>("/api/sprints/board?projectId=beta");
+        Assert.NotNull(response); Assert.Equal("beta", response.ProjectId);
+        var card = Assert.Single(response.Members);
+        Assert.Equal("beta title", card.Title); Assert.Equal("12", card.PrNumber); Assert.Equal("PROpen", card.State);
+        var body = await _client.GetStringAsync("/api/sprints/board?projectId=beta");
+        Assert.DoesNotContain("private full description", body); Assert.DoesNotContain("private large transcript", body);
+        Assert.Equal(HttpStatusCode.NotFound, (await _client.GetAsync($"/api/sprints/board?projectId=alpha&sprintId={sprint.Id}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _client.GetAsync("/api/sprints/summary?projectId=missing")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await _client.GetAsync("/api/sprints/summary?projectId=beta&cursor=malformed")).StatusCode);
+        var empty = await _client.GetFromJsonAsync<Forge.Dashboard.Features.Sprints.SprintBoardResponse>("/api/sprints/board?projectId=alpha");
+        Assert.Null(empty!.Sprint); Assert.Empty(empty.Members);
+    }
 
     private async Task<string> CreateBetaTaskAsync(string title)
     {

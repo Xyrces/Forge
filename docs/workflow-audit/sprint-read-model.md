@@ -1,6 +1,14 @@
 # Bounded sprint board and history reads
 
-Implementation plan, 2026-11-17. No production changes in this document. Implement in an isolated worktree after the current budget/UI changes are committed; do not branch from 8460dde and accidentally discard the confirmed gate/link fixes. This changes read paths and loading behavior, not sprint planning, initiative approval, dispatch eligibility, or operator authority.
+Design and implementation record, 2026-11-17. Implemented in isolated `codex/sprint-board-performance` from budget/UI commit `567473d2ddb2e994aaa2b9f5f8e99ca555d5994f`; not deployed. This changes read paths and loading behavior, not sprint planning, initiative approval, dispatch eligibility, or operator authority.
+
+## Implemented qualification
+
+`Core/SprintReadStore.cs` supplies dedicated summary/board projections: three history queries and four queries for a nonempty board, regardless of historical sprint count. `/api/queue?limit=8` uses a bounded active-sprint preview; the existing unlimited queue and dispatch paths retain their behavior. Sprints no longer consumes `ViewState` or calls `/api/state`; Backlog and other consumers are unchanged.
+
+Production Release build passed with zero warnings/errors. Forty focused tests passed (`SprintReadStoreTests`, `QueueEndpointTests`, `ProjectLensEndpointTests`, `SprintStoreTests`, `DashboardContractTests`). Evidence includes command-counting before/after 500 historical sprints, traversal of 2,500 members with bounded pages and exact totals, failed/open blockers and external-to-page boost, typed HTTP project isolation with colliding issue ids, and stale-selection cancellation. These tests use SQLite and local HTTP; actual SQL Server qualification and a rendered browser check remain pending. No live request or paid model call was required.
+
+Exact counts still require aggregate database work and header ordering may sort history. Existing build-state and draft secondary panels remain separate snapshot endpoints, not newly claimed bounded exports. Refreshes are coalesced; project/selection generations discard stale responses. Multi-statement reads are live projections, not frozen audit snapshots; a changed active sprint is handled by checking the queue's sprint id against the displayed board.
 
 ## Problem and preserved behavior
 

@@ -31,7 +31,7 @@ public static class QueueEndpoints
         ModelRateLimitTracker? rateLimits,
         string? primaryProjectId = null)
     {
-        app.MapGet("/api/queue", async (string? projectId, CancellationToken ct) =>
+        app.MapGet("/api/queue", async (string? projectId, int? limit, CancellationToken ct) =>
         {
             IIssueStore issues = primaryIssues;
             ISprintStore sprints = primarySprints;
@@ -47,28 +47,40 @@ public static class QueueEndpoints
             }
 
             var active = await sprints.GetActiveAsync(ct);
-            var memberIds = active is null
+            SprintQueuePreview? preview = null;
+            if (limit is not null)
+            {
+                if (issues is not IssueStore store) return Results.Problem("Bounded queue reads are unavailable.", statusCode: 503);
+                preview = active is null ? new(0, 0, [], [])
+                    : await new SprintReadStore(store.Db).QueueAsync(active.Id, limit.Value, ct);
+            }
+            var memberIds = preview is not null
+                ? preview.Ready.Concat(preview.Blocked).Select(r => r.Issue.Id).ToHashSet(StringComparer.Ordinal)
+                : active is null
                 ? new HashSet<string>(StringComparer.Ordinal)
                 : new HashSet<string>(await sprints.GetIssueIdsAsync(active.Id, ct), StringComparer.Ordinal);
 
-            var ready = await issues.ReadyAsync(0, (string?)null, ct);
+            var ready = preview?.Ready.Select(r => r.Issue).ToArray() ?? await issues.ReadyAsync(0, (string?)null, ct);
             var meters = slots?.Snapshot() ?? (IReadOnlyList<SlotTable.SlotMeter>)Array.Empty<SlotTable.SlotMeter>();
             var registry = new RoleAgentRegistry();
-            var boosted = await issues.OpenBlockingAsync(ready.Select(t => t.Id).ToArray(), ct);
+            var boosted = preview?.Ready.Where(r => r.Boosted).Select(r => r.Issue.Id).ToHashSet(StringComparer.Ordinal)
+                ?? await issues.OpenBlockingAsync(ready.Select(t => t.Id).ToArray(), ct);
 
             // Blocked members are NOT queue entries (ReadyAsync
             // excludes them) but the operator reconciles this panel
             // against the board's Queued column — show them in a
             // separate section with their open blockers so the math
             // adds up (operator 2026-07-31: "7 queued, queue empty?").
-            var blockedBy = memberIds.Count == 0
+            var blockedBy = preview is not null
+                ? preview.Blocked.ToDictionary(r => r.Issue.Id, r => r.BlockedBy)
+                : memberIds.Count == 0
                 ? new Dictionary<string, IReadOnlyList<string>>()
                 : new Dictionary<string, IReadOnlyList<string>>(
                     await issues.OpenBlockersAsync(memberIds.ToArray(), ct), StringComparer.Ordinal);
             var blockedMembers = new List<object>();
             if (blockedBy.Count > 0)
             {
-                var pendingMembers = await issues.ListAsync(
+                var pendingMembers = preview?.Blocked.Select(r => r.Issue).ToArray() ?? await issues.ListAsync(
                     new IssueFilter { Status = IssueStatus.Pending }, ct);
                 foreach (var t in pendingMembers)
                 {
@@ -81,6 +93,7 @@ public static class QueueEndpoints
                         type = t.Type,
                         priority = t.Priority,
                         blockedBy = blockedBy[t.Id],
+                        blockerCount = preview?.Blocked.FirstOrDefault(r => r.Issue.Id == t.Id)?.BlockerCount ?? blockedBy[t.Id].Count,
                     });
                 }
             }
@@ -162,6 +175,8 @@ public static class QueueEndpoints
                 projectId = pid,
                 sprintId = active?.Id,
                 sprintName = active?.Name,
+                total = preview?.Total ?? items.Count,
+                blockedTotal = preview?.BlockedTotal ?? blockedMembers.Count,
                 items,
                 blocked = blockedMembers,
             });
