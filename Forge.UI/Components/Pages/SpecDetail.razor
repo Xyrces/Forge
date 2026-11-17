@@ -3,6 +3,8 @@
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject HttpClient Http
 @inject NavigationManager Nav
+@inject Fluxor.IDispatcher Dispatch
+@inject Fluxor.IActionSubscriber ActionSubscriber
 @implements IDisposable
 @using System.Net.Http.Json
 @using System.Text.Json
@@ -11,8 +13,8 @@
 <div class="page">
     <div class="page-header">
         <h1>
-            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/specs"))">← Specs</button>
-            @(SpecProp("title") ?? SpecId)
+            <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo(BackToSpecs))">← Specs</button>
+            @(SpecProp("title") ?? (_notFound ? "Specification not found" : "Specification"))
         </h1>
         <div class="page-header__actions">
             <button class="btn btn--primary" @onclick="LoadAsync" disabled="@_acting">Refresh</button>
@@ -21,13 +23,13 @@
 
     @if (_error is not null)
     {
-        <div class="banner banner--error"><span>@_error</span></div>
+        <div class="banner banner--error"><span>@_error</span> <button class="btn btn--small" @onclick="LoadAsync">Try again</button></div>
     }
     @if (_actionError is not null)
     {
         <div class="banner banner--error">
             <span>@_actionError</span>
-            @if (_offerForceGroom)
+            @if (_offerForceGroom && _spec is not null && _loadedActionTarget == ActionTarget)
             {
                 <button class="btn btn--small" @onclick="() => GroomAsync(force: true)" disabled="@_acting">Re-decompose anyway (force)</button>
             }
@@ -35,11 +37,15 @@
         </div>
     }
 
-    @if (_spec is null)
+    @if (_notFound)
     {
-        <div class="page-subtitle">Loading…</div>
+        <div class="banner banner--info banner--stacked"><span>This specification was not found in project @(_scopeProject ?? "the current project").</span><a href="@BackToSpecs">Back to Specs</a></div>
     }
-    else
+    else if (_loading)
+    {
+        <div class="page-subtitle">Loading specification…</div>
+    }
+    else if (_spec is not null)
     {
         <div class="card" style="margin-bottom:14px">
             <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
@@ -276,12 +282,53 @@
     private bool _offerForceGroom;
     private string? _loadedActionTarget, _loadedSpecTarget, _groomingNotice;
     private int _loadGeneration;
+    private bool _loading, _notFound, _leaving, _aligningProject;
+    private string? _scopeProject, _routeTarget;
+    private string BackToSpecs => "/specs" + LensQuery;
+
+    protected override void OnInitialized()
+    {
+        ActionSubscriber.SubscribeToAction<Forge.Dashboard.Features.AppShell.AppShellActions.SelectProjectAction>(this, action =>
+        {
+            if (_aligningProject || _leaving || action.ProjectId == _scopeProject) return;
+            _leaving = true;
+            ++_loadGeneration;
+            _spec = null; _actions = null; _loadedActionTarget = null; _acting = false;
+            Nav.NavigateTo("/specs?project=" + Uri.EscapeDataString(action.ProjectId));
+        });
+        ActionSubscriber.SubscribeToAction<Forge.Dashboard.Features.AppShell.AppShellActions.ProjectsLoadedAction>(this, action =>
+        {
+            if (_leaving) return;
+            if (_scopeProject is not null) AlignShell();
+            else if (action.CurrentProjectId is not null)
+            {
+                _scopeProject = action.CurrentProjectId;
+                _ = InvokeAsync(LoadAsync);
+            }
+        });
+    }
+
+    private void AlignShell()
+    {
+        if (_scopeProject is null || ShellStore.Value.CurrentProjectId == _scopeProject) return;
+        _aligningProject = true;
+        try { Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.SelectProjectAction(_scopeProject)); }
+        finally { _aligningProject = false; }
+    }
     private string ActionTarget => SpecId + "|" + LensQuery;
 
     private string StatusCss => SpecProp("status")?.ToLowerInvariant() ?? "unknown";
 
     protected override async Task OnParametersSetAsync()
     {
+        var route = SpecId + "|" + Project;
+        if (_routeTarget != route)
+        {
+            _routeTarget = route;
+            _scopeProject = Project ?? ShellStore.Value.CurrentProjectId;
+            _leaving = false;
+            AlignShell();
+        }
         await LoadAsync();
     }
 
@@ -306,13 +353,16 @@
     }
 
     private string LensQuery =>
-        (Project ?? ShellStore.Value.CurrentProjectId) is { } pid
+        _scopeProject is { } pid
             ? $"?project={Uri.EscapeDataString(pid)}"
             : string.Empty;
 
     private async Task LoadAsync()
     {
-        _error = null;
+        if (_leaving || _disposeCts.IsCancellationRequested) return;
+        _error = null; _notFound = false; _loading = true;
+        _actionError = null; _offerForceGroom = false;
+        _spec = null; _actions = null; _loadedActionTarget = null;
         var generation = ++_loadGeneration;
         var target = ActionTarget;
         if (_loadedSpecTarget != target)
@@ -327,8 +377,16 @@
         }
         try
         {
-            var tree = await Http.GetFromJsonAsync<JsonElement>($"/api/specs/{SpecId}/tree" + LensQuery);
-            if (generation != _loadGeneration || target != ActionTarget) return;
+            using var response = await Http.GetAsync($"/api/specs/{Uri.EscapeDataString(SpecId)}/tree" + LensQuery, _disposeCts.Token);
+            if (generation != _loadGeneration || target != ActionTarget || _leaving) return;
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _notFound = true;
+                return;
+            }
+            response.EnsureSuccessStatusCode();
+            var tree = await response.Content.ReadFromJsonAsync<JsonElement>(_disposeCts.Token);
+            if (generation != _loadGeneration || target != ActionTarget || _leaving) return;
             _spec = tree.GetProperty("spec");
             _loadedSpecTarget = target;
             _stories = tree.GetProperty("stories").EnumerateArray().Select(StoryVm.From).ToList();
@@ -351,16 +409,25 @@
                 _actions = null;
                 _actionError = "Planning controls could not be loaded. Refresh before taking an action.";
             }
-            var projectId = Project ?? ShellStore.Value.CurrentProjectId;
+            var projectId = _scopeProject;
             _repoUrl = null;
             if (!string.IsNullOrEmpty(projectId))
             {
                 var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
-                if (generation == _loadGeneration && target == ActionTarget && projectId == (Project ?? ShellStore.Value.CurrentProjectId))
+                if (generation == _loadGeneration && target == ActionTarget && projectId == _scopeProject)
                     _repoUrl = RepositoryLinks.ForProject(projects, projectId);
             }
         }
-        catch (Exception ex) { if (generation == _loadGeneration && target == ActionTarget) _error = ex.Message; }
+        catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (generation == _loadGeneration && target == ActionTarget && !_leaving)
+            {
+                _spec = null; _actions = null; _loadedActionTarget = null;
+                _error = "The specification could not be loaded. Check your connection and try again.";
+            }
+        }
+        finally { if (generation == _loadGeneration && target == ActionTarget) _loading = false; }
     }
 
     private string? PrUrl(string prNumber) =>
@@ -368,26 +435,39 @@
 
     private async Task SetStatusAsync(string status)
     {
+        if (_acting || _loadedActionTarget != ActionTarget || _leaving) return;
+        var target = ActionTarget;
+        var generation = _loadGeneration;
+        var url = $"/api/specs/{Uri.EscapeDataString(SpecId)}" + LensQuery;
         _acting = true;
         try
         {
-            var resp = await Http.PatchAsJsonAsync($"/api/specs/{SpecId}" + LensQuery, new { op = "set_status", status });
-            if (!resp.IsSuccessStatusCode)
+            using var response = await Http.PatchAsJsonAsync(url, new { op = "set_status", status }, _disposeCts.Token);
+            if (target != ActionTarget || generation != _loadGeneration || _leaving) return;
+            if (!response.IsSuccessStatusCode)
             {
-                _actionError = $"{status} failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                _actionError = "The requested change was not accepted. Refresh the specification before trying again.";
                 return;
             }
-            _actionError = null;
+            _actionError = null; _acting = false;
             await LoadAsync();
         }
-        catch (Exception ex) { _actionError = ex.Message; }
-        finally { _acting = false; }
+        catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (target == ActionTarget && generation == _loadGeneration && !_leaving)
+                _actionError = "The change could not be confirmed. Refresh before trying again.";
+        }
+        finally { if (target == ActionTarget && generation == _loadGeneration) _acting = false; }
     }
 
     private readonly System.Threading.CancellationTokenSource _disposeCts = new();
 
     public void Dispose()
     {
+        ++_loadGeneration;
+        _leaving = true;
+        ActionSubscriber.UnsubscribeFromAllActions(this);
         _disposeCts.Cancel();
         _disposeCts.Dispose();
     }

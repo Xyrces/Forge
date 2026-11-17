@@ -140,7 +140,7 @@ public sealed class SpecExtractionReader : ISpecExtractionReader
         cmd.CommandText = $"""
             SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
                 s.current_version, s.created_at, s.updated_at,
-                v.body, v.author
+                v.body, v.author, v.created_at
             FROM {T("spec")} s
             JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
             WHERE s.parent_issue_id = @pid
@@ -161,7 +161,8 @@ public sealed class SpecExtractionReader : ISpecExtractionReader
                 CreatedAt: IssueStore.ParseTime(rd.GetString(7)),
                 UpdatedAt: IssueStore.ParseTime(rd.GetString(8)),
                 Body: rd.GetString(9),
-                Author: rd.IsDBNull(10) ? null : rd.GetString(10)));
+                Author: rd.IsDBNull(10) ? null : rd.GetString(10),
+                CurrentVersionCreatedAt: IssueStore.ParseTime(rd.GetString(11))));
         }
         return list;
     }
