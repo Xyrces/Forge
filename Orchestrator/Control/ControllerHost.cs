@@ -131,7 +131,7 @@ public static class ControllerHost
         var observed = await command.ExecuteScalarAsync(ct);
         var version = observed is null or DBNull ? 0 : Convert.ToInt32(observed);
         // This schema-38 bridge retains the old explicit-column SQL. Only M039's
-        // nullable billing-evidence additions are forward-compatible; never infer
+        // additive billing-evidence columns/tables are forward-compatible; never infer
         // support for another version from a range or the current migration list.
         if (version is not (38 or 39))
             throw new InvalidOperationException("Database schema is outside this bridge release's supported versions (38, 39).");

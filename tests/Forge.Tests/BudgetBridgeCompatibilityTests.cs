@@ -35,11 +35,24 @@ public sealed class BudgetBridgeCompatibilityTests
                 ALTER TABLE budget_reservation ADD COLUMN pricing_basis TEXT NULL;
                 UPDATE budget_reservation SET usage_json='existing evidence', pricing_basis='existing basis'
                     WHERE request_id='historic';
+                CREATE TABLE budget_reconciliation (
+                    reconciliation_id TEXT NOT NULL PRIMARY KEY, dataset_id TEXT NOT NULL,
+                    original_microusd INTEGER NOT NULL, reported_microusd INTEGER NOT NULL,
+                    source TEXT NOT NULL, operator_name TEXT NOT NULL, evidence_sha256 TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE budget_reconciliation_request (
+                    request_id TEXT NOT NULL PRIMARY KEY, reconciliation_id TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL, original_microusd INTEGER NOT NULL);
+                INSERT INTO budget_reconciliation VALUES
+                    ('correction','dataset',2000000,10000,'operator-reported','fixture','hash','{}','fixture');
+                INSERT INTO budget_reconciliation_request VALUES ('historic','correction','dataset',2000000);
                 INSERT INTO schema_version(version,applied_at) VALUES(39,'fixture');
                 """;
             await upgrade.ExecuteNonQueryAsync();
         }
 
+        // The bridge ignores schema39 reconciliation credit. Rollback remains
+        // conservative, retaining original liability instead of spending more.
         Assert.Equal(new BudgetSnapshot(25m, 2m, 4m), await budget.ReadAsync("dataset"));
         var replay = await budget.ReserveAsync(Request("historic", 3m));
         Assert.True(replay.Admitted);
@@ -64,6 +77,10 @@ public sealed class BudgetBridgeCompatibilityTests
         Assert.Equal(version, Convert.ToInt32(await command.ExecuteScalarAsync()));
         if (version == 39)
         {
+            command.CommandText = "SELECT reported_microusd FROM budget_reconciliation WHERE reconciliation_id='correction'";
+            Assert.Equal(10000L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+            command.CommandText = "SELECT original_microusd FROM budget_reconciliation_request WHERE request_id='historic'";
+            Assert.Equal(2000000L, Convert.ToInt64(await command.ExecuteScalarAsync()));
             command.CommandText = "SELECT usage_json,pricing_basis FROM budget_reservation WHERE request_id='historic'";
             using (var reader = await command.ExecuteReaderAsync())
             {

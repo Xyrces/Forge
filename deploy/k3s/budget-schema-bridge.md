@@ -8,14 +8,14 @@ This branch is a narrow bridge based on `8460dde0742640bb333c4540a255e1b7a3f4b2c
 
 `ControllerHost.RunAsync` sets `Db.AutoMigrate=false`. Registry/workload factories receive that setting via `ForgeComposition` and `Program.FactoryFor`; `IssueStore.InitializeSchema` returns immediately for a runtime factory. `ProjectContext.EnsureSchema` therefore performs no DDL and has no hidden exact-version check blocking the bridge on39. Run the distributed check against all registered schemas as part of qualification; status alone does not validate every workload schema. Do not run this bridge's initializer as a downgrade or migration tool.
 
-M039 in the separate budget release adds only nullable `core.budget_reservation.usage_json` and `pricing_basis`; all old SQL names explicit columns. Both registry/workload version stamps advance in that release. The bridge never imports M039 or queries those columns.
+M039 in the separate budget release adds nullable `core.budget_reservation.usage_json` and `pricing_basis`, plus append-only `budget_reconciliation` and `budget_reconciliation_request` evidence tables; all old SQL names explicit columns. The old bridge does not read the reconciliation tables and ignores any operator-reported reduction: rollback restores the original conservative liability calculation. That can deny new paid requests earlier than the new release, but never spends the credited balance twice or modifies the reconciliation. Do not claim equal remaining balances across versions. Both registry/workload version stamps advance in that release. The bridge never imports M039 or queries those columns.
 
 ## Local validation completed
 
 - Audit-enabled production Release build: `dotnet build Forge.Core/Forge.Core.csproj -c Release --verbosity quiet`: 0 warnings, 0 errors.
 - Audit-enabled focused tests: `dotnet test tests/Forge.Tests/Forge.Tests.csproj --filter "FullyQualifiedName~BudgetBridgeCompatibilityTests|FullyQualifiedName~ControlStoreTests|FullyQualifiedName~ControllerRuntimeTests" --verbosity quiet`: **24/24 passed**.
 - Read-only catalog tests accept38/39, reject37/40 and an empty version table, and prove the version is unchanged after checking.
-- Actual unchanged budget-store tests on38 and the additive39 shape preserve completed spend and uncertain liability; exercise idempotent replay, new insert/settlement, ceiling refusal, owner acquire/release; preserve existing extra-column evidence and leave new legacy-writer evidence null. They assert both application schema constants remain38.
+- Actual unchanged budget-store tests on38 and the additive39 shape preserve completed spend and uncertain liability; exercise idempotent replay, new insert/settlement, ceiling refusal, owner acquire/release; preserve existing extra-column evidence and leave new legacy-writer evidence null. They also seed reconciliation header/covered-request rows, prove the bridge ignores their credit while preserving the evidence, and assert both application schema constants remain38.
 
 These are offline SQLite fixtures and runtime tests, not Azure SQL or deployed-image qualification. No paid requests, live SQL writes, deployments, or pushes were performed for this bridge preparation.
 
