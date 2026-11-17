@@ -18,6 +18,11 @@ public sealed record TrustedImageReceipt(string SourceSha, string ImageDigest, b
 public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downloads, Func<string, CancellationToken, Task<string?>> token,
     Func<string?> runningRevision) : IRoutineReleaseSource, IDisposable
 {
+    // REST 2026-03-10 removes merge_commit_sha from PR responses. This reader
+    // deliberately uses the supported 2022 contract for observed merged source;
+    // PR head or current branch tip are not substitutes for a merged commit.
+    // https://docs.github.com/en/rest/about-the-rest-api/breaking-changes?apiVersion=2026-03-10
+    private const string MergedPullRequestApiVersion = "2022-11-28";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static bool Sha(string? value) => value is not null && Regex.IsMatch(value, "^[0-9a-f]{40}$");
     public void Dispose() { api.Dispose(); downloads.Dispose(); }
@@ -51,13 +56,15 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
             // Non-code dispositions belong to the completion evaluator, not an invented source SHA.
             if (member.GetMetadata("prNumber") is not { } value) continue;
             if (!int.TryParse(value, out var number) || number <= 0) throw new InvalidOperationException("Invalid merged pull request evidence.");
-            using var document = await GetJson(project.Id, $"repos/{repo}/pulls/{number}", ct);
+            using var document = await GetJson(project.Id, $"repos/{repo}/pulls/{number}", ct, MergedPullRequestApiVersion);
             var pr = document.RootElement;
+            if (!pr.TryGetProperty("merge_commit_sha", out var mergeCommit)
+                || mergeCommit.ValueKind != JsonValueKind.String || !Sha(mergeCommit.GetString()))
+                throw new InvalidOperationException("GitHub merged pull request response lacks a valid full merge commit SHA under the qualified 2022-11-28 contract.");
             if (!pr.GetProperty("merged").GetBoolean() || pr.GetProperty("base").GetProperty("ref").GetString() != project.DefaultBranch ||
-                !string.Equals(pr.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString(), repo, StringComparison.OrdinalIgnoreCase) ||
-                !Sha(pr.GetProperty("merge_commit_sha").GetString()))
+                !string.Equals(pr.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString(), repo, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Task pull request is not merged into the configured repository and branch.");
-            observations.Add((pr.GetProperty("merge_commit_sha").GetString()!, pr.GetProperty("merged_at").GetDateTimeOffset(), number));
+            observations.Add((mergeCommit.GetString()!, pr.GetProperty("merged_at").GetDateTimeOffset(), number));
         }
         if (observations.Count == 0) throw new InvalidOperationException("No merged source frontier is present; non-code completion needs an explicit no-deployment disposition.");
         var frontier = observations[0].Sha;
@@ -72,19 +79,51 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         }
         foreach (var observation in observations)
             await RequireAncestor(project, repo, observation.Sha, frontier, ct);
+        var running = runningRevision()?.Trim();
+        if (!Sha(running))
+            throw new InvalidOperationException("Running controller source revision is unavailable; routine deployment cannot prove forward ancestry.");
         using var branch = await GetJson(project.Id, $"repos/{repo}/branches/{Uri.EscapeDataString(project.DefaultBranch)}", ct);
-        await RequireAncestor(project, repo, frontier, branch.RootElement.GetProperty("commit").GetProperty("sha").GetString()!, ct);
-        return (frontier, JsonSerializer.Serialize(new { repository = repo, branch = project.DefaultBranch,
+        var branchTip = branch.RootElement.GetProperty("commit").GetProperty("sha").GetString()!;
+        await RequireAncestor(project, repo, frontier, branchTip, ct);
+
+        // Prefer the minimal member frontier. A repaired controller may instead
+        // require a shared descendant to avoid rolling its repair back. Only the
+        // configured branch can supply that candidate; unavailable ancestry is
+        // an error, never permission to select a different source.
+        var selected = frontier;
+        var reason = "member-frontier";
+        if (!await IsAncestorAsync(project, repo, running!, frontier, ct))
+        {
+            await RequireAncestor(project, repo, running!, branchTip, ct);
+            foreach (var observation in observations)
+                await RequireAncestor(project, repo, observation.Sha, branchTip, ct);
+            selected = branchTip;
+            reason = "running-source-forward-recovery";
+        }
+        return (selected, JsonSerializer.Serialize(new { repository = repo, branch = project.DefaultBranch,
+            memberFrontier = frontier, runningSource = running, selectedSource = selected, selectionReason = reason,
             merged = observations.Select(o => new { pullRequest = o.Pr, sourceSha = o.Sha, mergedAt = o.At }) }, Json));
     }
 
     private async Task RequireAncestor(ProjectOptions project, string repo, string ancestor, string descendant, CancellationToken ct)
     {
+        if (!await IsAncestorAsync(project, repo, ancestor, descendant, ct))
+            throw new InvalidOperationException("Selected release source does not contain the required source ancestry.");
+    }
+
+    private async Task<bool> IsAncestorAsync(ProjectOptions project, string repo, string ancestor, string descendant, CancellationToken ct)
+    {
         if (!Sha(ancestor) || !Sha(descendant)) throw new InvalidOperationException("Merged source evidence requires full commit identities.");
-        if (ancestor == descendant) return;
+        if (ancestor == descendant) return true;
         using var comparison = await GetJson(project.Id, $"repos/{repo}/compare/{ancestor}...{descendant}", ct);
-        if (comparison.RootElement.GetProperty("status").GetString() is not ("ahead" or "identical"))
-            throw new InvalidOperationException("Merged source frontier does not contain every completed pull request.");
+        if (!comparison.RootElement.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String)
+            throw new InvalidOperationException("GitHub ancestry evidence is missing.");
+        return status.GetString() switch
+        {
+            "ahead" or "identical" => true,
+            "behind" or "diverged" => false,
+            _ => throw new InvalidOperationException("GitHub ancestry evidence has an unrecognized status.")
+        };
     }
 
     public async Task<TrustedImageReceipt?> FindReceiptAsync(ProjectOptions project, string sha, CancellationToken ct)
@@ -172,19 +211,19 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         return null;
     }
 
-    private async Task<JsonDocument> GetJson(string project, string path, CancellationToken ct)
+    private async Task<JsonDocument> GetJson(string project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
     {
-        using var response = await SendApi(project, path, ct);
+        using var response = await SendApi(project, path, ct, apiVersion);
         response.EnsureSuccessStatusCode();
         return JsonDocument.Parse(await ReadBounded(response, ct));
     }
 
-    private async Task<HttpResponseMessage> SendApi(string project, string path, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendApi(string project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri("https://api.github.com/" + path));
         request.Headers.UserAgent.ParseAdd("Forge-Routine-Deployment");
         request.Headers.Accept.ParseAdd("application/vnd.github+json");
-        request.Headers.Add("X-GitHub-Api-Version", "2026-03-10");
+        request.Headers.Add("X-GitHub-Api-Version", apiVersion);
         var value = await token(project, ct);
         if (!string.IsNullOrEmpty(value)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", value);
         return await api.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
