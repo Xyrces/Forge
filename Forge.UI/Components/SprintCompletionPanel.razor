@@ -81,7 +81,7 @@
             <div class="card">
                 <strong>Follow-up batch · @CompletionPresentation.Processing(batch.State)</strong>
                 @if (!string.IsNullOrWhiteSpace(batch.Error)) { <p>@batch.Error</p> }
-                @if (batch.State == "NeedsReview")
+                @if (batch.State == "NeedsReview" && receipt.AbandonedAt is null)
                 {
                     <p>The previous model request may have finished and incurred a charge. Review its result before explicitly starting another request.</p>
                     <button class="btn" disabled="@_retrying" @onclick="() => RetryAsync(batch.Id)">Retry follow-up processing (may incur a charge)</button>
