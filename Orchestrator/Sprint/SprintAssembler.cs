@@ -258,6 +258,8 @@ public sealed class SprintAssembler
         var active = await sprints.GetActiveAsync(ct);
         if (active is not null)
         {
+            if (sprints is SprintStore ownedSprints)
+                await ownedSprints.RetireClosedVisibilityMembersAsync(active.Id, ct);
             var (complete, total, terminal, heldMembers) = await CompletionProgressAsync(active, issues, sprints, ct);
             if (!complete)
             {

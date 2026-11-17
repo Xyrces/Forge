@@ -49,6 +49,7 @@ public static class TaskEndpoints
         Func<string, GitHubService?>? gitHubForProject = null,
         Func<string, string, CancellationToken, Task<bool>>? hasActiveWorker = null)
     {
+        TaskRegroomEndpoints.MapTaskRegroomEndpoints(app, issues, projectContexts, logger);
         // Derived lifecycle state (Phase 1 read-model): what the task
         // is doing + what it's waiting on, projected from the task,
         // its PR-watch, and the live-run registry.

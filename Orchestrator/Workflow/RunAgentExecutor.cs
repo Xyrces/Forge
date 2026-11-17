@@ -143,7 +143,9 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         AgentRunResult result;
         CancellationToken effectiveCt = ct;
         CancellationTokenSource? timeoutCts = null;
-        if (timeoutMinutes > 0)
+        // Distributed workers enforce the model deadline in-pod; waiting also includes
+        // independent verification, which must not inherit an expired model timer.
+        if (timeoutMinutes > 0 && runner is not Workers.KubernetesAgentRunner)
         {
             timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
@@ -162,6 +164,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 ["projectId"] = projectId ?? string.Empty,
                 ["planFastPath"] = planFastPath ? "true" : "false",
             };
+            if (runner is Workers.KubernetesAgentRunner)
+                context["modelTimeoutMinutes"] = timeoutMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
             // Dispatch correlation id (v30): stamped on the issue by
             // OrchestratorAgent at claim; the runner writes it onto
             // the agent_run row so journal + run + task all join on
@@ -264,26 +268,6 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true && !ct.IsCancellationRequested)
         {
             var timeoutMsg = $"Agent run timed out after {timeoutMinutes} minute(s)";
-            if (runner is Workers.KubernetesAgentRunner workers)
-            {
-                try
-                {
-                    using var termination = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-                    var current = await issues.GetAsync(issue.Id, termination.Token);
-                    var dispatchId = current?.GetMetadata("dispatchId")
-                        ?? throw new InvalidOperationException("Timed-out worker has no dispatch identity.");
-                    await workers.CancelDispatchAsync(role, projectId ?? string.Empty, issue.Id, dispatchId, termination.Token);
-                }
-                catch (Exception terminationError)
-                {
-                    var blocked = await issues.GetAsync(issue.Id, ct) ?? issue;
-                    if (lifecycle is not null)
-                        await lifecycle.ReportAsync(issues, blocked, Core.TaskEvent.OperatorBlocked, watch: null, hasActiveDevRun: false, ct);
-                    await issues.TransitionAsync(issue.Id, IssueStatus.Blocked,
-                        "Worker termination not confirmed; inspect Job before retry: " + terminationError.Message, ct: ct);
-                    throw new InvalidOperationException("Worker termination not confirmed; task blocked to preserve its worktree.", terminationError);
-                }
-            }
             logger.LogWarning("RunAgent({Id}): {Msg}", issue.Id, timeoutMsg);
             var cur = await issues.GetAsync(issue.Id, ct);
             if (cur is not null)
@@ -292,7 +276,9 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
                 meta["lastError"] = timeoutMsg;
                 meta["modelResponse"] = $"<timed out after {timeoutMinutes}m>";
                 meta["agentTimeout"] = "true";
-                await issues.TransitionAsync(issue.Id, IssueStatus.Pending,
+                meta["lastErrorAt"] = DateTime.UtcNow.ToString("O");
+                // Preserve the running state until the orchestrator records RunDied and applies retry policy.
+                await issues.TransitionAsync(issue.Id, cur.Status,
                     error: timeoutMsg, metadata: meta, ct: ct);
             }
             throw new TimeoutException(timeoutMsg);

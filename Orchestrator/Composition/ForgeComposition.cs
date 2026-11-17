@@ -616,6 +616,12 @@ public static class ForgeComposition
             memory: memoryStore, projectRoot: primary.Root,
             projectRootLookup: ProjectRootLookup,
             issueStoreLookup: id => projectFactory.Find(id)?.Issues,
+            roleTerritoriesLookup: async (id, ct) =>
+            {
+                var registered = await projectStore.GetAsync(id, ct)
+                    ?? throw new InvalidOperationException($"Unknown grooming project {id}.");
+                return registered.Territories;
+            },
             roleCapacitiesLookup: async (id, ct) =>
             {
                 var registered = await projectStore.GetAsync(id, ct)

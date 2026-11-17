@@ -541,8 +541,8 @@ public class SprintAssemblerTests : IDisposable
 
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
-        Assert.Equal("Sprint 1: Ship the health/meta endpoint set.", active.Name);
-        Assert.Equal("Ship the health/meta endpoint set.", active.Goal);
+        Assert.Equal("Sprint 1: Health endpoints", active.Name);
+        Assert.Equal("Health endpoints", active.Goal);
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
         Assert.Equal(taskIds.Count + storyIds.Count, members.Count); // tasks + stories linked

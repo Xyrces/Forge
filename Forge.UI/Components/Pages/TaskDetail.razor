@@ -8,7 +8,7 @@
 
 <PageTitle>Task @TaskId</PageTitle>
 <div class="page">
-    <div class="page-header">
+    <div class="page-header page-header--wrapping">
         <h1>
             <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/sprints"))">← Sprints</button>
             <button class="btn btn--link" @onclick="@(() => Nav.NavigateTo("/backlog"))">Backlog</button>
@@ -16,14 +16,14 @@
         </h1>
         <div class="page-header__actions">
             <a class="btn" href="/flow?issue=@TaskId">View in flow</a>
-            @if (Prop(_task, "status") is "Failed" or "Blocked" or "InProgress")
+            @if (CanActOnLoadedTask && Prop(_task, "status") is "Failed" or "Blocked" or "InProgress")
             {
                 <button class="btn" disabled="@_resetting" @onclick="ResetStrikesAsync"
                         title="Clear all strike counters (rework, review, no-progress, auto-resume), refresh the stale window, and requeue if Failed/Blocked">
                     @(_resetting ? "Resetting…" : "Clear strikes & requeue")
                 </button>
             }
-            @if (Prop(_task, "status") is not ("Completed" or "Closed") && Prop(_task, "status") is not null)
+            @if (CanActOnLoadedTask && Prop(_task, "status") is not ("Completed" or "Closed") && Prop(_task, "status") is not null)
             {
                 <button class="btn" disabled="@_closing" @onclick="@(() => _closeOpen = !_closeOpen)"
                         title="Retire this task outright — work already on main via another task, superseded, won't-fix. Optionally closes the linked PR unmerged.">
@@ -34,7 +34,18 @@
         </div>
     </div>
 
-    @if (_closeOpen)
+    @if (_loadedRecoveryTarget == RecoveryTarget && _error is null && Prop(_task, "status") == "Pending"
+        && !string.IsNullOrWhiteSpace(Project ?? ShellStore.Value.CurrentProjectId))
+    {
+        <TaskRegroom @key="RecoveryTarget" TaskId="@TaskId" ProjectId="@(Project ?? ShellStore.Value.CurrentProjectId!)" Requested="RegroomRequestedAsync" />
+    }
+
+    @if (_regroomNotice is not null && _regroomNoticeTarget == RecoveryTarget)
+    {
+        <p role="status">@_regroomNotice</p>
+    }
+
+    @if (_closeOpen && CanActOnLoadedTask)
     {
         <div class="card" style="margin-bottom:14px">
             <div class="page-subtitle" style="margin-bottom:8px">Close task as obsolete / won't-fix</div>
@@ -345,6 +356,17 @@
     private List<RunVm> _runs = new();
     private string? _repoUrl;
     private string? _error;
+    private string? _loadedRecoveryTarget, _requestedRecoveryTarget;
+    private string? _regroomNotice, _regroomNoticeTarget;
+    private async Task RegroomRequestedAsync()
+    {
+        _regroomNoticeTarget = RecoveryTarget;
+        _regroomNotice = "Technical review requested. Normal grooming will reconsider this task; engineering has not been started.";
+        await LoadAsync();
+    }
+    private int _recoveryLoadGeneration;
+    private bool CanActOnLoadedTask => _loadedRecoveryTarget == RecoveryTarget && _error is null;
+    private string RecoveryTarget => (Project ?? ShellStore.Value.CurrentProjectId) + "|" + TaskId;
 
     private string StatusCss => Prop(_task, "status")?.ToLowerInvariant() ?? "unknown";
 
@@ -369,18 +391,30 @@
 
     private sealed record EventGroup(string FirstAt, string At, string Kind, string Detail, int Count);
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_requestedRecoveryTarget == RecoveryTarget) return;
+        _requestedRecoveryTarget = RecoveryTarget;
+        _task = null; _state = null; _sprint = null; _runs.Clear(); _events.Clear();
+        _closeOpen = false; _closeReason = ""; _closeResult = null;
+        await LoadAsync();
+    }
 
     private async Task LoadAsync()
     {
+        var recoveryTarget = RecoveryTarget;
+        var taskId = TaskId;
+        var recoveryGeneration = ++_recoveryLoadGeneration;
+        _loadedRecoveryTarget = null;
         _error = null;
         try
         {
             var projectId = Project ?? ShellStore.Value.CurrentProjectId;
             var url = string.IsNullOrEmpty(projectId)
-                ? $"/api/tasks/{TaskId}"
-                : $"/api/tasks/{TaskId}?projectId={Uri.EscapeDataString(projectId)}";
+                ? $"/api/tasks/{taskId}"
+                : $"/api/tasks/{taskId}?projectId={Uri.EscapeDataString(projectId)}";
             var doc = await Http.GetFromJsonAsync<JsonElement>(url);
+            if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
             _task = doc;
             _sprint = doc.ValueKind == JsonValueKind.Object && doc.TryGetProperty("sprint", out var sp) && sp.ValueKind == JsonValueKind.Object
                 ? sp : null;
@@ -394,24 +428,26 @@
             try
             {
                 var stateUrl = string.IsNullOrEmpty(projectId)
-                    ? $"/api/tasks/{TaskId}/state"
-                    : $"/api/tasks/{TaskId}/state?projectId={Uri.EscapeDataString(projectId)}";
+                    ? $"/api/tasks/{taskId}/state"
+                    : $"/api/tasks/{taskId}/state?projectId={Uri.EscapeDataString(projectId)}";
                 var sd = await Http.GetFromJsonAsync<JsonElement>(stateUrl);
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
                 _state = new StateVm(
                     Prop(sd, "state") ?? "", Prop(sd, "substate"), Prop(sd, "waitingOn") ?? "",
                     sd.TryGetProperty("strikes", out var st) && st.TryGetInt32(out var si) ? si : 0,
                     sd.TryGetProperty("maxStrikes", out var ms) && ms.TryGetInt32(out var msi) ? msi : 3);
             }
-            catch { _state = null; /* state is additive */ }
+            catch { if (recoveryTarget == RecoveryTarget && recoveryGeneration == _recoveryLoadGeneration) _state = null; /* state is additive */ }
 
             // Agent runs for this task (the "who worked on this and
             // what did they actually do" trail). Same shape as /runs.
             try
             {
                 var runsUrl = string.IsNullOrEmpty(projectId)
-                    ? $"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}"
-                    : $"/api/agent-runs?taskId={Uri.EscapeDataString(TaskId)}&projectId={Uri.EscapeDataString(projectId)}";
+                    ? $"/api/agent-runs?taskId={Uri.EscapeDataString(taskId)}"
+                    : $"/api/agent-runs?taskId={Uri.EscapeDataString(taskId)}&projectId={Uri.EscapeDataString(projectId)}";
                 var runsDoc = await Http.GetFromJsonAsync<JsonElement>(runsUrl);
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
                 var runs = new List<RunVm>();
                 foreach (var bucket in new[] { "active", "recent" })
                 {
@@ -442,10 +478,12 @@
                 _runs = runs.OrderByDescending(r => r.FinishedAt ?? r.LastActivityAt ?? r.StartedAt).ToList();
             }
             catch { /* runs are additive — never break the task page */ }
+            if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
             _repoUrl = null;
             if (!string.IsNullOrEmpty(projectId))
             {
                 var projects = await Http.GetFromJsonAsync<JsonElement>("/api/projects");
+                if (recoveryTarget != RecoveryTarget || recoveryGeneration != _recoveryLoadGeneration) return;
                 foreach (var p in projects.EnumerateArray())
                 {
                     if (string.Equals(Prop(p, "id"), projectId, StringComparison.OrdinalIgnoreCase))
@@ -457,7 +495,12 @@
                 }
             }
         }
-        catch (Exception ex) { _error = ex.Message; }
+        catch (Exception ex)
+        {
+            if (recoveryTarget == RecoveryTarget && recoveryGeneration == _recoveryLoadGeneration) _error = ex.Message;
+        }
+        if (_error is null && recoveryTarget == RecoveryTarget && recoveryGeneration == _recoveryLoadGeneration)
+            _loadedRecoveryTarget = recoveryTarget;
     }
 
     private static string ProjectQuery(string? projectId) =>
@@ -469,6 +512,7 @@
     /// and requeue (POST /api/tasks/{id}/reset-strikes).</summary>
     private async Task ResetStrikesAsync()
     {
+        if (!CanActOnLoadedTask) return;
         _resetting = true;
         try
         {
@@ -497,6 +541,7 @@
     /// retires the task; optionally closes the linked PR unmerged.</summary>
     private async Task CloseTaskAsync()
     {
+        if (!CanActOnLoadedTask) return;
         _closing = true;
         _closeResult = null;
         try

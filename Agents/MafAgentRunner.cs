@@ -481,7 +481,10 @@ public async Task<AgentRunResult> RunAsync(
             // as the backstop for whatever survives.
             var worktreePath = ResolveWorktreePath(context);
             var verifyCommands = ResolveVerifyCommands(projectId, worktreePath);
+            // Distributed workers run the same full gate once, independently in WorkerHost.
+            // Legacy in-process runs retain their in-session correction loop.
             if (gateState?.PlanApproved == true
+                && string.IsNullOrEmpty(ResolveContextString(context, "workerAttemptId"))
                 && worktreePath is not null
                 && verifyCommands is { Count: > 0 })
             {

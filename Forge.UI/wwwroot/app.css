@@ -491,6 +491,11 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 }
 .page-header__actions { margin-left: auto; display: flex; gap: 8px; }
 .page-header__actions .btn { height: 30px; }
+/* Entity headings keep their full width above actions on narrow screens. */
+@media (max-width: 640px) {
+  .page-header--wrapping { flex-direction: column; align-items: stretch; }
+  .page-header--wrapping .page-header__actions { margin-left: 0; flex-wrap: wrap; }
+}
 
 .page-subtitle--ok { color: var(--success); }
 .page-subtitle--error { color: var(--error); }
@@ -640,6 +645,11 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .sprint-hero__name { font-size: 18px; }
 .sprint-hero__dates { font-size: 12px; color: var(--on-surface-variant); }
 .sprint-hero__goal { font-size: 13px; color: var(--on-surface-variant); line-height: 1.5; }
+.sprint-goal { min-width: 0; }
+.sprint-goal > summary { cursor: pointer; color: var(--on-surface-variant); font-size: 13px; }
+.sprint-goal > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; }
+.sprint-goal__text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sprint-goal[open] > .sprint-goal__text { margin-top: 8px; }
 .sprint-progress { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
 .sprint-progress__fill { height: 100%; background: var(--tertiary); transition: width .3s ease; }
 

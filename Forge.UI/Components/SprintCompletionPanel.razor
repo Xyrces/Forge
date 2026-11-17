@@ -9,11 +9,11 @@
 <section class="card" aria-label="Sprint evidence and delivery">
     <strong>Sprint evidence and delivery</strong>
     <p class="page-subtitle">Terminal task counts do not prove an outcome was delivered.</p>
-    @if (_loading)
+    @if (_loading && _detail is null)
     {
         <p role="status">Loading completion evidence…</p>
     }
-    else if (_error is not null)
+    else if (_error is not null && _detail is null)
     {
         <p class="banner banner--warn" role="alert">@_error</p>
         <button class="btn" @onclick="LoadAsync">Retry loading evidence</button>
@@ -25,6 +25,11 @@
     else
     {
         var receipt = _detail.Receipt;
+        @if (_error is not null)
+        {
+            <p class="banner banner--warn" role="alert">@_error The last loaded evidence is shown below.</p>
+            <button class="btn" @onclick="LoadAsync">Retry loading evidence</button>
+        }
         <dl>
             <dt>Engineering evidence</dt><dd>@(receipt.AbandonedAt is null ? CompletionPresentation.Outcome(receipt.Outcome) : "Evidence incomplete — outcome stopped")</dd>
             <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
@@ -73,6 +78,15 @@
                 {
                     <p>@(criterion.ProofReference is not null ? "Operator observation recorded for this deployed version." : receipt.AbandonedAt is not null ? "Not verified; this outcome was stopped." : "Awaiting explicit operator observation of the exact deployed version.")</p>
                     @if (criterion.ProofReference is not null) { <p>Evidence: @criterion.ProofReference</p> }
+                    else if (receipt.AbandonedAt is null && receipt.ReadyForDeployment && receipt.DeploymentStatus == "Deployed"
+                        && receipt.PlanHash is not null && receipt.SourceSha is not null && receipt.DeploymentCandidateId is not null
+                        && ProjectId is not null && SprintId is not null)
+                    {
+                        <OperatorObservation @key="(ProjectId, SprintId, receipt.PlanHash, receipt.SourceSha, receipt.DeploymentCandidateId, criterion.Id)"
+                            ProjectId="@ProjectId" SprintId="@SprintId" PlanHash="@receipt.PlanHash"
+                            SourceSha="@receipt.SourceSha" DeploymentId="@receipt.DeploymentCandidateId"
+                            CriterionId="@criterion.Id" Enabled="@(_error is null && !_loading)" OnRecorded="LoadAsync" />
+                    }
                 }
             </div>
         }

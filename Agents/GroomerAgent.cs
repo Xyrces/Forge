@@ -45,6 +45,7 @@ public sealed class GroomerAgent
     private readonly string? _projectId;
     private readonly Func<string, string?>? _projectRootLookup;
     private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? _roleCapacitiesLookup;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? _roleTerritoriesLookup;
     private readonly string _runId;
 
     public GroomerAgent(
@@ -59,7 +60,8 @@ public sealed class GroomerAgent
         string? projectRoot = null,
         string? projectId = null,
         Func<string, string?>? projectRootLookup = null,
-        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null)
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null,
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? roleTerritoriesLookup = null)
     {
         _issues = issues;
         _specs = specs;
@@ -72,6 +74,7 @@ public sealed class GroomerAgent
         _projectId = projectId;
         _projectRootLookup = projectRootLookup;
         _roleCapacitiesLookup = roleCapacitiesLookup;
+        _roleTerritoriesLookup = roleTerritoriesLookup;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
     }
 
@@ -449,6 +452,10 @@ public sealed class GroomerAgent
         }
 
         var grounding = await BuildGroundingBlockAsync(projectId: _projectId, ct, excludeIssueId: issue.Id);
+        if (_issues is IssueStore owningStore && await new ActivePrerequisiteGrooming(owningStore).ReadPlanAsync(issue.Id, ct) is { } activePlan)
+            grounding += "\n## Exact committed acceptance for this active-sprint prerequisite\n"
+                + SprintPlanJson.Serialize(new { activePlan.Hash, activePlan.Objective, activePlan.Criteria, activePlan.Members })
+                + "\nBind only existing criterion IDs with their exact text, evidence kind and scope. Do not add a duplicate handoff criterion or expand the active outcome. Map necessary implementation to existing MergedAndVerified acceptance. Keep operator observations pending. Required task IDs may reference this task and committed members only. If the task cannot satisfy this existing scope, leave it ungroomed and explain the conflict.\n";
         var runProjectId = _projectId;
 
         var approveTool = AIFunctionFactory.Create(
@@ -507,6 +514,7 @@ public sealed class GroomerAgent
             ```
             {issue.Description ?? "(none)"}
             ```
+            Operator re-groom reason: {issue.GetMetadata("regroomReason") ?? "(none)"}
             Filed by: {issue.GetMetadata("source") ?? "operator"}{(followUpOf is not null ? $" — follow-up of {followUpOf}" : "")}
             """);
 
@@ -712,10 +720,22 @@ public sealed class GroomerAgent
         foreach (var role in workers)
             sb.AppendLine($"- {role}: {Math.Max(0, Forge.Configuration.DefaultProjectRoles.MaxFor(roles, role))} concurrent workers");
         sb.AppendLine("Soft parallel goal: where the approved outcome naturally supports it, plan genuine independent tasks that can use these workers concurrently.");
-        sb.AppendLine("For example, three suitable available workers favor three genuinely independent tasks, not an artificial three-task minimum.");
+        sb.AppendLine("Derive this soft goal from the configured limits above: keep each implementation role productively occupied where coherent, independent approved work permits it. There is no fixed task-count minimum.");
         sb.AppendLine("Use fewer tasks when that is the coherent solution; never pad work, invent QA work, or remove real prerequisites to fill slots. QA and Reviewer capacity are not implementation capacity.");
         sb.AppendLine("QA verifies an existing PR in the optional watch lane; it is not an extra implementation task to fill a parallel slot. Assign genuine automated test-code changes to CoreDev or ClientDev within their editing territory, not a standalone QA/reviewer task that cannot produce its own merged implementation.");
         sb.AppendLine("Ten engineering tasks including prerequisites is a ceiling, never a fill target. Story/task tool caps still apply; they are maxima, not targets.");
+        sb.AppendLine();
+        var territories = _roleTerritoriesLookup is not null && !string.IsNullOrWhiteSpace(projectId)
+            ? await _roleTerritoriesLookup(projectId, ct) : null;
+        sb.AppendLine("## Actual implementation role territories (owning project)");
+        var registry = new RoleAgentRegistry();
+        foreach (var role in workers)
+        {
+            var resolved = RoleAgentRegistry.ResolveTerritory(registry.ByAgentName(role)!, territories);
+            sb.AppendLine(RoleAgentRegistry.DescribeTerritory(role, resolved.Prefixes, resolved.AllowsRootFiles));
+        }
+        sb.AppendLine("Assign every required file deliverable to a role authorized for its destination. Do not assign ClientDev a docs/evidence edit outside its actual territory, invent a substitute destination, or silently omit an explicit deliverable. If no authorized role can fulfill a required destination, surface the assignment conflict rather than marking decomposition complete.");
+        sb.AppendLine("Worker commands/results and a pending operator handoff can be recorded in the run transcript; that is not a substitute for an explicitly required repository document. Assign any required repository collation to an authorized implementation owner. Actual visual/running-image qualification and final operator acceptance remain operator-owned and pending until observed; workers must not fabricate them.");
         sb.AppendLine();
         sb.AppendLine("## Project vision");
         // Per-project vision wins (vision/<projectId>); the legacy

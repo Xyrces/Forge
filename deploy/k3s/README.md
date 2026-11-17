@@ -239,6 +239,18 @@ committing and again before publication; it does not rerun project builds for
 worker executions. Changing source or verification commands invalidates the
 receipt. Legacy in-process execution retains its existing verification behavior.
 
+For K3s, `Spawner.AgentRunTimeoutMinutes` (default 15) bounds the model/tool
+phase inside the worker, not the controller's wait for the entire attempt.
+The independent verifier runs the full configured commands once after that
+phase; it retains the existing 15-minute per-command timeout. The Job's
+`Worker.DeadlineSeconds` (default 3600) remains the total hard ceiling, including
+startup and verification. No deadline increase or skipped qualification is
+implied. Ownership cancellation still stops either phase. Verification failures
+remain blocking worker failures handled by normal retry policy; only legacy
+in-process execution retains the automatic in-session verification correction
+loop. Dirty files and local commits are preserved for recovery, never evidence
+of successful qualification by themselves.
+
 The worker's tools and verification process still share its user identity, SQL
 credentials, project credentials, and writable PVC. A successful receipt proves
 that the trusted executor observed passing commands against that source tree;

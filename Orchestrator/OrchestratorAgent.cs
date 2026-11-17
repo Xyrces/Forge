@@ -278,6 +278,11 @@ public sealed class OrchestratorAgent : IAgent
                 // that role's tasks — other roles keep claiming.
                 foreach (var dev in claimable)
                 {
+                    // An inadmissible visibility-only prerequisite must not take the
+                    // role's last slot ahead of an eligible sibling. The dispatch
+                    // method repeats this check before claim to fence later changes.
+                    if (await CheckSprintAdmissionAsync(dev, bundle, cancellationToken) is not null)
+                        continue;
                     var role = ResolveRoleName(dev.Type);
                     // Triage model escalation (phase 3): a task
                     // carrying an unconsumed marker acquires ONLY its
@@ -427,13 +432,9 @@ public sealed class OrchestratorAgent : IAgent
     }
 
 
-    public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    private async Task<string?> CheckSprintAdmissionAsync(IssueRecord issue,
+        ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
-        // Concurrency is owned by the caller: the dispatch loop holds
-        // a per-role SlotTable slot for the whole run.
-        var startedAt = DateTime.UtcNow;
-        if (await bundle.IssueStore.GetAsync(issue.Id, cancellationToken) is not { Status: IssueStatus.Pending })
-            return new Result(false, "already-claimed");
         var scopeGap = bundle.IssueStore is IssueStore owned
             ? await SprintDispatchGuard.CheckAsync(owned, bundle.Sprints, bundle.Project.Id, issue.Id, cancellationToken)
             : "Engineering requires an owning project store with approved sprint evidence.";
@@ -441,8 +442,20 @@ public sealed class OrchestratorAgent : IAgent
         {
             _logger.LogWarning("Engineering dispatch held for {Task}: {ScopeGap}", issue.Id, scopeGap);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, "dispatch.scope-gap", issue.Id, scopeGap));
-            return new Result(false, "sprint-scope-gap: " + scopeGap);
+            return scopeGap;
         }
+        return null;
+    }
+
+    public async Task<Result> DispatchSingleTaskAsync(IssueRecord issue, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    {
+        // Concurrency is owned by the caller: the dispatch loop holds
+        // a per-role SlotTable slot for the whole run.
+        var startedAt = DateTime.UtcNow;
+        if (await bundle.IssueStore.GetAsync(issue.Id, cancellationToken) is not { Status: IssueStatus.Pending })
+            return new Result(false, "already-claimed");
+        if (await CheckSprintAdmissionAsync(issue, bundle, cancellationToken) is { } scopeGap)
+            return new Result(false, "sprint-scope-gap: " + scopeGap);
         try
         {
             // P3 (final wiring): dispatch is now driven by the MAF
