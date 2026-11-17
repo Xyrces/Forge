@@ -38,6 +38,7 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
     {
         public int CallCount;
         public string LastUserText = "";
+        public int FailOnVerificationRound;
         public readonly List<string> ToolResults = new();
 
         public Task<ChatResponse> GetResponseAsync(
@@ -45,6 +46,8 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
         {
             CallCount++;
             LastUserText = string.Concat(messages.Where(m => m.Role == ChatRole.User).Select(m => m.Text));
+            if (FailOnVerificationRound > 0 && LastUserText.Contains($"Pre-push verification failed (round {FailOnVerificationRound}/3)"))
+                throw new InvalidOperationException("Model request denied: budget_exhausted");
             foreach (var m in messages.Where(m => m.Role == ChatRole.Tool))
             {
                 var t = string.Concat(m.Contents.OfType<FunctionResultContent>().Select(c => c.Result?.ToString()));
@@ -117,6 +120,39 @@ public class MafAgentRunnerVerifyLoopTests : IDisposable
         // The failure output went back into the session as feedback.
         Assert.Contains("Pre-push verification failed (round 1/3)", client.LastUserText);
         Assert.Contains("SomeTest [FAIL]", client.LastUserText);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task VerificationFeedbackAdmissionFailure_PreservesDiagnosisInFailedRunTranscript(int failedRound)
+    {
+        var path = Path.Combine(_worktree, "audit.db");
+        await using var issues = new IssueStore(path);
+        var runs = new AgentRunStore(path);
+        var client = new VerifyScriptedChatClient { FailOnVerificationRound = failedRound };
+        var runner = new MafAgentRunner(
+            chatClientFactory: new ScriptingFactory(client),
+            config: new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
+            roles: new RoleAgentRegistry(), logger: NullLogger<MafAgentRunner>.Instance,
+            runs: runs, rolePromptsRoot: TempRoot.Instance.NewDirectory("vf-audit"),
+            verifyCommandsLookup: _ => new[] { "dotnet build" });
+        runner.VerifyRunner = (_, _, _, _) => Task.FromResult(
+            new RunVerification.Result(false, ["`dotnet build` exited 1: worker HOME is unavailable"]));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
+            AgentType.CoreDev, "add the thing", null,
+            new Dictionary<string, object> { ["worktreePath"] = _worktree,
+                ["issueId"] = "task-audit", ["projectId"] = "forge" }, default));
+
+        Assert.Contains("budget_exhausted", error.Message);
+        var run = Assert.Single(await runs.ListRecentAsync(taskId: "task-audit"));
+        Assert.Equal("failed", run.Status);
+        Assert.Contains("budget_exhausted", run.Error);
+        Assert.Contains("Pre-push verification failed (round 1/3)", run.TranscriptJson);
+        Assert.Contains($"Pre-push verification failed (round {failedRound}/3)", run.TranscriptJson);
+        Assert.Contains("worker HOME is unavailable", run.TranscriptJson);
+        Assert.Contains("work done", run.TranscriptJson);
     }
 
     [Fact]

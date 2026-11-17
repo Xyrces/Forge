@@ -1084,6 +1084,33 @@ public sealed class OrchestratorAgentTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task ExhaustedRetry_PreservesDirtyWorktreeForOperatorRequeue()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "preserve failed work"));
+        var path = await _worktrees.CreateAsync(issue.Id, "main", CancellationToken.None);
+        var edited = Path.Combine(path, "unfinished.cs");
+        await File.WriteAllTextAsync(edited, "// useful local work awaiting verification");
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Pending, null,
+            new Dictionary<string, object> { ["retryCount"] = 1, ["worktreePath"] = path });
+        var pending = (await _issues.GetAsync(issue.Id))!;
+
+        var result = await BuildOrchestrator(new BudgetDeniedRunner())
+            .DispatchSingleTaskAsync(pending, _bundle, CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(issue.Id))!.Status);
+        Assert.True(Directory.Exists(path), "Exhausted retries must not delete recoverable local work.");
+        Assert.Equal("// useful local work awaiting verification", await File.ReadAllTextAsync(edited));
+    }
+
+    private sealed class BudgetDeniedRunner : IAgentRunner
+    {
+        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
+            IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+            => throw new InvalidOperationException("Model request denied by durable budget admission: budget_exhausted");
+    }
+
     private sealed class ScriptedRunner : IAgentRunner
     {
         private readonly string _response;

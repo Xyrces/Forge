@@ -512,8 +512,11 @@ public async Task<AgentRunResult> RunAsync(
                         "Fix the failures below and iterate — verification runs again when you finish. " +
                         "Do not weaken tests to make them pass; fix the cause.\n\n" +
                         string.Join("\n\n", verify.Failures));
-                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
                     transcriptMessages.Add(feedback);
+                    // Preserve the verification diagnosis even if admission or
+                    // the provider fails before the corrective response arrives.
+                    await HeartbeatAsync(runStore, runId, transcriptMessages);
+                    response = await agent.RunAsync(feedback, session, cancellationToken: ct);
                     transcriptMessages.AddRange(response.Messages);
                     await HeartbeatAsync(runStore, runId, transcriptMessages);
                 }

@@ -877,7 +877,6 @@ public sealed class OrchestratorAgent : IAgent
         var retryCount = 0;
         var prev = issue.GetMetadata("retryCount");
         if (prev is not null && int.TryParse(prev, out var r)) retryCount = r;
-        var worktreePath = issue.GetMetadata("worktreePath");
 
         if (retryCount < _maxRetryCount)
         {
@@ -891,11 +890,11 @@ public sealed class OrchestratorAgent : IAgent
         else
         {
             await SafeTransitionAsync(issue.Id, IssueStatus.Failed, ex.Message, bundle, cancellationToken);
-            if (!string.IsNullOrEmpty(worktreePath))
-            {
-                try { await bundle.Worktrees.RemoveAsync(issue.Id, cancellationToken); }
-                catch (Exception wx) { _logger.LogWarning(wx, "Worktree removal failed"); }
-            }
+            // Failed work is recoverable evidence, not disposable scratch.
+            // A provider/budget outage can happen after useful uncommitted
+            // edits. Preserve the checkout for the sanctioned operator requeue;
+            // successful completion retains its existing cleanup behavior.
+            _logger.LogWarning("Issue {Id} exhausted retries; preserving its worktree for operator recovery", issue.Id);
         }
     }
 
