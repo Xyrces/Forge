@@ -114,6 +114,8 @@ public sealed class ProjectBootstrap
                     ".forge/\n*.user\n");
                 RunGit(rootPath, "add .gitignore");
                 RunGit(rootPath, "commit -q -m \"scaffold\"");
+                if (hasRepoUrl)
+                    File.WriteAllText(Path.Combine(rootPath, ".git", "forge-scaffold-head"), RunGit(rootPath, "rev-parse HEAD").Trim());
                 gitInitDone = true;
                 _logger?.LogInformation(
                     "Project '{Id}': initialised empty git repo at {Root} (default branch main)",
@@ -184,7 +186,7 @@ public sealed class ProjectBootstrap
         return p.ExitCode;
     }
 
-    private static void RunGit(string cwd, string args)
+    private static string RunGit(string cwd, string args)
     {
         var psi = new ProcessStartInfo
         {
@@ -206,5 +208,6 @@ public sealed class ProjectBootstrap
             throw new InvalidOperationException(
                 $"git {args} (cwd={cwd}) failed: {errOut}");
         }
+        return stdout.GetAwaiter().GetResult();
     }
 }

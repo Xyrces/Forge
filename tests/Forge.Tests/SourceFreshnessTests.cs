@@ -38,6 +38,41 @@ public sealed class SourceFreshnessTests : IDisposable
         return Git(_source, "rev-parse", "HEAD");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnlyUnchangedBootstrapScaffoldCanRecover(bool editScaffold)
+    {
+        _project.RepoUrl = Path.Combine(_root, "not-yet-available.git");
+        var boot = new ProjectBootstrap(_root, _cloner).EnsureProject(_project);
+        Assert.True(boot.InitializedAsGitRepo);
+        var path = boot.Project.Root;
+        var marker = Path.Combine(path, ".git", "forge-scaffold-head");
+        Assert.True(File.Exists(marker));
+        var original = Git(path, "rev-parse", "HEAD");
+        Assert.Equal(original, File.ReadAllText(marker));
+        if (editScaffold)
+        {
+            File.WriteAllText(Path.Combine(path, "local.txt"), "keep my work");
+            Git(path, "add", "local.txt"); Git(path, "commit", "-m", "operator work");
+        }
+        var before = Git(path, "rev-parse", "HEAD");
+        _project.RepoUrl = _remote;
+        var result = await _cloner.SyncAsync(_project, null);
+        Assert.Equal(!editScaffold, result.Ok);
+        Assert.Equal(editScaffold, File.Exists(marker));
+        if (editScaffold)
+        {
+            Assert.Equal(before, Git(path, "rev-parse", "HEAD"));
+            Assert.Equal("keep my work", File.ReadAllText(Path.Combine(path, "local.txt")));
+        }
+        else
+        {
+            Assert.Equal(Git(_source, "rev-parse", "HEAD"), Git(path, "rev-parse", "HEAD"));
+            Assert.True((await _cloner.SyncAsync(_project, null)).Ok);
+        }
+    }
+
     [Fact]
     public async Task StartupRefreshesManagedCloneWithResolvedRoot()
     {

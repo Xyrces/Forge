@@ -278,6 +278,20 @@ public sealed class ProjectCloner
             }
         }
 
+        var scaffoldMarker = Path.Combine(localPath, ".git", "forge-scaffold-head");
+        if (File.Exists(scaffoldMarker))
+        {
+            var recorded = (await File.ReadAllTextAsync(scaffoldMarker, ct)).Trim();
+            var head = await RunGitAsync(localPath, ct, "rev-parse", "HEAD");
+            var status = await RunGitAsync(localPath, ct, "status", "--porcelain", "--untracked-files=all");
+            if (!System.Text.RegularExpressions.Regex.IsMatch(recorded, "^[0-9a-f]{40}$")
+                || head.ExitCode != 0 || head.Stdout.Trim() != recorded || status.ExitCode != 0 || status.Stdout.Length != 0)
+                return new ProjectSyncResult(false, branch);
+            var healed = await ReconcileScaffoldAsync(project, localPath, branch, github, ct);
+            if (healed.Ok) File.Delete(scaffoldMarker);
+            return healed;
+        }
+
         // Do not infer that an origin-less repository is a disposable scaffold.
         // Automatic refresh must never reset unknown local work.
         var remoteCheck = await RunGitAsync(localPath, ct, "remote", "get-url", "origin");
@@ -343,7 +357,8 @@ public sealed class ProjectCloner
         _logger?.LogInformation("Project '{Id}': no origin remote; reconciling scaffold against {Url}",
             project.Id, ScrubUrl(project.RepoUrl));
 
-        var add = await RunGitAsync(localPath, "remote", "add", "origin", project.RepoUrl);
+        var exists = await RunGitAsync(localPath, ct, "remote", "get-url", "origin");
+        var add = await RunGitAsync(localPath, ct, "remote", exists.ExitCode == 0 ? "set-url" : "add", "origin", project.RepoUrl);
         if (add.ExitCode != 0)
         {
             _logger?.LogWarning("Project '{Id}': remote add failed: {Err}", project.Id, add.Stderr.Trim());
@@ -361,10 +376,10 @@ public sealed class ProjectCloner
                     File.SetUnixFileMode(credPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             }
             catch { /* non-POSIX — best effort */ }
-            await RunGitAsync(localPath, "config", "credential.helper", $"store --file={credPath}");
+            await RunGitAsync(localPath, ct, "config", "credential.helper", $"store --file={credPath}");
         }
 
-        var fetch = await RunGitAsync(localPath, "fetch", "origin", branch);
+        var fetch = await RunGitAsync(localPath, ct, "fetch", "origin", branch);
         if (fetch.ExitCode != 0)
         {
             // The stored branch may predate detection support (a "main"
@@ -379,7 +394,7 @@ public sealed class ProjectCloner
                 "Project '{Id}': stored branch '{Stored}' not on remote; using detected default '{Detected}'",
                 project.Id, branch, detected);
             branch = detected;
-            fetch = await RunGitAsync(localPath, "fetch", "origin", branch);
+            fetch = await RunGitAsync(localPath, ct, "fetch", "origin", branch);
             if (fetch.ExitCode != 0)
             {
                 _logger?.LogWarning("Project '{Id}': fetch failed: {Err}", project.Id, fetch.Stderr.Trim());
@@ -387,7 +402,7 @@ public sealed class ProjectCloner
             }
         }
 
-        var align = await RunGitAsync(localPath, "checkout", "-B", branch, $"origin/{branch}");
+        var align = await RunGitAsync(localPath, ct, "checkout", "-B", branch, $"origin/{branch}");
         if (align.ExitCode != 0)
         {
             _logger?.LogWarning("Project '{Id}': align to origin/{Branch} failed: {Err}", project.Id, branch, align.Stderr.Trim());
@@ -396,7 +411,7 @@ public sealed class ProjectCloner
         _logger?.LogInformation("Project '{Id}': scaffold reconciled with origin/{Branch}", project.Id, branch);
         // Stamp origin/HEAD so the clone's own pull info reflects the
         // remote default from here on (best effort).
-        await RunGitAsync(localPath, "remote", "set-head", "origin", "--auto");
+        await RunGitAsync(localPath, ct, "remote", "set-head", "origin", "--auto");
         return new ProjectSyncResult(true, branch);
     }
 
