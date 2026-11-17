@@ -89,6 +89,21 @@ public class SprintAssemblerTests : IDisposable
         await _assembler.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
     }
 
+    private async Task BindPrerequisitesAsync(string currentTaskId, params string[] prerequisiteIds)
+    {
+        var current = SprintPlanJson.ReadBinding((await _issues.GetAsync(currentTaskId))!)!;
+        foreach (var id in prerequisiteIds)
+        {
+            var own = SprintPlanJson.ReadBinding((await _issues.GetAsync(id))!);
+            await new SprintOutcomeAuthority(_issues).BindAsync(id, current with
+            {
+                Authority = own?.Authority ?? current.Authority,
+                RequiredTaskIds = prerequisiteIds,
+                Reason = SprintMemberReason.Prerequisite
+            });
+        }
+    }
+
     [Fact]
     public async Task GroomedSpecPlansWholeDependencyChainButOnlyPrerequisiteIsReady()
     {
@@ -144,6 +159,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
         var (_, _, prerequisites) = await SeedGroomedSpecAsync("needed infrastructure", 2);
+        await BindPrerequisitesAsync(current[0], prerequisites.ToArray());
         await _issues.AddDependencyAsync(prerequisites[0], prerequisites[1], IssueDepKind.Blocks);
         await _issues.AddDependencyAsync(prerequisites[1], current[0], IssueDepKind.Blocks);
         var unrelated = await _issues.CreateAsync(new NewIssue("task", "urgent unrelated", Priority: 1,
@@ -162,6 +178,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
         var (_, _, prerequisites) = await SeedGroomedSpecAsync("two prerequisites", 2);
+        await BindPrerequisitesAsync(current[0], prerequisites.ToArray());
         foreach (var prerequisite in prerequisites)
             await _issues.AddDependencyAsync(prerequisite, current[0], IssueDepKind.Blocks);
 
@@ -189,7 +206,7 @@ public class SprintAssemblerTests : IDisposable
             NullLogger<SprintAssembler>.Instance,followUpTriage:new EpicSuggestionTriage(),initiativeProposals:proposals);
         await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
         await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
-        var suggestion=Assert.Single(await proposals.ListAsync("test"));
+        var suggestion=Assert.Single(await proposals.ListAsync("test"), p => p.Origin == "forge");
         Assert.Equal("forge",suggestion.Origin); Assert.Null(suggestion.ApprovedAt);
         Assert.Equal(beforeIssues,(await _issues.ListAsync(new IssueFilter())).Count);
         Assert.Equal(beforeSpecs,(await _specs.ListAsync(null,null)).Count);
@@ -222,7 +239,7 @@ public class SprintAssemblerTests : IDisposable
         var receipt = Assert.Single(await completionStore.ListPendingBookkeepingAsync());
         Assert.Equal("NeedsReview", Assert.Single(await completionStore.ListBatchesAsync(receipt.Id)).State);
         await assembler.TickProjectAsync("test",_issues,_sprints,_specs,default);
-        Assert.Empty(await proposals.ListAsync("test"));
+        Assert.DoesNotContain(await proposals.ListAsync("test"), p => p.Origin == "forge");
         Assert.Equal(2,(await drafts.ListUnconsumedAsync()).Count);
     }
 
@@ -253,7 +270,7 @@ public class SprintAssemblerTests : IDisposable
     }
 
     private async Task<(string specId, List<string> storyIds, List<string> taskIds)> SeedGroomedSpecAsync(
-        string title, int taskCount, string? epicDescription = null)
+        string title, int taskCount, string? epicDescription = null, bool completeGrooming = true)
     {
         var proposals = new InitiativeProposalStore(_issues);
         var draft = await proposals.CreateAsync(new("test", Guid.NewGuid().ToString(), "user", title,
@@ -279,7 +296,7 @@ public class SprintAssemblerTests : IDisposable
         }
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, default);
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, default);
-        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
+        if (completeGrooming) await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
         foreach (var taskId in taskIds)
             await new SprintOutcomeAuthority(_issues).BindAsync(taskId, new(1, spec.Id, title,
                 [new(spec.Id + "-acceptance", epicDescription ?? title, SprintEvidenceKind.MergedAndVerified, scope)],
@@ -290,15 +307,15 @@ public class SprintAssemblerTests : IDisposable
     [Fact]
     public async Task PartialGrooming_WithholdsTasksUntilSpecCompletes()
     {
-        var spec = await _specs.CreateAsync(new NewSpec(ProjectId: "test", Title: "partial", Body: "body"));
-        await _specs.SetStatusAsync(spec.Id, SpecStatus.Approved, default);
-        await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming, default);
-        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "story", ParentId: spec.Id));
-        var first = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "first", ParentId: story.Id));
+        var (specId, stories, tasks) = await SeedGroomedSpecAsync("partial", 1, completeGrooming: false);
+        var first = (await _issues.GetAsync(tasks[0]))!;
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync());
-        var second = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "second", ParentId: story.Id));
-        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, default);
+        var second = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "second", ParentId: stories[0]));
+        var completeUnit = SprintPlanJson.ReadBinding(first)! with { RequiredTaskIds = [first.Id, second.Id] };
+        await new SprintOutcomeAuthority(_issues).BindAsync(first.Id, completeUnit);
+        await new SprintOutcomeAuthority(_issues).BindAsync(second.Id, completeUnit);
+        await _specs.SetStatusAsync(specId, SpecStatus.Groomed, default);
         await Tick();
         var active = Assert.IsType<SprintRecord>(await _sprints.GetActiveAsync());
         var members = await _sprints.GetIssueIdsAsync(active.Id);
@@ -524,7 +541,7 @@ public class SprintAssemblerTests : IDisposable
 
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
-        Assert.Equal("Sprint 1: Health endpoints", active.Name);
+        Assert.Equal("Sprint 1: Ship the health/meta endpoint set.", active.Name);
         Assert.Equal("Ship the health/meta endpoint set.", active.Goal);
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
@@ -562,6 +579,8 @@ public class SprintAssemblerTests : IDisposable
         var normal = await _issues.CreateAsync(new NewIssue(
             Type: "task", Title: "normal ad-hoc", Priority: 3,
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await BindAdHocFixtureAsync("approved urgent repair", blocker);
+        await BindAdHocFixtureAsync("approved ordinary improvement", normal);
 
         await Tick();
 
@@ -992,6 +1011,7 @@ public class SprintAssemblerTests : IDisposable
         var fixer = await _issues.CreateAsync(new NewIssue(
             Type: "task", Title: "merge-gate fix",
             Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+        await BindPrerequisitesAsync(aTasks[0], fixer.Id);
         await _issues.AddDependencyAsync(fixer.Id, aTasks[0], IssueDepKind.Blocks, CancellationToken.None);
 
         await Tick();
@@ -1013,6 +1033,7 @@ public class SprintAssemblerTests : IDisposable
 
         await _issues.TransitionAsync(fixer.Id, IssueStatus.Pending, null,
             metadata: new Dictionary<string, object> { ["groomed"] = true });
+        await BindPrerequisitesAsync(tasks[0], fixer.Id);
         var prerequisite = await _issues.CreateAsync(new NewIssue("task", "fix prerequisite"));
         await _issues.AddDependencyAsync(prerequisite.Id, fixer.Id, IssueDepKind.Blocks);
         await Tick();
@@ -1121,10 +1142,8 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync()); // nothing eligible
 
-        // Spec-chain task (assembly path; ad-hoc never assembles).
-        var (specId, _, _) = await SeedGroomedSpecAsync("real work", 0);
-        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "real story", ParentId: specId));
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real", ParentId: story.Id));
+        var (_, _, taskIds) = await SeedGroomedSpecAsync("real work", 1);
+        var taskId = taskIds[0];
         await Tick();
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
@@ -1135,24 +1154,17 @@ public class SprintAssemblerTests : IDisposable
 
         // Complete it; the same tasks must not be re-ingested into a
         // later sprint.
-        await _issues.TransitionAsync(task.Id, IssueStatus.Completed, null);
+        await _issues.TransitionAsync(taskId, IssueStatus.Completed, null);
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync()); // nothing new eligible
         Assert.Single(await _sprints.ListAsync(activeOnly: false));
     }
 
     [Fact]
-    public async Task RequeuedTask_FromCompletedSprint_IsReassembled()
+    public async Task RequeuedTask_WaitsForExplicitInterruptionOfIncompletePriorOutcome()
     {
-        // Operator requeue flow (observed live 2026-07-24, task-158):
-        // a task fails, the operator closes it, the sprint completes,
-        // then requeues it to Pending. Completed-sprint membership
-        // must NOT strand it â€” requeued work is a new sprint, not
-        // history to protect from resurrection. 2026-08-11 update:
-        // Failed no longer counts as terminal (a sprint with Failed
-        // stays active â€” operator rule 2026-07-25: don't auto-clear
-        // Failed), so the operator closes the Failed task first, the
-        // sprint completes, then requeue reassembles.
+        // Closing failed work ends task bookkeeping without delivering the outcome.
+        // Requeue alone cannot bypass that unresolved acceptance record.
         var (_, _, taskIds) = await SeedGroomedSpecAsync("requeue work", 1);
         var taskId = taskIds[0];
         await Tick();
@@ -1170,9 +1182,13 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
         Assert.Null(await _sprints.GetActiveAsync());
 
-        // Operator requeue: Closed -> Pending. Next tick assembles
-        // a NEW sprint containing it (previously: stranded forever).
         await _issues.TransitionAsync(taskId, IssueStatus.Pending, "operator requeue");
+        await Tick();
+        Assert.Null(await _sprints.GetActiveAsync());
+        var completions = new SprintCompletionStore(_issues);
+        var receipt = (await completions.GetAsync("completion-" + first!.Id))!;
+        Assert.Equal(EngineeringOutcome.Incomplete, receipt.EngineeringOutcome);
+        await completions.AbandonAsync(receipt.Id, receipt.PlanHash!, "Stop the unsuccessful attempt before retrying its approved work", "fixture operator");
         await Tick();
         var second = await _sprints.GetActiveAsync();
         Assert.NotNull(second);
@@ -1189,17 +1205,14 @@ public class SprintAssemblerTests : IDisposable
             Name: "empty", Goal: "g", StartDate: DateTime.UtcNow,
             EndDate: DateTime.UtcNow.AddDays(1), Status: SprintStatus.Active));
 
-        // Spec-chain task (assembly path; ad-hoc never assembles).
-        var (specId, _, _) = await SeedGroomedSpecAsync("real", 0);
-        var story = await _issues.CreateAsync(new NewIssue(Type: "story", Title: "s", ParentId: specId));
-        var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "real", ParentId: story.Id));
+        var (_, _, taskIds) = await SeedGroomedSpecAsync("real", 1);
         await Tick();
 
         var all = await _sprints.ListAsync(activeOnly: false);
         Assert.Equal(SprintStatus.Completed, all.Single(s => s.Id == empty.Id).Status);
         var active = await _sprints.GetActiveAsync();
         Assert.NotNull(active);
-        Assert.Contains(task.Id, await _sprints.GetIssueIdsAsync(active!.Id));
+        Assert.Contains(taskIds[0], await _sprints.GetIssueIdsAsync(active!.Id));
     }
 
     // ---- Inter-sprint build-state snapshot (operator request
