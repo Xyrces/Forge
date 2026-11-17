@@ -56,7 +56,7 @@ def bootstrap(version, checksum):
         if hashlib.sha256(binary.read_bytes()).hexdigest() != checksum:
             raise RuntimeError("K3s binary checksum mismatch")
         configuration = Path(temp) / "config.yaml"
-        configuration.write_text("cluster-init: true\nwrite-kubeconfig-mode: '0600'\ndisable:\n  - traefik\n  - servicelb\n", encoding="utf-8")
+        configuration.write_text("cluster-init: true\nsecrets-encryption: true\nwrite-kubeconfig-mode: '0600'\ndisable:\n  - traefik\n  - servicelb\n", encoding="utf-8")
         unit = Path(temp) / "k3s.service"
         unit.write_text("""[Unit]
 Description=K3s for Forge

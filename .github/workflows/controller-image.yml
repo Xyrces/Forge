@@ -75,6 +75,8 @@ jobs:
           file: deploy/k3s/Dockerfile
           platforms: linux/amd64
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: ${{ steps.inputs.outputs.image }}:sha-${{ steps.inputs.outputs.sha }}
           build-args: |
             SDK_IMAGE=${{ steps.inputs.outputs.sdk }}
