@@ -34,6 +34,7 @@ public sealed class BashTool
     private readonly IReadOnlyDictionary<string, string>? _envVars;
     private readonly Func<bool>? _mutationsAllowed;
     private readonly string? _mutationRefusalMessage;
+    private readonly bool _publicationForbidden;
 
     /// <param name="envVars">
     /// Extra environment variables injected into every spawned
@@ -54,7 +55,7 @@ public sealed class BashTool
     /// </param>
     public BashTool(string workingDirectory, TimeSpan? defaultTimeout = null, ILogger<BashTool>? logger = null,
         IReadOnlyDictionary<string, string>? envVars = null, Func<bool>? mutationsAllowed = null,
-        string? mutationRefusalMessage = null)
+        string? mutationRefusalMessage = null, bool publicationForbidden = false)
     {
         _workingDirectory = workingDirectory;
         _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(30);
@@ -62,6 +63,7 @@ public sealed class BashTool
         _envVars = envVars;
         _mutationsAllowed = mutationsAllowed;
         _mutationRefusalMessage = mutationRefusalMessage;
+        _publicationForbidden = publicationForbidden;
     }
 
     public string WorkingDirectory => _workingDirectory;
@@ -80,6 +82,11 @@ public sealed class BashTool
     {
         if (string.IsNullOrWhiteSpace(command))
             return "exit=-1\nstdout:\nstderr: command is required";
+
+        // Independent of plan approval: the worker host verifies first,
+        // then the controller owns remote publication.
+        if (_publicationForbidden && WorkerPublicationPolicy.IsPublication(command))
+            return "exit=-1\nstdout:\nstderr: REFUSED — worker publication is disabled. Finish local edits and tests, then return your summary. The host verifies and the controller commits/pushes/opens the PR. Do not publish through scripts or alternate tools.";
 
         // Plan gate (hard enforcement): mutating commands are
         // refused until submit_plan returns approved. Read/explore/

@@ -42,11 +42,19 @@ public class MafAgentRunnerBashToolTests : IDisposable
         public int CallCount;
         public ChatOptions? LastOptions;
         public bool ToolsPropagated;
+        public string Command = "type PROBE.txt";
+        public bool SawPublicationRefusal;
+        public bool SawWorkerInstructions;
 
         public Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             CallCount++;
+            var snapshot = messages.ToList();
+            SawPublicationRefusal |= snapshot.SelectMany(m => m.Contents).OfType<FunctionResultContent>()
+                .Any(r => r.Result?.ToString()?.Contains("worker publication is disabled", StringComparison.Ordinal) == true);
+            SawWorkerInstructions |= (options?.Instructions?.Contains("DISTRIBUTED WORKER PUBLICATION CONTRACT", StringComparison.Ordinal) == true)
+                || snapshot.Any(m => m.Text.Contains("DISTRIBUTED WORKER PUBLICATION CONTRACT", StringComparison.Ordinal));
             LastOptions = options;
             if (options is not null)
             {
@@ -56,7 +64,7 @@ public class MafAgentRunnerBashToolTests : IDisposable
             if (CallCount == 1)
             {
                 var call = new FunctionCallContent("c1", "bash",
-                    new Dictionary<string, object?> { ["command"] = "type PROBE.txt" });
+                    new Dictionary<string, object?> { ["command"] = Command });
                 return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, new[] { (AIContent)call })));
             }
             // Second turn: model sees the tool result + replies.
@@ -82,6 +90,20 @@ public class MafAgentRunnerBashToolTests : IDisposable
         private readonly IChatClient _client;
         public ScriptingFactory(IChatClient client) { _client = client; }
         public IChatClient Create(LlmConfig config, AgentType role, string? projectId = null, RoleModel? modelOverride = null) => _client;
+    }
+
+    [Fact]
+    public async Task WorkerContext_AddsPublicationInstructionsAndRefusesModelPush()
+    {
+        var client = new BashScriptedChatClient("done") { Command = "git push origin HEAD" };
+        var runner = new MafAgentRunner(new ScriptingFactory(client),
+            new LlmConfig(new ProviderConfig(LlmProviders.Stub, "", null, null, "stub-model")),
+            new RoleAgentRegistry(), NullLogger<MafAgentRunner>.Instance,
+            rolePromptsRoot: TempRoot.Instance.NewDirectory("worker-prompt"));
+        await runner.RunAsync(AgentType.CoreDev, "Make local changes", null,
+            new Dictionary<string, object> { ["worktreePath"] = _worktree, ["workerAttemptId"] = "attempt-test" }, default);
+        Assert.True(client.SawPublicationRefusal);
+        Assert.True(client.SawWorkerInstructions);
     }
 
     [Fact]

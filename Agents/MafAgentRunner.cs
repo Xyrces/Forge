@@ -149,6 +149,7 @@ public async Task<AgentRunResult> RunAsync(
         CancellationToken ct)
     {
         var roleDef = _roles.ForType(role);
+        var isWorker = !string.IsNullOrWhiteSpace(ResolveContextString(context, "workerAttemptId"));
         var projectId = ResolveContextString(context, "projectId");
         if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
         // The run registry row belongs to the OWNING project's schema:
@@ -167,6 +168,7 @@ public async Task<AgentRunResult> RunAsync(
             skillInstructions,
             BuildSprintBlock(context),
             memoryInstructions,
+            isWorker ? WorkerPublicationPolicy.Instructions : string.Empty,
         }.Where(s => !string.IsNullOrEmpty(s)));
         // P1 fix: instructions go to the agent's instructions: parameter,
         // NOT into the user message. The user prompt is the operator's
@@ -231,7 +233,8 @@ public async Task<AgentRunResult> RunAsync(
             }
 
             tools.Add(new BashTool(bashWorkingDir, logger: null, envVars: secretEnv,
-                mutationsAllowed: mutationsAllowed, mutationRefusalMessage: mutationRefusalMessage).AsAIFunction());
+                mutationsAllowed: mutationsAllowed, mutationRefusalMessage: mutationRefusalMessage,
+                publicationForbidden: isWorker).AsAIFunction());
         }
 
         // Reviewer drill-in: the dispatcher hands the FULL diff via
