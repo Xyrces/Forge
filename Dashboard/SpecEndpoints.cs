@@ -488,6 +488,8 @@ public static class SpecEndpoints
                 initiativeRevision = receipt?.Revision,
                 refinementError = receipt?.LastError,
                 reason = refinementBlocked ? $"Initiative already approved; refinement is {receipt!.RefinementState}. Wait for completion or retry failed refinement from Intake Proposals."
+                    : groomingActive ? "Technical planning is queued or running; existing planned work is retained."
+                    : groomingRetryAvailable ? "Review the interrupted attempt, then explicitly retry to resume its planned work."
                     : canApprove ? "draft is ready for approval"
                     : canStartGrooming ? "designed/approved specs feed the groomer"
                     : canShip ? "groomer has decomposed into stories/tasks"

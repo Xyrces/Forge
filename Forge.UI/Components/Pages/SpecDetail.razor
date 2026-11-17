@@ -178,7 +178,7 @@
                             <tr>
                                 <td class="mono">@run.Ts</td>
                                 <td class="mono">@run.Trigger</td>
-                                <td><span class="pill pill--@run.Status.ToLowerInvariant()">@run.Status</span></td>
+                                <td><span class="pill pill--@run.Status.ToLowerInvariant()">@GroomingLabel(run.Status)</span></td>
                                 <td>@run.Stories</td>
                                 <td>@run.Tasks</td>
                                 <td class="mono">@run.Duration</td>
@@ -330,7 +330,7 @@
         "Started" => "In progress",
         "Failed" => "Stopped after an error",
         "NeedsReview" => "Interrupted — explicit retry required",
-        "Completed" or "Success" => "Finished",
+        "Completed" or "Success" or "Succeeded" => "Finished",
         null => "Interrupted state requires review",
         _ => "Status unavailable"
     };
