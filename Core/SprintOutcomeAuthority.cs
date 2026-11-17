@@ -45,6 +45,9 @@ public sealed class SprintOutcomeAuthority(IssueStore issues)
                 || c.Text.Length > 2000 || !Enum.IsDefined(c.EvidenceKind)))
             throw new InvalidOperationException("Malformed explicit outcome mapping.");
 
+        if (SprintPlanJson.Serialize(binding).Length > SprintPlanJson.MaximumBindingJsonLength)
+            throw new InvalidOperationException("Serialized outcome mapping exceeds the supported binding size.");
+
         if (!binding.Criteria.Any(c => binding.CriterionIds.Contains(c.Id)
                 && c.EvidenceKind == SprintEvidenceKind.MergedAndVerified))
             throw new InvalidOperationException(

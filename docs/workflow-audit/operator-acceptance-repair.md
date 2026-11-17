@@ -28,6 +28,12 @@ or external dependencies, inconsistent units, incomplete criterion coverage,
 and dependency cycles. Historical inactive membership deleted without any
 durable audit cannot be reconstructed; the guard checks all recorded history.
 
+Shared outcome validation also enforces the reader's 32,768-character serialized
+binding limit before persistence. Two individually readable units cannot be
+combined into an unreadable result. A 10-plus-10-criterion regression verifies
+that both preview and apply refuse this case without changing rows or writing
+a repair receipt; 43 focused recovery/phase/planner tests passed with this guard.
+
 A serializable transaction rechecks a preview hash over the full affected
 rows, dependencies, specification/run coordinates and resulting bindings.
 IssueStore owns the binding updates, closure and event writes. Exact operator

@@ -25,6 +25,7 @@ public sealed record SprintPlan(int Version, string ProjectId, string Objective,
 public static class SprintPlanJson
 {
     public const string MetadataKey = "sprintOutcome";
+    public const int MaximumBindingJsonLength = 32768;
     public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
     { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
     public static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Options);
@@ -50,7 +51,7 @@ public static class SprintPlanJson
     public static SprintOutcomeBinding? ReadBinding(IssueRecord issue)
     {
         var json = issue.GetMetadata(MetadataKey);
-        if (string.IsNullOrWhiteSpace(json) || json.Length > 32768) return null;
+        if (string.IsNullOrWhiteSpace(json) || json.Length > MaximumBindingJsonLength) return null;
         try { return JsonSerializer.Deserialize<SprintOutcomeBinding>(json, Options); }
         catch (JsonException) { return null; }
     }

@@ -160,6 +160,44 @@ public sealed class OperatorAcceptanceRepairTests
     }
 
     [Fact]
+    public async Task IndividuallyReadableUnitsWhoseUnionExceedsBindingLimitRejectWithoutWrites()
+    {
+        var f = await Seed(); await using var issues = f.Issues;
+        var repair = new OperatorAcceptanceRepair(issues);
+        var originalPreview = (await repair.PreviewAsync(f.Scope.SpecId)).Preview!;
+        var allRows = f.Targets.Concat(f.Sources).ToArray();
+        foreach (var original in allRows)
+        {
+            var row = (await issues.GetAsync(original.Id))!;
+            var binding = SprintPlanJson.ReadBinding(row)!;
+            var isTarget = f.Targets.Any(t => t.Id == row.Id);
+            var criteria = Enumerable.Range(0, 10).Select(i => new SprintCriterion(
+                $"{(isTarget ? "implementation" : "observation")}-{i}", new string('x', 1800),
+                isTarget ? SprintEvidenceKind.MergedAndVerified : SprintEvidenceKind.OperatorObserved, f.Scope)).ToArray();
+            binding = binding with { Criteria = criteria, CriterionIds = criteria.Select(c => c.Id).ToArray() };
+            Assert.True(SprintPlanJson.Serialize(binding).Length <= SprintPlanJson.MaximumBindingJsonLength);
+            if (isTarget) SprintOutcomeAuthority.ValidateShape(row.Id, binding);
+            await issues.MergePendingMetadataAsync(row.Id, new Dictionary<string, object>
+                { [SprintPlanJson.MetadataKey] = JsonSerializer.SerializeToElement(binding, SprintPlanJson.Options) });
+            Assert.NotNull(SprintPlanJson.ReadBinding((await issues.GetAsync(row.Id))!));
+        }
+        var before = await Task.WhenAll(allRows.Select(r => issues.GetAsync(r.Id)));
+        var preview = await repair.PreviewAsync(f.Scope.SpecId);
+        Assert.False(preview.Eligible);
+        Assert.Contains("binding size", preview.Reason);
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            repair.ApplyAsync(f.Scope.SpecId, Request(originalPreview), "operator"));
+        Assert.Contains("binding size", failure.Message);
+        var after = await Task.WhenAll(allRows.Select(r => issues.GetAsync(r.Id)));
+        Assert.Equal(SprintPlanJson.Serialize(before), SprintPlanJson.Serialize(after));
+        Assert.All(after, row => Assert.Equal(IssueStatus.Pending, row!.Status));
+        await using var connection = await issues.Db.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM memory WHERE key LIKE 'operator-acceptance-repair/%'";
+        Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
     public async Task ActivationSnapshotTakenBeforeRepairCannotCommitAfterwards()
     {
         var f = await Seed(); await using var issues = f.Issues;
