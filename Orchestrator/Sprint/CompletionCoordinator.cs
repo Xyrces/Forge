@@ -39,13 +39,13 @@ internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? 
                 context.Add(reference, resolved);
         }
         var incomplete = members.Any(m => !IssueResolution.IsSatisfied(m, context));
-        var verified = members.Count > 0 && members.All(TaskDeliveryEvidence.IsMergedAndVerified);
+        var verified = members.Count > 0 && members.All(m => TaskDeliveryEvidence.IsImplementationVerified(m, plan));
         var outcome = incomplete ? EngineeringOutcome.Incomplete
             : plan is null ? EngineeringOutcome.LegacyTerminalOnly
             : !verified || routineDeploymentEnabled || plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved)
                 ? EngineeringOutcome.PendingEvidence : EngineeringOutcome.Satisfied;
         return await store.BeginCompletionAsync(sprint.Id, members, new(auditId, plan?.Hash, outcome,
-            JsonSerializer.Serialize(new { verifiedTasks = members.Where(TaskDeliveryEvidence.IsMergedAndVerified).Select(m => m.Id),
+            JsonSerializer.Serialize(new { verifiedTasks = members.Where(m => TaskDeliveryEvidence.IsImplementationVerified(m, plan)).Select(m => m.Id),
                 unresolvedTasks = members.Where(m => !IssueResolution.IsSatisfied(m, context)).Select(m => m.Id),
                 deploymentPending = plan?.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved) ?? false }),
             ReadyForDeployment: plan is not null && verified && !incomplete,

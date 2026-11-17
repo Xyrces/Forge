@@ -9,6 +9,8 @@ namespace Forge.Deploy;
 public interface IRoutineReleaseSource
 {
     Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project, IReadOnlyList<IssueRecord> members, CancellationToken ct);
+    Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project, IReadOnlyList<IssueRecord> members, SprintPlan plan, CancellationToken ct)
+        => ObserveMergedFrontierAsync(project, members, ct);
     Task<TrustedImageReceipt?> FindReceiptAsync(ProjectOptions project, string sha, CancellationToken ct);
     Task ValidateForwardAsync(ProjectOptions project, string sha, CancellationToken ct);
 }
@@ -61,7 +63,8 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
                             {
                                 var members = JsonSerializer.Deserialize<IssueRecord[]>(receipt.MembersJson, Json)
                                     ?? throw new InvalidOperationException("Completion member evidence is missing.");
-                                var observed = await source.ObserveMergedFrontierAsync(project.Options, members, ct);
+                                var plan = await project.Completions.GetBoundPlanAsync(receipt, ct);
+                                var observed = await source.ObserveMergedFrontierAsync(project.Options, members, plan, ct);
                                 await project.Completions.RecordSourceAsync(receipt.Id, observed.Sha, observed.Evidence, ct);
                                 sha = observed.Sha;
                             }

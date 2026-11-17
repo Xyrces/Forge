@@ -455,7 +455,7 @@ public sealed class GroomerAgent
         if (_issues is IssueStore owningStore && await new ActivePrerequisiteGrooming(owningStore).ReadPlanAsync(issue.Id, ct) is { } activePlan)
             grounding += "\n## Exact committed acceptance for this active-sprint prerequisite\n"
                 + SprintPlanJson.Serialize(new { activePlan.Hash, activePlan.Objective, activePlan.Criteria, activePlan.Members })
-                + "\nBind only existing criterion IDs with their exact text, evidence kind and scope. Do not add a duplicate handoff criterion or expand the active outcome. Map necessary implementation to existing MergedAndVerified acceptance. Keep operator observations pending. Required task IDs may reference this task and committed members only. If the task cannot satisfy this existing scope, leave it ungroomed and explain the conflict.\n";
+                + "\nBind only existing criterion IDs with their exact text, evidence kind and scope. Do not add a duplicate handoff criterion or expand the active outcome. Map necessary implementation to existing MergedAndVerified or ImplementationVerified acceptance without changing its kind. Keep operator observations pending. Required task IDs may reference this task and committed members only. If the task cannot satisfy this existing scope, leave it ungroomed and explain the conflict.\n";
         var runProjectId = _projectId;
 
         var approveTool = AIFunctionFactory.Create(
@@ -559,11 +559,11 @@ public sealed class GroomerAgent
         that use configured role capacities, but one or two coherent tasks is valid; never pad or split artificially.
         Tasks in one complete delivery unit share outcomeId, objective, criteria and complete requiredTaskIds.
         Use a common outcomeId/objective across related approved specifications only with explicit semantic justification.
-        criterionIds specifies each task's contribution. evidenceKind is MergedAndVerified (pre-deploy merge + trusted verification),
+        criterionIds specifies each task's contribution. Default implementation evidenceKind is ImplementationVerified (either a verified merged change or independently verified and reviewed existing implementation at an exact revision). Use MergedAndVerified when approved acceptance explicitly requires a new merged PR; never weaken that requirement. Other kinds are
         DeploymentHealthy (post-deploy controller/runtime qualification), or OperatorObserved (post-deploy operator-led acceptance,
         including visual/browser checks). Never substitute deployment health or merged code for actual visual acceptance.
         Keep pre-deployment implementation and post-deployment acceptance as distinct criteria WITHIN THE SAME delivery outcome.
-        Each engineering task's own criterionIds MUST include a genuine MergedAndVerified criterion; it may also contribute
+        Each engineering task's own criterionIds MUST include a genuine ImplementationVerified or MergedAndVerified criterion; it may also contribute
         to DeploymentHealthy or OperatorObserved criteria. Attach those later criteria to the implementation delivery members.
         requiredTaskIds contains actual pre-deployment engineering work, never separate operator-observation-only QA tasks
         or a second observation-only sprint. Do not invent code changes, PRs, or fake operator evidence to pass this rule.
@@ -572,7 +572,7 @@ public sealed class GroomerAgent
         reason is Delivers, Remediates, or Prerequisite. Every prerequisite needs explicit criterion mapping too.
         For remediation, bind to existing approved acceptance scope; followUpOf alone is not approval.
         Binding JSON: {"version":1,"outcomeId":"stable-goal-id","objective":"useful outcome",
-          "criteria":[{"id":"criterion-id","text":"observable acceptance","evidenceKind":"MergedAndVerified",
+          "criteria":[{"id":"criterion-id","text":"observable acceptance","evidenceKind":"ImplementationVerified",
             "scope":{"specId":"...","proposalId":"...","revision":1,"hash":"...","approvedExcerpt":"literal approved text"}}],
           "requiredTaskIds":["all tasks required for this unit"],"criterionIds":["criterion-id"],"reason":"Delivers",
           "authority":{"specId":"...","proposalId":"...","revision":1,"hash":"...","approvedExcerpt":"literal approved text"}}

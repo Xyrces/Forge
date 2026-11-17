@@ -84,7 +84,7 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
         if (evidence.Outcome == EngineeringOutcome.Satisfied && (evidence.PlanAuditId is null || evidence.PlanHash is null))
             throw new InvalidOperationException("Legacy terminal work cannot claim verified outcome delivery.");
         if ((evidence.ReadyForDeployment || evidence.Outcome == EngineeringOutcome.Satisfied)
-            && (members.Count == 0 || members.Any(m => !TaskDeliveryEvidence.IsMergedAndVerified(m))
+            && (members.Count == 0
                 || evidence.PlanAuditId is null || evidence.Outcome is EngineeringOutcome.Incomplete or EngineeringOutcome.LegacyTerminalOnly))
             throw new InvalidOperationException("Verified member publication and a bound plan are required for delivery.");
         await using var connection = await issues.Db.OpenAsync(ct);
@@ -121,6 +121,9 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
             if (plan is null || plan.Hash != evidence.PlanHash || plan.ProjectId != issues.ProjectId
                 || !actual.SetEquals(plan.Members.Select(m => m.TaskId)))
                 throw new InvalidOperationException("Committed completion plan changed or does not cover the exact members.");
+            if ((evidence.ReadyForDeployment || evidence.Outcome == EngineeringOutcome.Satisfied)
+                && members.Any(m => !TaskDeliveryEvidence.IsImplementationVerified(m, plan)))
+                throw new InvalidOperationException("Every implementation requires exact-plan trusted verification and independent delivery evidence.");
             deliveryRequired |= plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved);
             if (evidence.Outcome == EngineeringOutcome.Satisfied && plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved))
                 throw new InvalidOperationException("Deployment criteria require the linked deployment outcome.");
@@ -158,6 +161,20 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
             ("@sha", exactSha), ("@evidence", evidenceJson), ("@now", Now()), ("@id", id));
         await command.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
+    }
+
+    public async Task<SprintPlan> GetBoundPlanAsync(SprintCompletionRecord receipt, CancellationToken ct = default)
+    {
+        if (receipt.ProjectId != issues.ProjectId || receipt.PlanAuditId is null)
+            throw new InvalidOperationException("Completion lacks an owning-project plan.");
+        await using var connection = await issues.Db.OpenAsync(ct);
+        using var command = Command(connection, null,
+            $"SELECT weights_json FROM {T("sprint_proposal_audit")} WHERE id=@audit AND committed_sprint_id=@sprint",
+            ("@audit", receipt.PlanAuditId), ("@sprint", receipt.SprintId));
+        var plan = SprintPlanJson.ReadAuditPlan(await command.ExecuteScalarAsync(ct) as string ?? "{}");
+        if (plan is null || plan.ProjectId != issues.ProjectId || plan.Hash != receipt.PlanHash)
+            throw new InvalidOperationException("Completion plan evidence does not match its immutable binding.");
+        return plan;
     }
     public Task BindDeploymentAsync(string id, string candidateId, CancellationToken ct = default)
         => SetBindingAsync(id, "deployment_candidate_id", candidateId, ct);

@@ -49,9 +49,9 @@ public sealed class SprintOutcomeAuthority(IssueStore issues)
             throw new InvalidOperationException("Serialized outcome mapping exceeds the supported binding size.");
 
         if (!binding.Criteria.Any(c => binding.CriterionIds.Contains(c.Id)
-                && c.EvidenceKind == SprintEvidenceKind.MergedAndVerified))
+                && c.EvidenceKind is SprintEvidenceKind.MergedAndVerified or SprintEvidenceKind.ImplementationVerified))
             throw new InvalidOperationException(
-                "Every engineering task must contribute to a genuine pre-deployment MergedAndVerified criterion. "
+                "Every engineering task must contribute to a genuine pre-deployment MergedAndVerified or ImplementationVerified criterion. "
                 + "Attach DeploymentHealthy and OperatorObserved criteria to the implementation delivery members in the same outcome, "
                 + "not to separate observation-only engineering tasks or sprints. Do not invent code changes or PRs to satisfy this requirement; "
                 + "post-deployment evidence still requires actual runtime or operator verification.");

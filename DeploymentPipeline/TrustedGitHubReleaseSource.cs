@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Core.Completion;
 
 namespace Forge.Deploy;
 
@@ -46,13 +47,33 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         return path;
     }
 
-    public async Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project,
+    public Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project,
         IReadOnlyList<IssueRecord> members, CancellationToken ct)
+        => ObserveFrontierAsync(project, members, null, ct);
+
+    public Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project,
+        IReadOnlyList<IssueRecord> members, SprintPlan plan, CancellationToken ct)
+        => ObserveFrontierAsync(project, members, plan, ct);
+
+    private async Task<(string Sha, string Evidence)> ObserveFrontierAsync(ProjectOptions project,
+        IReadOnlyList<IssueRecord> members, SprintPlan? plan, CancellationToken ct)
     {
         var repo = Repository(project);
+        if (plan is not null && (plan.ProjectId != project.Id || !plan.HasValidHash
+            || !plan.Members.Select(m => m.TaskId).ToHashSet(StringComparer.Ordinal).SetEquals(members.Select(m => m.Id))))
+            throw new InvalidOperationException("Source qualification requires this project's exact completion plan and members.");
         var observations = new List<(string Sha, DateTimeOffset At, int Pr)>();
+        var existing = new List<VerifiedExistingImplementationEvidence>();
         foreach (var member in members.Where(m => !AgentTaskTypes.IsContainer(m.Type) && m.Type != AgentTaskTypes.PrWatch))
         {
+            if (plan is not null && ExistingImplementationEvidence.TryGet(member, plan, out var proof))
+            {
+                existing.Add(proof!);
+                observations.Add((proof!.SourceSha, proof.Review.ReviewedAt, 0));
+                continue;
+            }
+            if (member.GetMetadata(ExistingImplementationEvidence.MetadataKey) is not null && member.GetMetadata("prNumber") is null)
+                throw new InvalidOperationException("Existing implementation source lacks exact-plan independent evidence.");
             // Non-code dispositions belong to the completion evaluator, not an invented source SHA.
             if (member.GetMetadata("prNumber") is not { } value) continue;
             if (!int.TryParse(value, out var number) || number <= 0) throw new InvalidOperationException("Invalid merged pull request evidence.");
@@ -102,7 +123,8 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         }
         return (selected, JsonSerializer.Serialize(new { repository = repo, branch = project.DefaultBranch,
             memberFrontier = frontier, runningSource = running, selectedSource = selected, selectionReason = reason,
-            merged = observations.Select(o => new { pullRequest = o.Pr, sourceSha = o.Sha, mergedAt = o.At }) }, Json));
+            merged = observations.Where(o => o.Pr > 0).Select(o => new { pullRequest = o.Pr, sourceSha = o.Sha, mergedAt = o.At }),
+            verifiedExisting = existing.Select(e => new { e.TaskId, e.PlanHash, e.SourceSha, e.Verification, e.Review }) }, Json));
     }
 
     private async Task RequireAncestor(ProjectOptions project, string repo, string ancestor, string descendant, CancellationToken ct)

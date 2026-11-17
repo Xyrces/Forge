@@ -8,6 +8,9 @@ public sealed record ObservedMergeEvidence(string TaskId, int PullRequestNumber,
 
 public static class TaskDeliveryEvidence
 {
+    public static bool IsImplementationVerified(IssueRecord task, SprintPlan? plan) =>
+        IsMergedAndVerified(task) || (plan is not null && ExistingImplementationEvidence.TryGet(task, plan, out _));
+
     public static bool IsMergedAndVerified(IssueRecord task)
     {
         try
