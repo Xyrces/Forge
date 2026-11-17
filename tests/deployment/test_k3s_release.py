@@ -173,6 +173,16 @@ class ReleaseTests(unittest.TestCase):
         replacement.run()
         self.assertEqual([], kube.events)
 
+    def test_replacement_supervisor_does_not_replay_rolled_back_operation(self):
+        release, kube, controllers = self.make()
+        controllers.fail_activate.add("green")
+        with self.assertRaises(RuntimeError): release.run()
+        kube.events.clear()
+        replacement = Release(kube, controllers, "test-release", IMAGE, DATASET, "retry-pod", "retry-uid")
+        with self.assertRaisesRegex(RuntimeError, "operation rolled back"):
+            replacement.run()
+        self.assertEqual([], kube.events)
+
     def test_conflicting_operation_input_is_rejected(self):
         release, kube, controllers = self.make()
         release.run()
@@ -217,7 +227,10 @@ class ReleaseTests(unittest.TestCase):
             validate_image("registry.example/forge:latest")
         resource = job("forge", IMAGE, DATASET, "test", "release-test")
         self.assertNotIn("ownerReferences", resource["metadata"])
-        self.assertEqual(0, resource["spec"]["backoffLimit"])
+        self.assertEqual(3, resource["spec"]["backoffLimit"])
+        self.assertEqual("Never", resource["spec"]["template"]["spec"]["restartPolicy"])
+        initializer = job("forge", IMAGE, DATASET, "test", "initialize-test", initialize=True)
+        self.assertEqual(0, initializer["spec"]["backoffLimit"])
         self.assertNotIn("ttlSecondsAfterFinished", resource["spec"])
 
     def test_worker_cannot_get_cluster_api_and_control_plane_has_no_secret_read(self):

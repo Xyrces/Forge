@@ -34,6 +34,8 @@ public sealed class KubernetesDeploymentExecutorTests
     public void ReleaseManifestHasIndependentLifetimeAndExactImage()
     {
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(KubernetesDeploymentExecutor.BuildManifest(Project(), Candidate())));
+        Assert.Equal(3, json.RootElement.GetProperty("spec").GetProperty("backoffLimit").GetInt32());
+        Assert.Equal("Never", json.RootElement.GetProperty("spec").GetProperty("template").GetProperty("spec").GetProperty("restartPolicy").GetString());
         var root = json.RootElement;
         Assert.False(root.GetProperty("metadata").TryGetProperty("ownerReferences", out _));
         Assert.False(root.GetProperty("spec").TryGetProperty("ttlSecondsAfterFinished", out _));
