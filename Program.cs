@@ -1325,6 +1325,9 @@ Console.Error.WriteLine(ex.ToString());
                     try { await service.StopAsync(CancellationToken.None); }
                     catch (Exception ex) { logger.LogError(ex, "Background service shutdown failed"); }
                 }
+                // Message consumers no longer admit new watches. Join review/QA
+                // waits and their follow-on callbacks before returning ownership.
+                await provider.GetRequiredService<Orchestrator.WatchSweepService>().StopAsync();
                 foreach (var loop in backgroundLoops)
                 {
                     try { await loop; }

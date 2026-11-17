@@ -107,6 +107,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
     private readonly StageGates? _gates;
     private readonly Core.TaskStateMachine? _lifecycle;
     private readonly Core.Messaging.IEventPublisher? _eventPublisher;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasDurableWorker;
 
     public ProjectDispatchBundleFactory(
         AgentOptions options,
@@ -122,7 +123,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         ISecretStore? secrets = null,
         StageGates? gates = null,
         Core.TaskStateMachine? lifecycle = null,
-        Core.Messaging.IEventPublisher? eventPublisher = null)
+        Core.Messaging.IEventPublisher? eventPublisher = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
         _options = options;
         _dataRoot = dataRoot;
@@ -138,6 +140,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         _gates = gates;
         _lifecycle = lifecycle;
         _eventPublisher = eventPublisher;
+        _hasDurableWorker = hasDurableWorker;
     }
 
     /// <summary>
@@ -272,7 +275,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
             // Watch-lane QA stage (project $qa flag): QA playthrough
             // before review; the merge gate requires qaVerdict=pass at
             // the head and a fail verdict requeues a rework round.
-            qaEnabled: project.QaEnabled);
+            qaEnabled: project.QaEnabled,
+            hasDurableWorker: _hasDurableWorker is null ? null : (id, ct) => _hasDurableWorker(project.Id, id, ct));
 
         return new ProjectDispatchBundle(
             ensured.Project,

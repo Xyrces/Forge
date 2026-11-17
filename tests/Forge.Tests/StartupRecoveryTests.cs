@@ -52,6 +52,23 @@ public class StartupRecoveryTests : IDisposable
             NullLogger<StartupRecovery>.Instance);
     }
 
+    [Fact]
+    public async Task RestartRetainsDurableWorkerRunButClosesUnownedLocalRun()
+    {
+        using var runs = new AgentRunStore(_issues.Db);
+        await runs.StartAsync("durable", "task-live", "CoreDev", "m", projectId: "other-project");
+        await runs.StartAsync("dead", "task-dead", "CoreDev", "m", projectId: "other-project");
+        var recovery = new StartupRecovery(_issues, _reports, _worktrees, _gitHub, _events,
+            NullLogger<StartupRecovery>.Instance, hasDurableWorker: (project, task, _) =>
+            {
+                Assert.Equal("other-project", project);
+                return Task.FromResult(task == "task-live");
+            });
+        await recovery.RunAsync();
+        Assert.Equal("running", (await runs.GetAsync("durable"))!.Status);
+        Assert.Equal("failed", (await runs.GetAsync("dead"))!.Status);
+    }
+
     public void Dispose()
     {
         _issues.Dispose();

@@ -99,7 +99,8 @@ public class PRWatcherReworkTests : IDisposable
 
     private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
-        Forge.Core.AgentRunStore? runs = null) => new(
+        Forge.Core.AgentRunStore? runs = null,
+        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null) => new(
         gh,
         worktrees: new AgentTools.GitWorktreeService(
             new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -112,7 +113,7 @@ public class PRWatcherReworkTests : IDisposable
         gates: gates,
         lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
         workflow: workflow,
-        runs: runs);
+        runs: runs, hasDurableWorker: hasDurableWorker);
 
     private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
     {
@@ -856,6 +857,45 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     [Fact]
+    public async Task ConsumedRound_DurableVerificationWorker_NeverStalls_AfterModelFinished()
+    {
+        // The 2026-07-27 false-stall: clock measured from rework-fire
+        // time could exceed grace while a healthy run was still
+        // working (queue + 30-min run). With an active run in the
+        // registry, the guard must NOT re-fire regardless of age.
+        var gh = new FakeGitHub { Ci = CommitState.Failure };
+        var task = await SeedAsync();
+        // The agent_run table lives in IssueStore's schema — bootstrap it.
+        await using (var bootstrap = new IssueStore(Path.Combine(_workDir, "runs.db"))) { }
+        var runs = new Forge.Core.AgentRunStore(Path.Combine(_workDir, "runs.db"));
+        await runs.StartAsync("run-1", task.Id, "CoreDev", "test-model");
+        await runs.FinishAsync("run-1", "succeeded", 1, 1, 1, 1, null, null);
+        var watcher = new PRWatcher(gh,
+            worktrees: new AgentTools.GitWorktreeService(
+                new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+                NullLogger<AgentTools.GitWorktreeService>.Instance),
+            issues: _issues,
+            pollInterval: TimeSpan.FromSeconds(1),
+            staleAfter: TimeSpan.FromHours(1),
+            events: _events,
+            logger: NullLogger<PRWatcher>.Instance,
+            lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
+            runs: runs,
+            hasDurableWorker: (id, _) => Task.FromResult(id == task.Id),
+            reworkRoundGrace: TimeSpan.Zero);   // would "stall" instantly without the run check
+
+        await watcher.PollWatchedTaskAsync(task, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, error: null, ct: CancellationToken.None);
+        var freshTask = (await _issues.GetAsync(task.Id))!;
+        var second = await watcher.PollWatchedTaskAsync(freshTask, CancellationToken.None,
+            reviewsOverride: _ => Array.Empty<PullRequestReviewState>(), headShaOverride: _ => "abc123");
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, second);   // NOT re-fired
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
     public async Task CircuitBreaker_FourthFailure_TerminalFailed()
     {
         var gh = new FakeGitHub { Ci = CommitState.Failure };
@@ -1076,6 +1116,35 @@ public class PRWatcherReworkTests : IDisposable
         var gh = new FakeGitHub { Ci = CommitState.Success };
         var task = await SeedAsync();
         var outcome = await NewWatcher(gh, runs: runs).PollWatchedTaskAsync(
+            task, CancellationToken.None,
+            reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
+            headShaOverride: _ => "abc123",
+            mergeableOverride: _ => false);
+
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, outcome);
+        var after = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(after.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task ConflictStrike_Deferred_WhenOtherSyncHasDurableVerificationWorker()
+    {
+        await _issues.CreateAsync(new Forge.Core.NewIssue(
+            Type: "task", Title: "live sync",
+            Metadata: new Dictionary<string, object>
+            {
+                ["prNumber"] = 99,
+                ["reworkReason"] = "PR conflicts with the base branch",
+            }));
+        var all = await _issues.ListAsync(new Forge.Core.IssueFilter());
+        var other = all.First(t => t.Title == "live sync");
+        await _issues.TransitionAsync(other.Id, IssueStatus.InProgress, null);
+        var runs = new Forge.Core.AgentRunStore(_issues.Db);
+        // No running model row: the durable worker is verifying.
+
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var task = await SeedAsync();
+        var outcome = await NewWatcher(gh, runs: runs, hasDurableWorker: (id, _) => Task.FromResult(id == other.Id)).PollWatchedTaskAsync(
             task, CancellationToken.None,
             reviewsOverride: _ => new[] { PullRequestReviewState.Approved },
             headShaOverride: _ => "abc123",

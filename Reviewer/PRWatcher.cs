@@ -57,6 +57,7 @@ public sealed class PRWatcher
     /// requires qaVerdict=pass at the current head, and a fail verdict
     /// at the head requeues a rework round with the QA notes.</summary>
     private readonly bool _qaEnabled;
+    private readonly Func<string, CancellationToken, Task<bool>>? _hasDurableWorker;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -71,7 +72,8 @@ public sealed class PRWatcher
         Forge.Core.TaskStateMachine? lifecycle = null,
         AgentRunStore? runs = null,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
-        bool qaEnabled = false)
+        bool qaEnabled = false,
+        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -86,6 +88,7 @@ public sealed class PRWatcher
         _runs = runs;
         _workflow = workflow;
         _qaEnabled = qaEnabled;
+        _hasDurableWorker = hasDurableWorker;
     }
 
     /// <summary>
@@ -420,6 +423,8 @@ public sealed class PRWatcher
                         return WatchPollOutcome.Pending;
                     }
                 }
+                if (_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
+                    return WatchPollOutcome.Pending;
                 var enteredRaw = guardTask?.GetMetadata("stateEnteredAt");
                 var enteredAt = DateTimeOffset.TryParse(enteredRaw, out var ts)
                     ? ts.UtcDateTime : guardTask?.UpdatedAt ?? DateTime.MinValue;
@@ -892,7 +897,10 @@ public sealed class PRWatcher
             .Where(r => r.TaskId is not null)
             .Select(r => r.TaskId!)
             .ToHashSet(StringComparer.Ordinal);
-        return claimed.Any(t => activeTaskIds.Contains(t.Id));
+        foreach (var task in claimed)
+            if (activeTaskIds.Contains(task.Id)
+                || (_hasDurableWorker is not null && await _hasDurableWorker(task.Id, ct))) return true;
+        return false;
     }
 
     /// <summary>Phase 2 shadow-authority helper: report an observed

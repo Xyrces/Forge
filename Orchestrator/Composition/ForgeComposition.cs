@@ -427,11 +427,15 @@ public static class ForgeComposition
         }
         services.AddSingleton(dispatcher);
 
+        Func<string, string, CancellationToken, Task<bool>>? hasDurableWorker = options.Worker.Enabled
+            ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
+                .HasActiveAsync(options.Controller.DatasetId, projectId, taskId, ct)
+            : null;
         var dispatchBundleFactory = new ProjectDispatchBundleFactory(
             options, orchDataRoot, projectStore, cloner,
             agentRunner, roleRegistry, dispatcher, messageBus, eventBus, loggerFactory,
             secrets: secretStore, gates: stageGates, lifecycle: lifecycle,
-            eventPublisher: eventPublisher);
+            eventPublisher: eventPublisher, hasDurableWorker: hasDurableWorker);
         services.AddSingleton(dispatchBundleFactory);
 
         // Watch pipeline + scheduler triggers: ONE consumer per topic
@@ -688,7 +692,7 @@ public static class ForgeComposition
             new GitHubRecoveryAdapter(primaryBundle.GitHub),
             eventBus,
             loggerFactory.CreateLogger<StartupRecovery>(),
-            lifecycle: lifecycle);
+            lifecycle: lifecycle, hasDurableWorker: hasDurableWorker);
         services.AddSingleton(startupRecovery);
 
         log.LogInformation(
@@ -777,7 +781,7 @@ public static class ForgeComposition
         services.AddSingleton(new ScheduledWatchdog(
             projectFactory, eventBus,
             loggerFactory.CreateLogger<ScheduledWatchdog>(),
-            lifecycle));
+            lifecycle, hasDurableWorker));
         services.AddSingleton(new DesignerScheduler(
             routingSpecStore, designerAgentFactory, designerRuns, eventBus,
             loggerFactory.CreateLogger<DesignerScheduler>(),

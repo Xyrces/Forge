@@ -46,7 +46,8 @@ public sealed class StartupRecovery
         IDashboardEventBus events,
         ILogger<StartupRecovery> logger,
         StartupRecoveryOptions? options = null,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Func<string, string, CancellationToken, Task<bool>>? hasDurableWorker = null)
     {
         _issues = issues;
         _reports = reports;
@@ -56,9 +57,11 @@ public sealed class StartupRecovery
         _logger = logger;
         _options = options ?? new StartupRecoveryOptions();
         _lifecycle = lifecycle;
+        _hasDurableWorker = hasDurableWorker;
     }
 
     private readonly Core.TaskStateMachine? _lifecycle;
+    private readonly Func<string, string, CancellationToken, Task<bool>>? _hasDurableWorker;
 
     /// <summary>Everything the recovery pass needs that is
     /// project-scoped. The construction-time fields form the PRIMARY
@@ -148,20 +151,16 @@ public sealed class StartupRecovery
         {
             foreach (var ctx in contexts)
             {
-                // Zombie run rows cannot be alive — this process just
-                // started. Closing them is load-bearing beyond board
-                // truth: the orphan-claim reaper treats an active
-                // agent_run row as proof the task's claim is alive,
-                // so a zombie shields its orphaned claim forever
-                // (observed live 2026-08-01: reviewer rows 9h old).
+                // Local runs die with the controller; durable worker Jobs do not.
                 if (ctx.Issues is Core.IssueStore concrete)
                 {
                     var zombies = await new Core.AgentRunStore(concrete.Db)
-                        .FailZombieRunsAsync(null, "service restart — no run survives a process restart", ct);
+                        .FailZombieRunsAsync(null, "service restart: local run no longer owned", ct,
+                            _hasDurableWorker is null ? null : (run, token) => run.TaskId is null
+                                ? Task.FromResult(false)
+                                : _hasDurableWorker(run.ProjectId ?? concrete.ProjectId, run.TaskId, token));
                     foreach (var z in zombies)
-                    {
                         _logger.LogInformation("StartupRecovery: closed zombie agent run {RunId} (project={Project})", z, ctx.ProjectId);
-                    }
                 }
 
                 // The store returns every held InProgress row
