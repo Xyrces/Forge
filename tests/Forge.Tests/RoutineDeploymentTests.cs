@@ -99,6 +99,34 @@ public sealed class RoutineDeploymentTests : IDisposable
     }
 
     [Fact]
+    public async Task ConcurrentInterruptionAndCandidateCreationHaveOnlyOneAuthorityWinner()
+    {
+        var completion = await Complete();
+        await Completions.RecordSourceAsync(completion.Id, FakeSource.Sha, "{}");
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<string> Attempt(bool create)
+        {
+            await start.Task;
+            try
+            {
+                if (create) await Deployments.CreateOrGetRoutineAsync("forge", completion.Id, FakeSource.Sha);
+                else await Completions.AbandonAsync(completion.Id, completion.PlanHash!, "Explicit stop", "operator");
+                return create ? "created" : "stopped";
+            }
+            catch (InvalidOperationException) { return "rejected"; }
+        }
+        var create = Attempt(true);
+        var stop = Attempt(false);
+        start.SetResult();
+        var outcomes = await Task.WhenAll(create, stop);
+        Assert.Single(outcomes, value => value == "rejected");
+        var receipt = (await Completions.GetAsync(completion.Id))!;
+        var candidates = await Deployments.ListAsync();
+        if (receipt.AbandonmentJson is not null) Assert.Empty(candidates);
+        else Assert.Equal(Assert.Single(candidates).Id, receipt.DeploymentCandidateId);
+    }
+
+    [Fact]
     public async Task DeployHoldQualifiesButDoesNotApproveAndReleaseResumes()
     {
         await Complete(); await Gates.HoldAsync(StageGates.Deploy);
