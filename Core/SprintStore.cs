@@ -40,6 +40,8 @@ public interface ISprintStore
         => throw new NotSupportedException("Fenced inactive membership editing is required.");
     Task AddValidatedIssueAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
         => throw new NotSupportedException("Validated sprint membership is required.");
+    Task AddValidatedPrerequisiteAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+        => throw new NotSupportedException("Validated prerequisite amendment is required.");
     Task RemoveIssueAsync(string sprintId, string issueId, CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetIssueIdsAsync(string sprintId, CancellationToken ct = default);
 }
@@ -226,7 +228,13 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task AddValidatedIssueAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+    public Task AddValidatedIssueAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+        => AddValidatedIssueCoreAsync(sprintId, snapshot, false, ct);
+
+    public Task AddValidatedPrerequisiteAsync(string sprintId, SprintActivationSnapshot snapshot, CancellationToken ct = default)
+        => AddValidatedIssueCoreAsync(sprintId, snapshot, true, ct);
+
+    private async Task AddValidatedIssueCoreAsync(string sprintId, SprintActivationSnapshot snapshot, bool requirePrerequisite, CancellationToken ct)
     {
         await using var conn = await _issues.Db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
@@ -239,6 +247,19 @@ public sealed class SprintStore : ISprintStore, IAsyncDisposable
                 throw new InvalidOperationException("Sprint is no longer active.");
         }
         await ValidateSnapshotAsync(conn, tx, snapshot, ct);
+        if (requirePrerequisite)
+        {
+            foreach (var taskId in snapshot.TaskIds)
+            {
+                await using var necessity = conn.CreateCommand();
+                necessity.Transaction = tx;
+                necessity.CommandText = $"SELECT COUNT(*) FROM {T("issue_dep")} d JOIN {T("sprint_issue")} m ON m.issue_id=d.blocked_id JOIN {T("issue")} target ON target.id=m.issue_id WHERE d.blocker_id=@task AND d.kind='blocks' AND m.sprint_id=@sprint AND target.status NOT IN ('Completed','Closed')";
+                necessity.AddParam("@task", taskId);
+                necessity.AddParam("@sprint", sprintId);
+                if (Convert.ToInt32(await necessity.ExecuteScalarAsync(ct)) == 0)
+                    throw new InvalidOperationException("Task no longer blocks unfinished work in the active sprint.");
+            }
+        }
         foreach (var issue in snapshot.Issues)
         {
             await using var member = conn.CreateCommand();

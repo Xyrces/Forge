@@ -744,6 +744,30 @@ public sealed class OrchestratorAgentTests : IDisposable
     }
 
     [Fact]
+    public async Task DispatchCycle_UngroomedPrerequisiteMember_DoesNotRun()
+    {
+        await _projectStore.UpsertAsync(new NewProject(
+            Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
+        var runner = new CapturingRunner("ok. NO_CHANGES_NEEDED");
+        var orch = BuildOrchestrator(runner);
+        BindMaf(orch);
+        var current = await _issues.CreateAsync(new NewIssue(DevTaskType, "current work"));
+        var sprintId = await ActivateSprintWithAsync(current.Id);
+        var prerequisite = await _issues.CreateAsync(new NewIssue(DevTaskType, "ungroomed actual blocker", Priority: 1));
+        await _issues.AddDependencyAsync(prerequisite.Id, current.Id, IssueDepKind.Blocks);
+        // FollowUpTool can attach a genuine blocker at birth for visibility;
+        // membership and urgency must not bypass the dispatch grooming guard.
+        await _bundle.Sprints.AddIssueAsync(sprintId, prerequisite.Id);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        try { await orch.ExecuteAsync(cts.Token); }
+        catch (OperationCanceledException) { /* bounded observation */ }
+        Assert.Null(runner.LastPrompt);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(prerequisite.Id))!.Status);
+        Assert.Null((await _issues.GetAsync(prerequisite.Id))!.Assignee);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(current.Id))!.Status);
+    }
+
+    [Fact]
     public async Task DispatchCycle_TaskOutsideActiveSprint_StaysPending()
     {
         // Sprint flow: with a sprint active, only its members

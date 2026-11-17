@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 namespace Forge.Orchestrator.Control;
 
 public sealed record ControllerStatus(string InstanceId, string Mode, bool Ready, bool AdmissionOpen,
-    int ActiveRuns, long Epoch, string? LeaseOwner, string DatasetId);
+    int ActiveRuns, long Epoch, string? LeaseOwner, string DatasetId, int? SchemaVersion = null);
 
 /// <summary>One fenced owner. Standby does not construct any Forge scheduler or store with DDL.</summary>
 public sealed class ControllerRuntime : IAsyncDisposable

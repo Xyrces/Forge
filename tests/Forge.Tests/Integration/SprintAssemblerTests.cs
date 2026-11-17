@@ -132,15 +132,10 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task AgedFailure_AutoClosed_BySweep_StoryAndEpicFollow()
+    public async Task AgedFailure_RemainsFailed_ParentsAndDependenciesStayOpen()
     {
-        // Operator direction 2026-08-18 ("fix this permanently"): a
-        // Failed task nobody touched past the aging window is
-        // abandoned work — leaving it Failed holds its story/epic
-        // (and sprint assembly) hostage forever, which is how
-        // porthorizon sat idle 24h+ on 20 ancient failures while the
-        // board read as a busy backlog. The sweep closes it and the
-        // terminal-tree cascade closes its parents in the same tick.
+        // Legacy positive aging configuration must not reinterpret unfinished
+        // required work as abandoned or unblock its dependent tasks.
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
         var spec = await _specs.CreateAsync(new NewSpec(
             ProjectId: "test", Title: "s", Body: "b", ParentIssueId: epic.Id));
@@ -151,6 +146,10 @@ public class SprintAssemblerTests : IDisposable
         await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed, CancellationToken.None);
         await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
 
+        var dependent = await _issues.CreateAsync(new NewIssue("task", "dependent",
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await _issues.AddDependencyAsync(task.Id, dependent.Id, IssueDepKind.Blocks);
+
         var sweeping = new SprintAssembler(
             new ProjectContextFactory(new List<ProjectOptions>()),
             _events, NullLogger<SprintAssembler>.Instance,
@@ -158,17 +157,65 @@ public class SprintAssemblerTests : IDisposable
         await Task.Delay(30); // let the failure age past the tiny window
         await sweeping.TickProjectAsync("test", _issues, _sprints, _specs, CancellationToken.None);
 
-        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(task.Id))!.Status);
-        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(story.Id))!.Status);
-        Assert.Equal(IssueStatus.Closed, (await _issues.GetAsync(epic.Id))!.Status);
-        Assert.Contains(_events.GetHistorySnapshot(), e => e.Kind == "sprint.failure.swept");
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(story.Id))!.Status);
+        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(epic.Id))!.Status);
+        Assert.DoesNotContain(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.Contains(task.Id, (await _issues.OpenBlockersAsync([dependent.Id]))[dependent.Id]);
+        Assert.Null(await _sprints.GetActiveAsync());
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), e => e.Kind is "sprint.failure.swept" or DashboardEventKind.SprintCompleted);
+        var state = (await new MemoryStore(_issues.Db).RecallAsync(SprintAssembler.BuildStateKey)).First();
+        using var json = System.Text.Json.JsonDocument.Parse(state.Body);
+        Assert.Equal("starved", json.RootElement.GetProperty("phase").GetString());
+        Assert.Contains("explicitly close", json.RootElement.GetProperty("reason").GetString());
+        Assert.DoesNotContain("auto-close", json.RootElement.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task AgedFailedSprintMember_RequiresExplicitOperatorClosure_EvenWithGateHeld()
+    {
+        var (_, _, tasks) = await SeedGroomedSpecAsync("required outcome", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var taskId = tasks.Single();
+        await _issues.TransitionAsync(taskId, IssueStatus.Failed, "required behavior still missing");
+        var dependent = await _issues.CreateAsync(new NewIssue("task", "dependent",
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await _issues.AddDependencyAsync(taskId, dependent.Id, IssueDepKind.Blocks);
+        var gates = new StageGates(new MemoryStore(_issues.Db));
+        await gates.HoldAsync(StageGates.Sprint);
+        var assembler = new SprintAssembler(new ProjectContextFactory(new List<ProjectOptions>()),
+            _events, NullLogger<SprintAssembler>.Instance, gates: gates,
+            failureAgingWindow: TimeSpan.FromMilliseconds(1));
+        await Task.Delay(30);
+        await assembler.TickProjectAsync("test", _issues, _sprints, _specs, default);
+        await assembler.TickProjectAsync("test", _issues, _sprints, _specs, default);
+        Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(taskId))!.Status);
+        Assert.Equal(active.Id, (await _sprints.GetActiveAsync())!.Id);
+        Assert.Equal(SprintStatus.Active, (await _sprints.GetAsync(active.Id))!.Status);
+        Assert.DoesNotContain(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.DoesNotContain(_events.GetHistorySnapshot(), e => e.Kind == DashboardEventKind.SprintCompleted);
+        var state = (await new MemoryStore(_issues.Db).RecallAsync(SprintAssembler.BuildStateKey)).First();
+        using var json = System.Text.Json.JsonDocument.Parse(state.Body);
+        Assert.Contains("held by Failed/Blocked", json.RootElement.GetProperty("reason").GetString());
+        Assert.Equal(0, json.RootElement.GetProperty("activeTerminal").GetInt32());
+        Assert.Contains(json.RootElement.GetProperty("heldWork").EnumerateArray(), i => i.GetProperty("id").GetString() == taskId);
+
+        // Explicit operator close remains authoritative. Completion bookkeeping
+        // is allowed while the gate prevents a new sprint from assembling.
+        await _issues.TransitionAsync(taskId, IssueStatus.Closed, "operator explicitly abandons this work");
+        await assembler.TickProjectAsync("test", _issues, _sprints, _specs, default);
+        Assert.Equal(SprintStatus.Completed, (await _sprints.GetAsync(active.Id))!.Status);
+        Assert.Null(await _sprints.GetActiveAsync());
+        Assert.Contains(await _issues.ReadyAsync(100), i => i.Id == dependent.Id);
+        Assert.Contains(_events.GetHistorySnapshot(), e => e.Kind == DashboardEventKind.SprintCompleted);
     }
 
     [Fact]
     public async Task FreshFailure_Untouched_BuildStateStarved()
     {
-        // The no-auto-clear rule protects FRESH failures (the operator
-        // is investigating); the build state must NAME the blockage
+        // The no-auto-clear rule protects all failures. The build state
+        // must NAME the blockage
         // instead of the flat "no eligible work" — a completed sprint
         // plus a busy board read as a dead pipeline (2026-08-17/18).
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
@@ -197,7 +244,7 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task FailureAging_Disabled_NeverSweeps()
+    public async Task DefaultConfiguration_NeverSweepsFailures()
     {
         var epic = await _issues.CreateAsync(new NewIssue(Type: "epic", Title: "e"));
         var spec = await _specs.CreateAsync(new NewSpec(
@@ -207,7 +254,7 @@ public class SprintAssemblerTests : IDisposable
         await _issues.TransitionAsync(task.Id, IssueStatus.Failed, "boom");
 
         await Task.Delay(30);
-        await Tick(); // the default assembler has NO aging window
+        await Tick(); // default and legacy configurations both preserve failure
         Assert.Equal(IssueStatus.Failed, (await _issues.GetAsync(task.Id))!.Status);
     }
 
@@ -289,13 +336,9 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task BlockerTask_JoinsActiveSprint_WithoutWaitingForDrain()
+    public async Task UnrelatedPriorityOneTask_WaitsForCurrentSprintToFinish()
     {
-        // Blocker absorption (operator direction 2026-07-25): an
-        // urgent groomed ad-hoc task must join the ACTIVE sprint
-        // immediately — waiting for the current sprint to drain
-        // burned hours + tokens when an infra fix (task-166) queued
-        // behind six doomed tasks.
+        // Urgency chooses later work; it cannot expand the current objective.
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 2);
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
@@ -312,14 +355,19 @@ public class SprintAssemblerTests : IDisposable
         var activeAfter = (await _sprints.GetActiveAsync())!;
         Assert.Equal(active.Id, activeAfter.Id);                    // sprint NOT replaced
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(blocker.Id, members);                       // blocker absorbed
+        Assert.DoesNotContain(blocker.Id, members);                // urgency alone waits
         Assert.DoesNotContain(normal.Id, members);                  // P3 ad-hoc waits for assembly
         // The in-flight tasks are untouched.
         foreach (var id in aTasks) Assert.Contains(id, members);
+        foreach (var id in aTasks) await _issues.TransitionAsync(id, IssueStatus.Completed, null);
+        await Tick();
+        var next = (await _sprints.GetActiveAsync())!;
+        Assert.NotEqual(active.Id, next.Id);
+        Assert.Contains(blocker.Id, await _sprints.GetIssueIdsAsync(next.Id));
     }
 
     [Fact]
-    public async Task BlockerFlag_MetadataBlockerTrue_AlsoAbsorbed()
+    public async Task UnrelatedBlockerLabel_DoesNotInterruptCurrentSprint()
     {
         var (_, _, _) = await SeedGroomedSpecAsync("Sprint A", 1);
         await Tick();
@@ -332,7 +380,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(flagged.Id, members);
+        Assert.DoesNotContain(flagged.Id, members);
     }
 
     [Fact]
@@ -450,7 +498,7 @@ public class SprintAssemblerTests : IDisposable
         // Operator model 2026-07-31: followUpOf-chain "same work"
         // injection is REMOVED — follow-ups materialize at sprint
         // completion and join a LATER sprint through grooming. Only
-        // blocks edges / operator signals inject mid-sprint.
+        // actual blocks edges permit automatic mid-sprint amendments.
         var (_, _, aTasks) = await SeedGroomedSpecAsync("Sprint A", 1);
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
@@ -765,11 +813,33 @@ public class SprintAssemblerTests : IDisposable
     }
 
     [Fact]
-    public async Task RequeuedAdHoc_InjectsIntoActiveSprint()
+    public async Task ActualPrerequisite_WaitsForGroomingAndItsOwnBlocker()
     {
-        // Injection trigger 3b: an operator requeue carries intent
-        // to run — otherwise an ad-hoc task requeued from Failed
-        // would strand forever (no assembly path).
+        var (_, _, tasks) = await SeedGroomedSpecAsync("Sprint A", 1);
+        await Tick();
+        var active = (await _sprints.GetActiveAsync())!;
+        var fixer = await _issues.CreateAsync(new NewIssue("task", "needed fix", Priority: 5));
+        await _issues.AddDependencyAsync(fixer.Id, tasks[0], IssueDepKind.Blocks);
+        await Tick();
+        Assert.DoesNotContain(fixer.Id, await _sprints.GetIssueIdsAsync(active.Id));
+
+        await _issues.TransitionAsync(fixer.Id, IssueStatus.Pending, null,
+            metadata: new Dictionary<string, object> { ["groomed"] = true });
+        var prerequisite = await _issues.CreateAsync(new NewIssue("task", "fix prerequisite"));
+        await _issues.AddDependencyAsync(prerequisite.Id, fixer.Id, IssueDepKind.Blocks);
+        await Tick();
+        Assert.DoesNotContain(fixer.Id, await _sprints.GetIssueIdsAsync(active.Id));
+
+        await _issues.TransitionAsync(prerequisite.Id, IssueStatus.Completed, null);
+        await Tick();
+        Assert.Contains(fixer.Id, await _sprints.GetIssueIdsAsync(active.Id));
+        Assert.Equal(active.Id, (await _sprints.GetActiveAsync())!.Id);
+    }
+
+    [Fact]
+    public async Task UnrelatedRequeuedAdHoc_DoesNotInterruptCurrentSprint()
+    {
+        // Requeue requests another attempt, not an implicit sprint interruption.
         var (_, _, _) = await SeedGroomedSpecAsync("Sprint A", 1);
         await Tick();
         var active = (await _sprints.GetActiveAsync())!;
@@ -788,7 +858,7 @@ public class SprintAssemblerTests : IDisposable
         await Tick();
 
         var members = await _sprints.GetIssueIdsAsync(active.Id);
-        Assert.Contains(requeued.Id, members);
+        Assert.DoesNotContain(requeued.Id, members);
         Assert.DoesNotContain(unrelated.Id, members);
     }
 
