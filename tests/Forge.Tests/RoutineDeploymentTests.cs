@@ -47,7 +47,7 @@ public sealed class RoutineDeploymentTests : IDisposable
         command.AddParam("@sprint", sprint.Id);
         var audit = Convert.ToInt64(await command.ExecuteScalarAsync());
         return await Completions.BeginCompletionAsync(sprint.Id, [(await issues.GetAsync(task.Id))!],
-            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", ready));
+            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", ready, DeliveryRequired: true));
     }
 
     [Fact]
@@ -81,6 +81,21 @@ public sealed class RoutineDeploymentTests : IDisposable
         await Coordinator().ReconcileAsync(default);
         Assert.Equal(EngineeringOutcome.Satisfied, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
         Assert.Equal(1, executor.Calls);
+    }
+
+    [Fact]
+    public async Task AbandonedCompletionCannotCreateOrphanCandidateAndCreationBindsAtomically()
+    {
+        var completion = await Complete();
+        await Completions.RecordSourceAsync(completion.Id, FakeSource.Sha, "{}");
+        await Completions.AbandonAsync(completion.Id, completion.PlanHash!, "Operator stopped this outcome", "operator");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Deployments.CreateOrGetRoutineAsync("forge", completion.Id, FakeSource.Sha));
+        Assert.Empty(await Deployments.ListAsync());
+        var next = await Complete();
+        await Completions.RecordSourceAsync(next.Id, FakeSource.Sha, "{}");
+        var candidate = await Deployments.CreateOrGetRoutineAsync("forge", next.Id, FakeSource.Sha);
+        Assert.Equal(candidate.Id, (await Completions.GetAsync(next.Id))!.DeploymentCandidateId);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Completions.AbandonAsync(next.Id, next.PlanHash!, "Stop", "operator"));
     }
 
     [Fact]

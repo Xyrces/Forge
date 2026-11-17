@@ -763,7 +763,9 @@ public static class ForgeComposition
             gates: stageGates,
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
-            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals));
+            eventPublisher: eventPublisher, initiativeProposals: initiativeProposals,
+            routineDeploymentEnabled: projectId => projectFactory.Find(projectId)?.Options.Deployment
+                is { Kind: DeploymentKind.Kubernetes, RoutineEnabled: true }));
 
         return services.BuildServiceProvider();
     }

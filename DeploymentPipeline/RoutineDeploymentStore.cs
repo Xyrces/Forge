@@ -13,6 +13,23 @@ public sealed partial class DeploymentStore
         var id = "deploy-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(projectId + "\0" + completionId)))[..32].ToLowerInvariant();
         await using var conn = await _db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+        using (var fence = conn.CreateCommand())
+        {
+            fence.Transaction = tx;
+            fence.CommandText = $"UPDATE {T("completion_lock")} SET value=value WHERE id=1";
+            if (await fence.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Completion lock unavailable.");
+        }
+        using (var bind = conn.CreateCommand())
+        {
+            bind.Transaction = tx;
+            bind.CommandText = $"UPDATE {T("sprint_completion")} SET deployment_candidate_id=@candidate,updated_at=@now WHERE id=@completion AND project_id=@project AND source_sha=@source AND ready_for_deployment=1 AND abandonment_json IS NULL AND (deployment_candidate_id IS NULL OR deployment_candidate_id=@candidate)";
+            bind.AddParam("@candidate", id); bind.AddParam("@completion", completionId);
+            bind.AddParam("@project", projectId); bind.AddParam("@source", sourceSha);
+            bind.AddParam("@now", DateTime.UtcNow.ToString(DateFormat));
+            if (await bind.ExecuteNonQueryAsync(ct) != 1)
+                throw new InvalidOperationException("Completion is no longer authorized for these release inputs.");
+        }
+        DeploymentCandidate? prior = null;
         using (var find = conn.CreateCommand())
         {
             find.Transaction = tx;
@@ -24,8 +41,13 @@ public sealed partial class DeploymentStore
                 var existing = Read(reader);
                 if (existing.ProjectId != projectId || existing.CompletionId != completionId || existing.CommitSha != sourceSha)
                     throw new InvalidOperationException("Completion already binds different deployment inputs.");
-                return existing;
+                prior = existing;
             }
+        }
+        if (prior is not null)
+        {
+            await tx.CommitAsync(ct);
+            return prior;
         }
         using (var insert = conn.CreateCommand())
         {
