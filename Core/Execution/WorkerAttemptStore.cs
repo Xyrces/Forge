@@ -22,6 +22,18 @@ public sealed class WorkerAttemptStore(IDbConnectionFactory db)
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct)) != 0;
     }
 
+    public async Task<IReadOnlyList<string>> ListRoleAttemptIdsAsync(string datasetId, string projectId, string taskId, string role, CancellationToken ct)
+    {
+        await using var connection = await db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT id FROM {Table} WHERE dataset_id=@dataset AND project_id=@project AND task_id=@task AND role=@role";
+        Add(command, "@dataset", datasetId); Add(command, "@project", projectId); Add(command, "@task", taskId); Add(command, "@role", role);
+        var ids = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetString(0));
+        return ids;
+    }
+
     public async Task<WorkerAssignment> CreateOrGetAsync(WorkerAssignment assignment, CancellationToken ct = default)
     {
         await using var connection = await db.OpenAsync(ct);

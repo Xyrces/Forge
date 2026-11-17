@@ -25,7 +25,7 @@ public interface IWorkerJobs
 
 /// <summary>Wait cancellation detaches the controller; only a persisted cancellation request stops a worker.</summary>
 public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs jobs, string datasetId,
-    Func<CancellationToken, Task>? ensureAdmission = null) : IAgentRunner
+    Func<CancellationToken, Task>? ensureAdmission = null) : IAgentRunner, IReviewWorkerLifecycle
 {
     public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
         IReadOnlyDictionary<string, object>? context, CancellationToken ct)
@@ -97,6 +97,42 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
             { throw new WorkerExecutionUncertainException("Worker Job observation failed; preserve checkout before retry.", ex); }
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         }
+    }
+
+    public async Task<bool> HasUntrackedReviewWorkerAsync(AgentType role, string projectId, string taskId, CancellationToken ct)
+    {
+        foreach (var id in await store.ListRoleAttemptIdsAsync(datasetId, projectId, taskId, role.ToString(), ct))
+        {
+            var prior = await store.GetAsync(id, ct) ?? throw new InvalidOperationException("Review assignment disappeared.");
+            if (prior.State is "queued" or "running") return true;
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            bounded.CancelAfter(TimeSpan.FromSeconds(60));
+            await jobs.CancelAndWaitAsync(id, bounded.Token);
+        }
+        return false;
+    }
+
+    public async Task<ReviewWorkerState?> InspectReviewWorkerAsync(AgentType role, string projectId, string taskId,
+        string dispatchId, bool stop, CancellationToken ct)
+    {
+        var id = Hash(string.Join("\n", datasetId, projectId, taskId, role, dispatchId))[..40];
+        var assignment = await store.GetAsync(id, ct);
+        if (assignment is null) return null;
+        var terminal = assignment.State is "succeeded" or "failed" or "cancelled";
+        if (stop || terminal)
+        {
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            bounded.CancelAfter(TimeSpan.FromSeconds(60));
+            if (stop && !terminal) await store.RequestCancellationAsync(id, bounded.Token);
+            await jobs.CancelAndWaitAsync(id, bounded.Token);
+            if (!terminal) await store.MarkJobFailedAsync(id, "Review head changed; old worker stopped before checkout reuse.", bounded.Token);
+            terminal = true;
+        }
+        var invocation = JsonSerializer.Deserialize<WorkerInvocation>(assignment.AssignmentJson)
+            ?? throw new InvalidOperationException("Review worker assignment is unreadable.");
+        if (invocation.Role != role || invocation.Context.GetValueOrDefault("sourceSha") != assignment.SourceSha)
+            throw new InvalidOperationException("Review worker assignment identity mismatch.");
+        return new(terminal, assignment.WorktreePath, invocation.Context);
     }
 
     public async Task CancelDispatchAsync(AgentType role, string projectId, string taskId, string dispatchId, CancellationToken ct)
