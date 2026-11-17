@@ -608,7 +608,7 @@ operator records were present. Parent/container issue labels are not substituted
 for this durable outcome; the spec remained Groomed rather than being manually
 stamped Shipped.
 
-The actual deployed-Y `--check` passed at **21:59:35 UTC** without model generation. A final mechanical audit confirmed unchanged work, budget and schema snapshots across read-only checks and matching four-way source/image identities. The completion UI showed zero outstanding work, required evidence satisfied and release healthy.
+The actual deployed-Y `--check` passed at **21:59:35 UTC** without model generation. A final mechanical audit confirmed unchanged work, budget and schema snapshots across read-only checks and matching four-way source/image identities. The completion UI showed zero outstanding sprint outcomes, required evidence satisfied and release healthy.
 
 The final budget snapshot at **21:58:38 UTC** retained the **$25** limit:
 **$4.330884 usage-estimated + $1.01 operator-reported**, zero outstanding holds,
