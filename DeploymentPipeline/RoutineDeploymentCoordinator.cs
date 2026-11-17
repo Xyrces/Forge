@@ -96,6 +96,26 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
                 }
                 candidateCursor = candidates.Count == 50 ? candidates[^1].Id : null;
             } while (candidateCursor is not null);
+
+            // Recover a stop after the independent release result committed but before
+            // its completion projection advanced. Terminal deployments are absent from
+            // the pending query, so this is a separate durable bounded scan.
+            string? completionCursor = null;
+            do
+            {
+                var receipts = await project.Completions.ListAwaitingDeliveryOutcomeAsync(afterId: completionCursor, ct: ct);
+                foreach (var receipt in receipts)
+                {
+                    try { await project.Completions.RefreshDeploymentOutcomeAsync(receipt.Id, ct); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Completion {Completion} is awaiting final delivery evidence", receipt.Id);
+                        await project.Completions.RecordDeliveryWaitAsync(receipt.Id, "Final delivery evidence could not be confirmed: " + ex.Message, ct);
+                    }
+                }
+                completionCursor = receipts.Count == 50 ? receipts[^1].Id : null;
+            } while (completionCursor is not null);
         }
     }
 

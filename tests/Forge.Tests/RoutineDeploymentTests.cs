@@ -1,3 +1,5 @@
+using System.Text.Json;
+using Forge.Core.Db;
 using Forge.Configuration;
 using Forge.Core;
 using Forge.Core.Completion;
@@ -27,9 +29,25 @@ public sealed class RoutineDeploymentTests : IDisposable
         var sprints = new SprintStore(issues);
         var sprint = await sprints.CreateAsync(new("outcome", "outcome", DateTime.UtcNow, DateTime.UtcNow.AddDays(1)));
         await sprints.AddIssueAsync(sprint.Id, task.Id);
-        await issues.TransitionAsync(task.Id, IssueStatus.Completed, null);
+        await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+        {
+            ["prNumber"] = 1,
+            ["branchSha"] = FakeSource.Sha,
+            ["trustedPublication"] = JsonSerializer.Serialize(new TrustedPublicationEvidence(task.Id, FakeSource.Sha,
+                new("attempt", new string('c', 40), new string('d', 64), DateTimeOffset.UtcNow))),
+            ["observedMerge"] = JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 1, FakeSource.Sha, FakeSource.Sha, DateTimeOffset.UtcNow))
+        });
+        var plan = new SprintPlan(1, "forge", "deliver", [new("deployment", "Deployment is healthy", SprintEvidenceKind.DeploymentHealthy,
+            new("spec", "proposal", 1, "hash", "approved delivery"))], [new(task.Id, ["deployment"], SprintMemberReason.Delivers)], [], "snapshot", "");
+        plan = plan with { Hash = SprintPlan.ComputeHash(plan) };
+        await using var connection = await issues.Db.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO sprint_proposal_audit(ts,weights_json,candidates_json,selected_task_ids_json,committed_sprint_id) VALUES('now',@plan,'[]','[]',@sprint); SELECT last_insert_rowid();";
+        command.AddParam("@plan", SprintPlanJson.Serialize(new { plan }));
+        command.AddParam("@sprint", sprint.Id);
+        var audit = Convert.ToInt64(await command.ExecuteScalarAsync());
         return await Completions.BeginCompletionAsync(sprint.Id, [(await issues.GetAsync(task.Id))!],
-            new(1, "plan-hash", EngineeringOutcome.PendingEvidence, "{}", ready));
+            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", ready));
     }
 
     [Fact]
@@ -49,6 +67,20 @@ public sealed class RoutineDeploymentTests : IDisposable
         await Coordinator().ReconcileAsync(default);
         Assert.Equal(DeploymentStatus.Deployed, (await Deployments.GetAsync(pending.Id))!.Status);
         Assert.Single(await Deployments.ListAsync());
+    }
+
+    [Fact]
+    public async Task TerminalDeploymentBeforeControllerStopStillAdvancesCompletionAfterRestart()
+    {
+        var completion = await Complete();
+        await Coordinator().ReconcileAsync(default);
+        var candidate = Assert.Single(await Deployments.ListAsync());
+        await Deployments.MarkIndependentProgressAsync(candidate.Id, new(true, "committed before stop"));
+        Assert.Equal(EngineeringOutcome.PendingEvidence, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        Assert.Empty(await Deployments.ListPendingAsync("forge"));
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        Assert.Equal(1, executor.Calls);
     }
 
     [Fact]
