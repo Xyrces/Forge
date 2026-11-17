@@ -229,15 +229,20 @@ public sealed class DispatchLoopWakeupTests : IDisposable
 
     private static void InitRepo(string path)
     {
-        RunGit(path, "init", "-q -b main");
-        RunGit(path, "config", "user.email a@b");
-        RunGit(path, "config", "user.name a");
+        RunGit(path, "init", "-q", "-b", "main");
+        RunGit(path, "config", "user.email", "a@b");
+        RunGit(path, "config", "user.name", "a");
         File.WriteAllText(Path.Combine(path, "README.md"), "# Test\n");
         RunGit(path, "add", "README.md");
-        RunGit(path, "commit", "-q -m initial");
+        RunGit(path, "commit", "-q", "-m", "initial");
+        var origin = Path.Combine(path, ".portHorizon", "fixture-origin.git");
+        Directory.CreateDirectory(Path.GetDirectoryName(origin)!);
+        RunGit(path, "init", "--bare", "-q", origin);
+        RunGit(path, "remote", "add", "origin", origin);
+        RunGit(path, "push", "-q", "-u", "origin", "main");
     }
 
-    private static void RunGit(string cwd, string verb, string args)
+    private static void RunGit(string cwd, string verb, params string[] args)
     {
         var psi = new ProcessStartInfo
         {
@@ -250,7 +255,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         };
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
         psi.ArgumentList.Add(verb);
-        foreach (var part in args.Split(' ')) psi.ArgumentList.Add(part);
+        foreach (var part in args) psi.ArgumentList.Add(part);
         using var p = Process.Start(psi)!;
         p.WaitForExit(60_000);
         if (p.ExitCode != 0)
