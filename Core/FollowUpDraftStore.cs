@@ -202,25 +202,25 @@ public sealed class FollowUpDraftStore
             throw new ArgumentException("A bounded source group and disposition binding are required.");
         await using var connection = await _issues.Db.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
-        var now = IssueStore.DateFormatTime(DateTime.UtcNow);
-        foreach (var id in ids.Distinct().Order())
-        {
-            // Acquire each write lock before examining the binding. Stable ordering avoids
-            // deadlocks for overlapping groups; no partially acknowledged group can commit.
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = $"""
-                UPDATE {T("followup_draft")}
-                SET disposition=@disposition, disposition_detail=@detail, consumed_at=COALESCE(consumed_at,@now)
-                WHERE id=@id AND (consumed_at IS NULL OR (disposition=@disposition AND disposition_detail=@detail))
-                """;
-            Db.DbCommandExtensions.AddParam(command, "@disposition", disposition);
-            Db.DbCommandExtensions.AddParam(command, "@detail", detail);
-            Db.DbCommandExtensions.AddParam(command, "@now", now);
-            Db.DbCommandExtensions.AddParam(command, "@id", id);
-            if (await command.ExecuteNonQueryAsync(ct) != 1)
-                throw new InvalidOperationException("Source draft is missing or already consumed by another disposition.");
-        }
+        var uniqueIds = ids.Distinct().Order().ToArray();
+        var names = uniqueIds.Select((_, index) => $"@id{index}").ToArray();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // A single bounded update avoids one network round trip per source. A mismatch
+        // rolls back even the valid subset, so partial acknowledgement never commits.
+        command.CommandText = $"""
+            UPDATE {T("followup_draft")}
+            SET disposition=@disposition, disposition_detail=@detail, consumed_at=COALESCE(consumed_at,@now)
+            WHERE id IN ({string.Join(',', names)})
+              AND (consumed_at IS NULL OR (disposition=@disposition AND disposition_detail=@detail))
+            """;
+        Db.DbCommandExtensions.AddParam(command, "@disposition", disposition);
+        Db.DbCommandExtensions.AddParam(command, "@detail", detail);
+        Db.DbCommandExtensions.AddParam(command, "@now", IssueStore.DateFormatTime(DateTime.UtcNow));
+        for (var index = 0; index < uniqueIds.Length; index++)
+            Db.DbCommandExtensions.AddParam(command, names[index], uniqueIds[index]);
+        if (await command.ExecuteNonQueryAsync(ct) != uniqueIds.Length)
+            throw new InvalidOperationException("Source draft is missing or already consumed by another disposition.");
         await transaction.CommitAsync(ct);
     }
 
