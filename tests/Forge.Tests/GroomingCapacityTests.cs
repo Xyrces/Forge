@@ -16,7 +16,7 @@ public sealed class GroomingCapacityTests
         await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("capacity"), "other");
         var specs = new SpecStore(issues);
         var client = new CaptureClient();
-        var capacities = new Dictionary<string, int> { ["coredev"] = 3, ["clientdev"] = 0, ["qa"] = 77, ["reviewer"] = 99 };
+        var capacities = new Dictionary<string, int> { ["coredev"] = 4, ["clientdev"] = 0, ["qa"] = 77, ["reviewer"] = 99 };
         var lookedUp = new List<string>();
         var factory = Factory(issues, specs, client, (id, ct) =>
         {
@@ -24,12 +24,13 @@ public sealed class GroomingCapacityTests
             return Task.FromResult<IReadOnlyDictionary<string, int>>(capacities);
         });
         await Run(factory, specs);
-        Assert.Contains("coredev: 3 concurrent workers", client.Prompt);
+        Assert.Contains("coredev: 4 concurrent workers", client.Prompt);
         Assert.Contains("clientdev: 0 concurrent workers", client.Prompt);
         Assert.DoesNotContain("reviewer: 99 concurrent workers", client.Prompt);
         Assert.DoesNotContain("qa: 77 concurrent workers", client.Prompt);
         Assert.Contains("Assign genuine automated test-code changes to CoreDev or ClientDev", client.Prompt);
-        Assert.Contains("not an artificial three-task minimum", client.Prompt);
+        Assert.Contains("configured limits above", client.Prompt);
+        Assert.Contains("no fixed task-count minimum", client.Prompt);
         Assert.Contains("never a fill target", client.Prompt);
         capacities["coredev"] = 1;
         await Run(factory, specs);
