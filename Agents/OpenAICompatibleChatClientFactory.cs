@@ -312,14 +312,32 @@ internal sealed class UsageTrackingChatClient : DelegatingChatClient
         options.ProjectId = provider.ProjectId;
         // Retries belong to Forge policy: hidden SDK retries bypass durable admission.
         options.RetryPolicy = new System.ClientModel.Primitives.ClientRetryPolicy(0);
-        if (httpClient is not null)
+        ResponsesInputCountingHandler? counting = null;
+        HttpClient? countingClient = null;
+        if (string.Equals(provider.Api, "responses", StringComparison.OrdinalIgnoreCase))
+        {
+            counting = new ResponsesInputCountingHandler(httpClient ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+                { Timeout = Timeout.InfiniteTimeSpan }, ownsTransport: httpClient is null);
+            countingClient = new HttpClient(counting) { Timeout = Timeout.InfiniteTimeSpan };
+            options.Transport = new System.ClientModel.Primitives.HttpClientPipelineTransport(countingClient);
+        }
+        else if (httpClient is not null)
             options.Transport = new System.ClientModel.Primitives.HttpClientPipelineTransport(httpClient);
         var apiKeyCredential = new System.ClientModel.ApiKeyCredential(provider.ApiKey ?? string.Empty);
         var openAIClient = new OpenAIClient(apiKeyCredential, options);
         if (string.Equals(provider.Api, "responses", StringComparison.OrdinalIgnoreCase))
         {
 #pragma warning disable OPENAI001
-            return new ResponsesRequestChatClient(openAIClient.GetResponsesClient().AsIChatClient(model), provider, model);
+            var responses = openAIClient.GetResponsesClient();
+            counting!.CountAsync = async (body, ct) =>
+            {
+                using var content = System.ClientModel.BinaryContent.Create(BinaryData.FromBytes(body));
+                var result = await responses.GetInputTokenCountAsync(content, "application/json",
+                    new System.ClientModel.Primitives.RequestOptions { CancellationToken = ct });
+                using var response = result.GetRawResponse();
+                return response.Content.ToArray();
+            };
+            return new ResponsesRequestChatClient(responses.AsIChatClient(model), provider, model, countingClient);
 #pragma warning restore OPENAI001
         }
         return openAIClient.GetChatClient(model).AsIChatClient();

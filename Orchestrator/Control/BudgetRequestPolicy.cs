@@ -14,8 +14,8 @@ public static class BudgetRequestPolicy
     // Qualification checked 2026-11-17 UTC against:
     // https://developers.openai.com/api/docs/models/gpt-6.1-sol.md
     // https://developers.openai.com/api/docs/guides/prompt-caching.md
-    // Global Standard tier: full context is a deliberately conservative input
-    // ceiling, including opaque SDK reasoning replay. $10/M input covers the
+    // Global Standard tier: exact API count determines each reservation; full
+    // context remains the hard limit, including opaque SDK reasoning replay. $10/M input covers the
     // long-context multiplier and longest cache-write rate; $15/M output covers
     // the long-context rate. New models/tiers require explicit qualification.
     internal const string QualifiedModel = "gpt-6.1-sol";
@@ -43,8 +43,7 @@ public static class BudgetRequestPolicy
             return bounded;
         }
 
-        private async Task<(string RequestId, ModelPriceOptions Price)> ReserveAsync(
-            IReadOnlyList<ChatMessage> messages, ChatOptions? chatOptions, CancellationToken ct)
+        private ModelPriceOptions Qualify(IReadOnlyList<ChatMessage> messages, ChatOptions? chatOptions)
         {
             if (!options.Budget.PaidCallsEnabled)
                 throw new InvalidOperationException("Paid model calls are disabled in this deployment.");
@@ -92,9 +91,13 @@ public static class BudgetRequestPolicy
             }
             if (explicitInputBytes > price.MaximumInputTokens)
                 throw new InvalidOperationException("Explicit input exceeds the pilot payload size limit.");
-            var outputBound = Math.Min(context.MaxOutputTokens, chatOptions?.MaxOutputTokens ?? context.MaxOutputTokens);
+            return price;
+        }
+
+        private async Task<string> ReserveAsync(ModelPriceOptions price, long inputTokens, int outputBound, CancellationToken ct)
+        {
             if (outputBound <= 0) throw new InvalidOperationException("A positive output bound is required.");
-            var bound = (price.MaximumInputTokens * price.InputUsdPerMillion + outputBound * price.OutputUsdPerMillion) / 1_000_000m;
+            var bound = (inputTokens * price.InputUsdPerMillion + outputBound * price.OutputUsdPerMillion) / 1_000_000m;
             if (bound > options.Budget.MaximumRequestUsd)
                 throw new InvalidOperationException("Request worst-case cost exceeds the configured per-request ceiling.");
             await ensureAdmission(ct);
@@ -106,7 +109,7 @@ public static class BudgetRequestPolicy
             var reservation = await ledger.ReserveAsync(request, ct);
             if (!reservation.Admitted || !reservation.IsNew)
                 throw new InvalidOperationException("Model request denied by durable budget admission: " + reservation.Reason);
-            return (requestId, price);
+            return requestId;
         }
 
         private async Task SettleAsync(string requestId, ModelPriceOptions price, UsageDetails? usage)
@@ -126,16 +129,24 @@ public static class BudgetRequestPolicy
         {
             var input = messages.ToArray();
             chatOptions = BoundedOptions(chatOptions);
-            var (request, price) = await ReserveAsync(input, chatOptions, cancellationToken);
+            var price = Qualify(input, chatOptions);
+            string? request = null;
+            using var scope = new ResponsesInputAdmission(context.Model, chatOptions.MaxOutputTokens!.Value,
+                QualifiedContextTokens, async (count, output, ct) =>
+                {
+                    request = await ReserveAsync(price, count, output, ct);
+                    await ensureAdmission(ct);
+                });
             UsageDetails? usage = null;
             try
             {
                 await ensureAdmission(cancellationToken);
                 var response = await InnerClient.GetResponseAsync(input, chatOptions, cancellationToken);
+                if (!scope.Admitted) throw new InvalidOperationException("Generation bypassed exact input-token admission.");
                 usage = response.Usage;
                 return response;
             }
-            finally { await SettleAsync(request, price, usage); }
+            finally { if (request is not null) await SettleAsync(request, price, usage); }
         }
 
         public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
@@ -144,18 +155,26 @@ public static class BudgetRequestPolicy
         {
             var input = messages.ToArray();
             chatOptions = BoundedOptions(chatOptions);
-            var (request, price) = await ReserveAsync(input, chatOptions, cancellationToken);
+            var price = Qualify(input, chatOptions);
+            string? request = null;
+            using var scope = new ResponsesInputAdmission(context.Model, chatOptions.MaxOutputTokens!.Value,
+                QualifiedContextTokens, async (count, output, ct) =>
+                {
+                    request = await ReserveAsync(price, count, output, ct);
+                    await ensureAdmission(ct);
+                });
             UsageDetails? usage = null;
             try
             {
                 await ensureAdmission(cancellationToken);
                 await foreach (var update in InnerClient.GetStreamingResponseAsync(input, chatOptions, cancellationToken))
                 {
+                    if (!scope.Admitted) throw new InvalidOperationException("Generation bypassed exact input-token admission.");
                     foreach (var terminal in update.Contents.OfType<UsageContent>()) usage = terminal.Details;
                     yield return update;
                 }
             }
-            finally { await SettleAsync(request, price, usage); }
+            finally { if (request is not null) await SettleAsync(request, price, usage); }
         }
     }
 }

@@ -9,8 +9,13 @@ namespace Forge.Agents;
 public sealed record LlmRequestContext(string Provider, string Model, AgentType Role, string? ProjectId, int MaxOutputTokens);
 
 /// <summary>Stateless Responses requests with bounded output and resumable encrypted reasoning.</summary>
-internal sealed class ResponsesRequestChatClient(IChatClient inner, ProviderConfig provider, string model) : DelegatingChatClient(inner)
+internal sealed class ResponsesRequestChatClient(IChatClient inner, ProviderConfig provider, string model, IDisposable? transportOwner = null) : DelegatingChatClient(inner)
 {
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing) transportOwner?.Dispose();
+    }
     internal ChatOptions Prepare(ChatOptions? original)
     {
         var options = original?.Clone() ?? new ChatOptions();

@@ -37,7 +37,7 @@ public sealed class BudgetRequestPolicyTests
         if (failure == "context") price.MaximumInputTokens = 1_049_999;
         if (failure == "regional") options.Llm.Providers[0].BaseUrl = "https://eu.api.openai.com/v1";
         if (failure == "proxy") options.Headroom.Enabled = true;
-        if (failure == "ceiling") options.Budget.MaximumRequestUsd = 10.50m;
+        if (failure == "ceiling") options.Budget.MaximumRequestUsd = .01m;
         var ledger = new Ledger(); var transport = new Transport(ledger);
         using var client = Client(options, ledger, transport);
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync(Input()));
@@ -69,7 +69,7 @@ public sealed class BudgetRequestPolicyTests
     }
 
     [Fact]
-    public async Task OpaqueReasoningReplayStillReservesFullProtocolContext()
+    public async Task CountedOpaqueReasoningReplayReservesExactInputAtQualifiedRates()
     {
         var ledger = new Ledger(); var transport = new Transport(ledger);
         using var client = Client(Options(), ledger, transport);
@@ -78,7 +78,7 @@ public sealed class BudgetRequestPolicyTests
             RawRepresentation = new { encrypted_content = "opaque-provider-state" },
         };
         await client.GetResponseAsync([message]);
-        Assert.Equal(10.5015m, Assert.Single(ledger.Reservations).ReservationUsd);
+        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
         Assert.Equal(1, transport.Calls);
     }
 
@@ -92,7 +92,7 @@ public sealed class BudgetRequestPolicyTests
         };
         using var client = Client(options, ledger, transport);
         await client.GetResponseAsync(Input());
-        Assert.Equal(10.5015m, Assert.Single(ledger.Reservations).ReservationUsd);
+        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
         Assert.Equal(.00013m, Assert.Single(ledger.Settlements));
     }
 
@@ -127,7 +127,7 @@ public sealed class BudgetRequestPolicyTests
         else await client.GetResponseAsync(Input(), caller);
         Assert.Equal(900, caller.MaxOutputTokens);
         Assert.Equal(100, transport.OutputBound);
-        Assert.Equal(10.5015m, Assert.Single(ledger.Reservations).ReservationUsd);
+        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
         Assert.Equal(.00013m, Assert.Single(ledger.Settlements));
     }
 
@@ -159,7 +159,7 @@ public sealed class BudgetRequestPolicyTests
     public async Task AdmissionRecheckAfterReservationPreventsLostOwnerCall()
     {
         var ledger = new Ledger(); var transport = new Transport(ledger); var calls = 0;
-        using var client = Client(Options(), ledger, transport, _ => ++calls == 1 ? Task.CompletedTask : Task.FromException(new InvalidOperationException("owner changed")));
+        using var client = Client(Options(), ledger, transport, _ => ++calls < 3 ? Task.CompletedTask : Task.FromException(new InvalidOperationException("owner changed")));
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync(Input()));
         Assert.Equal(0, transport.Calls);
         Assert.Null(Assert.Single(ledger.Settlements));
@@ -235,19 +235,22 @@ public sealed class BudgetRequestPolicyTests
     {
         public int Calls; public int? OutputBound; public bool Cancel, Partial;
         public Action? OnBegin;
-        private void Begin(ChatOptions? options)
+        private async Task Begin(ChatOptions? options, CancellationToken ct)
         {
+            var scope = ResponsesInputAdmission.Current!;
+            scope.Claim();
+            await scope.AdmitAsync(1000, options!.MaxOutputTokens!.Value, ct);
             Assert.Single(ledger.Reservations);
             Calls++; OutputBound = options?.MaxOutputTokens;
             OnBegin?.Invoke();
             if (Cancel) throw new OperationCanceledException("transport cancelled");
         }
-        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
-        { Begin(options); return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")) { Usage = Usage() }); }
+        public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        { await Begin(options, cancellationToken); return new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")) { Usage = Usage() }; }
         public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            Begin(options); await Task.Yield();
+            await Begin(options, cancellationToken); await Task.Yield();
             if (Partial) yield return new() { Contents = [new TextContent("partial")] };
             yield return new() { Contents = [new UsageContent(Usage())] };
         }
