@@ -147,7 +147,8 @@ public sealed record SpecRecord(
     DateTime CreatedAt,
     DateTime UpdatedAt,
     string Body,
-    string? Author);
+    string? Author,
+    DateTime? CurrentVersionCreatedAt = null);
 
 public sealed record SpecVersionRecord(
     string SpecId,
@@ -266,7 +267,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             Status: SpecStatus.Draft,
             ParentIssueId: spec.ParentIssueId, ParentSpecId: spec.ParentSpecId,
             CurrentVersion: 1, CreatedAt: storedNow, UpdatedAt: storedNow,
-            Body: spec.Body, Author: spec.Author);
+            Body: spec.Body, Author: spec.Author, CurrentVersionCreatedAt: storedNow);
     }
 
     public async Task<SpecRecord?> GetAsync(string id, CancellationToken ct = default)
@@ -279,7 +280,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
             cmd.CommandText = $"""
                 SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
                 s.current_version, s.created_at, s.updated_at,
-                v.body, v.author
+                v.body, v.author, v.created_at
                 FROM {T("spec")} s
                 JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
                 WHERE s.id = @id
@@ -298,7 +299,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
                 CreatedAt: IssueStore.ParseTime(rd.GetString(7)),
                 UpdatedAt: IssueStore.ParseTime(rd.GetString(8)),
                 Body: rd.GetString(9),
-                Author: rd.IsDBNull(10) ? null : rd.GetString(10));
+                Author: rd.IsDBNull(10) ? null : rd.GetString(10),
+                CurrentVersionCreatedAt: IssueStore.ParseTime(rd.GetString(11)));
         }
         return spec;
     }
@@ -313,7 +315,7 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
         var sql = $"""
             SELECT s.id, s.project_id, s.title, s.status, s.parent_issue_id, s.parent_spec_id,
             s.current_version, s.created_at, s.updated_at,
-            v.body, v.author
+            v.body, v.author, v.created_at
             FROM {T("spec")} s
             JOIN {T("spec_version")} v ON v.spec_id = s.id AND v.version = s.current_version
             WHERE 1=1
@@ -339,7 +341,8 @@ public sealed class SpecStore : ISpecStore, IAsyncDisposable
                 CreatedAt: IssueStore.ParseTime(rd.GetString(7)),
                 UpdatedAt: IssueStore.ParseTime(rd.GetString(8)),
                 Body: rd.GetString(9),
-                Author: rd.IsDBNull(10) ? null : rd.GetString(10)));
+                Author: rd.IsDBNull(10) ? null : rd.GetString(10),
+                CurrentVersionCreatedAt: IssueStore.ParseTime(rd.GetString(11))));
         }
         return list;
     }

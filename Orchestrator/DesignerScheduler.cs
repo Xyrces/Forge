@@ -176,7 +176,11 @@ public sealed class DesignerScheduler
         if (recent.Count == 0) return true;
         var last = recent[0];
         if (last.Status is DesignerRunStatus.HygieneFailed or DesignerRunStatus.LlmFailed)
-            return DateTime.UtcNow - last.Ts >= FailedRetryCooldown;
+            // A repaired specification is new input, not another attempt at the
+            // failed input. Honor its ready event immediately; otherwise that
+            // event is consumed by the old cooldown and waits for the backstop.
+            return (spec.CurrentVersionCreatedAt is { } changed && changed > last.Ts)
+                || DateTime.UtcNow - last.Ts >= FailedRetryCooldown;
         return DateTime.UtcNow - last.Ts >= _interval;
     }
 
