@@ -1,6 +1,6 @@
 # Forge
 
-The Forge-first restart targets **K3s with embedded etcd, Azure SQL, and OpenAI Responses**. The new deployment path is in [the K3s runbook](deploy/k3s/README.md); the prior architecture review is under [docs/revival-review](docs/revival-review/). The historical systemd and SQLite instructions below remain for legacy development modes. They are not the new production installation procedure. TimeLoop remains deferred until installation, self-deployment, and rollback are qualified.
+The Forge-first restart targets **K3s with embedded etcd, Azure SQL, and OpenAI Responses**. The new deployment path is in [the K3s runbook](deploy/k3s/README.md); the prior architecture review is under [docs/revival-review](docs/revival-review/). The historical systemd and SQLite instructions below remain for legacy development modes. They are not the new production installation procedure. The approved Forge pilot has now completed automatic delivery and explicit operator acceptance on schema 41; see [the live qualification](docs/workflow-audit/unattended-live-qualification.md#final-qualification-2026-11-17) for the necessary repairs and limits. TimeLoop remains a separate next project, not qualified by this pilot.
 
 A long-lived .NET 10 orchestrator that drives AI coding agents against any registered git project. Forge owns the task queue, sprint assembly, git worktrees, the GitHub PR lifecycle, and the review-gated merge — **the model owns the code.**
 

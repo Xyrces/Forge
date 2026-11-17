@@ -1,18 +1,23 @@
 # Unattended workflow review
 
-This review separates source-confirmed behavior, offline reproductions, live UI
-observations and measured timings. It does not claim an unattended UI-originated
-delivery has passed. The prior pilot started at a task API and qualified a narrower
-engineering/deployment path.
+The approved UI-originated Forge pilot is now **Satisfied**, with automatic
+exact-source delivery and both operator acceptance criteria recorded through the
+UI. The [final qualification](unattended-live-qualification.md#final-qualification-2026-11-17)
+separates normal worker delivery, necessary system repairs, manual controller
+repair X, automatic pilot release Y, and actual/synthetic browser observations.
+This was an operator-assisted qualification, not an uninterrupted unattended run.
+Core and Forge workload schemas are 41. TimeLoop and dedicated GitHub agent
+identities remain separate follow-up projects.
 
-Recommended order: correct usage accounting; repair delivery visibility and
-outcome correctness; establish one bounded outcome planner; make normal delivery
-automatic within agreed project scope; qualify the full UI journey; then invest
-in model benchmarking. TimeLoop and dedicated GitHub agent identities remain later
-projects.
+The reports below preserve the original source audit, offline reproductions,
+measured performance and dated intermediate outcomes. Historical findings are
+not a list of defects still present in the qualified release.
 
 Reports:
 
+- [Final UI-originated live qualification](unattended-live-qualification.md#final-qualification-2026-11-17)
+- [Implemented bounded outcome planning](planner-design.md)
+- [Routine deployment authority](routine-deployment.md)
 - [UI journey and product direction](ui-journey.md)
 - [Sprint planning and seven offline reproductions](sprint-planning.md)
 - [Performance, query growth and refresh behavior](performance.md)
@@ -21,7 +26,7 @@ Reports:
 - [Completed live budget correction and release qualification](budget-live-qualification.md)
 - [Completed live workflow repair qualification](workflow-live-qualification.md)
 
-Top issues to decide together:
+Original audit findings and directions (historical):
 
 | Area | Evidence | Recommended direction |
 |---|---|---|
@@ -46,4 +51,4 @@ The operator also confirmed the historical pilot cost is **$1.01**. Record it as
 operator-reported aggregate correction, preserving original request rows and the
 $25 ceiling. It is not independently retrieved provider billing evidence.
 
-No additional paid requests were made for this review.
+The initial read-only audit made no paid requests. Subsequent authorized pilot work is separately accounted for in the final qualification; usage estimates and the operator-reported $1.01 remain distinct from provider billing evidence.
