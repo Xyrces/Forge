@@ -709,7 +709,8 @@ public static class ForgeComposition
                 : null,
             budgetStore: options.Controller.Enabled ? new Core.Control.DurableBudgetStore(registryIssues.Db) : null,
             budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
-            initiativeApprovals: initiativeApprovals));
+            initiativeApprovals: initiativeApprovals,
+            mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null));
 
         // Schedulers: trigger events kick via the wakeup signals; the
         // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is
