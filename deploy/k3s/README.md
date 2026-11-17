@@ -248,3 +248,18 @@ this trusted-code boundary. Strong isolation requires separate tool execution,
 a constrained credential broker, and artifacts that the worker cannot rewrite
 after verification. Do not treat namespace RBAC or output redaction as that
 isolation boundary.
+
+
+## Additive schema upgrades
+
+Same-schema releases retain the ordinary blue/green path. A target image may opt into one reviewed additive transition by bundling `deploy/k3s/schema-upgrade.json` with exactly `fromVersion`, `toVersion`, and `rollbackImage`. The rollback image must be an immutable digest that has been independently qualified on both versions, including partial additive migration. No policy file ships until that digest is approved. A source-39 binary that strictly accepts only39 is never a rollback for schema40.
+
+The supervisor first binds the observed previous image, dataset, and verified schema version to that policy. It journals the operation, drains admission and active runs, requires the SQL owner to be released, scales both controller slots to zero, and waits until every controller pod (including terminating pods) is gone and no live worker pods remain. Only then can its deterministic initializer Job run. The release service account gets Jobs create/get, not Secret read; only the initializer mounts the privileged database Secret, and that pod has no Kubernetes API token.
+
+Initializer preflight runs under the existing exclusive SQL schema lock before any DDL. It requires the same initialized dataset and budget, no lease owner, no queued/running worker attempts, exactly the registered Forge project with the configured repository/branch, and both `core` and `proj_forge` at the declared source or target version. The target must equal the initializer binary's expected version. Additional registered projects fail closed; this first upgrade coordinator does not silently leave their workload schemas behind.
+
+The journal and initializer Job are immutable-input bound. A replacement supervisor resumes the same operation and adopts the same Job. A different operation cannot take over an unfinished schema upgrade, even after its owner pod dies; the compatibility bridge includes that guard too. Supervisor Jobs allow three new-pod retries, with `restartPolicy: Never`. Initializer Jobs have zero automatic retries. Kubernetes Job retry behavior is documented in the [official Job guide](https://kubernetes.io/docs/concepts/workloads/controllers/job/); database side effects are protected separately by the schema lock and version checks.
+
+An initializer timeout or uncertain transport result leaves both controllers stopped and the operation resumable. It never triggers rollback while initializer execution might continue. A terminal initializer failure can restore the qualified bridge only after its pods are nonexecuting. A candidate failure after migration also restores that bridge without downgrading the database. The schema39/40 bridge is a maintenance fallback: it preserves the older feature set and is not feature-equivalent to new schema40 initiative workflows. Keep workflow gates held throughout qualification and rollback.
+
+The installer invokes the target's independent release Job; it does not orchestrate a host-side migration sequence. Full rollback/restart qualification must precede policy publication. Unit fault tests do not establish actual SQL migration or live bridge compatibility on their own.

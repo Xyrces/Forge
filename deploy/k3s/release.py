@@ -38,7 +38,7 @@ class Kube:
             raise ApiError(error.code, method + " " + path) from None
 
     def path(self, kind, name=""):
-        group = "/apis/apps/v1" if kind == "deployments" else "/api/v1"
+        group = "/apis/apps/v1" if kind == "deployments" else "/apis/batch/v1" if kind == "jobs" else "/api/v1"
         return f"{group}/namespaces/{self.namespace}/{kind}" + ("/" + name if name else "")
 
     def get(self, kind, name):
@@ -58,6 +58,10 @@ class Kube:
     def pods(self, slot):
         path = self.path("pods") + "?labelSelector=app%3Dforge-controller%2Cslot%3D" + slot
         return self.call("GET", path)["items"]
+
+    def selected_pods(self, selector):
+        from urllib.parse import quote
+        return self.call("GET", self.path("pods") + "?labelSelector=" + quote(selector))["items"]
 
 
 class Controllers:
@@ -157,7 +161,8 @@ class Release:
 
     def owned(self):
         lock = self.kube.get("configmaps", "forge-release-lock")
-        if not lock or lock["data"]["uid"] != self.pod_uid:
+        if not lock or any(lock["data"].get(key) != value for key, value in {
+                "uid": self.pod_uid, "pod": self.pod_name, "operation": self.operation}.items()):
             raise RuntimeError("release ownership lost")
 
     def record(self, phase):
@@ -306,8 +311,14 @@ def main():
         with open("/app/source-revision", encoding="utf-8") as source:
             if source.read().strip() != args.source_sha:
                 raise RuntimeError("release image does not match approved source SHA")
-    release = Release(Kube(args.namespace), Controllers(args.namespace, "/run/forge-control/controller-token"),
-                      args.operation, args.image, args.dataset, os.environ["POD_NAME"], os.environ["POD_UID"], args.timeout)
+    from schema_release import choose_release, load_policy
+    kube = Kube(args.namespace)
+    controllers = Controllers(args.namespace, "/run/forge-control/controller-token")
+    kind, policy = choose_release(kube, controllers, args.operation,
+        load_policy(os.path.join(os.path.dirname(__file__), "schema-upgrade.json")))
+    release = kind(kube, controllers, args.operation, args.image, args.dataset,
+                   os.environ["POD_NAME"], os.environ["POD_UID"], args.timeout,
+                   **({"policy": policy} if policy is not None else {}))
     release.run()
 
 

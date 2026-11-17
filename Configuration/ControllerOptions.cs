@@ -33,6 +33,9 @@ public sealed class BootstrapOptions
     public string DefaultBranch { get; set; } = "main";
     public string WorkerPrincipal { get; set; } = "forge-k3s-worker";
     public string ControllerPrincipal { get; set; } = "";
+    // Only the initializer Job receives these immutable upgrade inputs.
+    public int? MigrationFromVersion { get; set; }
+    public int? MigrationToVersion { get; set; }
 }
 
 public sealed class BudgetOptions
