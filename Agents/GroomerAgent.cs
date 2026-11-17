@@ -707,13 +707,14 @@ public sealed class GroomerAgent
             ? await _roleCapacitiesLookup(projectId, ct)
             : new Dictionary<string, int>();
         var roles = new Dictionary<string, int>(configured, StringComparer.OrdinalIgnoreCase);
-        var workers = new[] { "coredev", "clientdev", "qa" };
-        sb.AppendLine("## Engineering worker capacity (owning project)");
+        var workers = new[] { "coredev", "clientdev" };
+        sb.AppendLine("## Implementation worker capacity (owning project)");
         foreach (var role in workers)
             sb.AppendLine($"- {role}: {Math.Max(0, Forge.Configuration.DefaultProjectRoles.MaxFor(roles, role))} concurrent workers");
         sb.AppendLine("Soft parallel goal: where the approved outcome naturally supports it, plan genuine independent tasks that can use these workers concurrently.");
         sb.AppendLine("For example, three suitable available workers favor three genuinely independent tasks, not an artificial three-task minimum.");
-        sb.AppendLine("Use fewer tasks when that is the coherent solution; never pad work, invent QA work, or remove real prerequisites to fill slots. Reviewer capacity is not engineering capacity.");
+        sb.AppendLine("Use fewer tasks when that is the coherent solution; never pad work, invent QA work, or remove real prerequisites to fill slots. QA and Reviewer capacity are not implementation capacity.");
+        sb.AppendLine("QA verifies an existing PR in the optional watch lane; it is not an extra implementation task to fill a parallel slot. Assign genuine automated test-code changes to CoreDev or ClientDev within their editing territory, not a standalone QA/reviewer task that cannot produce its own merged implementation.");
         sb.AppendLine("Ten engineering tasks including prerequisites is a ceiling, never a fill target. Story/task tool caps still apply; they are maxima, not targets.");
         sb.AppendLine();
         sb.AppendLine("## Project vision");

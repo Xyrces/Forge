@@ -11,12 +11,12 @@ namespace Forge.Tests;
 public sealed class GroomingCapacityTests
 {
     [Fact]
-    public async Task OwningProjectCapacitiesAreReadForEachRunAndReviewerIsExcluded()
+    public async Task OwningProjectCapacitiesAreReadForEachRunAndVerificationRolesAreExcluded()
     {
         await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("capacity"), "other");
         var specs = new SpecStore(issues);
         var client = new CaptureClient();
-        var capacities = new Dictionary<string, int> { ["coredev"] = 3, ["clientdev"] = 0, ["qa"] = 0, ["reviewer"] = 99 };
+        var capacities = new Dictionary<string, int> { ["coredev"] = 3, ["clientdev"] = 0, ["qa"] = 77, ["reviewer"] = 99 };
         var lookedUp = new List<string>();
         var factory = Factory(issues, specs, client, (id, ct) =>
         {
@@ -27,6 +27,8 @@ public sealed class GroomingCapacityTests
         Assert.Contains("coredev: 3 concurrent workers", client.Prompt);
         Assert.Contains("clientdev: 0 concurrent workers", client.Prompt);
         Assert.DoesNotContain("99", client.Prompt);
+        Assert.DoesNotContain("77", client.Prompt);
+        Assert.Contains("Assign genuine automated test-code changes to CoreDev or ClientDev", client.Prompt);
         Assert.Contains("not an artificial three-task minimum", client.Prompt);
         Assert.Contains("never a fill target", client.Prompt);
         capacities["coredev"] = 1;
@@ -44,7 +46,8 @@ public sealed class GroomingCapacityTests
         await Run(Factory(issues, specs, client, null), specs);
         Assert.Contains("coredev: 2 concurrent workers", client.Prompt);
         Assert.Contains("clientdev: 2 concurrent workers", client.Prompt);
-        Assert.Contains("qa: 1 concurrent workers", client.Prompt);
+        Assert.DoesNotContain("qa: 1 concurrent workers", client.Prompt);
+        Assert.Contains("QA verifies an existing PR in the optional watch lane", client.Prompt);
         Assert.DoesNotContain("reviewer: 2", client.Prompt);
     }
 

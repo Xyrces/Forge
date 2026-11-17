@@ -14,6 +14,32 @@ public sealed class SprintOutcomePlannerTests
     private static SprintPlanBuilder Planner(IssueStore issues, int cap = 10, int slots = 3) => new(issues,
         new SprintStore(issues), new SpecStore(issues), issues.ProjectId, null, new() { MaxEngineeringTasks = cap }, new Dictionary<string, int> { ["coredev"] = slots });
 
+    [Theory]
+    [InlineData("qa")]
+    [InlineData("review")]
+    public async Task VerificationRoleCannotFillSoftParallelAimBeyondTwoImplementationRoles(string verificationType)
+    {
+        await using var issues = Store();
+        var scope = await ApprovedSprintFixture.Scope(issues);
+        var core = await issues.CreateAsync(new NewIssue("task", "Backend", Priority: 1, Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        var client = await issues.CreateAsync(new NewIssue("client", "UI", Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        var verification = await issues.CreateAsync(new NewIssue(verificationType, "Optional verification", Metadata: new Dictionary<string, object> { ["groomed"] = true }));
+        await ApprovedSprintFixture.Bind(issues, scope, [core], criterion: "backend");
+        await ApprovedSprintFixture.Bind(issues, scope, [client], criterion: "ui");
+        // Even a nominally pre-deployment binding must not turn verification capacity
+        // into a reason to pad the same approved outcome with another executable row.
+        await ApprovedSprintFixture.Bind(issues, scope, [verification], criterion: "verification");
+        var planner = new SprintPlanBuilder(issues, new SprintStore(issues), new SpecStore(issues), issues.ProjectId, null,
+            roleCaps: new Dictionary<string, int> { ["coredev"] = 1, ["clientdev"] = 1, ["qa"] = 3, ["reviewer"] = 3 });
+        var result = await planner.BuildAsync();
+        Assert.NotNull(result.Snapshot);
+        Assert.Equal(2, result.Snapshot.TaskIds.Count);
+        Assert.Contains(core.Id, result.Snapshot.TaskIds);
+        Assert.Contains(client.Id, result.Snapshot.TaskIds);
+        Assert.DoesNotContain(verification.Id, result.Snapshot.TaskIds);
+        Assert.Contains(result.Deferred, d => d.TaskId == verification.Id);
+    }
+
     [Fact]
     public async Task SmallCompleteOutcomeDoesNotPadToTenWithUnrelatedWork()
     {
