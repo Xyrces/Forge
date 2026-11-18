@@ -21,6 +21,7 @@
         </div>
     </div>
     @if (_error is not null) { <div class="banner banner--error" role="alert">Couldn’t refresh task: @_error. The previous view may be out of date.</div> }
+    @if (_retryError is not null) { <div class="banner banner--error" role="alert">@_retryError</div> }
     @if (_task is null) { <p>Loading task…</p> }
     else
     {
@@ -38,7 +39,7 @@
                 <details class="task-actions"><summary>Task actions</summary>
                     <button class="btn" disabled="@(_holdSaving || !_holdLoaded)" @onclick="ToggleHumanReviewAsync">@(_explicitHumanHold ? "Release task review hold" : NominatedHuman is null ? "Require human review for this task" : $"Require review by @{NominatedHuman} for this task")</button>
                     @if (_humanPolicy is "Human" or "Both") { <p class="meta-text">Project policy requires human review. Releasing a task hold does not waive that policy.</p> }
-                    @if (Prop(_task, "status") is "Failed" or "Blocked") { <button class="btn" disabled="@_resetting" @onclick="ResetStrikesAsync">@(Meta("blockedKind") == "review-integration" ? "Retry review" : "Retry work")</button> }
+                    @if (Prop(_task, "status") is "Failed" or "Blocked") { <button class="btn" disabled="@_resetting" @onclick="RetryAsync">@(Meta("blockedKind") == "review-integration" ? "Retry review" : "Retry work")</button> }
                     <button class="btn" @onclick="() => _closeOpen = !_closeOpen">Close task…</button>
                 </details>
             }
@@ -446,6 +447,7 @@
             return;
         }
         _requestedRecoveryTarget = RecoveryTarget;
+        ++_retryGeneration; _resetting = false; _retryError = null;
         InvalidateActivity();
         _section = Section is "Review" or "Plan & checks" or "History & runs" ? Section : "Overview"; _delivery = null; _repoUrl = null;
         _task = null; _state = null; _sprint = null; _runs.Clear(); _events.Clear(); _workers.Clear();
@@ -666,13 +668,15 @@
         projectId is null ? "" : $"?project={Uri.EscapeDataString(projectId)}";
 
     private bool _resetting;
-
-    /// <summary>Operator recovery nudge: clear every strike counter
-    /// and requeue (POST /api/tasks/{id}/reset-strikes).</summary>
-    private async Task ResetStrikesAsync()
+    private int _retryGeneration;
+    private string? _retryError;
+    private sealed record RetryFailure(string? Error, string? Detail);
+    private async Task RetryAsync()
     {
-        if (!CanActOnLoadedTask) return;
+        if (!CanActOnLoadedTask || _resetting) return;
+        var generation = ++_retryGeneration;
         _resetting = true;
+        _retryError = null;
         try
         {
             var projectId = Project ?? ShellStore.Value.CurrentProjectId;
@@ -680,15 +684,24 @@
             var url = string.IsNullOrEmpty(projectId)
                 ? $"/api/tasks/{TaskId}/{retryAction}"
                 : $"/api/tasks/{TaskId}/{retryAction}?projectId={Uri.EscapeDataString(projectId)}";
-            var resp = await Http.PostAsync(url, content: null);
+            using var resp = await Http.PostAsync(url, content: null);
             if (!resp.IsSuccessStatusCode)
             {
-                _error = $"Retry failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                var message = $"Retry failed (HTTP {(int)resp.StatusCode}).";
+                if (resp.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) is true)
+                {
+                    var reason = await resp.Content.ReadFromJsonAsync<RetryFailure>();
+                    message = $"Retry failed. {reason?.Error ?? reason?.Detail ?? resp.ReasonPhrase}";
+                }
+                if (generation == _retryGeneration) _retryError = message;
             }
         }
-        catch (Exception ex) { _error = ex.Message; }
-        finally { _resetting = false; }
-        await LoadAsync();
+        catch (Exception ex)
+        {
+            if (generation == _retryGeneration) _retryError = "Couldn’t confirm the retry. " + ex.Message;
+        }
+        finally { if (generation == _retryGeneration) _resetting = false; }
+        if (generation == _retryGeneration) await LoadAsync();
     }
 
     private bool _closeOpen;
