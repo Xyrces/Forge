@@ -88,7 +88,6 @@ class Session:
 
     def manifest(self, role):
         return {"name": f"{self.owner.lower()}-forge-{role}", "url": f"https://github.com/{self.owner}/{self.repository}", "description": f"Private Forge {role} for {self.owner}/{self.repository}", "public": False,
-                "hook_attributes": {"url": self.base + "/events", "active": False},
                 "redirect_url": self.base + "/callback/" + role,
                 "setup_url": self.base + "/installed/" + role,
                 "request_oauth_on_install": False, "setup_on_update": True,

@@ -1,3 +1,4 @@
+from html.parser import HTMLParser
 import importlib.util
 import json
 from pathlib import Path
@@ -39,13 +40,36 @@ class SetupTests(unittest.TestCase):
     def test_manifest_distinct_roles_and_no_key_in_html(self):
         with tempfile.TemporaryDirectory() as root:
             session,_=self.session(root)
-            self.assertFalse(session.manifest('publisher')['public'])
-            self.assertFalse(session.manifest('reviewer')['hook_attributes']['active'])
-            self.assertEqual('read',session.manifest('reviewer')['default_permissions']['contents'])
-            self.assertNotIn('workflows',session.manifest('reviewer')['default_permissions'])
-            self.assertNotIn('actions',session.manifest('reviewer')['default_permissions'])
-            self.assertEqual('read',session.manifest('publisher')['default_permissions']['actions'])
-            self.assertNotIn('privateKeyFile',session.page())
+            class Forms(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.manifests = []
+
+                def handle_starttag(self, tag, attrs):
+                    attributes = dict(attrs)
+                    if tag == 'input' and attributes.get('name') == 'manifest':
+                        self.manifests.append(json.loads(attributes['value']))
+
+            page = session.page()
+            forms = Forms()
+            forms.feed(page)
+            self.assertEqual(2, len(forms.manifests))
+            publisher, reviewer = forms.manifests
+            self.assertNotEqual(publisher['name'], reviewer['name'])
+            for role, manifest in zip(('publisher', 'reviewer'), forms.manifests):
+                with self.subTest(role=role):
+                    self.assertNotIn('hook_attributes', manifest)
+                    self.assertFalse(manifest['public'])
+                    self.assertEqual([], manifest['default_events'])
+                    self.assertEqual('http://127.0.0.1:18743/callback/' + role, manifest['redirect_url'])
+                    self.assertEqual('http://127.0.0.1:18743/installed/' + role, manifest['setup_url'])
+                    self.assertEqual(setup.permissions(role), manifest['default_permissions'])
+            self.assertEqual('read', reviewer['default_permissions']['contents'])
+            self.assertNotIn('workflows', reviewer['default_permissions'])
+            self.assertNotIn('actions', reviewer['default_permissions'])
+            self.assertEqual('write', publisher['default_permissions']['contents'])
+            self.assertEqual('read', publisher['default_permissions']['actions'])
+            self.assertNotIn('privateKeyFile', page)
 
     def test_state_replay_rejected_and_private_key_permissions(self):
         with tempfile.TemporaryDirectory() as root:
