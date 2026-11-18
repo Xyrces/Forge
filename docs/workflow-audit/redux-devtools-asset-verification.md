@@ -30,18 +30,21 @@ on success or failure. Without `FORGE_ASSET_CHECK_PUBLISH_DIR`, the published
 smoke test is **skipped**, while its deterministic tests still run.
 
 The check fetches the real HTML for `/sprints` and `/projects/forge/overview`.
-No Redux DevTools script reference is valid. If the HTML includes a Redux DevTools
-script `src`, the check resolves it as the page would and requires HTTP 200
-without a redirect, a JavaScript media type, and a response containing the Fluxor bridge assignment
-and extension API reference rather than an HTML fallback. The test does not execute scripts or
-check the browser extension, console, or interactive dashboard behavior.
+A page with no Redux DevTools script reference passes. If the HTML includes a
+Redux DevTools script `src`, the check resolves the URL against the page and
+requires an HTTP 200 JavaScript response without a redirect. It fingerprints
+the Fluxor 6.10 implementation: the bridge connects to the extension, and its
+`init` and `dispatch` methods parse and forward state and actions. Comments,
+placeholder scripts, and HTML fallbacks do not qualify. The check does not
+execute scripts or verify the browser extension or interactive behavior.
 
 Local regression proof: a Release publish of baseline `db6565a` started in
 Production and failed with HTTP 404 for the script referenced by `/sprints`.
-The same HTTP check passed on both routes with a synthetic JavaScript fixture
-served from that temporary publish directory. The no-reference path passed in
-a deterministic test. These are harness checks, not evidence of the UI fix or a
-browser extension connection.
+The check rejects an HTTP 200 JavaScript response containing only an alias to
+the extension. A representative bridge served from the temporary publish
+validated the pass path on both routes. A deterministic test covers no
+reference. These are harness checks, not evidence of the UI fix or a browser
+extension connection.
 
 ## Deployed Linux — Production browser results
 

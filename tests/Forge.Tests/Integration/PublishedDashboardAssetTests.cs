@@ -13,8 +13,41 @@ namespace Forge.Tests.Integration;
 public sealed class PublishedDashboardAssetTests(ITestOutputHelper output)
 {
     private const string AssetPath = "/_content/Fluxor.Blazor.Web.ReduxDevTools/reduxDevTools.js";
-    // Fluxor 6.10's bridge defines this global and connects to this browser extension API.
-    private const string Bridge = "window.__FluxorDevTools__ = window.__REDUX_DEVTOOLS_EXTENSION__;";
+    private const string AliasOnly = "window.__FluxorDevTools__ = window.__REDUX_DEVTOOLS_EXTENSION__;";
+    // Representative Fluxor 6.10 bridge with fixed connection options for this HTTP fixture.
+    private const string Bridge = """
+        window.__FluxorDevTools__ = new (function() {
+            const reduxDevTools = window.__REDUX_DEVTOOLS_EXTENSION__;
+            this.init = function() {};
+            if (reduxDevTools !== undefined && reduxDevTools !== null) {
+                const fluxorDevTools = reduxDevTools.connect({ name: "Forge asset fixture" });
+                if (fluxorDevTools !== undefined && fluxorDevTools !== null) {
+                    this.init = function(dotNetCallbacks, state) {
+                        window.fluxorDevToolsDotNetInterop = dotNetCallbacks;
+                        state = JSON.parse(state);
+                        fluxorDevTools.init(state);
+                    };
+                    this.dispatch = function(action, state, stackTrace) {
+                        action = JSON.parse(action);
+                        state = JSON.parse(state);
+                        window.fluxorDevToolsDotNetInterop.stackTrace = stackTrace;
+                        fluxorDevTools.send(action, state);
+                    };
+                }
+            }
+        })();
+        """;
+    private const string NoForwarding = """
+        window.__FluxorDevTools__ = new (function() {
+            const reduxDevTools = window.__REDUX_DEVTOOLS_EXTENSION__;
+            const fluxorDevTools = reduxDevTools.connect({});
+            this.init = function(dotNetCallbacks, state) { state = JSON.parse(state); };
+            this.dispatch = function(action, state, stackTrace) {
+                action = JSON.parse(action);
+                state = JSON.parse(state);
+            };
+        })();
+        """;
     private const string Bootstrap = "<script src='_framework/blazor.web.js'></script>";
     private static readonly string[] Routes = ["/sprints", "/projects/forge/overview"];
 
@@ -123,12 +156,14 @@ public sealed class PublishedDashboardAssetTests(ITestOutputHelper output)
     [Fact]
     public async Task ReferencedScriptUsesHtmlBaseAndPreservesQuery()
     {
+        var requests = new List<Uri>();
         using var client = TestClient($"<SCRIPT defer SRC='{AssetPath.TrimStart('/')}?v=2&amp;x=1'></SCRIPT>", uri =>
         {
-            Assert.Equal(AssetPath + "?v=2&x=1", uri.PathAndQuery);
+            requests.Add(uri);
             return Response(HttpStatusCode.OK, "application/javascript", Bridge);
         });
         await AssertReduxAssetServedAsync(client, Routes[1]);
+        Assert.Equal(AssetPath + "?v=2&x=1", Assert.Single(requests).PathAndQuery);
     }
 
     [Theory]
@@ -138,6 +173,11 @@ public sealed class PublishedDashboardAssetTests(ITestOutputHelper output)
     [InlineData(HttpStatusCode.OK, "text/html", "<html>fallback</html>", "JavaScript media type")]
     [InlineData(HttpStatusCode.OK, "text/javascript", "<html>" + Bridge + "</html>", "Fluxor bridge")]
     [InlineData(HttpStatusCode.OK, "text/javascript", "console.log('unrelated');", "Fluxor bridge")]
+    [InlineData(HttpStatusCode.OK, "text/javascript", AliasOnly, "Fluxor bridge")]
+    [InlineData(HttpStatusCode.OK, "text/javascript", "// " + AliasOnly, "Fluxor bridge")]
+    [InlineData(HttpStatusCode.OK, "text/javascript", "/*" + Bridge + "*/", "Fluxor bridge")]
+    [InlineData(HttpStatusCode.OK, "text/javascript", "const fixture = `" + Bridge + "`;", "Fluxor bridge")]
+    [InlineData(HttpStatusCode.OK, "text/javascript", NoForwarding, "Fluxor bridge")]
     public async Task ReferencedScriptMustServeTheExpectedJavaScript(
         HttpStatusCode status, string mediaType, string body, string diagnostic)
     {
@@ -179,11 +219,33 @@ public sealed class PublishedDashboardAssetTests(ITestOutputHelper output)
             Assert.True(type is "text/javascript" or "application/javascript" or "application/ecmascript" or "text/ecmascript",
                 $"{label}, but GET returned {type ?? "no Content-Type"} instead of a JavaScript media type.");
             var body = await response.Content.ReadAsStringAsync();
-            Assert.True(!body.TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith('<') &&
-                Regex.IsMatch(body, @"\bwindow\s*\.\s*__FluxorDevTools__\s*=(?!=)") &&
-                Regex.IsMatch(body, @"\bwindow\s*\.\s*__REDUX_DEVTOOLS_EXTENSION__\b"),
-                $"{label}, but the response does not contain the expected JavaScript Fluxor bridge.");
+            Assert.True(HasFluxorBridgeFingerprint(body),
+                $"{label}, but the response does not match the expected Fluxor bridge implementation.");
         }
+    }
+
+    private static bool HasFluxorBridgeFingerprint(string body)
+    {
+        if (body.TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith('<'))
+            return false;
+
+        // Fluxor.Blazor.Web.ReduxDevTools 6.10 generates this bridge with variable connection options.
+        // Match distinctive implementation statements, not exact formatting or option values.
+        // Ignore quoted text and comments: examples in a doc comment are not an implementation.
+        var code = Regex.Replace(body, """//[^\r\n]*|/\*[\s\S]*?(?:\*/|\z)|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`""", " ",
+            RegexOptions.NonBacktracking);
+        return Regex.IsMatch(code, @"
+            \bwindow\s*\.\s*__FluxorDevTools__\s*=\s*new\b
+            [\s\S]*?\bconst\s+reduxDevTools\s*=\s*window\s*\.\s*__REDUX_DEVTOOLS_EXTENSION__\b
+            [\s\S]*?\bconst\s+fluxorDevTools\s*=\s*reduxDevTools\s*\.\s*connect\s*\(
+            [\s\S]*?\bthis\s*\.\s*init\s*=\s*function\s*\(\s*dotNetCallbacks\s*,\s*state\s*\)\s*\{
+            [^{}]*?\bstate\s*=\s*JSON\s*\.\s*parse\s*\(\s*state\s*\)
+            [^{}]*?\bfluxorDevTools\s*\.\s*init\s*\(\s*state\s*\)
+            [\s\S]*?\bthis\s*\.\s*dispatch\s*=\s*function\s*\(\s*action\s*,\s*state\s*,\s*stackTrace\s*\)\s*\{
+            [^{}]*?\baction\s*=\s*JSON\s*\.\s*parse\s*\(\s*action\s*\)
+            [^{}]*?\bstate\s*=\s*JSON\s*\.\s*parse\s*\(\s*state\s*\)
+            [^{}]*?\bfluxorDevTools\s*\.\s*send\s*\(\s*action\s*,\s*state\s*\)",
+            RegexOptions.IgnorePatternWhitespace | RegexOptions.NonBacktracking);
     }
 
     private static string? Attribute(string tag, string name)
