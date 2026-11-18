@@ -161,6 +161,32 @@ public sealed class DesignArtifactStore
         return list;
     }
 
+    /// <summary>Read historical artifacts whose owning specs live in another project database.</summary>
+    internal async Task<IReadOnlyList<DesignArtifact>> ListBySpecsAsync(
+        IReadOnlyList<string> specIds, CancellationToken ct = default)
+    {
+        var list = new List<DesignArtifact>();
+        if (specIds.Count == 0) return list;
+        await using var conn = await _db.OpenAsync(ct);
+        // Keep below both providers' parameter limits without issuing a query per spec.
+        foreach (var batch in specIds.Distinct(StringComparer.Ordinal).Chunk(500))
+        {
+            await using var cmd = conn.CreateCommand();
+            var parameters = batch.Select((id, index) => (Name: $"@spec{index}", Id: id)).ToArray();
+            cmd.CommandText = $"""
+                SELECT id, spec_id, kind, title, body, body_kind,
+                       references_json, parent_artifact_id, status, author, created_at, updated_at
+                FROM {T("design_artifact")}
+                WHERE spec_id IN ({string.Join(",", parameters.Select(p => p.Name))})
+                ORDER BY created_at ASC
+                """;
+            foreach (var parameter in parameters) cmd.AddParam(parameter.Name, parameter.Id);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) list.Add(ReadRow(reader));
+        }
+        return list.OrderBy(a => a.CreatedAt).ToArray();
+    }
+
     public async Task<int> DeleteBySpecAsync(string specId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);

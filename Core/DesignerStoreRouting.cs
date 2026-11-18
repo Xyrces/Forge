@@ -27,9 +27,11 @@ public static class DesignerStoreRouting
             ? await primary.ListByProjectAsync(id, ct) : await primary.ListBySpecAsync(id, ct: ct));
         if (owner is not null && !primary.UsesDatabase(owner.Database))
         {
+            if (byProject)
+                results.AddRange(await primary.ListBySpecsAsync(await owner.ListIdsByProjectAsync(id, ct), ct));
             var scoped = new DesignArtifactStore(owner.Database);
             results.AddRange(byProject ? await scoped.ListByProjectAsync(id, ct) : await scoped.ListBySpecAsync(id, ct: ct));
         }
-        return results.DistinctBy(a => a.Id).OrderByDescending(a => a.CreatedAt).ToArray();
+        return results.DistinctBy(a => a.Id).OrderBy(a => a.CreatedAt).ToArray();
     }
 }

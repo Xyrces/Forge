@@ -258,9 +258,16 @@ public class DesignerAgentTests : IDisposable
         {
             var oldArtifact = await _artifacts.CreateAsync(new NewDesignArtifact(spec.Id, DesignArtifactKind.Wireframe,
                 "Historical artifact", "# Historical", "markdown"));
+            var otherProjectSpec = await _specs.CreateAsync(new NewSpec("P", "Other project", HealthyBody));
+            var unrelated = await _artifacts.CreateAsync(new NewDesignArtifact(otherProjectSpec.Id, DesignArtifactKind.Wireframe,
+                "Other project's artifact", "# Private", "markdown"));
             var visible = await DesignerStoreRouting.ListArtifactsAsync(routing, _artifacts, spec.Id, false);
             Assert.Equal(2, visible.Count);
-            Assert.Contains(visible, a => a.Id == oldArtifact.Id);
+            Assert.Equal(result.ArtifactIds[0], visible[0].Id);
+            Assert.Equal(oldArtifact.Id, visible[1].Id);
+            var projectVisible = await DesignerStoreRouting.ListArtifactsAsync(routing, _artifacts, spec.ProjectId, true);
+            Assert.Equal(visible.Select(a => a.Id), projectVisible.Select(a => a.Id));
+            Assert.DoesNotContain(projectVisible, a => a.Id == unrelated.Id);
         }
         var callsBeforeMissingSpec = client.CallCount;
         var missing = await factory.Create().DesignSpecAsync("spec-missing", DesignerTriggerKind.Scheduled);

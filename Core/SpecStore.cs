@@ -189,6 +189,18 @@ public interface ISpecStore
 public sealed partial class SpecStore : ISpecStore, IAsyncDisposable
 {
     internal Forge.Core.Db.IDbConnectionFactory Database => _issues.Db;
+
+    internal async Task<IReadOnlyList<string>> ListIdsByProjectAsync(string projectId, CancellationToken ct)
+    {
+        await using var connection = await _issues.Db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT id FROM {T("spec")} WHERE project_id=@project";
+        command.AddParam("@project", projectId);
+        var ids = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetString(0));
+        return ids;
+    }
     private readonly IssueStore _issues;
     private readonly SpecBodyExtractor _extractor;
     private readonly DesignArtifactStore? _designArtifacts;

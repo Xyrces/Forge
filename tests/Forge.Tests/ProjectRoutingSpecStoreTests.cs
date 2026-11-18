@@ -45,6 +45,19 @@ public class ProjectRoutingSpecStoreTests : IDisposable
         new(ProjectId: project, Title: title, Body: "body " + title);
 
     [Fact]
+    public async Task HistoricalArtifactLookupBatchesSpecIdsAndDoesNotExpandTheirScope()
+    {
+        var artifacts = new DesignArtifactStore(_primaryIssues.Db);
+        var ids = Enumerable.Range(0, 501).Select(i => $"owned-spec-{i}").ToArray();
+        var first = await artifacts.CreateAsync(new NewDesignArtifact(ids[0], DesignArtifactKind.Wireframe, "first", "body", "markdown"));
+        var second = await artifacts.CreateAsync(new NewDesignArtifact(ids[500], DesignArtifactKind.Wireframe, "second", "body", "markdown"));
+        await artifacts.CreateAsync(new NewDesignArtifact("foreign-spec", DesignArtifactKind.Wireframe, "foreign", "body", "markdown"));
+        var result = await artifacts.ListBySpecsAsync(ids.Append("' OR 1=1 --").ToArray());
+        Assert.Equal(new[] { first.Id, second.Id }, result.Select(a => a.Id));
+        Assert.Empty(await artifacts.ListBySpecsAsync([]));
+    }
+
+    [Fact]
     public async Task DesignDecision_RoutesAtomicReceiptToOwner_AndDoesNotRegressOnReplay()
     {
         var spec = await _routing.CreateAsync(Spec("porthorizon", "owner handoff"));
