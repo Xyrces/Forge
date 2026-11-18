@@ -545,6 +545,13 @@ public sealed class ReviewerDispatcher
     {
         try
         {
+            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+            {
+                var scope = GitHubAppIdentities.FromUrl($"https://github.com/{_gitHub.Owner}/{_gitHub.Repo}");
+                var result = await Forge.AgentTools.ControllerGitRunner.RunAsync(worktreePath, ["fetch", "origin"], scope, cancellationToken);
+                if (result.ExitCode != 0) _logger.LogDebug("Isolated review fetch failed for {Path}", worktreePath);
+                return;
+            }
             using var process = new System.Diagnostics.Process();
             process.StartInfo = new System.Diagnostics.ProcessStartInfo
             {

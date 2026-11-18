@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Text;
+using Forge.AgentTools;
 using Microsoft.Extensions.Logging;
 using Forge.Configuration;
 
@@ -50,6 +50,11 @@ public sealed record ProjectSyncResult(bool Ok, string Branch);
 /// </summary>
 public sealed class ProjectCloner
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, GitHubAppIdentities.Repository> AppScopes = new(StringComparer.Ordinal);
+    private static void RegisterAppScope(string path, string url)
+    {
+        if (GitHubAppIdentities.FromUrl(url) is { } scope) AppScopes[Path.GetFullPath(path)] = scope;
+    }
     private readonly string _dataRoot;
     private readonly ILogger<ProjectCloner>? _logger;
 
@@ -80,6 +85,7 @@ public sealed class ProjectCloner
             throw new InvalidOperationException($"Project '{project.Id}' has no RepoUrl.");
 
         var localPath = ForgesystemPaths.ProjectDir(_dataRoot, project.Id);
+        RegisterAppScope(localPath, project.RepoUrl);
         Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
 
         var gitDir = Path.Combine(localPath, ".git");
@@ -255,6 +261,7 @@ public sealed class ProjectCloner
         var branch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch;
         var localPath = string.IsNullOrWhiteSpace(project.Root)
             ? ForgesystemPaths.ProjectDir(_dataRoot, project.Id) : Path.GetFullPath(project.Root);
+        RegisterAppScope(localPath, project.RepoUrl);
         if (!Directory.Exists(Path.Combine(localPath, ".git")))
         {
             if (!string.Equals(Path.GetFullPath(localPath), Path.GetFullPath(ForgesystemPaths.ProjectDir(_dataRoot, project.Id)),
@@ -464,6 +471,14 @@ public sealed class ProjectCloner
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
         string cwd, CancellationToken ct, params string[] args)
     {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+        {
+            AppScopes.TryGetValue(Path.GetFullPath(cwd), out var scope);
+            var explicitUrl = args.FirstOrDefault(a => a.StartsWith("https://github.com/", StringComparison.Ordinal));
+            if (explicitUrl is not null) scope = GitHubAppIdentities.FromUrl(explicitUrl);
+            var isolated = await ControllerGitRunner.RunAsync(cwd, args, scope, ct);
+            return (isolated.ExitCode, isolated.Stdout, isolated.Stderr);
+        }
         var psi = new ProcessStartInfo
         {
             FileName = "git",
@@ -484,28 +499,6 @@ public sealed class ProjectCloner
         // an extra positional that confused git into printing help).
         foreach (var a in args) psi.ArgumentList.Add(a);
 
-        string? authorization = null;
-        if (args.FirstOrDefault() is "clone" or "fetch" or "pull" or "ls-remote")
-        {
-            var remote = args.FirstOrDefault(a => a.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase));
-            if (remote is null && args.FirstOrDefault() != "clone")
-            {
-                var origin = await RunGitAsync(cwd, ct, "remote", "get-url", "origin");
-                if (origin.ExitCode == 0) remote = origin.Stdout.Trim();
-            }
-            if (GitHubAppIdentities.FromUrl(remote) is { } apps)
-            {
-                var token = await new GitHubAppIdentities.InstallationCredentials(apps, apps.Publisher, false).GetTokenAsync();
-                authorization = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:" + token));
-                psi.Environment["GIT_CONFIG_COUNT"] = "3";
-                psi.Environment["GIT_CONFIG_KEY_0"] = "credential.helper";
-                psi.Environment["GIT_CONFIG_VALUE_0"] = "";
-                psi.Environment["GIT_CONFIG_KEY_1"] = $"http.https://github.com/{apps.Owner}/{apps.Name}.extraheader";
-                psi.Environment["GIT_CONFIG_VALUE_1"] = "AUTHORIZATION: " + authorization;
-                psi.Environment["GIT_CONFIG_KEY_2"] = $"http.https://github.com/{apps.Owner}/{apps.Name}.git.extraheader";
-                psi.Environment["GIT_CONFIG_VALUE_2"] = "AUTHORIZATION: " + authorization;
-            }
-        }
         using var p = Process.Start(psi)!;
         var stdoutTask = p.StandardOutput.ReadToEndAsync();
         var stderrTask = p.StandardError.ReadToEndAsync();
@@ -520,7 +513,6 @@ public sealed class ProjectCloner
             throw;
         }
         var stdout = await stdoutTask; var stderr = await stderrTask;
-        if (authorization is not null) { stdout = stdout.Replace(authorization, "[redacted]", StringComparison.Ordinal); stderr = stderr.Replace(authorization, "[redacted]", StringComparison.Ordinal); }
         return (p.ExitCode, stdout, stderr);
     }
 }

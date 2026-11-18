@@ -11,6 +11,17 @@ setup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup)
 
 class SetupTests(unittest.TestCase):
+    def test_empty_resume_preserves_access_but_renews_form_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            original = setup.Session(Path(root)/'private', 18743)
+            setup.private_write(original.directory/'session-url', original.base+'/?session='+original.secret)
+            resumed = setup.Session(original.directory, 18743, resume_empty=True)
+            self.assertEqual(original.secret, resumed.secret)
+            self.assertNotEqual(original.states, resumed.states)
+            setup.private_write(original.directory/'publisher-registration.json', '{}')
+            with self.assertRaises(RuntimeError):
+                setup.Session(original.directory, 18743, resume_empty=True)
+
     def session(self, parent, repos=None):
         calls=[]
         def api(method, path, token=None, body=None):
@@ -32,6 +43,8 @@ class SetupTests(unittest.TestCase):
             self.assertFalse(session.manifest('reviewer')['hook_attributes']['active'])
             self.assertEqual('read',session.manifest('reviewer')['default_permissions']['contents'])
             self.assertNotIn('workflows',session.manifest('reviewer')['default_permissions'])
+            self.assertNotIn('actions',session.manifest('reviewer')['default_permissions'])
+            self.assertEqual('read',session.manifest('publisher')['default_permissions']['actions'])
             self.assertNotIn('privateKeyFile',session.page())
 
     def test_state_replay_rejected_and_private_key_permissions(self):

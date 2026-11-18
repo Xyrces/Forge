@@ -12,6 +12,10 @@ internal static class GitHubAppIdentities
 {
     internal sealed record App(long AppId, long InstallationId, string Slug, string PrivateKeyFile);
     internal sealed record Repository(string Owner, string Name, App Publisher, App Reviewer);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(Repository Repository, bool Reviewer), InstallationCredentials> Clients = new();
+    internal static InstallationCredentials CredentialsFor(Repository repository, bool reviewer)
+        => Clients.GetOrAdd((repository, reviewer), static scope =>
+            new(scope.Repository, scope.Reviewer ? scope.Repository.Reviewer : scope.Repository.Publisher, scope.Reviewer));
     private sealed record Settings(Repository[] Repositories);
     internal static Repository? FromUrl(string? url)
     {
@@ -64,7 +68,7 @@ internal static class GitHubAppIdentities
                     throw new InvalidOperationException("GitHub App installation does not match the configured owner.");
                 using var request = Request(HttpMethod.Post, $"app/installations/{app.InstallationId}/access_tokens", jwt);
                 var permissions = new Dictionary<string, string> { ["contents"] = reviewer ? "read" : "write", ["pull_requests"] = "write", ["metadata"] = "read", ["checks"] = "read", ["statuses"] = "read" };
-                if (!reviewer) { permissions["issues"] = "write"; permissions["workflows"] = "write"; }
+                if (!reviewer) { permissions["issues"] = "write"; permissions["workflows"] = "write"; permissions["actions"] = "read"; }
                 request.Content = JsonContent.Create(new { repositories = new[] { repository.Name }, permissions });
                 using var response = await (http ?? SharedHttp).SendAsync(request);
                 if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"GitHub App token renewal failed ({(int)response.StatusCode}).");

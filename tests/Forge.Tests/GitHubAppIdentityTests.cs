@@ -32,6 +32,8 @@ public sealed class GitHubAppIdentityTests
             Assert.Equal(reviewer ? "read" : "write", permissions.GetProperty("contents").GetString());
             Assert.Equal("write", permissions.GetProperty("pull_requests").GetString());
             Assert.Equal(!reviewer, permissions.TryGetProperty("workflows", out _));
+            Assert.Equal(!reviewer, permissions.TryGetProperty("actions", out var actions));
+            if (!reviewer) Assert.Equal("read", actions.GetString());
             Assert.False(permissions.TryGetProperty("administration", out _));
         }
         finally { File.Delete(key); }

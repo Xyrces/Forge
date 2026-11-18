@@ -102,6 +102,8 @@ public sealed class ProjectBootstrap
 
             if (!Directory.Exists(Path.Combine(rootPath, ".git")))
             {
+                if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+                    throw new InvalidOperationException("App-enabled bootstrap requires a successful private clone; shared scaffold execution is disabled.");
                 // The cloner deletes the local path on clone failure
                 // (so a retry isn't a no-op). Re-create it here so
                 // the git-init fallback has a valid cwd.

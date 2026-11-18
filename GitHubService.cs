@@ -29,9 +29,9 @@ public partial class GitHubService
         var apps = GitHubAppIdentities.Find(owner, repo);
         if (apps is not null)
         {
-            _publisherCredentials = new GitHubAppIdentities.InstallationCredentials(apps, apps.Publisher, false);
+            _publisherCredentials = GitHubAppIdentities.CredentialsFor(apps, reviewer: false);
             _client = new GitHubClient(new ProductHeaderValue("Forge"), _publisherCredentials);
-            _reviewClient = new GitHubClient(new ProductHeaderValue("Forge-Reviewer"), new GitHubAppIdentities.InstallationCredentials(apps, apps.Reviewer, true));
+            _reviewClient = new GitHubClient(new ProductHeaderValue("Forge-Reviewer"), GitHubAppIdentities.CredentialsFor(apps, reviewer: true));
             ReviewerLogin = apps.Reviewer.Slug + "[bot]";
             return;
         }

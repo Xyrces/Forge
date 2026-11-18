@@ -83,7 +83,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         var worktreePath = input.Worktree.WorktreePath!;
         var commands = verifyCommands ?? AgentTools.RunVerification.DefaultCommands(worktreePath);
         if (input.RequiresWorkerVerification && (input.Verification is null
-            || !await WorkerVerification.MatchesAsync(input.Verification, worktreePath, commands, ct)))
+            || !await WorkerVerification.MatchesAsync(input.Verification, worktreePath, commands, ct, worktrees.WorkspaceRoot)))
             throw new InvalidOperationException("Worker verification receipt is missing or source/commands changed; no controller build or publication permitted.");
 
         // Operator-park guard: a park (Blocked) can land while the run
@@ -283,7 +283,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
             }
             else if (input.RequiresWorkerVerification)
             {
-                verification = await WorkerVerification.MatchesAsync(input.Verification!, worktreePath, commands, ct)
+                verification = await WorkerVerification.MatchesAsync(input.Verification!, worktreePath, commands, ct, worktrees.WorkspaceRoot)
                     ? new AgentTools.RunVerification.Result(true, [])
                     : new AgentTools.RunVerification.Result(false, ["Source changed since trusted worker verification."]);
             }
@@ -409,7 +409,7 @@ public sealed class CommitPushPrExecutor : FunctionExecutor<AgentCompleted, PrOp
         // crash after the PR is recorded.
         logger.LogInformation("CommitPushPr({Id}): setting CommitDone", issue.Id);
         await issues.SetCheckpointAsync(issue.Id, DispatchCheckpoint.CommitDone, ct);
-        if (input.RequiresWorkerVerification && !await WorkerVerification.MatchesAsync(input.Verification!, worktreePath, commands, ct))
+        if (input.RequiresWorkerVerification && !await WorkerVerification.MatchesAsync(input.Verification!, worktreePath, commands, ct, worktrees.WorkspaceRoot))
             throw new InvalidOperationException("Source changed after verified commit; publication refused.");
         logger.LogInformation("CommitPushPr({Id}): calling PushAsync", issue.Id);
         try

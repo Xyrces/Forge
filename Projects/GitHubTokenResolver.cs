@@ -14,6 +14,14 @@ namespace Forge.Projects;
 /// </summary>
 public static class GitHubTokenResolver
 {
+    internal static async Task<string?> ResolveReleaseTokenAsync(ProjectOptions project, GitHubOptions? global, ISecretStore? secrets, CancellationToken ct)
+    {
+        var repository = GitHubAppIdentities.FromUrl(project.RepoUrl);
+        return repository is null
+            ? await ResolveTokenAsync(null, project.Id, global, secrets, ct)
+            : await GitHubAppIdentities.CredentialsFor(repository, reviewer: false).GetTokenAsync().WaitAsync(ct);
+    }
+
     /// <summary>
     /// Resolve the raw token with explicit-first precedence: an
     /// explicitly supplied token (e.g. entered in the UI) wins, then

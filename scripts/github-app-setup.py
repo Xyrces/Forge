@@ -21,7 +21,7 @@ ROLES = ("publisher", "reviewer")
 def permissions(role):
     result = {"contents": "write" if role == "publisher" else "read", "pull_requests": "write", "checks": "read", "statuses": "read", "metadata": "read"}
     if role == "publisher":
-        result.update(issues="write", workflows="write")
+        result.update(issues="write", workflows="write", actions="read")
     return result
 
 def private_write(path, value):
@@ -56,14 +56,29 @@ def jwt(app, key):
     return value + "." + encode(signed.stdout)
 
 class Session:
-    def __init__(self, directory, port, owner="Xyrces", repository="Forge", request=api):
+    def __init__(self, directory, port, owner="Xyrces", repository="Forge", request=api, resume_empty=False):
         self.directory = Path(directory)
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+        if resume_empty:
+            url_file = self.directory / "session-url"
+            if self.directory.is_symlink() or url_file.is_symlink() or set(p.name for p in self.directory.iterdir()) != {"session-url"}:
+                raise RuntimeError("Only an empty registration session can be resumed")
+            if self.directory.stat().st_uid != os.getuid() or self.directory.stat().st_mode & 0o077 or url_file.stat().st_mode & 0o077:
+                raise RuntimeError("Registration session must remain privately owned")
+            parsed = urllib.parse.urlparse(url_file.read_text())
+            saved = urllib.parse.parse_qs(parsed.query).get("session", [""])[0]
+            if parsed.scheme != "http" or parsed.netloc != f"127.0.0.1:{port}" or len(saved) < 32:
+                raise RuntimeError("Registration session URL is invalid")
+            self.secret = saved
+            self.expires = url_file.stat().st_mtime + 7200
+            if self.expires <= time.time():
+                raise RuntimeError("Registration session has expired")
+        else:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+            self.secret = secrets.token_urlsafe(32)
+            self.expires = time.time() + 7200
         self.port, self.owner, self.repository, self.request = port, owner, repository, request
-        self.secret = secrets.token_urlsafe(32)
         self.states = {role: secrets.token_urlsafe(32) for role in ROLES}
         self.apps = {}
-        self.expires = time.time() + 7200
         self.lock = threading.Lock()
         self.notice = ""
 
@@ -184,13 +199,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", required=True)
     parser.add_argument("--port", type=int, default=18743)
+    parser.add_argument("--resume-empty", action="store_true", help="Preserve access to an unexpired session with no App registrations; outstanding manifest forms must be refreshed")
     args = parser.parse_args()
     os.umask(0o077)
-    session = Session(args.directory, args.port)
+    session = Session(args.directory, args.port, resume_empty=args.resume_empty)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.session = session
-    private_write(session.directory / "session-url", session.base + "/?session=" + session.secret)
-    stop = threading.Timer(7200, server.shutdown); stop.daemon=True; stop.start()
+    if not args.resume_empty:
+        private_write(session.directory / "session-url", session.base + "/?session=" + session.secret)
+    stop = threading.Timer(max(1, session.expires-time.time()), server.shutdown); stop.daemon=True; stop.start()
     try:
         server.serve_forever()
     finally:
