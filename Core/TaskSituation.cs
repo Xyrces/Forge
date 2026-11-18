@@ -58,7 +58,8 @@ public static class TaskSituation
             _ => "",
         };
         var alsoThreads = openThreads > 0 ? " " + threadSummary : "";
-        if (bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting)
+        if (bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting
+            && (humanPending || openThreads == 0 || protection is "ReviewRequired" or "ChangesRequested"))
         {
             if (protection is "ReviewRequired" or "ChangesRequested")
                 return Result(protection == "ChangesRequested" ? "GitHub changes requested" : "GitHub approval required",
@@ -94,6 +95,10 @@ public static class TaskSituation
             case "UNKNOWN" or "Unavailable":
                 return Result("Checking merge requirements", "Forge is waiting for GitHub to confirm whether this revision can merge.", "Forge", "warn");
         }
+        if (issue.GetMetadata("reviewProtectionHead") is { Length: > 0 } head
+            && head == issue.GetMetadata("reviewMergeRefusedHead")
+            && issue.GetMetadata("reviewMergeRefusedReason") is { Length: > 0 } reason)
+            return Result("GitHub declined the merge", reason, "PR participants", "action");
         if (state == "MergeReady") return Result("Final merge checks", "Forge is checking review, CI and merge requirements.", "Forge");
         var legacy = DescribeLegacy(issue);
         return legacy with { Label = issue.Status is IssueStatus.Blocked or IssueStatus.Failed ? "Needs attention" : "In progress",

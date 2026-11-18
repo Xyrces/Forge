@@ -3,6 +3,8 @@ using Forge.Configuration;
 
 namespace Forge;
 
+public sealed record PullRequestMergeAttempt(bool Merged, string? Reason = null);
+
 public partial class GitHubService
 {
     private readonly GitHubClient _client;
@@ -138,18 +140,21 @@ public partial class GitHubService
     }
 
     public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        => (await TryMergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha)).Merged;
+
+    public virtual async Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
     {
         try
         {
             var merge = new MergePullRequest { Sha = expectedHeadSha };
             var result = await _client.PullRequest.Merge(_owner, _repo, prNumber, merge).WaitAsync(cancellationToken);
-            return result.Merged;
+            return new(result.Merged, result.Merged ? null : result.Message);
         }
         catch (ApiException ex) when (ex.StatusCode is System.Net.HttpStatusCode.MethodNotAllowed
             or System.Net.HttpStatusCode.Conflict or System.Net.HttpStatusCode.UnprocessableEntity)
         {
             // A normal policy/head rejection is reconciled by the watcher through fresh reads.
-            return false;
+            return new(false, ex.ApiError?.Message ?? ex.Message);
         }
     }
 

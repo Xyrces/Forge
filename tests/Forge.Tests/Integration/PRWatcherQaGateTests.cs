@@ -65,10 +65,10 @@ public class PRWatcherQaGateTests : IDisposable
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult((IReadOnlyList<PullRequestReview>)new List<PullRequestReview>());
         public override Task<bool> DeleteBranchAsync(string branch, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        public override Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
         {
             MergeCalls++;
-            return Task.FromResult(true);
+            return Task.FromResult(new PullRequestMergeAttempt(true));
         }
     }
 

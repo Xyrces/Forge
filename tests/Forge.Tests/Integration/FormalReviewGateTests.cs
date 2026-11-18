@@ -463,6 +463,28 @@ public sealed class FormalReviewGateTests : IDisposable
     }
 
     [Fact]
+    public async Task CleanSnapshotWithMergeRefusalShowsReasonAndBacksOffOnlyTheWrite()
+    {
+        var github = new GitHub();
+        var watcher = Watch(github);
+        var task = await Seed();
+        await watcher.PollWatchedTaskAsync(task);
+        var refused = (await _issues.GetAsync(task.Id))!;
+        var situation = TaskSituation.Describe(refused);
+        Assert.Equal("GitHub declined the merge", situation.Label);
+        Assert.Equal("Merge queue is required.", situation.Text);
+        var reads = github.Reads;
+        await watcher.PollWatchedTaskAsync(refused);
+        Assert.Equal(1, github.Merges);
+        Assert.True(github.Reads > reads);
+        await _issues.PatchReviewMetadataAsync(task.Id, new Dictionary<string, object>
+        { ["reviewMergeRetryAfter"] = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("O") }, null);
+        await watcher.PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!);
+        Assert.Equal(2, github.Merges);
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
     public async Task ReleasingLongHumanWaitDoesNotImmediatelyExpireTheWatch()
     {
         var task = await Seed();

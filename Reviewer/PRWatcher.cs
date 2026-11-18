@@ -548,6 +548,14 @@ public sealed partial class PRWatcher
                 var current = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
                 if (current.Merged || current.State.Value != ItemState.Open || current.Head.Sha != sha)
                     return WatchPollOutcome.Pending;
+                // GitHub can refuse a merge even with clean checks (for example, a required queue).
+                // Continue reading gates on every turn. Back off only an identical write attempt.
+                if (task.GetMetadata("reviewMergeRefusedHead") == sha
+                    && task.GetMetadata("reviewMergeRefusedBase") == (current.Base?.Sha ?? "")
+                    && task.GetMetadata("reviewMergeRefusedPrUpdatedAt") == current.UpdatedAt.ToString("O")
+                    && DateTimeOffset.TryParse(task.GetMetadata("reviewMergeRetryAfter"), out var retryAfter)
+                    && retryAfter > DateTimeOffset.UtcNow)
+                    return WatchPollOutcome.Pending;
                 var currentGate = await TryReadFormalGateAsync(task, current, sha, cancellationToken);
                 if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0
                     || currentGate.MergeState is "BEHIND" or "DIRTY"
@@ -559,8 +567,8 @@ public sealed partial class PRWatcher
                     || currentGate.MergeState is "BEHIND" or "DIRTY")
                     return WatchPollOutcome.Pending;
             }
-            var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
-            if (merged)
+            var attempt = await _gitHub.TryMergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
+            if (attempt.Merged)
             {
                 var observedMerged = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
                 if (!HasMergeEvidence(observedMerged))
@@ -581,6 +589,18 @@ public sealed partial class PRWatcher
             {
                 var refused = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
                 var refusedGate = await TryReadFormalGateAsync(task, refused, refused.Head.Sha, cancellationToken);
+                if (!refused.Merged && refused.Head.Sha == sha && refusedGate is { Approved: true } && _issues is IssueStore issueStore)
+                {
+                    var message = string.IsNullOrWhiteSpace(attempt.Reason) ? "GitHub declined the attempt. Check the PR merge box for the outstanding requirement." : attempt.Reason.Trim();
+                    await issueStore.PatchReviewMetadataAsync(task.Id, new Dictionary<string, object>
+                    {
+                        ["reviewMergeRefusedHead"] = sha,
+                        ["reviewMergeRefusedReason"] = message[..Math.Min(message.Length, 1000)],
+                        ["reviewMergeRefusedBase"] = refused.Base?.Sha ?? "",
+                        ["reviewMergeRefusedPrUpdatedAt"] = refused.UpdatedAt.ToString("O"),
+                        ["reviewMergeRetryAfter"] = DateTimeOffset.UtcNow.AddMinutes(1).ToString("O"),
+                    }, null, cancellationToken);
+                }
                 await RecordHumanWaitAsync(task, refused.Head.Sha == sha && refusedGate is { HumanWaiting: true, AutomatedSatisfied: true }
                     && refusedGate.Requests.Count == 0
                     && refusedGate.MergeState is not ("BEHIND" or "DIRTY")

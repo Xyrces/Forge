@@ -131,6 +131,9 @@ public class TaskSituationTests
     [Fact]
     public void ConversationsAccompanyApprovalButDoNotHideReworkOrCompletion()
     {
+        var approved = TaskSituation.Describe(Task(IssueStatus.InProgress, ("awaitingHumanReview", "true"),
+            ("reviewProtectionDecision", "Approved"), ("reviewUnresolvedThreads", "1"), ("reviewHumanThreads", "1")));
+        Assert.Equal("Review conversations open", approved.Label);
         var situation = TaskSituation.Describe(Task(IssueStatus.InProgress, ("awaitingHumanReview", "true"),
             ("reviewUnresolvedThreads", "1"), ("reviewProtectionDecision", "ReviewRequired")));
         Assert.Equal("GitHub approval required", situation.Label);
