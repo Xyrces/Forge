@@ -369,16 +369,13 @@ public class ArtistAgentTests : IDisposable
         Assert.Equal(old.Id, (await routing.ReadHistoricalArtAcrossProjectsAsync(old.Id, default))!.Artifact.Id);
         await using var otherIssues = new IssueStore(Path.Combine(_workDir, "other-owner.db"), "other");
         var other = new SpecStore(otherIssues);
-        await other.CreateAsync(new("other", "Duplicate ownership", "body"));
-        await using (var connection = await otherIssues.Db.OpenAsync())
+        // A copied project database reproduces duplicate ownership, including version history.
+        await using (var source = await ownerIssues.Db.OpenAsync())
+        await using (var destination = await otherIssues.Db.OpenAsync())
         {
-            await using var command = connection.CreateCommand();
-            command.CommandText = "UPDATE spec SET id=@id";
-            var parameter = command.CreateParameter(); parameter.ParameterName = "@id"; parameter.Value = spec.Id;
-            command.Parameters.Add(parameter);
-            await command.ExecuteNonQueryAsync();
+            ((Microsoft.Data.Sqlite.SqliteConnection)source)
+                .BackupDatabase((Microsoft.Data.Sqlite.SqliteConnection)destination);
         }
-        await new OwnedArtifactHistoryStore(otherIssues.Db).ImportAsync(new("writer", _issues.Db, _workDir), other);
         var conflictingOwners = new ProjectRoutingSpecStore(owner, _ => null, () => [owner, other],
             () => [owner, other]);
         await Assert.ThrowsAsync<ArtifactHistoryAmbiguousException>(() =>
