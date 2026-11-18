@@ -139,7 +139,7 @@ public sealed class ProjectStore : IProjectStore, IAsyncDisposable
             ins.Transaction = tx;
             ins.CommandText = _issues.Db.Provider == ForgeDbProvider.SqlServer
                 ? $"""
-                    IF NOT EXISTS (SELECT 1 FROM {T("project")} WHERE id = @id)
+                    IF NOT EXISTS (SELECT 1 FROM {T("project")} WITH (UPDLOCK,HOLDLOCK) WHERE id = @id)
                     INSERT INTO {T("project")} (id, name, repo_url, default_branch, created_at, updated_at)
                     VALUES (@id, @name, @url, @branch, @now, @now);
                     """
