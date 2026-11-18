@@ -65,7 +65,7 @@ public sealed partial class PRWatcher
             ["humanReviewNominee"] = settings.NominatedHuman ?? "",
             ["humanReviewRequired"] = human, ["humanReviewTaskHold"] = hold.Required,
             ["humanReviewSyncPending"] = false, ["reviewMode"] = mode.ToString(),
-            ["reviewGateError"] = protection is null ? "GitHub’s protected review requirement could not be checked. Forge will retry the read; merging is paused." : "",
+            ["reviewGateError"] = protection is null ? "GitHubâ€™s protected review requirement could not be checked. Forge will retry the read; merging is paused." : "",
             ["reviewProtectionDecision"] = protection?.ToString() ?? "Unavailable",
             ["reviewProtectionHead"] = head,
             ["reviewHumanPending"] = humanPending
