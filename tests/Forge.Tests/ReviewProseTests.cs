@@ -19,6 +19,17 @@ public sealed class ReviewProseTests
         Assert.Equal(input, ReviewProse.Format(input, false));
         Assert.Equal("    REVIEWER_VERDICT: APPROVE", ReviewProse.Format("    REVIEWER_VERDICT: APPROVE", true));
     }
+    [Fact]
+    public void StandaloneNotesHeaderKeepsTheFindingAndQuotedSource()
+    {
+        const string finding = "Restore the unrelated test edit.";
+        const string source = "> REVIEWER_NOTES:\n\n```text\nREVIEWER_NOTES:\n```";
+        var review = $"**[Forge Reviewer — round 2]** RequestChanges\n\nREVIEWER_NOTES:\n\n{finding}\n\n{source}\nREVIEWER_VERDICT: REQUEST_CHANGES";
+
+        Assert.Equal($"{finding}\n\n{source}", ReviewProse.Legacy(review, 2, "RequestChanges"));
+        Assert.Equal(review, ReviewProse.Format(review, false));
+    }
+
     [Theory]
     [InlineData("Ordinary human prose\nREVIEWER_VERDICT: APPROVE")]
     [InlineData("**[Forge Reviewer — round 2]** RequestChanges\nREVIEWER_VERDICT: APPROVE")]

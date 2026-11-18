@@ -61,6 +61,23 @@ public sealed class SprintBoardRestoreTests
         if (action != "dispose") page.Dispose();
     }
 
+    [Theory]
+    [InlineData("SelectSprintAsync", "chosen-sprint")]
+    [InlineData("SelectLaneAsync", "Queued")]
+    public async Task ExplicitSelectionCancelsArmedLayoutRestoration(string method, string value)
+    {
+        var browser = new Browser(_ => Task.FromResult(Location("forge")));
+        var page = Create(new State("forge"), browser);
+        typeof(Sprints).GetField("_restoreBoard", Private)!.SetValue(page, true);
+        typeof(Sprints).GetField("_refreshing", Private)!.SetValue(page, true);
+
+        await (Task)typeof(Sprints).GetMethod(method, Private)!.Invoke(page, [new ChangeEventArgs { Value = value }])!;
+
+        Assert.False(Field<bool>(page, "_restoreBoard"));
+        Assert.Contains("cancelRestore", browser.Calls);
+        page.Dispose();
+    }
+
     private static string Location(string prefix) => JsonSerializer.Serialize(new
     {
         sprintId = prefix + "-sprint", lane = "Queued", memberCursor = prefix + "-cursor"
@@ -89,10 +106,12 @@ public sealed class SprintBoardRestoreTests
 
     private sealed class Browser(Func<string, Task<string>> read) : IJSObjectReference
     {
+        public List<string> Calls { get; } = [];
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public ValueTask<T> InvokeAsync<T>(string name, object?[]? args) => InvokeAsync<T>(name, default, args);
         public async ValueTask<T> InvokeAsync<T>(string name, CancellationToken ct, object?[]? args)
         {
+            Calls.Add(name);
             if (name != "begin") return default!;
             return JsonSerializer.Deserialize<T>(await read((string)args![0]!), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
         }

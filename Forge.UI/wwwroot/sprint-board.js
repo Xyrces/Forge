@@ -1,5 +1,6 @@
 let project = null;
 let restoring = false;
+let restoreGeneration = 0;
 const key = p => `forge:sprint-board:${p}`;
 export function read(p) {
     try { return JSON.parse(sessionStorage.getItem(key(p)) || 'null'); }
@@ -18,19 +19,22 @@ function saveScroll() {
     catch { /* Private browsing may deny storage. */ }
 }
 export function restoreScroll(p) {
+    const generation = ++restoreGeneration;
     restoring = true;
     const saved = read(p);
     if (!saved) { restoring = false; return; }
     requestAnimationFrame(() => {
+        if (generation !== restoreGeneration || project !== p) return;
         const main = document.querySelector('.app-main');
         if (saved.focusHref) [...document.querySelectorAll('.sprint-workspace a, .task-list-workspace a')]
             .find(a => a.getAttribute('href') === saved.focusHref)?.focus({preventScroll:true});
         if (main) main.scrollTop = saved.scroll || 0;
         window.scrollTo(0, saved.windowScroll || 0);
-        requestAnimationFrame(() => { restoring = false; });
+        requestAnimationFrame(() => { if (generation === restoreGeneration) restoring = false; });
     });
 }
-export function begin(p) { project = p; restoring = true; return read(p); }
+export function cancelRestore() { ++restoreGeneration; restoring = false; }
+export function begin(p) { ++restoreGeneration; project = p; restoring = true; return read(p); }
 export function rememberList(p, view, search, pages) {
     project = p;
     try { sessionStorage.setItem(key(p), JSON.stringify({ ...read(p), view, search, pages })); }

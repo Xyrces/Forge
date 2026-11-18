@@ -46,3 +46,12 @@ loaded pages, and separate project histories. Its fixture API supports exact
 query-string responses so paging and project selection are not simulated with
 one response for every request. `navigation.json` records completed checks and
 browser errors. Run separately from the other fixture suites.
+
+`node scripts/browser/sprint-scroll.spec.mjs /tmp/forge-sprint-scroll` checks
+desktop and mobile card returns through breadcrumbs and browser Back while
+completion evidence loads one second later than the board. It compares the
+actual saved departure scroll and the card's viewport position after rendering,
+including missing and failed completion responses. `sprint-scroll.json` records
+each comparison. It also checks that explicit sprint/lane changes cancel a
+pending restore and resume scroll saving. Run separately from other fixture
+suites.
