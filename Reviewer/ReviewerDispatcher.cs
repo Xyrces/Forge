@@ -153,6 +153,7 @@ public sealed class ReviewerDispatcher
         // watcher's circuit breaker bounds the retries).
         var reviewedSha = task.GetMetadata("reviewSha");
         var recordedVerdict = task.GetMetadata("reviewVerdict");
+        var humanCheckpoint = ReviewFindings.HumanConversationCheckpoint(conversations, headSha, _gitHub.ReviewerLogin);
         if (_gitHub.RequireFormalReview && reviewedSha == headSha && recordedVerdict == nameof(ReviewerVerdict.Error)
             && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var errorAttempts) && errorAttempts >= 3)
             return null; // Bounded paid attempts; a new head or explicit operator reconciliation is required.
@@ -162,7 +163,9 @@ public sealed class ReviewerDispatcher
             && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha)
             && !(recordedVerdict == nameof(ReviewerVerdict.Approve)
                 && conversations.Any(t => GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin))
-                && ReviewFindings.ConversationCheckpoint(conversations, _gitHub.ReviewerLogin) != task.GetMetadata("reviewThreadCheckpoint")))
+                && ReviewFindings.ConversationCheckpoint(conversations, _gitHub.ReviewerLogin) != task.GetMetadata("reviewThreadCheckpoint"))
+            && !(recordedVerdict == nameof(ReviewerVerdict.Approve) && humanCheckpoint is not null
+                && humanCheckpoint != task.GetMetadata("reviewHumanThreadCheckpoint")))
         {
             return null;
         }
@@ -295,6 +298,9 @@ public sealed class ReviewerDispatcher
             {
                 threadId = conversation.Id, lastCommentId = conversation.LastCommentId, path = conversation.Path,
                 eligible = GitHubService.CanResolveConversation(conversation, _gitHub.ReviewerLogin),
+                originalHead = conversation.OriginalHead,
+                evidenceReplyAllowed = GitHubService.CanReplyToHumanConversation(conversation, headSha)
+                    && !GitHubService.HasCurrentHumanEvidence(conversation, headSha, _gitHub.ReviewerLogin),
                 discussion = conversation.Body
             }, ReviewFindings.Json);
         ReviewerVerdict verdict;
@@ -504,6 +510,7 @@ public sealed class ReviewerDispatcher
                 m["reviewNotes"] = draft.Summary; m["reviewRound"] = draft.Round;
                 m["reviewPublishedHead"] = draft.HeadSha; m["reviewDraft"] = null!;
                 m["reviewThreadCheckpoint"] = draft.ThreadCheckpoint!;
+                m["reviewHumanThreadCheckpoint"] = draft.HumanThreadCheckpoint!;
                 m["reviewPublishStarted"] = null!; m["reviewStartedAt"] = null!;
                 m["reviewError"] = null!; m["reviewIntegrationError"] = null!;
                 m["reviewErrorAttempts"] = null!;

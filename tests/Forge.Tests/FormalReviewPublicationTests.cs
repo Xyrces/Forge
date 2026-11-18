@@ -59,10 +59,23 @@ public sealed class FormalReviewPublicationTests
         public override string? ReviewerLogin => "reviewer[bot]";
         public MergeRequirements Requirements = new("CLEAN", []);
         public int Resolutions;
+        public int HumanEvidenceReplies;
+        public bool LoseEvidenceReplyResponse;
         public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
             => Task.FromResult(Requirements);
         public override Task ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
         {
+            if (draft.EvidenceReplies is { Count: > 0 } && !Requirements.Conversations.All(t => GitHubService.HasCurrentHumanEvidence(t, draft.HeadSha, ReviewerLogin)))
+            {
+                HumanEvidenceReplies++;
+                Requirements = new("BLOCKED", Requirements.Conversations.Select(t => t with
+                {
+                    LastCommentId = "evidence-reply", LastAuthor = ReviewerLogin,
+                    LastBody = ReviewFindings.EvidenceMarker(draft, t.Id),
+                    Body = "Original finding\n\n" + ReviewFindings.EvidenceMarker(draft, t.Id)
+                }).ToArray());
+                if (LoseEvidenceReplyResponse) throw new IOException("Accepted reply response lost");
+            }
             if (draft.Resolutions is { Count: > 0 })
             {
                 Resolutions++;
@@ -145,6 +158,42 @@ public sealed class FormalReviewPublicationTests
         Assert.Equal(2, runner.Calls);
         Assert.Equal(2, github.Resolutions);
         Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+    }
+
+    [Theory]
+    [InlineData(true)] [InlineData(false)]
+    public async Task HumanCorrectionEvidenceUsesSavedReviewAndDoesNotReopenPaidWork(bool actualCorrection)
+    {
+        var directory = TempRoot.Instance.NewDirectory("human-thread-evidence");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        {
+            ["prNumber"] = 7, ["worktreePath"] = directory, ["reviewSha"] = "head",
+            ["reviewVerdict"] = "Approve", ["reviewPublishedHead"] = "head"
+        }));
+        var thread = new ReviewConversation("human", false, true, "File.cs", "alice", "comment", false,
+            "Please fix validation", OriginalHead: "old-head");
+        var github = new PublicationGitHub { LoseResponse = false, LoseEvidenceReplyResponse = actualCorrection,
+            Requirements = new("BLOCKED", [thread]) };
+        var runner = new Runner
+        {
+            Output = (actualCorrection ? "REVIEWER_ADDRESSED_THREAD: {\"threadId\":\"human\",\"lastCommentId\":\"comment\",\"reason\":\"Verified guard and regression\"}\n" : "")
+                + "REVIEWER_VERDICT: APPROVE"
+        };
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        var first = await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        Assert.Equal(actualCorrection ? ReviewerVerdict.Error : ReviewerVerdict.Approve, first!.Verdict);
+        if (actualCorrection)
+        {
+            Assert.NotNull((await issues.GetAsync(task.Id))!.GetMetadata("reviewDraft"));
+            Assert.Equal(ReviewerVerdict.Approve, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        }
+        for (var i = 0; i < 3; i++) Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+        Assert.Equal(1, runner.Calls);
+        Assert.Equal(1, github.Publications);
+        Assert.Equal(actualCorrection ? 1 : 0, github.HumanEvidenceReplies);
+        Assert.Equal(0, github.Resolutions);
+        Assert.Equal(1, github.Requirements.Unresolved);
     }
 
     [Fact]

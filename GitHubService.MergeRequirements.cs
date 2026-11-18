@@ -5,7 +5,8 @@ using Octokit;
 namespace Forge;
 
 public sealed record ReviewConversation(string Id, bool Resolved, bool CanResolve, string Path,
-    string Author, string LastCommentId, bool HasOtherParticipants, string Body, string? LastBody = null);
+    string Author, string LastCommentId, bool HasOtherParticipants, string Body, string? LastBody = null,
+    string? LastAuthor = null, string? OriginalHead = null, bool Complete = true);
 public sealed record MergeRequirements(string State, IReadOnlyList<ReviewConversation> Conversations)
 {
     public int Unresolved => Conversations.Count(t => !t.Resolved);
@@ -24,8 +25,8 @@ public partial class GitHubService
             var root = await ReviewGraphAsync(_client, """
                 query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){
                   headRefOid isDraft mergeStateStatus reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{
-                    id isResolved viewerCanResolve path comments(first:100){pageInfo{hasNextPage} nodes{id author{login __typename}}}
-                    original:comments(first:1){nodes{body}} latest:comments(last:1){nodes{id body}}}}}}}
+                    id isResolved viewerCanResolve path comments(first:100){pageInfo{hasNextPage} nodes{id body author{login __typename}}}
+                    original:comments(first:1){nodes{body originalCommit{oid}}} latest:comments(last:1){nodes{id body author{login __typename}}}}}}}}
                 """, new { owner = _owner, name = _repo, number, cursor }, ct);
             var pr = root.GetProperty("data").GetProperty("repository").GetProperty("pullRequest");
             if (pr.GetProperty("headRefOid").GetString() != head)
@@ -48,12 +49,15 @@ public partial class GitHubService
                 }
                 var author = Login(nodes[0]);
                 var truncated = comments.GetProperty("pageInfo").GetProperty("hasNextPage").GetBoolean();
+                var latest = row.GetProperty("latest").GetProperty("nodes")[0];
+                var original = row.GetProperty("original").GetProperty("nodes")[0];
                 threads.Add(new(row.GetProperty("id").GetString()!, row.GetProperty("isResolved").GetBoolean(),
                     row.GetProperty("viewerCanResolve").GetBoolean(), row.GetProperty("path").GetString()!, author,
-                    nodes[^1].GetProperty("id").GetString()!, truncated || nodes.Any(n => !string.Equals(Login(n), author, StringComparison.OrdinalIgnoreCase)),
-                    row.GetProperty("original").GetProperty("nodes")[0].GetProperty("body").GetString() + "\n\n"
-                        + row.GetProperty("latest").GetProperty("nodes")[0].GetProperty("body").GetString(),
-                    row.GetProperty("latest").GetProperty("nodes")[0].GetProperty("body").GetString()));
+                    latest.GetProperty("id").GetString()!, truncated || nodes.Any(n => !string.Equals(Login(n), author, StringComparison.OrdinalIgnoreCase)),
+                    string.Join("\n\n", nodes.Select(n => Login(n) + ": " + n.GetProperty("body").GetString())),
+                    latest.GetProperty("body").GetString(), Login(latest),
+                    original.GetProperty("originalCommit").ValueKind == JsonValueKind.Object
+                        ? original.GetProperty("originalCommit").GetProperty("oid").GetString() : null, !truncated));
             }
             var info = page.GetProperty("pageInfo");
             var next = info.GetProperty("hasNextPage").GetBoolean() ? info.GetProperty("endCursor").GetString() : null;
@@ -69,8 +73,19 @@ public partial class GitHubService
         && thread.CanResolve && !thread.HasOtherParticipants && !string.IsNullOrWhiteSpace(reviewer)
         && string.Equals(thread.Author, reviewer, StringComparison.OrdinalIgnoreCase);
 
+    internal static bool CanReplyToHumanConversation(ReviewConversation thread, string head) => !thread.Resolved
+        && thread.Complete && !string.IsNullOrWhiteSpace(thread.Author)
+        && !thread.Author.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrWhiteSpace(thread.OriginalHead) && thread.OriginalHead != head;
+
+    internal static bool HasCurrentHumanEvidence(ReviewConversation thread, string head, string? reviewer) =>
+        !string.IsNullOrWhiteSpace(reviewer) && string.Equals(thread.LastAuthor, reviewer, StringComparison.OrdinalIgnoreCase)
+        && thread.LastBody?.Contains($"<!-- forge-thread-evidence:v1:{head}:{thread.Id}:", StringComparison.Ordinal) == true
+        && thread.LastBody.EndsWith(" -->", StringComparison.Ordinal);
+
     public virtual async Task ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
     {
+        await ReplyToVerifiedHumanConversationsAsync(number, draft, ct);
         if (draft.Resolutions is not { Count: > 0 }) return;
         if (_reviewClient is null || draft.Verdict != nameof(ReviewerVerdict.Approve))
             throw new InvalidOperationException("Review conversation resolution requires the independent reviewer's approval.");
@@ -103,6 +118,31 @@ public partial class GitHubService
                 "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}", new { id = thread.Id }, ct);
             if (!result.GetProperty("data").GetProperty("resolveReviewThread").GetProperty("thread").GetProperty("isResolved").GetBoolean())
                 throw new InvalidOperationException("GitHub did not confirm review conversation resolution.");
+        }
+    }
+
+    private async Task ReplyToVerifiedHumanConversationsAsync(int number, ReviewDraft draft, CancellationToken ct)
+    {
+        if (draft.EvidenceReplies is not { Count: > 0 }) return;
+        if (_reviewClient is null || string.IsNullOrWhiteSpace(ReviewerLogin)
+            || draft.Verdict is not (nameof(ReviewerVerdict.Approve) or nameof(ReviewerVerdict.RequestChanges)))
+            throw new InvalidOperationException("Human conversation evidence requires a published independent review.");
+        foreach (var evidence in draft.EvidenceReplies)
+        {
+            var current = await GetMergeRequirementsAsync(number, draft.HeadSha, ct);
+            var thread = current.Conversations.SingleOrDefault(t => t.Id == evidence.ThreadId)
+                ?? throw new InvalidOperationException("Verified human conversation is no longer available.");
+            if (thread.Resolved) continue;
+            var marker = ReviewFindings.EvidenceMarker(draft, thread.Id);
+            if (string.Equals(thread.LastAuthor, ReviewerLogin, StringComparison.OrdinalIgnoreCase)
+                && thread.LastBody?.EndsWith(marker, StringComparison.Ordinal) == true) continue;
+            if (!CanReplyToHumanConversation(thread, draft.HeadSha) || thread.LastCommentId != evidence.LastCommentId)
+                throw new InvalidOperationException("Human conversation changed after verification; retaining the saved evidence for reconciliation.");
+            var posted = await ReviewGraphAsync(_reviewClient,
+                "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}",
+                new { id = thread.Id, body = $"Verified correction at `{draft.HeadSha}`. {evidence.Reason}\n\nPlease review the correction. This conversation awaits its participants' decision.\n\n{marker}" }, ct);
+            if (string.IsNullOrWhiteSpace(posted.GetProperty("data").GetProperty("addPullRequestReviewThreadReply").GetProperty("comment").GetProperty("id").GetString()))
+                throw new InvalidOperationException("GitHub did not identify the evidence reply.");
         }
     }
 

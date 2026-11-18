@@ -28,15 +28,17 @@ public sealed class MergeRequirementsTests
     private static GitHubClient Client(HttpMessageHandler handler, string token) => new(new Connection(
         new ProductHeaderValue("test"), new HttpClientAdapter(() => handler))) { Credentials = new Credentials(token) };
     private static object Thread(string id, string author = "reviewer", string actorType = "Bot",
-        bool other = false, bool resolved = false, bool truncated = false, string last = "comment", string body = "Original finding") => new
+        bool other = false, bool resolved = false, bool truncated = false, string last = "comment", string body = "Original finding",
+        string originalHead = "older-head", string? lastAuthor = null, string? lastActorType = null) => new
         {
             id, isResolved = resolved, viewerCanResolve = true, path = "File.cs",
             comments = new { pageInfo = new { hasNextPage = truncated },
-                nodes = other ? new[] { new { id = "comment", author = new { login = author, __typename = actorType } },
-                    new { id = last, author = new { login = "human", __typename = "User" } } }
-                : new[] { new { id = last, author = new { login = author, __typename = actorType } } } },
-            original = new { nodes = new[] { new { body = "Original finding" } } },
-            latest = new { nodes = new[] { new { id = last, body } } }
+                nodes = other ? new[] { new { id = "comment", body = "Original finding", author = new { login = author, __typename = actorType } },
+                    new { id = last, body, author = new { login = lastAuthor ?? "human", __typename = lastActorType ?? "User" } } }
+                : new[] { new { id = last, body, author = new { login = author, __typename = actorType } } } },
+            original = new { nodes = new[] { new { body = "Original finding", originalCommit = new { oid = originalHead } } } },
+            latest = new { nodes = new[] { new { id = last, body, author = new { login = lastAuthor ?? (other ? "human" : author),
+                __typename = lastActorType ?? (other ? "User" : actorType) } } } }
         };
     private static string Page(object[] threads, string state = "CLEAN", string head = "head", string? next = null) =>
         JsonSerializer.Serialize(new { data = new { repository = new { pullRequest = new
@@ -193,5 +195,76 @@ public sealed class MergeRequirementsTests
             [thread with { Author = "human" }], "reviewer[bot]"));
         Assert.Throws<InvalidOperationException>(() => ReviewFindings.Create(2, "head", "Approve", output, "",
             [thread with { LastCommentId = "new" }], "reviewer[bot]"));
+    }
+
+    [Fact]
+    public async Task HumanEvidenceReplyRecoversLostResponseAndNeverResolvesOrApprovesForHuman()
+    {
+        string? posted = null;
+        var posts = 0;
+        using var handler = new Handler((request, token) =>
+        {
+            var query = request.GetProperty("query").GetString()!;
+            if (query.StartsWith("query"))
+            {
+                Assert.Equal("publisher", token);
+                return Page([Thread("human-thread", "alice", "User", other: posted is not null,
+                    last: posted is null ? "comment" : "reply", body: posted ?? "Please fix",
+                    lastAuthor: posted is null ? "alice" : "reviewer", lastActorType: posted is null ? "User" : "Bot")]);
+            }
+            Assert.Equal("reviewer", token);
+            Assert.Contains("addPullRequestReviewThreadReply", query);
+            posted = request.GetProperty("variables").GetProperty("body").GetString();
+            Assert.Contains("Verified correction at `head`", posted);
+            posts++;
+            throw new IOException("Lost accepted reply response");
+        });
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        var draft = new ReviewDraft(2, "head", "Approve", "Fixed", [],
+            EvidenceReplies: [new("human-thread", "comment", "The validation now rejects invalid paths; regression passes.")]);
+        await Assert.ThrowsAsync<IOException>(() => service.ResolveReviewedConversationsAsync(1, draft));
+        await service.ResolveReviewedConversationsAsync(1, draft);
+        Assert.Equal(1, posts);
+        var snapshot = await service.GetMergeRequirementsAsync(1, "head");
+        Assert.Equal(1, snapshot.Unresolved);
+        Assert.False(snapshot.AllowsMerge);
+        Assert.True(GitHubService.HasCurrentHumanEvidence(snapshot.Conversations[0], "head", "reviewer[bot]"));
+        Assert.Null(ReviewFindings.HumanConversationCheckpoint(snapshot.Conversations, "head", "reviewer[bot]"));
+        Assert.DoesNotContain(handler.Queries, q => q.Contains("resolveReviewThread(input"));
+    }
+
+    [Fact]
+    public async Task ChangedHumanConversationRejectsSavedEvidenceBeforePosting()
+    {
+        using var handler = new Handler((request, _) =>
+        {
+            Assert.StartsWith("query", request.GetProperty("query").GetString());
+            return Page([Thread("human-thread", "alice", "User", last: "new-comment")]);
+        });
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ResolveReviewedConversationsAsync(1,
+            new(2, "head", "Approve", "Fixed", [], EvidenceReplies: [new("human-thread", "comment", "Verified")])));
+    }
+
+    [Fact]
+    public void HumanEvidenceRequiresACompleteOlderFindingAndCannotClaimResolution()
+    {
+        var human = new ReviewConversation("human", false, true, "File.cs", "alice", "comment", false, "Finding",
+            OriginalHead: "older-head");
+        var output = "REVIEWER_ADDRESSED_THREAD: {\"threadId\":\"human\",\"lastCommentId\":\"comment\",\"reason\":\"Verified correction\"}";
+        var draft = ReviewFindings.Create(2, "head", "Approve", output, "", [human], "reviewer[bot]");
+        Assert.Single(draft.EvidenceReplies!);
+        Assert.Null(draft.Resolutions);
+        Assert.NotNull(draft.HumanThreadCheckpoint);
+        foreach (var ineligible in new[] { human with { Complete = false }, human with { OriginalHead = "head" },
+            human with { Author = "another[bot]" }, human with { OriginalHead = null } })
+            Assert.Throws<InvalidOperationException>(() => ReviewFindings.Create(2, "head", "Approve", output, "", [ineligible], "reviewer[bot]"));
+        Assert.Throws<InvalidOperationException>(() => ReviewFindings.Create(2, "head", "Approve",
+            output.Replace("REVIEWER_ADDRESSED_THREAD:", "REVIEWER_RESOLVED_THREAD:"), "", [human], "reviewer[bot]"));
+        Assert.False(GitHubService.HasCurrentHumanEvidence(human with
+        {
+            LastAuthor = "alice",
+            LastBody = "copied " + ReviewFindings.EvidenceMarker(draft, "human")
+        }, "head", "reviewer[bot]"));
     }
 }
