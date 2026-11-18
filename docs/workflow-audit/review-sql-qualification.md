@@ -42,3 +42,19 @@ The 05:03–05:04 UTC run qualified the final guard against actual SQL. Separate
 The prior controller's normal raw `MemoryStore` setter could not reopen that legacy gate after a fence was recorded. Deleting or renaming the gate, deleting the audit receipt, a multi-row rewrite, and publishing a workflow without merge-gate enforcement were rejected. Publishing the default workflow and restoring it by deleting the live override remained valid. These restrictions apply to controller writes as well as worker writes. A downgraded dashboard cannot override the protection: supported recovery is to upgrade to a controller that understands the saved review controls and reconciles them. No generic bypass was added.
 
 All attestation, worker authority, transactional metadata, measured wait and 211-event paging checks passed again. The main schema `audit_review_79ef6df9893c410ea5a3478f2f2864a4`, both additional fence schemas and both temporary users were removed, with absence verified. No production records or permissions were changed. The tested assembly SHA256 was `d97aa385780e29430ed93c059be7f093997c209ece20b1651d89dd0df87320a3`; `fence-result.jsonl`, `fence-manifest.json` and `Program.fence-tested.txt` retain sanitized receipts and exact source hashes, which were compared between Windows and Linux. The Linux deployment suite passed 62 checks, including prevention of a subsequent release overtaking a still-running authority initializer.
+
+## Queue timing and worker cancellation
+
+The 05:59 UTC Linux run used the production store implementations with the
+Azure SQL provider in a disposable schema. Activating a sprint recorded one
+task event in the same transaction. Reopening the store recovered the event ID
+and UTC timestamp. The worker attempt retained that event and its first observed
+dispatch admission after a subsequent requeue. This interval can include time
+waiting for a dependency or hold. The attempt records admission to worker start
+as a separate interval.
+
+A cancellation after the final ownership check produced a cancelled worker
+record, retained its measured phases and rejected a second completion.
+The harness verified that the disposable schema was absent after cleanup.
+The Linux receipts are in `sprint-review/queue-sql-proof/`. A live worker pod
+and real GitHub review are part of the separate deployment qualification.

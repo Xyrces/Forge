@@ -133,6 +133,7 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
                 await link.ExecuteNonQueryAsync(ct);
             }
         }
+        if (spec.Status == SprintStatus.Active) await RecordActiveQueueEventsAsync(conn, tx, id, now, ct);
         await tx.CommitAsync(ct);
         await PublishStatusChangedAsync(id, fromStatus: null, spec.Status, now, ct);
         return new SprintRecord(id, name, spec.Goal, spec.StartDate, spec.EndDate, spec.Status, now, now);
@@ -246,6 +247,8 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
             await using var cmd = conn.CreateCommand(); cmd.Transaction = tx;
             ApplySprintUpdateCommand(cmd, merged, now); cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
+            if (merged.Status == SprintStatus.Active && existing.Status != SprintStatus.Active)
+                await RecordActiveQueueEventsAsync(conn, tx, id, now, ct);
             await tx.CommitAsync(ct);
         }
         await PublishStatusChangedAsync(id, existing.Status, merged.Status, now, ct);
@@ -342,6 +345,7 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
             if (await cmd.ExecuteNonQueryAsync(ct) != 1)
                 throw new InvalidOperationException($"Sprint {id} no longer exists.");
         }
+        if (existing.Status != SprintStatus.Active) await RecordActiveQueueEventsAsync(conn, tx, id, now, ct);
         await tx.CommitAsync(ct);
         await PublishStatusChangedAsync(id, existing.Status, SprintStatus.Active, now, ct);
         return existing with { Status = SprintStatus.Active, UpdatedAt = now };
@@ -362,6 +366,7 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
             cmd.AddParam("@id", id);
             await cmd.ExecuteNonQueryAsync(ct);
         }
+        if (existing?.Status != SprintStatus.Active) await RecordActiveQueueEventsAsync(conn, tx, id, now, ct);
         await tx.CommitAsync(ct);
         await PublishStatusChangedAsync(id, existing?.Status, SprintStatus.Active, now, ct);
         return (await GetAsync(id, ct))!;
@@ -482,6 +487,15 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
             if (Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) != 1)
                 throw new InvalidOperationException($"Sprint specification is stale: {spec.Id} changed.");
         }
+    }
+
+    private async Task RecordActiveQueueEventsAsync(DbConnection conn, DbTransaction tx, string sprintId, DateTime now, CancellationToken ct)
+    {
+        // Same commit as activation: survives delivery loss/restart and is project-local.
+        using var cmd = conn.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = $"INSERT INTO {T("issue_event")} (issue_id,ts,actor,kind,detail) SELECT m.issue_id,@now,'orchestrator','sprint_activated',@sid FROM {T("sprint_issue")} m JOIN {T("issue")} i ON i.id=m.issue_id WHERE m.sprint_id=@sid AND i.status='Pending'";
+        cmd.AddParam("@sid", sprintId); cmd.AddParam("@now", IssueStore.DateFormatTime(now));
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private void ApplySprintUpdateCommand(DbCommand cmd, SprintRecord s, DateTime now)

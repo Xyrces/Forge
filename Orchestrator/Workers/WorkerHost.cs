@@ -23,6 +23,8 @@ public static class WorkerHost
         if (assignment.DatasetId != options.Controller.DatasetId) throw new InvalidOperationException("Worker dataset mismatch.");
         if (!await attempts.ClaimAsync(assignment.Id, worker.PodUid, ct)) return 0; // duplicate pod is inert
         var workerStartedAt = DateTimeOffset.UtcNow;
+        var observed = new AgentRunResult("", null, 0, 0, TimeSpan.Zero,
+            Phases: new(null, null, WorkerStartedAt: workerStartedAt, WorkerOutcome: "running"));
         using var runCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var monitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var logger = loggerFactory.CreateLogger("Forge.Worker");
@@ -31,6 +33,8 @@ public static class WorkerHost
         {
             var invocation = JsonSerializer.Deserialize<WorkerInvocation>(assignment.AssignmentJson)
                 ?? throw new InvalidOperationException("Invalid worker assignment.");
+            observed = InitialProgress(invocation, workerStartedAt);
+            await RecordAsync(observed, runCancellation.Token);
             if (!string.Equals(await KubernetesAgentRunner.ReadHeadAsync(assignment.WorktreePath, runCancellation.Token), assignment.SourceSha, StringComparison.Ordinal))
                 throw new InvalidOperationException("Worker source changed before pod execution.");
             using var runtime = await BuildRunner(options, assignment, attempts, loggerFactory, runCancellation.Token);
@@ -48,23 +52,22 @@ public static class WorkerHost
                     await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, token);
                     return await AgentTools.WorkerVerification.VerifyAsync(assignment.Id, assignment.WorktreePath,
                         runtime.VerifyCommands, logger, token);
-                }, runCancellation.Token, async (progress, token) =>
-                {
-                    if (!await attempts.RecordProgressAsync(assignment.Id, worker.PodUid,
-                        assignment.AttemptToken, JsonSerializer.Serialize(progress), token))
-                        throw new OperationCanceledException("Worker phase recording lost ownership.", token);
-                });
+                }, runCancellation.Token, RecordAsync, failure => observed = failure);
             await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, runCancellation.Token);
             using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            result = result with { Phases = result.Phases! with { WorkerCompletedAt = DateTimeOffset.UtcNow, WorkerOutcome = "succeeded" } };
             if (!await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, JsonSerializer.Serialize(result), null, finalize.Token))
                 throw new InvalidOperationException("Worker result publication lost ownership.");
-            return 0;
+            var terminal = await attempts.GetAsync(assignment.Id, finalize.Token);
+            return terminal?.State == "succeeded" ? 0 : 1;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Worker attempt {Attempt} failed", assignment.Id);
             using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, null,
+            observed = observed with { Phases = observed.Phases! with
+                { WorkerCompletedAt = DateTimeOffset.UtcNow, WorkerOutcome = ex is OperationCanceledException ? "cancelled" : "failed" } };
+            await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, JsonSerializer.Serialize(observed),
                 ex is OperationCanceledException ? "cancelled" : ex.Message, finalize.Token);
             return 1;
         }
@@ -72,6 +75,14 @@ public static class WorkerHost
         {
             await monitorCancellation.CancelAsync();
             await monitor;
+        }
+
+        async Task RecordAsync(AgentRunResult progress, CancellationToken token)
+        {
+            observed = progress;
+            if (!await attempts.RecordProgressAsync(assignment.Id, worker.PodUid,
+                assignment.AttemptToken, JsonSerializer.Serialize(progress), token))
+                throw new OperationCanceledException("Worker phase recording lost ownership.", token);
         }
 
         async Task MonitorAsync()
@@ -93,44 +104,81 @@ public static class WorkerHost
         }
     }
 
+    internal static AgentRunResult InitialProgress(WorkerInvocation invocation, DateTimeOffset startedAt)
+    {
+        var context = invocation.Context;
+        var eligible = context.TryGetValue("dispatchEligibleAt", out var value)
+            && DateTimeOffset.TryParse(value, out var timestamp) ? (DateTimeOffset?)timestamp : null;
+        var wakeup = context.TryGetValue("dispatchWakeup", out var json)
+            ? JsonSerializer.Deserialize<DispatchWakeupTiming>(json) : null;
+        return new("", invocation.SessionId, 0, 0, TimeSpan.Zero,
+            Phases: new(null, null, EligibleAt: eligible, WorkerStartedAt: startedAt,
+                WorkerOutcome: "running", QueueWakeup: wakeup));
+    }
+
     /// <summary>The model deadline ends before independent exact-tree verification starts.
     /// Verification keeps RunVerification's per-command deadline and the Job's overall hard ceiling.</summary>
     internal static async Task<AgentRunResult> RunPhasesAsync(IAgentRunner runner, WorkerInvocation invocation,
         IReadOnlyDictionary<string, object> context, TimeSpan? modelTimeout,
         Func<CancellationToken, Task<VerificationReceipt>> verify, CancellationToken ct,
-        Func<AgentRunResult, CancellationToken, Task>? recordProgress = null)
+        Func<AgentRunResult, CancellationToken, Task>? recordProgress = null,
+        Action<AgentRunResult>? observeFailure = null)
     {
-        AgentRunResult result;
-        var modelStarted = DateTimeOffset.UtcNow;
-        using (var model = CancellationTokenSource.CreateLinkedTokenSource(ct))
-        {
-            if (modelTimeout is { } timeout) model.CancelAfter(timeout);
-            try
-            {
-                result = await runner.RunAsync(invocation.Role, invocation.Prompt, invocation.SessionId, context, model.Token);
-                model.Token.ThrowIfCancellationRequested();
-            }
-            catch (OperationCanceledException) when (model.IsCancellationRequested && !ct.IsCancellationRequested)
-            { throw new TimeoutException($"Worker model phase timed out after {modelTimeout}."); }
-        }
-        ct.ThrowIfCancellationRequested();
-        var engineering = invocation.Role is AgentType.CoreDev or AgentType.ClientDev;
-        var modelCompleted = DateTimeOffset.UtcNow;
         DateTimeOffset? Measured(string key) => context.TryGetValue(key, out var value)
             && DateTimeOffset.TryParse(value?.ToString(), out var timestamp) ? timestamp : null;
-        result = result with { Phases = new WorkerPhaseTiming(modelStarted, modelCompleted,
-            engineering ? modelCompleted : null, EligibleAt: Measured("dispatchEligibleAt"),
-            WorkerStartedAt: Measured("workerStartedAt")) };
-        if (recordProgress is not null) await recordProgress(result, ct);
-        if (engineering)
+        var phases = new WorkerPhaseTiming(null, null, EligibleAt: Measured("dispatchEligibleAt"),
+            WorkerStartedAt: Measured("workerStartedAt"), WorkerOutcome: "running",
+            QueueWakeup: context.TryGetValue("dispatchWakeup", out var wakeup) && wakeup is string json
+                ? JsonSerializer.Deserialize<DispatchWakeupTiming>(json) : null);
+        var result = new AgentRunResult("", invocation.SessionId, 0, 0, TimeSpan.Zero, Phases: phases);
+        try
         {
-            var verification = await verify(ct);
-            result = result with { Verification = verification,
-                Phases = result.Phases! with { VerificationCompletedAt = DateTimeOffset.UtcNow } };
+            ct.ThrowIfCancellationRequested();
+            phases = phases with { ModelStartedAt = DateTimeOffset.UtcNow, ModelOutcome = "running" };
+            result = result with { Phases = phases };
             if (recordProgress is not null) await recordProgress(result, ct);
+            using (var model = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                if (modelTimeout is { } timeout) model.CancelAfter(timeout);
+                try
+                {
+                    result = await runner.RunAsync(invocation.Role, invocation.Prompt, invocation.SessionId, context, model.Token);
+                    model.Token.ThrowIfCancellationRequested();
+                }
+                catch (OperationCanceledException) when (model.IsCancellationRequested && !ct.IsCancellationRequested)
+                { throw new TimeoutException($"Worker model phase timed out after {modelTimeout}."); }
+            }
+            ct.ThrowIfCancellationRequested();
+            phases = phases with { ModelCompletedAt = DateTimeOffset.UtcNow, ModelOutcome = "succeeded" };
+            result = result with { Phases = phases };
+            if (recordProgress is not null) await recordProgress(result, ct);
+            if (invocation.Role is AgentType.CoreDev or AgentType.ClientDev)
+            {
+                ct.ThrowIfCancellationRequested();
+                phases = phases with { VerificationStartedAt = DateTimeOffset.UtcNow, VerificationOutcome = "running" };
+                result = result with { Phases = phases };
+                if (recordProgress is not null) await recordProgress(result, ct);
+                var verification = await verify(ct);
+                ct.ThrowIfCancellationRequested();
+                phases = phases with { VerificationCompletedAt = DateTimeOffset.UtcNow, VerificationOutcome = "succeeded" };
+                result = result with { Verification = verification, Phases = phases };
+                if (recordProgress is not null) await recordProgress(result, ct);
+            }
+            ct.ThrowIfCancellationRequested();
+            return result;
         }
-        ct.ThrowIfCancellationRequested();
-        return result;
+        catch (Exception ex)
+        {
+            var outcome = ex is OperationCanceledException ? "cancelled" : ex is TimeoutException ? "timed-out" : "failed";
+            if (phases.VerificationStartedAt is not null && phases.VerificationCompletedAt is null)
+                phases = phases with { VerificationCompletedAt = DateTimeOffset.UtcNow, VerificationOutcome = outcome };
+            else if (phases.ModelStartedAt is not null && phases.ModelCompletedAt is null)
+                phases = phases with { ModelCompletedAt = DateTimeOffset.UtcNow, ModelOutcome = outcome };
+            // The owning worker's existing fenced finalization persists this even
+            // after cancellation. No new progress-write permission is introduced.
+            observeFailure?.Invoke(result with { Phases = phases });
+            throw;
+        }
     }
 
     public static async Task<WorkerRuntime> BuildRunner(AgentOptions options, WorkerAssignment assignment,
