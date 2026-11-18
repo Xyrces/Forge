@@ -52,8 +52,15 @@ public class ProjectRoutingSpecStoreTests : IDisposable
         var first = await artifacts.CreateAsync(new NewDesignArtifact(ids[0], DesignArtifactKind.Wireframe, "first", "body", "markdown"));
         var second = await artifacts.CreateAsync(new NewDesignArtifact(ids[500], DesignArtifactKind.Wireframe, "second", "body", "markdown"));
         await artifacts.CreateAsync(new NewDesignArtifact("foreign-spec", DesignArtifactKind.Wireframe, "foreign", "body", "markdown"));
+        // Persisted timestamps have millisecond precision. Exercise the ID tiebreaker across batches.
+        await using (var connection = await _primaryIssues.Db.OpenAsync())
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE design_artifact SET created_at='2026-01-01 00:00:00.000'";
+            await command.ExecuteNonQueryAsync();
+        }
         var result = await artifacts.ListBySpecsAsync(ids.Append("' OR 1=1 --").ToArray());
-        Assert.Equal(new[] { first.Id, second.Id }, result.Select(a => a.Id));
+        Assert.Equal(new[] { first.Id, second.Id }.Order(StringComparer.Ordinal), result.Select(a => a.Id));
         Assert.Empty(await artifacts.ListBySpecsAsync([]));
     }
 
