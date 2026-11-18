@@ -31,8 +31,8 @@ try {
  // GitHub's repository rule is a separate requirement from an optional Forge task hold.
  const protectedTask = {
   id:'protected-review-fixture', title:'Synthetic protected PR awaiting GitHub approval', type:'ui', status:'InProgress',
-  metadata:{prNumber:'150',state:'MergeReady',watchHeadSha:'263bbfe0000000000000000000000000000000000',reviewProtectionHead:'263bbfe0000000000000000000000000000000000',reviewProtectionDecision:'ReviewRequired',awaitingHumanReview:true,humanReviewRequired:false,humanReviewTaskHold:false},
-  situation:{label:'GitHub approval required',text:'GitHub branch protection still requires an eligible approval of this revision. A Forge reviewer approval alone has not satisfied that requirement.',nextActor:'Eligible GitHub reviewer',tone:'action',humanReviewRequired:false,nominatedHuman:'Xyrces'},events:[]
+  metadata:{prNumber:'150',state:'MergeReady',watchHeadSha:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',reviewProtectionHead:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',reviewProtectionDecision:'ReviewRequired',awaitingHumanReview:true,humanReviewRequired:false,humanReviewTaskHold:false},
+  situation:{label:'GitHub approval required',text:'GitHub branch protection still requires an eligible approval of this revision.',nextActor:'Eligible GitHub reviewer',tone:'action',humanReviewRequired:false,nominatedHuman:'Xyrces'},events:[]
  };
  await put({
   '/api/tasks/protected-review-fixture':protectedTask,
@@ -54,6 +54,8 @@ try {
  }
  await page.getByRole('button',{name:'Require review by @Xyrces for this task',exact:true}).click();
  await page.getByRole('button',{name:'Release task review hold',exact:true}).waitFor();
+ await page.getByText('Next: @Xyrces',{exact:true}).waitFor();
+ await page.getByText('GitHub branch protection still requires an eligible approval of this revision. Forge also requires review by @Xyrces.',{exact:true}).waitFor();
  assert.equal(await page.getByText('GitHub approval required',{exact:true}).count(),1);
  await page.getByRole('button',{name:'Release task review hold',exact:true}).click();
  await page.getByRole('button',{name:'Require review by @Xyrces for this task',exact:true}).waitFor();

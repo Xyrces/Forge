@@ -65,7 +65,18 @@ class Handler(BaseHTTPRequestHandler):
                     member['humanReviewRequired'] = required
                     member['humanReviewTaskHold'] = required
             if '/api/tasks/' + task in fixtures:
-                fixtures['/api/tasks/' + task]['metadata']['humanReviewRequired'] = required
+                task_fixture = fixtures['/api/tasks/' + task]
+                task_fixture['metadata']['humanReviewRequired'] = required
+                if task == 'protected-review-fixture':
+                    # Synthetic protected-only wait; mirror the independent Forge hold projection.
+                    task_fixture['metadata']['humanReviewTaskHold'] = required
+                    task_fixture['metadata']['reviewHumanPending'] = required
+                    situation = task_fixture['situation']
+                    situation['humanReviewRequired'] = required
+                    situation['nextActor'] = '@Xyrces' if required else 'Eligible GitHub reviewer'
+                    situation['text'] = 'GitHub branch protection still requires an eligible approval of this revision.'
+                    if required:
+                        situation['text'] += ' Forge also requires review by @Xyrces.'
             return self.send(200, fixtures[path])
         return self.send(405, {'error': 'No fixture mutation for ' + path})
 
