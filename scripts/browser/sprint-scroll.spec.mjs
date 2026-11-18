@@ -320,6 +320,14 @@ try {
       await page.waitForTimeout(200);
       assert.notEqual(await page.evaluate(() => document.activeElement?.getAttribute('href')),
         '/tasks/scroll-task?project=forge', 'Returning to page two does not refocus the old page card');
+    } else if (gesture === 'task-link') {
+      await page.goBack();
+      await completionReady(200).waitFor();
+      await page.waitForTimeout(200);
+      assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('href')),
+        '/tasks/scroll-task?project=forge', 'Back restores the newly opened task, not the obsolete target');
+      assert.ok(Math.abs(await page.locator('.app-main').evaluate(element => element.scrollTop)
+        - operator.saved.scroll) < 2, 'Back restores the actual delayed-load departure position');
     }
   }
   for (const unrelated of ['modifier', 'sidebar']) {
