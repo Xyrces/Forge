@@ -323,6 +323,7 @@
     [Parameter][SupplyParameterFromQuery(Name = "sprint")] public string? Sprint { get; set; }
     private IJSObjectReference? _boardBrowser;
     private bool _restoreBoard, _chooseLane;
+    private int _restoreGeneration;
     private string? _holdBusy, _holdError, _holdNotice;
     private sealed record BoardLocation(string? SprintId, string? Lane, string? MemberCursor, string? HistoryCursor, string?[]? MemberPages, string?[]? HistoryPages);
     private string TaskUrl(string id) => $"/tasks/{Uri.EscapeDataString(id)}?project={Uri.EscapeDataString(_loadedProject ?? "")}";
@@ -344,9 +345,16 @@
     }
     private async Task SelectLaneAsync(ChangeEventArgs e)
     {
+        if (_disposed) return;
+        ++_restoreGeneration;
         var lane = e.Value?.ToString();
-        if (Columns.Any(c => c.Title == lane)) _lane = lane!;
+        if (Columns.Any(c => c.Title == lane))
+        {
+            _lane = lane!;
+            _chooseLane = false;
+        }
         await SaveBoardLocationAsync();
+        if (_loading) await RefreshAsync();
     }
     private async Task SaveBoardLocationAsync()
     {
@@ -726,10 +734,31 @@
     }
     private async Task ChangeProjectAsync()
     {
+        if (!await RestoreProjectLocationAsync()) return;
+        StateHasChanged();
+        var generation = _restoreGeneration;
+        await LoadRepoUrlAsync();
+        if (_disposed || generation != _restoreGeneration) return;
+        await RefreshAsync();
+    }
+    private async Task<bool> RestoreProjectLocationAsync()
+    {
+        if (_disposed) return false;
+        var generation = ++_restoreGeneration;
+        var project = ShellStore.Value.CurrentProjectId;
         _loading = true;
-        _loadedProject = ShellStore.Value.CurrentProjectId;
+        _loadedProject = project;
+        _selectedSprintId = null;
+        _historyCursor = null; _memberCursor = null;
+        _historyPages.Clear(); _memberPages.Clear();
+        _restoreBoard = false;
+        _selection.Select(project, null);
+        _summary = null; _board = null; _repoUrl = null;
+        _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null;
         var remembered = _boardBrowser is null || _loadedProject is null ? null
-            : await _boardBrowser.InvokeAsync<BoardLocation?>("begin", _loadedProject);
+            : await _boardBrowser.InvokeAsync<BoardLocation?>("begin", project);
+        if (_disposed || generation != _restoreGeneration || project != ShellStore.Value.CurrentProjectId)
+            return false;
         _selectedSprintId = Project == _loadedProject && !string.IsNullOrEmpty(Sprint) ? Sprint : remembered?.SprintId;
         _lane = Columns.Any(c => c.Title == remembered?.Lane) ? remembered!.Lane! : "Queued";
         _restoreBoard = true; _chooseLane = remembered is null;
@@ -739,9 +768,7 @@
         foreach (var cursor in (remembered?.HistoryPages ?? []).Reverse()) _historyPages.Push(cursor);
         foreach (var cursor in (remembered?.MemberPages ?? []).Reverse()) _memberPages.Push(cursor); _summary = null; _board = null; _repoUrl = null;
         _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null; _queueTotal = 0; _error = null; _queueError = null;
-        StateHasChanged();
-        await LoadRepoUrlAsync();
-        await RefreshAsync();
+        return true;
     }
     private void OnShellChanged(object? sender, EventArgs e)
     {
@@ -751,6 +778,8 @@
     }
     private async Task SelectSprintAsync(ChangeEventArgs e)
     {
+        if (_disposed) return;
+        ++_restoreGeneration;
         _selectedSprintId = e.Value?.ToString(); _memberCursor = null; _memberPages.Clear();
         _selection.Select(_loadedProject, _selectedSprintId); _board = null; _drafts.Clear();
         await SaveBoardLocationAsync();
@@ -767,10 +796,11 @@
         _memberPages.Push(_memberCursor); _memberCursor = _board?.NextCursor; await RefreshSelectionAsync();
     }
     private async Task PreviousMembersAsync() { _memberCursor = _memberPages.Pop(); await RefreshSelectionAsync(); }
-    private async Task RefreshSelectionAsync() { _selection.Select(_loadedProject, _selectedSprintId); await RefreshAsync(); }
+    private async Task RefreshSelectionAsync() { ++_restoreGeneration; _selection.Select(_loadedProject, _selectedSprintId); await RefreshAsync(); }
     public void Dispose()
     {
         _disposed = true;
+        ++_restoreGeneration;
         _gateTimer?.Dispose(); _selection.Dispose();
         _reloadDebounce?.Cancel(); _reloadDebounce?.Dispose();
         Events.Received -= OnServerEvent; ShellStore.StateChanged -= OnShellChanged;
