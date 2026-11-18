@@ -91,11 +91,11 @@ The path is computed from the UI assembly location at runtime, so the same code 
 
 **Fix.** Copy the framework JS into `Forge.UI/wwwroot/_framework/blazor.web.js` and `<script src="_framework/blazor.web.js">` from `App.razor` will be served by `UseStaticFiles`. The file is `200KB` and identical across `dotnet` versions, so this is a one-time vendor step.
 
-## Symptom: HTTP 500 on `/_content/Fluxor.Blazor.Web.ReduxDevTools/reduxDevTools.js`
+## Symptom: HTTP 404 or 500 for `reduxDevTools.js` in Production
 
-**Cause.** The Redux DevTools browser extension script isn't bundled in the Fluxor package — it's served from a separate, optional CDN. `AddFluxor(...).UseReduxDevTools()` only wires *receiving* browser devtools, not the client script.
+**Cause.** The dashboard references an optional Redux DevTools script, but the published host does not serve the expected JavaScript at that URL. A successful response with an HTML fallback is also a broken script load.
 
-**Fix.** Either remove the `<script src="_content/Fluxor.Blazor.Web.ReduxDevTools/reduxDevTools.js">` reference in `App.razor`, or pull the script from a CDN. The 404 is harmless (development-only, extension is optional).
+**Check.** Production should not request the Development-only integration. Use the [published Production check and browser record](workflow-audit/redux-devtools-asset-verification.md) to verify the published output and capture any deployed regression separately.
 
 ## Symptom: tests pass but the browser shows unstyled content
 
