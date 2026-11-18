@@ -58,10 +58,10 @@ public static class TaskSituation
                     + (humanPending ? " " + humanRequirement : ""),
                     humanPending ? humanActor : "Eligible GitHub reviewer", "action");
             return Result("Waiting for human review", "Review the current PR revision before merge."
-                + (protection == "Unavailable" ? " GitHub’s protected review check is also temporarily unavailable; Forge will retry it." : ""), humanActor, "action");
+                + (protection == "Unavailable" ? " GitHubâ€™s protected review check is also temporarily unavailable; Forge will retry it." : ""), humanActor, "action");
         }
         if (protection == "Unavailable")
-            return Result("Review check unavailable", "Forge cannot yet confirm GitHub’s protected review requirement. It will retry the read before merging."
+            return Result("Review check unavailable", "Forge cannot yet confirm GitHubâ€™s protected review requirement. It will retry the read before merging."
                 + (humanPending ? " " + humanRequirement : ""), humanPending ? humanActor : "Forge", "warn");
         if (issue.Status == IssueStatus.Pending)
             return Result("Queued", issue.GetMetadata("reworkReason") ?? "Waiting for an available worker.", "Worker");

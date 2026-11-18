@@ -459,7 +459,7 @@ public sealed class WatchSweepService
                 if (fresh is not null) await TryLaunchBackgroundReviewAsync(fresh, bundle, ct);
             }
             else
-                _logger.LogWarning("Background QA for {TaskId}: {Verdict} — {Detail} (project={Project})",
+                _logger.LogWarning("Background QA for {TaskId}: {Verdict} â€” {Detail} (project={Project})",
                     task.Id, result.Verdict, result.Error ?? result.Notes, bundle.Project.Id);
         }, QaBackgroundBudget))
             _logger.LogInformation("Watch (task {Id}): QA stage launched in background (project={Project})", task.Id, bundle.Project.Id);

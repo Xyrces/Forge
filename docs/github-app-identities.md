@@ -89,8 +89,8 @@ current-head findings, failed CI and conflicts still follow normal correction.
 Forge's own human holds, nominated reviewers and unresolved human objections also
 remain required, including repositories with no protected-review requirement.
 
-The board/task situation distinguishes “GitHub approval required”, “GitHub changes
-requested”, and an unavailable protection check. A separately required named human
+The board/task situation distinguishes â€œGitHub approval requiredâ€, â€œGitHub changes
+requestedâ€, and an unavailable protection check. A separately required named human
 remains the next actor. Missing, stale-head, unknown or error responses fail closed
 without inventing CI results or approvals. Refused merges refresh this wait state.
 No branch rules, credentials or bypass permissions are changed.
