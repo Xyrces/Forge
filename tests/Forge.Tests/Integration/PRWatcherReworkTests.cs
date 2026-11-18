@@ -115,7 +115,8 @@ public class PRWatcherReworkTests : IDisposable
         gates: gates,
         lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
         workflow: workflow,
-        runs: runs, hasDurableWorker: hasDurableWorker, joinTaskWorkers: joinTaskWorkers);
+        runs: runs, hasDurableWorker: hasDurableWorker, joinTaskWorkers: joinTaskWorkers,
+        projectId: _workDir); // Each isolated store models a distinct project.
 
     private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
     {
@@ -796,6 +797,24 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal(0, gh.CloseCalls);
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(IssueStatus.Blocked, after.Status);
+    }
+
+    [Fact]
+    public async Task EmptyDiff_UnrelatedProjectReviewDoesNotDiscardObservation()
+    {
+        var task = await SeedAsync();
+        await _issues.SetCheckpointAsync(task.Id, DispatchCheckpoint.PrOpened);
+        // A different fixture/project may legitimately use exactly the same task ID.
+        var unrelated = ReviewWorkerAttempt.Gate(null, task.Id, AgentType.Reviewer);
+        await unrelated.WaitAsync();
+        try
+        {
+            var outcome = await NewWatcher(new FakeGitHub(), joinTaskWorkers: (_, _) => Task.FromResult(true))
+                .PollWatchedTaskAsync(task, headShaOverride: _ => "abc123", changedFilesOverride: _ => 0);
+            Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
+            Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(task.Id))!.Status);
+        }
+        finally { unrelated.Release(); }
     }
 
     [Fact]
