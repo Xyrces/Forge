@@ -157,14 +157,15 @@ public sealed class OrchestratorAgentTests : IDisposable
             NullLoggerFactory.Instance,
             NullLogger<Forge.Orchestrator.WatchSweepService>.Instance);
 
-    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null, WakeupSignal? wakeup = null)
+    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null,
+        WakeupSignal? wakeup = null, IWorkflowDispatcher? dispatcher = null)
         => new OrchestratorAgent(
             _projectStore,
             new StubBundleFactory(_bundle),
             runner,
             _roleRegistry,
             _messageBus,
-            new InProcessDispatcher(
+            dispatcher ?? new InProcessDispatcher(
                 (issue, bundle, ct) => RunWorkflowInProcess(runner, issue, ct),
                 NullLogger<InProcessDispatcher>.Instance),
             _events,
@@ -346,48 +347,68 @@ public sealed class OrchestratorAgentTests : IDisposable
         // escalated run per (project, role). A second escalated task
         // for the same role waits in Pending while a NORMAL task of
         // the same role claims from the untouched normal pool.
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var runner = new BlockingRunner(gate);
         var slots = new Forge.Orchestrator.Slots.SlotTable();
         var markers = BuildMarkers();
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
-        var orch = BuildOrchestrator(runner, slots);
-        BindMafWithEscalation(orch, markers);
-
-        var esc1 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc1", Description: "x"));
-        var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc2", Description: "x"));
-        var normal = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "normal", Description: "x"));
+        var esc1 = await _issues.CreateAsync(new NewIssue(DevTaskType, "esc1", Priority: 1));
+        var esc2 = await _issues.CreateAsync(new NewIssue(DevTaskType, "esc2", Priority: 2));
+        var normal = await _issues.CreateAsync(new NewIssue(DevTaskType, "normal", Priority: 3));
         await ActivateSprintWithAsync(esc1.Id, esc2.Id, normal.Id);
         await markers.WriteAsync("test", esc1.Id, "escalate 1");
         await markers.WriteAsync("test", esc2.Id, "escalate 2");
 
+        // Hold the claims at the workflow boundary, before unrelated worktree
+        // and agent setup can fail and release a slot before we inspect it.
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new Dictionary<string, TaskCompletionSource<IssueRecord>>
+        {
+            [esc1.Id] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [esc2.Id] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            [normal.Id] = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var dispatcher = new InProcessDispatcher(async (issue, bundle, ct) =>
+        {
+            started[issue.Id].TrySetResult(issue);
+            if (issue.Id == esc1.Id)
+            {
+                await releaseFirst.Task.WaitAsync(ct);
+                await bundle.IssueStore.TransitionAsync(issue.Id, IssueStatus.Closed, "fixture run finished", ct: ct);
+            }
+            else
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+        }, NullLogger<InProcessDispatcher>.Instance);
+        var orch = BuildOrchestrator(new ScriptedRunner("unused"), slots, dispatcher: dispatcher);
+        BindMafWithEscalation(orch, markers);
+
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var loop = orch.ExecuteAsync(cts.Token);
-
-        // The first escalated task claims the (test, escalated:coredev)
-        // pool; the normal task claims from the NORMAL coredev pool.
-        await WaitForAsync(async () =>
+        try
         {
-            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            return (await _issues.GetAsync(esc1.Id))!.Status == IssueStatus.InProgress
-                && (await _issues.GetAsync(normal.Id))!.Status == IssueStatus.InProgress;
-        }, TimeSpan.FromSeconds(15));
-        // Pool accounting: the escalated run did NOT touch the normal
-        // pool beyond the normal task's own slot.
-        Assert.Equal(1, slots.InFlight("test", "escalated:coredev"));
-        Assert.Equal(1, slots.MaxFor("test", "escalated:coredev"));
-        Assert.Equal(1, slots.InFlight("test", "coredev"));
-        // The second escalated task waits for the escalation pool.
-        await Task.Delay(2500);
-        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
-        Assert.True(markers.Peek("test", esc2.Id)); // marker not consumed while waiting
+            var first = await started[esc1.Id].Task.WaitAsync(cts.Token);
+            // The normal task comes last in the ready queue. Its entry proves
+            // the cycle already considered the second escalated candidate.
+            var normalRun = await started[normal.Id].Task.WaitAsync(cts.Token);
+            Assert.Equal("openai/gpt-5-pro", first.GetMetadata("modelEscalatedTo"));
+            Assert.Null(normalRun.GetMetadata("modelEscalatedTo"));
+            Assert.Equal(1, slots.InFlight("test", "escalated:coredev"));
+            Assert.Equal(1, slots.MaxFor("test", "escalated:coredev"));
+            Assert.Equal(1, slots.InFlight("test", "coredev"));
+            Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
+            Assert.True(markers.Peek("test", esc2.Id));
 
-        gate.SetResult();
-        await WaitForAsync(async () =>
-            (await _issues.GetAsync(esc2.Id))!.Status != IssueStatus.Pending, TimeSpan.FromSeconds(15));
-        cts.Cancel();
-        try { await loop; } catch (OperationCanceledException) { }
+            releaseFirst.SetResult();
+            var second = await started[esc2.Id].Task.WaitAsync(cts.Token);
+            Assert.Equal("openai/gpt-5-pro", second.GetMetadata("modelEscalatedTo"));
+            Assert.False(markers.Peek("test", esc2.Id));
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await loop; } catch (OperationCanceledException) { }
+        }
     }
 
     [Fact]
