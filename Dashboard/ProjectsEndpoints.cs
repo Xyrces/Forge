@@ -226,9 +226,12 @@ public static class ProjectsEndpoints
         return Results.Ok(new { project = record, clone });
     }
 
-    private static async Task<IResult> RemoveProjectAsync(
-        string id, IProjectStore store, CancellationToken ct)
+    internal static async Task<IResult> RemoveProjectAsync(
+        string id, IProjectStore store, ProjectContextFactory factory, CancellationToken ct)
     {
+        if (await store.GetAsync(id, ct) is null)
+            return Results.NotFound(new { error = "project not found", id });
+        await factory.PreserveArtifactHistoryAsync(id, ct);
         var removed = await store.DeleteAsync(id, ct);
         return removed ? Results.NoContent() : Results.NotFound(new { error = "project not found", id });
     }

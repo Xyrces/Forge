@@ -99,6 +99,7 @@ public static class ForgeComposition
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
             events: eventPublisher, deploymentProfiles: options.Deployments);
         services.AddSingleton(projectFactory);
+        await projectFactory.PreserveArtifactHistoryAsync(null, ct);
         string? ProjectRootLookup(string projectId) =>
             projectFactory.KnownProjects
                 .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
@@ -305,19 +306,6 @@ public static class ForgeComposition
         var specStoreRef = new SpecStoreHolder();
         services.AddSingleton(specStoreRef);
 
-        async Task<IReadOnlyList<ArtifactStoreSource>> ArtifactSources(CancellationToken token)
-        {
-            var registered = await projectStore.ListAsync(token);
-            return registered.Select(source =>
-            {
-                var dbPath = orchDbByProject.TryGetValue(source.Id, out var assigned) ? assigned
-                    : ProjectStateDirs.IssuesDbFor(source.ToProjectOptions(
-                        source.LocalPath ?? ForgesystemPaths.ProjectDir(orchDataRoot, source.Id)), orchDataRoot);
-                return new ArtifactStoreSource(source.Id, Program.FactoryFor(options.Db, source.Id, dbPath),
-                    ForgesystemPaths.ArtistOutputRoot(orchDataRoot, source.Id, source.LocalPath));
-            }).ToArray();
-        }
-
         MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
         var localAgentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
@@ -350,8 +338,6 @@ public static class ForgeComposition
                 : projectFactory.Find(pid)?.Issues,
             modelOverrides: roleModelOverrides,
             gates: options.Gates,
-            artifactHistorySources: async (ownerId, token) =>
-                (await ArtifactSources(token)).Where(source => source.ProjectId != ownerId).ToArray(),
             artOutputRoot: id => ForgesystemPaths.ArtistOutputRoot(orchDataRoot, id,
                 id == "default" ? ProjectRootLookup(id) : null));
         IAgentRunner agentRunner = localAgentRunner;
@@ -394,7 +380,7 @@ public static class ForgeComposition
                 lifecycle: lifecycle,
                 workflow: workflowResolver,
                 verifyCommands: primary.VerifyCommands,
-                sprints: new SprintStore(issues), reviewSlots: slots, artifactSources: ArtifactSources)
+                sprints: new SprintStore(issues), reviewSlots: slots)
                 .Build();
             var durableServices = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -429,7 +415,6 @@ public static class ForgeComposition
                         workflow: workflowResolver,
                         verifyCommands: bundle.Project.VerifyCommands,
                         reviewSlots: slots,
-                        artifactSources: ArtifactSources,
                         // Message-driven review trigger: publish
                         // PrOpened — the PrOpenedConsumer launches the
                         // background review on the pushed head while CI
@@ -719,7 +704,9 @@ public static class ForgeComposition
         services.AddSingleton(meshy);
         var artistAgentFactory = new ArtistAgentFactory(
             routingSpecStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,
-            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,
+            artOutputRoot: id => ForgesystemPaths.ArtistOutputRoot(orchDataRoot, id,
+                id == "default" ? ProjectRootLookup(id) : null));
         services.AddSingleton(artistAgentFactory);
 
         var primaryBundle = dispatchBundleFactory.Build(primary);

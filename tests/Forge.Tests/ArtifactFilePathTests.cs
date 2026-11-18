@@ -1,3 +1,4 @@
+using Forge.Meshy;
 using System.Diagnostics;
 using System.Text.Json;
 using Forge.AgentTools;
@@ -27,8 +28,8 @@ public sealed class ArtifactFilePathTests
         var stored = absoluteStoredPath ? file : Path.Combine(spec.Id, "mesh with space.glb");
         var artifact = await new ArtOutputStore(writer.Db).CreateAsync(new(spec.Id,
             ArtOutputKind.Mesh, "Historical file", stored, "glb"));
-        var history = new ArtifactHistory(specs, _ => Task.FromResult<IReadOnlyList<ArtifactStoreSource>>(
-            [new("writer", writer.Db, outputRoot)]));
+        var history = new OwnedArtifactHistoryStore(owner.Db);
+        await history.ImportAsync(new("writer", writer.Db, outputRoot), specs);
         var tool = new ArtifactReadTool(new(owner.Db), specs, new(owner.Db),
             new ContextHandoffStore(owner.Db), requireOwnedSpec: true, history: history,
             artOutputRoot: Path.Combine(root, "owner-art-output"));

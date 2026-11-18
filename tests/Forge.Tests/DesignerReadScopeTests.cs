@@ -42,6 +42,7 @@ public sealed class DesignerReadScopeTests
         await Add(owner, local, first, "first body");
         await Add(primary, historical, third, "obsolete historical body");
         await Add(primary, historical, second, "unique historical body");
+        await new OwnedArtifactHistoryStore(owner.Db).ImportAsync(new("primary", primary.Db, null), specs);
         var localIds = new[] { first, third };
         Assert.Equal(localIds, (await local.ListBySpecAsync(spec.Id)).Select(a => a.Id));
         Assert.Equal(localIds, (await local.ListBySpecAsync(spec.Id, DesignArtifactStatus.Draft)).Select(a => a.Id));
@@ -105,6 +106,7 @@ public sealed class DesignerReadScopeTests
             ["aaa"] = new SpecStore(newPrimary), ["primary"] = new SpecStore(oldPrimary), ["second"] = ownerSpecs,
         };
         var routing = new ProjectRoutingSpecStore(stores["aaa"], id => stores.GetValueOrDefault(id), () => stores.Values.ToArray());
+        await new OwnedArtifactHistoryStore(owner.Db).ImportAsync(new("primary", oldPrimary.Db, null), ownerSpecs);
         var listed = await DesignerStoreRouting.ListArtifactsAsync(routing, new DesignArtifactStore(newPrimary.Db), "second", true);
         Assert.Equal(artifact.Id, Assert.Single(listed).Id);
         var scoped = await DesignerStoreRouting.ListRunsAsync(routing, new DesignerRunStore(newPrimary.Db), spec.Id, 10);
@@ -170,6 +172,7 @@ public sealed class DesignerReadScopeTests
             command.Parameters.Add(currentId);
             await command.ExecuteNonQueryAsync();
         }
+        await new OwnedArtifactHistoryStore(secondary.Db).ImportAsync(new("primary", primary.Db, null), secondarySpecs);
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0");
         await using var app = builder.Build();

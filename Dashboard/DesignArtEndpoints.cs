@@ -125,7 +125,9 @@ public static class DesignArtEndpoints
                     return Results.Json(Array.Empty<ArtView>(), DashboardJson.Options);
                 }
 
-                var list = await artOutputs.ListByProjectAsync(projectId, statusFilter, ct);
+                var list = specs is null ? await artOutputs.ListByProjectAsync(projectId, statusFilter, ct)
+                    : await ArtistStoreRouting.ListAsync(specs, projectId, true, ct);
+                if (statusFilter is not null) list = list.Where(a => a.Status == statusFilter).ToArray();
                 return Results.Json(list.Select(ToArtView).ToArray(), DashboardJson.Options);
             }
             catch (Exception ex)
@@ -163,5 +165,5 @@ public static class DesignArtEndpoints
     private static ArtView ToArtView(ArtOutput a) => new(
         a.Id, a.SpecId, a.Kind.ToString(), a.Title, a.BodyKind,
         a.Status.ToString(), a.Author,
-        $"/api/art-output/{a.Id}/file", a.CreatedAt, a.UpdatedAt);
+        $"/api/art-output/{a.Id}/file?specId={Uri.EscapeDataString(a.SpecId)}", a.CreatedAt, a.UpdatedAt);
 }

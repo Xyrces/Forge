@@ -2,6 +2,7 @@ using System.Text.Json;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Dashboard;
 using Forge.Orchestrator.Composition;
 using Forge.Projects;
 using Microsoft.Extensions.AI;
@@ -13,8 +14,10 @@ namespace Forge.Tests.Integration;
 
 public sealed class EngineeringArtifactScopeTests
 {
-    [Fact]
-    public async Task RestartAfterRegisteringEarlierProjectRetainsOriginalWriterArtifacts()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RestartRetainsOriginalWriterArtifacts(bool removeWriter)
     {
         var root = TempRoot.Instance.NewDirectory("artifact-controller-restart");
         var repo = Path.Combine(root, "repo");
@@ -59,7 +62,27 @@ public sealed class EngineeringArtifactScopeTests
             originalPath = Path.Combine(ForgesystemPaths.ArtOutputDir(root, "primary"), asset.Body);
             Directory.CreateDirectory(Path.GetDirectoryName(originalPath)!);
             await File.WriteAllBytesAsync(originalPath, bytes);
-            await ReadAndVerify(original);
+            if (removeWriter)
+            {
+                var projects = original.GetRequiredService<ProjectContextFactory>();
+                // A failed copy must leave the writer registered and retryable.
+                await using var connection = await owner.Db.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TRIGGER refuse_copy BEFORE INSERT ON owned_artifact_history
+                    BEGIN SELECT RAISE(ABORT,'simulated storage failure'); END
+                    """;
+                await command.ExecuteNonQueryAsync();
+                await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(() =>
+                    ProjectsEndpoints.RemoveProjectAsync("primary", registry, projects, default));
+                Assert.NotNull(await registry.GetAsync("primary"));
+                command.CommandText = "DROP TRIGGER refuse_copy";
+                await command.ExecuteNonQueryAsync();
+                Assert.IsType<Microsoft.AspNetCore.Http.HttpResults.NoContent>(
+                    await ProjectsEndpoints.RemoveProjectAsync("primary", registry, projects, default));
+                Assert.Null(await registry.GetAsync("primary"));
+                await ReadAndVerify(original);
+            }
         }
 
         await Register("aaa-new-primary");
@@ -148,6 +171,7 @@ public sealed class EngineeringArtifactScopeTests
             [foreignSpec.Id] = null, [foreign.Id] = null, [foreignArt.Id] = null,
             [misplaced.Id] = null, [orphan.Id] = null,
         };
+        await projects.PreserveArtifactHistoryAsync("primary", default);
         var client = new ArtifactReadClient(expected.Keys.ToArray());
         // Keep the real composition/runner/tool construction. Replace only the
         // provider transport through its existing request-policy seam: no HTTP.

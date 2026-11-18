@@ -82,6 +82,7 @@ public sealed class WorkerHistoricalArtifactTests
             [foreign.Id] = null, [foreignDesign.Id] = null, [orphan.Id] = null,
             [misplaced.Id] = null, [foreignArt.Id] = null,
         };
+        await fixture.ImportHistory("second", "primary");
         using var runtime = await fixture.Build("second", legacyHistoricalProject);
         var client = await Read(runtime, "second", expected.Keys.ToArray());
         foreach (var (id, body) in expected)
@@ -115,12 +116,13 @@ public sealed class WorkerHistoricalArtifactTests
         var spec = await new SpecStore(fixture.Secondary).CreateAsync(new NewSpec("second", "Owned", "local spec"));
         var local = await new DesignArtifactStore(fixture.Secondary.Db).CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Current", "local design", "html"));
         var historical = await new DesignArtifactStore(fixture.Primary.Db).CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Historical", "historical design", "html"));
+        await fixture.ImportHistory("second", "primary");
         using var runtime = await fixture.Build("second", "missing-project");
         var client = await Read(runtime, "second", [local.Id, historical.Id]);
         Assert.Contains("local design", client.Results[local.Id]);
         Assert.Contains("historical design", client.Results[historical.Id]);
         Assert.DoesNotContain("missing-project", fixture.OpenedProjects);
-        Assert.Contains("primary", fixture.OpenedProjects);
+        Assert.Equal(new[] { "second" }, fixture.OpenedProjects);
     }
 
     [Fact]
@@ -142,6 +144,8 @@ public sealed class WorkerHistoricalArtifactTests
             command.AddParam("@old", second.Id);
             await command.ExecuteNonQueryAsync();
         }
+        await fixture.ImportHistory("second", "primary");
+        await fixture.ImportHistory("second", "aaa");
         using var runtime = await fixture.Build("second", "aaa");
         var response = await Read(runtime, "second", [first.Id]);
         Assert.Contains("ambiguous_history", response.Results[first.Id]);
@@ -160,6 +164,32 @@ public sealed class WorkerHistoricalArtifactTests
         using var runtime = await fixture.Build("second", null);
         await Read(runtime, "second", [artifact.Id]);
         Assert.Equal(new[] { "second" }, fixture.OpenedProjects);
+    }
+
+    [Fact]
+    public async Task DeregisteredWriterAndUninitializedProjectDoNotAffectWorkerReads()
+    {
+        await using var fixture = await Fixture.Create();
+        var spec = await new SpecStore(fixture.Secondary).CreateAsync(new("second", "Owned", "body"));
+        var design = await new DesignArtifactStore(fixture.Primary.Db).CreateAsync(
+            new(spec.Id, DesignArtifactKind.Wireframe, "Historical", "owned history", "html"));
+        var art = await new ArtOutputStore(fixture.Primary.Db).CreateAsync(
+            new(spec.Id, ArtOutputKind.Mesh, "Historical file", spec.Id + "/model.glb", "glb"));
+        var path = fixture.ArtFile("primary", art.Body);
+        await fixture.ImportHistory("second", "primary");
+        await fixture.Remove("primary");
+        var unreadyPath = await fixture.RegisterUninitialized("unready");
+        using var runtime = await fixture.Build("second", null);
+        var response = await Read(runtime, "second", [design.Id, art.Id, "design-unknown", "art-unknown"]);
+        using var historical = JsonDocument.Parse(response.Results[design.Id]);
+        Assert.Equal(design.Body, historical.RootElement.GetProperty("body").GetString());
+        using var asset = JsonDocument.Parse(response.Results[art.Id]);
+        Assert.Equal(path, asset.RootElement.GetProperty("body").GetString());
+        Assert.Equal("artifact bytes", await File.ReadAllTextAsync(path));
+        Assert.Contains("not_found", response.Results["design-unknown"]);
+        Assert.Contains("not_found", response.Results["art-unknown"]);
+        Assert.Equal(new[] { "second" }, fixture.OpenedProjects);
+        Assert.False(File.Exists(unreadyPath));
     }
 
     [Fact]
@@ -216,6 +246,17 @@ public sealed class WorkerHistoricalArtifactTests
             await projects.UpsertAsync(new NewProject(id, id, "https://example.invalid/fixture.git"));
             await projects.UpdateLocalPathAsync(id, _root);
         }
+        public Task ImportHistory(string owner, string writer)
+            => new OwnedArtifactHistoryStore(_stores[owner].Db).ImportAsync(
+                new(writer, _stores[writer].Db, ForgesystemPaths.ArtOutputDir(_root, writer)), new SpecStore(_stores[owner]));
+        public Task<bool> Remove(string project) => new ProjectStore(_registry).DeleteAsync(project);
+        public async Task<string> RegisterUninitialized(string project)
+        {
+            var registry = new ProjectStore(_registry);
+            await registry.UpsertAsync(new(project, project, "https://example.invalid/unready.git"));
+            await registry.UpdateLocalPathAsync(project, Path.Combine(_root, project));
+            return Path.Combine(_root, project + ".db");
+        }
         public async Task<WorkerRuntime> Build(string project, string? historical)
         {
             var context = new Dictionary<string, string> { ["projectId"] = project };
@@ -241,6 +282,7 @@ public sealed class WorkerHistoricalArtifactTests
             IDbConnectionFactory Database(string id)
             {
                 OpenedProjects.Add(id);
+                Assert.Equal(project, id);
                 return _stores[id].Db;
             }
             return await WorkerHost.BuildRunner(options, assignment, new WorkerAttemptStore(_registry.Db),

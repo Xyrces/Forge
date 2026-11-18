@@ -136,6 +136,7 @@ public sealed class ProjectProvisioningTests
     {
         var sql = ControllerInitializer.InitiativeWorkerPermissionsSql("worker", "proj_second-project");
         Assert.Contains("[proj_second-project].[initiative_proposal]", sql);
+        Assert.Contains("DENY INSERT,UPDATE,DELETE ON OBJECT::[proj_second-project].[owned_artifact_history]", sql);
         Assert.Contains("DENY INSERT,UPDATE,DELETE", sql);
         Assert.DoesNotContain("proj_forge", sql);
     }

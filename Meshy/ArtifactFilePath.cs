@@ -1,4 +1,4 @@
-namespace Forge.AgentTools;
+namespace Forge.Meshy;
 
 /// <summary>Resolve an artist output to the file visible on the shared worker volume.</summary>
 internal static class ArtifactFilePath

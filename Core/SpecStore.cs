@@ -189,6 +189,7 @@ public interface ISpecStore
 public sealed partial class SpecStore : ISpecStore, IAsyncDisposable
 {
     internal Forge.Core.Db.IDbConnectionFactory Database => _issues.Db;
+    internal string ProjectId => _issues.ProjectId;
 
     internal async Task<IReadOnlyList<string>> ListOwnedIdsAsync(CancellationToken ct)
     {

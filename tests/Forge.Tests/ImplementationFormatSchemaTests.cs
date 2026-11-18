@@ -26,7 +26,7 @@ public sealed class ImplementationFormatSchemaTests
         await using var check = await reopened.Db.OpenAsync();
         using var read = check.CreateCommand();
         read.CommandText = "SELECT MAX(version) FROM schema_version";
-        Assert.Equal(42L, Convert.ToInt64(await read.ExecuteScalarAsync()));
+        Assert.Equal((long)IssueStore.CurrentSchemaVersion, Convert.ToInt64(await read.ExecuteScalarAsync()));
         read.CommandText = "SELECT body FROM memory WHERE key='format-fixture'";
         Assert.Equal("unchanged", await read.ExecuteScalarAsync());
         read.CommandText = "SELECT group_concat(sql,'|') FROM (SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name)";

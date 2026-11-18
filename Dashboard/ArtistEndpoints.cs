@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Forge.Core;
+using Forge.Meshy;
 using Forge.Orchestrator;
 
 namespace Forge.Dashboard;
@@ -78,28 +79,51 @@ public static class ArtistEndpoints
 
         app.MapGet("/api/specs/{id}/art-output", async (string id, CancellationToken ct) =>
         {
-            var list = await artOutputs.ListBySpecAsync(id);
+            var list = await ArtistStoreRouting.ListAsync(specs, id, false, ct);
             return Results.Json(list.Select(ToView).ToArray());
         });
 
-        app.MapGet("/api/art-output/{id}/file", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/art-output/{id}/file", async (string id, string? specId, CancellationToken ct) =>
         {
-            var art = await artOutputs.GetAsync(id, ct);
+            ArtOutput? art;
+            string? root = meshy.ArtOutputRoot;
+            if (specId is null)
+            {
+                // Existing links identify records in the original primary store.
+                art = await artOutputs.GetAsync(id, ct);
+            }
+            else
+            {
+                var owner = specs is ProjectRoutingSpecStore routing
+                    ? routing.ResolveOwner(specId) as SpecStore : specs as SpecStore;
+                if (owner is null || await owner.GetAsync(specId, ct) is null)
+                    return Results.NotFound(new { error = "art_output_not_found" });
+                art = await new ArtOutputStore(owner.Database).GetAsync(id, ct);
+                root = artistFactory?.ArtOutputRoot(owner) ?? meshy.ArtOutputRoot;
+                if (art is null)
+                {
+                    try
+                    {
+                        var historical = await new OwnedArtifactHistoryStore(owner.Database).GetArtAsync(id, ct);
+                        art = historical?.Artifact;
+                        root = historical?.ArtOutputRoot;
+                    }
+                    catch (ArtifactHistoryAmbiguousException)
+                    {
+                        return Results.Conflict(new { error = "ambiguous_history" });
+                    }
+                }
+                if (art?.SpecId != specId) return Results.NotFound(new { error = "art_output_not_found" });
+            }
             if (art is null) return Results.NotFound(new { error = "art_output_not_found" });
-            // The body is a relative path under
-            // .portHorizon/art-output/{specId}/{id}.{ext}. Resolve
-            // and verify it's still under the configured root
-            // (path-traversal guard).
-            var root = Path.GetFullPath(meshy.ArtOutputRoot);
-            var full = Path.GetFullPath(Path.Combine(root, art.Body));
-            if (!full.StartsWith(root, StringComparison.Ordinal))
+            string? full;
+            try { full = root is null ? null : ArtifactFilePath.Resolve(root, art.SpecId, art.Body); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
             {
-                return Results.BadRequest(new { error = "invalid_path" });
+                logger.LogWarning(ex, "Art output file unavailable for {Id}", id);
+                full = null;
             }
-            if (!File.Exists(full))
-            {
-                return Results.NotFound(new { error = "file_not_found", path = art.Body });
-            }
+            if (full is null) return Results.NotFound(new { error = "file_not_found" });
             var contentType = art.BodyKind switch
             {
                 "glb" => "model/gltf-binary",
@@ -140,7 +164,7 @@ public static class ArtistEndpoints
         author = a.Author,
         createdAt = a.CreatedAt,
         updatedAt = a.UpdatedAt,
-        fileUrl = $"/api/art-output/{a.Id}/file",
+        fileUrl = $"/api/art-output/{a.Id}/file?specId={Uri.EscapeDataString(a.SpecId)}",
         references = a.ReferencesJson is null ? null : (object?)JsonSerializer.Deserialize<JsonElement>(a.ReferencesJson),
     };
 }

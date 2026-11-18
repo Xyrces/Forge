@@ -44,7 +44,6 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<DesignArtifactStore?>? _designArtifactsFactory;
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
-    private readonly Func<string, CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? _artifactHistorySources;
     private readonly Func<string, string?>? _artOutputRoot;
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
@@ -115,7 +114,6 @@ public sealed class MafAgentRunner : IAgentRunner
         Func<string?, IIssueStore?>? issueStoreLookup = null,
         RoleModelOverrides? modelOverrides = null,
         Configuration.GateOptions? gates = null,
-        Func<string, CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? artifactHistorySources = null,
         Func<string, string?>? artOutputRoot = null)
     {
         _chatClientFactory = chatClientFactory;
@@ -132,7 +130,6 @@ public sealed class MafAgentRunner : IAgentRunner
         _designArtifactsFactory = designArtifacts;
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
-        _artifactHistorySources = artifactHistorySources;
         _artOutputRoot = artOutputRoot;
         _secrets = secrets;
         _issues = issues;
@@ -267,19 +264,15 @@ public async Task<AgentRunResult> RunAsync(
         var artOutputs = _artOutputsFactory?.Invoke();
         if (designArtifacts is not null && specs is not null && artOutputs is not null)
         {
-            // The normal in-process runner receives primary historical stores plus
-            // a routing spec store. Bind its reads and audit trail to this run's
-            // registered owner, never to the router's cross-project ID probe.
+            // Bind engineering reads and audit to the run's physical owner.
+            // Historical records are copied into that same store during upgrade.
             if (projectId is not null && specs is ProjectRoutingSpecStore)
             {
                 if (_issueStoreLookup?.Invoke(projectId) is IssueStore owner)
                     tools.Add(new ArtifactReadTool(
                         new DesignArtifactStore(owner.Db), new SpecStore(owner), new ArtOutputStore(owner.Db),
                         new ContextHandoffStore(owner.Db), requireOwnedSpec: true,
-                        historicalDesignArtifacts: _artifactHistorySources is null ? designArtifacts : null,
-                        historicalArtOutputs: _artifactHistorySources is null ? artOutputs : null,
-                        history: _artifactHistorySources is null ? null
-                            : new ArtifactHistory(new SpecStore(owner), token => _artifactHistorySources(projectId, token)),
+                        history: new OwnedArtifactHistoryStore(owner.Db),
                         artOutputRoot: _artOutputRoot?.Invoke(projectId)).AsAIFunction());
             }
             else if (specs is SpecStore && (!isWorker || projectId is not null)
@@ -289,8 +282,8 @@ public async Task<AgentRunResult> RunAsync(
                 // concrete owner-local spec store. No routing lookup is needed;
                 // artifact IDs must still resolve to a spec in that physical store.
                 tools.Add(new ArtifactReadTool(designArtifacts, specs, artOutputs, _handoffs, requireOwnedSpec: true,
-                    history: projectId is null || _artifactHistorySources is null ? null
-                        : new ArtifactHistory(specs, token => _artifactHistorySources(projectId, token)),
+                    history: _artOutputRoot is not null && _issues is IssueStore localOwner
+                        ? new OwnedArtifactHistoryStore(localOwner.Db) : null,
                     artOutputRoot: projectId is null ? null : _artOutputRoot?.Invoke(projectId)).AsAIFunction());
             }
         }

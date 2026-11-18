@@ -201,9 +201,6 @@ public static class WorkerHost
         var dataRoot = ForgesystemPaths.ResolveDataRoot(options.Forgesystem.DataRoot);
         string ArtRoot(ProjectRecord source) =>
             ForgesystemPaths.ArtistOutputRoot(dataRoot, source.Id, source.LocalPath);
-        async Task<IReadOnlyList<ArtifactStoreSource>> HistorySources(string ownerId, CancellationToken token)
-            => (await projects.ListAsync(token)).Where(source => source.Id != ownerId)
-                .Select(source => new ArtifactStoreSource(source.Id, projectDatabase(source.Id), ArtRoot(source))).ToArray();
         var issues = new IssueStore(workload, project.Id);
         var memory = new MemoryStore(workload);
         var secrets = new SecretStore(registryIssues, Program.CreateSecretProtection(options), logs.CreateLogger<SecretStore>());
@@ -231,7 +228,7 @@ public static class WorkerHost
             memory: memory, handoffs: new ContextHandoffStore(workload), designArtifacts: () => artifacts,
             specs: () => new SpecStore(issues, designArtifacts: artifacts), artOutputs: () => new ArtOutputStore(workload),
             secrets: secrets, issues: issues, runs: new AgentRunStore(workload), modelOverrides: overrides, gates: options.Gates,
-            artifactHistorySources: HistorySources, artOutputRoot: id => id == project.Id ? ArtRoot(project) : null);
+            artOutputRoot: id => id == project.Id ? ArtRoot(project) : null);
         return new(runner, factory, project.VerifyCommands ?? AgentTools.RunVerification.DefaultCommands(assignment.WorktreePath));
     }
 }

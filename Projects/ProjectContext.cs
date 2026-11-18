@@ -176,6 +176,27 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         return options;
     }
 
+    /// <summary>Administrative backfill before admission or removal of a legacy writer.</summary>
+    public async Task PreserveArtifactHistoryAsync(string? writerId, CancellationToken ct)
+    {
+        var projects = KnownProjects;
+        if (projects.Count < 2) return;
+        foreach (var writer in projects.Where(p => writerId is null || p.Id == writerId))
+        {
+            if (Find(writer.Id)?.Specs is not SpecStore writerSpecs)
+                throw new InvalidOperationException($"Could not open registered artifact writer {writer.Id}.");
+            var source = new ArtifactStoreSource(writer.Id, writerSpecs.Database,
+                ForgesystemPaths.ArtistOutputRoot(_dataRoot, writer.Id, writer.Root));
+            if (!await source.HasForeignArtifactsAsync(ct)) continue;
+            foreach (var project in projects.Where(p => p.Id != writer.Id))
+            {
+                if (Find(project.Id)?.Specs is not SpecStore owner)
+                    throw new InvalidOperationException($"Could not open registered artifact owner {project.Id}.");
+                await new OwnedArtifactHistoryStore(owner.Database).ImportAsync(source, owner, ct);
+            }
+        }
+    }
+
     public IReadOnlyList<ProjectOptions> KnownProjects
     {
         get

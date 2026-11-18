@@ -39,11 +39,10 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         string? projectId = null,
         ISprintStore? sprints = null,
         double timeoutMinutes = 15.0,
-        Core.TaskStateMachine? lifecycle = null,
-        Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? artifactSources = null)
+        Core.TaskStateMachine? lifecycle = null)
         : base(
             "run-agent",
-            ExecutorFaultGuard.Wrap<WorktreeReady, AgentCompleted>("run-agent", logger, (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle, artifactSources)),
+            ExecutorFaultGuard.Wrap<WorktreeReady, AgentCompleted>("run-agent", logger, (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle)),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -74,8 +73,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         ISprintStore? sprints,
         CancellationToken ct,
         double timeoutMinutes = 15.0,
-        Core.TaskStateMachine? lifecycle = null,
-        Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? artifactSources = null)
+        Core.TaskStateMachine? lifecycle = null)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
         {
@@ -92,7 +90,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             issue.Id, $"role={roleAgent.AgentName} worktree={worktreePath}"));
 
         var (designRefs, artRefs) = await LoadArtifactReferencesAsync(
-            issues, issue, designArtifacts, artOutputs, artifactSources, ct);
+            issues, issue, designArtifacts, artOutputs, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
         if (!string.IsNullOrWhiteSpace(issue.GetMetadata("existingVerificationRequest")))
             prompt += "\n\nThe former PR was closed unmerged because it contained no changes. That is not acceptance evidence. " +
@@ -455,7 +453,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
 
     internal static async Task<(IReadOnlyList<DesignArtifactRef>, IReadOnlyList<ArtOutputRef>)> LoadArtifactReferencesAsync(
         IIssueStore issues, IssueRecord task, DesignArtifactStore designs, ArtOutputStore art,
-        Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? sources, CancellationToken ct)
+        CancellationToken ct)
     {
         if (issues is not IssueStore owner) return ([], []);
         // Groomed tasks parent to a story and stories parent to a spec, which lives
@@ -473,16 +471,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
 
         var local = new List<ArtifactReference>(await designs.ListReferencesAsync(parentId, ct));
         local.AddRange(await art.ListReferencesAsync(parentId, ct));
-        var historical = new List<ArtifactReference>();
-        if (sources is not null)
-        {
-            foreach (var source in await sources(ct))
-            {
-                if (designs.UsesDatabase(source.Database)) continue;
-                historical.AddRange(await new DesignArtifactStore(source.Database).ListReferencesAsync(parentId, ct));
-                historical.AddRange(await new ArtOutputStore(source.Database).ListReferencesAsync(parentId, ct));
-            }
-        }
+        var historical = await new OwnedArtifactHistoryStore(owner.Db).ListReferencesAsync(parentId, ct);
         var refs = ArtifactHistory.IncludeUnambiguousHistory(local, historical, r => r.Id)
             .OrderBy(r => r.Id, StringComparer.Ordinal).ToList();
         return (refs.Where(r => r.Id.StartsWith("design-", StringComparison.Ordinal))

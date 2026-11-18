@@ -273,6 +273,8 @@ public class DesignerAgentTests : IDisposable
             var otherProjectSpec = await _specs.CreateAsync(new NewSpec("P", "Other project", HealthyBody));
             var unrelated = await _artifacts.CreateAsync(new NewDesignArtifact(otherProjectSpec.Id, DesignArtifactKind.Wireframe,
                 "Other project's artifact", "# Private", "markdown"));
+            await new OwnedArtifactHistoryStore(ownerIssues.Db).ImportAsync(
+                new("P", _issues.Db, null), new SpecStore(ownerIssues));
             var visible = await DesignerStoreRouting.ListArtifactsAsync(routing, _artifacts, spec.Id, false);
             Assert.Equal(2, visible.Count);
             Assert.Equal(result.ArtifactIds[0], visible[0].Id);

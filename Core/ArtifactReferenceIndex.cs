@@ -3,7 +3,7 @@ using Forge.Core.Db;
 namespace Forge.Core;
 
 /// <summary>Only the reference metadata needed in an engineering prompt. Bodies are fetched on demand.</summary>
-internal sealed record ArtifactReference(string Id, string Kind, string BodyKind, string Title);
+public sealed record ArtifactReference(string Id, string Kind, string BodyKind, string Title);
 
 internal static class ArtifactReferenceIndex
 {

@@ -66,6 +66,19 @@ public sealed class MeshyClient
 
     public string ArtOutputRoot => _artOutputRoot;
 
+    public MeshyClient ForArtOutputRoot(string root)
+        => new(this, root);
+
+    private MeshyClient(MeshyClient source, string root)
+    {
+        _http = source._http;
+        _httpMessageHandler = source._httpMessageHandler;
+        _options = source._options;
+        _logger = source._logger;
+        _artOutputRoot = root;
+        Directory.CreateDirectory(root);
+    }
+
     /// <summary>Submit a text-to-3d job. Returns the Meshy task id.</summary>
     public Task<string> SubmitTextTo3dAsync(TextTo3dRequest req, CancellationToken ct = default)
         => SubmitAsync("/openapi/v2/text-to-3d", req, ct);

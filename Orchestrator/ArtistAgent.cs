@@ -46,6 +46,7 @@ public sealed class ArtistAgent
     private readonly IDashboardEventBus _events;
     private readonly ILogger<ArtistAgent> _logger;
     private readonly string _runId;
+    private readonly Func<string, string>? _artOutputRoot;
 
     public ArtistAgent(
         ISpecStore specs,
@@ -59,7 +60,8 @@ public sealed class ArtistAgent
         RoleAgentRegistry roles,
         IDashboardEventBus events,
         ILogger<ArtistAgent> logger,
-        string? runId = null)
+        string? runId = null,
+        Func<string, string>? artOutputRoot = null)
     {
         _specs = specs;
         _designArtifacts = designArtifacts;
@@ -73,6 +75,7 @@ public sealed class ArtistAgent
         _events = events;
         _logger = logger;
         _runId = runId ?? Guid.NewGuid().ToString("N").Substring(0, 12);
+        _artOutputRoot = artOutputRoot;
     }
 
     public string RunId => _runId;
@@ -92,6 +95,16 @@ public sealed class ArtistAgent
     public async Task<ArtistResult> ArtSpecAsync(
         string specId, ArtistTriggerKind trigger, CancellationToken ct = default)
     {
+        if (_specs is ProjectRoutingSpecStore routing)
+        {
+            var owner = routing.ResolveOwner(specId) as SpecStore;
+            if (owner is null) return new(false, null, [], [], "Spec not found");
+            var root = _artOutputRoot?.Invoke(owner.ProjectId) ?? _meshy.ArtOutputRoot;
+            var scoped = new ArtistAgent(owner, new DesignArtifactStore(owner.Database),
+                new ArtOutputStore(owner.Database), _runs, _memory, _meshy.ForArtOutputRoot(root),
+                _chatClientFactory, _config, _roles, _events, _logger, _runId);
+            return await scoped.ArtSpecAsync(specId, trigger, ct);
+        }
         var run = await _runs.StartAsync(specId, trigger, ct);
         var startedAt = DateTime.UtcNow;
         _logger.LogInformation("Artist: starting run {RunId} for spec {SpecId} (trigger={Trigger})",
@@ -411,6 +424,8 @@ public sealed class ArtistAgent
     private async Task<string> DbSaveArtOutput(
         string specId, string kind, string title, string body, string bodyKind, string? references)
     {
+        if (await _specs.GetAsync(specId) is null)
+            return JsonSerializer.Serialize(new { error = "spec_not_found" });
         if (!ArtOutputKindExtensions.TryParseDb(kind, out var k))
             return $"{{\"error\":\"unknown kind '{kind}'\"}}";
         if (bodyKind is not ("glb" or "fbx" or "obj" or "png" or "mp4" or "usdz"))

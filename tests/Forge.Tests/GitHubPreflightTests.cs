@@ -109,7 +109,7 @@ public sealed class GitHubPreflightTests
             _ =>
             {
                 stateReads++;
-                return Task.FromResult<(int, IReadOnlyList<ProjectOptions>)>((42, [Project("registered-workload")]));
+                return Task.FromResult<(int, IReadOnlyList<ProjectOptions>)>((IssueStore.CurrentSchemaVersion, [Project("registered-workload")]));
             },
             (projects, ct) => new GitHubPreflight(http, credentials).CheckAsync(projects, options.GitHub, ct));
 

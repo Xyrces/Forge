@@ -1,3 +1,4 @@
+using Forge.Meshy;
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
@@ -41,9 +42,7 @@ public sealed class ArtifactReadTool
     private readonly ContextHandoffStore? _handoffs;
     private readonly ILogger<ArtifactReadTool>? _logger;
     private readonly bool _requireOwnedSpec;
-    private readonly DesignArtifactStore? _historicalDesignArtifacts;
-    private readonly ArtOutputStore? _historicalArtOutputs;
-    private readonly ArtifactHistory? _history;
+    private readonly OwnedArtifactHistoryStore? _history;
     private readonly string? _artOutputRoot;
 
     public ArtifactReadTool(
@@ -53,9 +52,7 @@ public sealed class ArtifactReadTool
         ContextHandoffStore? handoffs = null,
         ILogger<ArtifactReadTool>? logger = null,
         bool requireOwnedSpec = false,
-        DesignArtifactStore? historicalDesignArtifacts = null,
-        ArtOutputStore? historicalArtOutputs = null,
-        ArtifactHistory? history = null,
+        OwnedArtifactHistoryStore? history = null,
         string? artOutputRoot = null)
     {
         if (requireOwnedSpec && specs is ProjectRoutingSpecStore)
@@ -66,8 +63,6 @@ public sealed class ArtifactReadTool
         _handoffs = handoffs;
         _logger = logger;
         _requireOwnedSpec = requireOwnedSpec;
-        _historicalDesignArtifacts = historicalDesignArtifacts;
-        _historicalArtOutputs = historicalArtOutputs;
         _history = history;
         _artOutputRoot = artOutputRoot;
     }
@@ -95,15 +90,13 @@ public sealed class ArtifactReadTool
             var row = await _designArtifacts.GetAsync(artifactId, cancellationToken);
             if (row is null && _history is not null)
             {
-                try { row = (await _history.FindDesignAsync(artifactId, cancellationToken))?.Artifact; }
+                try { row = (await _history.GetDesignAsync(artifactId, cancellationToken))?.Artifact; }
                 catch (ArtifactHistoryAmbiguousException ex)
                 {
                     _logger?.LogWarning(ex, "Artifact history is ambiguous for {Id}", artifactId);
                     return JsonSerializer.Serialize(new { error = "ambiguous_history", id = artifactId });
                 }
             }
-            row ??= _historicalDesignArtifacts is null ? null
-                : await _historicalDesignArtifacts.GetAsync(artifactId, cancellationToken);
             if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
             {
                 body = row.Body;
@@ -127,20 +120,15 @@ public sealed class ArtifactReadTool
             {
                 try
                 {
-                    var found = await _history.FindArtAsync(artifactId, cancellationToken);
+                    var found = await _history.GetArtAsync(artifactId, cancellationToken);
                     row = found?.Artifact;
-                    root = found?.Source.ArtOutputRoot;
+                    root = found?.ArtOutputRoot;
                 }
                 catch (ArtifactHistoryAmbiguousException ex)
                 {
                     _logger?.LogWarning(ex, "Artifact history is ambiguous for {Id}", artifactId);
                     return JsonSerializer.Serialize(new { error = "ambiguous_history", id = artifactId });
                 }
-            }
-            if (row is null && _historicalArtOutputs is not null)
-            {
-                row = await _historicalArtOutputs.GetAsync(artifactId, cancellationToken);
-                root = null;
             }
             if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
             {

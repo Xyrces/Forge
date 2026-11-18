@@ -11,6 +11,10 @@ using Forge.Meshy;
 using Forge.Orchestrator;
 using Xunit;
 using Xunit.Abstractions;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using System.Net.Http.Json;
+using Forge.Tests.Integration;
 
 namespace Forge.Tests;
 
@@ -239,6 +243,63 @@ public class ArtistAgentTests : IDisposable
         // dedicated MeshyClient tests cover that path; the Agent
         // tests cover the orchestration.
         Assert.Empty(run.MeshyTasks ?? new List<MeshyTaskRecord>());
+    }
+
+    [Fact]
+    public async Task SecondaryArtistWritesAndServesOwnedFilesAndMaterializedHistory()
+    {
+        await using var secondary = new IssueStore(Path.Combine(_workDir, "second.db"), "second");
+        var owner = new SpecStore(secondary);
+        var spec = await owner.CreateAsync(new("stale-project", "Owned asset", "Create a mesh"));
+        await owner.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
+        await owner.SetStatusAsync(spec.Id, SpecStatus.Designed);
+        var routing = new ProjectRoutingSpecStore(_specs,
+            id => id == "second" ? owner : null, () => [_specs, owner]);
+        var handler = new StubHttpHandler();
+        handler.Responses["GET /mesh.glb"] = new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent([0x67, 0x6c, 0x54, 0x46, 1, 2, 3]),
+        };
+        var meshy = NewMeshy(handler);
+        var ownerRoot = Path.Combine(_workDir, "owned-art");
+        var client = new TwoStepClient(
+            ("db_save_art_output", new() { ["specId"] = spec.Id, ["kind"] = "mesh", ["title"] = "Mesh",
+                ["body"] = "https://assets.test/mesh.glb", ["bodyKind"] = "glb" }, "saved"),
+            ("db_set_spec_status", new() { ["specId"] = spec.Id, ["status"] = "AssetReady" }, "ok"), "Done");
+        var factory = new ArtistAgentFactory(routing, _designArtifacts, _artOutputs, _runs, _memory, meshy,
+            new SingleClientFactory(client), new LlmConfig(new ProviderConfig("stub", "", null, null, "stub-model")),
+            new RoleAgentRegistry(), _events, NullLoggerFactory.Instance,
+            artOutputRoot: id => id == "second" ? ownerRoot : throw new InvalidOperationException("Wrong physical owner"));
+        var result = await factory.Create().ArtSpecAsync(spec.Id, ArtistTriggerKind.Manual);
+        Assert.True(result.Success, result.Error);
+        var created = Assert.Single(await new ArtOutputStore(secondary.Db).ListBySpecAsync(spec.Id));
+        Assert.Empty(await _artOutputs.ListBySpecAsync(spec.Id));
+        var expected = new byte[] { 0x67, 0x6c, 0x54, 0x46, 1, 2, 3 };
+        Assert.Equal(expected, await File.ReadAllBytesAsync(Path.Combine(ownerRoot, created.Body)));
+        Assert.False(File.Exists(Path.Combine(meshy.ArtOutputRoot, created.Body)));
+        var historical = await _artOutputs.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "History", spec.Id + "/old.glb", "glb"));
+        Directory.CreateDirectory(Path.Combine(meshy.ArtOutputRoot, spec.Id));
+        await File.WriteAllBytesAsync(Path.Combine(meshy.ArtOutputRoot, historical.Body), expected);
+        await new OwnedArtifactHistoryStore(secondary.Db).ImportAsync(new("primary", _issues.Db, meshy.ArtOutputRoot), owner);
+        var foreign = await _artOutputs.CreateAsync(new("foreign-spec", ArtOutputKind.Mesh, "Foreign", "foreign-spec/x.glb", "glb"));
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        ArtistEndpoints.MapArtistEndpoints(app, routing, factory, _runs, _artOutputs, meshy, NullLogger.Instance);
+        DesignArtEndpoints.MapDesignArtEndpoints(app, _designArtifacts, _artOutputs, null, _runs, NullLogger.Instance, routing);
+        await app.StartAsync();
+        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}") };
+        var gallery = await http.GetFromJsonAsync<JsonElement>("/api/art-output?projectId=second");
+        Assert.Equal(2, gallery.GetArrayLength());
+        foreach (var entry in gallery.EnumerateArray())
+            Assert.Equal(expected, await http.GetByteArrayAsync(entry.GetProperty("fileUrl").GetString()));
+        var rows = await http.GetFromJsonAsync<JsonElement>($"/api/specs/{spec.Id}/art-output");
+        Assert.Equal(2, rows.GetArrayLength());
+        Assert.Equal(expected, await http.GetByteArrayAsync($"/api/art-output/{historical.Id}/file"));
+        Assert.Equal(System.Net.HttpStatusCode.NotFound,
+            (await http.GetAsync($"/api/art-output/{foreign.Id}/file?specId={spec.Id}")).StatusCode);
+        await app.StopAsync();
     }
 
     [Fact]

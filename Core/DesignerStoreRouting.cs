@@ -28,30 +28,20 @@ public static class DesignerStoreRouting
     public static async Task<IReadOnlyList<DesignArtifact>> ListArtifactsAsync(ISpecStore? specs,
         DesignArtifactStore primary, string id, bool byProject, CancellationToken ct = default)
     {
-        if (specs is ProjectRoutingSpecStore routing)
+        var owner = (specs is ProjectRoutingSpecStore routing
+            ? byProject ? routing.FindRegisteredStore(id) : routing.ResolveOwner(id)
+            : specs) as SpecStore;
+        if (owner is null)
         {
-            var owner = (byProject ? routing.FindRegisteredStore(id) : routing.ResolveOwner(id)) as SpecStore;
-            if (owner is null) return [];
-            IReadOnlyList<string> ids = byProject ? await owner.ListOwnedIdsAsync(ct) : [id];
-            var owned = await new DesignArtifactStore(owner.Database).ListBySpecsAsync(ids, ct);
-            var historical = new List<DesignArtifact>();
-            // Owner-local records take precedence. Historical IDs remain tied to physically owned specs.
-            foreach (var store in routing.ArtifactStores)
-            {
-                if (new DesignArtifactStore(store.Database).UsesDatabase(owner.Database)) continue;
-                historical.AddRange(await new DesignArtifactStore(store.Database).ListBySpecsAsync(ids, ct));
-            }
-            return ArtifactHistory.IncludeUnambiguousHistory(owned, historical, artifact => artifact.Id)
-                .OrderBy(artifact => artifact.CreatedAt).ThenBy(artifact => artifact.Id, StringComparer.Ordinal).ToArray();
+            if (specs is ProjectRoutingSpecStore) return [];
+            return byProject ? await primary.ListByProjectAsync(id, ct) : await primary.ListBySpecAsync(id, ct: ct);
         }
-        var results = new List<DesignArtifact>(byProject
-            ? await primary.ListByProjectAsync(id, ct) : await primary.ListBySpecAsync(id, ct: ct));
-        if (specs is SpecStore local && !primary.UsesDatabase(local.Database))
-        {
-            var scoped = new DesignArtifactStore(local.Database);
-            results.AddRange(byProject ? await scoped.ListByProjectAsync(id, ct) : await scoped.ListBySpecAsync(id, ct: ct));
-        }
-        return results.DistinctBy(artifact => artifact.Id).OrderBy(artifact => artifact.CreatedAt)
-            .ThenBy(artifact => artifact.Id, StringComparer.Ordinal).ToArray();
+        if (byProject && specs is SpecStore && id != owner.ProjectId) return [];
+        if (!byProject && await owner.GetAsync(id, ct) is null) return [];
+        IReadOnlyList<string> ids = byProject ? await owner.ListOwnedIdsAsync(ct) : [id];
+        var owned = await new DesignArtifactStore(owner.Database).ListBySpecsAsync(ids, ct);
+        var historical = await new OwnedArtifactHistoryStore(owner.Database).ListDesignsAsync(ids, ct);
+        return ArtifactHistory.IncludeUnambiguousHistory(owned, historical, a => a.Id)
+            .OrderBy(a => a.CreatedAt).ThenBy(a => a.Id, StringComparer.Ordinal).ToArray();
     }
 }

@@ -2,14 +2,31 @@ using Forge.Core.Db;
 
 namespace Forge.Core;
 
-public sealed record ArtifactStoreSource(string ProjectId, IDbConnectionFactory Database, string? ArtOutputRoot);
-public sealed record LocatedArtifact<T>(T Artifact, ArtifactStoreSource Source);
+public sealed record ArtifactStoreSource(string ProjectId, IDbConnectionFactory Database, string? ArtOutputRoot)
+{
+    internal async Task<bool> HasForeignArtifactsAsync(CancellationToken ct)
+    {
+        var dialect = Database.Dialect;
+        var specs = dialect.Table("spec");
+        await using var connection = await Database.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT CASE WHEN EXISTS (
+                SELECT 1 FROM {dialect.Table("design_artifact")} a
+                WHERE NOT EXISTS (SELECT 1 FROM {specs} s WHERE s.id=a.spec_id)
+            ) OR EXISTS (
+                SELECT 1 FROM {dialect.Table("art_output")} a
+                WHERE NOT EXISTS (SELECT 1 FROM {specs} s WHERE s.id=a.spec_id)
+            ) THEN 1 ELSE 0 END
+            """;
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct)) == 1;
+    }
+}
 public sealed class ArtifactHistoryAmbiguousException(string artifactId)
     : InvalidOperationException($"Artifact {artifactId} exists in multiple historical stores.");
 
-/// <summary>Locate legacy records by their global ID and the reader's physical spec ownership.</summary>
-public sealed class ArtifactHistory(ISpecStore owner,
-    Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>> sources)
+/// <summary>Combine owned records with unambiguous retained historical records.</summary>
+public static class ArtifactHistory
 {
     public static IReadOnlyList<T> IncludeUnambiguousHistory<T>(IReadOnlyList<T> owned,
         IEnumerable<T> historical, Func<T, string> id)
@@ -17,33 +34,5 @@ public sealed class ArtifactHistory(ISpecStore owner,
         var ownerIds = owned.Select(id).ToHashSet(StringComparer.Ordinal);
         return owned.Concat(historical.Where(row => !ownerIds.Contains(id(row)))
             .GroupBy(id, StringComparer.Ordinal).Where(group => group.Count() == 1).Select(group => group.Single())).ToArray();
-    }
-
-    public Task<LocatedArtifact<DesignArtifact>?> FindDesignAsync(string id, CancellationToken ct = default)
-        => FindAsync(id, source => new DesignArtifactStore(source.Database).GetSpecIdAsync(id, ct),
-            source => new DesignArtifactStore(source.Database).GetAsync(id, ct), ct);
-
-    public Task<LocatedArtifact<ArtOutput>?> FindArtAsync(string id, CancellationToken ct = default)
-        => FindAsync(id, source => new ArtOutputStore(source.Database).GetSpecIdAsync(id, ct),
-            source => new ArtOutputStore(source.Database).GetAsync(id, ct), ct);
-
-    private async Task<LocatedArtifact<T>?> FindAsync<T>(string id,
-        Func<ArtifactStoreSource, Task<string?>> specId,
-        Func<ArtifactStoreSource, Task<T?>> read, CancellationToken ct) where T : class
-    {
-        if (owner is ProjectRoutingSpecStore)
-            throw new ArgumentException("Artifact history requires the reader's physical spec store.", nameof(owner));
-        ArtifactStoreSource? found = null;
-        foreach (var source in (await sources(ct)).DistinctBy(source =>
-            (source.Database.Provider, source.Database.ConnectionString, source.Database.Qualifier)))
-        {
-            var owningSpec = await specId(source);
-            if (owningSpec is null || await owner.GetAsync(owningSpec, ct) is null) continue;
-            if (found is not null) throw new ArtifactHistoryAmbiguousException(id);
-            found = source;
-        }
-        if (found is null) return null;
-        var artifact = await read(found);
-        return artifact is null ? null : new(artifact, found);
     }
 }
