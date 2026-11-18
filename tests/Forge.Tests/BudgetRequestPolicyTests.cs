@@ -58,6 +58,25 @@ public sealed class BudgetRequestPolicyTests
         Assert.Equal(0, transport.Calls);
     }
 
+    [Theory]
+    [InlineData(10, 60, 1000)]
+    [InlineData(40, 15, 1000)]
+    [InlineData(40, 60, 300000)]
+    public async Task AstraRequiresItsOwnRatesAndFitsTheSameRequestCeiling(int inputRate, int outputRate, int inputCount)
+    {
+        var options = Options();
+        const string model = "gpt-6.2-astra";
+        options.Budget.Models[model] = new() { InputUsdPerMillion = inputRate,
+            OutputUsdPerMillion = outputRate, MaximumInputTokens = 1_050_000 };
+        var ledger = new Ledger();
+        var transport = new Transport(ledger) { InputCount = inputCount };
+        using var client = new BudgetRequestPolicy.BudgetChatClient(transport, ledger, options,
+            new("openai", model, AgentType.CoreDev, "forge", 100), _ => Task.CompletedTask);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetResponseAsync(Input()));
+        Assert.Empty(ledger.Reservations);
+        Assert.Equal(0, transport.Calls);
+    }
+
     [Fact]
     public async Task ModelOverrideIsRejectedBeforeReserving()
     {
@@ -94,6 +113,23 @@ public sealed class BudgetRequestPolicyTests
         await client.GetResponseAsync(Input());
         Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
         Assert.Equal(.00013m, Assert.Single(ledger.Settlements));
+    }
+
+    [Theory]
+    [InlineData("gpt-6.2-astra", "default")]
+    [InlineData("gpt-6.1-sol", "priority")]
+    public async Task UnexpectedResponseModelOrTierRetainsReservation(string model, string tier)
+    {
+        var ledger = new Ledger();
+        var transport = new Transport(ledger)
+        {
+            OnBegin = () => ResponsesInputAdmission.Current!.BillingEvidenceJson =
+                JsonSerializer.Serialize(new { model, service_tier = tier, status = "completed" }),
+        };
+        using var client = Client(Options(), ledger, transport);
+        await client.GetResponseAsync(Input());
+        Assert.Single(ledger.Reservations);
+        Assert.Null(Assert.Single(ledger.Settlements));
     }
 
     [Theory]
@@ -233,12 +269,13 @@ public sealed class BudgetRequestPolicyTests
     private sealed class Transport(Ledger ledger) : IChatClient
     {
         public int Calls; public int? OutputBound; public bool Cancel, Partial;
+        public int InputCount = 1000;
         public Action? OnBegin;
         private async Task Begin(ChatOptions? options, CancellationToken ct)
         {
             var scope = ResponsesInputAdmission.Current!;
             scope.Claim();
-            await scope.AdmitAsync(1000, options!.MaxOutputTokens!.Value, ct);
+            await scope.AdmitAsync(InputCount, options!.MaxOutputTokens!.Value, ct);
             Assert.Single(ledger.Reservations);
             Calls++; OutputBound = options?.MaxOutputTokens;
             OnBegin?.Invoke();

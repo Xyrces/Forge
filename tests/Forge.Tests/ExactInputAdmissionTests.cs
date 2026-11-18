@@ -17,21 +17,26 @@ public sealed class ExactInputAdmissionTests
         {"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"gpt-6.1-sol","output":[{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque-reasoning"},{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"OK","annotations":[]}]}],"usage":{"input_tokens":1000,"output_tokens":2,"total_tokens":1002,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}
         """;
 
-    private static AgentOptions Options() => new()
+    private const string Sol61 = "gpt-6.1-sol";
+    private const string Sol62 = "gpt-6.2-sol";
+    private const string Astra62 = "gpt-6.2-astra";
+
+    private static AgentOptions Options(string model = Sol61) => new()
     {
         Llm = new() { Providers = [new() { Name = "openai", Api = "responses", BaseUrl = "https://api.openai.com/v1" }] },
         Budget = new() { PaidCallsEnabled = true, MaximumRequestUsd = 12m, Models = new() {
-            ["gpt-6.1-sol"] = new() { InputUsdPerMillion = 10, OutputUsdPerMillion = 15, MaximumInputTokens = 1050000 } } }
+            [model] = new() { InputUsdPerMillion = model == Astra62 ? 40 : 10, OutputUsdPerMillion = model == Astra62 ? 60 : 15,
+                MaximumInputTokens = 1050000 } } }
     };
 
-    private static IChatClient Native(HttpClient http) => OpenAICompatibleChatClientFactory.Build(
-        new("openai", "https://api.openai.com/v1", "fake-key", "org-test", "gpt-6.1-sol",
+    private static IChatClient Native(HttpClient http, string model = Sol61) => OpenAICompatibleChatClientFactory.Build(
+        new("openai", "https://api.openai.com/v1", "fake-key", "org-test", model,
             Api: "responses", MaxOutputTokens: 100, ProjectId: "project-test", ReasoningEffort: "High"),
-        "gpt-6.1-sol", httpClient: http);
+        model, httpClient: http);
 
-    private static IChatClient Budget(IChatClient inner, Ledger ledger, Func<CancellationToken, Task>? owner = null)
-        => new BudgetRequestPolicy.BudgetChatClient(inner, ledger, Options(),
-            new("openai", "gpt-6.1-sol", AgentType.CoreDev, "forge", 100), owner ?? (_ => Task.CompletedTask));
+    private static IChatClient Budget(IChatClient inner, Ledger ledger, Func<CancellationToken, Task>? owner = null, string model = Sol61)
+        => new BudgetRequestPolicy.BudgetChatClient(inner, ledger, Options(model),
+            new("openai", model, AgentType.CoreDev, "forge", 100), owner ?? (_ => Task.CompletedTask));
 
     [Theory]
     [InlineData(false)]
@@ -43,7 +48,7 @@ public sealed class ExactInputAdmissionTests
         var input = new[] { new ChatMessage(ChatRole.User, new string('界', 400_000)) };
         if (stream) { await foreach (var update in client.GetStreamingResponseAsync(input)) { } }
         else await client.GetResponseAsync(input);
-        Assert.True(Encoding.UTF8.GetByteCount(Assert.Single(handler.Counted)) > BudgetRequestPolicy.QualifiedContextTokens);
+        Assert.True(Encoding.UTF8.GetByteCount(Assert.Single(handler.Counted)) > OpenAiStandardPricing.ContextTokens);
         Assert.Single(handler.Generated);
         Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
         Assert.Equal(new[] { "count", "reserve", "generate" }, ledger.Events);
@@ -96,22 +101,45 @@ public sealed class ExactInputAdmissionTests
     }
 
     [Theory]
-    [InlineData(false, "completed")]
-    [InlineData(true, "completed")]
-    [InlineData(false, "incomplete")]
-    [InlineData(true, "incomplete")]
-    public async Task NativeUsagePreservesUnknownCacheWriteFieldsAndSettlesBothPaths(bool stream, string status)
+    [InlineData(false, "completed", Sol61, .0115, .0007, "openai-sol-standard-2026-11-17")]
+    [InlineData(true, "completed", Sol61, .0115, .0007, "openai-sol-standard-2026-11-17")]
+    [InlineData(false, "incomplete", Sol61, .0115, .0007, "openai-sol-standard-2026-11-17")]
+    [InlineData(true, "incomplete", Sol61, .0115, .0007, "openai-sol-standard-2026-11-17")]
+    [InlineData(false, "completed", Sol62, .0115, .0007, "openai-6.2-sol-standard-2026-11-17")]
+    [InlineData(true, "completed", Sol62, .0115, .0007, "openai-6.2-sol-standard-2026-11-17")]
+    [InlineData(false, "completed", Astra62, .046, .0028, "openai-6.2-astra-standard-2026-11-17")]
+    [InlineData(true, "completed", Astra62, .046, .0028, "openai-6.2-astra-standard-2026-11-17")]
+    public async Task NativeUsagePreservesCacheWriteFieldsAndSettlesForTheRequestedModel(bool stream, string status,
+        string model, decimal reserved, decimal settled, string basisVersion)
     {
         var ledger = new Ledger();
         var handler = new Wire(ledger) { Stream = stream, EventType = "response." + status, ResponseBody = Response
+            .Replace(Sol61, model)
             .Replace("\"status\":\"completed\"", "\"status\":\"" + status + "\"")
             .Replace("\"model\":", "\"service_tier\":\"default\",\"model\":")
             .Replace("\"cached_tokens\":0", "\"cached_tokens\":800,\"cache_write_tokens\":150,\"cache_write_tokens_details\":{\"ttl_30m_tokens\":100,\"ttl_12h_tokens\":50}") };
-        using var http = new HttpClient(handler); using var native = Native(http); using var client = Budget(native, ledger);
-        if (stream) { await foreach (var update in client.GetStreamingResponseAsync([new(ChatRole.User, "test")])) { } }
-        else await client.GetResponseAsync([new(ChatRole.User, "test")]);
-        Assert.Equal(.0115m, Assert.Single(ledger.Reservations).ReservationUsd);
-        Assert.Equal(.0007m, Assert.Single(ledger.Settled));
+        using var http = new HttpClient(handler); using var native = Native(http, model); using var client = Budget(native, ledger, model: model);
+        var options = new ChatOptions { MaxOutputTokens = 900 };
+        if (stream) { await foreach (var update in client.GetStreamingResponseAsync([new(ChatRole.User, "test")], options)) { } }
+        else await client.GetResponseAsync([new(ChatRole.User, "test")], options);
+
+        using var counted = JsonDocument.Parse(Assert.Single(handler.Counted));
+        using var generated = JsonDocument.Parse(Assert.Single(handler.Generated));
+        foreach (var body in new[] { counted.RootElement, generated.RootElement })
+        {
+            Assert.Equal(model, body.GetProperty("model").GetString());
+            Assert.Equal("high", body.GetProperty("reasoning").GetProperty("effort").GetString());
+        }
+        Assert.Equal("default", generated.RootElement.GetProperty("service_tier").GetString());
+        Assert.Equal(100, generated.RootElement.GetProperty("max_output_tokens").GetInt32());
+        Assert.Equal(stream, generated.RootElement.TryGetProperty("stream", out var streamFlag) && streamFlag.GetBoolean());
+        Assert.Equal(new[] { "count", "reserve", "generate" }, ledger.Events);
+
+        var reservation = Assert.Single(ledger.Reservations);
+        Assert.Equal(model, reservation.Model);
+        Assert.Equal(reserved, reservation.ReservationUsd);
+        Assert.Equal(settled, Assert.Single(ledger.Settled));
+        Assert.Equal(basisVersion + ":usage-estimate", Assert.Single(ledger.Bases));
         var evidence = Assert.Single(ledger.Evidence);
         Assert.Contains("ttl_12h_tokens", evidence);
         Assert.DoesNotContain("opaque-reasoning", evidence);
