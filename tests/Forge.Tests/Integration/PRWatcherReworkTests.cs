@@ -805,7 +805,7 @@ public class PRWatcherReworkTests : IDisposable
         var task = await SeedAsync();
         await _issues.SetCheckpointAsync(task.Id, DispatchCheckpoint.PrOpened);
         // A different fixture/project may legitimately use exactly the same task ID.
-        var unrelated = ReviewWorkerAttempt.Gate(null, task.Id, AgentType.Reviewer);
+        var unrelated = ReviewWorkerAttempt.Gate(_workDir + "-other", task.Id, AgentType.Reviewer);
         await unrelated.WaitAsync();
         try
         {
