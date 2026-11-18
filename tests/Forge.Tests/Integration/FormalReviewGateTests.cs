@@ -502,6 +502,32 @@ public sealed class FormalReviewGateTests : IDisposable
         Assert.Equal(0, ReviewWaitTiming.CompletedSeconds(current));
     }
 
+    [Theory]
+    [InlineData(true)] [InlineData(false)]
+    public async Task ExternalGateWaitStopsWhileWorkerOrCiStillHasWork(bool workerActive)
+    {
+        var task = await Seed();
+        var github = new GitHub { Requirements = new("BLOCKED", []), Ci = workerActive ? CommitState.Success : CommitState.Pending };
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object>
+        { ["reviewExternalWaitStartedAt"] = DateTimeOffset.UtcNow.AddMinutes(-5).ToString("O") });
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github, workerActive).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.NotNull(current.GetMetadata("reviewExternalWaitEndedAt"));
+        var measured = ReviewWaitTiming.ExternalSeconds(current);
+        await Watch(github, workerActive).PollWatchedTaskAsync(current);
+        Assert.Equal(measured, ReviewWaitTiming.ExternalSeconds((await _issues.GetAsync(task.Id))!));
+    }
+
+    [Fact]
+    public async Task AutomatedThreadReconciliationDoesNotStartExternalGateTimer()
+    {
+        var task = await Seed();
+        var github = new GitHub { Requirements = new("BLOCKED",
+            [new("thread", false, true, "File.cs", "reviewer[bot]", "comment", false, "Review concern")]) };
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reviewExternalWaitStartedAt"));
+    }
+
     [Fact]
     public async Task ReleasingLongHumanWaitDoesNotImmediatelyExpireTheWatch()
     {

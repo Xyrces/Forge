@@ -267,24 +267,23 @@ public sealed partial class PRWatcher
         {
             formalGate = await TryReadFormalGateAsync(task, pr, sha, cancellationToken);
             if (formalGate is null) return WatchPollOutcome.Pending;
-            if (_issues is IssueStore waitStore)
-            {
-                var externalWait = ReviewWaitTiming.ObserveExternal(task,
-                    formalGate.Waiting && !formalGate.HumanWaiting, DateTimeOffset.UtcNow);
-                if (externalWait.Count > 0)
-                    await waitStore.PatchReviewMetadataAsync(taskId, externalWait, null, cancellationToken);
-            }
+            // Close a released gate's observed interval before evaluating the stale deadline.
+            if (!formalGate.Waiting || formalGate.HumanWaiting || !formalGate.AutomatedSatisfied
+                || formalGate.AutomationPending || formalGate.Requests.Count > 0)
+                await RecordExternalWaitAsync(task, false, cancellationToken);
             if (!formalGate.Waiting) await RecordHumanWaitAsync(task, false, cancellationToken);
         }
         if (_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
         {
             if (formalRequired) await RecordHumanWaitAsync(task, false, cancellationToken);
+            if (formalRequired) await RecordExternalWaitAsync(task, false, cancellationToken);
             return WatchPollOutcome.Pending;
         }
         if (_runs is not null && (await _runs.ListActiveAsync(cancellationToken))
             .Any(r => r.TaskId == taskId && r.Role is "CoreDev" or "ClientDev"))
         {
             if (formalRequired) await RecordHumanWaitAsync(task, false, cancellationToken);
+            if (formalRequired) await RecordExternalWaitAsync(task, false, cancellationToken);
             return WatchPollOutcome.Pending;
         }
         // Human decisions have no expiry or paid retry budget. Current-head findings
@@ -458,10 +457,16 @@ public sealed partial class PRWatcher
                 || string.Equals(qaVerdict, QaDispatcher.VerdictNotApplicable, StringComparison.Ordinal)));
         var qaFailed = _qaEnabled && qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal);
         if (formalGate is not null)
+        {
             await RecordHumanWaitAsync(task, formalGate.HumanWaiting && formalGate.AutomatedSatisfied
                 && formalGate.Requests.Count == 0 && ciGreen && qaPassed
                 && formalGate.MergeState is not ("BEHIND" or "DIRTY")
                 && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
+            await RecordExternalWaitAsync(task, formalGate.Waiting && !formalGate.HumanWaiting
+                && formalGate.AutomatedSatisfied && !formalGate.AutomationPending && formalGate.Requests.Count == 0
+                && ciGreen && qaPassed && formalGate.MergeState is not ("BEHIND" or "DIRTY")
+                && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
+        }
 
         // Rework guard: a rework round was already queued FOR THIS
         // HEAD. The guard reads the MACHINE's record on the task

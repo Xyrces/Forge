@@ -14,7 +14,8 @@ public sealed partial class PRWatcher
     }
 
     private sealed record FormalGate(bool Approved, bool Waiting, IReadOnlyList<FormalDecision> Requests, bool AutomatedSatisfied,
-        bool ProtectionUnavailable = false, bool HumanPending = false, string? MergeState = null, bool HumanWaiting = false);
+        bool ProtectionUnavailable = false, bool HumanPending = false, string? MergeState = null, bool HumanWaiting = false,
+        bool AutomationPending = false);
 
     private async Task<FormalGate> ReadFormalGateAsync(IssueRecord task, PullRequest pr, string head, CancellationToken ct)
     {
@@ -87,7 +88,16 @@ public sealed partial class PRWatcher
         await store.PatchReviewMetadataAsync(task.Id, fields, null, ct);
         return new((!automated || effective.AutomatedApproved) && (!human || effective.HumanApproved)
             && !effective.OutstandingHumanObjection && protectionSatisfied && mergeSatisfied, waiting, requests,
-            !automated || effective.AutomatedApproved, protection is null, humanPending, merge?.State, humanWaiting);
+            !automated || effective.AutomatedApproved, protection is null, humanPending, merge?.State, humanWaiting,
+            merge is not null && merge.Unresolved > humanThreads);
+    }
+
+    private async Task RecordExternalWaitAsync(IssueRecord task, bool waiting, CancellationToken ct)
+    {
+        if (_issues is not IssueStore store) return;
+        var current = await store.GetAsync(task.Id, ct) ?? task;
+        var fields = ReviewWaitTiming.ObserveExternal(current, waiting, DateTimeOffset.UtcNow);
+        if (fields.Count > 0) await store.PatchReviewMetadataAsync(task.Id, fields, null, ct);
     }
 
     private async Task RecordHumanWaitAsync(IssueRecord task, bool waiting, CancellationToken ct)
