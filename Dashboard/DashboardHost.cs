@@ -250,7 +250,7 @@ public sealed class DashboardHost : IAsyncDisposable
         var localBaseAddress = ResolveLocalBaseAddress();
         var mutationAuthentication = _mutationTokenFile is null ? null
             : new DashboardMutationAuthentication(await File.ReadAllTextAsync(_mutationTokenFile, cancellationToken));
-        builder.Services.AddForgeUI(new Uri(publicBaseUrl), new Uri(localBaseAddress), mutationAuthentication);
+        builder.Services.AddForgeUI(builder.Environment, new Uri(publicBaseUrl), new Uri(localBaseAddress), mutationAuthentication);
 
         if (_projectFactory is not null) builder.Services.AddSingleton(_projectFactory);
         if (_slots is not null) builder.Services.AddSingleton(_slots);

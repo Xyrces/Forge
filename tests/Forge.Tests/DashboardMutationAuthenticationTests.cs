@@ -80,17 +80,18 @@ public sealed class DashboardMutationAuthenticationTests
     [Fact]
     public async Task RegisteredServerClientsReceiveProtectionWithoutBrowserToken()
     {
-        var services=new ServiceCollection();services.AddLogging();
+        var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { EnvironmentName = "Production" });
+        var services = builder.Services;
         var local=new Uri("http://localhost:4197");
-        services.AddForgeUI(local,local,new DashboardMutationAuthentication(Token));
+        services.AddForgeUI(builder.Environment,local,local,new DashboardMutationAuthentication(Token));
         var captures=new Dictionary<string,Capture>();
         foreach(var name in new[]{"ForgeApi","ForgeApiLongPoll",typeof(Forge.Dashboard.Features.Deployments.DeploymentsClient).FullName!})
         {
             var capture=new Capture();captures[name]=capture;
             services.AddHttpClient(name).ConfigurePrimaryHttpMessageHandler(()=>capture);
         }
-        using var provider=services.BuildServiceProvider();
-        var factory=provider.GetRequiredService<IHttpClientFactory>();
+        await using var app = builder.Build();
+        var factory=app.Services.GetRequiredService<IHttpClientFactory>();
         foreach(var (name,capture) in captures)
         {
             using var client=factory.CreateClient(name);
