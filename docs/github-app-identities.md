@@ -78,3 +78,19 @@ Cards and task detail name the configured login in the review action and show
 that person as next actor only when human review is actually actionable. Adding
 an extra hold while engineering is running does not stop engineering; releasing
 that hold cannot waive project-wide human approval.
+
+## Protected approval waits
+
+A submitted reviewer App approval is not necessarily an eligible approval under
+GitHub branch protection. Before merging, Forge reads the current-head GraphQL
+`reviewDecision` using its publisher identity. `REVIEW_REQUIRED` and
+`CHANGES_REQUESTED` retain the watch without merge attempts or paid rework strikes;
+current-head findings, failed CI and conflicts still follow normal correction.
+Forge's own human holds, nominated reviewers and unresolved human objections also
+remain required, including repositories with no protected-review requirement.
+
+The board/task situation distinguishes “GitHub approval required”, “GitHub changes
+requested”, and an unavailable protection check. A separately required named human
+remains the next actor. Missing, stale-head, unknown or error responses fail closed
+without inventing CI results or approvals. Refused merges refresh this wait state.
+No branch rules, credentials or bypass permissions are changed.

@@ -82,6 +82,7 @@ public class LocalGitHubServiceOverrideTests
             "GetFailedCheckRunSummariesAsync",
             "GetIssueCommentsAsync",
             "GetOpenPullRequestForBranchAsync",
+            "GetProtectionReviewDecisionAsync",
             "GetPullRequestAsync",
             "GetPullRequestDiffAsync",
             "GetReviewReworkContextAsync",

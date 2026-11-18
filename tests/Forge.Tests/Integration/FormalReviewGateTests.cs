@@ -49,6 +49,11 @@ public sealed class FormalReviewGateTests : IDisposable
         public GitHub() : base("owner", "repo") { }
         public override string? ReviewerLogin => "reviewer[bot]";
         public int Reads, Merges;
+        public ProtectionReviewDecision Protection = ProtectionReviewDecision.NotRequired;
+        public bool ProtectionUnavailable;
+        public Action? OnMerge;
+        public override Task<ProtectionReviewDecision> GetProtectionReviewDecisionAsync(int number, string head, CancellationToken ct = default)
+            => ProtectionUnavailable ? Task.FromException<ProtectionReviewDecision>(new InvalidOperationException("read unavailable")) : Task.FromResult(Protection);
         public bool Label;
         public CommitState Ci = CommitState.Success;
         public bool Mergeable = true;
@@ -64,11 +69,12 @@ public sealed class FormalReviewGateTests : IDisposable
         }
         public override Task<bool> HasHumanReviewLabelAsync(int number, CancellationToken ct = default) => Task.FromResult(Label);
         public override Task SetHumanReviewLabelAsync(int number, bool required, CancellationToken ct = default) { Label = required; return Task.CompletedTask; }
+        public override Task<string> GetReviewReworkContextAsync(int number, IReadOnlyList<FormalDecision> requests, CancellationToken ct = default) => Task.FromResult("original human finding");
         public override Task<IReadOnlyList<FormalDecision>> GetAuthorizedDecisionsAsync(int number, string? author, CancellationToken ct = default) => Task.FromResult(Decisions(++Reads));
         public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult(sha == "base" ? CommitState.Success : Ci);
         public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default) => Task.FromResult("base");
         public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>(["test failure"]);
-        public override Task<bool> MergePullRequestAsync(int number, CancellationToken cancellationToken = default, string? expectedHeadSha = null) { Merges++; return Task.FromResult(false); }
+        public override Task<bool> MergePullRequestAsync(int number, CancellationToken cancellationToken = default, string? expectedHeadSha = null) { Merges++; OnMerge?.Invoke(); return Task.FromResult(false); }
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
     }
     private static FormalDecision Decision(string user, bool bot, PullRequestReviewState state, string head = "head", long id = 1) => new(user, head, state, bot, id, "finding", "url");
@@ -97,6 +103,135 @@ public sealed class FormalReviewGateTests : IDisposable
         github.Decisions = _ => [Decision("reviewer[bot]",true,PullRequestReviewState.Approved),Decision("OWNER",false,PullRequestReviewState.Approved)];
         await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!);
         Assert.Equal(1,github.Merges);
+    }
+
+    [Fact]
+    public async Task AppApprovalWaitsForEligibleProtectedApprovalWithoutMergeRetries()
+    {
+        var task = await Seed();
+        var github = new GitHub { Protection = ProtectionReviewDecision.ReviewRequired };
+        for (var i = 0; i < 3; i++)
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        var waiting = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(0, github.Merges);
+        Assert.Null(waiting.GetMetadata("reworkAttempts"));
+        Assert.Equal("True", waiting.GetMetadata("awaitingHumanReview"));
+        Assert.Equal("GitHub approval required", TaskSituation.Describe(waiting).Label);
+        github.Decisions = _ => [Decision("reviewer[bot]", true, PullRequestReviewState.Approved), Decision("human", false, PullRequestReviewState.Approved)];
+        github.Protection = ProtectionReviewDecision.Approved;
+        await Watch(github).PollWatchedTaskAsync(waiting);
+        Assert.Equal(1, github.Merges);
+        Assert.Equal("False", (await _issues.GetAsync(task.Id))!.GetMetadata("awaitingHumanReview"));
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public async Task ProtectedApprovalWaitAndUnavailableReadStillAllowCiRepair(bool unavailable)
+    {
+        var github = new GitHub { Protection = ProtectionReviewDecision.ReviewRequired, ProtectionUnavailable = unavailable, Ci = CommitState.Failure };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(0, github.Merges);
+        Assert.Equal("False", (await _issues.GetAsync(task.Id))!.GetMetadata("awaitingHumanReview"));
+    }
+
+    [Fact]
+    public async Task UnavailableProtectionFailsClosedWithoutInventingHumanWait()
+    {
+        var github = new GitHub { ProtectionUnavailable = true };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(0, github.Merges);
+        var waiting = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("False", waiting.GetMetadata("awaitingHumanReview"));
+        Assert.Equal("Review check unavailable", TaskSituation.Describe(waiting).Label);
+    }
+
+    [Fact]
+    public async Task ProtectedRequestedChangesStillQueueCurrentHeadCorrection()
+    {
+        var task = await Seed();
+        var github = new GitHub { Protection = ProtectionReviewDecision.ChangesRequested,
+            Decisions = _ => [Decision("human", false, PullRequestReviewState.ChangesRequested)] };
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(0, github.Merges);
+        Assert.Equal("False", (await _issues.GetAsync(task.Id))!.GetMetadata("awaitingHumanReview"));
+    }
+
+    [Theory]
+    [InlineData(ProtectionReviewDecision.NotRequired)]
+    [InlineData(ProtectionReviewDecision.Approved)]
+    public async Task GithubDecisionNeverOverridesForgeHoldOrOldHumanObjection(ProtectionReviewDecision protection)
+    {
+        var task = await Seed();
+        await new PullRequestReviewPolicy(new MemoryStore(_issues.Db)).SetHoldAsync(task.Id, new(true, true), default);
+        var github = new GitHub { Protection = protection };
+        await Watch(github).PollWatchedTaskAsync(task);
+        Assert.Equal(0, github.Merges);
+        await new PullRequestReviewPolicy(new MemoryStore(_issues.Db)).SetHoldAsync(task.Id, new(false, true), default);
+        github.Decisions = _ => [Decision("reviewer[bot]", true, PullRequestReviewState.Approved), Decision("human", false, PullRequestReviewState.ChangesRequested, "old")];
+        await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!);
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Fact]
+    public async Task ProtectedWaitIsNotTimedOutAndRecoveryDoesNotBypassIt()
+    {
+        var task = await Seed();
+        task = await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null,
+            new Dictionary<string, object> { ["prOpenedAt"] = DateTimeOffset.UtcNow.AddDays(-3).ToString("O") });
+        var github = new GitHub { Protection = ProtectionReviewDecision.ReviewRequired };
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
+        task = await _issues.TransitionAsync(task.Id, IssueStatus.Blocked, null);
+        Assert.Null(await Watch(github).TryResumeMergeableBlockedAsync(task));
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public async Task ProtectedWaitAndOutageRetainNamedHumanRequirement(bool unavailable)
+    {
+        var task = await Seed();
+        await new PullRequestReviewPolicy(new MemoryStore(_issues.Db)).SetAsync(RequiredReview.Human, "Xyrces", "operator", default);
+        var github = new GitHub { Protection = ProtectionReviewDecision.ReviewRequired, ProtectionUnavailable = unavailable,
+            Decisions = _ => [] };
+        await Watch(github).PollWatchedTaskAsync(task);
+        var waiting = (await _issues.GetAsync(task.Id))!;
+        var situation = TaskSituation.Describe(waiting, nominatedHuman: "Xyrces");
+        Assert.Equal("@Xyrces", situation.NextActor);
+        Assert.DoesNotContain("Forge reviewer approval", situation.Text);
+        Assert.Equal(unavailable ? "Waiting for human review" : "GitHub approval required", situation.Label);
+        Assert.Equal("True", waiting.GetMetadata("awaitingHumanReview"));
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Fact]
+    public async Task AggregateOldRequestedChangesStayVisibleWithoutRepeatingCorrection()
+    {
+        var task = await Seed();
+        var github = new GitHub { Protection = ProtectionReviewDecision.ChangesRequested,
+            Decisions = _ => [Decision("reviewer[bot]", true, PullRequestReviewState.Approved), Decision("human", false, PullRequestReviewState.ChangesRequested, "old")] };
+        await Watch(github).PollWatchedTaskAsync(task);
+        var waiting = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("GitHub changes requested", TaskSituation.Describe(waiting).Label);
+        Assert.Null(waiting.GetMetadata("reworkAttempts"));
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Fact]
+    public async Task RefusedMergeImmediatelyRecordsNewProtectionWait()
+    {
+        var task = await Seed();
+        var github = new GitHub();
+        github.OnMerge = () => github.Protection = ProtectionReviewDecision.ReviewRequired;
+        await Watch(github).PollWatchedTaskAsync(task);
+        var waiting = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(1, github.Merges);
+        Assert.Equal("True", waiting.GetMetadata("awaitingHumanReview"));
+        Assert.Equal("GitHub approval required", TaskSituation.Describe(waiting).Label);
+        await Watch(github).PollWatchedTaskAsync(waiting);
+        Assert.Equal(1, github.Merges);
     }
 
     [Fact]

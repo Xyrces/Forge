@@ -61,6 +61,9 @@ public sealed class LocalGitHubService : GitHubService
         return Task.FromResult<IReadOnlyList<FormalDecision>>(decisions);
     }
 
+    public override Task<ProtectionReviewDecision> GetProtectionReviewDecisionAsync(int number, string head, CancellationToken ct = default)
+        => Task.FromResult(ProtectionReviewDecision.NotRequired);
+
     public override Task<bool> HasHumanReviewLabelAsync(int number, CancellationToken ct = default)
         => Task.FromResult(_prStore.HumanReviewLabels.ContainsKey(number));
 

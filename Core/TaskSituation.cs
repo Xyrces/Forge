@@ -43,8 +43,26 @@ public static class TaskSituation
         if (state == "ReworkRunning") return Result("Making a requested change", issue.GetMetadata("reworkReason") ?? "The worker is addressing feedback.", "Worker");
         if (state == "ReworkQueued") return Result("Change queued", issue.GetMetadata("reworkReason") ?? "A worker will address the requested change.", "Worker");
         if (state == "AgentRunning") return Result("Implementing", "The worker is preparing and verifying the change.", "Worker");
+        var humanPending = bool.TryParse(issue.GetMetadata("reviewHumanPending"), out var pending) && pending;
+        var humanActor = nominatedHuman is null ? "Human reviewer" : "@" + nominatedHuman;
+        var humanRequirement = nominatedHuman is null ? "Forge also requires human review."
+            : $"Forge also requires review by @{nominatedHuman}.";
+        var protection = issue.GetMetadata("reviewProtectionDecision");
         if (bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting)
-            return Result("Waiting for human review", "Review the current PR revision before merge.", nominatedHuman is null ? "Human reviewer" : "@" + nominatedHuman, "action");
+        {
+            if (protection is "ReviewRequired" or "ChangesRequested")
+                return Result(protection == "ChangesRequested" ? "GitHub changes requested" : "GitHub approval required",
+                    (protection == "ChangesRequested"
+                        ? "GitHub still reports requested changes. Address the review and obtain an eligible approval of the current revision before merge."
+                        : "GitHub branch protection still requires an eligible approval of this revision.")
+                    + (humanPending ? " " + humanRequirement : ""),
+                    humanPending ? humanActor : "Eligible GitHub reviewer", "action");
+            return Result("Waiting for human review", "Review the current PR revision before merge."
+                + (protection == "Unavailable" ? " GitHub’s protected review check is also temporarily unavailable; Forge will retry it." : ""), humanActor, "action");
+        }
+        if (protection == "Unavailable")
+            return Result("Review check unavailable", "Forge cannot yet confirm GitHub’s protected review requirement. It will retry the read before merging."
+                + (humanPending ? " " + humanRequirement : ""), humanPending ? humanActor : "Forge", "warn");
         if (issue.Status == IssueStatus.Pending)
             return Result("Queued", issue.GetMetadata("reworkReason") ?? "Waiting for an available worker.", "Worker");
         if (state == "MergeReady") return Result("Final merge checks", "Forge is checking review, CI and merge requirements.", "Forge");
