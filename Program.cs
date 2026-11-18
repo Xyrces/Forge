@@ -704,6 +704,7 @@ Console.Error.WriteLine(ex.ToString());
             var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
             await using var issues = new IssueStore(primaryFactory);
             var recoveryReports = new RecoveryReportStore(primaryFactory);
+            var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
             var worktrees = new GitWorktreeService(
                 new WorkspaceOptions
                 {
@@ -711,8 +712,9 @@ Console.Error.WriteLine(ex.ToString());
                     WorktreeRoot = options.Workspace.WorktreeRoot,
                     DefaultBranch = options.Workspace.DefaultBranch,
                 },
-                loggerFactory.CreateLogger<GitWorktreeService>());
-            var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
+                loggerFactory.CreateLogger<GitWorktreeService>(),
+                publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+                publisherRepository: gitHub.UsesAppIdentity ? $"https://github.com/{options.GitHub.Owner}/{options.GitHub.Repo}" : null);
             var recovery = new Orchestrator.StartupRecovery(
                 issues, recoveryReports, worktrees,
                 new Orchestrator.GitHubRecoveryAdapter(gitHub),

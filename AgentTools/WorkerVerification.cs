@@ -24,18 +24,18 @@ public static class WorkerVerification
     }
 
     public static async Task<bool> MatchesAsync(VerificationReceipt receipt, string worktree,
-        IReadOnlyList<string> commands, CancellationToken ct) =>
-        receipt.CommandsSha == CommandsHash(commands) && receipt.TreeSha == await TreeAsync(worktree, ct);
+        IReadOnlyList<string> commands, CancellationToken ct, string? trustedRepositoryRoot = null) =>
+        receipt.CommandsSha == CommandsHash(commands) && receipt.TreeSha == await TreeAsync(worktree, ct, trustedRepositoryRoot);
 
     /// <summary>Prospective commit tree using a private index; tracked and untracked nonignored edits are included.</summary>
-    public static async Task<string> TreeAsync(string worktree, CancellationToken ct)
+    public static async Task<string> TreeAsync(string worktree, CancellationToken ct, string? trustedRepositoryRoot = null)
     {
         var index = Path.Combine(Path.GetTempPath(), "forge-verification-index-" + Guid.NewGuid().ToString("N"));
         try
         {
-            await GitAsync(worktree, index, ["read-tree", "HEAD"], ct);
-            await GitAsync(worktree, index, ["add", "-A", "--", "."], ct);
-            return (await GitAsync(worktree, index, ["write-tree"], ct)).Trim();
+            await GitAsync(worktree, index, ["read-tree", "HEAD"], ct, trustedRepositoryRoot);
+            await GitAsync(worktree, index, ["add", "-A", "--", ":/"], ct, trustedRepositoryRoot);
+            return (await GitAsync(worktree, index, ["write-tree"], ct, trustedRepositoryRoot)).Trim();
         }
         finally
         {
@@ -44,10 +44,16 @@ public static class WorkerVerification
         }
     }
 
-    private static async Task<string> GitAsync(string worktree, string index, string[] arguments, CancellationToken ct)
+    private static async Task<string> GitAsync(string worktree, string index, string[] arguments, CancellationToken ct, string? trustedRepositoryRoot)
     {
+        var controllerApps = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"));
+        if (controllerApps && trustedRepositoryRoot is null)
+            throw new InvalidOperationException("Controller receipt verification requires the registered repository root.");
+        using var isolation = controllerApps || (OperatingSystem.IsLinux() && trustedRepositoryRoot is not null)
+            ? new IsolatedGitMetadata(worktree, trustedRepositoryRoot: trustedRepositoryRoot) : null;
         var start = new ProcessStartInfo("git") { WorkingDirectory = worktree, UseShellExecute = false,
             RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        isolation?.Configure(start);
         start.Environment["GIT_INDEX_FILE"] = index;
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Git verification snapshot.");
@@ -56,6 +62,7 @@ public static class WorkerVerification
         try { await process.WaitForExitAsync(ct); }
         catch (OperationCanceledException) { if (!process.HasExited) process.Kill(true); throw; }
         if (process.ExitCode != 0) throw new InvalidOperationException("Git verification snapshot failed: " + await error);
+        isolation?.PublishData();
         return await output;
     }
 }

@@ -304,6 +304,9 @@ public static class DeploymentsEndpoints
             CreateNoWindow = true,
             StandardOutputEncoding = Encoding.UTF8,
         };
+        using var isolation = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+            ? null : new Forge.AgentTools.IsolatedGitMetadata(root);
+        isolation?.Configure(psi);
         using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start git");
         var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
         await proc.WaitForExitAsync(ct);

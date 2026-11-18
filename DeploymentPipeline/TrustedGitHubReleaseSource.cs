@@ -16,7 +16,7 @@ public sealed record TrustedImageReceipt(string SourceSha, string ImageDigest, b
     int SchemaVersion, string ValidationWorkflow, string ValidationRunId);
 
 /// <summary>Trusted control-plane reads only. Repository content and artifact prose never authorize a release.</summary>
-public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downloads, Func<string, CancellationToken, Task<string?>> token,
+public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downloads, Func<ProjectOptions, CancellationToken, Task<string?>> token,
     Func<string?> runningRevision) : IRoutineReleaseSource, IDisposable
 {
     // REST 2026-03-10 removes merge_commit_sha from PR responses. This reader
@@ -77,7 +77,7 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
             // Non-code dispositions belong to the completion evaluator, not an invented source SHA.
             if (member.GetMetadata("prNumber") is not { } value) continue;
             if (!int.TryParse(value, out var number) || number <= 0) throw new InvalidOperationException("Invalid merged pull request evidence.");
-            using var document = await GetJson(project.Id, $"repos/{repo}/pulls/{number}", ct, MergedPullRequestApiVersion);
+            using var document = await GetJson(project, $"repos/{repo}/pulls/{number}", ct, MergedPullRequestApiVersion);
             var pr = document.RootElement;
             if (!pr.TryGetProperty("merge_commit_sha", out var mergeCommit)
                 || mergeCommit.ValueKind != JsonValueKind.String || !Sha(mergeCommit.GetString()))
@@ -92,7 +92,7 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         foreach (var observation in observations.Skip(1))
         {
             if (frontier == observation.Sha) continue;
-            using var comparison = await GetJson(project.Id, $"repos/{repo}/compare/{frontier}...{observation.Sha}", ct);
+            using var comparison = await GetJson(project, $"repos/{repo}/compare/{frontier}...{observation.Sha}", ct);
             var relation = comparison.RootElement.GetProperty("status").GetString();
             if (relation == "ahead") frontier = observation.Sha;
             else if (relation is not ("behind" or "identical"))
@@ -103,7 +103,7 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         var running = runningRevision()?.Trim();
         if (!Sha(running))
             throw new InvalidOperationException("Running controller source revision is unavailable; routine deployment cannot prove forward ancestry.");
-        using var branch = await GetJson(project.Id, $"repos/{repo}/branches/{Uri.EscapeDataString(project.DefaultBranch)}", ct);
+        using var branch = await GetJson(project, $"repos/{repo}/branches/{Uri.EscapeDataString(project.DefaultBranch)}", ct);
         var branchTip = branch.RootElement.GetProperty("commit").GetProperty("sha").GetString()!;
         await RequireAncestor(project, repo, frontier, branchTip, ct);
 
@@ -137,7 +137,7 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
     {
         if (!Sha(ancestor) || !Sha(descendant)) throw new InvalidOperationException("Merged source evidence requires full commit identities.");
         if (ancestor == descendant) return true;
-        using var comparison = await GetJson(project.Id, $"repos/{repo}/compare/{ancestor}...{descendant}", ct);
+        using var comparison = await GetJson(project, $"repos/{repo}/compare/{ancestor}...{descendant}", ct);
         if (!comparison.RootElement.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String)
             throw new InvalidOperationException("GitHub ancestry evidence is missing.");
         return status.GetString() switch
@@ -158,11 +158,11 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         var repo = Repository(project);
         var validationRun = await FindValidationRun(project, repo, sha, ct);
         if (validationRun is null) return null;
-        using var workflow = await GetJson(project.Id, $"repos/{repo}/actions/workflows/{options.RoutineWorkflow}", ct);
+        using var workflow = await GetJson(project, $"repos/{repo}/actions/workflows/{options.RoutineWorkflow}", ct);
         var workflowId = workflow.RootElement.GetProperty("id").GetInt64();
         if (workflow.RootElement.GetProperty("path").GetString() != ".github/workflows/" + options.RoutineWorkflow)
             throw new InvalidOperationException("Configured workflow path changed.");
-        using var runs = await GetJson(project.Id, $"repos/{repo}/actions/workflows/{workflowId}/runs?head_sha={sha}&branch={Uri.EscapeDataString(project.DefaultBranch)}&event=push&per_page=100", ct);
+        using var runs = await GetJson(project, $"repos/{repo}/actions/workflows/{workflowId}/runs?head_sha={sha}&branch={Uri.EscapeDataString(project.DefaultBranch)}&event=push&per_page=100", ct);
         foreach (var run in runs.RootElement.GetProperty("workflow_runs").EnumerateArray().OrderByDescending(r => r.GetProperty("id").GetInt64()).Take(1))
         {
             if (run.GetProperty("status").GetString() != "completed" || run.GetProperty("conclusion").GetString() != "success") continue;
@@ -172,7 +172,7 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
                 !string.Equals(run.GetProperty("repository").GetProperty("full_name").GetString(), repo, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(run.GetProperty("head_repository").GetProperty("full_name").GetString(), repo, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Workflow run provenance does not match routine release policy.");
-            using var artifacts = await GetJson(project.Id, $"repos/{repo}/actions/runs/{runId}/artifacts?per_page=100", ct);
+            using var artifacts = await GetJson(project, $"repos/{repo}/actions/runs/{runId}/artifacts?per_page=100", ct);
             var matches = artifacts.RootElement.GetProperty("artifacts").EnumerateArray()
                 .Where(a => a.GetProperty("name").GetString() == "forge-image-receipt" && !a.GetProperty("expired").GetBoolean()).ToArray();
             if (matches.Length == 0) continue;
@@ -188,7 +188,7 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
             var digest = artifact.GetProperty("digest").GetString();
             if (artifact.GetProperty("size_in_bytes").GetInt64() > 1048576 || digest is null || !Regex.IsMatch(digest, "^sha256:[0-9a-f]{64}$"))
                 throw new InvalidOperationException("CI artifact has no bounded immutable digest.");
-            var bytes = await DownloadArtifact(project.Id, $"repos/{repo}/actions/artifacts/{id}/zip", ct);
+            var bytes = await DownloadArtifact(project, $"repos/{repo}/actions/artifacts/{id}/zip", ct);
             if ("sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant() != digest)
                 throw new InvalidOperationException("CI artifact digest verification failed.");
             using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
@@ -215,11 +215,11 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
     {
         var name = project.Deployment!.RoutineValidationWorkflow;
         if (!Regex.IsMatch(name, "^[A-Za-z0-9_.-]+\\.ya?ml$")) throw new InvalidOperationException("Invalid validation workflow.");
-        using var workflow = await GetJson(project.Id, $"repos/{repo}/actions/workflows/{name}", ct);
+        using var workflow = await GetJson(project, $"repos/{repo}/actions/workflows/{name}", ct);
         if (workflow.RootElement.GetProperty("path").GetString() != ".github/workflows/" + name)
             throw new InvalidOperationException("Validation workflow identity changed.");
         var id = workflow.RootElement.GetProperty("id").GetInt64();
-        using var runs = await GetJson(project.Id, $"repos/{repo}/actions/workflows/{id}/runs?head_sha={sha}&branch={Uri.EscapeDataString(project.DefaultBranch)}&event=push&per_page=100", ct);
+        using var runs = await GetJson(project, $"repos/{repo}/actions/workflows/{id}/runs?head_sha={sha}&branch={Uri.EscapeDataString(project.DefaultBranch)}&event=push&per_page=100", ct);
         foreach (var run in runs.RootElement.GetProperty("workflow_runs").EnumerateArray().OrderByDescending(r => r.GetProperty("id").GetInt64()).Take(1))
         {
             if (run.GetProperty("status").GetString() != "completed" || run.GetProperty("conclusion").GetString() != "success") continue;
@@ -233,14 +233,14 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         return null;
     }
 
-    private async Task<JsonDocument> GetJson(string project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
+    private async Task<JsonDocument> GetJson(ProjectOptions project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
     {
         using var response = await SendApi(project, path, ct, apiVersion);
         response.EnsureSuccessStatusCode();
         return JsonDocument.Parse(await ReadBounded(response, ct));
     }
 
-    private async Task<HttpResponseMessage> SendApi(string project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
+    private async Task<HttpResponseMessage> SendApi(ProjectOptions project, string path, CancellationToken ct, string apiVersion = "2026-03-10")
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri("https://api.github.com/" + path));
         request.Headers.UserAgent.ParseAdd("Forge-Routine-Deployment");
@@ -251,7 +251,7 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         return await api.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 
-    private async Task<byte[]> DownloadArtifact(string project, string path, CancellationToken ct)
+    private async Task<byte[]> DownloadArtifact(ProjectOptions project, string path, CancellationToken ct)
     {
         using var response = await SendApi(project, path, ct);
         if (response.StatusCode != HttpStatusCode.Found) { response.EnsureSuccessStatusCode(); return await ReadBounded(response, ct); }

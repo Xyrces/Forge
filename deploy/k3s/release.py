@@ -103,6 +103,7 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
         "Worker__Enabled": "true", "Worker__Image": image, "Worker__Namespace": namespace,
         "HOME": "/var/lib/forge", "Dashboard__Hostname": "0.0.0.0", "Dashboard__Port": "8080",
     }.items()]
+    env += [{"name": "FORGE_GITHUB_APPS_FILE", "valueFrom": {"secretKeyRef": {"name": "forge-github-apps", "key": "config-path", "optional": True}}}]
     env += [{"name": "Controller__InstanceId", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
             {"name": "Db__ConnectionString", "valueFrom": {"secretKeyRef": {
                 "name": "forge-runtime", "key": "sql-connection-string"}}}]
@@ -121,9 +122,11 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
                          "readinessProbe": {"httpGet": {"path": "/healthz", "port": 9090}, "periodSeconds": 5},
                          "volumeMounts": [{"name": "state", "mountPath": "/var/lib/forge"},
                              {"name": "control-token", "mountPath": "/run/forge-control", "readOnly": True},
+                             {"name": "github-apps", "mountPath": "/run/forge-github-apps", "readOnly": True},
                              {"name": "config", "mountPath": "/app/appsettings.json", "subPath": "appsettings.json", "readOnly": True}]}],
                      "volumes": [{"name": "state", "persistentVolumeClaim": {"claimName": "forge-state"}},
                          {"name": "control-token", "secret": {"secretName": "forge-control", "defaultMode": 288}},
+                         {"name": "github-apps", "secret": {"secretName": "forge-github-apps", "defaultMode": 288, "optional": True}},
                          {"name": "config", "secret": {"secretName": "forge-config", "defaultMode": 288}}]}}}}
 
 

@@ -130,6 +130,8 @@ public static class ForgeComposition
         services.AddSingleton<ISprintStore>(sprints);
         var messageBus = new AgentMessageBus();
         services.AddSingleton(messageBus);
+        var gitHub = Program.BuildGitHubService(
+            options.GitHub ?? new GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         var worktrees = new GitWorktreeService(
             new WorkspaceOptions
             {
@@ -138,10 +140,10 @@ public static class ForgeComposition
                 DefaultBranch = options.Workspace.DefaultBranch,
             },
             loggerFactory.CreateLogger<GitWorktreeService>(),
-            githubToken: options.GitHub?.Token);
+            githubToken: gitHub.UsesAppIdentity ? null : options.GitHub?.Token,
+            publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+            publisherRepository: $"https://github.com/{gitHub.Owner}/{gitHub.Repo}");
         services.AddSingleton(worktrees);
-        var gitHub = Program.BuildGitHubService(
-            options.GitHub ?? new GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         services.AddSingleton(gitHub);
         var roleRegistry = new RoleAgentRegistry();
         services.AddSingleton(roleRegistry);
@@ -191,7 +193,7 @@ public static class ForgeComposition
         services.AddSingleton<Forge.Deploy.IRoutineReleaseSource>(_ => new Forge.Deploy.TrustedGitHubReleaseSource(
             new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
             new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
-            (project, ct) => GitHubTokenResolver.ResolveTokenAsync(null, project, options.GitHub, secretStore, ct),
+            (project, ct) => GitHubTokenResolver.ResolveReleaseTokenAsync(project, options.GitHub, secretStore, ct),
             () => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "source-revision"))));
         services.AddSingleton(provider => new Forge.Deploy.RoutineDeploymentCoordinator(
             () => projectFactory.KnownProjects.Select(project => projectFactory.Find(project.Id))
@@ -336,6 +338,8 @@ public static class ForgeComposition
             modelOverrides: roleModelOverrides,
             gates: options.Gates);
         IAgentRunner agentRunner = localAgentRunner;
+        if (!options.Worker.Enabled && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+            throw new InvalidOperationException("GitHub App credentials require isolated Kubernetes workers.");
         if (options.Worker.Enabled)
         {
             if (!options.Controller.Enabled || !options.Db.IsSqlServer || admission is null)

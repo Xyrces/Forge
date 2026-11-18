@@ -3,11 +3,21 @@ using Forge.Configuration;
 
 namespace Forge;
 
-public class GitHubService
+public partial class GitHubService
 {
     private readonly GitHubClient _client;
+    internal readonly GitHubClient? _reviewClient;
+    private readonly GitHubAppIdentities.InstallationCredentials? _publisherCredentials;
+    public virtual string? ReviewerLogin { get; }
+    public bool UsesAppIdentity => _publisherCredentials is not null;
+    public async Task<string?> GetPublisherTokenAsync() => _publisherCredentials is null ? null : await _publisherCredentials.GetTokenAsync();
     private readonly string _owner;
     private readonly string _repo;
+
+    internal GitHubService(string owner, string repo, GitHubClient publisher, GitHubClient reviewer)
+    {
+        _owner = owner; _repo = repo; _client = publisher; _reviewClient = reviewer;
+    }
 
     public GitHubService(GitHubOptions options)
         : this(options.Owner, options.Repo, options.Token) { }
@@ -16,6 +26,15 @@ public class GitHubService
     {
         _owner = owner;
         _repo = repo;
+        var apps = GitHubAppIdentities.Find(owner, repo);
+        if (apps is not null)
+        {
+            _publisherCredentials = GitHubAppIdentities.CredentialsFor(apps, reviewer: false);
+            _client = new GitHubClient(new ProductHeaderValue("Forge"), _publisherCredentials);
+            _reviewClient = new GitHubClient(new ProductHeaderValue("Forge-Reviewer"), GitHubAppIdentities.CredentialsFor(apps, reviewer: true));
+            ReviewerLogin = apps.Reviewer.Slug + "[bot]";
+            return;
+        }
         _client = new GitHubClient(new ProductHeaderValue("Forge"));
         if (!string.IsNullOrEmpty(token))
             _client.Credentials = new Credentials(token);
@@ -219,7 +238,8 @@ public class GitHubService
                 _ => PullRequestReviewEvent.Comment,
             },
         };
-        var result = await _client.PullRequest.Review.Create(_owner, _repo, prNumber, review);
+        var reviewer = _reviewClient ?? (UsesAppIdentity ? throw new InvalidOperationException("Configured reviewer identity is unavailable.") : _client);
+        var result = await reviewer.PullRequest.Review.Create(_owner, _repo, prNumber, review);
         return result.Id;
     }
 

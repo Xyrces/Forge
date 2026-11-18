@@ -236,6 +236,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         var designArtifacts = new DesignArtifactStore(issueStore.Db);
         var artOutputs = new ArtOutputStore(issueStore.Db);
 
+        var gitHub = new GitHubService(BuildGitHubOptions(ensured.Project));
         var worktrees = new GitWorktreeService(
             new WorkspaceOptions
             {
@@ -244,9 +245,9 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
                 DefaultBranch = string.IsNullOrWhiteSpace(ensured.Project.DefaultBranch) ? "main" : ensured.Project.DefaultBranch,
             },
             _loggerFactory.CreateLogger<GitWorktreeService>(),
-            githubToken: ResolveGitHubToken(project.Id));
-
-        var gitHub = new GitHubService(BuildGitHubOptions(ensured.Project));
+            githubToken: gitHub.UsesAppIdentity ? null : ResolveGitHubToken(project.Id),
+            publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+            publisherRepository: $"https://github.com/{gitHub.Owner}/{gitHub.Repo}");
 
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issueStore,

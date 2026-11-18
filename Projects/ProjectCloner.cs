@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Text;
+using Forge.AgentTools;
 using Microsoft.Extensions.Logging;
 using Forge.Configuration;
 
@@ -50,6 +50,11 @@ public sealed record ProjectSyncResult(bool Ok, string Branch);
 /// </summary>
 public sealed class ProjectCloner
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, GitHubAppIdentities.Repository> AppScopes = new(StringComparer.Ordinal);
+    private static void RegisterAppScope(string path, string url)
+    {
+        if (GitHubAppIdentities.FromUrl(url) is { } scope) AppScopes[Path.GetFullPath(path)] = scope;
+    }
     private readonly string _dataRoot;
     private readonly ILogger<ProjectCloner>? _logger;
 
@@ -80,6 +85,7 @@ public sealed class ProjectCloner
             throw new InvalidOperationException($"Project '{project.Id}' has no RepoUrl.");
 
         var localPath = ForgesystemPaths.ProjectDir(_dataRoot, project.Id);
+        RegisterAppScope(localPath, project.RepoUrl);
         Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
 
         var gitDir = Path.Combine(localPath, ".git");
@@ -109,7 +115,7 @@ public sealed class ProjectCloner
                 $"git clone for project '{project.Id}' failed: {cloneResult.Stderr.Trim()}");
         }
 
-        if (isHttps && !string.IsNullOrEmpty(github?.Token))
+        if (isHttps && !string.IsNullOrEmpty(github?.Token) && GitHubAppIdentities.FromUrl(project.RepoUrl) is null)
         {
             // 1. Reset the stored remote URL to drop the PAT from .git/config.
             await ResetRemoteAsync(localPath, project.RepoUrl, ct);
@@ -255,6 +261,7 @@ public sealed class ProjectCloner
         var branch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch;
         var localPath = string.IsNullOrWhiteSpace(project.Root)
             ? ForgesystemPaths.ProjectDir(_dataRoot, project.Id) : Path.GetFullPath(project.Root);
+        RegisterAppScope(localPath, project.RepoUrl);
         if (!Directory.Exists(Path.Combine(localPath, ".git")))
         {
             if (!string.Equals(Path.GetFullPath(localPath), Path.GetFullPath(ForgesystemPaths.ProjectDir(_dataRoot, project.Id)),
@@ -365,7 +372,7 @@ public sealed class ProjectCloner
             return new ProjectSyncResult(false, branch);
         }
 
-        if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token))
+        if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token) && GitHubAppIdentities.FromUrl(project.RepoUrl) is null)
         {
             var credPath = Path.Combine(localPath, ".forge", "git-credentials");
             Directory.CreateDirectory(Path.GetDirectoryName(credPath)!);
@@ -417,6 +424,7 @@ public sealed class ProjectCloner
 
     private static (string effectiveUrl, bool isHttps) BuildAuthenticatedUrl(string repoUrl, string? token)
     {
+        if (GitHubAppIdentities.FromUrl(repoUrl) is not null) return (repoUrl, true);
         if (string.IsNullOrEmpty(token)) return (repoUrl, IsHttps(repoUrl));
         if (!IsHttps(repoUrl)) return (repoUrl, false);
 
@@ -463,6 +471,14 @@ public sealed class ProjectCloner
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
         string cwd, CancellationToken ct, params string[] args)
     {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+        {
+            AppScopes.TryGetValue(Path.GetFullPath(cwd), out var scope);
+            var explicitUrl = args.FirstOrDefault(a => a.StartsWith("https://github.com/", StringComparison.Ordinal));
+            if (explicitUrl is not null) scope = GitHubAppIdentities.FromUrl(explicitUrl);
+            var isolated = await ControllerGitRunner.RunAsync(cwd, args, scope, ct);
+            return (isolated.ExitCode, isolated.Stdout, isolated.Stderr);
+        }
         var psi = new ProcessStartInfo
         {
             FileName = "git",
@@ -496,6 +512,7 @@ public sealed class ProjectCloner
             await Task.WhenAll(stdoutTask, stderrTask);
             throw;
         }
-        return (p.ExitCode, await stdoutTask, await stderrTask);
+        var stdout = await stdoutTask; var stderr = await stderrTask;
+        return (p.ExitCode, stdout, stderr);
     }
 }
