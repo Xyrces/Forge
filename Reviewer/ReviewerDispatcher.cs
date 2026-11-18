@@ -135,6 +135,18 @@ public sealed class ReviewerDispatcher
                 || bool.TryParse(task.GetMetadata("reviewPublishStarted"), out var uncertain) && uncertain
                 ? await CompleteDraftAsync(task, prNumber, pending, cancellationToken, headShaOverride) : null;
 
+        IReadOnlyList<ReviewConversation> conversations = [];
+        if (_gitHub.RequireFormalReview)
+        {
+            try { conversations = (await _gitHub.GetMergeRequirementsAsync(prNumber, headSha, cancellationToken)).Conversations; }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, "", headSha, "Review conversations unavailable: " + ex.Message);
+            }
+        }
+
         // Per-SHA dedupe: the watch sweep calls this every pass; only
         // a head move (rework push) triggers a fresh round. An Error
         // verdict does NOT dedupe — the sweep retries the review (the
@@ -147,7 +159,10 @@ public sealed class ReviewerDispatcher
         if (string.Equals(reviewedSha, headSha, StringComparison.Ordinal)
             && !string.IsNullOrEmpty(recordedVerdict)
             && recordedVerdict != nameof(ReviewerVerdict.Error)
-            && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha))
+            && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha)
+            && !(recordedVerdict == nameof(ReviewerVerdict.Approve)
+                && conversations.Any(t => GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin))
+                && ReviewFindings.ConversationCheckpoint(conversations, _gitHub.ReviewerLogin) != task.GetMetadata("reviewThreadCheckpoint")))
         {
             return null;
         }
@@ -179,18 +194,6 @@ public sealed class ReviewerDispatcher
                 || string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal))
             {
                 return null;
-            }
-        }
-
-        IReadOnlyList<ReviewConversation> conversations = [];
-        if (_gitHub.RequireFormalReview)
-        {
-            try { conversations = (await _gitHub.GetMergeRequirementsAsync(prNumber, headSha, cancellationToken)).Conversations; }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-            catch (Exception ex)
-            {
-                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
-                return new(ReviewerVerdict.Error, "", headSha, "Review conversations unavailable: " + ex.Message);
             }
         }
 
@@ -500,6 +503,7 @@ public sealed class ReviewerDispatcher
                 m["reviewSha"] = draft.HeadSha; m["reviewVerdict"] = draft.Verdict;
                 m["reviewNotes"] = draft.Summary; m["reviewRound"] = draft.Round;
                 m["reviewPublishedHead"] = draft.HeadSha; m["reviewDraft"] = null!;
+                m["reviewThreadCheckpoint"] = draft.ThreadCheckpoint!;
                 m["reviewPublishStarted"] = null!; m["reviewStartedAt"] = null!;
                 m["reviewError"] = null!; m["reviewIntegrationError"] = null!;
                 m["reviewErrorAttempts"] = null!;

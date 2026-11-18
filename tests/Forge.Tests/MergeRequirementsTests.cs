@@ -92,6 +92,7 @@ public sealed class MergeRequirementsTests
         var resolved = false;
         var replies = 0;
         var resolutions = 0;
+        string? replyBody = null;
         using var handler = new Handler((request, token) =>
         {
             var query = request.GetProperty("query").GetString()!;
@@ -99,12 +100,13 @@ public sealed class MergeRequirementsTests
             {
                 Assert.Equal("publisher", token);
                 return Page([Thread("thread", resolved: resolved, last: replied ? "reply" : "comment",
-                    body: replied ? "<!-- forge-thread-resolution:head:thread -->" : "finding")]);
+                    body: replied ? replyBody! : "finding")]);
             }
             Assert.Equal("reviewer", token);
             if (query.Contains("addPullRequestReviewThreadReply"))
             {
                 Assert.Contains("Verified at", request.GetProperty("variables").GetProperty("body").GetString());
+                replyBody = request.GetProperty("variables").GetProperty("body").GetString();
                 replied = true; replies++;
                 return "{\"data\":{\"addPullRequestReviewThreadReply\":{\"comment\":{\"id\":\"reply\"}}}}";
             }
@@ -130,6 +132,25 @@ public sealed class MergeRequirementsTests
         var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.ResolveReviewedConversationsAsync(1,
             new(2, "head", "Approve", "Verified", [], [new("thread", "comment", "corrected")])));
+    }
+
+    [Fact]
+    public async Task NewCommentFromSameAppAfterVerificationReplyRemainsUnresolved()
+    {
+        var replied = false;
+        using var handler = new Handler((request, _) =>
+        {
+            var query = request.GetProperty("query").GetString()!;
+            if (query.StartsWith("query"))
+                return Page([Thread("thread", last: replied ? "new-finding" : "comment", body: "Additional concern")]);
+            Assert.Contains("addPullRequestReviewThreadReply", query);
+            replied = true;
+            return "{\"data\":{\"addPullRequestReviewThreadReply\":{\"comment\":{\"id\":\"receipt\"}}}}";
+        });
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ResolveReviewedConversationsAsync(1,
+            new(2, "head", "Approve", "Verified", [], [new("thread", "comment", "fixed")])));
+        Assert.DoesNotContain(handler.Queries, q => q.Contains("resolveReviewThread(input"));
     }
 
     [Fact]

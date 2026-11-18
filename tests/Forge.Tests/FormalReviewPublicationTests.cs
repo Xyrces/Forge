@@ -57,27 +57,40 @@ public sealed class FormalReviewPublicationTests
     {
         public PublicationGitHub() : base("o", "r", null) { }
         public override string? ReviewerLogin => "reviewer[bot]";
+        public MergeRequirements Requirements = new("CLEAN", []);
+        public int Resolutions;
         public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
-            => Task.FromResult(new MergeRequirements("CLEAN", []));
+            => Task.FromResult(Requirements);
+        public override Task ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
+        {
+            if (draft.Resolutions is { Count: > 0 })
+            {
+                Resolutions++;
+                Requirements = new("CLEAN", []);
+            }
+            return Task.CompletedTask;
+        }
         public int Publications;
         public bool MissingIdentity, DiscoverPublished = true;
         public bool RejectPublication, LoseResponse = true;
         public int RejectStatus;
         public int Accepted;
         private PublishedReview? _published;
+        private string? _publishedMarker;
         public override Task EnsureReviewerIdentityAsync(int pr, CancellationToken ct) => MissingIdentity ? Task.FromException(new InvalidOperationException("missing reviewer App")) : Task.CompletedTask;
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult(new PullRequest(number));
         public override Task<string> GetPullRequestDiffAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult("");
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
         public override Task<IReadOnlyList<PrComment>> GetIssueCommentsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PrComment>>([]);
         public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult(CommitState.Success);
-        public override Task<PublishedReview?> FindPublishedReviewAsync(int pr, ReviewDraft draft, string marker, CancellationToken ct) => Task.FromResult(DiscoverPublished ? _published : null);
+        public override Task<PublishedReview?> FindPublishedReviewAsync(int pr, ReviewDraft draft, string marker, CancellationToken ct) => Task.FromResult(DiscoverPublished && _publishedMarker == marker ? _published : null);
         public override Task<PublishedReview> PublishFormalReviewAsync(int pr, ReviewDraft draft, string marker, CancellationToken ct)
         {
             Publications++;
             if (RejectStatus != 0) throw new ApiException("Fixture refusal", (System.Net.HttpStatusCode)RejectStatus);
             if (RejectPublication) throw new ApiValidationException();
             Accepted++;
+            _publishedMarker = marker;
             _published = new(draft.Round, draft.HeadSha, draft.Verdict, draft.Summary, ReviewerLogin!, "https://github.com/o/r/pull/7#pullrequestreview-1", DateTimeOffset.UtcNow, draft.Findings);
             return LoseResponse ? throw new IOException("Response lost after GitHub accepted review") : Task.FromResult(_published);
         }
@@ -100,6 +113,38 @@ public sealed class FormalReviewPublicationTests
         Assert.Equal(visible ? ReviewerVerdict.Approve : ReviewerVerdict.Error, next!.Verdict);
         Assert.Equal(1, runner.Calls);
         Assert.Equal(1, github.Publications);
+    }
+
+    [Fact]
+    public async Task PreviouslyApprovedHeadReviewsNewConversationsOnceAndDeduplicatesUnchangedEvidence()
+    {
+        var directory = TempRoot.Instance.NewDirectory("same-head-threads");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        {
+            ["prNumber"] = 7, ["worktreePath"] = directory, ["reviewSha"] = "head",
+            ["reviewVerdict"] = "Approve", ["reviewPublishedHead"] = "head"
+        }));
+        var thread = new ReviewConversation("thread", false, true, "File.cs", "reviewer[bot]", "comment", false, "Original concern");
+        var github = new PublicationGitHub { LoseResponse = false, Requirements = new("BLOCKED", [thread]) };
+        var runner = new Runner { Output = "REVIEWER_RESOLVED_THREAD: {\"threadId\":\"thread\",\"lastCommentId\":\"comment\",\"reason\":\"Verified the new guard and regression\"}\nREVIEWER_VERDICT: APPROVE" };
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        Assert.Equal(ReviewerVerdict.Approve, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        Assert.Equal(1, runner.Calls);
+        Assert.Equal(1, github.Resolutions);
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+        github.Requirements = new("BLOCKED", [thread]);
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+        Assert.Equal(1, runner.Calls);
+        github.Requirements = new("BLOCKED", [thread with { Author = "human", LastCommentId = "new-human-comment" }]);
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+        Assert.Equal(1, runner.Calls);
+        github.Requirements = new("BLOCKED", [thread with { LastCommentId = "receipt", Body = "Reopened after verification" }]);
+        runner.Output = runner.Output.Replace("\"lastCommentId\":\"comment\"", "\"lastCommentId\":\"receipt\"");
+        Assert.Equal(ReviewerVerdict.Approve, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        Assert.Equal(2, runner.Calls);
+        Assert.Equal(2, github.Resolutions);
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
     }
 
     [Fact]

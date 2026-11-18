@@ -8,7 +8,8 @@ namespace Forge.Reviewer;
 public sealed record ReviewFinding(string Path, int Line, string Side, string Body);
 public sealed record ReviewThreadResolution(string ThreadId, string LastCommentId, string Reason);
 public sealed record ReviewDraft(int Round, string HeadSha, string Verdict, string Summary, List<ReviewFinding> Findings,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] List<ReviewThreadResolution>? Resolutions = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] List<ReviewThreadResolution>? Resolutions = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ThreadCheckpoint = null);
 public sealed record PublishedReview(int Round, string HeadSha, string Verdict, string Summary, string Reviewer, string Url,
     DateTimeOffset? SubmittedAt, List<ReviewFinding> Findings);
 public sealed record FormalDecision(string Login, string Head, PullRequestReviewState State, bool Automated,
@@ -32,6 +33,13 @@ public sealed record EffectiveReview(bool AutomatedApproved, bool HumanApproved,
 
 internal static partial class ReviewFindings
 {
+    internal static string ResolutionMarker(ReviewDraft draft, string thread) => "<!-- forge-thread-resolution:v1:"
+        + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(draft, Json)))
+        + ":" + thread + " -->";
+    internal static string ConversationCheckpoint(IEnumerable<ReviewConversation> conversations, string? reviewer) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(
+            conversations.Where(t => GitHubService.CanResolveConversation(t, reviewer)).OrderBy(t => t.Id, StringComparer.Ordinal)
+                .Select(t => new { t.Id, t.LastCommentId, t.Body }), Json)));
     internal static string Marker(ReviewDraft draft) => "<!-- forge-review:v1:" + Convert.ToHexStringLower(
         System.Security.Cryptography.SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(draft, Json))) + " -->";
     internal static ReviewerVerdict ParseVerdict(string? output)
@@ -119,6 +127,7 @@ internal static partial class ReviewFindings
             && conversations.Any(t => GitHubService.CanResolveConversation(t, reviewer) && !resolutions.Any(r => r.ThreadId == t.Id)))
             throw new InvalidOperationException("Approval omitted verification of an unresolved reviewer conversation.");
         return new(round, sha, verdict, body.Length == 0 ? verdict : body, findings,
-            verdict == nameof(ReviewerVerdict.Approve) && resolutions.Count > 0 ? resolutions : null);
+            verdict == nameof(ReviewerVerdict.Approve) && resolutions.Count > 0 ? resolutions : null,
+            conversations?.Any(t => GitHubService.CanResolveConversation(t, reviewer)) == true ? ConversationCheckpoint(conversations, reviewer) : null);
     }
 }

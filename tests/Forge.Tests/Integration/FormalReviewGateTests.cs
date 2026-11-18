@@ -76,9 +76,15 @@ public sealed class FormalReviewGateTests : IDisposable
         public override Task<string> GetReviewReworkContextAsync(int number, IReadOnlyList<FormalDecision> requests, CancellationToken ct = default) => Task.FromResult("original human finding");
         public override Task<IReadOnlyList<FormalDecision>> GetAuthorizedDecisionsAsync(int number, string? author, CancellationToken ct = default) => Task.FromResult(Decisions(++Reads));
         public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult(sha == "base" ? CommitState.Success : Ci);
+        public override Task<int> GetCiSignalCountAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult(1);
         public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default) => Task.FromResult("base");
         public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>(["test failure"]);
-        public override Task<bool> MergePullRequestAsync(int number, CancellationToken cancellationToken = default, string? expectedHeadSha = null) { Merges++; OnMerge?.Invoke(); return Task.FromResult(false); }
+        public override Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int number, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        {
+            Merges++;
+            OnMerge?.Invoke();
+            return Task.FromResult(new PullRequestMergeAttempt(false, "Merge queue is required."));
+        }
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
     }
     private static FormalDecision Decision(string user, bool bot, PullRequestReviewState state, string head = "head", long id = 1) => new(user, head, state, bot, id, "finding", "url");

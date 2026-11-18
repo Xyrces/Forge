@@ -5,7 +5,7 @@ using Octokit;
 namespace Forge;
 
 public sealed record ReviewConversation(string Id, bool Resolved, bool CanResolve, string Path,
-    string Author, string LastCommentId, bool HasOtherParticipants, string Body);
+    string Author, string LastCommentId, bool HasOtherParticipants, string Body, string? LastBody = null);
 public sealed record MergeRequirements(string State, IReadOnlyList<ReviewConversation> Conversations)
 {
     public int Unresolved => Conversations.Count(t => !t.Resolved);
@@ -52,7 +52,8 @@ public partial class GitHubService
                     row.GetProperty("viewerCanResolve").GetBoolean(), row.GetProperty("path").GetString()!, author,
                     nodes[^1].GetProperty("id").GetString()!, truncated || nodes.Any(n => !string.Equals(Login(n), author, StringComparison.OrdinalIgnoreCase)),
                     row.GetProperty("original").GetProperty("nodes")[0].GetProperty("body").GetString() + "\n\n"
-                        + row.GetProperty("latest").GetProperty("nodes")[0].GetProperty("body").GetString()));
+                        + row.GetProperty("latest").GetProperty("nodes")[0].GetProperty("body").GetString(),
+                    row.GetProperty("latest").GetProperty("nodes")[0].GetProperty("body").GetString()));
             }
             var info = page.GetProperty("pageInfo");
             var next = info.GetProperty("hasNextPage").GetBoolean() ? info.GetProperty("endCursor").GetString() : null;
@@ -79,19 +80,24 @@ public partial class GitHubService
             var thread = current.Conversations.SingleOrDefault(t => t.Id == resolution.ThreadId)
                 ?? throw new InvalidOperationException("Reviewed conversation is no longer available.");
             if (thread.Resolved) continue;
-            var marker = $"<!-- forge-thread-resolution:{draft.HeadSha}:{resolution.ThreadId} -->";
-            var previouslyReplied = thread.Body.Contains(marker, StringComparison.Ordinal);
+            var marker = ReviewFindings.ResolutionMarker(draft, resolution.ThreadId);
+            var previouslyReplied = thread.LastBody?.EndsWith(marker, StringComparison.Ordinal) == true;
+            var receiptId = thread.LastCommentId;
             if (!CanResolveConversation(thread, ReviewerLogin) || (!previouslyReplied && thread.LastCommentId != resolution.LastCommentId))
                 throw new InvalidOperationException("Review conversation changed after verification; manual reconciliation is required.");
             if (!previouslyReplied)
-                await ReviewGraphAsync(_reviewClient,
+            {
+                var reply = await ReviewGraphAsync(_reviewClient,
                     "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}",
                     new { id = thread.Id, body = $"Verified at `{draft.HeadSha}`. {resolution.Reason}\n\n{marker}" }, ct);
+                receiptId = reply.GetProperty("data").GetProperty("addPullRequestReviewThreadReply").GetProperty("comment").GetProperty("id").GetString()
+                    ?? throw new InvalidOperationException("GitHub did not identify the verification reply.");
+            }
             // Recheck the head and participants after replying. GitHub remains the final authority on races at merge.
             current = await GetMergeRequirementsAsync(number, draft.HeadSha, ct);
             thread = current.Conversations.Single(t => t.Id == resolution.ThreadId);
             if (thread.Resolved) continue;
-            if (!CanResolveConversation(thread, ReviewerLogin))
+            if (!CanResolveConversation(thread, ReviewerLogin) || thread.LastCommentId != receiptId)
                 throw new InvalidOperationException("Another participant joined the review conversation; leaving it open.");
             var result = await ReviewGraphAsync(_reviewClient,
                 "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}", new { id = thread.Id }, ct);
