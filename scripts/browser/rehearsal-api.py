@@ -33,8 +33,35 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(value['status'], value['body'])
         return self.send(200, value)
 
+    def read_body(self):
+        if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
+            chunks = []
+            while True:
+                length = int(self.rfile.readline().strip().split(b';')[0], 16)
+                if not length:
+                    self.rfile.readline()
+                    break
+                chunks.append(self.rfile.read(length))
+                self.rfile.read(2)
+            raw = b''.join(chunks)
+        else:
+            raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        return json.loads(raw or '{}')
+
     def do_POST(self):
         path = urlparse(self.path).path.rstrip('/')
+        if path == '/api/projects':
+            body = self.read_body()
+            writes.append({'method': 'POST', 'path': self.path, 'body': body})
+            result = fixtures.get('/__project_registration', {'status': 503, 'body': {'error': 'Synthetic provisioning not ready'}})
+            if result['status'] != 201:
+                return self.send(result['status'], result['body'])
+            projects = fixtures.setdefault('/api/projects', [])
+            if any(project['id'] == body['id'] for project in projects):
+                return self.send(409, {'error': 'Project already registered'})
+            project = {**body, 'slots': [], 'pending': 0, 'inProgress': 0, 'completed': 0, 'failed': 0}
+            projects.append(project)
+            return self.send(201, {'Project': project, 'ClonedInfo': None, 'Warning': None})
         writes.append({'method': 'POST', 'path': self.path})
         response = fixtures.get(self.path)
         if not isinstance(response, dict) or path != '/api/tasks/synthetic-review-retry/requeue':
@@ -53,19 +80,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlparse(self.path).path.rstrip('/')
-        if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':
-            chunks = []
-            while True:
-                length = int(self.rfile.readline().strip().split(b';')[0], 16)
-                if not length:
-                    self.rfile.readline()
-                    break
-                chunks.append(self.rfile.read(length))
-                self.rfile.read(2)
-            raw = b''.join(chunks)
-        else:
-            raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-        body = json.loads(raw or '{}')
+        body = self.read_body()
         if path == '/__fixtures':
             fixtures.update(body)
             return self.send(200, {'fixtureCount': len(fixtures)})
