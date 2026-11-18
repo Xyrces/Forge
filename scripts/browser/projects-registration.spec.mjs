@@ -41,28 +41,37 @@ try {
  await page.getByPlaceholder('main',{exact:true}).fill('main');
  const before=(await (await page.request.get(api+'/__writes')).json()).length;
  await page.getByRole('button',{name:'Register',exact:true}).click();
- await page.getByText('Synthetic project storage provisioning failed. Retry registration.',{exact:false}).waitFor();
+ await page.getByText('Synthetic project storage provisioning failed. Retry registration.',{exact:true}).waitFor();
+ assert.equal(await page.getByText('POST /api/projects returned',{exact:false}).count(),0);
  assert.equal(await id.inputValue(),'second-project');
  assert.equal(await name.inputValue(),'Synthetic second project');
  assert.equal(await repo.inputValue(),'https://github.com/example/synthetic-second.git');
  assert.equal(await page.locator('.project-card').count(),1);
  await capture(page,{path:`${output}/project-registration-retry-1280.png`,fullPage:true});
+ await put({'/__project_registration':{status:503,body:{type:'about:blank',title:'Provisioning unavailable',detail:'Synthetic storage is still unavailable. Retry shortly.'}}});
+ await page.getByRole('button',{name:'Register',exact:true}).click();
+ await page.getByText('Synthetic storage is still unavailable. Retry shortly.',{exact:true}).waitFor();
+ assert.equal(await id.inputValue(),'second-project');
+ const readsBefore=(await (await page.request.get(api+'/__reads')).json()).length;
  await put({'/__project_registration':{status:201,body:{}}});
  await page.getByRole('button',{name:'Register',exact:true}).click();
  await page.locator('.project-card').filter({hasText:'Synthetic second project'}).waitFor();
  assert.equal(await page.locator('.project-card').count(),2);
  const writes=(await (await page.request.get(api+'/__writes')).json()).slice(before);
- assert.equal(writes.length,2);
+ assert.equal(writes.length,3);
+ assert.deepEqual(writes[1],writes[2]);
  assert.deepEqual(writes[0],writes[1]);
  assert.equal(writes[0].path,'/api/projects/');
  assert.equal(writes[0].body.id,'second-project');
  assert.equal(writes[0].body.defaultBranch,'main');
+ const successReads=(await (await page.request.get(api+'/__reads')).json()).slice(readsBefore);
+ assert.equal(successReads.filter(path=>path==='/api/projects/').length,1);
  assert.equal((await (await page.request.get(api+'/api/projects')).json()).length,2);
  for(const width of [1280,390]) {
   await page.setViewportSize({width,height:900});
   await capture(page,{path:`${output}/project-registration-success-${width}.png`,fullPage:true});
  }
- receipt.checks.push('Actual Add Project form: retryable synthetic503 reason visible; fields retained; identical retry succeeds; exactly two projects listed, no duplicate registration');
+ receipt.checks.push('Actual Add Project form: retryable synthetic503 reason visible; fields retained; error and ProblemDetails reasons displayed without raw JSON; identical retry succeeds with one list refresh; exactly two projects listed, no duplicate registration');
  assert.deepEqual(errors,[]);receipt.result='passed';
 } catch(error) {
  receipt.result='failed';receipt.failure=String(error.stack||error);process.exitCode=1;

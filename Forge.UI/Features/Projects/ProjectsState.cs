@@ -98,12 +98,37 @@ public sealed class ProjectsClient
 
     public async Task<AddProjectResponseBody> AddAsync(AddProjectRequestBody body, CancellationToken ct)
     {
-        var resp = await _http.PostAsJsonAsync("/api/projects/", body, ct);
+        using var resp = await _http.PostAsJsonAsync("/api/projects/", body, ct);
         var raw = await resp.Content.ReadAsStringAsync(ct);
         if (!resp.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException(
-                $"POST /api/projects returned {(int)resp.StatusCode}: {raw}");
+            string? detail = null;
+            try
+            {
+                using var problem = System.Text.Json.JsonDocument.Parse(raw);
+                if (problem.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    foreach (var key in new[] { "detail", "error" })
+                    {
+                        if (problem.RootElement.TryGetProperty(key, out var value)
+                            && value.ValueKind == System.Text.Json.JsonValueKind.String
+                            && !string.IsNullOrWhiteSpace(value.GetString()))
+                        {
+                            detail = value.GetString();
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // A non-JSON proxy response must not expose HTML or protocol noise.
+                if (resp.Content.Headers.ContentType?.MediaType == "text/plain")
+                    detail = raw.Trim();
+            }
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+                ? $"Project registration failed (HTTP {(int)resp.StatusCode}). Please retry."
+                : detail);
         }
         return System.Text.Json.JsonSerializer.Deserialize<AddProjectResponseBody>(raw)
             ?? throw new InvalidOperationException("Empty response body");
