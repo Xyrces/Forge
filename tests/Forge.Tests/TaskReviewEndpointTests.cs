@@ -22,6 +22,7 @@ public sealed class TaskReviewEndpointTests : IAsyncLifetime
     private WebApplication app = null!;
     private HttpClient client = null!;
     private IssueRecord task = null!;
+    private bool hasReviewer = true;
 
     public async Task InitializeAsync()
     {
@@ -32,11 +33,27 @@ public sealed class TaskReviewEndpointTests : IAsyncLifetime
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         app = builder.Build();
         new DashboardMutationAuthentication(Token).Protect(app);
-        TaskReviewEndpoints.MapTaskReviewEndpoints(app, issues, null, hints, NullLogger.Instance);
+        TaskReviewEndpoints.MapTaskReviewEndpoints(app, issues, null, hints, NullLogger.Instance,
+            (_, mode) => PullRequestReviewPolicy.ReviewerConfigurationIssue(mode, hasReviewer));
         await app.StartAsync();
         client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}/") };
     }
     private string HoldPath => $"/api/tasks/{task.Id}/human-review?projectId=forge";
+    [Fact]
+    public async Task MissingReviewerIsVisibleAndHumanPolicyRemainsAvailable()
+    {
+        hasReviewer = false;
+        Authenticate();
+        const string path = "/api/projects/forge/review-policy";
+        Assert.Contains("independent reviewer App", await client.GetStringAsync(path));
+        (await client.PutAsJsonAsync(path, new { mode = "Human" })).EnsureSuccessStatusCode();
+        Assert.DoesNotContain("independent reviewer App", await client.GetStringAsync(path));
+        var rejected = await client.PutAsJsonAsync(path, new { mode = "Both" });
+        Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
+        Assert.Contains("independent reviewer App", await rejected.Content.ReadAsStringAsync());
+        using var memory = new MemoryStore(issues.Db);
+        Assert.Equal(RequiredReview.Human, await new PullRequestReviewPolicy(memory).GetModeAsync(default));
+    }
     private void Authenticate() => client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Token);
 
     [Fact]

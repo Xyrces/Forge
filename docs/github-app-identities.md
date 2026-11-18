@@ -25,7 +25,9 @@ kubectl -n forge create secret generic forge-github-apps \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-The new deployment mounts this optional Secret only in controller pods and supplies `FORGE_GITHUB_APPS_FILE` from its `config-path` key. Absence of the entire Secret preserves legacy project authentication. A configured but missing/invalid file fails explicitly. Deploy a new qualified controller revision to activate or change the App mapping. Initial fresh-install bootstrap can still use its existing provisioning credential; steady-state clone/sync and trusted push use App credentials.
+The controller mounts the optional Secret and reads `FORGE_GITHUB_APPS_FILE` from its `config-path` key. Deploy a qualified controller revision to activate or change an App mapping. A configured but missing or invalid file fails the preflight check.
+
+For a repository with personal-token authentication, select **Human reviewer** in **Project overview → Pull request approvals**. An eligible human other than the author must approve the current revision. The default **Forge reviewer** policy and **Forge and human reviewers** both require distinct publisher and reviewer Apps. Without that mapping, the project control explains what to fix, `--check` reports the affected project, and Forge holds its engineering tasks before assigning a worker. Other projects can continue. Fresh-install bootstrap can use its existing provisioning credential.
 
 7. In a disposable protected repository, install the same Apps with only that repository selected in their token request configuration. Verify a publisher-authored PR receives a formal reviewer approval, a human request for changes stops merging, and a correction requires approval of the new head. Verify the actual merge occurs without a bypass. Only then switch Forge's production project to these credentials. Preserve any active human holds during rollout or rollback.
 

@@ -937,7 +937,8 @@ Console.Error.WriteLine(ex.ToString());
             { Timeout = TimeSpan.FromSeconds(15) })
         {
             var githubCheck = new GitHubPreflight(githubHttp,
-                new GitHubPreflightCredentials(options.GitHub, secretStore));
+                new GitHubPreflightCredentials(options.GitHub, secretStore,
+                    id => FactoryFor(options.Db, id, dbByProject[id])));
             var result = await githubCheck.CheckAsync(projects, options.GitHub, CancellationToken.None);
             foreach (var message in result.Passed) Console.WriteLine("  [ok] " + message);
             failures.AddRange(result.Failed);

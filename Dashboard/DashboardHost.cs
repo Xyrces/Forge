@@ -562,7 +562,23 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
         var runningRevision = new RunningRevisionReader(_logger);
         CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory, runningRevision.ReadAsync);
-        TaskReviewEndpoints.MapTaskReviewEndpoints(_app, _issues, _projectFactory, _eventPublisher, _logger);
+        string? ReviewConfigurationIssue(string projectId, RequiredReview mode)
+        {
+            var repo = ProjectDispatchBundleFactory.ParseGitHubOwnerRepo(_projectFactory?.Find(projectId)?.Options.RepoUrl);
+            var owner = repo?.Owner ?? _githubOptions?.Owner ?? "";
+            var name = repo?.Repo ?? _githubOptions?.Repo ?? "";
+            try
+            {
+                var hasReviewer = _gitHub is LocalGitHubService || GitHubAppIdentities.Find(owner, name) is not null;
+                return PullRequestReviewPolicy.ReviewerConfigurationIssue(mode, hasReviewer);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Invalid GitHub App configuration for project {Project}", projectId);
+                return "The GitHub App configuration could not be read. Correct it and rerun the Forge preflight check.";
+            }
+        }
+        TaskReviewEndpoints.MapTaskReviewEndpoints(_app, _issues, _projectFactory, _eventPublisher, _logger, ReviewConfigurationIssue);
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)

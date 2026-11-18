@@ -106,7 +106,8 @@ public static class ControllerHost
         {
             Timeout = TimeSpan.FromSeconds(15)
         };
-        return await new GitHubPreflight(http, new GitHubPreflightCredentials(options.GitHub, secrets))
+        return await new GitHubPreflight(http, new GitHubPreflightCredentials(options.GitHub, secrets,
+                id => ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(id), initializeSchema: false)))
             .CheckAsync(projects, options.GitHub, ct);
     }
 

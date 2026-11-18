@@ -39,7 +39,12 @@ public sealed class OrchestratorAgentTests : IDisposable
     private readonly InMemoryDashboardEventBus _events;
     private readonly RoleAgentRegistry _roleRegistry;
     private readonly GitWorktreeService _worktrees;
-    private readonly GitHubService _github;
+    private readonly FixtureGitHub _github;
+    private sealed class FixtureGitHub() : GitHubService("", "")
+    {
+        public bool HasReviewer { get; set; } = true;
+        public override string? ReviewerLogin => HasReviewer ? "reviewer[bot]" : null;
+    }
     private readonly PRWatcher _prWatcher;
     private readonly ProjectDispatchBundle _bundle;
     private readonly string _originalCwd;
@@ -63,7 +68,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         _messageBus = new AgentMessageBus();
         _events = new InMemoryDashboardEventBus();
         _roleRegistry = new RoleAgentRegistry();
-        _github = new GitHubService("", "", "");
+        _github = new FixtureGitHub();
         _prWatcher = new PRWatcher(
             _github, _worktrees, _issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30), _events,
@@ -136,6 +141,26 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.False(result.Success); Assert.Contains("scope-gap",result.Message);
         Assert.Equal(IssueStatus.Pending,(await _issues.GetAsync(task.Id))!.Status);
         Assert.Null((await _issues.GetAsync(task.Id))!.DispatchCheckpoint);
+    }
+
+    [Fact]
+    public async Task TokenOnlyDispatchWaitsForExplicitHumanPolicyBeforeEngineering()
+    {
+        _github.HasReviewer = false;
+        var runner = new CapturingRunner("No edits. NO_CHANGES_NEEDED");
+        var orch = BuildOrchestrator(runner);
+        BindMaf(orch);
+        var task = await _issues.CreateAsync(new NewIssue(DevTaskType, "Token-only project"));
+        var held = await DispatchApprovedAsync(orch, task, default);
+        Assert.False(held.Success);
+        Assert.Contains("independent reviewer App", held.Message);
+        Assert.Null(runner.LastPrompt);
+        Assert.Null((await _issues.GetAsync(task.Id))!.Assignee);
+        using var memory = new MemoryStore(_issues.Db);
+        await new PullRequestReviewPolicy(memory).SetModeAsync(RequiredReview.Human, "test operator", default);
+        var resumed = await DispatchApprovedAsync(orch, task, default);
+        Assert.True(resumed.Success, resumed.Message);
+        Assert.NotNull(runner.LastPrompt);
     }
 
     public void Dispose()

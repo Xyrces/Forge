@@ -14,7 +14,8 @@ public sealed record ReviewPolicyRequest(string Mode, System.Text.Json.JsonEleme
 public static class TaskReviewEndpoints
 {
     public static void MapTaskReviewEndpoints(WebApplication app, IIssueStore primary,
-        ProjectContextFactory? projects, IEventPublisher? publisher, ILogger logger)
+        ProjectContextFactory? projects, IEventPublisher? publisher, ILogger logger,
+        Func<string, RequiredReview, string?> configurationIssue)
     {
         IssueStore? Resolve(string projectId) => projects is not null ? projects.Find(projectId)?.Issues as IssueStore
             : primary is IssueStore concrete && concrete.ProjectId == projectId ? concrete : null;
@@ -89,7 +90,8 @@ public static class TaskReviewEndpoints
             if (store is null) return Results.NotFound();
             await using var memory = new MemoryStore(store.Db);
             var settings = await new PullRequestReviewPolicy(memory).GetSettingsAsync(ct);
-            return Results.Ok(new { mode = settings.Mode.ToString(), settings.NominatedHuman });
+            return Results.Ok(new { mode = settings.Mode.ToString(), settings.NominatedHuman,
+                configurationIssue = configurationIssue(id, settings.Mode) });
         });
 
         app.MapPut("/api/projects/{id}/review-policy", async (string id, ReviewPolicyRequest request,
@@ -102,6 +104,8 @@ public static class TaskReviewEndpoints
                 return Results.BadRequest(new { error = "Choose Automated, Human, or Both." });
             var store = Resolve(id);
             if (store is null) return Results.NotFound();
+            if (configurationIssue(id, mode) is { } issue)
+                return Results.Conflict(new { error = issue });
             var gates = PRWatcher.GetPollGatesForTasks(id, (await store.ListAsync(new IssueFilter(), ct))
                 .Where(t => t.Status is not (IssueStatus.Completed or IssueStatus.Closed)).Select(t => t.Id));
             var held = new List<SemaphoreSlim>();

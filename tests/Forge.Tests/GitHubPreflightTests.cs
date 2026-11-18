@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using Forge.Configuration;
+using Forge.Core;
 using Forge.Projects;
 using Xunit;
 
@@ -54,9 +55,9 @@ public sealed class GitHubPreflightTests
     }
 
     [Fact]
-    public async Task UnconfiguredRepositoryRetainsLegacyCredentialRoute()
+    public async Task TokenOnlyRepositoryRetainsExplicitHumanReview()
     {
-        var credentials = new Credentials { Legacy = true };
+        var credentials = new Credentials { Legacy = true, Mode = RequiredReview.Human };
         using var handler = new MetadataHandler();
         using var http = new HttpClient(handler);
         var result = await new GitHubPreflight(http, credentials).CheckAsync(
@@ -127,10 +128,28 @@ public sealed class GitHubPreflightTests
 
     private static ProjectOptions Project(string name) => new() { Id = name, RepoUrl = "https://github.com/owner/" + name };
 
+    [Theory]
+    [InlineData(RequiredReview.Automated)]
+    [InlineData(RequiredReview.Both)]
+    public async Task TokenOnlyAutomaticPolicyFailsOnlyForAffectedProject(RequiredReview mode)
+    {
+        var credentials = new Credentials { Legacy = true, Mode = mode };
+        using var handler = new MetadataHandler();
+        using var http = new HttpClient(handler);
+        var result = await new GitHubPreflight(http, credentials).CheckAsync(
+            [Project("legacy"), Project("human-only")], new GitHubOptions(), default);
+        Assert.Contains("independent reviewer App", Assert.Single(result.Failed));
+        Assert.Contains("human-only", Assert.Single(result.Passed));
+        Assert.Equal(1, credentials.LegacyRequests);
+    }
+
     private sealed class Credentials : IGitHubPreflightCredentials
     {
         public string? Failure { get; init; }
         public bool Legacy { get; init; }
+        public RequiredReview Mode { get; init; }
+        public Task<RequiredReview> ReviewModeAsync(string projectId, CancellationToken ct) =>
+            Task.FromResult(projectId == "human-only" ? RequiredReview.Human : Mode);
         public int LegacyRequests { get; private set; }
         public List<(string Repository, bool Reviewer)> AppRequests { get; } = [];
 

@@ -11,10 +11,18 @@ internal interface IGitHubPreflightCredentials
     GitHubAppIdentities.Repository? FindApps(string owner, string repository);
     Task<string> AppTokenAsync(GitHubAppIdentities.Repository repository, bool reviewer, CancellationToken ct);
     Task<string?> LegacyTokenAsync(string projectId, CancellationToken ct);
+    Task<RequiredReview> ReviewModeAsync(string projectId, CancellationToken ct);
 }
 
-internal sealed class GitHubPreflightCredentials(GitHubOptions global, ISecretStore secrets) : IGitHubPreflightCredentials
+internal sealed class GitHubPreflightCredentials(GitHubOptions global, ISecretStore secrets,
+    Func<string, Core.Db.IDbConnectionFactory> projectDatabase) : IGitHubPreflightCredentials
 {
+    public async Task<RequiredReview> ReviewModeAsync(string projectId, CancellationToken ct)
+    {
+        await using var memory = new MemoryStore(projectDatabase(projectId));
+        return await new PullRequestReviewPolicy(memory).GetModeAsync(ct);
+    }
+
     public GitHubAppIdentities.Repository? FindApps(string owner, string repository)
         => GitHubAppIdentities.Find(owner, repository);
 
@@ -45,6 +53,14 @@ internal sealed class GitHubPreflight(HttpClient http, IGitHubPreflightCredentia
                 continue;
             }
             var scope = owner + "/" + repository;
+            RequiredReview mode;
+            try { mode = await credentials.ReviewModeAsync(project.Id, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception)
+            {
+                failed.Add($"Project '{project.Id}' ({scope}): could not read the project's saved review policy.");
+                continue;
+            }
             GitHubAppIdentities.Repository? apps;
             try { apps = credentials.FindApps(owner, repository); }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -89,13 +105,18 @@ internal sealed class GitHubPreflight(HttpClient http, IGitHubPreflightCredentia
             }
             else
             {
+                if (PullRequestReviewPolicy.ReviewerConfigurationIssue(mode, false) is { } issue)
+                {
+                    failed.Add($"Project '{project.Id}' ({scope}): {issue}");
+                    continue;
+                }
                 try
                 {
                     var token = await credentials.LegacyTokenAsync(project.Id, ct);
                     if (string.IsNullOrWhiteSpace(token) || token.StartsWith("GITHUB_TOKEN", StringComparison.Ordinal))
                         throw new InvalidOperationException("Legacy credential is unset.");
                     await ReadRepositoryAsync(scope, token, ct);
-                    passed.Add($"GitHub {scope}: legacy repository read passed.");
+                    passed.Add($"GitHub {scope}: personal-token repository read passed for Human review.");
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception)

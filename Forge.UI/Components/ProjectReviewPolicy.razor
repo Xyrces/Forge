@@ -17,6 +17,7 @@
     }
     else
     {
+        @if (_configurationIssue is not null) { <p class="banner banner--warn" role="alert">@_configurationIssue</p> }
         <form class="form-grid" @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
             <label class="form-grid__full">
                 <span>Required approval</span>
@@ -41,12 +42,13 @@
 
 @code {
     [Parameter, EditorRequired] public string ProjectId { get; set; } = "";
-    private string? _loadedProject, _savedMode, _error, _notice;
+    private string? _loadedProject, _savedMode, _error, _notice, _configurationIssue;
     private string _mode = "Automated", _nominee = "";
     private string? _savedNominee;
     private bool _loading, _saving;
     private CancellationTokenSource _lifetime = new();
-    private sealed record PolicyDto(string Mode, string? NominatedHuman = null);
+    private sealed record PolicyDto(string Mode, string? NominatedHuman = null, string? ConfigurationIssue = null);
+    private sealed record PolicyError(string Error);
     private string Description => _mode switch
     {
         "Human" => "An eligible human must approve the current revision on GitHub. Forge still runs engineering and CI checks.",
@@ -71,6 +73,7 @@
                 ?? throw new InvalidOperationException("Review policy response was empty.");
             if (ct.IsCancellationRequested || project != ProjectId) return;
             _mode = _savedMode = policy.Mode;
+            _configurationIssue = policy.ConfigurationIssue;
             _nominee = policy.NominatedHuman ?? ""; _savedNominee = policy.NominatedHuman;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
@@ -89,6 +92,13 @@
         try
         {
             using var response = await Http.PutAsJsonAsync($"/api/projects/{Uri.EscapeDataString(project)}/review-policy", new { mode = _mode, nominatedHuman = _nominee.Trim() }, ct);
+            if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                var reason = await response.Content.ReadFromJsonAsync<PolicyError>(ct);
+                if (project == ProjectId && !ct.IsCancellationRequested)
+                    _error = reason?.Error ?? "The repository cannot use this review policy yet.";
+                return;
+            }
             response.EnsureSuccessStatusCode();
             var policy = await response.Content.ReadFromJsonAsync<PolicyDto>(ct)
                 ?? throw new InvalidOperationException("Review policy response was empty.");
@@ -96,6 +106,7 @@
             _mode = _savedMode = policy.Mode;
             _nominee = policy.NominatedHuman ?? ""; _savedNominee = policy.NominatedHuman;
             _notice = "Review policy saved. Open pull requests will be checked against this policy.";
+            _configurationIssue = policy.ConfigurationIssue;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex)

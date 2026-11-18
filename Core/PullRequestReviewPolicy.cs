@@ -33,6 +33,10 @@ public sealed class PullRequestReviewPolicy(MemoryStore memory)
         return login;
     }
     public async Task<RequiredReview> GetModeAsync(CancellationToken ct) => (await GetSettingsAsync(ct)).Mode;
+    internal static string? ReviewerConfigurationIssue(RequiredReview mode, bool hasReviewer) =>
+        !hasReviewer && mode is RequiredReview.Automated or RequiredReview.Both
+            ? $"Engineering is paused. The {mode} review policy requires an independent reviewer App for this repository. Configure the publisher and reviewer Apps, or select Human review in the project’s pull request approvals."
+            : null;
     public async Task SetModeAsync(RequiredReview mode, CancellationToken ct)
         => await memory.RememberAsync(PolicyKey, JsonSerializer.Serialize((await GetSettingsAsync(ct)) with { Mode = mode }), ct: ct);
     public async Task SetModeAsync(RequiredReview mode, string actor, CancellationToken ct)
