@@ -33,6 +33,24 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(value['status'], value['body'])
         return self.send(200, value)
 
+    def do_POST(self):
+        path = urlparse(self.path).path.rstrip('/')
+        writes.append({'method': 'POST', 'path': self.path})
+        response = fixtures.get(self.path)
+        if not isinstance(response, dict) or path != '/api/tasks/synthetic-review-retry/requeue':
+            return self.send(405, {'error': 'No fixture mutation for ' + path})
+        if response.get('status', 200) != 200:
+            return self.send(response['status'], response['body'])
+        # Synthetic persisted reconciliation context; never a real scheduler or database.
+        task = fixtures['/api/tasks/synthetic-review-retry']
+        task['status'] = 'InProgress'
+        for key in ['blockedKind', 'reviewIntegrationError', 'lastError']:
+            task['metadata'].pop(key, None)
+        task['metadata']['reviewIntegrationAttempts'] = 0
+        task['situation'] = {'label': 'Review queued', 'text': 'Review reconciliation queued; engineering work retained.', 'nextActor': 'Forge reviewer'}
+        fixtures['/api/tasks/synthetic-review-retry/state']['state'] = 'Reviewing'
+        return self.send(200, {'taskId': task['id'], 'status': 'InProgress', 'action': 'retry-review'})
+
     def do_PUT(self):
         path = urlparse(self.path).path.rstrip('/')
         if self.headers.get('Transfer-Encoding', '').lower() == 'chunked':

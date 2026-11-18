@@ -36,6 +36,7 @@ try {
   await verifySprintBoard(page,base,{fixtureApi:api,screenshotDir:output});
   receipt.checks.push('1280 sidebar + all five lane/card bounds; 390 all five lanes; mid-work hold; refreshed lane persistence');
  }
+ if (!process.argv.includes('--retry-only')) {
  const binding=JSON.parse(actualTask.metadata.sprintOutcome), publication=JSON.parse(actualTask.metadata.trustedPublication), merge=JSON.parse(actualTask.metadata.observedMerge);
  const task={...actualTask,delivery:{criteria:binding.criteria.filter(c=>binding.criterionIds.includes(c.id)).map(c=>({text:c.text,evidenceKind:c.evidenceKind})),verifiedHead:publication.PublishedHeadSha,verifiedAt:publication.Verification.CompletedAt,mergeCommit:merge.MergeSha,mergeObservedAt:merge.ObservedAt},situation:{label:'Merged',text:'Merge observed. Release and acceptance are tracked with the sprint.',nextActor:null,humanReviewRequired:false},events:historical.reviews.map(r=>({kind:'review',at:r.submittedAt,actor:`PR comment by ${r.reviewer}`,detail:r.summary}))};
  await put({
@@ -203,6 +204,39 @@ try {
   await capture(page,{path:`${output}/synthetic-existing-${width}.png`,fullPage:true});
  }
  receipt.checks.push('Separate synthetic rework and completion states; measured worker/model/verification/human wait, independent integration errors, linked run detail at 1280/390');
+ }
+ // Explicitly synthetic recovery fixture. The real endpoint/state transition has separate backend tests.
+ const retryId = 'synthetic-review-retry';
+ const retryPath = '/api/tasks/' + retryId;
+ const retryRoute = retryPath + '/requeue?projectId=forge';
+ for (const width of [1280,390]) {
+  const preserved = {reworkAttempts:2,reviewDraft:'synthetic saved draft',reviewPublicationIntent:'synthetic pending intent',humanReviewTaskHold:true,branch:'synthetic-retained-branch'};
+  await put({
+   [retryPath]:{id:retryId,title:'Synthetic review integration recovery',status:'Blocked',metadata:{...preserved,blockedKind:'review-integration',reviewIntegrationAttempts:3,reviewIntegrationError:'Review connection needs attention.'},situation:{label:'Review needs attention',text:'Fix the connection, then retry review.',nextActor:'You'},events:[]},
+   [retryPath+'/state']:{state:'Blocked',strikes:2,maxStrikes:3},
+   [retryPath+'/human-review']:{required:true,syncPending:false,mode:'Both'},
+   [retryRoute]:{status:503,body:{error:'Synthetic temporary review service outage'}}
+  });
+  await page.setViewportSize({width,height:900});
+  await page.goto(base+'/tasks/'+retryId+'?project=forge');
+  await page.getByRole('heading',{name:'Synthetic review integration recovery',exact:true}).waitFor();
+  await page.locator('.task-actions > summary').click();
+  const writesBefore = (await (await page.request.get(api+'/__writes')).json()).length;
+  await page.getByRole('button',{name:'Retry review',exact:true}).click();
+  await page.getByText('Retry failed. Synthetic temporary review service outage',{exact:true}).waitFor();
+  await put({[retryRoute]:{status:200,body:{}}});
+  await page.getByRole('button',{name:'Retry review',exact:true}).click();
+  await page.getByText('Review reconciliation queued; engineering work retained.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Retry review',exact:true}).count(),0);
+  const writes = (await (await page.request.get(api+'/__writes')).json()).slice(writesBefore);
+  assert.deepEqual(writes,[{method:'POST',path:retryRoute},{method:'POST',path:retryRoute}]);
+  const saved = await (await page.request.get(api+retryPath)).json();
+  assert.equal(saved.status,'InProgress');
+  for(const [key,value] of Object.entries(preserved)) assert.equal(saved.metadata[key],value);
+  assert.equal((await (await page.request.get(api+retryPath+'/state')).json()).strikes,2);
+  await capture(page,{path:`${output}/synthetic-review-retry-${width}.png`,fullPage:true});
+ }
+ receipt.checks.push('Synthetic Retry review at 1280/390: failed action stays visible; project-scoped requeue resumes review with retained strikes/draft/intent/hold/branch, never reset-strikes');
  assert.deepEqual(errors,[]);
  receipt.result='passed';
 } catch(error) {
