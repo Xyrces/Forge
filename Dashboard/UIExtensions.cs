@@ -20,8 +20,8 @@ namespace Forge.Dashboard;
 
 public static class UIExtensions
 {
-    public static IServiceCollection AddForgeUI(this IServiceCollection services, Uri publicBaseAddress, Uri localBaseAddress,
-        DashboardMutationAuthentication? mutationAuthentication = null)
+    public static IServiceCollection AddForgeUI(this IServiceCollection services, IHostEnvironment environment,
+        Uri publicBaseAddress, Uri localBaseAddress, DashboardMutationAuthentication? mutationAuthentication = null)
     {
         if (mutationAuthentication is not null)
             services.ConfigureAll<Microsoft.Extensions.Http.HttpClientFactoryOptions>(options =>
@@ -32,8 +32,11 @@ public static class UIExtensions
             .AddInteractiveServerComponents();
         services.Configure<Microsoft.AspNetCore.Components.Server.CircuitOptions>(o => o.DetailedErrors = true);
         services.AddFluxor(options =>
-            options.ScanAssemblies(uiAssembly)
-                   .UseReduxDevTools());
+        {
+            options.ScanAssemblies(uiAssembly);
+            if (environment.IsDevelopment())
+                options.UseReduxDevTools();
+        });
         // publicBaseAddress is what the Blazor ForgeUI component
         // sees (so the rendered HTML links to e.g.
         // https://192.168.68.78:443/...). localBaseAddress is what
