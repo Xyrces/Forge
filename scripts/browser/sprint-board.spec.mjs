@@ -2,6 +2,31 @@ import { capture } from './capture.mjs';
 // Import into the Linux browser runner after opening an authenticated Forge UI.
 // Routes are fixtures only; no service state is changed by this qualification.
 import assert from 'node:assert/strict';
+async function verifyActiveSprintLabel(page, width) {
+  const label = page.locator('.app-active-sprint');
+  await label.waitFor({state:'visible'});
+  const text = await label.innerText();
+  assert.equal(await label.getAttribute('title'), 'Active sprint: ' + text);
+  const geometry = await label.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    return {
+      left: bounds.left, right: bounds.right,
+      top: bounds.top, bottom: bounds.bottom,
+      lines: [...range.getClientRects()].map(line => ({
+        left: line.left, right: line.right, top: line.top, bottom: line.bottom,
+      })),
+      clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+    };
+  });
+  assert.ok(geometry.left >= 0 && geometry.right <= width, 'Active sprint label fits viewport');
+  assert.ok(geometry.scrollHeight <= geometry.clientHeight + 1, 'Active sprint text is not vertically clipped');
+  for (const line of geometry.lines) {
+    assert.ok(line.left >= geometry.left && line.right <= geometry.right + 1, 'Sprint text fits horizontally');
+    assert.ok(line.top >= geometry.top && line.bottom <= geometry.bottom + 1, 'Each sprint name line fits vertically');
+  }
+}
 export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, screenshotDir = null, nominatedHuman = null } = {}) {
   const projectId = 'forge';
   const sprint = { id:'ux-fixture', name:'Review the dashboard change', goal:'## Goal\nKeep production clean.\n\n- Preserve development tooling.', status:'Active', startDate:'2026-11-17T00:00:00Z' };
@@ -48,6 +73,7 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
     assert.ok(card.x>=bounds.x && card.x+card.width<=bounds.x+bounds.width+1,'Card fits lane');
   }
   assert.ok(await page.locator('.app-nav').isVisible(),'Desktop sidebar is open during bounds check');
+  await verifyActiveSprintLabel(page, 1280);
   await lanes.first().scrollIntoViewIfNeeded();
   const tops=await lanes.evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().top));
   assert.ok(Math.max(...tops)-Math.min(...tops)<2,'All desktop lanes share a row');
@@ -63,6 +89,7 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
   assert.equal(holdWrites,1);
   assert.ok(await page.getByRole('region',{name:'Running',exact:true}).getByText('Task 2:',{exact:false}).isVisible());
   await page.setViewportSize({width:390,height:844});
+  await verifyActiveSprintLabel(page, 390);
   const picker=page.getByLabel('Task lane');
   for(const lane of ['Queued','Running','Review','Needs you','Completed / closed']) {
     await picker.selectOption({label:`${lane} (1)`});

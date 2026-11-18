@@ -23,7 +23,7 @@ const now='2026-11-18T02:20:00Z';
 const common={
  '/api/projects':[{id:'forge',name:'Forge · offline rehearsal',repoUrl:'https://github.com/Xyrces/Forge.git'}],
  '/api/meta/buildinfo':{informationalVersion:'Offline UI rehearsal',framework:'.NET 10'},
- '/api/health/heartbeat':{status:'healthy',at:now}, '/api/sprints/active':{id:'ux-fixture',name:'Offline browser qualification'},
+ '/api/health/heartbeat':{status:'healthy',at:now}, '/api/sprints/active':{id:'ux-fixture',name:'Qualify the deployed Forge sprint board and protected pull request workflow across desktop and mobile'},
  '/api/state':{tasks:[],agents:[],skills:[],sprints:[]}, '/api/now':{items:[]},
  '/api/gates':{design:'open',groom:'open',sprint:'open',merge:'open',deploy:'open'},
  '/api/sprints/building':{}, '/api/queue':{ready:[],blocked:[]},
