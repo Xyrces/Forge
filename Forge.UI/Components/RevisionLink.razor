@@ -1,0 +1,14 @@
+@using Forge.Dashboard.Services
+@if (Valid)
+{
+    @if (RepositoryLinks.WebUrl(Repository) is { } url)
+    { <a href="@(url + "/commit/" + Sha)" title="@Sha" target="_blank" rel="noopener">@(Sha![..7])</a> }
+    else { <code title="@Sha">@(Sha![..7])</code> }
+}
+else { <span>@Unavailable</span> }
+@code {
+    [Parameter] public string? Sha { get; set; }
+    [Parameter] public string? Repository { get; set; }
+    [Parameter] public string Unavailable { get; set; } = "Revision not verified";
+    private bool Valid => System.Text.RegularExpressions.Regex.IsMatch(Sha ?? "", "\\A[a-fA-F0-9]{40}\\z");
+}

@@ -77,12 +77,12 @@
                 @foreach (var native in _nativeReviews)
                 {
                     <article class="task-finding"><h3>@NativeDecisionLabel(native.Verdict) · @native.Reviewer</h3>
-                        <p class="meta-text">@native.Role · @FmtDate(native.SubmittedAt) · revision <code>@native.HeadSha</code>@(native.HeadSha != Meta("branchSha") ? " · Earlier or unconfirmed revision" : " · Current recorded revision")</p>
-                        <RecordedMarkdown Text="@native.Summary" />
+                        <p class="meta-text">@native.Role · @FmtDate(native.SubmittedAt) · revision <RevisionLink Sha="@native.HeadSha" Repository="@_repoUrl" />@(native.HeadSha != Meta("branchSha") ? " · Earlier or unconfirmed revision" : " · Current recorded revision")</p>
+                        <RecordedMarkdown Text="@ReviewProse.Format(native.Summary, native.Role == "Forge reviewer App")" />
                         @foreach (var comment in native.Comments)
                         {
                             <details><summary>@comment.Path · @comment.Author@(comment.InReplyToId is null ? " · Inline comment" : " · Discussion reply")</summary>
-                                <RecordedMarkdown Text="@comment.Body" /><p class="meta-text">Original commented revision: <code>@comment.OriginalHead</code>. The excerpt is GitHub’s recorded diff context; no correction is inferred.</p>
+                                <RecordedMarkdown Text="@comment.Body" /><p class="meta-text">Original commented revision: <RevisionLink Sha="@comment.OriginalHead" Repository="@_repoUrl" />. The excerpt is GitHub’s recorded diff context; no correction is inferred.</p>
                                 <pre class="task-source" tabindex="0" aria-label="Recorded diff context; scroll horizontally for long lines"><code>@comment.DiffHunk</code></pre>
                                 @if (SafeReviewUrl(comment.Url) is { } commentUrl) { <a href="@commentUrl" target="_blank" rel="noopener">Open exact GitHub discussion ↗</a> }
                             </details>
@@ -99,8 +99,8 @@
                 <section class="card"><label>Review decision <select @bind="_legacyIndex" @bind:after="ResetLegacyCode">@for (var i = 0; i < _legacyReviews.Count; i++) { <option value="@i">Review @_legacyReviews[i].Round · @DecisionLabel(_legacyReviews[i].Verdict)</option> }</select></label>
                     <div class="task-review-heading"><h2>@DecisionLabel(review.Verdict)</h2><span>Published by @review.Reviewer · @FmtDate(review.SubmittedAt)</span></div>
                     <p class="meta-text">Historical assessment from a PR comment. Its author is shown above; this was not a formal GitHub review.</p>
-                    <p>Reviewed revision: <code>@(review.HeadSha ?? "Could not verify the revision from PR commits")</code></p>
-                    <RecordedMarkdown Text="@review.Summary" />
+                    <p>Reviewed revision: <RevisionLink Sha="@review.HeadSha" Repository="@_repoUrl" /></p>
+                    <RecordedMarkdown Text="@ReviewProse.Legacy(review.Summary, review.Round, review.Verdict)" />
                     @foreach (var finding in review.Findings)
                     {
                         var excerpt = _laterCode ? finding.LaterCode : finding.ReportedCode;
@@ -108,7 +108,7 @@
                             <div class="task-controls"><button class="btn @(!_laterCode ? "btn--primary" : "")" @onclick="() => _laterCode = false">Reported code</button>
                                 @if (finding.LaterCode is not null) { <button class="btn @(_laterCode ? "btn--primary" : "")" @onclick="() => _laterCode = true">Later reviewed revision</button> }
                             </div>
-                            @if (excerpt is not null) { <p class="meta-text">@excerpt.HeadSha[..7] · excerpt lines @excerpt.Line–@excerpt.EndLine</p><pre class="task-source" tabindex="0" aria-label="Verified source excerpt; scroll horizontally for long lines"><code>@CodeLines(excerpt)</code></pre><a href="@excerpt.Url" target="_blank" rel="noopener">Open verified source ↗</a> }
+                            @if (excerpt is not null) { <p class="meta-text"><RevisionLink Sha="@excerpt.HeadSha" Repository="@_repoUrl" /> · excerpt lines @excerpt.Line–@excerpt.EndLine</p><pre class="task-source" tabindex="0" aria-label="Verified source excerpt; scroll horizontally for long lines"><code>@CodeLines(excerpt)</code></pre><a href="@excerpt.Url" target="_blank" rel="noopener">Open verified source ↗</a> }
                             else { <p>Source excerpt unavailable.</p> }
                         </article>
                     }
@@ -121,7 +121,7 @@
                 var selected = history[Math.Clamp(_reviewIndex, 0, history.Count - 1)];
                 <section class="card"><label>Review decision <select @bind="_reviewIndex">@for (var i = 0; i < history.Count; i++) { <option value="@i">Review @history[i].Round · @DecisionLabel(history[i].Verdict)</option> }</select></label>
                     <div class="task-review-heading"><h2>@DecisionLabel(selected.Verdict)</h2><span>@(selected.Reviewer ?? "Reviewer not recorded") · @FmtDate(selected.SubmittedAt)</span></div>
-                    <p class="meta-text">Reviewed revision <code>@selected.HeadSha</code></p><RecordedMarkdown Text="@selected.Summary" />
+                    <p class="meta-text">Reviewed revision <RevisionLink Sha="@selected.HeadSha" Repository="@_repoUrl" /></p><RecordedMarkdown Text="@ReviewProse.Format(selected.Summary, true)" />
                     @foreach (var finding in selected.Findings ?? [])
                     {
                         <article class="task-finding"><h3>@finding.Path · line @finding.Line</h3><RecordedMarkdown Text="@finding.Body" />
@@ -136,9 +136,9 @@
             else if (_legacyReviews.Count == 0 && _nativeReviews.Count == 0)
             {
             <section class="card"><div class="task-review-heading"><h2>@ReviewLabel</h2><span class="meta-text">Forge reviewer · @(Meta("reviewRound") is { } round ? $"Review {round}" : "Review number not recorded")</span></div>
-                <dl class="task-facts"><dt>Revision</dt><dd><code>@(Meta("reviewSha") ?? "Not recorded")</code></dd><dt>Source</dt><dd>Forge’s recorded verdict. See the PR for formal GitHub decisions and inline discussions.</dd></dl>
+                <dl class="task-facts"><dt>Revision</dt><dd><RevisionLink Sha="@Meta("reviewSha")" Repository="@_repoUrl" /></dd><dt>Source</dt><dd>Forge’s recorded verdict. See the PR for formal GitHub decisions and inline discussions.</dd></dl>
                 @if (Meta("reviewSha") is { } reviewed && Meta("branchSha") is { } head && reviewed != head) { <p class="banner banner--warn">This decision applies to an earlier revision. The current revision needs its own review.</p> }
-                @if (Meta("reviewNotes") is { Length: > 0 } notes) { <RecordedMarkdown Text="@notes" /> }
+                @if (Meta("reviewNotes") is { Length: > 0 } notes) { <RecordedMarkdown Text="@ReviewProse.Format(notes, true)" /> }
                 else { <p class="meta-text">No reviewer notes recorded.</p> }
                 @if (Meta("reworkContext") is { Length: > 0 } feedback) { <details><summary>Requested change and worker context</summary><RecordedMarkdown Text="@feedback" /></details> }
                 <p class="meta-text">Earlier decisions and run outcomes are retained in History &amp; runs. Missing file anchors are not inferred from prose.</p>

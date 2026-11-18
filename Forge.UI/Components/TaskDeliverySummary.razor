@@ -58,9 +58,5 @@ else
     };
     private static string When(DateTimeOffset? time) => time is { } recorded && recorded != default
         ? $"· {recorded.UtcDateTime:MMM d, HH:mm} UTC" : "";
-    private RenderFragment Commit(string sha) => @<span>
-        @if (RepositoryLinks.WebUrl(Repository) is { } url)
-        { <a href="@(url + "/commit/" + sha)" target="_blank" rel="noopener">@sha[..7]</a> }
-        else { <code>@sha[..7]</code> }
-    </span>;
+    private RenderFragment Commit(string sha) => @<RevisionLink Sha="@sha" Repository="@Repository" />;
 }

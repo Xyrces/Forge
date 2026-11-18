@@ -8,7 +8,7 @@ const browser=await chromium.launch({headless:true,executablePath:process.env.FO
 const page=await browser.newPage({viewport:{width:1280,height:1000}});
 const url='https://github.com/example/repo/pull/7', old='1'.repeat(40), head='2'.repeat(40);
 const row=(id,verdict,reviewer,sha,summary,comments=[])=>({id,verdict,reviewer,headSha:sha,summary,comments,url:url+'#pullrequestreview-'+id,submittedAt:'2026-11-18T03:00:00Z',role:reviewer.endsWith('[bot]')?'Forge reviewer App':'GitHub participant'});
-const native=[row(5,'Approved','human-reviewer',head,'I reviewed the correction at this revision.'),row(4,'Commented','observer',head,'Advisory suggestion, not a change request.'),row(3,'Dismissed','other-reviewer',old,'This decision was dismissed.'),row(2,'ChangesRequested','human-reviewer',old,'Please preserve the Development registration.',[{id:12,author:'human-reviewer',path:'tests/Forge.Tests/Integration/OrchestratorAgentTests.cs',body:'Development still needs this registration.',diffHunk:'@@ -8,2 +8,2 @@\n-if (environment.IsDevelopment())\n+if (environment.IsProduction())',url:url+'#discussion_r12',originalHead:old,inReplyToId:null}]),row(1,'Approved','forge-reviewer[bot]',old,'Automated review recorded.')];
+const native=[row(5,'Approved','human-reviewer',head,'I reviewed the correction at this revision.'),row(4,'Commented','observer',head,'Advisory suggestion, not a change request.\n\nREVIEWER_VERDICT: APPROVE'),row(3,'Dismissed','other-reviewer',old,'This decision was dismissed.'),row(2,'ChangesRequested','human-reviewer',old,'Please preserve the Development registration.',[{id:12,author:'human-reviewer',path:'tests/Forge.Tests/Integration/OrchestratorAgentTests.cs',body:'Development still needs this registration.',diffHunk:'@@ -8,2 +8,2 @@\n-if (environment.IsDevelopment())\n+if (environment.IsProduction())',url:url+'#discussion_r12',originalHead:old,inReplyToId:null}]),row(1,'Approved','forge-reviewer[bot]',old,'Automated review recorded.\n\nREVIEWER_VERDICT: APPROVE\n<!-- forge-review:v1:'+ 'a'.repeat(64)+' -->')];
 const legacy={round:1,headSha:old,verdict:'RequestChanges',reviewer:'legacy-publisher',url:url+'#issuecomment-9',submittedAt:'2026-11-18T01:00:00Z',summary:'Earlier ordinary comment preserved separately.',findings:[]};
 try {
  await page.request.put('http://127.0.0.1:5124/__fixtures',{data:{'/api/projects':[{id:'forge',name:'Synthetic mixed review fixture',repoUrl:'https://github.com/example/repo.git'}],'/api/tasks/mixed':{id:'mixed',title:'Synthetic mixed review history',status:'InProgress',metadata:{prNumber:'7',branchSha:head,reviewHistory:JSON.stringify([{round:1,headSha:old,verdict:'Approve',summary:'Automated review recorded.',url:native[4].url}])},situation:{label:'In review',text:'Synthetic history qualification'}},'/api/tasks/mixed/human-review':{required:false,mode:'Both'},'/api/tasks/mixed/review-history':{reviews:[legacy],nativeReviews:native,notes:[],limited:false}}});
@@ -17,6 +17,9 @@ try {
  await page.getByText('tests/Forge.Tests/Integration/OrchestratorAgentTests.cs · human-reviewer · Inline comment',{exact:true}).click();
  for(const text of ['Advisory comments · observer','Dismissed review · other-reviewer','Approval recorded · human-reviewer','Changes requested at this review · human-reviewer','Earlier ordinary comment preserved separately.']) await page.getByText(text,{exact:true}).waitFor();
  assert.equal(await page.getByText('Automated review recorded.',{exact:true}).count(),1);
+ assert.equal(await page.getByText('REVIEWER_VERDICT: APPROVE',{exact:true}).count(),1,'Human review prose stays verbatim while Forge protocol is hidden');
+ assert.ok(await page.getByRole('link',{name:'2222222',exact:true}).count()>0);
+ assert.equal(await page.getByRole('link',{name:'2222222',exact:true}).first().getAttribute('title'),head);
  assert.equal(await page.getByRole('link',{name:'Open exact GitHub discussion ↗'}).getAttribute('href'),url+'#discussion_r12');
  await capture(page,{path:output+'/mixed-native-legacy-1280.png',fullPage:true});
  await page.getByRole('heading',{name:'GitHub reviews and inline discussions'}).scrollIntoViewIfNeeded();
@@ -33,6 +36,7 @@ try {
  await page.getByRole('heading',{name:legacyTask.title,exact:true}).waitFor();
  await page.getByRole('button',{name:'Review',exact:true}).click();
  await page.getByLabel('Review decision').selectOption('1');
+ assert.equal(await page.getByText('REVIEWER_VERDICT: REQUEST_CHANGES',{exact:true}).count(),0);
  await page.locator('.task-finding').first().scrollIntoViewIfNeeded();
  const oldBounds=await page.locator('.task-finding h3').evaluateAll(nodes=>nodes.map(n=>{const r=document.createRange();r.selectNodeContents(n);return [...r.getClientRects()].map(b=>({left:b.left,right:b.right}));}).flat());
  assert.ok(oldBounds.length>0 && oldBounds.every(b=>b.left>=0 && b.right<=390),'Historical path text must wrap inside mobile viewport');
