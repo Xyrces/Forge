@@ -1,0 +1,5 @@
+@using Forge.Dashboard.Services
+<div class="task-prose">@((MarkupString)MarkdownRenderer.ToHtml(Text))</div>
+@code {
+    [Parameter] public string? Text { get; set; }
+}

@@ -1,0 +1,66 @@
+@using Forge.Dashboard.Features.Tasks
+@using Forge.Dashboard.Services
+
+@if (Data is { } delivery && (delivery.Criteria.Count > 0 || delivery.MergeCommit is not null || delivery.ExistingSource is not null))
+{
+    @if (delivery.ExistingSource is { } existing)
+    {
+        <h2>Existing implementation verified</h2>
+        <dl class="task-facts"><dt>Verified revision</dt><dd>@Commit(existing) @When(delivery.ExistingVerifiedAt)</dd><dt>Independent review</dt><dd>Approved @When(delivery.ExistingReviewedAt)</dd></dl>
+        <p class="meta-text">The approved behavior was independently checked in existing code. This evidence does not claim a new merge or deployment.</p>
+    }
+    @if (delivery.MergeCommit is not null)
+    {
+        <h2>Delivery evidence</h2>
+        <dl class="task-facts">
+            @if (delivery.VerifiedHead is not null)
+            {
+                <dt>Worker verification</dt><dd>Passed on @Commit(delivery.VerifiedHead) @When(delivery.VerifiedAt)</dd>
+            }
+            <dt>Merged revision</dt><dd>@Commit(delivery.MergeCommit) @When(delivery.MergeObservedAt)</dd>
+            @if (SprintUrl is not null)
+            {
+                <dt>Sprint acceptance</dt><dd><a href="@SprintUrl">View release and acceptance evidence</a></dd>
+            }
+        </dl>
+    }
+    @if (delivery.Criteria.Count > 0)
+    {
+        <h2>What this task contributes</h2>
+        <ul class="task-criteria">
+            @foreach (var criterion in delivery.Criteria)
+            {
+                <li><strong>@Kind(criterion.EvidenceKind)</strong><span>@criterion.Text</span></li>
+            }
+        </ul>
+    }
+    @if (!string.IsNullOrWhiteSpace(Description))
+    { <details><summary>Original task request</summary><RecordedMarkdown Text="@Description" /></details> }
+}
+else
+{
+    <h2>Work requested</h2>
+    @if (string.IsNullOrWhiteSpace(Description)) { <p class="meta-text">No description recorded.</p> }
+    else { <RecordedMarkdown Text="@Description" /> }
+}
+
+@code {
+    [Parameter] public TaskDeliveryRead? Data { get; set; }
+    [Parameter] public string? Description { get; set; }
+    [Parameter] public string? Repository { get; set; }
+    [Parameter] public string? SprintUrl { get; set; }
+    private static string Kind(string kind) => kind switch
+    {
+        "ImplementationVerified" or "MergedAndVerified" => "Implementation",
+        "OperatorObserved" => "Operator observation",
+        "DeploymentHealthy" => "Deployment",
+        _ => "Acceptance criterion"
+    };
+    private static string When(DateTimeOffset? time) => time is { } recorded && recorded != default
+        ? $"· {recorded.UtcDateTime:MMM d, HH:mm} UTC" : "";
+    private RenderFragment Commit(string sha) => @<span>
+        @if (RepositoryLinks.WebUrl(Repository) is { } url)
+        { <a href="@(url + "/commit/" + sha)" target="_blank" rel="noopener">@sha[..7]</a> }
+        else { <code>@sha[..7]</code> }
+    </span>;
+}

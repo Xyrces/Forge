@@ -6,9 +6,9 @@
 @inject ILogger<SprintCompletionPanel> Logger
 @implements IDisposable
 
-<section class="card" aria-label="Sprint evidence and delivery">
-    <strong>Sprint evidence and delivery</strong>
-    <p class="page-subtitle">Terminal task counts do not prove an outcome was delivered.</p>
+<section class="card sprint-acceptance" aria-label="Sprint evidence and delivery">
+    <h2>Acceptance and delivery</h2>
+    <p class="page-subtitle">Engineering proof, release status and operator observations are tracked separately.</p>
     @if (_loading && _detail is null)
     {
         <p role="status">Loading completion evidence…</p>
@@ -30,7 +30,7 @@
             <p class="banner banner--warn" role="alert">@_error The last loaded evidence is shown below.</p>
             <button class="btn" @onclick="LoadAsync">Retry loading evidence</button>
         }
-        <dl>
+        <dl class="delivery-summary">
             <dt>Engineering evidence</dt><dd>@(receipt.AbandonedAt is null ? CompletionPresentation.Outcome(receipt.Outcome) : "Evidence incomplete — outcome stopped")</dd>
             <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
             <dt>Deployment</dt><dd>@(receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus) : receipt.DeliveryRequired == false ? "Not required for this outcome" : (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
@@ -45,7 +45,7 @@
         }
         @if (receipt.SourceSha is not null)
         {
-            <p class="page-subtitle">Qualified source: <code>@receipt.SourceSha</code></p>
+            <details class="release-reference"><summary>Qualified source revision</summary><code>@receipt.SourceSha</code></details>
         }
         @if (receipt.AbandonedAt is not null)
         {
@@ -69,10 +69,12 @@
                 }
             </details>
         }
+        <h3>Approved acceptance criteria</h3>
+        @if (_detail.Criteria.Count == 0) { <p>No structured criteria were recorded. Read the original sprint objective above.</p> }
         @foreach (var criterion in _detail.Criteria)
         {
-            <div class="card">
-                <strong>@criterion.Text</strong>
+            <section class="acceptance-criterion">
+                <h4>@criterion.Text</h4>
                 <p class="page-subtitle">@CompletionPresentation.Evidence(criterion.EvidenceKind)</p>
                 @if (criterion.EvidenceKind == "ImplementationVerified")
                 {
@@ -81,7 +83,11 @@
                 @if (criterion.EvidenceKind == "OperatorObserved")
                 {
                     <p>@(criterion.ProofReference is not null ? "Operator observation recorded for this deployed version." : receipt.AbandonedAt is not null ? "Not verified; this outcome was stopped." : "Awaiting explicit operator observation of the exact deployed version.")</p>
-                    @if (criterion.ProofReference is not null) { <p>Evidence: @criterion.ProofReference</p> }
+                    @if (criterion.ProofReference is not null)
+                    {
+                        <dl><dt>Recorded by</dt><dd>@(criterion.OperatorIdentity ?? "Identity not recorded")</dd>
+                        <dt>Evidence reference</dt><dd>@criterion.ProofReference</dd></dl>
+                    }
                     else if (receipt.AbandonedAt is null && receipt.ReadyForDeployment && receipt.DeploymentStatus == "Deployed"
                         && receipt.PlanHash is not null && receipt.SourceSha is not null && receipt.DeploymentCandidateId is not null
                         && ProjectId is not null && SprintId is not null)
@@ -92,7 +98,7 @@
                             CriterionId="@criterion.Id" Enabled="@(_error is null && !_loading)" OnRecorded="LoadAsync" />
                     }
                 }
-            </div>
+            </section>
         }
         @foreach (var batch in _detail.Batches)
         {

@@ -4,118 +4,32 @@
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @implements IDisposable
 @using System.Net.Http.Json
-
+@using Forge.Dashboard.Services
 <PageTitle>Agent runs</PageTitle>
-<div class="page">
-    <div class="page-header">
-        <h1>Agent runs</h1>
-        <div class="page-header__meta">@(_data is null ? "loading…" : $"{_data.Active.Count} active · {_data.Recent.Count} recent")</div>
-        <div class="page-header__actions">
-            <button class="btn" @onclick="LoadAsync">Refresh</button>
-        </div>
-    </div>
-
-    @if (_data is null && _loadError is not null)
+<div class="page task-detail">
+    <div class="page-header"><h1>Agent runs</h1><button class="btn" @onclick="LoadAsync">Refresh</button></div>
+    <p class="meta-text">Recorded agent work. A completed run does not itself establish verification, publication or deployment.</p>
+    @if (_loadError is not null) { <p class="banner banner--error" role="alert">Couldn’t refresh runs: @_loadError <button class="btn" @onclick="LoadAsync">Retry</button></p> }
+    @if (_data is null && _loadError is null) { <p>Loading…</p> }
+    @if (_data is not null)
     {
-        <div class="banner banner--error">Failed to load agent runs: @_loadError <button class="btn btn--small" @onclick="LoadAsync">Retry</button></div>
-    }
-    else if (_data is null)
-    {
-        <div class="page-subtitle">Loading…</div>
-    }
-    else
-    {
-        @if (_data.Active.Count > 0)
-        {
-            <div class="run-active-grid">
-                @foreach (var r in _data.Active)
-                {
-                    <div class="run-active-card">
-                        <div class="run-active-card__top">
-                            <span class="run-active-card__role">
-                                <span class="agent-row__dot"></span>
-                                <strong>@r.Role</strong>
-                                <span class="pill">@ProjectBadge(r.ProjectId)</span>
-                            </span>
-                            <span class="mono run-active-card__elapsed">@Elapsed(r)</span>
-                        </div>
-                        <div class="run-active-card__body">
-                            @if (r.TaskId is not null)
-                            {
-                                <a href="@($"/tasks/{r.TaskId}{ProjectQuery(r.ProjectId)}")" class="mono">@r.TaskId</a>
-                            }
-                            else
-                            {
-                                <span class="mono">(no task)</span>
-                            }
-                            <span class="meta-text"> · @r.Model</span>
-                            @if (r.ResumedSession == true)
-                            {
-                                <span class="pill pill--info">resumed</span>
-                            }
-                        </div>
-                        @if (!string.IsNullOrEmpty(r.Phase))
-                        {
-                            <div class="meta-text">@r.Phase</div>
-                        }
-                        <div class="mono run-active-card__meta">run @r.Id · started @r.StartedAt.ToLocalTime().ToString("HH:mm:ss")</div>
-                    </div>
-                }
-            </div>
-        }
-        else
-        {
-            <div class="page-subtitle" style="margin-bottom:14px">No agent runs in flight.</div>
-        }
-
-        <table class="data-grid">
-            <thead>
-                <tr>
-                    <th>When</th><th>Role</th><th>Task</th><th>Duration</th>
-                    <th>Msgs</th><th>Tools</th><th>Status</th><th>Phase</th><th></th>
-                </tr>
-            </thead>
-            <tbody>
-                @if (_data.Recent.Count == 0)
-                {
-                    <tr><td colspan="9" class="meta-text">No finished runs yet.</td></tr>
-                }
-                @foreach (var r in _data.Recent)
-                {
-                    <tr style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/runs/{r.Id}{ProjectQuery(r.ProjectId)}"))">
-                        <td class="mono">@r.StartedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
-                        <td>
-                            @r.Role
-                            <span class="pill">@ProjectBadge(r.ProjectId)</span>
-                            @if (r.ResumedSession == true)
-                            {
-                                <span class="pill pill--info">resumed</span>
-                            }
-                        </td>
-                        <td class="mono">@(r.TaskId ?? "—")</td>
-                        <td class="mono">@(r.DurationMs is null ? "—" : Fmt(r.DurationMs.Value))</td>
-                        <td class="mono">@(r.MessageCount?.ToString() ?? "—")</td>
-                        <td class="mono">@(r.ToolCallCount?.ToString() ?? "—")</td>
-                        <td>
-                            <span class="pill @(r.Status == "succeeded" ? "pill--completed" : r.Status == "failed" ? "pill--failed" : "pill--pending")">@r.Status</span>
-                            @if (r.Error is not null)
-                            {
-                                <span style="font-size:11px;color:var(--on-surface-variant)" title="@r.Error"> ⚠</span>
-                            }
-                        </td>
-                        <td class="meta-text">@(r.Phase ?? "—")</td>
-                        <td>@(r.HasTranscript ? "transcript →" : "")</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
+        <section class="card"><h2>Active · @_data.Active.Count</h2>
+            @if (_data.Active.Count == 0) { <p class="meta-text">No agents currently running.</p> }
+            <div class="task-run-list">@foreach (var r in _data.Active) { <article><div><a href="@($"/runs/{Uri.EscapeDataString(r.Id)}{ProjectQuery(r.ScopeProjectId)}")">@(r.TaskTitle ?? r.TaskId ?? "Planning run")</a><span>@WorkPresentation.Role(r.Role) · @Elapsed(r)</span></div><p>@(r.Phase ?? "Agent working")</p></article> }</div>
+        </section>
+        <section class="card"><h2>Recent history</h2><p class="meta-text">Latest 50 retained runs. Earlier runs may have expired under the retention policy.</p>
+            <div class="task-run-list">@foreach (var r in _data.Recent) { <article><div><a href="@($"/runs/{Uri.EscapeDataString(r.Id)}{ProjectQuery(r.ScopeProjectId)}")">@(r.TaskTitle ?? r.TaskId ?? "Planning run")</a><strong>@WorkPresentation.RunOutcome(r.Status, r.Role)</strong></div><p class="meta-text">@WorkPresentation.Role(r.Role) · @r.StartedAt.ToLocalTime().ToString("MMM d, HH:mm") · @(r.DurationMs is { } ms ? Fmt(ms) : "Duration not recorded")</p>@if (r.Error is { Length: > 0 }) { <details><summary>Run diagnostic</summary><RecordedMarkdown Text="@r.Error" /></details> }</article> }</div>
+            @if (_data.Recent.Count == 0) { <p>No finished runs recorded.</p> }
+        </section>
     }
 </div>
-
 @code {
     private RunsDto? _data;
     private string? _loadError;
     private System.Threading.Timer? _timer;
+    private string? _loadedProject;
+    private int _loadGeneration;
+    [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
 
     protected override void OnInitialized()
     {
@@ -129,20 +43,25 @@
 
     private async Task LoadAsync()
     {
+        var project = Project ?? ShellStore.Value.CurrentProjectId;
+        var generation = ++_loadGeneration;
+        if (_loadedProject != project) { _data = null; _loadedProject = project; }
         try
         {
             // agent_run is per-project workload data: follow the
             // active-project lens (the 5s poll re-reads it). Rows
             // pre-dating the per-project writers live in the primary
             // store and show the "legacy" badge.
-            var lens = ShellStore.Value.CurrentProjectId is { } pid
+            var lens = project is { } pid
                 ? $"?projectId={Uri.EscapeDataString(pid)}"
                 : string.Empty;
-            _data = await Http.GetFromJsonAsync<RunsDto>("/api/agent-runs" + lens);
+            var data = await Http.GetFromJsonAsync<RunsDto>("/api/agent-runs" + lens);
+            if (generation != _loadGeneration || project != (Project ?? ShellStore.Value.CurrentProjectId)) return;
+            _data = data;
             _loadError = null;
             StateHasChanged();
         }
-        catch (Exception ex) { _loadError = ex.Message; /* keep last good */ }
+        catch (Exception ex) { if (generation == _loadGeneration) { _loadError = ex.Message; StateHasChanged(); } }
     }
 
     private static string Elapsed(RunViewDto r)
@@ -164,5 +83,5 @@
         DateTime StartedAt, DateTime? FinishedAt, long? DurationMs,
         int? MessageCount, int? ToolCallCount, int? TextChars,
         string? Error, bool HasTranscript, string? Phase, bool? ResumedSession,
-        string? ProjectId);
+        string? ProjectId, string? TaskTitle, string? ScopeProjectId);
 }

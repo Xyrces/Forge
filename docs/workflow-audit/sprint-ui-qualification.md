@@ -92,3 +92,141 @@ the narrow layout kept the content within the viewport. Screenshots
 the private preview directory. The Mermaid block remains readable fenced
 source; this check does not claim an interactive diagram renderer. No
 scheduler, provider call or production data mutation occurred in the preview.
+
+
+## Task, review and sprint presentation rehearsal (November 17)
+
+The actual Blazor components were built and hosted on the Linux machine in
+`~/forge-revival-validation/task-browser-20261117`, independently of the live
+service. A loopback-only fixture API supplies server-side HttpClient responses;
+there is no production database, scheduler or model call in this rehearsal.
+The build passed with zero warnings and errors. The reusable runner is
+`scripts/browser/task-review.spec.mjs`; its board assertions are shared with
+`scripts/browser/sprint-board.spec.mjs`.
+
+`browser-final/receipt.json` records a passing desktop1280 and phone390 run:
+
+- Five desktop lanes occupy the same row with the sidebar open; every lane
+  and card fits, including the rightmost Completed / closed lane. Every phone
+  lane is selectable, fits, and retains selection after refresh.
+- A human-review hold added during active work stays in Running and records
+  one successful hold write. It does not imply the worker stopped.
+- PR150's three historical comment decisions use verified original comment
+  URLs and exact repository excerpts from190d128 and263bbfe. Historical
+  comment provenance stays distinct from formal reviews. An earlier note's
+  pending checks are not silently rewritten as passed.
+- Task overview, review selection/source toggles, structured plan checks and
+  timeline render at both widths. An unreadable critic verdict is shown as
+  allowed with warning, distinct from the two passed deterministic checks.
+- Separate explicitly synthetic fixtures exercise active rework, completed
+  work lacking merge evidence, linked agent-run detail, measured eligibility,
+  model/verification and human wait timings, and independent gate/publication
+  integration errors. These fixtures do not assert historical PR150 run data.
+
+Screenshots in `browser-final` include visible desktop cards, each phone lane,
+PR150 review/plan/history, and synthetic worker/run views. Desktop/mobile card
+screenshots were visually inspected. No browser page errors occurred; aborted
+Blazor disconnect requests on deliberate navigation are recorded in the receipt.
+This is an offline presentation qualification, not proof of a live merge,
+deployment, native GitHub review publication or current release acceptance.
+
+Browser testing exposed unserved isolated board styles. The three components'
+styles now ship in the linked shared `sprint-review.css`; the successful rerun
+confirms the delivered styles, rather than merely inspecting their source.
+
+
+### Capture audit correction
+
+The earlier `browser-final` screenshots are superseded: the parent review
+caught an overview captured during Blazor rehydration, despite earlier logical
+assertions passing. The runner now waits for populated, stable content on each
+capture, compares exact DOM text before and after it, and retains a `.png.txt`
+companion. Run navigation additionally waits for its exact URL and run-only
+content. Assertions cannot substitute for inspecting the captured image.
+
+`browser-qualified/receipt.json` is the passing full rerun. All22 screenshots
+were visually audited using the audit contact sheets. Finding/check/timeline
+and worker sections are scrolled into view because the dashboard uses an inner
+scrolling surface; `fullPage` alone does not show their offscreen content.
+The active sprint now has explicit synthetic engineering/browser criteria,
+merged and pending work, and separate pending deployment/observation states.
+The duplicate leading Goal heading is suppressed under Sprint objective.
+
+That visual audit found RunDetail's narrow header overflow. Its title now uses
+its own row and metadata wraps; `browser-qualified-runs/receipt.json` records
+the subsequent task/run regression check including a document-width assertion.
+These screenshots precede any later task-overview acceptance-component changes;
+that new surface requires its own qualification.
+
+
+### Task detail loading and authoritative delivery summary
+
+A subsequent Linux-only task qualification uses the actual allowlisted PR150
+metadata, fetched read-only from the existing service. It includes its four
+assigned acceptance criteria (one implementation and three operator observation
+requirements), excludes the sibling's regression criterion, and preserves the
+recorded263bbfe verification and30a6ec9 merge/time. Operator observations are
+shown as requirements, never inferred as passed from implementation evidence.
+
+The `browser-task-performance-final` receipt records one task overview API read per
+navigation, including prerender-to-interactive handoff. A persisted component
+snapshot eliminates duplicate hydration reads. Overview fetches no task history,
+worker attempts, run collection or legacy source history. History opens those
+reads once, concurrently, with task-scoped runs and cancellation/generation
+checks. Navigation resets prior evidence and selection. Refresh invalidates
+activity/review caches. The additive includeEvents=false contract avoids reading
+100events only to fetch the dedicated history endpoint later; the default API
+contract remains compatible.
+
+The focused Linux run passed79 tests: task evidence (including capturedPR150,
+independently reviewed existing code, and historical cancellation), task endpoint
+contracts/history, active-run scoping, task situations and delayed response/navigation authorization. Browser checks cover
+hydrated1280/390 presentation and request counts. Build passed without warnings.
+The test project retains unrelated existing analyzer warnings.
+
+The reusable runner now resolves Playwright normally or through the documented
+FORGE_BROWSER_NODE_PACKAGE override; an optional FORGE_BROWSER_EXECUTABLE selects
+installed Chrome. Host-private paths are supplied only by the invocation.
+
+
+### Nominated human reviewer qualification
+
+`browser-nomination-final/receipt.json` records an offline actual-component
+walkthrough: save the optional login from Project overview, activate the board's
+Require review by @Xyrces action during running engineering, and view the
+configured person as task next actor only for an actual human-review wait.
+The existing desktop/sidebar and mobile lane bounds checks run in this fixture.
+The name is fixture configuration only; production has no hardcoded nominee and
+no production setting was changed. Project and mobile-task captures were
+visually inspected.
+
+46 focused Linux tests cover the nominated eligible human's current-head
+approval, another writer's non-substituting approval, case-insensitive matching,
+stale approval, PR-author/bot exclusion, every eligible human's outstanding
+objection, project scoping, audited/authenticated save, optional-field preservation
+and explicit clearing. Watcher integration exercises Both and additional-hold
+paths, and clearing restores eligible-human fallback without changing Human mode.
+
+## Production reference for the sprint and task redesign
+
+On November 18 at 05:01 UTC, Linux Chrome opened PR #150's actual Forge task
+and Sprint 3 on production revision `30a6ec9f8b740dd4bd2775b26edac0db7ee48997`.
+At a 1280-pixel viewport each of the three completed cards started at x=1131
+and ended at x=1309. The outer page measured 1280 pixels wide, so checking
+document overflow alone missed 29 pixels of clipping. At 390 pixels those
+historical cards spanned x=23 to x=367. The saved screenshots show the same
+task and sprint at both widths. All prior sprints were complete at capture.
+
+The reference read is recorded in `baseline-pr150-stable/receipt.json` under
+the Linux sprint-review qualification directory. Its task-ready samples were
+1.98 seconds at desktop width and 1.02 seconds at phone width, measured from
+navigation to the visible task title, PR link and recorded review text. These
+are individual browser observations. The pilot must separately measure the
+redesigned UI, human review, CI and deployment. The
+[accepted design](task-review-ux-plan.md) defines the operator journey.
+
+### Mixed native review history
+
+The lazy task Review view reads up to 100 formal GitHub reviews and 100 inline comments, preserving actual authors, recorded revisions, discussion permalinks and original diff context. It retains legacy ordinary comments alongside native reviews and deduplicates cached Forge review records by publication URL. Historical requests, dismissed reviews and advisory comments are explicitly distinguished from a new merge decision. A later approval is not presented as proof that each discussion was resolved. No worker correction is inferred without a separate receipt.
+
+Linux offline runner `scripts/browser/native-review-history.spec.mjs` qualifies a synthetic App review, human requested changes with inline discussion, later human approval, advisory/dismissed decisions and a legacy comment. Receipt: `browser-native-history/receipt.json`; hydrated screenshots include the native decision summary and expanded inline discussion. Fifteen focused tests passed (native history, navigation guards and local GitHub-service overrides). These receipts do not establish production behavior or make a GitHub mutation.

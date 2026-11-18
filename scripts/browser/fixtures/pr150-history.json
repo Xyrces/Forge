@@ -1,0 +1,88 @@
+{
+  "notes": [
+    "Historical fixture verified from GitHub PR #150 comments and git objects; not live API state."
+  ],
+  "limited": false,
+  "reviews": [
+    {
+      "submittedAt": "2026-11-18T01:35:15Z",
+      "reviewer": "Xyrces",
+      "findings": [],
+      "verdict": "Approve",
+      "url": "https://github.com/Xyrces/Forge/pull/150#issuecomment-6966317332",
+      "round": 1,
+      "headSha": "66ca85f89c1510cf8f31045ec381e1d81707d441",
+      "sourceKind": "legacy-comment",
+      "summary": "**[Forge Reviewer — round 1]** Approve\n\nReviewed `66ca85f8`. Production no longer renders the obsolete `reduxDevTools.js` reference, and the existing `IsDevelopment()` guard keeps DevTools middleware out of Production. Development retains Fluxor’s built-in extension bridge through `StoreInitializer`, which remains active in every environment.\n\nI reran all five `DashboardFluxorRegistrationTests` in Release. They passed, covering the rendered shell, Development-only bridge registration, and ordinary dispatch in Development, Production, and Staging. The PR correctly leaves the browser extension handshake to the separate operator check. No pilot evidence or unrelated dashboard features changed.\n\nREVIEWER_NOTES: No findings.\n\nREVIEWER_VERDICT: APPROVE"
+    },
+    {
+      "submittedAt": "2026-11-18T01:55:21Z",
+      "reviewer": "Xyrces",
+      "findings": [
+        {
+          "endLine": 170,
+          "path": "tests/Forge.Tests/Integration/OrchestratorAgentTests.cs",
+          "line": 160,
+          "laterCode": {
+            "code": "    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null, WakeupSignal? wakeup = null)\n        => new OrchestratorAgent(\n            _projectStore,\n            new StubBundleFactory(_bundle),\n            runner,\n            _roleRegistry,\n            _messageBus,\n            new InProcessDispatcher(\n                (issue, bundle, ct) => RunWorkflowInProcess(runner, issue, ct),\n                NullLogger<InProcessDispatcher>.Instance),\n            _events,",
+            "headSha": "263bbfeb44a12565e3738b01ae08bbc92283ae63",
+            "path": "tests/Forge.Tests/Integration/OrchestratorAgentTests.cs",
+            "endLine": 170,
+            "line": 160,
+            "url": "https://github.com/Xyrces/Forge/blob/263bbfeb44a12565e3738b01ae08bbc92283ae63/tests/Forge.Tests/Integration/OrchestratorAgentTests.cs#L160-L170"
+          },
+          "verificationNote": "Location reconstructed from the comment and verified against repository content; not a native GitHub review thread.",
+          "body": "Location cited in original review",
+          "reportedCode": {
+            "code": "    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, Forge.Orchestrator.Slots.SlotTable? slots = null,\n        WakeupSignal? wakeup = null, IWorkflowDispatcher? dispatcher = null)\n        => new OrchestratorAgent(\n            _projectStore,\n            new StubBundleFactory(_bundle),\n            runner,\n            _roleRegistry,\n            _messageBus,\n            dispatcher ?? new InProcessDispatcher(\n                (issue, bundle, ct) => RunWorkflowInProcess(runner, issue, ct),\n                NullLogger<InProcessDispatcher>.Instance),",
+            "headSha": "190d128b59c88c1ff684ffb5a2c941c65032888d",
+            "path": "tests/Forge.Tests/Integration/OrchestratorAgentTests.cs",
+            "endLine": 170,
+            "line": 160,
+            "url": "https://github.com/Xyrces/Forge/blob/190d128b59c88c1ff684ffb5a2c941c65032888d/tests/Forge.Tests/Integration/OrchestratorAgentTests.cs#L160-L170"
+          }
+        },
+        {
+          "endLine": 411,
+          "path": "tests/Forge.Tests/Integration/OrchestratorAgentTests.cs",
+          "line": 350,
+          "laterCode": {
+            "code": "        var runner = new BlockingRunner(gate);\n        var slots = new Forge.Orchestrator.Slots.SlotTable();\n        var markers = BuildMarkers();\n        await _projectStore.UpsertAsync(new NewProject(\n            Id: \"test\", Name: \"Test\", RepoUrl: _workDir, DefaultBranch: \"main\"));\n        var orch = BuildOrchestrator(runner, slots);\n        BindMafWithEscalation(orch, markers);\n\n        var esc1 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: \"esc1\", Description: \"x\"));\n        var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: \"esc2\", Description: \"x\"));\n        var normal = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: \"normal\", Description: \"x\"));\n        await ActivateSprintWithAsync(esc1.Id, esc2.Id, normal.Id);",
+            "headSha": "263bbfeb44a12565e3738b01ae08bbc92283ae63",
+            "path": "tests/Forge.Tests/Integration/OrchestratorAgentTests.cs",
+            "endLine": 361,
+            "line": 350,
+            "url": "https://github.com/Xyrces/Forge/blob/263bbfeb44a12565e3738b01ae08bbc92283ae63/tests/Forge.Tests/Integration/OrchestratorAgentTests.cs#L350-L361"
+          },
+          "verificationNote": "Location reconstructed from the comment and verified against repository content; not a native GitHub review thread.",
+          "body": "Location cited in original review",
+          "reportedCode": {
+            "code": "        var slots = new Forge.Orchestrator.Slots.SlotTable();\n        var markers = BuildMarkers();\n        await _projectStore.UpsertAsync(new NewProject(\n            Id: \"test\", Name: \"Test\", RepoUrl: _workDir, DefaultBranch: \"main\"));\n        var esc1 = await _issues.CreateAsync(new NewIssue(DevTaskType, \"esc1\", Priority: 1));\n        var esc2 = await _issues.CreateAsync(new NewIssue(DevTaskType, \"esc2\", Priority: 2));\n        var normal = await _issues.CreateAsync(new NewIssue(DevTaskType, \"normal\", Priority: 3));\n        await ActivateSprintWithAsync(esc1.Id, esc2.Id, normal.Id);\n        await markers.WriteAsync(\"test\", esc1.Id, \"escalate 1\");\n        await markers.WriteAsync(\"test\", esc2.Id, \"escalate 2\");\n\n        // Hold the claims at the workflow boundary, before unrelated worktree",
+            "headSha": "190d128b59c88c1ff684ffb5a2c941c65032888d",
+            "path": "tests/Forge.Tests/Integration/OrchestratorAgentTests.cs",
+            "endLine": 361,
+            "line": 350,
+            "url": "https://github.com/Xyrces/Forge/blob/190d128b59c88c1ff684ffb5a2c941c65032888d/tests/Forge.Tests/Integration/OrchestratorAgentTests.cs#L350-L361"
+          }
+        }
+      ],
+      "verdict": "RequestChanges",
+      "url": "https://github.com/Xyrces/Forge/pull/150#issuecomment-6966646881",
+      "round": 2,
+      "headSha": "190d128b59c88c1ff684ffb5a2c941c65032888d",
+      "sourceKind": "legacy-comment",
+      "summary": "**[Forge Reviewer — round 2]** RequestChanges\n\nAt `190d128`, the approved Redux DevTools implementation and its tests are unchanged. All five dashboard tests and the modified orchestration test passed locally in Release. The only blocker is the scope of the new commit.\n\nREVIEWER_NOTES:\n- `tests/Forge.Tests/Integration/OrchestratorAgentTests.cs:160–170,350–411` — Restore this file to its `66ca85f` version. The new dispatcher lets the escalation-slot test hold and release claims without running the engineering workflow. That changes what the orchestration test exercises, but it neither implements nor verifies the dashboard’s DevTools behavior. The test stabilization is tracked separately as `draft-3`; no dashboard rework is needed.\n\nREVIEWER_VERDICT: REQUEST_CHANGES"
+    },
+    {
+      "submittedAt": "2026-11-18T02:16:37Z",
+      "reviewer": "Xyrces",
+      "findings": [],
+      "verdict": "Approve",
+      "url": "https://github.com/Xyrces/Forge/pull/150#issuecomment-6966990156",
+      "round": 3,
+      "headSha": "263bbfeb44a12565e3738b01ae08bbc92283ae63",
+      "sourceKind": "legacy-comment",
+      "summary": "**[Forge Reviewer — round 3]** Approve\n\nThe scope blocker is resolved at `263bbfe`. I verified that the rework restores `OrchestratorAgentTests.cs` exactly: `git diff 66ca85f HEAD` is empty. The PR contains only the previously approved dashboard wiring and its focused tests. Current-head CI and the separate operator-led Development extension check are still pending.\n\nREVIEWER_NOTES: No remaining findings.\n\nREVIEWER_VERDICT: APPROVE"
+    }
+  ]
+}
