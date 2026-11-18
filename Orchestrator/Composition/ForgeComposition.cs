@@ -331,7 +331,7 @@ public static class ForgeComposition
                 : projectFactory.Find(pid) is { } runCtx
                     ? new AgentRunStore(((IssueStore)runCtx.Issues).Db)
                     : agentRunStore,
-            // file_followup rows belong to the RUN's project store.
+            // Follow-ups and engineering artifact reads use the RUN's project store.
             issueStoreLookup: pid => pid is null
                 ? null
                 : projectFactory.Find(pid)?.Issues,

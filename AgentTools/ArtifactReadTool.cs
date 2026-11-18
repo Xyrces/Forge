@@ -39,19 +39,30 @@ public sealed class ArtifactReadTool
     private readonly ArtOutputStore _artOutputs;
     private readonly ContextHandoffStore? _handoffs;
     private readonly ILogger<ArtifactReadTool>? _logger;
+    private readonly bool _requireOwnedSpec;
+    private readonly DesignArtifactStore? _historicalDesignArtifacts;
+    private readonly ArtOutputStore? _historicalArtOutputs;
 
     public ArtifactReadTool(
         DesignArtifactStore designArtifacts,
         ISpecStore specs,
         ArtOutputStore artOutputs,
         ContextHandoffStore? handoffs = null,
-        ILogger<ArtifactReadTool>? logger = null)
+        ILogger<ArtifactReadTool>? logger = null,
+        bool requireOwnedSpec = false,
+        DesignArtifactStore? historicalDesignArtifacts = null,
+        ArtOutputStore? historicalArtOutputs = null)
     {
+        if (requireOwnedSpec && specs is ProjectRoutingSpecStore)
+            throw new ArgumentException("Scoped artifact reads require the project's physical spec store.", nameof(specs));
         _designArtifacts = designArtifacts;
         _specs = specs;
         _artOutputs = artOutputs;
         _handoffs = handoffs;
         _logger = logger;
+        _requireOwnedSpec = requireOwnedSpec;
+        _historicalDesignArtifacts = historicalDesignArtifacts;
+        _historicalArtOutputs = historicalArtOutputs;
     }
 
     /// <summary>
@@ -75,7 +86,9 @@ public sealed class ArtifactReadTool
         if (artifactId.StartsWith("design-", StringComparison.Ordinal))
         {
             var row = await _designArtifacts.GetAsync(artifactId, cancellationToken);
-            if (row is not null)
+            row ??= _historicalDesignArtifacts is null ? null
+                : await _historicalDesignArtifacts.GetAsync(artifactId, cancellationToken);
+            if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
             {
                 body = row.Body;
                 kind = "design";
@@ -93,7 +106,9 @@ public sealed class ArtifactReadTool
         else if (artifactId.StartsWith("art-", StringComparison.Ordinal))
         {
             var row = await _artOutputs.GetAsync(artifactId, cancellationToken);
-            if (row is not null)
+            row ??= _historicalArtOutputs is null ? null
+                : await _historicalArtOutputs.GetAsync(artifactId, cancellationToken);
+            if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
             {
                 // The body of an art_output is a relative file
                 // path. Returning the path (not the file content)
@@ -132,6 +147,11 @@ public sealed class ArtifactReadTool
             body,
         });
     }
+
+    private async Task<bool> OwnsSpecAsync(string specId, CancellationToken ct)
+        // The supplied spec store is the run's physical project owner. Legacy
+        // project_id text can be stale; it must not replace that boundary.
+        => !_requireOwnedSpec || await _specs.GetAsync(specId, ct) is not null;
 
     /// <summary>
     /// MAF-friendly wrapper. Same signature but uses an

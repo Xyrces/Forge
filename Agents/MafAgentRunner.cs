@@ -261,9 +261,26 @@ public async Task<AgentRunResult> RunAsync(
         var artOutputs = _artOutputsFactory?.Invoke();
         if (designArtifacts is not null && specs is not null && artOutputs is not null)
         {
-            var readTool = new ArtifactReadTool(
-                designArtifacts, specs, artOutputs, _handoffs, logger: null);
-            tools.Add(readTool.AsAIFunction());
+            // The normal in-process runner receives primary historical stores plus
+            // a routing spec store. Bind its reads and audit trail to this run's
+            // registered owner, never to the router's cross-project ID probe.
+            if (projectId is not null && specs is ProjectRoutingSpecStore)
+            {
+                if (_issueStoreLookup?.Invoke(projectId) is IssueStore owner)
+                    tools.Add(new ArtifactReadTool(
+                        new DesignArtifactStore(owner.Db), new SpecStore(owner), new ArtOutputStore(owner.Db),
+                        new ContextHandoffStore(owner.Db), requireOwnedSpec: true,
+                        historicalDesignArtifacts: designArtifacts, historicalArtOutputs: artOutputs).AsAIFunction());
+            }
+            else if (specs is SpecStore && (!isWorker || projectId is not null)
+                && (_issues is not IssueStore local || projectId is null || local.ProjectId == projectId))
+            {
+                // Workers and legacy single-project constructors already supply a
+                // concrete owner-local spec store. No routing lookup is needed;
+                // artifact IDs must still resolve to a spec in that physical store.
+                tools.Add(new ArtifactReadTool(designArtifacts, specs, artOutputs, _handoffs,
+                    requireOwnedSpec: true).AsAIFunction());
+            }
         }
 
         // Follow-up filing: engineering + review roles can file
