@@ -127,7 +127,9 @@ public partial class GitHubService
             if (!CanResolveConversation(thread, ReviewerLogin) || thread.LastCommentId != receiptId
                 || !MatchesAssessedVersion(thread, receiptId))
                 throw new InvalidOperationException("Another participant joined the review conversation; leaving it open.");
-            var result = await ReviewGraphAsync(_reviewClient,
+            // viewerCanResolve was observed as the Publisher. Its write permission performs only
+            // the closure; the independent Reviewer still owns the verdict and verified receipt.
+            var result = await ReviewGraphAsync(_client,
                 "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}", new { id = thread.Id }, ct);
             if (!result.GetProperty("data").GetProperty("resolveReviewThread").GetProperty("thread").GetProperty("isResolved").GetBoolean())
                 throw new InvalidOperationException("GitHub did not confirm review conversation resolution.");

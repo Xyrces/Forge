@@ -119,14 +119,16 @@ public sealed class MergeRequirementsTests
                 return Page([Thread("thread", resolved: resolved, last: replied ? "reply" : "comment",
                     body: replied ? replyBody! : "finding", append: replied)]);
             }
-            Assert.Equal("reviewer", token);
             if (query.Contains("addPullRequestReviewThreadReply"))
             {
+                Assert.Equal("reviewer", token);
                 Assert.Contains("Verified at", request.GetProperty("variables").GetProperty("body").GetString());
                 replyBody = request.GetProperty("variables").GetProperty("body").GetString();
                 replied = true; replies++;
                 return "{\"data\":{\"addPullRequestReviewThreadReply\":{\"comment\":{\"id\":\"reply\"}}}}";
             }
+            Assert.Equal("publisher", token);
+            Assert.Contains("resolveReviewThread(input", query);
             resolved = true; resolutions++;
             throw new IOException("Lost response after mutation");
         });
@@ -157,17 +159,22 @@ public sealed class MergeRequirementsTests
         string? posted = null;
         var posts = 0;
         var resolves = 0;
-        using var handler = new Handler((request, _) =>
+        using var handler = new Handler((request, token) =>
         {
             var query = request.GetProperty("query").GetString()!;
             if (query.StartsWith("query"))
+            {
+                Assert.Equal("publisher", token);
                 return Page([Thread("thread", last: posted is null ? "comment" : "receipt", body: posted ?? "Finding", append: posted is not null)]);
+            }
             if (query.Contains("addPullRequestReviewThreadReply"))
             {
+                Assert.Equal("reviewer", token);
                 posted = request.GetProperty("variables").GetProperty("body").GetString();
                 posts++;
                 throw new IOException("Reply accepted but response lost");
             }
+            Assert.Equal("publisher", token);
             resolves++;
             return "{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}";
         });
