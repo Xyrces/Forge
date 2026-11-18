@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using System.Text.Json;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core.Control;
@@ -11,19 +10,6 @@ namespace Forge.Orchestrator.Control;
 /// <summary>Reserve durable worst-case liability before every HTTP generation, including streaming.</summary>
 public static class BudgetRequestPolicy
 {
-    // Qualification checked 2026-11-17 UTC against:
-    // https://developers.openai.com/api/docs/models/gpt-6.1-sol.md
-    // https://developers.openai.com/api/docs/guides/prompt-caching.md
-    // Global Standard tier: exact API count determines each reservation; full
-    // context remains the hard limit, including opaque SDK reasoning replay. $10/M input covers the
-    // long-context multiplier and longest cache-write rate; $15/M output covers
-    // the long-context rate. New models/tiers require explicit qualification.
-    internal const string QualifiedModel = "gpt-6.1-sol";
-    internal const int QualifiedContextTokens = 1_050_000;
-    internal const int QualifiedMaxOutputTokens = 128_000;
-    internal const decimal MinimumInputUsdPerMillion = 10m;
-    internal const decimal MinimumOutputUsdPerMillion = 15m;
-
     public static Func<LlmRequestContext, IChatClient, IChatClient> Create(AgentOptions options,
         IDbConnectionFactory registry, Func<CancellationToken, Task> ensureAdmission) =>
         (context, client) => new BudgetChatClient(client, new DurableBudgetStore(registry),
@@ -38,12 +24,13 @@ public static class BudgetRequestPolicy
             var bounded = original?.Clone() ?? new ChatOptions();
             if (bounded.ModelId is { } requested && !string.Equals(requested, context.Model, StringComparison.Ordinal))
                 throw new InvalidOperationException("Model changes require a separately qualified admission context.");
-            bounded.MaxOutputTokens = Math.Min(QualifiedMaxOutputTokens,
+            bounded.MaxOutputTokens = Math.Min(OpenAiStandardPricing.MaxOutputTokens,
                 Math.Min(context.MaxOutputTokens, bounded.MaxOutputTokens ?? context.MaxOutputTokens));
             return bounded;
         }
 
-        private ModelPriceOptions Qualify(IReadOnlyList<ChatMessage> messages, ChatOptions? chatOptions)
+        private (OpenAiStandardPricing Tariff, ModelPriceOptions ReservationRates) Qualify(
+            IReadOnlyList<ChatMessage> messages, ChatOptions? chatOptions)
         {
             if (!options.Budget.PaidCallsEnabled)
                 throw new InvalidOperationException("Paid model calls are disabled in this deployment.");
@@ -55,11 +42,12 @@ public static class BudgetRequestPolicy
                 || endpoint.AbsolutePath.TrimEnd('/') != "/v1" || endpoint.Query.Length != 0
                 || endpoint.Fragment.Length != 0 || endpoint.UserInfo.Length != 0)
                 throw new InvalidOperationException("The qualified spending profile requires the direct global OpenAI endpoint.");
-            if (!string.Equals(context.Model, QualifiedModel, StringComparison.Ordinal)
+            var tariff = OpenAiStandardPricing.ForModel(context.Model);
+            if (tariff is null
                 || !options.Budget.Models.TryGetValue(context.Model, out var price)
-                || price.InputUsdPerMillion < MinimumInputUsdPerMillion
-                || price.OutputUsdPerMillion < MinimumOutputUsdPerMillion
-                || price.MaximumInputTokens < QualifiedContextTokens)
+                || price.InputUsdPerMillion < tariff.MinimumInputUsdPerMillion
+                || price.OutputUsdPerMillion < tariff.MinimumOutputUsdPerMillion
+                || price.MaximumInputTokens < OpenAiStandardPricing.ContextTokens)
                 throw new InvalidOperationException("Model pricing/context is below the qualified full-protocol spending bound.");
             // Keep the reservation and settlement on the same price snapshot.
             price = new ModelPriceOptions
@@ -78,12 +66,13 @@ public static class BudgetRequestPolicy
             // before exact counting; only that count controls token admission.
             if (chatOptions?.Tools?.Any(tool => tool is not AIFunction) == true)
                 throw new InvalidOperationException("Hosted tools require an explicit additional spending policy.");
-            return price;
+            return (tariff, price);
         }
 
         private async Task<string> ReserveAsync(ModelPriceOptions price, long inputTokens, int outputBound, CancellationToken ct)
         {
-            if (inputTokens > 922_000) throw new InvalidOperationException("Counted input exceeds the qualified model input limit.");
+            if (inputTokens > OpenAiStandardPricing.MaxInputTokens)
+                throw new InvalidOperationException("Counted input exceeds the qualified model input limit.");
             if (outputBound <= 0) throw new InvalidOperationException("A positive output bound is required.");
             var bound = (inputTokens * price.InputUsdPerMillion + outputBound * price.OutputUsdPerMillion) / 1_000_000m;
             if (bound > options.Budget.MaximumRequestUsd)
@@ -100,22 +89,26 @@ public static class BudgetRequestPolicy
             return requestId;
         }
 
-        private async Task SettleAsync(string requestId, ModelPriceOptions price, UsageDetails? usage, ResponsesInputAdmission scope)
+        private async Task SettleAsync(string requestId, OpenAiStandardPricing tariff, ModelPriceOptions price,
+            UsageDetails? usage, ResponsesInputAdmission scope)
         {
-            // Settle at conservative qualified rates, not an exact invoice estimate.
-            // Charge all reported input at the upper rate; no assumed cache discount.
-            // Missing or interrupted usage remains reserved, never silently refunded.
+            // Without category evidence, settle reported totals at the upper rates. Missing totals retain the hold.
             decimal? cost = usage?.InputTokenCount is >= 0 and var input && input <= scope.CountedInputTokens
                 && usage.OutputTokenCount is >= 0 and var output && output <= scope.MaxOutputTokens
                 ? (input * price.InputUsdPerMillion + output * price.OutputUsdPerMillion) / 1_000_000m : null;
             var basis = "legacy-conservative-bound-v1";
             if (scope.BillingEvidenceJson is { } evidence)
             {
-                var estimate = OpenAiSolPricing.Calculate(evidence, scope.CountedInputTokens, scope.MaxOutputTokens);
-                if (estimate is not null)
+                var estimate = tariff.Calculate(evidence, scope.CountedInputTokens, scope.MaxOutputTokens, out var unexpectedProfile);
+                if (unexpectedProfile)
+                {
+                    cost = null;
+                    basis = "uncertain:unexpected-model-or-tier";
+                }
+                else if (estimate is not null)
                 {
                     cost = estimate.CostUsd;
-                    basis = OpenAiSolPricing.Version + (estimate.CompleteBreakdown ? ":usage-estimate" : ":cache-aware-upper-bound");
+                    basis = tariff.Version + (estimate.CompleteBreakdown ? ":usage-estimate" : ":cache-aware-upper-bound");
                 }
                 else basis = "conservative-fallback:incomplete-or-invalid-usage";
             }
@@ -130,10 +123,10 @@ public static class BudgetRequestPolicy
         {
             var input = messages.ToArray();
             chatOptions = BoundedOptions(chatOptions);
-            var price = Qualify(input, chatOptions);
+            var (tariff, price) = Qualify(input, chatOptions);
             string? request = null;
             using var scope = new ResponsesInputAdmission(context.Model, chatOptions.MaxOutputTokens!.Value,
-                QualifiedContextTokens, async (count, output, ct) =>
+                OpenAiStandardPricing.ContextTokens, async (count, output, ct) =>
                 {
                     request = await ReserveAsync(price, count, output, ct);
                     await ensureAdmission(ct);
@@ -147,7 +140,7 @@ public static class BudgetRequestPolicy
                 usage = response.Usage;
                 return response;
             }
-            finally { if (request is not null) await SettleAsync(request, price, usage, scope); }
+            finally { if (request is not null) await SettleAsync(request, tariff, price, usage, scope); }
         }
 
         public override async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
@@ -156,10 +149,10 @@ public static class BudgetRequestPolicy
         {
             var input = messages.ToArray();
             chatOptions = BoundedOptions(chatOptions);
-            var price = Qualify(input, chatOptions);
+            var (tariff, price) = Qualify(input, chatOptions);
             string? request = null;
             using var scope = new ResponsesInputAdmission(context.Model, chatOptions.MaxOutputTokens!.Value,
-                QualifiedContextTokens, async (count, output, ct) =>
+                OpenAiStandardPricing.ContextTokens, async (count, output, ct) =>
                 {
                     request = await ReserveAsync(price, count, output, ct);
                     await ensureAdmission(ct);
@@ -175,7 +168,7 @@ public static class BudgetRequestPolicy
                     yield return update;
                 }
             }
-            finally { if (request is not null) await SettleAsync(request, price, usage, scope); }
+            finally { if (request is not null) await SettleAsync(request, tariff, price, usage, scope); }
         }
     }
 }
