@@ -6,6 +6,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Forge.AgentTools;
 using Forge.Core;
+using Forge.Core.Db;
 
 namespace Forge.Agents;
 
@@ -44,6 +45,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<DesignArtifactStore?>? _designArtifactsFactory;
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
+    private readonly IDbConnectionFactory? _workerArtifactHistory;
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
     private readonly AgentRunStore? _runs;
@@ -112,7 +114,8 @@ public sealed class MafAgentRunner : IAgentRunner
         // Resolves by context projectId; null/unknown → _issues.
         Func<string?, IIssueStore?>? issueStoreLookup = null,
         RoleModelOverrides? modelOverrides = null,
-        Configuration.GateOptions? gates = null)
+        Configuration.GateOptions? gates = null,
+        IDbConnectionFactory? workerArtifactHistory = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -128,6 +131,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _designArtifactsFactory = designArtifacts;
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
+        _workerArtifactHistory = workerArtifactHistory;
         _secrets = secrets;
         _issues = issues;
         _runs = runs;
@@ -278,8 +282,10 @@ public async Task<AgentRunResult> RunAsync(
                 // Workers and legacy single-project constructors already supply a
                 // concrete owner-local spec store. No routing lookup is needed;
                 // artifact IDs must still resolve to a spec in that physical store.
-                tools.Add(new ArtifactReadTool(designArtifacts, specs, artOutputs, _handoffs,
-                    requireOwnedSpec: true).AsAIFunction());
+                var history = isWorker ? _workerArtifactHistory : null;
+                tools.Add(new ArtifactReadTool(designArtifacts, specs, artOutputs, _handoffs, requireOwnedSpec: true,
+                    historicalDesignArtifacts: history is null ? null : new DesignArtifactStore(history),
+                    historicalArtOutputs: history is null ? null : new ArtOutputStore(history)).AsAIFunction());
             }
         }
 

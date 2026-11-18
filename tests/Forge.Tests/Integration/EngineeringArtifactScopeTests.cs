@@ -69,7 +69,7 @@ public sealed class EngineeringArtifactScopeTests
             [foreignSpec.Id] = null, [foreign.Id] = null, [foreignArt.Id] = null,
             [misplaced.Id] = null, [orphan.Id] = null,
         };
-        var client = new ArtifactClient(expected.Keys.ToArray());
+        var client = new ArtifactReadClient(expected.Keys.ToArray());
         // Keep the real composition/runner/tool construction. Replace only the
         // provider transport through its existing request-policy seam: no HTTP.
         var factory = Assert.IsType<OpenAICompatibleChatClientFactory>(services.GetRequiredService<IChatClientFactory>());
@@ -88,7 +88,7 @@ public sealed class EngineeringArtifactScopeTests
         Assert.Equal(expected.Count(pair => pair.Value is not null), reads.Count);
         Assert.Empty(await new ContextHandoffStore(services.GetRequiredService<IssueStore>().Db).ListForTaskAsync(""));
 
-        var primaryClient = new ArtifactClient([foreignSpec.Id, foreign.Id, legacy.Id]);
+        var primaryClient = new ArtifactReadClient([foreignSpec.Id, foreign.Id, legacy.Id]);
         factory.RequestPolicy = (_, _) => primaryClient;
         await runner.RunAsync(AgentType.Reviewer, "Read primary project artifacts", null,
             new Dictionary<string, object> { ["projectId"] = "primary" }, CancellationToken.None);
@@ -98,7 +98,7 @@ public sealed class EngineeringArtifactScopeTests
 
         foreach (var projectId in new string?[] { "unknown-project", null })
         {
-            var noScope = new ArtifactClient([]);
+            var noScope = new ArtifactReadClient([]);
             factory.RequestPolicy = (_, _) => noScope;
             var context = projectId is null ? null : new Dictionary<string, object> { ["projectId"] = projectId };
             await runner.RunAsync(AgentType.Reviewer, "No unscoped artifact access", null, context, CancellationToken.None);
@@ -117,7 +117,7 @@ public sealed class EngineeringArtifactScopeTests
         var art = new ArtOutputStore(issues.Db);
         var output = await art.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Owned", "assets/mesh.glb", "glb"));
         var foreign = await designs.CreateAsync(new("spec-foreign", DesignArtifactKind.Wireframe, "Foreign", "foreign body", "html"));
-        var client = new ArtifactClient([spec.Id, output.Id, foreign.Id]);
+        var client = new ArtifactReadClient([spec.Id, output.Id, foreign.Id]);
         var runner = new MafAgentRunner(new ClientFactory(client),
             new LlmConfig(new ProviderConfig("fixture", "", null, null, "fixture-model")),
             new RoleAgentRegistry(), NullLogger<MafAgentRunner>.Instance,
@@ -149,7 +149,7 @@ public sealed class EngineeringArtifactScopeTests
         var designs = new DesignArtifactStore(issues.Db);
         var design = await designs.CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Owned", "single design body", "html"));
         var foreign = await designs.CreateAsync(new("spec-foreign", DesignArtifactKind.Wireframe, "Foreign", "foreign body", "html"));
-        var client = new ArtifactClient([spec.Id, design.Id, foreign.Id]);
+        var client = new ArtifactReadClient([spec.Id, design.Id, foreign.Id]);
         var runner = new MafAgentRunner(new ClientFactory(client),
             new LlmConfig(new ProviderConfig("fixture", "", null, null, "fixture-model")),
             new RoleAgentRegistry(), NullLogger<MafAgentRunner>.Instance, rolePromptsRoot: root,
@@ -162,33 +162,34 @@ public sealed class EngineeringArtifactScopeTests
         Assert.Contains("not_found", client.Results[foreign.Id]);
     }
 
-    private sealed class ArtifactClient(string[] ids) : IChatClient
+}
+
+internal sealed class ArtifactReadClient(string[] ids) : IChatClient
+{
+    private bool _called;
+    public bool ArtifactToolOffered { get; private set; }
+    public Dictionary<string, string> Results { get; } = [];
+    public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null, CancellationToken cancellationToken = default)
     {
-        private bool _called;
-        public bool ArtifactToolOffered { get; private set; }
-        public Dictionary<string, string> Results { get; } = [];
-        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
-            ChatOptions? options = null, CancellationToken cancellationToken = default)
+        if (!_called)
         {
-            if (!_called)
+            _called = true;
+            ArtifactToolOffered = options?.Tools?.OfType<AIFunction>().Any(t => t.Name == "read_artifact") == true;
+            if (ids.Length > 0)
             {
-                _called = true;
-                ArtifactToolOffered = options?.Tools?.OfType<AIFunction>().Any(t => t.Name == "read_artifact") == true;
-                if (ids.Length > 0)
-                {
-                    Assert.True(ArtifactToolOffered);
-                    return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant,
-                        ids.Select((id, index) => (AIContent)new FunctionCallContent(index.ToString(), "read_artifact",
-                            new Dictionary<string, object?> { ["artifactId"] = id })).ToList())));
-                }
+                Assert.True(ArtifactToolOffered);
+                return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                    ids.Select((id, index) => (AIContent)new FunctionCallContent(index.ToString(), "read_artifact",
+                        new Dictionary<string, object?> { ["artifactId"] = id })).ToList())));
             }
-            foreach (var result in messages.SelectMany(m => m.Contents).OfType<FunctionResultContent>())
-                Results[ids[int.Parse(result.CallId)]] = result.Result?.ToString() ?? "null";
-            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Artifact reads complete.")));
         }
-        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
-            ChatOptions? options = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public object? GetService(Type serviceType, object? serviceKey = null) => null;
-        public void Dispose() { }
+        foreach (var result in messages.SelectMany(m => m.Contents).OfType<FunctionResultContent>())
+            Results[ids[int.Parse(result.CallId)]] = result.Result?.ToString() ?? "null";
+        return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "Artifact reads complete.")));
     }
+    public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
+        ChatOptions? options = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+    public void Dispose() { }
 }

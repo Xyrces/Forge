@@ -181,15 +181,38 @@ public static class WorkerHost
         }
     }
 
-    public static async Task<WorkerRuntime> BuildRunner(AgentOptions options, WorkerAssignment assignment,
+    public static Task<WorkerRuntime> BuildRunner(AgentOptions options, WorkerAssignment assignment,
         WorkerAttemptStore attempts, ILoggerFactory logs, CancellationToken ct)
     {
         var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema, ForgeSchemaProfile.Core, initializeSchema: false);
+        return BuildRunner(options, assignment, attempts, logs, ct, registry,
+            id => ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(id), initializeSchema: false));
+    }
+
+    internal static async Task<WorkerRuntime> BuildRunner(AgentOptions options, WorkerAssignment assignment,
+        WorkerAttemptStore attempts, ILoggerFactory logs, CancellationToken ct, IDbConnectionFactory registry,
+        Func<string, IDbConnectionFactory> projectDatabase)
+    {
         var registryIssues = new IssueStore(registry);
         var projects = new ProjectStore(registryIssues);
         var project = await projects.GetAsync(assignment.ProjectId, ct) ?? throw new InvalidOperationException("Worker project is not registered.");
         if (string.IsNullOrEmpty(project.LocalPath)) throw new InvalidOperationException("Worker project has no clone path.");
-        var workload = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id), initializeSchema: false);
+        var workload = projectDatabase(project.Id);
+        var invocation = JsonSerializer.Deserialize<WorkerInvocation>(assignment.AssignmentJson)
+            ?? throw new InvalidOperationException("Invalid worker assignment.");
+        // Old assignments predate the captured primary. Use the controller's registry order
+        // for those only. A removed, explicitly named primary must never select another store.
+        var historyProject = invocation.HistoricalProjectId switch
+        {
+            null => (await projects.ListAsync(ct)).FirstOrDefault(),
+            var id when id == project.Id => project,
+            var id => await projects.GetAsync(id, ct),
+        };
+        if (historyProject is null && invocation.HistoricalProjectId is { } missing)
+            logs.CreateLogger("Forge.Worker").LogWarning(
+                "Historical project {Project} for worker attempt {Attempt} is no longer registered", missing, assignment.Id);
+        var history = historyProject is not null && historyProject.Id != project.Id
+            ? projectDatabase(historyProject.Id) : null;
         var issues = new IssueStore(workload, project.Id);
         var memory = new MemoryStore(workload);
         var secrets = new SecretStore(registryIssues, Program.CreateSecretProtection(options), logs.CreateLogger<SecretStore>());
@@ -216,7 +239,8 @@ public static class WorkerHost
             verifyCommandsLookup: id => id == project.Id ? project.VerifyCommands : null,
             memory: memory, handoffs: new ContextHandoffStore(workload), designArtifacts: () => artifacts,
             specs: () => new SpecStore(issues, designArtifacts: artifacts), artOutputs: () => new ArtOutputStore(workload),
-            secrets: secrets, issues: issues, runs: new AgentRunStore(workload), modelOverrides: overrides, gates: options.Gates);
+            secrets: secrets, issues: issues, runs: new AgentRunStore(workload), modelOverrides: overrides, gates: options.Gates,
+            workerArtifactHistory: history);
         return new(runner, factory, project.VerifyCommands ?? AgentTools.RunVerification.DefaultCommands(assignment.WorktreePath));
     }
 }

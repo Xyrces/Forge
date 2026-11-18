@@ -348,7 +348,8 @@ public static class ForgeComposition
             services.AddSingleton(kubeClient);
             agentRunner = new Workers.KubernetesAgentRunner(
                 new Core.Execution.WorkerAttemptStore(registryIssues.Db),
-                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission);
+                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission,
+                historicalProjectId: primary.Id);
         }
         services.AddSingleton(localAgentRunner);
         services.AddSingleton<IAgentRunner>(agentRunner);
