@@ -15,6 +15,17 @@ public class TaskSituationTests
             ParentIssueId: null, DispatchCheckpoint: null, CheckpointAt: null, RecoveryAttempts: 0);
 
     [Fact]
+    public void LimitedDiscussionOffersParticipantAction()
+    {
+        var situation = TaskSituation.Describe(Task(IssueStatus.InProgress,
+            ("prNumber", "42"), ("reviewMergeState", "BLOCKED"), ("reviewUnresolvedThreads", "1"),
+            ("reviewHumanThreads", "1"), ("reviewConversationInputLimited", "1")));
+        Assert.Equal("Review discussion needs a participant", situation.Label);
+        Assert.Equal("action", situation.Tone);
+        Assert.Contains("GitHub", situation.Text);
+    }
+
+    [Fact]
     public void FailedVerify_IsActionable_WithNextStep()
     {
         var s = TaskSituation.Describe(Task(IssueStatus.Failed, ("lastError", "pre-push verification failed: `dotnet test` exited 1")));

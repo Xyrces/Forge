@@ -288,7 +288,7 @@ public sealed class MergeRequirementsTests
         {
             calls++;
             Assert.Equal("open", request.GetProperty("variables").GetProperty("id").GetString());
-            var first = request.GetProperty("variables").GetProperty("cursor").ValueKind == JsonValueKind.Null;
+            var first = !request.GetProperty("variables").TryGetProperty("cursor", out var cursor) || cursor.ValueKind == JsonValueKind.Null;
             return JsonSerializer.Serialize(new { data = new { node = new { comments = new {
                 pageInfo = new { hasNextPage = first, endCursor = first ? "next" : null },
                 nodes = versions.Skip(first ? 0 : 20).Take(first ? 20 : 1).Select(v => new {
@@ -330,6 +330,47 @@ public sealed class MergeRequirementsTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.ResolveReviewedConversationsAsync(1,
             new(1, "head", "Approve", "Verified", [], [new("thread", "comment", "corrected", Version())])));
         Assert.DoesNotContain(handler.Queries, q => q.StartsWith("mutation"));
+    }
+
+    [Fact]
+    public async Task CombinedDiscussionBudgetAndEditedEvidenceAreBounded()
+    {
+        using var handler = new Handler((request, _) => JsonSerializer.Serialize(new { data = new { node = new { comments = new {
+            pageInfo = new { hasNextPage = false, endCursor = (string?)null },
+            nodes = new[] { new { id = "comment", updatedAt = "date", body = new string('x', 30_000), author = new { login = "reviewer", __typename = "Bot" } } }
+        } } } }));
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        var observed = new ReviewConversation("a", false, true, "File.cs", "reviewer[bot]", "comment", false, "",
+            Versions: [new("comment", "reviewer[bot]", "date")], AssessmentComplete: false);
+        var inputs = await service.GetReviewConversationInputsAsync([observed, observed with { Id = "b" }, observed with { Id = "c" }], "head");
+        Assert.Equal(2, inputs.Count(i => i.AssessmentComplete));
+        Assert.True(inputs.Where(i => i.AssessmentComplete).Sum(i => ReviewFindings.ConversationPrompt(i, "head", "reviewer[bot]").Length + 2) < 80_000);
+        Assert.Empty(inputs[2].Body);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetReviewConversationInputsAsync(
+            [observed with { Versions = [new("comment", "reviewer[bot]", "previous-date")] }], "head"));
+    }
+
+    [Fact]
+    public async Task SameIdEditAfterReceiptPreventsClosingEvenOnRecovery()
+    {
+        string? posted = null;
+        using var handler = new Handler((request, _) =>
+        {
+            if (request.GetProperty("query").GetString()!.StartsWith("query"))
+            {
+                var page = Page([Thread("thread", append: posted is not null, last: posted is null ? "comment" : "receipt", body: posted ?? "Finding")]);
+                return posted is null ? page : page.Replace("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z");
+            }
+            Assert.Contains("addPullRequestReviewThreadReply", request.GetProperty("query").GetString());
+            posted = request.GetProperty("variables").GetProperty("body").GetString();
+            return "{\"data\":{\"addPullRequestReviewThreadReply\":{\"comment\":{\"id\":\"receipt\"}}}}";
+        });
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        var draft = new ReviewDraft(1, "head", "Approve", "Verified", [], [new("thread", "comment", "corrected", Version())]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ResolveReviewedConversationsAsync(1, draft));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ResolveReviewedConversationsAsync(1, draft));
+        Assert.DoesNotContain(handler.Queries, q => q.Contains("resolveReviewThread(input"));
+        Assert.Single(handler.Queries.Where(q => q.StartsWith("mutation")));
     }
 
 }
