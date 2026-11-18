@@ -1,0 +1,74 @@
+{
+  "fixture": "Deployed sprint board: manual browser qualification inputs",
+  "scope": "Expected observations only. Collect browser results separately from serving-revision proof, reviews, CI, and merge evidence.",
+  "inputs": {
+    "route": "{dashboardOrigin}/sprints?project={projectId}&sprint={sprintId}",
+    "runContext": "Use the operator-authorized deployment, project, active sprint with a goal, qualification task and its linked PR, and the intended human role. Substitute the actual IDs and URL-encode the query values.",
+    "servingRevision": "Link independent evidence that the running workload serves the intended release. Recheck if routing or the running image changes; do not combine captures across unverified revisions."
+  },
+  "beforeEachViewport": [
+    "Set browser page zoom to 100%. Set the CSS viewport to the profile dimensions and verify window.innerWidth and window.innerHeight; screenshot dimensions are not viewport measurements.",
+    "Open the sprint route and wait for the named project, active sprint, and task board to load. Record the member page; use Previous tasks or Next tasks if needed to reach the qualification card."
+  ],
+  "lanes": [
+    { "name": "Queued", "desktop": "D2", "mobile": "M1" },
+    { "name": "Running", "desktop": "D3", "mobile": "M2" },
+    { "name": "Review", "desktop": "D4", "mobile": "M3" },
+    { "name": "Needs you", "desktop": "D5", "mobile": "M4" },
+    { "name": "Completed / closed", "desktop": "D6", "mobile": "M5" }
+  ],
+  "desktop": {
+    "viewportCssPx": { "width": 1280, "height": 900 },
+    "mode": "Desktop browsing, no mobile emulation; sidebar open",
+    "layout": {
+      "id": "D1",
+      "steps": "Open the sidebar with Toggle navigation if needed. Capture the sidebar, the sprint goal and the Sprint task board. If they do not fit in one capture, scroll vertically and take consecutive captures without changing width or sidebar state.",
+      "expected": "The sidebar remains open. The goal and board occupy separate vertical bands in the main area, with the goal above the board, not beside it."
+    },
+    "laneCheck": {
+      "steps": "Use Jump to task cards. For each desktop checkpoint in lanes, reach the named heading. Open a card by its title and return to the board; if the lane is empty on this page, inspect its empty state.",
+      "expected": "Each heading and its linked card or No tasks in this lane message is readable and not clipped. Where a card exists, its title opens the matching task in the same project."
+    }
+  },
+  "mobile": {
+    "viewportCssPx": { "width": 390, "height": 844 },
+    "mode": "Responsive mobile emulation; close the navigation overlay if open",
+    "laneCheck": {
+      "steps": "For each mobile checkpoint in lanes, select the named option in Task lane (ignore its count suffix), then scroll to the heading and a card or empty state before returning to the picker.",
+      "expected": "The selected lane can be reached and its heading and card or No tasks in this lane message are readable without clipping."
+    },
+    "reviewChecks": [
+      {
+        "id": "R1",
+        "steps": "In the active sprint, find the nonterminal qualification card in its current lane and expand Task actions. Inspect the hold control without pressing it.",
+        "expected": "The control is readable and reachable when offered to the role: Require review by @{nominee} before a task hold (Require human review if no nominee is configured), or Release additional review hold while the task hold is present. A held card identifies who must review when a nominee is configured."
+      },
+      {
+        "id": "R2",
+        "steps": "On the linked card, follow Review PR #{number} ↗ when awaiting human review, or Open PR #{number} ↗ otherwise. Capture the GitHub handoff without submitting a decision.",
+        "expected": "The visible PR link opens the exact qualification PR in a new tab."
+      },
+      {
+        "id": "R3",
+        "steps": "Under Task actions, follow Open task history. On task detail, open History & runs and Review. Where original review sources exist, expand the inline discussion and follow the original review or exact discussion link without posting.",
+        "expected": "The matching task opens in the same project. History and review areas are reachable; available review and discussion links lead to their exact GitHub records."
+      },
+      {
+        "id": "R4",
+        "steps": "On task detail, expand Task actions when the acting role is allowed to manage the nonterminal task. Inspect the task hold control without pressing it.",
+        "expected": "The control is readable and reachable when offered: Require review by @{nominee} for this task (Require human review for this task if no nominee is configured), or Release task review hold while the task hold is present."
+      }
+    ],
+    "stateNotes": "Record each additional review action offered to the acting role, with its exact label, path and safe destination or prompt. For disabled or absent controls, record the sprint/task/PR state and role rather than counting them as reached. Observe naturally available states; do not create or undo a hold, submit a review, or alter policy for a capture."
+  },
+  "captureFields": [
+    "checkpoint and original capture reference",
+    "UTC timestamp and independent serving-revision evidence reference",
+    "dashboard route, project, sprint and sprint state",
+    "task and PR state when relevant",
+    "acting human role",
+    "browser and version, measured CSS width and height, zoom/emulation and sidebar state",
+    "lane or exact action label, member page and interaction steps",
+    "expected and observed result, including clipping, disabled state or other obstruction"
+  ]
+}
