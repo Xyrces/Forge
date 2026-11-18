@@ -188,6 +188,20 @@ public interface ISpecStore
 
 public sealed partial class SpecStore : ISpecStore, IAsyncDisposable
 {
+    internal Forge.Core.Db.IDbConnectionFactory Database => _issues.Db;
+    internal string ProjectId => _issues.ProjectId;
+
+    internal async Task<IReadOnlyList<string>> ListOwnedIdsAsync(CancellationToken ct)
+    {
+        await using var connection = await _issues.Db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        // Physical ownership is authoritative even when a legacy row's project_id is stale.
+        command.CommandText = $"SELECT id FROM {T("spec")}";
+        var ids = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) ids.Add(reader.GetString(0));
+        return ids;
+    }
     private readonly IssueStore _issues;
     private readonly SpecBodyExtractor _extractor;
     private readonly DesignArtifactStore? _designArtifacts;

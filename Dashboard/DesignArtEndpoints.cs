@@ -50,7 +50,8 @@ public static class DesignArtEndpoints
         ArtOutputStore artOutputs,
         DesignerRunStore? designerRuns,
         ArtistRunStore? artistRuns,
-        ILogger logger)
+        ILogger logger,
+        ISpecStore? specs = null)
     {
         app.MapGet("/api/designs", async (string? projectId, string? status, CancellationToken ct) =>
         {
@@ -65,7 +66,7 @@ public static class DesignArtEndpoints
                     return Results.Json(Array.Empty<DesignView>(), DashboardJson.Options);
                 }
 
-                var list = await designArtifacts.ListByProjectAsync(projectId, ct);
+                var list = await DesignerStoreRouting.ListArtifactsAsync(specs, designArtifacts, projectId, true, ct);
                 var filtered = statusFilter is null
                     ? list
                     : list.Where(a => a.Status == statusFilter.Value).ToArray();
@@ -83,7 +84,7 @@ public static class DesignArtEndpoints
             if (designerRuns is null) return Results.Json(new { }, DashboardJson.Options);
             try
             {
-                var list = await designerRuns.ListAsync(id, limit: 1, ct);
+                var list = await DesignerStoreRouting.ListRunsAsync(specs, designerRuns, id, 1, ct);
                 var run = list.FirstOrDefault();
                 if (run is null) return Results.Json(new { }, DashboardJson.Options);
 
@@ -124,7 +125,9 @@ public static class DesignArtEndpoints
                     return Results.Json(Array.Empty<ArtView>(), DashboardJson.Options);
                 }
 
-                var list = await artOutputs.ListByProjectAsync(projectId, statusFilter, ct);
+                var list = specs is null ? await artOutputs.ListByProjectAsync(projectId, statusFilter, ct)
+                    : await ArtistStoreRouting.ListAsync(specs, projectId, true, ct);
+                if (statusFilter is not null) list = list.Where(a => a.Status == statusFilter).ToArray();
                 return Results.Json(list.Select(ToArtView).ToArray(), DashboardJson.Options);
             }
             catch (Exception ex)
@@ -162,5 +165,5 @@ public static class DesignArtEndpoints
     private static ArtView ToArtView(ArtOutput a) => new(
         a.Id, a.SpecId, a.Kind.ToString(), a.Title, a.BodyKind,
         a.Status.ToString(), a.Author,
-        $"/api/art-output/{a.Id}/file", a.CreatedAt, a.UpdatedAt);
+        $"/api/art-output/{a.Id}/file?specId={Uri.EscapeDataString(a.SpecId)}", a.CreatedAt, a.UpdatedAt);
 }

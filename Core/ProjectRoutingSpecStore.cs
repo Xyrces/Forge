@@ -35,6 +35,7 @@ public sealed class ProjectRoutingSpecStore : ISpecStore
     private readonly ISpecStore _primary;
     private readonly Func<string, ISpecStore?> _findByProject;
     private readonly Func<IReadOnlyList<ISpecStore>> _allProjectStores;
+    private readonly Func<IReadOnlyList<SpecStore>>? _initializedHistoryStores;
     private readonly ConcurrentDictionary<string, ISpecStore> _ownerCache = new();
 
     /// <param name="primary">The primary project's store (fallback
@@ -47,20 +48,46 @@ public sealed class ProjectRoutingSpecStore : ISpecStore
     public ProjectRoutingSpecStore(
         ISpecStore primary,
         Func<string, ISpecStore?> findByProject,
-        Func<IReadOnlyList<ISpecStore>> allProjectStores)
+        Func<IReadOnlyList<ISpecStore>> allProjectStores,
+        Func<IReadOnlyList<SpecStore>>? initializedHistoryStores = null)
     {
         _primary = primary;
         _findByProject = findByProject;
         _allProjectStores = allProjectStores;
+        _initializedHistoryStores = initializedHistoryStores;
     }
 
-    private ISpecStore StoreFor(string? projectId)
+    internal ISpecStore StoreFor(string? projectId)
     {
         if (string.IsNullOrWhiteSpace(projectId)) return _primary;
         return _findByProject(projectId) ?? _primary;
     }
 
-    private ISpecStore? ResolveOwner(string id)
+    internal ISpecStore? FindRegisteredStore(string projectId) => _findByProject(projectId);
+    internal IEnumerable<SpecStore> ArtifactStores => new[] { _primary }.Concat(_allProjectStores())
+        .OfType<SpecStore>().DistinctBy(store => (store.Database.Provider, store.Database.ConnectionString, store.Database.Qualifier));
+
+    /// <summary>Compatibility for old administrator file links which predate spec-scoped URLs.</summary>
+    internal async Task<OwnedHistoricalArtifact<ArtOutput>?> ReadHistoricalArtAcrossProjectsAsync(
+        string id, CancellationToken ct)
+    {
+        var stores = _initializedHistoryStores is null
+            ? new[] { _primary }.Concat(_allProjectStores()).OfType<SpecStore>()
+            : _initializedHistoryStores();
+        var owners = stores
+            .DistinctBy(store => (store.Database.Provider, store.Database.ConnectionString, store.Database.Qualifier));
+        OwnedHistoricalArtifact<ArtOutput>? found = null;
+        foreach (var owner in owners)
+        {
+            var candidate = await new OwnedArtifactHistoryStore(owner.Database).GetArtAsync(id, ct);
+            if (candidate is null) continue;
+            if (found is not null) throw new ArtifactHistoryAmbiguousException(id);
+            found = candidate;
+        }
+        return found;
+    }
+
+    internal ISpecStore? ResolveOwner(string id)
     {
         if (_ownerCache.TryGetValue(id, out var cached)) return cached;
         var candidates = new List<ISpecStore> { _primary };
@@ -131,6 +158,11 @@ public sealed class ProjectRoutingSpecStore : ISpecStore
     public Task<SpecRecord> SetStatusAsync(string id, SpecStatus status, CancellationToken ct = default) =>
         (ResolveOwner(id) ?? throw new InvalidOperationException($"spec {id} not found in any project store"))
             .SetStatusAsync(id, status, ct);
+
+    public Task CommitDesignDecisionAsync(string id, SpecStatus status, long runId,
+        IReadOnlyList<string> artifactIds, string hygieneJson, TimeSpan duration, CancellationToken ct = default) =>
+        (ResolveOwner(id) ?? throw new InvalidOperationException($"spec {id} not found in any project store"))
+            .CommitDesignDecisionAsync(id, status, runId, artifactIds, hygieneJson, duration, ct);
 
     public async Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default)
     {

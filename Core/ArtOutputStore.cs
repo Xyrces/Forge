@@ -49,6 +49,9 @@ public sealed class ArtOutputStore
 
     public string DbPath => _dbPath;
 
+    internal Task<IReadOnlyList<ArtifactReference>> ListReferencesAsync(string specId, CancellationToken ct) =>
+        ArtifactReferenceIndex.ReadAsync(_db, "art_output", specId, ct);
+
     public async Task<ArtOutput> CreateAsync(NewArtOutput req, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(req.SpecId))
@@ -171,6 +174,30 @@ public sealed class ArtOutputStore
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         while (await rd.ReadAsync(ct)) list.Add(ReadRow(rd));
         return list;
+    }
+
+    internal async Task<IReadOnlyList<ArtOutput>> ListBySpecsAsync(
+        IReadOnlyList<string> specIds, CancellationToken ct = default)
+    {
+        var rows = new List<ArtOutput>();
+        if (specIds.Count == 0) return rows;
+        await using var connection = await _db.OpenAsync(ct);
+        foreach (var batch in specIds.Distinct(StringComparer.Ordinal).Chunk(500))
+        {
+            await using var command = connection.CreateCommand();
+            var parameters = batch.Select((id, index) => (Name: $"@spec{index}", Id: id)).ToArray();
+            command.CommandText = $"""
+                SELECT id, spec_id, kind, title, body, body_kind,
+                       references_json, parent_artifact_id, status, author, created_at, updated_at
+                FROM {T("art_output")}
+                WHERE spec_id IN ({string.Join(",", parameters.Select(p => p.Name))})
+                ORDER BY created_at, id
+                """;
+            foreach (var parameter in parameters) command.AddParam(parameter.Name, parameter.Id);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) rows.Add(ReadRow(reader));
+        }
+        return rows;
     }
 
     public async Task<int> DeleteBySpecAsync(string specId, CancellationToken ct = default)

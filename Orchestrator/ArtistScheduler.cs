@@ -195,6 +195,7 @@ public sealed class ArtistAgentFactory
     private readonly RoleAgentRegistry _roles;
     private readonly IDashboardEventBus _events;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly Func<string, string>? _artOutputRoot;
 
     public ArtistAgentFactory(
         ISpecStore specs,
@@ -207,7 +208,8 @@ public sealed class ArtistAgentFactory
         LlmConfig config,
         RoleAgentRegistry roles,
         IDashboardEventBus events,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        Func<string, string>? artOutputRoot = null)
     {
         _specs = specs;
         _designArtifacts = designArtifacts;
@@ -220,9 +222,13 @@ public sealed class ArtistAgentFactory
         _roles = roles;
         _events = events;
         _loggerFactory = loggerFactory;
+        _artOutputRoot = artOutputRoot;
     }
 
     public ArtistAgent Create() => new(
         _specs, _designArtifacts, _artOutputs, _runs, _memory, _meshy, _chatClientFactory, _config, _roles, _events,
-        _loggerFactory.CreateLogger<ArtistAgent>());
+        _loggerFactory.CreateLogger<ArtistAgent>(), artOutputRoot: _artOutputRoot);
+
+    internal string ArtOutputRoot(SpecStore owner)
+        => _artOutputRoot?.Invoke(owner.ProjectId) ?? _meshy.ArtOutputRoot;
 }

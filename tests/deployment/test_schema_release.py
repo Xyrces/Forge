@@ -1,8 +1,10 @@
 import copy
+import re
 import unittest
+from pathlib import Path
 from test_k3s_release import FakeKube, FakeControllers, IMAGE, OLD_IMAGE, DATASET
 from release import Release
-from schema_release import SchemaRelease, choose_release, validate_policy
+from schema_release import SchemaRelease, choose_release, load_policy, validate_policy
 
 POLICY = {"fromVersion": 39, "toVersion": 40, "rollbackImage": OLD_IMAGE}
 
@@ -45,6 +47,15 @@ class Controllers(FakeControllers):
 class Crash(BaseException): pass
 
 class SchemaReleaseTests(unittest.TestCase):
+    def test_bundled_upgrade_policy_targets_the_workload_schema(self):
+        root = Path(__file__).resolve().parents[2]
+        policy = load_policy(root / "deploy/k3s/schema-upgrade.json")
+        version = re.search(r"public const int CurrentSchemaVersion = (\d+);",
+                            (root / "Core/IssueStore.cs").read_text(encoding="utf-8"))
+        self.assertIsNotNone(policy, "Missing bundled rollback policy")
+        self.assertIsNotNone(version, "Workload schema version declaration was not found")
+        self.assertEqual(int(version.group(1)), policy["toVersion"])
+
     def make(self, kube=None, controllers=None, uid="uid-1"):
         kube = kube or Kube()
         controllers = controllers or Controllers(kube)

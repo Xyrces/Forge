@@ -14,7 +14,9 @@ namespace Forge.Orchestrator.Workers;
 
 public sealed class WorkerExecutionUncertainException(string message, Exception? inner = null) : Exception(message, inner);
 
-public sealed record WorkerInvocation(AgentType Role, string Prompt, string? SessionId, Dictionary<string, string> Context);
+// HistoricalProjectId remains readable for existing assignments; artifact records determine their actual source.
+public sealed record WorkerInvocation(AgentType Role, string Prompt, string? SessionId, Dictionary<string, string> Context,
+    string? HistoricalProjectId = null);
 
 public interface IWorkerJobs
 {

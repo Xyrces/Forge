@@ -99,6 +99,7 @@ public static class ForgeComposition
             (pid, path) => Program.FactoryFor(options.Db, pid, path),
             events: eventPublisher, deploymentProfiles: options.Deployments);
         services.AddSingleton(projectFactory);
+        await projectFactory.PreserveArtifactHistoryAsync(null, ct);
         string? ProjectRootLookup(string projectId) =>
             projectFactory.KnownProjects
                 .FirstOrDefault(p => string.Equals(p.Id, projectId, StringComparison.OrdinalIgnoreCase))
@@ -331,12 +332,14 @@ public static class ForgeComposition
                 : projectFactory.Find(pid) is { } runCtx
                     ? new AgentRunStore(((IssueStore)runCtx.Issues).Db)
                     : agentRunStore,
-            // file_followup rows belong to the RUN's project store.
+            // Follow-ups and engineering artifact reads use the RUN's project store.
             issueStoreLookup: pid => pid is null
                 ? null
                 : projectFactory.Find(pid)?.Issues,
             modelOverrides: roleModelOverrides,
-            gates: options.Gates);
+            gates: options.Gates,
+            artOutputRoot: id => ForgesystemPaths.ArtistOutputRoot(orchDataRoot, id,
+                id == "default" ? ProjectRootLookup(id) : null));
         IAgentRunner agentRunner = localAgentRunner;
         if (!options.Worker.Enabled && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
             throw new InvalidOperationException("GitHub App credentials require isolated Kubernetes workers.");
@@ -585,7 +588,8 @@ public static class ForgeComposition
                 .Select(proj => projectFactory.Find(proj.Id)?.Specs)
                 .Where(st => st is not null)
                 .Cast<ISpecStore>()
-                .ToList());
+                .ToList(),
+            initializedHistoryStores: () => projectFactory.GetInitializedHistoryStores(specStore));
         services.AddSingleton(routingSpecStore);
         specStoreRef.Set(routingSpecStore);
 
@@ -697,13 +701,13 @@ public static class ForgeComposition
             new SocketsHttpHandler(),
             meshyOptions,
             loggerFactory.CreateLogger<Forge.Meshy.MeshyClient>(),
-            artOutputRoot: primary.Id == "default"
-                ? Path.Combine(primary.Root, ".portHorizon", "art-output")
-                : ForgesystemPaths.ArtOutputDir(orchDataRoot, primary.Id));
+            artOutputRoot: ForgesystemPaths.ArtistOutputRoot(orchDataRoot, primary.Id, primary.Root));
         services.AddSingleton(meshy);
         var artistAgentFactory = new ArtistAgentFactory(
             routingSpecStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,
-            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory);
+            chatClientFactory, llmConfig, roleRegistry, eventBus, loggerFactory,
+            artOutputRoot: id => ForgesystemPaths.ArtistOutputRoot(orchDataRoot, id,
+                id == "default" ? ProjectRootLookup(id) : null));
         services.AddSingleton(artistAgentFactory);
 
         var primaryBundle = dispatchBundleFactory.Build(primary);

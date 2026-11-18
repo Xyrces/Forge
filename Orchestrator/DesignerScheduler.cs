@@ -172,7 +172,7 @@ public sealed class DesignerScheduler
 
     private async Task<bool> ShouldDesignAsync(SpecRecord spec, CancellationToken ct)
     {
-        var recent = await _runs.ListAsync(specId: spec.Id, limit: 1, ct);
+        var recent = await DesignerStoreRouting.ListRunsAsync(_specs, _runs, spec.Id, 1, ct);
         if (recent.Count == 0) return true;
         var last = recent[0];
         if (last.Status is DesignerRunStatus.HygieneFailed or DesignerRunStatus.LlmFailed)
@@ -206,6 +206,7 @@ public sealed class DesignerScheduler
 /// </summary>
 public sealed class DesignerAgentFactory
 {
+    internal ISpecStore Specs => _specs;
     private readonly ISpecStore _specs;
     private readonly DesignArtifactStore _artifacts;
     private readonly DesignerRunStore _runs;

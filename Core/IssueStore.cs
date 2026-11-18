@@ -223,7 +223,7 @@ public interface IIssueStore
 /// </summary>
 public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 42;
+    public const int CurrentSchemaVersion = 43;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1027,6 +1027,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         M040InitiativeApproval.Create(conn, SqliteDialect.Instance);
         M041SprintCompletion.Create(conn, SqliteDialect.Instance);
         M042ImplementationEvidence.ApplySqlite(conn);
+        M043OwnedArtifactHistory.Create(conn, SqliteDialect.Instance);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;
@@ -1648,6 +1649,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 
         M040InitiativeApproval.Create(conn, d);
         if (_db.Profile == ForgeSchemaProfile.Workload) M041SprintCompletion.Create(conn, d);
+        if (_db.Profile == ForgeSchemaProfile.Workload) M043OwnedArtifactHistory.Create(conn, d);
 
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the
@@ -2010,7 +2012,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 
         await InsertEventAsync(conn, tx, id, "created", spec.Description, ct);
         return new IssueRecord(id, shortIdStr, spec.Type, spec.Title, spec.Description,
-            IssueStatus.Pending, spec.Priority, spec.Assignee, now, now, null, metadataJson);
+            IssueStatus.Pending, spec.Priority, spec.Assignee, now, now, null, metadataJson, ParentIssueId: spec.ParentId);
     }
 
     internal async Task PublishCreatedAsync(IssueRecord issue, CancellationToken ct)

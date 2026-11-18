@@ -144,6 +144,39 @@ public sealed class InitiativeHygieneRepairTests
     }
 
     [Fact]
+    public async Task RegisteredSecondaryProjectRepairUsesItsOwnReceiptDespitePrimaryRunIdCollision()
+    {
+        var f = await Seed(); await using var owner = f.Issues;
+        await using var primary = new IssueStore(TempRoot.Instance.NewDbPath("repair-primary"), "primary");
+        var registry = new ProjectStore(primary);
+        await registry.UpsertAsync(new NewProject("test", "Secondary", "https://github.com/example/secondary"));
+        await using var contexts = new Forge.Projects.ProjectContextFactory(registry,
+            TempRoot.Instance.NewDirectory("repair-context"), dbResolver: (_, _) => owner.Db);
+        var primaryRuns = new DesignerRunStore(primary.Db);
+        var collision = await primaryRuns.StartAsync("unrelated-spec", DesignerTriggerKind.Manual);
+        Assert.Equal(f.Request.DesignRunId, collision.Id);
+        var service = new Forge.Agents.InitiativeApprovalService(new InitiativeProposalStore(owner),
+            _ => new InitiativeIngestionStore(owner), new Forge.Dashboard.InMemoryDashboardEventBus());
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        Forge.Dashboard.SpecEndpoints.MapSpecEndpoints(app, new SpecStore(primary), new NullSpecExtractionReader(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, projectContexts: contexts,
+            issues: primary, initiativeApprovals: service, designerRuns: primaryRuns);
+        await app.StartAsync();
+        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{((IHost)app).GetPort()}") };
+        var action = await http.GetFromJsonAsync<JsonElement>($"/api/specs/{f.Receipt.SpecId}/actions?project=test");
+        Assert.True(action.GetProperty("canRepairHygiene").GetBoolean());
+        Assert.Equal("HygieneFailed", action.GetProperty("designState").GetString());
+        using var response = await http.PostAsJsonAsync($"/api/specs/{f.Receipt.SpecId}/refine-again?project=test",
+            new Forge.Dashboard.SpecHygieneRepairRequest(f.Proposal.Id, 1, f.Proposal.Hash, 1, f.Request.DesignRunId));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal("Pending", (await new InitiativeIngestionStore(owner).GetAsync(f.Proposal.Id, 1))!.RefinementState);
+        Assert.Equal(DesignerRunStatus.Started, Assert.Single(await primaryRuns.ListAsync()).Status);
+        await app.StopAsync();
+    }
+
+    [Fact]
     public async Task ConcurrentDesignerStartAndRepairCannotBothWin()
     {
         var f = await Seed(); await using var issues = f.Issues;

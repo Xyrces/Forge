@@ -126,6 +126,7 @@
     [Parameter] public string? ProjectId { get; set; }
     [Parameter] public string? SprintId { get; set; }
     [Parameter] public DateTime RefreshAt { get; set; }
+    [Parameter] public EventCallback<(string? ProjectId, string? SprintId)> OnLayoutReady { get; set; }
     private string? _identity, _cursor, _error, _actionError, _notice;
     private string _stopReason = "";
     private DateTime _refreshAt;
@@ -133,6 +134,14 @@
     private CancellationTokenSource? _request;
     private int _generation;
     private bool _loading, _retrying;
+    private bool _layoutReadyNotified;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_loading || _layoutReadyNotified) return;
+        _layoutReadyNotified = true;
+        await OnLayoutReady.InvokeAsync((ProjectId, SprintId));
+    }
 
     protected override async Task OnParametersSetAsync()
     {
@@ -159,6 +168,7 @@
         var token = _request.Token;
         var generation = ++_generation;
         _loading = true;
+        _layoutReadyNotified = false;
         _error = null;
         if (ProjectId is null || SprintId is null) { _detail = null; _loading = false; return; }
         var url = $"/api/sprints/{Uri.EscapeDataString(SprintId)}/completion?projectId={Uri.EscapeDataString(ProjectId)}";

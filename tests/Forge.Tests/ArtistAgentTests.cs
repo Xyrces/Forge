@@ -11,6 +11,10 @@ using Forge.Meshy;
 using Forge.Orchestrator;
 using Xunit;
 using Xunit.Abstractions;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using System.Net.Http.Json;
+using Forge.Tests.Integration;
 
 namespace Forge.Tests;
 
@@ -239,6 +243,146 @@ public class ArtistAgentTests : IDisposable
         // dedicated MeshyClient tests cover that path; the Agent
         // tests cover the orchestration.
         Assert.Empty(run.MeshyTasks ?? new List<MeshyTaskRecord>());
+    }
+
+    [Fact]
+    public async Task SecondaryArtistWritesAndServesOwnedFilesAndMaterializedHistory()
+    {
+        await using var secondary = new IssueStore(Path.Combine(_workDir, "second.db"), "second");
+        var owner = new SpecStore(secondary);
+        var spec = await owner.CreateAsync(new("stale-project", "Owned asset", "Create a mesh"));
+        await owner.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
+        await owner.SetStatusAsync(spec.Id, SpecStatus.Designed);
+        var routing = new ProjectRoutingSpecStore(_specs,
+            id => id == "second" ? owner : null, () => [_specs, owner]);
+        var handler = new StubHttpHandler();
+        handler.Responses["GET /mesh.glb"] = new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent([0x67, 0x6c, 0x54, 0x46, 1, 2, 3]),
+        };
+        var meshy = NewMeshy(handler);
+        var ownerRoot = Path.Combine(_workDir, "owned-art");
+        var client = new TwoStepClient(
+            ("db_save_art_output", new() { ["specId"] = spec.Id, ["kind"] = "mesh", ["title"] = "Mesh",
+                ["body"] = "https://assets.test/mesh.glb", ["bodyKind"] = "glb" }, "saved"),
+            ("db_set_spec_status", new() { ["specId"] = spec.Id, ["status"] = "AssetReady" }, "ok"), "Done");
+        var factory = new ArtistAgentFactory(routing, _designArtifacts, _artOutputs, _runs, _memory, meshy,
+            new SingleClientFactory(client), new LlmConfig(new ProviderConfig("stub", "", null, null, "stub-model")),
+            new RoleAgentRegistry(), _events, NullLoggerFactory.Instance,
+            artOutputRoot: id => id == "second" ? ownerRoot : throw new InvalidOperationException("Wrong physical owner"));
+        var result = await factory.Create().ArtSpecAsync(spec.Id, ArtistTriggerKind.Manual);
+        Assert.True(result.Success, result.Error);
+        var created = Assert.Single(await new ArtOutputStore(secondary.Db).ListBySpecAsync(spec.Id));
+        Assert.Empty(await _artOutputs.ListBySpecAsync(spec.Id));
+        var expected = new byte[] { 0x67, 0x6c, 0x54, 0x46, 1, 2, 3 };
+        Assert.Equal(expected, await File.ReadAllBytesAsync(Path.Combine(ownerRoot, created.Body)));
+        Assert.False(File.Exists(Path.Combine(meshy.ArtOutputRoot, created.Body)));
+        var historical = await _artOutputs.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "History", spec.Id + "/old.glb", "glb"));
+        Directory.CreateDirectory(Path.Combine(meshy.ArtOutputRoot, spec.Id));
+        await File.WriteAllBytesAsync(Path.Combine(meshy.ArtOutputRoot, historical.Body), expected);
+        await new OwnedArtifactHistoryStore(secondary.Db).ImportAsync(new("primary", _issues.Db, meshy.ArtOutputRoot), owner);
+        var foreign = await _artOutputs.CreateAsync(new("foreign-spec", ArtOutputKind.Mesh, "Foreign", "foreign-spec/x.glb", "glb"));
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        ArtistEndpoints.MapArtistEndpoints(app, routing, factory, _runs, _artOutputs, meshy, NullLogger.Instance);
+        DesignArtEndpoints.MapDesignArtEndpoints(app, _designArtifacts, _artOutputs, null, _runs, NullLogger.Instance, routing);
+        await app.StartAsync();
+        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}") };
+        var gallery = await http.GetFromJsonAsync<JsonElement>("/api/art-output?projectId=second");
+        Assert.Equal(2, gallery.GetArrayLength());
+        foreach (var entry in gallery.EnumerateArray())
+            Assert.Equal(expected, await http.GetByteArrayAsync(entry.GetProperty("fileUrl").GetString()));
+        var rows = await http.GetFromJsonAsync<JsonElement>($"/api/specs/{spec.Id}/art-output");
+        Assert.Equal(2, rows.GetArrayLength());
+        Assert.Equal(expected, await http.GetByteArrayAsync($"/api/art-output/{historical.Id}/file"));
+        Assert.Equal(System.Net.HttpStatusCode.NotFound,
+            (await http.GetAsync($"/api/art-output/{foreign.Id}/file?specId={spec.Id}")).StatusCode);
+        await app.StopAsync();
+    }
+
+    [Fact]
+    public async Task LegacyFileBookmarkUsesRetainedHistoryAfterPrimaryRemovalWithoutExposingCurrentOtherProjectArt()
+    {
+        await using var next = new IssueStore(Path.Combine(_workDir, "next.db"), "next");
+        await using var ownerIssues = new IssueStore(Path.Combine(_workDir, "owner.db"), "owner");
+        var owner = new SpecStore(ownerIssues);
+        var spec = await owner.CreateAsync(new("owner", "Owner", "body"));
+        var meshy = NewMeshy(new StubHttpHandler());
+        Directory.CreateDirectory(Path.Combine(meshy.ArtOutputRoot, spec.Id));
+        var historical = await _artOutputs.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Old link", spec.Id + "/old.glb", "glb"));
+        await File.WriteAllTextAsync(Path.Combine(meshy.ArtOutputRoot, historical.Body), "retained bytes");
+        await new OwnedArtifactHistoryStore(ownerIssues.Db).ImportAsync(new("removed-writer", _issues.Db, meshy.ArtOutputRoot), owner);
+        var local = await new ArtOutputStore(ownerIssues.Db).CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Current", spec.Id + "/current.glb", "glb"));
+        await File.WriteAllTextAsync(Path.Combine(meshy.ArtOutputRoot, local.Body), "current bytes");
+        var registry = new ProjectStore(_issues);
+        await registry.UpsertAsync(new("removed-writer", "Former primary", "https://example.invalid/old.git"));
+        await registry.DeleteAsync("removed-writer");
+        await registry.UpsertAsync(new("next", "Next", "https://example.invalid/next.git"));
+        await registry.UpsertAsync(new("owner", "Owner", "https://example.invalid/owner.git"));
+        await using var projects = new Forge.Projects.ProjectContextFactory(registry, _workDir,
+            dbResolver: (id, _) => id == "owner" ? ownerIssues.Db : throw new InvalidOperationException("Unrelated store opened"));
+        _ = projects.Find("owner");
+        var nextSpecs = new SpecStore(next);
+        var routing = new ProjectRoutingSpecStore(nextSpecs, _ => null,
+            () => throw new InvalidOperationException("Legacy link must not initialize registered stores"),
+            () => projects.GetInitializedHistoryStores(nextSpecs));
+        await registry.UpsertAsync(new("unready", "Unready", "https://example.invalid/unready.git"));
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        ArtistEndpoints.MapArtistEndpoints(app, routing, null, _runs, new ArtOutputStore(next.Db), meshy, NullLogger.Instance);
+        await app.StartAsync();
+        using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{app.GetPort()}") };
+        Assert.Equal("retained bytes", await http.GetStringAsync($"/api/art-output/{historical.Id}/file"));
+        Assert.Equal(System.Net.HttpStatusCode.NotFound,
+            (await http.GetAsync($"/api/art-output/{local.Id}/file")).StatusCode);
+        await new OwnedArtifactHistoryStore(ownerIssues.Db).ImportAsync(
+            new("conflicting-writer", _issues.Db, meshy.ArtOutputRoot), owner);
+        Assert.Equal(System.Net.HttpStatusCode.Conflict,
+            (await http.GetAsync($"/api/art-output/{historical.Id}/file")).StatusCode);
+        await registry.DeleteAsync("owner");
+        Assert.Equal(System.Net.HttpStatusCode.NotFound,
+            (await http.GetAsync($"/api/art-output/{historical.Id}/file")).StatusCode);
+        Assert.False(Directory.Exists(Path.Combine(_workDir, "projects", "unready")));
+        await app.StopAsync();
+    }
+
+    [Fact]
+    public async Task FreshSingleOwnerIncludesItsTypedStoreInLegacyHistoryAndRejectsAmbiguity()
+    {
+        await using var ownerIssues = new IssueStore(Path.Combine(_workDir, "single.db"), "owner");
+        var owner = new SpecStore(ownerIssues);
+        var spec = await owner.CreateAsync(new("owner", "Owner", "body"));
+        var old = await _artOutputs.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "History", spec.Id + "/old.glb", "glb"));
+        var history = new OwnedArtifactHistoryStore(ownerIssues.Db);
+        await history.ImportAsync(new("writer", _issues.Db, _workDir), owner);
+        var registry = new ProjectStore(_issues);
+        await registry.UpsertAsync(new("owner", "Owner", "https://example.invalid/owner.git"));
+        await using var projects = new Forge.Projects.ProjectContextFactory(registry, _workDir,
+            dbResolver: (_, _) => throw new InvalidOperationException("Typed primary already exists"));
+        var routing = new ProjectRoutingSpecStore(owner, _ => owner,
+            () => throw new InvalidOperationException("No project initialization is needed"),
+            () => projects.GetInitializedHistoryStores(owner));
+        Assert.Equal(old.Id, (await routing.ReadHistoricalArtAcrossProjectsAsync(old.Id, default))!.Artifact.Id);
+        await using var otherIssues = new IssueStore(Path.Combine(_workDir, "other-owner.db"), "other");
+        var other = new SpecStore(otherIssues);
+        // A copied project database reproduces duplicate ownership, including version history.
+        await using (var source = await ownerIssues.Db.OpenAsync())
+        await using (var destination = await otherIssues.Db.OpenAsync())
+        {
+            ((Microsoft.Data.Sqlite.SqliteConnection)source)
+                .BackupDatabase((Microsoft.Data.Sqlite.SqliteConnection)destination);
+        }
+        var conflictingOwners = new ProjectRoutingSpecStore(owner, _ => null, () => [owner, other],
+            () => [owner, other]);
+        await Assert.ThrowsAsync<ArtifactHistoryAmbiguousException>(() =>
+            conflictingOwners.ReadHistoricalArtAcrossProjectsAsync(old.Id, default));
+        await history.ImportAsync(new("different-writer", _issues.Db, _workDir), owner);
+        await Assert.ThrowsAsync<ArtifactHistoryAmbiguousException>(() =>
+            routing.ReadHistoricalArtAcrossProjectsAsync(old.Id, default));
     }
 
     [Fact]

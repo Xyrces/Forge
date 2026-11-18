@@ -1,5 +1,6 @@
 """Loopback-only browser fixtures. Never reads a Forge database or calls a provider."""
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -30,6 +31,7 @@ class Handler(BaseHTTPRequestHandler):
         if value is None:
             return self.send(404, {'error': 'No fixture for ' + path})
         if isinstance(value, dict) and 'body' in value and isinstance(value.get('status'), int):
+            time.sleep(min(max(value.get('delayMs', 0), 0), 10000) / 1000)
             return self.send(value['status'], value['body'])
         return self.send(200, value)
 

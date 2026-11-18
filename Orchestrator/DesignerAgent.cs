@@ -41,6 +41,8 @@ public sealed class DesignerAgent
     private readonly ILogger<DesignerAgent> _logger;
     private readonly string _runId;
     private readonly string _rolePromptsRoot;
+    private ISpecStore? _artifactReadSpecs;
+    private DesignArtifactStore? _historicalArtifacts;
 
     public DesignerAgent(
         ISpecStore specs,
@@ -86,6 +88,29 @@ public sealed class DesignerAgent
 
     public async Task<DesignerResult> DesignSpecAsync(
         string specId, DesignerTriggerKind trigger, CancellationToken ct = default)
+    {
+        // The run receipt and artifacts must share the spec's owning database.
+        // In particular, run IDs are only unique inside one project schema.
+        if (_specs is ProjectRoutingSpecStore routing)
+        {
+            var resolved = routing.ResolveOwner(specId);
+            if (resolved is null) return new DesignerResult(false, null, [], null, "Spec not found");
+            var owner = resolved as SpecStore
+                ?? throw new InvalidOperationException("Designer requires the specification's owning database.");
+            var scoped = new DesignerAgent(owner, new DesignArtifactStore(owner.Database),
+                new DesignerRunStore(owner.Database), _memory, _hygiene, _chatClientFactory,
+                _config, _roles, _events, _logger, _rolePromptsRoot, _runId)
+            {
+                _artifactReadSpecs = routing,
+                _historicalArtifacts = _artifacts,
+            };
+            return await scoped.DesignOwnedSpecAsync(specId, trigger, ct);
+        }
+        return await DesignOwnedSpecAsync(specId, trigger, ct);
+    }
+
+    private async Task<DesignerResult> DesignOwnedSpecAsync(
+        string specId, DesignerTriggerKind trigger, CancellationToken ct)
     {
         var run = await _runs.StartAsync(specId, trigger, ct);
         var startedAt = DateTime.UtcNow;
@@ -263,7 +288,7 @@ public sealed class DesignerAgent
                 description: "Read the codebase graph (modules + import edges) for the project. Use this to confirm ## Touches references match real module ids."),
 
             AIFunctionFactory.Create(
-                ([Description("Optional spec id; if null returns the project's full artifact set.")] string? specId) => DbGetExistingDesignArtifacts(specId),
+                ([Description("This run's spec id; omit to read this run's artifacts.")] string? specId = null) => DbGetExistingDesignArtifacts(spec.Id, specId),
                 name: "db_get_existing_design_artifacts",
                 description: "List existing design artifacts (wireframes, mockups, component-specs, visual-rules). Use this to find a visual pattern to reuse instead of inventing a new one."),
 
@@ -314,18 +339,18 @@ public sealed class DesignerAgent
         return "{\"note\":\"graph loaded from scheduler context; see .portHorizon/codebase-graph/\"}";
     }
 
-    private async Task<string> DbGetExistingDesignArtifacts(string? specId)
+    private async Task<string> DbGetExistingDesignArtifacts(string expectedSpecId, string? specId)
     {
         // v1: spec-scoped only. The LLM passes a spec_id and we
         // return its approved design_artifact rows. (Project-wide
         // lookup would need a projectId; the LLM doesn't have
         // one in v1. The visual-language memory + the
         // design-system rules are the cross-spec context.)
-        if (string.IsNullOrWhiteSpace(specId))
-        {
-            return "[]";
-        }
-        var list = await _artifacts.ListBySpecAsync(specId, DesignArtifactStatus.Approved);
+        specId ??= expectedSpecId;
+        if (specId != expectedSpecId) return "{\"error\":\"Design artifacts must belong to this run's specification.\"}";
+        var list = (await DesignerStoreRouting.ListArtifactsAsync(_artifactReadSpecs ?? _specs,
+            _historicalArtifacts ?? _artifacts, specId, false))
+            .Where(a => a.Status == DesignArtifactStatus.Approved).ToArray();
         return JsonSerializer.Serialize(list.Select(a => new
         {
             a.Id, a.SpecId, Kind = a.Kind.ToString(),

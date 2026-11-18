@@ -33,7 +33,8 @@ public static class ReviewProse
                 output.Add(line); continue;
             }
             if (fence != '\0' || line.StartsWith('>') || line.StartsWith("    ") || line.StartsWith('\t')) { output.Add(line); continue; }
-            if (Regex.IsMatch(line, @"^REVIEWER_VERDICT:\s*(APPROVE|REQUEST_CHANGES|ERROR)\s*$")
+            if (line.TrimEnd() == "REVIEWER_NOTES:"
+                || Regex.IsMatch(line, @"^REVIEWER_VERDICT:\s*(APPROVE|REQUEST_CHANGES|ERROR)\s*$")
                 || Regex.IsMatch(line, @"^\*\*\[Forge Reviewer [—-] round \d+\]\*\* (Approve|RequestChanges)\s*$")
                 || Regex.IsMatch(line, @"^<!-- forge-review:v1:[a-f0-9]{64} -->\s*$")) continue;
             output.Add(line.StartsWith("REVIEWER_NOTES: ", StringComparison.Ordinal) ? line[16..] : line);

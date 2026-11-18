@@ -183,7 +183,7 @@ public static class ControllerInitializer
         // operator-facing approval path may change authority or ingestion receipts.
         // The existence guard keeps the schema-39 compatibility bridge usable.
         return string.Concat(new[] { "initiative_proposal", "initiative_revision", "initiative_ingestion", "initiative_lock",
-                "sprint_completion", "completion_triage", "completion_draft_claim", "completion_lock", "completion_criterion_evidence", "deployment", "sprint_proposal_audit" }
+                "sprint_completion", "completion_triage", "completion_draft_claim", "completion_lock", "completion_criterion_evidence", "deployment", "sprint_proposal_audit", "owned_artifact_history" }
             .Select(table => $"IF OBJECT_ID(N'{schema}.{table}',N'U') IS NOT NULL BEGIN "
                 + $"GRANT SELECT ON OBJECT::[{schema}].[{table}] TO [{workerPrincipal}];"
                 + $"DENY INSERT,UPDATE,DELETE ON OBJECT::[{schema}].[{table}] TO [{workerPrincipal}]; END;"));

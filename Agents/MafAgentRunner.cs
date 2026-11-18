@@ -44,6 +44,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<DesignArtifactStore?>? _designArtifactsFactory;
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
+    private readonly Func<string, string?>? _artOutputRoot;
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
     private readonly AgentRunStore? _runs;
@@ -112,7 +113,8 @@ public sealed class MafAgentRunner : IAgentRunner
         // Resolves by context projectId; null/unknown → _issues.
         Func<string?, IIssueStore?>? issueStoreLookup = null,
         RoleModelOverrides? modelOverrides = null,
-        Configuration.GateOptions? gates = null)
+        Configuration.GateOptions? gates = null,
+        Func<string, string?>? artOutputRoot = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -128,6 +130,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _designArtifactsFactory = designArtifacts;
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
+        _artOutputRoot = artOutputRoot;
         _secrets = secrets;
         _issues = issues;
         _runs = runs;
@@ -261,9 +264,28 @@ public async Task<AgentRunResult> RunAsync(
         var artOutputs = _artOutputsFactory?.Invoke();
         if (designArtifacts is not null && specs is not null && artOutputs is not null)
         {
-            var readTool = new ArtifactReadTool(
-                designArtifacts, specs, artOutputs, _handoffs, logger: null);
-            tools.Add(readTool.AsAIFunction());
+            // Bind engineering reads and audit to the run's physical owner.
+            // Historical records are copied into that same store during upgrade.
+            if (projectId is not null && specs is ProjectRoutingSpecStore)
+            {
+                if (_issueStoreLookup?.Invoke(projectId) is IssueStore owner)
+                    tools.Add(new ArtifactReadTool(
+                        new DesignArtifactStore(owner.Db), new SpecStore(owner), new ArtOutputStore(owner.Db),
+                        new ContextHandoffStore(owner.Db), requireOwnedSpec: true,
+                        history: new OwnedArtifactHistoryStore(owner.Db),
+                        artOutputRoot: _artOutputRoot?.Invoke(projectId)).AsAIFunction());
+            }
+            else if (specs is SpecStore && (!isWorker || projectId is not null)
+                && (_issues is not IssueStore local || projectId is null || local.ProjectId == projectId))
+            {
+                // Workers and legacy single-project constructors already supply a
+                // concrete owner-local spec store. No routing lookup is needed;
+                // artifact IDs must still resolve to a spec in that physical store.
+                tools.Add(new ArtifactReadTool(designArtifacts, specs, artOutputs, _handoffs, requireOwnedSpec: true,
+                    history: _artOutputRoot is not null && _issues is IssueStore localOwner
+                        ? new OwnedArtifactHistoryStore(localOwner.Db) : null,
+                    artOutputRoot: projectId is null ? null : _artOutputRoot?.Invoke(projectId)).AsAIFunction());
+            }
         }
 
         // Follow-up filing: engineering + review roles can file

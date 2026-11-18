@@ -45,6 +45,44 @@ public class ProjectRoutingSpecStoreTests : IDisposable
         new(ProjectId: project, Title: title, Body: "body " + title);
 
     [Fact]
+    public async Task HistoricalArtifactLookupBatchesSpecIdsAndDoesNotExpandTheirScope()
+    {
+        var artifacts = new DesignArtifactStore(_primaryIssues.Db);
+        var ids = Enumerable.Range(0, 501).Select(i => $"owned-spec-{i}").ToArray();
+        var first = await artifacts.CreateAsync(new NewDesignArtifact(ids[0], DesignArtifactKind.Wireframe, "first", "body", "markdown"));
+        var second = await artifacts.CreateAsync(new NewDesignArtifact(ids[500], DesignArtifactKind.Wireframe, "second", "body", "markdown"));
+        await artifacts.CreateAsync(new NewDesignArtifact("foreign-spec", DesignArtifactKind.Wireframe, "foreign", "body", "markdown"));
+        // Persisted timestamps have millisecond precision. Exercise the ID tiebreaker across batches.
+        await using (var connection = await _primaryIssues.Db.OpenAsync())
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE design_artifact SET created_at='2026-01-01 00:00:00.000'";
+            await command.ExecuteNonQueryAsync();
+        }
+        var result = await artifacts.ListBySpecsAsync(ids.Append("' OR 1=1 --").ToArray());
+        Assert.Equal(new[] { first.Id, second.Id }.Order(StringComparer.Ordinal), result.Select(a => a.Id));
+        Assert.Empty(await artifacts.ListBySpecsAsync([]));
+    }
+
+    [Fact]
+    public async Task DesignDecision_RoutesAtomicReceiptToOwner_AndDoesNotRegressOnReplay()
+    {
+        var spec = await _routing.CreateAsync(Spec("porthorizon", "owner handoff"));
+        await _routing.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
+        var primaryRun = await new DesignerRunStore(_primaryIssues.Db).StartAsync("unrelated", DesignerTriggerKind.Manual);
+        var ownedRuns = new DesignerRunStore(_phIssues.Db);
+        var run = await ownedRuns.StartAsync(spec.Id, DesignerTriggerKind.Manual);
+        Assert.Equal(primaryRun.Id, run.Id);
+        await _routing.CommitDesignDecisionAsync(spec.Id, SpecStatus.Approved, run.Id, [], "{}", TimeSpan.FromSeconds(1));
+        Assert.Equal(DesignerRunStatus.Succeeded, Assert.Single(await ownedRuns.ListAsync(spec.Id)).Status);
+        Assert.Equal(DesignerRunStatus.Started, Assert.Single(await new DesignerRunStore(_primaryIssues.Db).ListAsync()).Status);
+        await _routing.SetStatusAsync(spec.Id, SpecStatus.Grooming);
+        await _routing.SetStatusAsync(spec.Id, SpecStatus.Groomed);
+        await _routing.CommitDesignDecisionAsync(spec.Id, SpecStatus.Approved, run.Id, [], "{}", TimeSpan.FromSeconds(1));
+        Assert.Equal(SpecStatus.Groomed, (await _routing.GetAsync(spec.Id))!.Status);
+    }
+
+    [Fact]
     public async Task Create_RoutesToOwningProject()
     {
         var ph = await _routing.CreateAsync(Spec("porthorizon", "ph spec"));

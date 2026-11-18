@@ -122,6 +122,60 @@ public class RunAgentExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task PromptDiscoversCurrentAndHistoricalRefsThroughTheTasksOwnStoryAndSpec()
+    {
+        await using var history = new IssueStore(TempRoot.Instance.NewDbPath("artifact-prompt-writer"), "writer");
+        var spec = await new SpecStore(_issues).CreateAsync(new("stale-project", "Approved design", "Body"));
+        var story = await _issues.CreateAsync(new("story", "Groomed story", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new("task", "Implement the design", ParentId: story.Id));
+        var designs = new DesignArtifactStore(_issues.Db);
+        var art = new ArtOutputStore(_issues.Db);
+        var local = await designs.CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Local", "private body", "html"));
+        var pastArt = new ArtOutputStore(history.Db);
+        var historical = await pastArt.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Mesh", "stored/path.glb", "glb"));
+        var foreign = await pastArt.CreateAsync(new("other-spec", ArtOutputKind.Mesh, "Foreign", "foreign.glb", "glb"));
+        await new OwnedArtifactHistoryStore(_issues.Db).ImportAsync(new("writer", history.Db, null), new SpecStore(_issues));
+        var (designRefs, artRefs) = await RunAgentExecutor.LoadArtifactReferencesAsync(_issues, task, designs, art, default);
+        var prompt = RunAgentExecutor.BuildPrompt(task, AgentType.CoreDev, _workDir, "feature", "main", designRefs, artRefs);
+        Assert.Equal(local.Id, Assert.Single(designRefs).Id);
+        Assert.Equal(historical.Id, Assert.Single(artRefs).Id);
+        Assert.Contains(historical.Id, prompt);
+        Assert.Contains("read_artifact", prompt);
+        Assert.DoesNotContain("curl", prompt);
+        Assert.DoesNotContain(foreign.Id, prompt);
+        Assert.DoesNotContain("private body", prompt);
+        Assert.DoesNotContain("stored/path.glb", prompt);
+
+        var orphan = task with { ParentIssueId = "other-spec" };
+        var empty = await RunAgentExecutor.LoadArtifactReferencesAsync(_issues, orphan, designs, art, default);
+        Assert.Empty(empty.Item1);
+        Assert.Empty(empty.Item2);
+    }
+
+    [Fact]
+    public async Task SpecBackedDispatchStartsWithoutOpeningAnUninitializedRegisteredProject()
+    {
+        var unreadyRoot = Path.Combine(_workDir, "unready");
+        var registry = new ProjectStore(_issues);
+        await registry.UpsertAsync(new("unready", "Uninitialized", "https://example.invalid/unready.git"));
+        await registry.UpdateLocalPathAsync("unready", unreadyRoot);
+        var spec = await new SpecStore(_issues).CreateAsync(new("owner", "Approved", "body"));
+        var story = await _issues.CreateAsync(new("story", "Story", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new("task", "Task", ParentId: story.Id));
+        var designs = new DesignArtifactStore(_issues.Db);
+        await designs.CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Local", "design", "html"));
+        var claimed = await ClaimExecutor.HandleAsync(task, _issues, NullLogger<ClaimExecutor>.Instance, default);
+        var worktree = await WorktreeExecutor.HandleAsync(
+            claimed, _issues, _worktrees, "main", NullLogger<WorktreeExecutor>.Instance, default);
+        var result = await RunAgentExecutor.HandleAsync(worktree, _issues, RunnerWithScriptedClient(),
+            _roleRegistry, _ => null, _events, designs, new ArtOutputStore(_issues.Db),
+            NullLogger<RunAgentExecutor>.Instance, projectId: null, sprints: null, default);
+        Assert.Equal(AgentResult.Ok, result.Result);
+        Assert.Contains("I made the change", result.Text);
+        Assert.False(Directory.Exists(unreadyRoot));
+    }
+
+    [Fact]
     public async Task RunAgent_SkippedForAlreadyClaimed()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));

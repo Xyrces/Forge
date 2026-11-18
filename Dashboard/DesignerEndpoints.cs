@@ -66,13 +66,13 @@ public static class DesignerEndpoints
 
         app.MapGet("/api/designer/runs", async (string? specId, int? limit, CancellationToken ct) =>
         {
-            var list = await runs.ListAsync(specId, limit ?? 100, ct);
+            var list = await DesignerStoreRouting.ListRunsAsync(specs, runs, specId, limit ?? 100, ct);
             return Results.Json(list.Select(ToView).ToArray());
         });
 
         app.MapGet("/api/specs/{id}/design-artifacts", async (string id, CancellationToken ct) =>
         {
-            var list = await artifacts.ListBySpecAsync(id);
+            var list = await DesignerStoreRouting.ListArtifactsAsync(specs, artifacts, id, false, ct);
             return Results.Json(list.Select(ToView).ToArray());
         });
     }

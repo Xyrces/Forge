@@ -111,6 +111,14 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly IReadOnlyDictionary<string, DeploymentOptions> _deploymentProfiles;
     private readonly ConcurrentDictionary<string, ProjectContext> _cache = new();
+    internal IReadOnlyList<SpecStore> GetInitializedHistoryStores(SpecStore primary)
+    {
+        var registered = KnownProjects.Select(project => project.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _cache.Values.Select(context => context.Specs).OfType<SpecStore>().Append(primary)
+            .Where(store => registered.Contains(store.ProjectId))
+            .DistinctBy(store => (store.Database.Provider, store.Database.ConnectionString, store.Database.Qualifier))
+            .ToArray();
+    }
     private bool _disposed;
 
     /// <summary>Static (legacy) construction. <see cref="KnownProjects"/> is fixed.</summary>
@@ -174,6 +182,27 @@ public sealed class ProjectContextFactory : IAsyncDisposable
         var options = record.ToProjectOptions(RootFor(record));
         if (_deploymentProfiles.TryGetValue(record.Id, out var profile)) options.Deployment = profile;
         return options;
+    }
+
+    /// <summary>Administrative backfill before admission or removal of a legacy writer.</summary>
+    public async Task PreserveArtifactHistoryAsync(string? writerId, CancellationToken ct)
+    {
+        var projects = KnownProjects;
+        if (projects.Count < 2) return;
+        foreach (var writer in projects.Where(p => writerId is null || p.Id == writerId))
+        {
+            if (Find(writer.Id)?.Specs is not SpecStore writerSpecs)
+                throw new InvalidOperationException($"Could not open registered artifact writer {writer.Id}.");
+            var source = new ArtifactStoreSource(writer.Id, writerSpecs.Database,
+                ForgesystemPaths.ArtistOutputRoot(_dataRoot, writer.Id, writer.Root));
+            if (!await source.HasForeignArtifactsAsync(ct)) continue;
+            foreach (var project in projects.Where(p => p.Id != writer.Id))
+            {
+                if (Find(project.Id)?.Specs is not SpecStore owner)
+                    throw new InvalidOperationException($"Could not open registered artifact owner {project.Id}.");
+                await new OwnedArtifactHistoryStore(owner.Database).ImportAsync(source, owner, ct);
+            }
+        }
     }
 
     public IReadOnlyList<ProjectOptions> KnownProjects
