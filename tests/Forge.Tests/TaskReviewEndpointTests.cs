@@ -51,7 +51,7 @@ public sealed class TaskReviewEndpointTests : IAsyncLifetime
         var rejected = await client.PutAsJsonAsync(path, new { mode = "Both" });
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
         Assert.Contains("independent reviewer App", await rejected.Content.ReadAsStringAsync());
-        using var memory = new MemoryStore(issues.Db);
+        await using var memory = new MemoryStore(issues.Db);
         Assert.Equal(RequiredReview.Human, await new PullRequestReviewPolicy(memory).GetModeAsync(default));
     }
     private void Authenticate() => client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Token);

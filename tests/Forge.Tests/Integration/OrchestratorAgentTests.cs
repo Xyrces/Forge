@@ -156,7 +156,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         Assert.Contains("independent reviewer App", held.Message);
         Assert.Null(runner.LastPrompt);
         Assert.Null((await _issues.GetAsync(task.Id))!.Assignee);
-        using var memory = new MemoryStore(_issues.Db);
+        await using var memory = new MemoryStore(_issues.Db);
         await new PullRequestReviewPolicy(memory).SetModeAsync(RequiredReview.Human, "test operator", default);
         var resumed = await DispatchApprovedAsync(orch, task, default);
         Assert.True(resumed.Success, resumed.Message);
