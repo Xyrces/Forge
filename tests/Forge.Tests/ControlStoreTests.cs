@@ -93,6 +93,7 @@ public sealed class ControlStoreTests : IDisposable
     [InlineData(-1)]
     [InlineData(0)]
     [InlineData(1)]
+    [InlineData(2)]
     public async Task StandbyCatalogCheck_IsReadOnlyAndRejectsIncompatibleSchema(int offset)
     {
         var version = SqlServerMigrations.ExpectedVersion + offset;
@@ -106,7 +107,7 @@ public sealed class ControlStoreTests : IDisposable
         var factory = new ReadOnlyCatalogFactory(_issues.DbPath);
         await using var runtime = new IssueStore(factory);
         runtime.EnsureSchema();
-        if (offset == 0) await ControllerHost.VerifySchemaAsync(factory, default);
+        if (offset is 0 or 1) await ControllerHost.VerifySchemaAsync(factory, default);
         else await Assert.ThrowsAsync<InvalidOperationException>(() => ControllerHost.VerifySchemaAsync(factory, default));
         await using var check = await factory.OpenAsync();
         using var read = check.CreateCommand();
