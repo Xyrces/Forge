@@ -91,6 +91,22 @@ public static class ArtistEndpoints
             {
                 // Existing links identify records in the original primary store.
                 art = await artOutputs.GetAsync(id, ct);
+                if (art is null)
+                {
+                    try
+                    {
+                        var historical = specs is ProjectRoutingSpecStore historyRouter
+                            ? await historyRouter.ReadHistoricalArtAcrossProjectsAsync(id, ct)
+                            : specs is SpecStore single
+                                ? await new OwnedArtifactHistoryStore(single.Database).GetArtAsync(id, ct) : null;
+                        art = historical?.Artifact;
+                        root = historical?.ArtOutputRoot;
+                    }
+                    catch (ArtifactHistoryAmbiguousException)
+                    {
+                        return Results.Conflict(new { error = "ambiguous_history" });
+                    }
+                }
             }
             else
             {

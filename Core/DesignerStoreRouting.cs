@@ -28,20 +28,31 @@ public static class DesignerStoreRouting
     public static async Task<IReadOnlyList<DesignArtifact>> ListArtifactsAsync(ISpecStore? specs,
         DesignArtifactStore primary, string id, bool byProject, CancellationToken ct = default)
     {
-        var owner = (specs is ProjectRoutingSpecStore routing
-            ? byProject ? routing.FindRegisteredStore(id) : routing.ResolveOwner(id)
-            : specs) as SpecStore;
-        if (owner is null)
-        {
-            if (specs is ProjectRoutingSpecStore) return [];
+        if (specs is not (ProjectRoutingSpecStore or SpecStore))
             return byProject ? await primary.ListByProjectAsync(id, ct) : await primary.ListBySpecAsync(id, ct: ct);
-        }
-        if (byProject && specs is SpecStore && id != owner.ProjectId) return [];
-        if (!byProject && await owner.GetAsync(id, ct) is null) return [];
-        IReadOnlyList<string> ids = byProject ? await owner.ListOwnedIdsAsync(ct) : [id];
+        if (await ResolveArtifactScopeAsync(specs, id, byProject, ct) is not { } scope) return [];
+        var (owner, ids) = scope;
         var owned = await new DesignArtifactStore(owner.Database).ListBySpecsAsync(ids, ct);
         var historical = await new OwnedArtifactHistoryStore(owner.Database).ListDesignsAsync(ids, ct);
         return ArtifactHistory.IncludeUnambiguousHistory(owned, historical, a => a.Id)
             .OrderBy(a => a.CreatedAt).ThenBy(a => a.Id, StringComparer.Ordinal).ToArray();
+    }
+
+    internal static async Task<(SpecStore Owner, IReadOnlyList<string> Ids)?> ResolveArtifactScopeAsync(
+        ISpecStore specs, string id, bool byProject, CancellationToken ct)
+    {
+        var owner = specs is ProjectRoutingSpecStore routing
+            ? (byProject ? routing.FindRegisteredStore(id) : routing.ResolveOwner(id)) as SpecStore
+            : specs as SpecStore;
+        if (owner is null) return null;
+        if (!byProject)
+        {
+            if (await owner.GetAsync(id, ct) is null) return null;
+            return (owner, [id]);
+        }
+        // Legacy single-store installations may keep multiple logical projects together.
+        var ids = specs is ProjectRoutingSpecStore ? await owner.ListOwnedIdsAsync(ct)
+            : (await owner.ListAsync(id, null, ct)).Select(spec => spec.Id).ToArray();
+        return (owner, ids);
     }
 }

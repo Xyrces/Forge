@@ -588,7 +588,8 @@ public static class ForgeComposition
                 .Select(proj => projectFactory.Find(proj.Id)?.Specs)
                 .Where(st => st is not null)
                 .Cast<ISpecStore>()
-                .ToList());
+                .ToList(),
+            initializedHistoryStores: () => projectFactory.GetInitializedHistoryStores(specStore));
         services.AddSingleton(routingSpecStore);
         specStoreRef.Set(routingSpecStore);
 

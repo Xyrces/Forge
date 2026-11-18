@@ -25,17 +25,17 @@ class ReviewAuthorityReleaseTests(unittest.TestCase):
         original_call = controllers.call
         def observed(slot, action, operation, expected_previous_owner=None):
             result = original_call(slot, action, operation, expected_previous_owner)
-            if action == "status": result["schemaVersion"] = 42
+            if action == "status": result["schemaVersion"] = 43
             return result
         controllers.call = observed
         ticks = iter(range(10000))
         return Release(kube, controllers, "authority-test", IMAGE, DATASET, "pod", "uid",
                        timeout=2, sleep=lambda _: None, clock=lambda: next(ticks)), kube, controllers
 
-    def test_existing_schema42_normal_release_initializes_before_candidate(self):
+    def test_existing_schema43_normal_release_initializes_before_candidate(self):
         release, kube, controllers = self.make()
         kind, policy = choose_release(kube, controllers, "authority-test",
-            {"fromVersion": 41, "toVersion": 42, "rollbackImage": OLD_IMAGE})
+            {"fromVersion": 42, "toVersion": 43, "rollbackImage": OLD_IMAGE})
         self.assertIs(kind, Release)
         self.assertIsNone(policy)
         release.run()

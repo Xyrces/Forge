@@ -111,6 +111,14 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly IReadOnlyDictionary<string, DeploymentOptions> _deploymentProfiles;
     private readonly ConcurrentDictionary<string, ProjectContext> _cache = new();
+    internal IReadOnlyList<SpecStore> GetInitializedHistoryStores(SpecStore primary)
+    {
+        var registered = KnownProjects.Select(project => project.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _cache.Values.Select(context => context.Specs).Append(primary)
+            .Where(store => registered.Contains(store.ProjectId))
+            .DistinctBy(store => (store.Database.Provider, store.Database.ConnectionString, store.Database.Qualifier))
+            .ToArray();
+    }
     private bool _disposed;
 
     /// <summary>Static (legacy) construction. <see cref="KnownProjects"/> is fixed.</summary>
