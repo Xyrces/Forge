@@ -13,7 +13,8 @@ public sealed partial class PRWatcher
             .Any(run => run.TaskId == taskId && run.Role is "CoreDev" or "ClientDev");
     }
 
-    private sealed record FormalGate(bool Approved, bool Waiting, IReadOnlyList<FormalDecision> Requests, bool AutomatedSatisfied, bool ProtectionUnavailable = false, bool HumanPending = false);
+    private sealed record FormalGate(bool Approved, bool Waiting, IReadOnlyList<FormalDecision> Requests, bool AutomatedSatisfied,
+        bool ProtectionUnavailable = false, bool HumanPending = false, string? MergeState = null, bool HumanWaiting = false);
 
     private async Task<FormalGate> ReadFormalGateAsync(IssueRecord task, PullRequest pr, string head, CancellationToken ct)
     {
@@ -58,8 +59,17 @@ public sealed partial class PRWatcher
             _logger.LogWarning(ex, "Task {TaskId}: GitHub protected review decision unavailable", task.Id);
         }
         var protectionSatisfied = protection is ProtectionReviewDecision.NotRequired or ProtectionReviewDecision.Approved;
+        MergeRequirements? merge = null;
+        try { merge = await _gitHub.GetMergeRequirementsAsync(pr.Number, head, ct); }
+        catch (RateLimitExceededException) { throw; }
+        catch (SecondaryRateLimitExceededException) { throw; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _logger.LogWarning(ex, "Task {TaskId}: GitHub merge requirements unavailable", task.Id); }
         var humanPending = effective.OutstandingHumanObjection || (human && !effective.HumanApproved);
-        var waiting = humanPending || !protectionSatisfied;
+        var mergeSatisfied = merge is { Unresolved: 0 } && (merge.AllowsMerge || merge.State is "BEHIND" or "DIRTY");
+        var humanThreads = merge?.Conversations.Count(t => !t.Resolved && !GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin)) ?? 0;
+        var humanWaiting = humanPending || protection is ProtectionReviewDecision.ReviewRequired or ProtectionReviewDecision.ChangesRequested || humanThreads > 0;
+        var waiting = humanWaiting || !protectionSatisfied || !mergeSatisfied;
         var fields = new Dictionary<string, object>
         {
             ["humanReviewNominee"] = settings.NominatedHuman ?? "",
@@ -68,12 +78,15 @@ public sealed partial class PRWatcher
             ["reviewGateError"] = protection is null ? "GitHub’s protected review requirement could not be checked. Forge will retry the read; merging is paused." : "",
             ["reviewProtectionDecision"] = protection?.ToString() ?? "Unavailable",
             ["reviewProtectionHead"] = head,
-            ["reviewHumanPending"] = humanPending
+            ["reviewHumanPending"] = humanPending,
+            ["reviewMergeState"] = merge?.State ?? "Unavailable",
+            ["reviewUnresolvedThreads"] = merge?.Unresolved ?? -1,
+            ["reviewHumanThreads"] = humanThreads
         };
         await store.PatchReviewMetadataAsync(task.Id, fields, null, ct);
         return new((!automated || effective.AutomatedApproved) && (!human || effective.HumanApproved)
-            && !effective.OutstandingHumanObjection && protectionSatisfied, waiting, requests,
-            !automated || effective.AutomatedApproved, protection is null, humanPending);
+            && !effective.OutstandingHumanObjection && protectionSatisfied && mergeSatisfied, waiting, requests,
+            !automated || effective.AutomatedApproved, protection is null, humanPending, merge?.State, humanWaiting);
     }
 
     private async Task RecordHumanWaitAsync(IssueRecord task, bool waiting, CancellationToken ct)

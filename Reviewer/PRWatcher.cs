@@ -441,7 +441,7 @@ public sealed partial class PRWatcher
                 || string.Equals(qaVerdict, QaDispatcher.VerdictNotApplicable, StringComparison.Ordinal)));
         var qaFailed = _qaEnabled && qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal);
         if (formalGate is not null)
-            await RecordHumanWaitAsync(task, formalGate.Waiting && (!formalGate.ProtectionUnavailable || formalGate.HumanPending) && formalGate.AutomatedSatisfied
+            await RecordHumanWaitAsync(task, formalGate.HumanWaiting && formalGate.AutomatedSatisfied
                 && formalGate.Requests.Count == 0 && ciGreen && qaPassed
                 && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
 
@@ -508,13 +508,15 @@ public sealed partial class PRWatcher
             // round instead. Mergeable==null means "still computing"
             // — attempt the merge and re-check on failure.
             var mergeableGreen = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
-            if (mergeableGreen == false)
+            if (mergeableGreen == false || formalGate?.MergeState is "BEHIND" or "DIRTY")
             {
                 await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
                     task, worktreePath, sha,
-                    reason: ConflictReworkReason,
-                    context: ConflictContext,
+                    reason: formalGate?.MergeState == "BEHIND" ? "GitHub requires an up-to-date branch" : ConflictReworkReason,
+                    context: formalGate?.MergeState == "BEHIND"
+                        ? "GitHub requires this PR branch to include the current base branch. Fetch and merge the base branch into this SAME branch, run the verification suite, and push. Preserve the existing changes and PR."
+                        : ConflictContext,
                     terminalStatus: IssueStatus.Blocked,
                     terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                     terminalOutcome: WatchPollOutcome.Blocked,
@@ -546,11 +548,13 @@ public sealed partial class PRWatcher
                     return WatchPollOutcome.Pending;
                 var currentGate = await TryReadFormalGateAsync(task, current, sha, cancellationToken);
                 if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0
+                    || currentGate.MergeState is "BEHIND" or "DIRTY"
                     || await _gitHub.GetCommitStatusAsync(sha, cancellationToken) != CommitState.Success)
                     return WatchPollOutcome.Pending;
                 // Read decisions after CI as well, minimizing the last-read/merge race.
                 currentGate = await TryReadFormalGateAsync(task, current, sha, cancellationToken);
-                if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0)
+                if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0
+                    || currentGate.MergeState is "BEHIND" or "DIRTY")
                     return WatchPollOutcome.Pending;
             }
             var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
@@ -575,8 +579,8 @@ public sealed partial class PRWatcher
             {
                 var refused = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
                 var refusedGate = await TryReadFormalGateAsync(task, refused, refused.Head.Sha, cancellationToken);
-                await RecordHumanWaitAsync(task, refused.Head.Sha == sha && refusedGate is { Waiting: true, AutomatedSatisfied: true }
-                    && (!refusedGate.ProtectionUnavailable || refusedGate.HumanPending) && refusedGate.Requests.Count == 0
+                await RecordHumanWaitAsync(task, refused.Head.Sha == sha && refusedGate is { HumanWaiting: true, AutomatedSatisfied: true }
+                    && refusedGate.Requests.Count == 0
                     && qaPassed && refused.Mergeable != false
                     && await _gitHub.GetCommitStatusAsync(sha, cancellationToken) == CommitState.Success, cancellationToken);
                 return WatchPollOutcome.Pending;

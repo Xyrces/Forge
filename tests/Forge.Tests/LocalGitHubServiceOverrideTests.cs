@@ -81,6 +81,7 @@ public class LocalGitHubServiceOverrideTests
             "GetCompareDiffAsync",
             "GetFailedCheckRunSummariesAsync",
             "GetIssueCommentsAsync",
+            "GetMergeRequirementsAsync",
             "GetOpenPullRequestForBranchAsync",
             "GetProtectionReviewDecisionAsync",
             "GetPullRequestAsync",
@@ -93,6 +94,7 @@ public class LocalGitHubServiceOverrideTests
             "ReadLegacyReviewHistoryAsync",
             "ReadReviewExcerptAsync",
             "ReadReviewHistoryAsync",
+            "ResolveReviewedConversationsAsync",
             "SetHumanReviewLabelAsync",
             "SubmitReviewAsync",
         };

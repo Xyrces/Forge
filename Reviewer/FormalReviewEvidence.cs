@@ -6,7 +6,9 @@ using Octokit;
 namespace Forge.Reviewer;
 
 public sealed record ReviewFinding(string Path, int Line, string Side, string Body);
-public sealed record ReviewDraft(int Round, string HeadSha, string Verdict, string Summary, List<ReviewFinding> Findings);
+public sealed record ReviewThreadResolution(string ThreadId, string LastCommentId, string Reason);
+public sealed record ReviewDraft(int Round, string HeadSha, string Verdict, string Summary, List<ReviewFinding> Findings,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] List<ReviewThreadResolution>? Resolutions = null);
 public sealed record PublishedReview(int Round, string HeadSha, string Verdict, string Summary, string Reviewer, string Url,
     DateTimeOffset? SubmittedAt, List<ReviewFinding> Findings);
 public sealed record FormalDecision(string Login, string Head, PullRequestReviewState State, bool Automated,
@@ -46,12 +48,17 @@ internal static partial class ReviewFindings
     internal const string Instructions = "End with REVIEWER_VERDICT: APPROVE or REVIEWER_VERDICT: REQUEST_CHANGES on a line of its own. "
         + "Before the verdict, put each actionable line finding on one separate line as REVIEWER_FINDING: "
         + "{\"path\":\"repository/relative/file\",\"line\":42,\"side\":\"RIGHT\",\"body\":\"What must change and why\"}. "
-        + "Use LEFT for a removed line. Explain findings without a diff anchor in the assessment.";
+        + "Use LEFT for a removed line. Explain findings without a diff anchor in the assessment. "
+        + "For each eligible unresolved review conversation, verify the original finding against the current code. "
+        + "If corrected, emit REVIEWER_RESOLVED_THREAD: {\"threadId\":\"id\",\"lastCommentId\":\"id\",\"reason\":\"Specific correction and verification evidence\"}. "
+        + "Resolve only conversations explicitly marked eligible. Every eligible thread needs either a verified resolution or REQUEST_CHANGES. "
+        + "Human conversations remain open for their participants.";
 
     [GeneratedRegex(@"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")]
     private static partial Regex Hunk();
 
-    public static ReviewDraft Create(int round, string sha, string verdict, string output, string diff)
+    public static ReviewDraft Create(int round, string sha, string verdict, string output, string diff,
+        IReadOnlyList<ReviewConversation>? conversations = null, string? reviewer = null)
     {
         var anchors = new HashSet<(string Path, int Line, string Side)>();
         string? left = null, right = null;
@@ -73,11 +80,25 @@ internal static partial class ReviewFindings
             if (row[0] is ' ' or '+') { if (right is not null) anchors.Add((right, newLine, "RIGHT")); newLine++; }
         }
         List<ReviewFinding> findings = [];
+        List<ReviewThreadResolution> resolutions = [];
         List<string> summary = [];
         foreach (var raw in output.Split('\n'))
         {
             var line = raw.Trim();
             if (line.StartsWith("REVIEWER_VERDICT:", StringComparison.OrdinalIgnoreCase)) continue;
+            if (line.StartsWith("REVIEWER_RESOLVED_THREAD:", StringComparison.OrdinalIgnoreCase))
+            {
+                var resolution = JsonSerializer.Deserialize<ReviewThreadResolution>(line["REVIEWER_RESOLVED_THREAD:".Length..], Json)
+                    ?? throw new InvalidOperationException("Review thread resolution has no evidence.");
+                var thread = conversations?.SingleOrDefault(t => t.Id == resolution.ThreadId);
+                if (thread is null || !GitHubService.CanResolveConversation(thread, reviewer)
+                    || thread.LastCommentId != resolution.LastCommentId || string.IsNullOrWhiteSpace(resolution.Reason))
+                    throw new InvalidOperationException("Review thread resolution does not match an eligible verified conversation.");
+                if (resolutions.Any(r => r.ThreadId == resolution.ThreadId))
+                    throw new InvalidOperationException("Review thread resolution is duplicated.");
+                resolutions.Add(resolution);
+                continue;
+            }
             if (line.StartsWith("REVIEWER_FINDING:", StringComparison.OrdinalIgnoreCase))
             {
                 ReviewFinding? finding;
@@ -94,6 +115,10 @@ internal static partial class ReviewFindings
             summary.Add(raw.Replace("REVIEWER_NOTES:", "", StringComparison.OrdinalIgnoreCase).TrimEnd());
         }
         var body = string.Join("\n", summary).Trim();
-        return new(round, sha, verdict, body.Length == 0 ? verdict : body, findings);
+        if (verdict == nameof(ReviewerVerdict.Approve) && conversations is not null
+            && conversations.Any(t => GitHubService.CanResolveConversation(t, reviewer) && !resolutions.Any(r => r.ThreadId == t.Id)))
+            throw new InvalidOperationException("Approval omitted verification of an unresolved reviewer conversation.");
+        return new(round, sha, verdict, body.Length == 0 ? verdict : body, findings,
+            verdict == nameof(ReviewerVerdict.Approve) && resolutions.Count > 0 ? resolutions : null);
     }
 }

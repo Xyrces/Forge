@@ -64,6 +64,12 @@ public sealed class LocalGitHubService : GitHubService
     public override Task<ProtectionReviewDecision> GetProtectionReviewDecisionAsync(int number, string head, CancellationToken ct = default)
         => Task.FromResult(ProtectionReviewDecision.NotRequired);
 
+    public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
+        => Task.FromResult(new MergeRequirements("CLEAN", []));
+
+    public override Task ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
+        => Task.CompletedTask;
+
     public override Task<bool> HasHumanReviewLabelAsync(int number, CancellationToken ct = default)
         => Task.FromResult(_prStore.HumanReviewLabels.ContainsKey(number));
 

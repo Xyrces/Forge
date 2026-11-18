@@ -138,13 +138,19 @@ public partial class GitHubService
     }
 
     public virtual async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
-    {        try
+    {
+        try
         {
             var merge = new MergePullRequest { Sha = expectedHeadSha };
-            var result = await _client.PullRequest.Merge(_owner, _repo, prNumber, merge);
+            var result = await _client.PullRequest.Merge(_owner, _repo, prNumber, merge).WaitAsync(cancellationToken);
             return result.Merged;
         }
-        catch { return false; }
+        catch (ApiException ex) when (ex.StatusCode is System.Net.HttpStatusCode.MethodNotAllowed
+            or System.Net.HttpStatusCode.Conflict or System.Net.HttpStatusCode.UnprocessableEntity)
+        {
+            // A normal policy/head rejection is reconciled by the watcher through fresh reads.
+            return false;
+        }
     }
 
     public virtual async Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)

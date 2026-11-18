@@ -182,6 +182,18 @@ public sealed class ReviewerDispatcher
             }
         }
 
+        IReadOnlyList<ReviewConversation> conversations = [];
+        if (_gitHub.RequireFormalReview)
+        {
+            try { conversations = (await _gitHub.GetMergeRequirementsAsync(prNumber, headSha, cancellationToken)).Conversations; }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, "", headSha, "Review conversations unavailable: " + ex.Message);
+            }
+        }
+
         // Worktree access is MANDATORY (operator rule 2026-07-30): the
         // reviewer cannot do its job from a diff paste — it needs the
         // branch checkout for full context. No usable worktree →
@@ -275,6 +287,13 @@ public sealed class ReviewerDispatcher
             ? BuildReReviewPrompt(pr, diff, task, previousReviewSha!, recordedVerdict!, task.GetMetadata("reviewNotes"), worktreePath, reviewContext)
             : BuildReviewerPrompt(pr, diff, task, worktreePath, headSha, reviewContext);
         prompt += "\n\n" + ReviewFindings.Instructions;
+        foreach (var conversation in conversations.Where(t => !t.Resolved))
+            prompt += "\n\nReview conversation " + JsonSerializer.Serialize(new
+            {
+                threadId = conversation.Id, lastCommentId = conversation.LastCommentId, path = conversation.Path,
+                eligible = GitHubService.CanResolveConversation(conversation, _gitHub.ReviewerLogin),
+                discussion = conversation.Body
+            }, ReviewFindings.Json);
         ReviewerVerdict verdict;
         string body;
         string? error = null;
@@ -348,7 +367,13 @@ public sealed class ReviewerDispatcher
                 _logger.LogWarning(ex, "Full PR diff unavailable for #{Pr}; retaining findings in the review summary without anchors", prNumber);
                 fullDiff = "";
             }
-            var draft = ReviewFindings.Create(round, headSha, verdict.ToString(), body, fullDiff);
+            ReviewDraft draft;
+            try { draft = ReviewFindings.Create(round, headSha, verdict.ToString(), body, fullDiff, conversations, _gitHub.ReviewerLogin); }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, body, headSha, ex.Message);
+            }
             await UpdateWatchMetadataAsync(task, m =>
             {
                 m["reviewDraft"] = JsonSerializer.Serialize(draft, ReviewFindings.Json);
@@ -455,6 +480,7 @@ public sealed class ReviewerDispatcher
                     throw;
                 }
             }
+            await _gitHub.ResolveReviewedConversationsAsync(prNumber, draft, ct);
             await UpdateWatchMetadataAsync(task, m =>
             {
                 var history = new List<PublishedReview>();

@@ -49,6 +49,10 @@ public sealed class FormalReviewGateTests : IDisposable
         public GitHub() : base("owner", "repo") { }
         public override string? ReviewerLogin => "reviewer[bot]";
         public int Reads, Merges;
+        public MergeRequirements Requirements = new("CLEAN", []);
+        public bool MergeRequirementsUnavailable;
+        public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
+            => MergeRequirementsUnavailable ? Task.FromException<MergeRequirements>(new IOException("unavailable")) : Task.FromResult(Requirements);
         public ProtectionReviewDecision Protection = ProtectionReviewDecision.NotRequired;
         public bool ProtectionUnavailable;
         public Action? OnMerge;
@@ -87,6 +91,78 @@ public sealed class FormalReviewGateTests : IDisposable
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "review", Metadata: new Dictionary<string, object>
         { ["prNumber"] = "42", ["branch"] = "branch", ["reviewVerdict"] = "Approve", ["reviewSha"] = "head" }));
         return await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null);
+    }
+
+    [Theory]
+    [InlineData("BLOCKED")] [InlineData("UNKNOWN")] [InlineData("DRAFT")]
+    public async Task ExternalRequirementsWaitWithoutMergingOrConsumingEngineeringAttempts(string state)
+    {
+        var github = new GitHub { Requirements = new(state, []) };
+        var task = await Seed();
+        for (var i = 0; i < 4; i++)
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        Assert.Equal(0, github.Merges);
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(current.GetMetadata("reworkAttempts"));
+        Assert.Equal(state, current.GetMetadata("reviewMergeState"));
+        Assert.Equal("False", current.GetMetadata("awaitingHumanReview"));
+    }
+
+    [Fact]
+    public async Task UnresolvedThreadsHoldMergeAndResumeWhenResolved()
+    {
+        var github = new GitHub { Requirements = new("CLEAN",
+            [new("thread", false, true, "File.cs", "human", "comment", false, "Please verify")]) };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(0, github.Merges);
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("1", current.GetMetadata("reviewUnresolvedThreads"));
+        Assert.Equal("1", current.GetMetadata("reviewHumanThreads"));
+        Assert.Null(current.GetMetadata("reworkAttempts"));
+        github.Requirements = new("CLEAN", []);
+        await Watch(github).PollWatchedTaskAsync(current);
+        Assert.Equal(1, github.Merges);
+        Assert.Equal("0", (await _issues.GetAsync(task.Id))!.GetMetadata("reviewUnresolvedThreads"));
+    }
+
+    [Fact]
+    public async Task RequiredBranchUpdateUsesExistingReworkOnce()
+    {
+        var github = new GitHub { Requirements = new("BEHIND", []) };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, await Watch(github).PollWatchedTaskAsync(task));
+        var changed = (await _issues.GetAsync(task.Id))!;
+        Assert.Contains("up-to-date", changed.GetMetadata("reworkReason"));
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(changed));
+        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Fact]
+    public async Task FailedMergeRefreshesNewThreadGateWithoutAnotherEngineeringStrike()
+    {
+        var github = new GitHub();
+        github.OnMerge = () => github.Requirements = new("BLOCKED",
+            [new("thread", false, true, "File.cs", "human", "comment", false, "New comment")]);
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(1, github.Merges);
+        var changed = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("1", changed.GetMetadata("reviewUnresolvedThreads"));
+        Assert.Null(changed.GetMetadata("reworkAttempts"));
+        await Watch(github).PollWatchedTaskAsync(changed);
+        Assert.Equal(1, github.Merges);
+    }
+
+    [Fact]
+    public async Task UnavailableMergeRequirementReadRetainsWatchWithoutMerging()
+    {
+        var github = new GitHub { MergeRequirementsUnavailable = true };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(0, github.Merges);
+        Assert.Equal("Unavailable", (await _issues.GetAsync(task.Id))!.GetMetadata("reviewMergeState"));
     }
 
     [Fact]

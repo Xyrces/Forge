@@ -57,6 +57,8 @@ public sealed class FormalReviewPublicationTests
     {
         public PublicationGitHub() : base("o", "r", null) { }
         public override string? ReviewerLogin => "reviewer[bot]";
+        public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
+            => Task.FromResult(new MergeRequirements("CLEAN", []));
         public int Publications;
         public bool MissingIdentity, DiscoverPublished = true;
         public bool RejectPublication, LoseResponse = true;
