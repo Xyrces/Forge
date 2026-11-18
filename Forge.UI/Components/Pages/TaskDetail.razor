@@ -38,7 +38,7 @@
                 <details class="task-actions"><summary>Task actions</summary>
                     <button class="btn" disabled="@(_holdSaving || !_holdLoaded)" @onclick="ToggleHumanReviewAsync">@(_explicitHumanHold ? "Release task review hold" : NominatedHuman is null ? "Require human review for this task" : $"Require review by @{NominatedHuman} for this task")</button>
                     @if (_humanPolicy is "Human" or "Both") { <p class="meta-text">Project policy requires human review. Releasing a task hold does not waive that policy.</p> }
-                    @if (Prop(_task, "status") is "Failed" or "Blocked") { <button class="btn" disabled="@_resetting" @onclick="ResetStrikesAsync">Retry work</button> }
+                    @if (Prop(_task, "status") is "Failed" or "Blocked") { <button class="btn" disabled="@_resetting" @onclick="ResetStrikesAsync">@(Meta("blockedKind") == "review-integration" ? "Retry review" : "Retry work")</button> }
                     <button class="btn" @onclick="() => _closeOpen = !_closeOpen">Close task…</button>
                 </details>
             }
@@ -676,13 +676,14 @@
         try
         {
             var projectId = Project ?? ShellStore.Value.CurrentProjectId;
+            var retryAction = Meta("blockedKind") == "review-integration" ? "requeue" : "reset-strikes";
             var url = string.IsNullOrEmpty(projectId)
-                ? $"/api/tasks/{TaskId}/reset-strikes"
-                : $"/api/tasks/{TaskId}/reset-strikes?projectId={Uri.EscapeDataString(projectId)}";
+                ? $"/api/tasks/{TaskId}/{retryAction}"
+                : $"/api/tasks/{TaskId}/{retryAction}?projectId={Uri.EscapeDataString(projectId)}";
             var resp = await Http.PostAsync(url, content: null);
             if (!resp.IsSuccessStatusCode)
             {
-                _error = $"strike reset failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
+                _error = $"Retry failed: {(int)resp.StatusCode} {await resp.Content.ReadAsStringAsync()}";
             }
         }
         catch (Exception ex) { _error = ex.Message; }

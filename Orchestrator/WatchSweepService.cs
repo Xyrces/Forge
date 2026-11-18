@@ -315,6 +315,8 @@ public sealed class WatchSweepService
     /// marker is fresh (covers pre-restart reviews).</summary>
     internal bool ShouldLaunchReview(IssueRecord task, string projectId)
     {
+        if (ReviewIntegrationState.IsBlocked(task)
+            || ReviewIntegrationState.Exhausted(task, task.GetMetadata("watchHeadSha") ?? "")) return false;
         if (task.GetMetadata("reviewVerdict") == "Error"
             && task.GetMetadata("reviewSha") == task.GetMetadata("watchHeadSha")
             && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var failures) && failures >= 3)

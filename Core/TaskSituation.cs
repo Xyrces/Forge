@@ -26,6 +26,8 @@ public static class TaskSituation
         var held = bool.TryParse(issue.GetMetadata("humanReviewRequired"), out var required) && required;
         Situation Result(string label, string reason, string? actor = null, string tone = "info") =>
             new(reason, tone) { Label = label, NextActor = actor, HumanReviewRequired = held, NominatedHuman = nominatedHuman };
+        if (ReviewIntegrationState.IsBlocked(issue))
+            return Result("Review integration needs attention", "Resolve the review connection or verdict problem, then choose Retry review. Saved publication evidence and engineering work are retained.", "Operator", "action");
         if (issue.Status == IssueStatus.Completed)
             return plan is not null && Completion.ExistingImplementationEvidence.TryGet(issue, plan, out _)
                 ? Result("Existing implementation verified", "Independent verification and review established the approved behavior at a recorded revision.")

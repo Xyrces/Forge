@@ -325,6 +325,34 @@ public static class TaskEndpoints
                 if (t.Status is not (IssueStatus.Failed or IssueStatus.Blocked))
                     return Results.Conflict(new { error = $"only Failed or Blocked tasks can be requeued (status is {t.Status})" });
 
+                if (ReviewIntegrationState.IsBlocked(t))
+                {
+                    if (guideReason is not null || guideContext is not null)
+                        return Results.Conflict(new { error = "Retry review preserves engineering work; use a separate work request for code changes." });
+                    var scope = projectId ?? (store as IssueStore)?.ProjectId;
+                    var pollGate = Forge.Reviewer.PRWatcher.GetPollGate(scope, id);
+                    var reviewGate = Forge.Reviewer.ReviewWorkerAttempt.Gate(scope, id, AgentType.Reviewer);
+                    await pollGate.WaitAsync(ct);
+                    try
+                    {
+                        await reviewGate.WaitAsync(ct);
+                        try
+                        {
+                            var current = await store.GetAsync(id, ct);
+                            if (current is null || !ReviewIntegrationState.IsBlocked(current))
+                                return Results.Conflict(new { error = "Task changed; reload before retrying review." });
+                            var fields = ReviewIntegrationState.RetryMetadata();
+                            fields["prOpenedAt"] = DateTime.UtcNow.ToString("O");
+                            await store.TransitionAsync(id, IssueStatus.InProgress, "Operator requested review reconciliation; engineering work retained", fields, ct);
+                            if (lifecycle is not null)
+                                await lifecycle.ReportAsync(store, (await store.GetAsync(id, ct))!, Forge.Core.TaskEvent.WatchResumed, null, false, ct);
+                            return Results.Json(new { taskId = id, status = "InProgress", action = "retry-review" });
+                        }
+                        finally { reviewGate.Release(); }
+                    }
+                    finally { pollGate.Release(); }
+                }
+
                 // One atomic transition: Failed -> Pending + clear the
                 // failure bookkeeping so the retry budget starts fresh
                 // (upsert-merge only: JSON null is the delete idiom).
@@ -590,6 +618,8 @@ public static class TaskEndpoints
                 if (t is null) return Results.NotFound(new { error = "task not found", id });
                 if (t.Status is not (IssueStatus.Failed or IssueStatus.Blocked or IssueStatus.InProgress))
                     return Results.Conflict(new { error = $"only Failed, Blocked, or InProgress tasks can have strikes reset (status is {t.Status})" });
+                if (ReviewIntegrationState.IsBlocked(t))
+                    return Results.Conflict(new { error = "Use Retry review to reconcile publication without resetting engineering strikes." });
 
                 var resets = int.TryParse(t.GetMetadata("strikeResetCount"), out var n) ? n + 1 : 1;
                 var meta = new Dictionary<string, object>

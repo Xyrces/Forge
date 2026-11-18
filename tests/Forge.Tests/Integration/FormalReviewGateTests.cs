@@ -78,14 +78,63 @@ public sealed class FormalReviewGateTests : IDisposable
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
     }
     private static FormalDecision Decision(string user, bool bot, PullRequestReviewState state, string head = "head", long id = 1) => new(user, head, state, bot, id, "finding", "url");
-    private PRWatcher Watch(GitHub github) => new(github,
+    private PRWatcher Watch(GitHub github, bool activeWorker = false) => new(github,
         new AgentTools.GitWorktreeService(new Configuration.WorkspaceOptions { Root = _root, WorktreeRoot = ".wt", DefaultBranch = "main" }, NullLogger<AgentTools.GitWorktreeService>.Instance),
-        _issues, TimeSpan.FromSeconds(1), TimeSpan.FromDays(1), new InMemoryDashboardEventBus(), NullLogger<PRWatcher>.Instance);
+        _issues, TimeSpan.FromSeconds(1), TimeSpan.FromDays(1), new InMemoryDashboardEventBus(), NullLogger<PRWatcher>.Instance,
+        hasDurableWorker: (_, _) => Task.FromResult(activeWorker));
     private async Task<IssueRecord> Seed()
     {
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "review", Metadata: new Dictionary<string, object>
         { ["prNumber"] = "42", ["branch"] = "branch", ["reviewVerdict"] = "Approve", ["reviewSha"] = "head" }));
         return await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null);
+    }
+
+    [Fact]
+    public async Task ExhaustedAutomationIsVisibleAndDoesNotAutoResumeWhileHumanWaits()
+    {
+        var task = await Seed();
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object>
+        { ["reviewVerdict"] = "Error", ["reviewErrorAttempts"] = 3, ["reworkAttempts"] = 2 });
+        var github = new GitHub { Protection = ProtectionReviewDecision.ReviewRequired };
+        var watcher = Watch(github);
+        Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, await watcher.PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        var blocked = (await _issues.GetAsync(task.Id))!;
+        Assert.True(ReviewIntegrationState.IsBlocked(blocked));
+        Assert.Equal("Review integration needs attention", TaskSituation.Describe(blocked).Label);
+        Assert.Equal("Operator", TaskSituation.Describe(blocked).NextActor);
+        Assert.Null(await watcher.TryResumeMergeableBlockedAsync(blocked));
+        Assert.Equal("2", blocked.GetMetadata("reworkAttempts"));
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Theory]
+    [InlineData(true)] [InlineData(false)]
+    public async Task ExhaustedOldAutomationDoesNotBlockOwnedWorkOrHumanOnlyPolicy(bool activeWorker)
+    {
+        var task = await Seed();
+        task = await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object>
+        { ["reviewVerdict"] = "Error", ["reviewErrorAttempts"] = 3 });
+        if (!activeWorker) await new PullRequestReviewPolicy(new MemoryStore(_issues.Db)).SetModeAsync(RequiredReview.Human, default);
+        var github = new GitHub { Protection = ProtectionReviewDecision.ReviewRequired };
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github, activeWorker).PollWatchedTaskAsync(task));
+        Assert.False(ReviewIntegrationState.IsBlocked((await _issues.GetAsync(task.Id))!));
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Fact]
+    public async Task InFlightReviewerReconciliationCannotBeParkedMidResult()
+    {
+        var task = await Seed();
+        task = await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object>
+        { ["reviewVerdict"] = "Error", ["reviewErrorAttempts"] = 3 });
+        var gate = ReviewWorkerAttempt.Gate(null, task.Id, AgentType.Reviewer);
+        await gate.WaitAsync();
+        try
+        {
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(new GitHub()).PollWatchedTaskAsync(task));
+            Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
+        }
+        finally { gate.Release(); }
     }
 
     [Theory]

@@ -59,6 +59,7 @@ public sealed class FormalReviewPublicationTests
         public override string? ReviewerLogin => "reviewer[bot]";
         public int Publications;
         public bool MissingIdentity, DiscoverPublished = true;
+        public bool RejectPublication, LoseResponse = true;
         private PublishedReview? _published;
         public override Task EnsureReviewerIdentityAsync(int pr, CancellationToken ct) => MissingIdentity ? Task.FromException(new InvalidOperationException("missing reviewer App")) : Task.CompletedTask;
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult(new PullRequest(number));
@@ -70,8 +71,9 @@ public sealed class FormalReviewPublicationTests
         public override Task<PublishedReview> PublishFormalReviewAsync(int pr, ReviewDraft draft, string marker, CancellationToken ct)
         {
             Publications++;
+            if (RejectPublication) throw new ApiValidationException();
             _published = new(draft.Round, draft.HeadSha, draft.Verdict, draft.Summary, ReviewerLogin!, "https://github.com/o/r/pull/7#pullrequestreview-1", DateTimeOffset.UtcNow, draft.Findings);
-            throw new IOException("Response lost after GitHub accepted review");
+            return LoseResponse ? throw new IOException("Response lost after GitHub accepted review") : Task.FromResult(_published);
         }
     }
 
@@ -104,5 +106,39 @@ public sealed class FormalReviewPublicationTests
         var result = await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
         Assert.Equal(ReviewerVerdict.Error, result!.Verdict);
         Assert.Equal(0, runner.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public async Task PublicationFaultHasBoundedPostsAndOperatorRetryKeepsDraft(bool uncertain)
+    {
+        var directory = TempRoot.Instance.NewDirectory("publication-recovery");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        { ["prNumber"] = 7, ["worktreePath"] = directory, ["reworkAttempts"] = 2 }));
+        var github = new PublicationGitHub { RejectPublication = !uncertain, DiscoverPublished = false };
+        var runner = new Runner();
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        for (var i = 0; i < 5; i++) await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        task = (await issues.GetAsync(task.Id))!;
+        Assert.True(ReviewIntegrationState.Exhausted(task, "head"));
+        Assert.Equal(uncertain ? 1 : 3, github.Publications);
+        Assert.Equal(1, runner.Calls);
+        await issues.TransitionAsync(task.Id, IssueStatus.Blocked, "integration fault",
+            new Dictionary<string, object> { ["blockedKind"] = ReviewIntegrationState.BlockedKind });
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+        // Normal endpoint applies these exact metadata resets, preserving uncertain intent.
+        await issues.TransitionAsync(task.Id, IssueStatus.InProgress, "operator retry", ReviewIntegrationState.RetryMetadata());
+        if (uncertain)
+        {
+            Assert.Equal(ReviewerVerdict.Error, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+            Assert.Equal(1, github.Publications);
+            await issues.TransitionAsync(task.Id, IssueStatus.InProgress, "operator retry", ReviewIntegrationState.RetryMetadata());
+        }
+        github.RejectPublication = false; github.DiscoverPublished = true; github.LoseResponse = false;
+        Assert.Equal(ReviewerVerdict.Approve, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        Assert.Equal(uncertain ? 1 : 4, github.Publications);
+        Assert.Equal(1, runner.Calls);
+        Assert.Equal("2", (await issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
     }
 }

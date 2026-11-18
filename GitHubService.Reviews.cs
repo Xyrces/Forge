@@ -29,8 +29,18 @@ public partial class GitHubService
             {
                 if (!authorized.TryGetValue(login, out var allowed))
                 {
-                    var permission = await _client.Repository.Collaborator.ReviewPermission(_owner, _repo, login).WaitAsync(ct);
-                    authorized[login] = allowed = CanDecideReview(permission.Permission);
+                    try
+                    {
+                        var permission = await _client.Repository.Collaborator.ReviewPermission(_owner, _repo, login).WaitAsync(ct);
+                        authorized[login] = allowed = CanDecideReview(permission.Permission);
+                    }
+                    catch (NotFoundException)
+                    {
+                        // Confirm repository visibility before attributing a 404 to this
+                        // reviewer. Missing repo access must still fail the entire gate.
+                        await _client.Repository.Get(_owner, _repo).WaitAsync(ct);
+                        authorized[login] = allowed = false;
+                    }
                 }
                 if (!allowed) continue;
             }

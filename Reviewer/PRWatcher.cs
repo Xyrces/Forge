@@ -228,6 +228,31 @@ public sealed partial class PRWatcher
         var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
 
         var formalRequired = _gitHub.RequireFormalReview && reviewsOverride is null;
+        // Stop impossible automated review visibly, even while GitHub legitimately
+        // waits for a human. Do not interfere with a rightful engineering worker.
+        var integrationTask = await _issues.GetAsync(taskId, cancellationToken) ?? task;
+        if (formalRequired && ReviewIntegrationState.Exhausted(integrationTask, sha)
+            && !await HasOwnedWorkerAsync(taskId, cancellationToken)
+            && _issues is IssueStore integrationStore
+            && await new PullRequestReviewPolicy(new MemoryStore(integrationStore.Db)).GetModeAsync(cancellationToken) != RequiredReview.Human)
+        {
+            var reviewGate = ReviewWorkerAttempt.Gate(_projectId, taskId, AgentType.Reviewer);
+            if (!await reviewGate.WaitAsync(0, cancellationToken)) return WatchPollOutcome.Pending;
+            try
+            {
+                integrationTask = await _issues.GetAsync(taskId, cancellationToken) ?? integrationTask;
+                if (!ReviewIntegrationState.Exhausted(integrationTask, sha)
+                    || integrationTask.Status is IssueStatus.Completed or IssueStatus.Closed or IssueStatus.Failed
+                    || await HasOwnedWorkerAsync(taskId, cancellationToken)) return WatchPollOutcome.Pending;
+                await RecordHumanWaitAsync(integrationTask, false, cancellationToken);
+                await ReportAsync(Forge.Core.TaskEvent.OperatorBlocked);
+                await _issues.TransitionAsync(taskId, IssueStatus.Blocked,
+                    "Review integration needs attention. Fix the connection or verdict issue, then Retry review; an uncertain submission will only be reconciled.",
+                    new Dictionary<string, object> { ["blockedKind"] = ReviewIntegrationState.BlockedKind }, cancellationToken);
+                return WatchPollOutcome.Blocked;
+            }
+            finally { reviewGate.Release(); }
+        }
         FormalGate? formalGate = null;
         if (formalRequired)
         {
@@ -832,6 +857,7 @@ public sealed partial class PRWatcher
                 headShaOverride, mergeableOverride, null);
             return null;
         }
+        if (ReviewIntegrationState.IsBlocked(task)) return null; // Explicit Retry review owns reconciliation.
         var attempts = int.TryParse(task.GetMetadata("autoResumeAttempts"), out var a) ? a : 0;
         if (attempts >= MaxAutoResumeAttempts)
         {

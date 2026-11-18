@@ -91,6 +91,7 @@ public sealed class ReviewerDispatcher
     private async Task<ReviewOutcome?> ReviewCoreAsync(IssueRecord task, CancellationToken cancellationToken,
         Func<PullRequest, string>? headShaOverride)
     {
+        if (ReviewIntegrationState.IsBlocked(task)) return null;
         var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber))
         {
@@ -112,10 +113,13 @@ public sealed class ReviewerDispatcher
         // the e2e harness keeps SHA in a side channel); tests supply
         // the head SHA directly.
         var headSha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+        if (_gitHub.RequireFormalReview && ReviewIntegrationState.Exhausted(task, headSha)
+            && task.GetMetadata("reviewDraft") is null) return null;
         try { await _gitHub.EnsureReviewerIdentityAsync(prNumber, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            await UpdateWatchMetadataAsync(task, m => { m["reviewIntegrationError"] = ex.Message; return m; }, cancellationToken);
+            await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
             return new(ReviewerVerdict.Error, "", headSha, ex.Message);
         }
         ReviewDraft? pending;
@@ -123,11 +127,13 @@ public sealed class ReviewerDispatcher
         catch (JsonException ex)
         {
             var draftError = "Saved review draft is invalid; operator reconciliation is required: " + ex.Message;
-            await UpdateWatchMetadataAsync(task, m => { m["reviewIntegrationError"] = draftError; return m; }, cancellationToken);
+            await RecordIntegrationFailureAsync(task, headSha, draftError, true, cancellationToken);
             return new(ReviewerVerdict.Error, "", headSha, draftError);
         }
         if (pending is not null && pending.HeadSha == headSha)
-            return await CompleteDraftAsync(task, prNumber, pending, cancellationToken, headShaOverride);
+            return !ReviewIntegrationState.Exhausted(task, headSha)
+                || bool.TryParse(task.GetMetadata("reviewPublishStarted"), out var uncertain) && uncertain
+                ? await CompleteDraftAsync(task, prNumber, pending, cancellationToken, headShaOverride) : null;
 
         // Per-SHA dedupe: the watch sweep calls this every pass; only
         // a head move (rework push) triggers a fresh round. An Error
@@ -435,7 +441,7 @@ public sealed class ReviewerDispatcher
                 var currentHead = headOverride is null ? currentPr.Head.Sha : headOverride(currentPr);
                 if (currentHead != draft.HeadSha || currentPr.Merged || currentPr.State == ItemState.Closed)
                     throw new InvalidOperationException("PR changed or closed before review publication; the saved review was not submitted.");
-                await UpdateWatchMetadataAsync(task, m => { m["reviewPublishStarted"] = true; return m; }, ct);
+                await UpdateWatchMetadataAsync(task, m => { m["reviewPublishStarted"] = true; m["reviewIntegrationError"] = null!; return m; }, ct);
                 try { published = await _gitHub.PublishFormalReviewAsync(prNumber, draft, marker, ct); }
                 catch (ApiValidationException)
                 {
@@ -447,6 +453,7 @@ public sealed class ReviewerDispatcher
             await UpdateWatchMetadataAsync(task, m =>
             {
                 var history = new List<PublishedReview>();
+                m["reviewIntegrationAttempts"] = 0;
                 if (m.TryGetValue("reviewHistory", out var raw))
                     history = JsonSerializer.Deserialize<List<PublishedReview>>(raw.ToString()!, ReviewFindings.Json) ?? [];
                 if (history.Count == 0 && m.TryGetValue("reviewSha", out var oldHead) && m.TryGetValue("reviewVerdict", out var oldVerdict)
@@ -489,10 +496,21 @@ public sealed class ReviewerDispatcher
         {
             _logger.LogWarning(ex, "PR #{Pr}: formal review publication/reconciliation failed", prNumber);
             if (!ct.IsCancellationRequested)
-                await UpdateWatchMetadataAsync(task, m => { m["reviewIntegrationError"] = ex.Message; m["reviewStartedAt"] = null!; return m; }, ct);
+            {
+                var fresh = await _issues.GetAsync(task.Id, ct) ?? task;
+                await RecordIntegrationFailureAsync(fresh, draft.HeadSha, ex.Message,
+                    bool.TryParse(fresh.GetMetadata("reviewPublishStarted"), out var started) && started, ct);
+            }
             return new(ReviewerVerdict.Error, draft.Summary, draft.HeadSha, "Review publication: " + ex.Message);
         }
     }
+
+    private Task RecordIntegrationFailureAsync(IssueRecord task, string head, string error, bool uncertain, CancellationToken ct) =>
+        UpdateWatchMetadataAsync(task, metadata =>
+        {
+            foreach (var field in ReviewIntegrationState.Failure(task, head, error, uncertain)) metadata[field.Key] = field.Value;
+            return metadata;
+        }, ct);
 
     /// <summary>
     /// Back-compat wrapper for the HTTP endpoint: review once and
