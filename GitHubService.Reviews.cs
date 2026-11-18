@@ -21,6 +21,8 @@ public partial class GitHubService
         List<FormalDecision> result = [];
         foreach (var review in reviews)
         {
+            if (review.State.Value is not (PullRequestReviewState.Approved or PullRequestReviewState.ChangesRequested or PullRequestReviewState.Dismissed))
+                continue; // Advisory comments and pending drafts cannot decide this gate.
             var login = review.User?.Login;
             if (string.IsNullOrEmpty(login) || !IsReviewIdentityEligible(login, author, ReviewerLogin,
                 login.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase) || review.User?.Type == AccountType.Bot)) continue;

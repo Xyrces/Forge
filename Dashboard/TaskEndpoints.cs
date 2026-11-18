@@ -346,11 +346,22 @@ public static class TaskEndpoints
                             await store.TransitionAsync(id, IssueStatus.InProgress, "Operator requested review reconciliation; engineering work retained", fields, ct);
                             if (lifecycle is not null)
                                 await lifecycle.ReportAsync(store, (await store.GetAsync(id, ct))!, Forge.Core.TaskEvent.WatchResumed, null, false, ct);
-                            return Results.Json(new { taskId = id, status = "InProgress", action = "retry-review" });
                         }
                         finally { reviewGate.Release(); }
                     }
                     finally { pollGate.Release(); }
+                    // A lifecycle/status hint may arrive while the locks above are held.
+                    // Wake the actual review-launching watch sweep only AFTER releasing both.
+                    if (store is IssueStore concrete)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        await concrete.Events.PublishAsync(new Forge.Core.Messaging.SweepTick
+                        {
+                            MessageId = $"review-retry:{concrete.ProjectId}:{id}:{now:O}",
+                            ProjectId = concrete.ProjectId, Kind = Forge.Core.Messaging.SweepKind.Watch, TickAt = now
+                        }, ct);
+                    }
+                    return Results.Json(new { taskId = id, status = "InProgress", action = "retry-review" });
                 }
 
                 // One atomic transition: Failed -> Pending + clear the

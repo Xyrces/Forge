@@ -60,6 +60,8 @@ public sealed class FormalReviewPublicationTests
         public int Publications;
         public bool MissingIdentity, DiscoverPublished = true;
         public bool RejectPublication, LoseResponse = true;
+        public int RejectStatus;
+        public int Accepted;
         private PublishedReview? _published;
         public override Task EnsureReviewerIdentityAsync(int pr, CancellationToken ct) => MissingIdentity ? Task.FromException(new InvalidOperationException("missing reviewer App")) : Task.CompletedTask;
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult(new PullRequest(number));
@@ -71,7 +73,9 @@ public sealed class FormalReviewPublicationTests
         public override Task<PublishedReview> PublishFormalReviewAsync(int pr, ReviewDraft draft, string marker, CancellationToken ct)
         {
             Publications++;
+            if (RejectStatus != 0) throw new ApiException("Fixture refusal", (System.Net.HttpStatusCode)RejectStatus);
             if (RejectPublication) throw new ApiValidationException();
+            Accepted++;
             _published = new(draft.Round, draft.HeadSha, draft.Verdict, draft.Summary, ReviewerLogin!, "https://github.com/o/r/pull/7#pullrequestreview-1", DateTimeOffset.UtcNow, draft.Findings);
             return LoseResponse ? throw new IOException("Response lost after GitHub accepted review") : Task.FromResult(_published);
         }
@@ -140,5 +144,70 @@ public sealed class FormalReviewPublicationTests
         Assert.Equal(uncertain ? 1 : 4, github.Publications);
         Assert.Equal(1, runner.Calls);
         Assert.Equal("2", (await issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Theory]
+    [InlineData(401)] [InlineData(403)] [InlineData(404)] [InlineData(422)] [InlineData(429)]
+    public async Task DefinitePermissionOrValidationRefusalCanRecoverSameDraftWithoutPaidRerun(int status)
+    {
+        var directory = TempRoot.Instance.NewDirectory("refused-review");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        { ["prNumber"] = 7, ["worktreePath"] = directory }));
+        var github = new PublicationGitHub { RejectStatus = status, LoseResponse = false };
+        var runner = new Runner();
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        for (var i = 0; i < 5; i++) await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        var refused = (await issues.GetAsync(task.Id))!;
+        Assert.Equal("False", refused.GetMetadata("reviewPublishStarted"));
+        Assert.Equal(3, github.Publications); Assert.Equal(0, github.Accepted); Assert.Equal(1, runner.Calls);
+        var draft = refused.GetMetadata("reviewDraft");
+        await issues.TransitionAsync(task.Id, IssueStatus.Blocked, "review refused", new Dictionary<string, object> { ["blockedKind"] = ReviewIntegrationState.BlockedKind });
+        await issues.TransitionAsync(task.Id, IssueStatus.InProgress, "operator repaired permissions", ReviewIntegrationState.RetryMetadata());
+        Assert.Equal(draft, (await issues.GetAsync(task.Id))!.GetMetadata("reviewDraft"));
+        github.RejectStatus = 0;
+        Assert.Equal(ReviewerVerdict.Approve, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+        Assert.Equal(1, runner.Calls); Assert.Equal(1, github.Accepted); Assert.Equal(4, github.Publications);
+    }
+
+    [Theory]
+    [InlineData(500)] [InlineData(502)] [InlineData(503)] [InlineData(504)]
+    public void ServerFailuresRemainAmbiguous(int status) =>
+        Assert.False(ReviewerDispatcher.IsDefinitePublicationRefusal(new ApiException("Server fault", (System.Net.HttpStatusCode)status)));
+
+    [Fact]
+    public async Task RepairingServerFailureDoesNotAuthorizeBlindResubmission()
+    {
+        var directory = TempRoot.Instance.NewDirectory("ambiguous-server-review");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        { ["prNumber"] = 7, ["worktreePath"] = directory }));
+        var github = new PublicationGitHub { RejectStatus = 503, LoseResponse = false, DiscoverPublished = false };
+        var runner = new Runner();
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        Assert.Equal("True", (await issues.GetAsync(task.Id))!.GetMetadata("reviewPublishStarted"));
+        await issues.TransitionAsync(task.Id, IssueStatus.InProgress, "operator retry", ReviewIntegrationState.RetryMetadata());
+        github.RejectStatus = 0;
+        Assert.Equal(ReviewerVerdict.Error, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        Assert.Equal(1, runner.Calls); Assert.Equal(1, github.Publications); Assert.Equal(0, github.Accepted);
+        Assert.True(ReviewIntegrationState.Exhausted((await issues.GetAsync(task.Id))!, "head"));
+    }
+
+    [Theory]
+    [InlineData("Error")] [InlineData("unknown")] [InlineData("999")]
+    public async Task InvalidSavedDraftVerdictStopsWithoutPaidWorkOrSubmission(string verdict)
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("invalid-draft"));
+        var draft = new ReviewDraft(1, "head", verdict, "Unusable saved draft", []);
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        { ["prNumber"] = 7, ["reviewDraft"] = System.Text.Json.JsonSerializer.Serialize(draft, ReviewFindings.Json) }));
+        var github = new PublicationGitHub(); var runner = new Runner();
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        Assert.Equal(ReviewerVerdict.Error, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        Assert.True(ReviewIntegrationState.Exhausted((await issues.GetAsync(task.Id))!, "head"));
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"));
+        Assert.Equal(0, runner.Calls); Assert.Equal(0, github.Publications);
     }
 }

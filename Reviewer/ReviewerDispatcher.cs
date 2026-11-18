@@ -426,8 +426,13 @@ public sealed class ReviewerDispatcher
     private async Task<ReviewOutcome> CompleteDraftAsync(IssueRecord task, int prNumber, ReviewDraft draft,
         CancellationToken ct, Func<PullRequest, string>? headOverride)
     {
-        if (!Enum.TryParse<ReviewerVerdict>(draft.Verdict, out var verdict) || verdict == ReviewerVerdict.Error)
+        if (!Enum.TryParse<ReviewerVerdict>(draft.Verdict, out var verdict)
+            || verdict is not (ReviewerVerdict.Approve or ReviewerVerdict.RequestChanges))
+        {
+            await RecordIntegrationFailureAsync(task, draft.HeadSha,
+                "Saved draft has no publishable verdict; operator reconciliation is required.", true, ct);
             return new(ReviewerVerdict.Error, "", draft.HeadSha, "Saved draft has no publishable verdict.");
+        }
         var marker = ReviewFindings.Marker(draft);
         try
         {
@@ -443,7 +448,7 @@ public sealed class ReviewerDispatcher
                     throw new InvalidOperationException("PR changed or closed before review publication; the saved review was not submitted.");
                 await UpdateWatchMetadataAsync(task, m => { m["reviewPublishStarted"] = true; m["reviewIntegrationError"] = null!; return m; }, ct);
                 try { published = await _gitHub.PublishFormalReviewAsync(prNumber, draft, marker, ct); }
-                catch (ApiValidationException)
+                catch (ApiException ex) when (IsDefinitePublicationRefusal(ex))
                 {
                     // GitHub rejected the request without creating a review. Keep the draft, not a new paid run.
                     await UpdateWatchMetadataAsync(task, m => { m["reviewPublishStarted"] = false; return m; }, ct);
@@ -504,6 +509,11 @@ public sealed class ReviewerDispatcher
             return new(ReviewerVerdict.Error, draft.Summary, draft.HeadSha, "Review publication: " + ex.Message);
         }
     }
+
+    internal static bool IsDefinitePublicationRefusal(ApiException error) => error is ApiValidationException
+        || error.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden
+            or System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.UnprocessableEntity
+            or System.Net.HttpStatusCode.TooManyRequests;
 
     private Task RecordIntegrationFailureAsync(IssueRecord task, string head, string error, bool uncertain, CancellationToken ct) =>
         UpdateWatchMetadataAsync(task, metadata =>
