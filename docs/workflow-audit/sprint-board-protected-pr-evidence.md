@@ -20,7 +20,7 @@ sources; checkpoint names and example field names are not evidence.
 | Observed serving SHA and DEP observation window(s) | Pending ([Serving revision](#serving-revision-dep)) |
 | Project, sprint ID/link, test task ID/link | Pending |
 | Repository, protected base, live PR number/permalink | Pending ([PR and hold](#pr-and-hold)) |
-| H0 initial head SHA; H1 corrected head SHA | Pending ([PR and hold](#pr-and-hold)) |
+| H0 initial head SHA; H1 corrected head SHA; intermediate heads if observed | Pending ([PR and hold](#pr-and-hold), [CI head inventory](#required-ci-by-head-ci)) |
 | Earlier reviewed SHA (identify if different from H0) | Pending ([Human gate](#human-gate)) |
 | Merged head SHA and separate merge commit | Pending ([Merge](#protected-merge)) |
 | Hold at merge; no-bypass coverage | Pending ([Merge](#protected-merge), [MAN](#manual-interventions-man)) |
@@ -76,15 +76,19 @@ For each row enter capture ID/link and UTC time; DEP ID; actual view settings
 role; route and project/sprint, task and PR state where relevant; steps and
 observed result. Use the deployed lane and control names. Add one row per
 review action/state as needed, including disabled/absent cases with context.
+For D2–D6, link a shared viewport capture or browser bounds showing all five
+lanes in one row inside the 1280 CSS px viewport with sidebar open and no
+horizontal scrolling. Include evidence per lane that populated cards fit within
+its visible bounds, or document the empty state; vertical scrolling is fine.
 
 | Checkpoint | Expected evidence | Actual steps, result and capture metadata/source |
 | --- | --- | --- |
 | D1 | 1280 CSS px, sidebar open, goal above board | Pending |
-| D2 | Desktop lane 1: heading and usable content/empty state | Pending |
-| D3 | Desktop lane 2: heading and usable content/empty state | Pending |
-| D4 | Desktop lane 3: heading and usable content/empty state | Pending |
-| D5 | Desktop lane 4: heading and usable content/empty state | Pending |
-| D6 | Desktop lane 5: heading and usable content/empty state | Pending |
+| D2 | Desktop lane 1: one-row viewport fit, heading and card fit/usability or empty state | Pending |
+| D3 | Desktop lane 2: one-row viewport fit, heading and card fit/usability or empty state | Pending |
+| D4 | Desktop lane 3: one-row viewport fit, heading and card fit/usability or empty state | Pending |
+| D5 | Desktop lane 4: one-row viewport fit, heading and card fit/usability or empty state | Pending |
+| D6 | Desktop lane 5: one-row viewport fit, heading and card fit/usability or empty state | Pending |
 | M1 | 390 CSS px, lane 1 reached and readable | Pending |
 | M2 | 390 CSS px, lane 2 reached and readable | Pending |
 | M3 | 390 CSS px, lane 3 reached and readable | Pending |
@@ -98,7 +102,8 @@ review action/state as needed, including disabled/absent cases with context.
 | --- | --- | --- |
 | PR-H0 | Active sprint/task, controller publication receipt, testing-only diff, live PR and H0 | Pending |
 | PR-H0-REQUEST | Native blocking review decision on H0, review ID, reviewer, reviewed SHA, genuine inline finding, link to MAN | Pending |
-| HOLD | Active-sprint evidence, placement surface/event, reconciled hold/label, nominee and current-head requirement, link to MAN | Pending |
+| HOLD-CHECK | Before placement and on resume: scoped task read (`required` / `syncPending`) and PR label/timeline if a PR exists, UTC, sources and decision to preserve or place | Pending |
+| HOLD | Original authorized placement event, active-sprint evidence, sequence/continuity, reconciled hold/label (or pending sync/gap), nominee and current-head requirement; link HOLD-CHECK, P-AUTH and MAN-HOLD | Pending |
 | PR-H1 | Worker correction on same PR, diff addressing finding, run/publication event, H1, link to AUTO-WORKER | Pending |
 
 ## Human gate
@@ -119,13 +124,29 @@ to MAN and automated actions to AUTO-REVIEW.
 
 ## Required CI by head (CI)
 
-Add a row per required check/status from P-POLICY, and link the exact set of
-passing H1 records to MERGE. Keep any H0 observations separately identified;
-never count them, a main build, or deployment build receipts toward H1.
+Inventory every observed PR head (H0, each intermediate head, and H1) from the
+PR timeline or publication receipts. Expand a row for each observed head and
+link to its CI records. The head may differ from a synthetic ref reported by a
+check run.
 
-| ID | PR, required check/context and trusted publisher | Run/check/status ID and source | Tested full head SHA (and exact-head linkage if GitHub reports a synthetic ref) | Outcome and completion UTC |
-| --- | --- | --- | --- | --- |
-| CI-1…n | Pending | Pending | Pending | Pending |
+| Head role | Full PR head SHA and observation UTC | PR/head event source and matching CI IDs |
+| --- | --- | --- |
+| H0 | Pending | Pending |
+| Intermediate (one per observed head, if any) | Pending | Pending |
+| H1 | Pending | Pending |
+
+For **each** inventoried head, add a row for **every** required check/status from
+P-POLICY, even if pending, cancelled, failed, or never started. When no run exists,
+link a timestamped source for the observed absence of a run and record the run ID,
+tested SHA and completion time as not applicable, not as if it ran. If the
+source cannot establish a check's state, record the evidence gap; do not assume
+it never started. Earlier-head rows are required but need not pass. Link only
+passing, required checks proven against the merged H1 to MERGE; main builds,
+deployment builds and earlier-head rows do not count toward H1.
+
+| ID | PR and full PR head SHA | Required check/context and trusted publisher | Run/check/status ID, source and observation UTC | Tested SHA and exact-head linkage (if synthetic ref) | Observed state/outcome and completion UTC if completed |
+| --- | --- | --- | --- | --- | --- |
+| CI-1…n | Pending | Pending | Pending | Pending | Pending |
 
 ## Manual interventions (MAN)
 
@@ -138,7 +159,7 @@ worker and reviewer automation out of this ledger.
 | ID / action expected | Actor and role | UTC event time | Action performed and surface | Sprint / PR and reviewed/current SHA where applicable | Source link and related IDs |
 | --- | --- | --- | --- | --- | --- |
 | MAN-REQUEST (inline request) | Pending | Pending | Pending | Pending | Pending |
-| MAN-HOLD (placement) | Pending | Pending | Pending | Pending | Pending |
+| MAN-HOLD (original placement, link P-AUTH and HOLD even if placed before PR open) | Pending | Pending | Pending | Pending | Pending |
 | MAN-STALE (earlier approval if arranged) | Pending | Pending | Pending | Pending | Pending |
 | MAN-APPROVAL (nominee H1 approval) | Pending | Pending | Pending | Pending | Pending |
 
@@ -170,11 +191,12 @@ the run index and cite exact receipt IDs and any separate defect IDs.
 | --- | --- | --- |
 | Exact-revision authorization, roles and budget | Preflight | Pending |
 | Intended redesign independently verified as serving | DEP | Pending |
-| 1280 px goal/board stacking and five usable lanes | D1–D6 + DEP | Pending |
+| 1280 px goal/board stacking and five usable lanes in one row with cards fitting and no horizontal scroll | D1–D6 + DEP | Pending |
 | 390 px five reachable lanes and available review actions | M1–M5, R1…Rn + DEP | Pending |
-| Protected rework and active-sprint hold | PR-H0, HOLD, PR-H1 + MAN | Pending |
+| Protected rework and active-sprint hold | PR-H0, HOLD-CHECK, HOLD, PR-H1 + MAN | Pending |
 | Automated and earlier-head approvals rejected for the human gate | G-AUTO, G-STALE + AUTO-REVIEW/MAN | Pending |
-| Nominee approved current H1; required CI passed on H1 | G-APPROVED + MAN + CI | Pending |
+| Nominee approved current H1 with hold still present | G-APPROVED + MAN | Pending |
+| Each required CI state recorded for every observed head; required CI passed on H1 | CI head inventory and CI records | Pending |
 | Protected merge on H1 with hold in place and no bypass | MERGE, MERGE-HOLD, MERGE-PATH | Pending |
 | All manual actions accounted for and evidence independently reviewable | MAN + related sources | Pending |
 
