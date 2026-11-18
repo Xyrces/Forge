@@ -28,6 +28,42 @@ try {
  await page.locator('details.task-actions summary').click();
  await page.getByRole('button',{name:'Require review by @Xyrces for this task',exact:true}).waitFor();
  await capture(page,{path:output+'/task-nomination-390.png',fullPage:true});
- assert.deepEqual(errors,[]);receipt.result='passed';receipt.checks=['Project UI saves nominated login','Board action is Require review by @Xyrces; engineering stays Running after hold','All desktop/mobile board lanes fit','Task next actor and action name show @Xyrces; extra hold cannot waive Both policy'];
+ // GitHub's repository rule is a separate requirement from an optional Forge task hold.
+ const protectedTask = {
+  id:'protected-review-fixture', title:'Synthetic protected PR awaiting GitHub approval', type:'ui', status:'InProgress',
+  metadata:{prNumber:'150',state:'MergeReady',watchHeadSha:'263bbfe0000000000000000000000000000000000',reviewProtectionHead:'263bbfe0000000000000000000000000000000000',reviewProtectionDecision:'ReviewRequired',awaitingHumanReview:true,humanReviewRequired:false,humanReviewTaskHold:false},
+  situation:{label:'GitHub approval required',text:'GitHub branch protection still requires an eligible approval of this revision. A Forge reviewer approval alone has not satisfied that requirement.',nextActor:'Eligible GitHub reviewer',tone:'action',humanReviewRequired:false,nominatedHuman:'Xyrces'},events:[]
+ };
+ await put({
+  '/api/tasks/protected-review-fixture':protectedTask,
+  '/api/tasks/protected-review-fixture/human-review':{required:false,syncPending:false,mode:'Automated',nominatedHuman:'Xyrces'}
+ });
+ for (const width of [1280,390]) {
+  await page.setViewportSize({width,height:900});
+  await page.goto(base+'/tasks/protected-review-fixture?project=forge');
+  await page.getByText('GitHub approval required',{exact:true}).waitFor();
+  await page.getByText('Next: Eligible GitHub reviewer',{exact:true}).waitFor();
+  await page.locator('details.task-actions summary').click();
+  await page.getByRole('button',{name:'Require review by @Xyrces for this task',exact:true}).waitFor();
+  const pr=page.getByRole('link',{name:'Open PR #150 ↗',exact:true});
+  assert.equal(await pr.getAttribute('href'),'https://github.com/Xyrces/Forge/pull/150');
+  assert.equal(await pr.getAttribute('target'),'_blank');
+  await pr.scrollIntoViewIfNeeded();
+  assert.ok(await pr.isVisible());
+  await capture(page,{path:output+`/github-approval-required-${width}.png`,fullPage:true});
+ }
+ await page.getByRole('button',{name:'Require review by @Xyrces for this task',exact:true}).click();
+ await page.getByRole('button',{name:'Release task review hold',exact:true}).waitFor();
+ assert.equal(await page.getByText('GitHub approval required',{exact:true}).count(),1);
+ await page.getByRole('button',{name:'Release task review hold',exact:true}).click();
+ await page.getByRole('button',{name:'Require review by @Xyrces for this task',exact:true}).waitFor();
+ await page.getByText('Next: Eligible GitHub reviewer',{exact:true}).waitFor();
+ assert.equal(await page.getByText('GitHub approval required',{exact:true}).count(),1);
+ const protectedWrites=(await (await page.request.get(api+'/__writes')).json()).filter(w=>w.path==='/api/tasks/protected-review-fixture/human-review');
+ assert.deepEqual(protectedWrites.map(w=>w.body.required),[true,false]);
+ const finalHold=await (await page.request.get(api+'/api/tasks/protected-review-fixture/human-review')).json();
+ assert.equal(finalHold.required,false);
+ assert.equal(finalHold.mode,'Automated');
+ assert.deepEqual(errors,[]);receipt.result='passed';receipt.checks=['Project UI saves nominated login','Board action is Require review by @Xyrces; engineering stays Running after hold','All desktop/mobile board lanes fit','Task next actor and action name show @Xyrces; extra hold cannot waive Both policy','GitHub branch-rule approval is distinct from the optional named task hold at1280/390; adding/releasing that hold leaves the GitHub requirement visible','Existing PR150 link is visible with the correct GitHub destination and new-tab action; no GitHub write or live approval claimed'];
 } catch(e){receipt.result='failed';receipt.error=String(e.stack||e);process.exitCode=1;await page.screenshot({path:output+'/failure.png'}).catch(()=>{});}
 finally {await fs.writeFile(output+'/receipt.json',JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt,null,2));await browser.close();}
