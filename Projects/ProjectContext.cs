@@ -114,7 +114,7 @@ public sealed class ProjectContextFactory : IAsyncDisposable
     internal IReadOnlyList<SpecStore> GetInitializedHistoryStores(SpecStore primary)
     {
         var registered = KnownProjects.Select(project => project.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return _cache.Values.Select(context => context.Specs).Append(primary)
+        return _cache.Values.Select(context => context.Specs).OfType<SpecStore>().Append(primary)
             .Where(store => registered.Contains(store.ProjectId))
             .DistinctBy(store => (store.Database.Provider, store.Database.ConnectionString, store.Database.Qualifier))
             .ToArray();
