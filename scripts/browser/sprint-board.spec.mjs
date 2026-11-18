@@ -29,7 +29,7 @@ async function verifyActiveSprintLabel(page, width) {
 }
 export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, screenshotDir = null, nominatedHuman = null } = {}) {
   const projectId = 'forge';
-  const sprint = { id:'ux-fixture', name:'Review the dashboard change', goal:'## Goal\nKeep production clean.\n\n- Preserve development tooling.', status:'Active', startDate:'2026-11-17T00:00:00Z' };
+  const sprint = { id:'ux-fixture', name:'Review the dashboard change and qualify the protected pull request workflow across desktop and mobile', goal:'## Goal\nKeep production clean.\n\n- Preserve development tooling.', status:'Active', startDate:'2026-11-17T00:00:00Z' };
   const states = ['Pending','AgentRunning','PROpen','PROpen','Merged'];
   const members = states.map((state,i) => ({ id:`fixture-${i}`, title:`Task ${i+1}: verify a long title remains readable inside its lane without clipping`, type:'ui', status:i===4?'Completed':i===0?'Pending':'InProgress', state, priority:2, assignee:i===1?'worker':null, prNumber:null, reworkAttempts:i===4?'2':null, boosted:false, blockerCount:0, blockedBy:[], situation:i===1?'Responding to a recorded review finding.':'Fixture evidence', situationTone:'muted', label:['Ready for work','Making a requested change','Review in progress','Waiting for human review','Merged'][i], nextActor:i===3?(nominatedHuman?'@'+nominatedHuman:'Human reviewer'):'Forge', nominatedHuman, humanReviewTaskHold:i===3, humanReviewRequired:i===3, awaitingHumanReview:i===3 }));
   const completion={receipt:{id:'synthetic-completion',projectId,sprintId:sprint.id,outcome:'PendingEvidence',bookkeepingState:'Completed',readyForDeployment:false,deploymentStatus:'Pending',deliveryNote:'Synthetic active-sprint fixture: one change merged; deployment and browser observation remain pending.'},batches:[],criteria:[{id:'code',text:'Keep production free of development-tool requests',evidenceKind:'MergedAndVerified'},{id:'browser',text:'Confirm the deployed dashboard opens without missing-script requests',evidenceKind:'OperatorObserved',proofReference:null}],nextCursor:null};
@@ -37,12 +37,14 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
   const previousWrites = fixtureApi ? (await (await page.request.get(`${fixtureApi}/__writes`)).json()).length : 0;
   if (fixtureApi) {
     await page.request.put(`${fixtureApi}/__fixtures`, {data:{
+      '/api/sprints/active':sprint,
       '/api/sprints/summary':{projectId,generatedAt:new Date().toISOString(),active:sprint,total:1,history:[],nextCursor:null},
       '/api/sprints/board':{projectId,generatedAt:new Date().toISOString(),sprint,total:5,done:1,members,nextCursor:null},
       '/api/sprints/ux-fixture/completion':completion,
       '/api/tasks/fixture-1/human-review':{required:false,syncPending:false,mode:'Automated'}
     }});
   } else {
+  await page.route('**/api/sprints/active**', route => route.fulfill({json:sprint}));
   await page.route('**/api/sprints/summary?**', route => route.fulfill({json:{projectId,generatedAt:new Date().toISOString(),active:sprint,total:1,history:[],nextCursor:null}}));
   await page.route('**/api/sprints/board?**', route => route.fulfill({json:{projectId,generatedAt:new Date().toISOString(),sprint,total:5,done:1,members,nextCursor:null}}));
   await page.route('**/api/sprints/ux-fixture/completion?**', route => route.fulfill({json:completion}));
