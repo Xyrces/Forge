@@ -36,6 +36,7 @@ namespace Forge;
 /// </remarks>
 public sealed class LocalGitHubService : GitHubService
 {
+    public override string? ReviewerLogin => null;
     private readonly LocalPrStore _prStore;
     private readonly string _localRemotePath;
 

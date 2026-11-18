@@ -109,7 +109,7 @@ public sealed class ProjectCloner
                 $"git clone for project '{project.Id}' failed: {cloneResult.Stderr.Trim()}");
         }
 
-        if (isHttps && !string.IsNullOrEmpty(github?.Token))
+        if (isHttps && !string.IsNullOrEmpty(github?.Token) && GitHubAppIdentities.FromUrl(project.RepoUrl) is null)
         {
             // 1. Reset the stored remote URL to drop the PAT from .git/config.
             await ResetRemoteAsync(localPath, project.RepoUrl, ct);
@@ -365,7 +365,7 @@ public sealed class ProjectCloner
             return new ProjectSyncResult(false, branch);
         }
 
-        if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token))
+        if (IsHttps(project.RepoUrl) && !string.IsNullOrEmpty(github?.Token) && GitHubAppIdentities.FromUrl(project.RepoUrl) is null)
         {
             var credPath = Path.Combine(localPath, ".forge", "git-credentials");
             Directory.CreateDirectory(Path.GetDirectoryName(credPath)!);
@@ -417,6 +417,7 @@ public sealed class ProjectCloner
 
     private static (string effectiveUrl, bool isHttps) BuildAuthenticatedUrl(string repoUrl, string? token)
     {
+        if (GitHubAppIdentities.FromUrl(repoUrl) is not null) return (repoUrl, true);
         if (string.IsNullOrEmpty(token)) return (repoUrl, IsHttps(repoUrl));
         if (!IsHttps(repoUrl)) return (repoUrl, false);
 
@@ -483,6 +484,28 @@ public sealed class ProjectCloner
         // an extra positional that confused git into printing help).
         foreach (var a in args) psi.ArgumentList.Add(a);
 
+        string? authorization = null;
+        if (args.FirstOrDefault() is "clone" or "fetch" or "pull" or "ls-remote")
+        {
+            var remote = args.FirstOrDefault(a => a.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase));
+            if (remote is null && args.FirstOrDefault() != "clone")
+            {
+                var origin = await RunGitAsync(cwd, ct, "remote", "get-url", "origin");
+                if (origin.ExitCode == 0) remote = origin.Stdout.Trim();
+            }
+            if (GitHubAppIdentities.FromUrl(remote) is { } apps)
+            {
+                var token = await new GitHubAppIdentities.InstallationCredentials(apps, apps.Publisher, false).GetTokenAsync();
+                authorization = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:" + token));
+                psi.Environment["GIT_CONFIG_COUNT"] = "3";
+                psi.Environment["GIT_CONFIG_KEY_0"] = "credential.helper";
+                psi.Environment["GIT_CONFIG_VALUE_0"] = "";
+                psi.Environment["GIT_CONFIG_KEY_1"] = $"http.https://github.com/{apps.Owner}/{apps.Name}.extraheader";
+                psi.Environment["GIT_CONFIG_VALUE_1"] = "AUTHORIZATION: " + authorization;
+                psi.Environment["GIT_CONFIG_KEY_2"] = $"http.https://github.com/{apps.Owner}/{apps.Name}.git.extraheader";
+                psi.Environment["GIT_CONFIG_VALUE_2"] = "AUTHORIZATION: " + authorization;
+            }
+        }
         using var p = Process.Start(psi)!;
         var stdoutTask = p.StandardOutput.ReadToEndAsync();
         var stderrTask = p.StandardError.ReadToEndAsync();
@@ -496,6 +519,8 @@ public sealed class ProjectCloner
             await Task.WhenAll(stdoutTask, stderrTask);
             throw;
         }
-        return (p.ExitCode, await stdoutTask, await stderrTask);
+        var stdout = await stdoutTask; var stderr = await stderrTask;
+        if (authorization is not null) { stdout = stdout.Replace(authorization, "[redacted]", StringComparison.Ordinal); stderr = stderr.Replace(authorization, "[redacted]", StringComparison.Ordinal); }
+        return (p.ExitCode, stdout, stderr);
     }
 }

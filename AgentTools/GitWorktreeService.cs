@@ -16,12 +16,16 @@ public sealed class GitWorktreeService
     // GITHUB_TOKEN in its environment; git honors it for github.com
     // remote operations even with no credential helper present.
     private readonly string? _githubToken;
+    private readonly Func<Task<string?>>? _publisherToken;
+    private readonly string? _publisherRepository;
 
-    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger, string? githubToken = null)
+    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger, string? githubToken = null, Func<Task<string?>>? publisherToken = null, string? publisherRepository = null)
     {
         _options = options;
         _logger = logger;
         _githubToken = githubToken;
+        _publisherToken = publisherToken;
+        _publisherRepository = publisherRepository;
     }
 
     public string WorkspaceRoot => Path.GetFullPath(_options.Root);
@@ -595,6 +599,28 @@ public sealed class GitWorktreeService
             psi.Environment["GITHUB_TOKEN"] = _githubToken;
         }
 
+        // App credentials exist only in this trusted controller child process. Never persist them in a shared worktree.
+        string? authorization = null;
+        var network = (argumentList?.FirstOrDefault() ?? arguments.Split(' ', 2)[0]) is "fetch" or "push" or "pull" or "ls-remote";
+        if (_publisherToken is not null && network)
+        {
+            if (_publisherRepository is null) throw new InvalidOperationException("Publisher repository scope is missing.");
+            var origin = await RunGitInAsync(workingDir, "remote get-url origin", cancellationToken);
+            if (origin.ExitCode != 0 || !Uri.TryCreate(origin.Stdout.Trim(), UriKind.Absolute, out var remote)
+                || remote.Scheme != "https" || remote.UserInfo.Length != 0
+                || !string.Equals(NormalizeRepositoryUrl(remote), _publisherRepository, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Configured App publication requires the matching clean GitHub HTTPS origin; refusing another credential path.");
+            var token = await _publisherToken() ?? throw new InvalidOperationException("Publisher App token unavailable.");
+            authorization = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:" + token));
+            psi.Environment.Remove("GITHUB_TOKEN");
+            psi.Environment["GIT_CONFIG_COUNT"] = "3";
+            psi.Environment["GIT_CONFIG_KEY_0"] = "credential.helper";
+            psi.Environment["GIT_CONFIG_VALUE_0"] = "";
+            psi.Environment["GIT_CONFIG_KEY_1"] = "http." + _publisherRepository + ".extraheader";
+            psi.Environment["GIT_CONFIG_VALUE_1"] = "AUTHORIZATION: " + authorization;
+            psi.Environment["GIT_CONFIG_KEY_2"] = "http." + _publisherRepository + ".git.extraheader";
+            psi.Environment["GIT_CONFIG_VALUE_2"] = "AUTHORIZATION: " + authorization;
+        }
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start git process");
         var stdoutTask = proc.StandardOutput.ReadToEndAsync();
@@ -609,6 +635,7 @@ public sealed class GitWorktreeService
         }
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
+        if (authorization is not null) { stdout = stdout.Replace(authorization, "[redacted]", StringComparison.Ordinal); stderr = stderr.Replace(authorization, "[redacted]", StringComparison.Ordinal); }
         return new GitResult(proc.ExitCode, stdout, stderr);
     }
 
@@ -631,6 +658,12 @@ public sealed class GitWorktreeService
             if (char.IsWhiteSpace(c))
                 throw new InvalidOperationException($"GitWorktreeService: {label} must not contain whitespace (got '{component}')");
         }
+    }
+
+    private static string NormalizeRepositoryUrl(Uri uri)
+    {
+        var value = uri.GetLeftPart(UriPartial.Path).TrimEnd('/');
+        return value.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? value[..^4] : value;
     }
 
     private static string Sanitize(string s)

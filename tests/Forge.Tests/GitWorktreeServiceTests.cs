@@ -87,6 +87,20 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ConfiguredPublisherRefusesAnotherOriginBeforeMintingToken()
+    {
+        var tokenRequested = false;
+        var service = new GitWorktreeService(
+            new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+            NullLogger<GitWorktreeService>.Instance,
+            publisherToken: () => { tokenRequested = true; return Task.FromResult<string?>("unused"); },
+            publisherRepository: "https://github.com/owner/repo");
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.CreateFreshAsync("wrong-origin", "main"));
+        Assert.Contains("matching clean GitHub HTTPS origin", error.Message);
+        Assert.False(tokenRequested);
+    }
+
+    [Fact]
     public async Task CancelledFreshCheckoutDoesNotCreateWorktree()
     {
         using var cancellation = new CancellationTokenSource();

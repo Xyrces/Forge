@@ -69,6 +69,7 @@ public class LocalGitHubServiceOverrideTests
             "CreateIssueCommentAsync",
             "CreatePullRequestAsync",
             "DeleteBranchAsync",
+            "get_ReviewerLogin",
             "GetBranchHeadShaAsync",
             "GetCiSignalCountAsync",
             "GetCommitStatusAsync",

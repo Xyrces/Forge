@@ -285,3 +285,8 @@ The journal and initializer Job are immutable-input bound. A replacement supervi
 An initializer timeout or uncertain transport result leaves both controllers stopped and the operation resumable. It never triggers rollback while initializer execution might continue. A terminal initializer failure can restore the qualified bridge only after its pods are nonexecuting. A candidate failure after migration also restores that bridge without downgrading the database. The schema39/40 bridge is a maintenance fallback: it preserves the older feature set and is not feature-equivalent to new schema40 initiative workflows. Keep workflow gates held throughout qualification and rollback.
 
 The installer invokes the target's independent release Job; it does not orchestrate a host-side migration sequence. Full rollback/restart qualification must precede policy publication. Unit fault tests do not establish actual SQL migration or live bridge compatibility on their own.
+
+
+## Optional GitHub App identities
+
+Pass `--github-apps-directory /private/staged-directory` to package `config.json` and referenced PEM keys into a controller-only Secret. Both release colors receive this read-only mount; initializer, release and worker Jobs do not. Existing credentials are never silently overwritten. Without App configuration, the previous authentication behavior is unchanged. See [private registration and qualification](../../docs/github-app-identities.md). The image copies the complete `deploy/k3s/` module directory, including `github_apps.py`; run the installer from that directory tree, not a standalone copied `install.py`.
