@@ -50,6 +50,14 @@ public static class TaskSituation
         var humanRequirement = nominatedHuman is null ? "Forge also requires human review."
             : $"Forge also requires review by @{nominatedHuman}.";
         var protection = issue.GetMetadata("reviewProtectionDecision");
+        var openThreads = int.TryParse(issue.GetMetadata("reviewUnresolvedThreads"), out var count) ? count : 0;
+        var threadSummary = openThreads switch
+        {
+            1 => "1 review conversation is open.",
+            > 1 => $"{openThreads} review conversations are open.",
+            _ => "",
+        };
+        var alsoThreads = openThreads > 0 ? " " + threadSummary : "";
         if (bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting)
         {
             if (protection is "ReviewRequired" or "ChangesRequested")
@@ -57,16 +65,35 @@ public static class TaskSituation
                     (protection == "ChangesRequested"
                         ? "GitHub still reports requested changes. Address the review and obtain an eligible approval of the current revision before merge."
                         : "GitHub branch protection still requires an eligible approval of this revision.")
-                    + (humanPending ? " " + humanRequirement : ""),
+                    + (humanPending ? " " + humanRequirement : "") + alsoThreads,
                     humanPending ? humanActor : "Eligible GitHub reviewer", "action");
             return Result("Waiting for human review", "Review the current PR revision before merge."
-                + (protection == "Unavailable" ? " GitHub’s protected review check is also temporarily unavailable; Forge will retry it." : ""), humanActor, "action");
+                + (protection == "Unavailable" ? " GitHub’s protected review check is also temporarily unavailable; Forge will retry it." : "") + alsoThreads, humanActor, "action");
         }
         if (protection == "Unavailable")
             return Result("Review check unavailable", "Forge cannot yet confirm GitHub’s protected review requirement. It will retry the read before merging."
                 + (humanPending ? " " + humanRequirement : ""), humanPending ? humanActor : "Forge", "warn");
         if (issue.Status == IssueStatus.Pending)
             return Result("Queued", issue.GetMetadata("reworkReason") ?? "Waiting for an available worker.", "Worker");
+        if (openThreads > 0)
+        {
+            if (int.TryParse(issue.GetMetadata("reviewHumanThreads"), out var humanThreads) && humanThreads == 0)
+                return Result("Review conversations open", threadSummary + " Forge checks the correction before resolving its finding.", "Forge reviewer");
+            return Result("Review conversations open", threadSummary + " Open the PR to check the outstanding feedback and resolve the conversation when addressed.", "PR participants", "action");
+        }
+        switch (issue.GetMetadata("reviewMergeState"))
+        {
+            case "BEHIND":
+                return Result("Branch update required", "The PR branch is behind its base. Forge rechecks the updated revision before merge.", "Forge");
+            case "DIRTY":
+                return Result("Merge conflict", "The PR conflicts with its base. The conflicting changes need to be reconciled before merge.", "Forge");
+            case "DRAFT":
+                return Result("Draft pull request", "Mark the PR ready for review on GitHub when the work is ready.", "PR author", "action");
+            case "BLOCKED":
+                return Result("GitHub merge requirement pending", "Open the PR merge box for the outstanding requirement. Forge rechecks it before merging.", "PR participants", "action");
+            case "UNKNOWN" or "Unavailable":
+                return Result("Checking merge requirements", "Forge is waiting for GitHub to confirm whether this revision can merge.", "Forge", "warn");
+        }
         if (state == "MergeReady") return Result("Final merge checks", "Forge is checking review, CI and merge requirements.", "Forge");
         var legacy = DescribeLegacy(issue);
         return legacy with { Label = issue.Status is IssueStatus.Blocked or IssueStatus.Failed ? "Needs attention" : "In progress",

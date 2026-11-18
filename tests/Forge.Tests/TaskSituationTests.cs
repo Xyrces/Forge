@@ -101,6 +101,46 @@ public class TaskSituationTests
         Assert.Contains("merge gate", s.Text);
     }
 
+    [Theory]
+    [InlineData("BEHIND", "Branch update required", "Forge")]
+    [InlineData("DIRTY", "Merge conflict", "Forge")]
+    [InlineData("BLOCKED", "GitHub merge requirement pending", "PR participants")]
+    [InlineData("DRAFT", "Draft pull request", "PR author")]
+    [InlineData("UNKNOWN", "Checking merge requirements", "Forge")]
+    [InlineData("Unavailable", "Checking merge requirements", "Forge")]
+    [InlineData("CLEAN", "Final merge checks", "Forge")]
+    public void MergeRequirementIdentifiesNextAction(string mergeState, string label, string actor)
+    {
+        var situation = TaskSituation.Describe(Task(IssueStatus.InProgress, ("state", "MergeReady"), ("reviewMergeState", mergeState)));
+        Assert.Equal(label, situation.Label);
+        Assert.Equal(actor, situation.NextActor);
+    }
+
+    [Theory]
+    [InlineData("1", "0", "Forge reviewer", "1 review conversation is open.")]
+    [InlineData("2", "1", "PR participants", "2 review conversations are open.")]
+    public void OutstandingConversationsIdentifyWhoActs(string count, string human, string actor, string summary)
+    {
+        var situation = TaskSituation.Describe(Task(IssueStatus.InProgress, ("state", "MergeReady"),
+            ("reviewMergeState", "BLOCKED"), ("reviewUnresolvedThreads", count), ("reviewHumanThreads", human)));
+        Assert.Equal("Review conversations open", situation.Label);
+        Assert.StartsWith(summary, situation.Text);
+        Assert.Equal(actor, situation.NextActor);
+    }
+
+    [Fact]
+    public void ConversationsAccompanyApprovalButDoNotHideReworkOrCompletion()
+    {
+        var situation = TaskSituation.Describe(Task(IssueStatus.InProgress, ("awaitingHumanReview", "true"),
+            ("reviewUnresolvedThreads", "1"), ("reviewProtectionDecision", "ReviewRequired")));
+        Assert.Equal("GitHub approval required", situation.Label);
+        Assert.Contains("1 review conversation is open.", situation.Text);
+        Assert.Equal("Making a requested change", TaskSituation.Describe(Task(IssueStatus.InProgress,
+            ("state", "ReworkRunning"), ("reviewUnresolvedThreads", "1"))).Label);
+        Assert.Equal("Completion recorded", TaskSituation.Describe(Task(IssueStatus.Completed,
+            ("reviewMergeState", "BLOCKED"), ("reviewUnresolvedThreads", "1"))).Label);
+    }
+
     [Fact]
     public void StalledRework_ExplainsWatcherRefire()
     {
