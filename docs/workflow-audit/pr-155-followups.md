@@ -1,15 +1,12 @@
 # PR #155 follow-up backlog and review dispositions
 
-Reviewed baseline: `1f798bde8c83308375fbdb5eeced9a9d92d1fef2`.
-Source: the operator-supplied numbered review of PR #155, November 18, 2026.
-Numbers below preserve that review's identifiers. Locations refer to this baseline;
-subsequent fixes may move lines. This document records repository backlog only:
-it does not create issues, enqueue work, or authorize a deployment.
+These follow-ups come from the November 18 review of [PR #155](https://github.com/Xyrces/Forge/pull/155).
+The numbers match the original findings. File locations refer to the reviewed
+revision `1f798bde8c83308375fbdb5eeced9a9d92d1fef2`.
 
-Findings #1–4 and #16 are being handled separately as immediate correctness or
-security work. They are not silently accepted or closed by this document. The
-Markdown fix for #16 is local commit `5b3a91b16660ea1ffba0e3e946461327ff5279dd`;
-its inclusion and integrated qualification must be checked separately.
+The ten backlog items below await prioritization. Findings #7 and #11 have
+separate dispositions at the end. Findings #1–4 and #16 are tracked in the
+[five inline review threads](https://github.com/Xyrces/Forge/pull/155#pullrequestreview-5957748467).
 
 ## #5 — Measure and reduce repeated private Git imports
 
