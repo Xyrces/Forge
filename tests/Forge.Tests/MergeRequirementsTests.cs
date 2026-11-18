@@ -51,7 +51,7 @@ public sealed class MergeRequirementsTests
         using var handler = new Handler((r, token) =>
         {
             Assert.Equal("publisher", token);
-            return r.GetProperty("variables").GetProperty("cursor").ValueKind == JsonValueKind.Null
+            return !r.GetProperty("variables").TryGetProperty("cursor", out var cursor) || cursor.ValueKind == JsonValueKind.Null
                 ? Page([Thread("bot")], next: "next")
                 : Page([Thread("human", actorType: "User"), Thread("replied", other: true), Thread("partial", truncated: true)]);
         });

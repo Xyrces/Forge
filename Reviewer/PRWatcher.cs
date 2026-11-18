@@ -443,6 +443,7 @@ public sealed partial class PRWatcher
         if (formalGate is not null)
             await RecordHumanWaitAsync(task, formalGate.HumanWaiting && formalGate.AutomatedSatisfied
                 && formalGate.Requests.Count == 0 && ciGreen && qaPassed
+                && formalGate.MergeState is not ("BEHIND" or "DIRTY")
                 && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
 
         // Rework guard: a rework round was already queued FOR THIS
@@ -510,10 +511,10 @@ public sealed partial class PRWatcher
             var mergeableGreen = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
             if (mergeableGreen == false || formalGate?.MergeState is "BEHIND" or "DIRTY")
             {
-                await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
+                if (formalGate?.MergeState != "BEHIND") await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
                     task, worktreePath, sha,
-                    reason: formalGate?.MergeState == "BEHIND" ? "GitHub requires an up-to-date branch" : ConflictReworkReason,
+                    reason: formalGate?.MergeState == "BEHIND" ? BaseRefreshReason : ConflictReworkReason,
                     context: formalGate?.MergeState == "BEHIND"
                         ? "GitHub requires this PR branch to include the current base branch. Fetch and merge the base branch into this SAME branch, run the verification suite, and push. Preserve the existing changes and PR."
                         : ConflictContext,
@@ -521,6 +522,7 @@ public sealed partial class PRWatcher
                     terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                     terminalOutcome: WatchPollOutcome.Blocked,
                     cancellationToken,
+                    countAsStrike: formalGate?.MergeState != "BEHIND",
                     maxStrikes: maxStrikes);
             }
 
@@ -581,6 +583,7 @@ public sealed partial class PRWatcher
                 var refusedGate = await TryReadFormalGateAsync(task, refused, refused.Head.Sha, cancellationToken);
                 await RecordHumanWaitAsync(task, refused.Head.Sha == sha && refusedGate is { HumanWaiting: true, AutomatedSatisfied: true }
                     && refusedGate.Requests.Count == 0
+                    && refusedGate.MergeState is not ("BEHIND" or "DIRTY")
                     && qaPassed && refused.Mergeable != false
                     && await _gitHub.GetCommitStatusAsync(sha, cancellationToken) == CommitState.Success, cancellationToken);
                 return WatchPollOutcome.Pending;
@@ -769,17 +772,20 @@ public sealed partial class PRWatcher
         //     Mergeable is null while GitHub computes — skip those
         //     sweeps rather than firing spurious rounds.
         var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
-        if (mergeable == false)
+        if (mergeable == false || formalGate?.MergeState is "BEHIND" or "DIRTY")
         {
-            await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
+            if (formalGate?.MergeState != "BEHIND") await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
             return await ReworkOrTripAsync(
                 task, worktreePath, sha,
-                reason: ConflictReworkReason,
-                context: ConflictContext,
+                reason: formalGate?.MergeState == "BEHIND" ? BaseRefreshReason : ConflictReworkReason,
+                context: formalGate?.MergeState == "BEHIND"
+                    ? "GitHub requires this PR branch to include the current base branch. Fetch and merge the base branch into this SAME branch, run the verification suite, and push. Preserve the existing changes and PR."
+                    : ConflictContext,
                 terminalStatus: IssueStatus.Blocked,
                 terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                 terminalOutcome: WatchPollOutcome.Blocked,
                 cancellationToken,
+                countAsStrike: formalGate?.MergeState != "BEHIND",
                 maxStrikes: maxStrikes);
         }
 
@@ -813,6 +819,7 @@ public sealed partial class PRWatcher
     /// the conflict mutex keys on it, so it must be a single
     /// literal.</summary>
     internal const string ConflictReworkReason = "PR conflicts with the base branch";
+    internal const string BaseRefreshReason = "GitHub requires an up-to-date branch";
 
     /// <summary>Shared context for conflict sync rounds (used by the
     /// green+approved-conflicting route and the non-green conflict
@@ -967,7 +974,7 @@ public sealed partial class PRWatcher
         var claimed = (await _issues.ListAsync(
                 new Forge.Core.IssueFilter { Status = IssueStatus.InProgress }, ct))
             .Where(t => t.Id != selfTaskId
-                && t.GetMetadata("reworkReason") == ConflictReworkReason)
+                && t.GetMetadata("reworkReason") is ConflictReworkReason or BaseRefreshReason)
             .ToList();
         if (claimed.Count == 0) return false;
         if (_runs is null) return true;   // no registry — conservative
@@ -1030,7 +1037,7 @@ public sealed partial class PRWatcher
         // conflict-sync round is claimed, wait — the strike fires
         // once the base stops moving. Single choke point: every
         // conflict branch (MergeReady, CI-red, 2b) routes here.
-        if (reason == ConflictReworkReason
+        if (reason is ConflictReworkReason or BaseRefreshReason
             && await ConflictSyncInFlightAsync(taskId, cancellationToken))
         {
             _logger.LogInformation(

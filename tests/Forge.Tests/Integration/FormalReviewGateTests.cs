@@ -126,16 +126,17 @@ public sealed class FormalReviewGateTests : IDisposable
         Assert.Equal("0", (await _issues.GetAsync(task.Id))!.GetMetadata("reviewUnresolvedThreads"));
     }
 
-    [Fact]
-    public async Task RequiredBranchUpdateUsesExistingReworkOnce()
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public async Task RequiredBranchUpdateUsesExistingReworkOnce(bool humanHold)
     {
-        var github = new GitHub { Requirements = new("BEHIND", []) };
+        var github = new GitHub { Requirements = new("BEHIND", []), Label = humanHold, Ci = humanHold ? CommitState.Pending : CommitState.Success };
         var task = await Seed();
         Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, await Watch(github).PollWatchedTaskAsync(task));
         var changed = (await _issues.GetAsync(task.Id))!;
         Assert.Contains("up-to-date", changed.GetMetadata("reworkReason"));
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(changed));
-        Assert.Equal("1", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+        Assert.Equal("0", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
         Assert.Equal(0, github.Merges);
     }
 
