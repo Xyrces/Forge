@@ -97,6 +97,7 @@ public class LocalGitHubServiceOverrideTests
             "ResolveReviewedConversationsAsync",
             "SetHumanReviewLabelAsync",
             "SubmitReviewAsync",
+            "TryMergePullRequestAsync",
         };
 
         Assert.Equal(expected, virtualMethods);

@@ -141,6 +141,9 @@ public sealed class LocalGitHubService : GitHubService
         return _prStore.CreatePr(title, body, headBranch, baseBranch, sha);
     }
 
+    public override async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        => (await TryMergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha)).Merged;
+
     public override Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
     {
         // P4 e2e-harness C2: when the PRWatcher reaches the
