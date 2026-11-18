@@ -45,3 +45,8 @@ def app_bundle(directory):
         if apps[0]['appId']==apps[1]['appId'] or apps[0]['slug']==apps[1]['slug']:
             raise ValueError('Publisher and reviewer must be distinct Apps')
     return result
+
+def webhook_bundle(path):
+    value=Path(path).read_bytes().strip()
+    if len(value)<32: raise ValueError('Webhook secret must contain at least 32 bytes')
+    return {'path': b'/run/forge-github-events/webhook-secret', 'webhook-secret': value}

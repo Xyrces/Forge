@@ -48,3 +48,26 @@ References: [installation tokens](https://docs.github.com/en/apps/creating-githu
 The helper uses GitHub's manifest exchange with one-use CSRF state and a private browser cookie. It stores each generated PEM with mode0600 in a mode0700 directory; unused OAuth secrets are discarded. On installation it validates App identity, owner and explicit repository selection, obtains a metadata-only audit token to verify the entire installation contains exactly `Xyrces/Forge`, and revokes that token immediately. Only after both roles validate does it stage `config.json`. It never applies a Kubernetes Secret or deploys. The session ends after two hours. Temporary forwarding allowances must be removed when setup ends (the operator's setup schedules that cleanup).
 
 Run the offline helper qualification on Linux with `python3 tests/deployment/test_github_app_setup.py`; it performs no GitHub registrations or paid model calls. Tests cover state/replay rejection, private file modes, distinct role permissions, exact repository checks, audit-token revocation and staged config. A browser walkthrough still verifies GitHub's real manifest/installation screens.
+
+
+## Optional nominated human approver
+
+Project overview → Pull request approvals has an optional human GitHub login.
+When configured, that eligible person's current-head formal approval is required
+whenever Human/Both policy or an additional task hold requires human review.
+A different eligible collaborator's approval cannot substitute. Every eligible
+human's outstanding formal objection still blocks, even if the nominee approved.
+The PR author and bots never count as the human approver. No username is built in.
+
+The authenticated review-policy endpoint reads/writes `nominatedHuman` alongside
+`mode`; both are committed atomically with the immutable operator audit in the
+project's protected `review/` memory. Omitting the field preserves its current
+value; null or blank explicitly clears it and restores any-eligible-human
+fallback without changing the selected mode. Older stored mode-only values remain
+readable. Invalid logins are rejected. A valid-looking but ineligible/absent login
+cannot satisfy the approval gate and should be corrected in the project control.
+
+Cards and task detail name the configured login in the review action and show
+that person as next actor only when human review is actually actionable. Adding
+an extra hold while engineering is running does not stop engineering; releasing
+that hold cannot waive project-wide human approval.

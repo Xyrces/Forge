@@ -101,7 +101,7 @@ class InstallerGuardTests(unittest.TestCase):
                     for container in pod["containers"] for item in container.get("env", [])
                     if "secretKeyRef" in item.get("valueFrom", {})]
         self.assertEqual(["forge-initialize-runtime"], references(initializer))
-        self.assertEqual(["forge-github-apps", "forge-runtime"], references(controller))
+        self.assertEqual(["forge-github-events", "forge-github-apps", "forge-runtime"], references(controller))
         self.assertEqual([], references(release))
 
 

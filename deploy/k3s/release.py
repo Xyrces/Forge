@@ -103,7 +103,10 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
         "Worker__Enabled": "true", "Worker__Image": image, "Worker__Namespace": namespace,
         "HOME": "/var/lib/forge", "Dashboard__Hostname": "0.0.0.0", "Dashboard__Port": "8080",
     }.items()]
-    env += [{"name": "FORGE_GITHUB_APPS_FILE", "valueFrom": {"secretKeyRef": {"name": "forge-github-apps", "key": "config-path", "optional": True}}}]
+    env += [{"name": "GitHub__WebhookSecretFile", "valueFrom": {"secretKeyRef": {
+                "name": "forge-github-events", "key": "path", "optional": True}}}]
+    env += [{"name": "FORGE_GITHUB_APPS_FILE", "valueFrom": {"secretKeyRef": {
+                "name": "forge-github-apps", "key": "config-path", "optional": True}}}]
     env += [{"name": "Controller__InstanceId", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
             {"name": "Db__ConnectionString", "valueFrom": {"secretKeyRef": {
                 "name": "forge-runtime", "key": "sql-connection-string"}}}]
@@ -123,10 +126,12 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
                          "volumeMounts": [{"name": "state", "mountPath": "/var/lib/forge"},
                              {"name": "control-token", "mountPath": "/run/forge-control", "readOnly": True},
                              {"name": "github-apps", "mountPath": "/run/forge-github-apps", "readOnly": True},
+                             {"name": "github-events", "mountPath": "/run/forge-github-events", "readOnly": True},
                              {"name": "config", "mountPath": "/app/appsettings.json", "subPath": "appsettings.json", "readOnly": True}]}],
                      "volumes": [{"name": "state", "persistentVolumeClaim": {"claimName": "forge-state"}},
                          {"name": "control-token", "secret": {"secretName": "forge-control", "defaultMode": 288}},
                          {"name": "github-apps", "secret": {"secretName": "forge-github-apps", "defaultMode": 288, "optional": True}},
+                         {"name": "github-events", "secret": {"secretName": "forge-github-events", "defaultMode": 288, "optional": True}},
                          {"name": "config", "secret": {"secretName": "forge-config", "defaultMode": 288}}]}}}}
 
 
@@ -154,6 +159,8 @@ class Release:
                 if not prior_operation:
                     raise RuntimeError("release lock omitted operation identity; refusing ambiguous takeover")
                 prior = self.kube.get("configmaps", "forge-release-" + prior_operation)
+                from review_authority import assert_previous_initializer_stopped
+                assert_previous_initializer_stopped(self.kube, prior)
                 if prior and prior.get("data", {}).get("kind") == "schema-upgrade" and prior["data"].get("phase") not in ("committed", "rolled-back"):
                     raise RuntimeError("unfinished schema upgrade must be resumed with its original operation id")
             self.kube.patch("configmaps", "forge-release-lock", {
@@ -224,6 +231,11 @@ class Release:
         self.kube.patch("services", "forge", {"spec": {"selector": {"app": "forge-controller", "slot": slot}}})
 
     def rollback(self, candidate, previous):
+        if self.journal["data"].get("candidateActivationAttempted") == "true" and self.journal["data"].get("mergeFenceRequired") == "true" and self.journal["data"].get("mergeFenceConfirmed") != "true":
+            self.stop(candidate)
+            self.route("none")
+            self.record("rollback-needs-merge-fence")
+            raise RuntimeError("Downgrade blocked: persisted merge fence was not confirmed; operator reconciliation required")
         self.record("rolling-back")
         self.stop(candidate)  # Never reactivate previous while candidate might own side effects.
         if previous:
@@ -248,6 +260,8 @@ class Release:
                 raise RuntimeError("operation id already used for different immutable inputs")
             if data["phase"] == "committed":
                 return
+            if data["phase"] == "rollback-needs-merge-fence":
+                raise RuntimeError("Rollback awaits explicit merge-fence reconciliation")
             if data["phase"] == "rolled-back":
                 raise RuntimeError("operation rolled back; use a new operation id after correcting failure")
         else:
@@ -267,6 +281,9 @@ class Release:
             if existing["spec"].get("replicas", 1) != 0 or self.kube.pods(candidate):
                 raise RuntimeError("candidate slot contains another live release; no workloads changed")
         try:
+            from review_authority import ensure_review_authority
+            ensure_review_authority(self)
+            data = self.journal["data"]
             desired = deployment(candidate, self.image, self.dataset, self.operation, self.kube.namespace)
             self.owned()
             if not existing:
@@ -283,6 +300,9 @@ class Release:
                     if instance:
                         known.add(instance)
             data["knownOwners"] = json.dumps(sorted(known))
+            # Persist the old controller's protocol before its status endpoint disappears.
+            if previous and self.status(previous).get("reviewHoldProtocolVersion", 0) < 1:
+                self.journal["data"]["mergeFenceRequired"] = "true"
             self.record("qualified")
             if previous:
                 previous_deploy = self.kube.get("deployments", "forge-" + previous)
@@ -293,6 +313,17 @@ class Release:
                               self.status(previous).get("activeRuns") == 0, "drain timed out")
                 self.stop(previous)
             self.record("old-stopped")
+            if self.journal["data"].get("mergeFenceRequired") == "true":
+                # The old UI can no longer change the stored operator intent.
+                # The candidate must confirm the old controller sees a hold
+                # before the new controller can accept any human review request.
+                self.record("fencing-merge")
+                fence = self.controllers.call(candidate, "merge-fence", self.operation)
+                if fence.get("held") is not True or fence.get("operationId") != self.operation or fence.get("projects", 0) < 1:
+                    raise RuntimeError("Candidate did not confirm a persisted merge fence")
+                self.journal["data"]["mergeFenceConfirmed"] = "true"
+            self.journal["data"]["candidateActivationAttempted"] = "true"
+            self.record("activating")
             self.activate(candidate)
             self.record("activated")
             self.route(candidate)

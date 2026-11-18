@@ -7,8 +7,35 @@ namespace Forge.Reviewer;
 
 public sealed partial class PRWatcher
 {
-    private static readonly SemaphoreSlim[] PollGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
-    private SemaphoreSlim PollGate(string taskId) => PollGates[(StringComparer.Ordinal.GetHashCode($"{_projectId}/{taskId}") & int.MaxValue) % PollGates.Length];
+    // Do not stripe these gates: a busy unrelated task would discard a valid
+    // event with WaitAsync(0), losing counter progress and adding reconciliation latency.
+    // Callers retain strong references through Release, including policy batches.
+    // Weak cache entries can therefore expire only after holders and waiters are
+    // gone; never remove a live gate or dispose a semaphore another caller owns.
+    private static readonly Dictionary<string, WeakReference<SemaphoreSlim>> PollGates = new(StringComparer.Ordinal);
+    private static readonly object PollGateCacheLock = new();
+    private static int PollGateCacheReads;
+    private static string PollGateKey(string? projectId, string taskId) => $"{projectId}/{taskId}";
+    private static SemaphoreSlim GetPollGateByKey(string key)
+    {
+        lock (PollGateCacheLock)
+        {
+            if (++PollGateCacheReads % 256 == 0)
+                foreach (var stale in PollGates.Where(pair => !pair.Value.TryGetTarget(out _)).Select(pair => pair.Key).ToArray())
+                    PollGates.Remove(stale);
+            if (PollGates.TryGetValue(key, out var weak) && weak.TryGetTarget(out var existing)) return existing;
+            var created = new SemaphoreSlim(1, 1);
+            PollGates[key] = new(created);
+            return created;
+        }
+    }
+    internal static SemaphoreSlim GetPollGate(string? projectId, string taskId) => GetPollGateByKey(PollGateKey(projectId, taskId));
+    internal static IReadOnlyList<SemaphoreSlim> GetPollGatesForTasks(string? projectId, IEnumerable<string> taskIds)
+        => taskIds.Select(id => PollGateKey(projectId, id)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)
+            .Select(GetPollGateByKey).ToArray();
+    private sealed class LocalPollScope { public string Id { get; } = Guid.NewGuid().ToString("N"); }
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IIssueStore, LocalPollScope> LocalPollScopes = new();
+    private SemaphoreSlim PollGate(string taskId) => GetPollGate(_projectId ?? LocalPollScopes.GetOrCreateValue(_issues).Id, taskId);
 
     public async Task<WatchPollOutcome> PollWatchedTaskAsync(IssueRecord task, CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
@@ -17,7 +44,14 @@ public sealed partial class PRWatcher
     {
         var gate = PollGate(task.Id);
         if (!await gate.WaitAsync(0, cancellationToken)) return WatchPollOutcome.Pending;
-        try { return await PollWatchedTaskCoreAsync(task, cancellationToken, reviewsOverride, headShaOverride, mergeableOverride, changedFilesOverride); }
+        try
+        {
+            var current = await _issues.GetAsync(task.Id, cancellationToken);
+            if (current is null || current.GetMetadata("prNumber") != task.GetMetadata("prNumber"))
+                return WatchPollOutcome.Pending;
+            task = current;
+            return await PollWatchedTaskCoreAsync(task, cancellationToken, reviewsOverride, headShaOverride, mergeableOverride, changedFilesOverride);
+        }
         finally { gate.Release(); }
     }
 

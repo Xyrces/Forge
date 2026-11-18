@@ -6,6 +6,18 @@ namespace Forge.Tests;
 public class GitHubCheckPolicyTests
 {
     [Theory]
+    [InlineData(1, 1, CommitState.Success, 1, CommitState.Failure, CommitState.Failure)]
+    [InlineData(1, 1, CommitState.Success, 1, CommitState.Pending, CommitState.Pending)]
+    [InlineData(1, 1, CommitState.Success, 0, CommitState.Pending, CommitState.Success)]
+    [InlineData(0, 0, CommitState.Pending, 1, CommitState.Success, CommitState.Success)]
+    [InlineData(0, 0, CommitState.Pending, 0, CommitState.Pending, CommitState.Pending)]
+    [InlineData(2, 1, CommitState.Success, 1, CommitState.Success, CommitState.Pending)]
+    [InlineData(1, 1, CommitState.Failure, 1, CommitState.Success, CommitState.Failure)]
+    public void CurrentHeadMustSatisfyEveryCiSignal(int reported, int observed, CommitState checks,
+        int contexts, CommitState statuses, CommitState expected)
+        => Assert.Equal(expected, GitHubService.CombineCiSignals(reported, observed, checks, contexts, statuses));
+
+    [Theory]
     [InlineData(CheckConclusion.Cancelled)]
     [InlineData(CheckConclusion.Failure)]
     [InlineData(CheckConclusion.TimedOut)]

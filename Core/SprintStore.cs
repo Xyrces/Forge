@@ -34,6 +34,12 @@ public interface ISprintStore
         => throw new NotSupportedException("Atomic sprint activation is required.");
     Task<IReadOnlyList<SprintRecord>> ListAsync(bool activeOnly, CancellationToken ct = default);
     Task<SprintRecord?> GetAsync(string id, CancellationToken ct = default);
+    async Task<SprintRecord?> FindForIssueAsync(string issueId, CancellationToken ct = default)
+    {
+        foreach (var sprint in await ListAsync(false, ct))
+            if ((await GetIssueIdsAsync(sprint.Id, ct)).Contains(issueId)) return sprint;
+        return null;
+    }
     Task<SprintRecord?> GetActiveAsync(CancellationToken ct = default);
     Task<SprintRecord> UpdateAsync(string id, IReadOnlyDictionary<string, object?> fields, CancellationToken ct = default);
     Task DeleteAsync(string id, CancellationToken ct = default);
@@ -180,6 +186,21 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
         cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? Read(rd) : null;
+    }
+
+    public async Task<SprintRecord?> FindForIssueAsync(string issueId, CancellationToken ct = default)
+    {
+        await using var connection = await _issues.Db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        var dialect = _issues.Db.Dialect;
+        command.CommandText = $"""
+            SELECT {dialect.Top(1)}s.id,s.name,s.goal,s.start_date,s.end_date,s.status,s.created_at,s.updated_at
+            FROM {T("sprint_issue")} m JOIN {T("sprint")} s ON s.id=m.sprint_id
+            WHERE m.issue_id=@issue ORDER BY s.start_date DESC,s.created_at DESC,s.id{dialect.Limit(1)}
+            """;
+        command.AddParam("@issue", issueId);
+        await using var rows = await command.ExecuteReaderAsync(ct);
+        return await rows.ReadAsync(ct) ? Read(rows) : null;
     }
 
     public async Task<SprintRecord?> GetActiveAsync(CancellationToken ct = default)

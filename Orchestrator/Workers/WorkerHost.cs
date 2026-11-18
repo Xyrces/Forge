@@ -22,6 +22,7 @@ public static class WorkerHost
         var assignment = await attempts.GetAsync(worker.AttemptId, ct) ?? throw new InvalidOperationException("Unknown worker attempt.");
         if (assignment.DatasetId != options.Controller.DatasetId) throw new InvalidOperationException("Worker dataset mismatch.");
         if (!await attempts.ClaimAsync(assignment.Id, worker.PodUid, ct)) return 0; // duplicate pod is inert
+        var workerStartedAt = DateTimeOffset.UtcNow;
         using var runCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var monitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var logger = loggerFactory.CreateLogger("Forge.Worker");
@@ -35,6 +36,7 @@ public static class WorkerHost
             using var runtime = await BuildRunner(options, assignment, attempts, loggerFactory, runCancellation.Token);
             var context = invocation.Context.ToDictionary(x => x.Key, x => (object)x.Value);
             context["workerAttemptId"] = assignment.Id;
+            context["workerStartedAt"] = workerStartedAt.ToString("O");
             var modelMinutes = invocation.Context.TryGetValue("modelTimeoutMinutes", out var configured)
                 ? double.Parse(configured, System.Globalization.CultureInfo.InvariantCulture)
                 : options.Spawner.AgentRunTimeoutMinutes;
@@ -114,8 +116,11 @@ public static class WorkerHost
         ct.ThrowIfCancellationRequested();
         var engineering = invocation.Role is AgentType.CoreDev or AgentType.ClientDev;
         var modelCompleted = DateTimeOffset.UtcNow;
+        DateTimeOffset? Measured(string key) => context.TryGetValue(key, out var value)
+            && DateTimeOffset.TryParse(value?.ToString(), out var timestamp) ? timestamp : null;
         result = result with { Phases = new WorkerPhaseTiming(modelStarted, modelCompleted,
-            engineering ? modelCompleted : null) };
+            engineering ? modelCompleted : null, EligibleAt: Measured("dispatchEligibleAt"),
+            WorkerStartedAt: Measured("workerStartedAt")) };
         if (recordProgress is not null) await recordProgress(result, ct);
         if (engineering)
         {

@@ -445,6 +445,7 @@ public static class ForgeComposition
             secrets: secretStore, gates: stageGates, lifecycle: lifecycle,
             eventPublisher: eventPublisher, hasDurableWorker: hasDurableWorker);
         services.AddSingleton(dispatchBundleFactory);
+        services.AddSingleton<IProjectDispatchBundleFactory>(dispatchBundleFactory);
 
         // Watch pipeline + scheduler triggers: ONE consumer per topic
         // (the in-memory transport is competing-consumer) fanning out
@@ -468,6 +469,10 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.SpecStatusChangedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SpecStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.SprintStatusChangedConsumer(
+            sp.GetRequiredService<ITransport>(), wakeups,
+            sp.GetRequiredService<ILogger<Consumers.SprintStatusChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintStatusChangedConsumer>());
         services.AddSingleton(sp => new Consumers.TaskStatusChangedConsumer(
             sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
             sp.GetRequiredService<ILogger<Consumers.TaskStatusChangedConsumer>>()));
@@ -476,10 +481,11 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
             sp.GetRequiredService<ILogger<Consumers.SprintOutcomeChangedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintOutcomeChangedConsumer>());
-        services.AddSingleton(sp => new Consumers.SprintStatusChangedConsumer(
-            sp.GetRequiredService<ITransport>(), wakeups,
-            sp.GetRequiredService<ILogger<Consumers.SprintStatusChangedConsumer>>()));
-        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.PrWatchRequestedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<IProjectDispatchBundleFactory>(),
+            sp.GetRequiredService<IProjectStore>(), sp.GetRequiredService<WatchSweepService>(),
+            sp.GetRequiredService<ILogger<Consumers.PrWatchRequestedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.PrWatchRequestedConsumer>());
         services.AddSingleton(sp => new Consumers.FollowUpFiledConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.FollowUpFiledConsumer>>()));
@@ -775,7 +781,9 @@ public static class ForgeComposition
             budgetStore: options.Controller.Enabled ? new Core.Control.DurableBudgetStore(registryIssues.Db) : null,
             budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
             initiativeApprovals: initiativeApprovals,
-            mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null));
+            mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null,
+            workerHistory: options.Worker.Enabled ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
+                .ListSummariesAsync(options.Controller.DatasetId, projectId, taskId, ct) : null));
 
         // Schedulers: trigger events kick via the wakeup signals; the
         // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is

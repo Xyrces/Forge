@@ -180,6 +180,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             {
                 context["dispatchId"] = dispatchId;
             }
+            if (issue.GetMetadata("dispatchEligibleAt") is { Length: > 0 } eligibleAt)
+                context["dispatchEligibleAt"] = eligibleAt;
             // Triage model escalation (phase 3): the dispatch path
             // consumed the task's llm/taskModel marker and stamped
             // modelEscalatedTo — this run rides THAT provider+model

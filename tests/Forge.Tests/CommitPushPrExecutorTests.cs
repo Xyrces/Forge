@@ -92,6 +92,7 @@ public class CommitPushPrExecutorTests : IDisposable
     /// </summary>
     private sealed class StubGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public PullRequest? OpenPrForBranch;
         public StubGitHub() : base(new Configuration.AgentOptions().GitHub) { }
         public override Task<PullRequest?> GetOpenPullRequestForBranchAsync(

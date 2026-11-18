@@ -66,6 +66,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
     private readonly Func<string, string, CancellationToken, Task<bool>>? _hasActiveWorker;
+    private readonly Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? _workerHistory;
     private readonly Core.Control.IDurableBudgetStore? _budgetStore;
     private readonly string? _budgetDatasetId;
     private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
@@ -137,9 +138,11 @@ public sealed class DashboardHost : IAsyncDisposable
         Core.Control.IDurableBudgetStore? budgetStore = null,
         string? budgetDatasetId = null,
         Agents.InitiativeApprovalService? initiativeApprovals = null,
-        string? mutationTokenFile = null)
+        string? mutationTokenFile = null,
+        Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null)
     {
         _mutationTokenFile = mutationTokenFile;
+        _workerHistory = workerHistory;
         _initiativeApprovals = initiativeApprovals;
         _options = options;
         _headroom = headroom;
@@ -463,6 +466,14 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory,
             _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _sprintPropose?.Planning);
 
+        if (!string.IsNullOrWhiteSpace(_githubOptions?.WebhookSecretFile))
+        {
+            if (_projectStore is null || _eventPublisher is null)
+                throw new InvalidOperationException("GitHub webhook ingress requires the project registry and event publisher.");
+            var webhookSecret = (await File.ReadAllTextAsync(_githubOptions.WebhookSecretFile, cancellationToken)).Trim();
+            GitHubWebhookEndpoints.MapGitHubWebhookEndpoints(_app, webhookSecret, _projectStore, _eventPublisher);
+        }
+
         if (_projectFactory is not null && _slots is not null)
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
@@ -539,7 +550,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         BudgetEndpoints.MapBudgetEndpoints(_app, _budgetStore, _budgetDatasetId, _logger);
         if (_agentRuns is not null)
         {
-            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory);
+            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory, _issues);
         }
         AgentsEndpoints.MapAgentsEndpoints(_app, new Agents.RoleAgentRegistry(),
             _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory,
@@ -549,6 +560,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
         var runningRevision = new RunningRevisionReader(_logger);
         CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory, runningRevision.ReadAsync);
+        TaskReviewEndpoints.MapTaskReviewEndpoints(_app, _issues, _projectFactory, _eventPublisher, _logger);
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)
@@ -598,7 +610,7 @@ if (_groomerRuns is not null)
 
             TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
                 _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
-                _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker);
+                _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker, workerHistory: _workerHistory);
         }
 
         _app.MapBuildInfoEndpoint(runningRevision);

@@ -220,8 +220,8 @@ public sealed class AgentRunStore : IDisposable
         }
     }
 
-    public async Task<IReadOnlyList<AgentRunRecord>> ListActiveAsync(CancellationToken ct = default)
-        => await QueryAsync("WHERE status = 'running' ORDER BY started_at DESC", null, ct);
+    public async Task<IReadOnlyList<AgentRunRecord>> ListActiveAsync(CancellationToken ct = default, string? taskId = null)
+        => await QueryAsync("WHERE status = 'running'" + (taskId is null ? "" : $" AND task_id = '{taskId.Replace("'", "''")}'") + " ORDER BY started_at DESC", null, ct);
 
     /// <summary>
     /// Fail 'running' rows whose heartbeat went stale (or ALL running

@@ -195,20 +195,6 @@ public sealed partial class PRWatcher
             return WatchPollOutcome.Merged;
         }
 
-        // Stale window anchored to the PR-open time (prOpenedAt
-        // metadata, written by CommitPushPrExecutor / recovery;
-        // legacy rows fall back to task creation).
-        var prOpenedRaw = task.GetMetadata("prOpenedAt");
-        var anchor = DateTimeOffset.TryParse(prOpenedRaw, out var openedAt)
-            ? openedAt.UtcDateTime : task.CreatedAt;
-        if (DateTime.UtcNow - anchor > _staleAfter)
-        {
-            _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
-            await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
-            await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
-            return WatchPollOutcome.Stale;
-        }
-
         var pr = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
 
         // Externally merged (operator merged by hand, or the
@@ -240,6 +226,46 @@ public sealed partial class PRWatcher
         // directly without going through Octokit's
         // PullRequest.Head (which has a private setter).
         var sha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+
+        var formalRequired = _gitHub.RequireFormalReview && reviewsOverride is null;
+        FormalGate? formalGate = null;
+        if (formalRequired)
+        {
+            formalGate = await TryReadFormalGateAsync(task, pr, sha, cancellationToken);
+            if (formalGate is null) return WatchPollOutcome.Pending;
+            if (!formalGate.Waiting) await RecordHumanWaitAsync(task, false, cancellationToken);
+        }
+        if (_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
+        {
+            if (formalRequired) await RecordHumanWaitAsync(task, false, cancellationToken);
+            return WatchPollOutcome.Pending;
+        }
+        if (_runs is not null && (await _runs.ListActiveAsync(cancellationToken))
+            .Any(r => r.TaskId == taskId && r.Role is "CoreDev" or "ClientDev"))
+        {
+            if (formalRequired) await RecordHumanWaitAsync(task, false, cancellationToken);
+            return WatchPollOutcome.Pending;
+        }
+        // Human decisions have no expiry or paid retry budget. Current-head findings
+        // can still enter rework once; old-head objections only hold the merge.
+        if (formalGate?.Waiting != true)
+        {
+            // Stale window anchored to the PR-open time (prOpenedAt
+            // metadata, written by CommitPushPrExecutor / recovery;
+            // legacy rows fall back to task creation).
+            var prOpenedRaw = task.GetMetadata("prOpenedAt");
+            var anchor = DateTimeOffset.TryParse(prOpenedRaw, out var openedAt)
+                ? openedAt.UtcDateTime : task.CreatedAt;
+            var timingTask = await _issues.GetAsync(taskId, cancellationToken) ?? task;
+            if (DateTime.UtcNow - anchor - TimeSpan.FromSeconds(ReviewWaitTiming.CompletedSeconds(timingTask)) > _staleAfter)
+            {
+                _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
+                await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
+                await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
+                return WatchPollOutcome.Stale;
+            }
+
+        }
 
         // Record the observed live head. The sweep's QA-due check
         // anchors currency to this: branchSha only moves on Forge's
@@ -286,6 +312,8 @@ public sealed partial class PRWatcher
         var ciRedOutcome = wf?.GetEdgeSelection("pr", "rework", "rework") ?? "rework";
 
         var ci = await _gitHub.GetCommitStatusAsync(sha, cancellationToken);
+        if (formalRequired && ci != CommitState.Success)
+            await RecordHumanWaitAsync(task, false, cancellationToken);
         // CI-never-fired detection (live 2026-08-18, porthorizon
         // task-651/PR #905): a head with ZERO CI signal (no check
         // runs, no legacy statuses) reads Pending forever — the merge
@@ -339,7 +367,7 @@ public sealed partial class PRWatcher
         // block the new head (the same SHA rule the reviewer-agent
         // verdict below already follows). The reviewsOverride test
         // seam supplies states directly and is treated as current-head.
-        var reviewStates = reviewsOverride is not null
+        var reviewStates = formalRequired ? new List<PullRequestReviewState>() : reviewsOverride is not null
             ? reviewsOverride(prNumber)
             : (await _gitHub.GetReviewsAsync(prNumber, cancellationToken))
                 .Where(r => string.Equals(r.CommitId, sha, StringComparison.Ordinal))
@@ -363,6 +391,13 @@ public sealed partial class PRWatcher
             || (agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.RequestChanges), StringComparison.Ordinal));
         var reviewErrored = agentVerdictCurrent && string.Equals(agentVerdict, nameof(ReviewerVerdict.Error), StringComparison.Ordinal);
 
+        if (formalGate is not null)
+        {
+            approved = formalGate.Approved;
+            changesRequested = formalGate.Requests.Count > 0;
+            reviewErrored = false; // Integration failures are holds, never engineering strikes.
+        }
+
         var ciGreen = ci == CommitState.Success;
         var ciFailed = ci is CommitState.Failure or CommitState.Error;
 
@@ -380,6 +415,10 @@ public sealed partial class PRWatcher
             && (string.Equals(qaVerdict, QaDispatcher.VerdictPass, StringComparison.Ordinal)
                 || string.Equals(qaVerdict, QaDispatcher.VerdictNotApplicable, StringComparison.Ordinal)));
         var qaFailed = _qaEnabled && qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal);
+        if (formalGate is not null)
+            await RecordHumanWaitAsync(task, formalGate.Waiting && formalGate.AutomatedSatisfied
+                && formalGate.Requests.Count == 0 && ciGreen && qaPassed
+                && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
 
         // Rework guard: a rework round was already queued FOR THIS
         // HEAD. The guard reads the MACHINE's record on the task
@@ -392,26 +431,23 @@ public sealed partial class PRWatcher
         {
             var guardTask = await _issues.GetAsync(taskId, cancellationToken);
             var recordedSha = guardTask?.GetMetadata("reworkForSha");
+            // A live worker is not stalled, even if a legacy metadata write
+            // lost the head it was responding to. Verification is part of
+            // worker ownership too, after the model run has finished.
+            if (_runs is not null)
+            {
+                var activeRun = (await _runs.ListActiveAsync(cancellationToken))
+                    .Any(r => string.Equals(r.TaskId, taskId, StringComparison.Ordinal)
+                        && r.Role is "CoreDev" or "ClientDev");
+                if (activeRun)
+                {
+                    return WatchPollOutcome.Pending;
+                }
+            }
+            if (_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
+                return WatchPollOutcome.Pending;
             if (string.Equals(recordedSha, sha, StringComparison.Ordinal))
             {
-                // Run-registry first: an active dev run for this task
-                // means the round is definitionally not stalled —
-                // regardless of how long the queue + run have taken
-                // (observed live 2026-07-27: the clock measured from
-                // rework-fire time and could re-fire against a
-                // healthy 30-min run).
-                if (_runs is not null)
-                {
-                    var activeRun = (await _runs.ListActiveAsync(cancellationToken))
-                        .Any(r => string.Equals(r.TaskId, taskId, StringComparison.Ordinal)
-                            && r.Role is "CoreDev" or "ClientDev");
-                    if (activeRun)
-                    {
-                        return WatchPollOutcome.Pending;
-                    }
-                }
-                if (_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
-                    return WatchPollOutcome.Pending;
                 var enteredRaw = guardTask?.GetMetadata("stateEnteredAt");
                 var enteredAt = DateTimeOffset.TryParse(enteredRaw, out var ts)
                     ? ts.UtcDateTime : guardTask?.UpdatedAt ?? DateTime.MinValue;
@@ -478,6 +514,20 @@ public sealed partial class PRWatcher
                 _logger.LogInformation("PR #{PrNumber}: merge held by operator gate", prNumber);
                 return WatchPollOutcome.Pending;
             }
+            if (formalRequired)
+            {
+                var current = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+                if (current.Merged || current.State.Value != ItemState.Open || current.Head.Sha != sha)
+                    return WatchPollOutcome.Pending;
+                var currentGate = await TryReadFormalGateAsync(task, current, sha, cancellationToken);
+                if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0
+                    || await _gitHub.GetCommitStatusAsync(sha, cancellationToken) != CommitState.Success)
+                    return WatchPollOutcome.Pending;
+                // Read decisions after CI as well, minimizing the last-read/merge race.
+                currentGate = await TryReadFormalGateAsync(task, current, sha, cancellationToken);
+                if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0)
+                    return WatchPollOutcome.Pending;
+            }
             var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
             if (merged)
             {
@@ -495,6 +545,12 @@ public sealed partial class PRWatcher
                     taskId, $"PR #{prNumber} merged and branch deleted"));
                 _logger.LogInformation("PR #{PrNumber} merged; task {TaskId} completed", prNumber, taskId);
                 return WatchPollOutcome.Merged;
+            }
+            if (formalRequired)
+            {
+                var refused = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
+                await TryReadFormalGateAsync(task, refused, refused.Head.Sha, cancellationToken);
+                return WatchPollOutcome.Pending;
             }
             // Merge refused with mergeable previously unknown: the
             // computation may have landed by now — a conflict gets
@@ -630,7 +686,9 @@ public sealed partial class PRWatcher
         if (changesRequested)
         {
             await ReportAsync(Forge.Core.TaskEvent.ReviewChangesRequested);
-            var notes = task.GetMetadata("reviewNotes");
+            var notes = formalGate is not null
+                ? await _gitHub.GetReviewReworkContextAsync(prNumber, formalGate.Requests, cancellationToken)
+                : task.GetMetadata("reviewNotes");
             return await ReworkOrTripAsync(
                 task, worktreePath, sha,
                 reason: "reviewer requested changes",
@@ -751,13 +809,6 @@ public sealed partial class PRWatcher
         var prText = task.GetMetadata("prNumber");
         if (!int.TryParse(prText, out var prNumber)) return null;
 
-        var attempts = int.TryParse(task.GetMetadata("autoResumeAttempts"), out var a) ? a : 0;
-        if (attempts >= MaxAutoResumeAttempts)
-        {
-            _logger.LogDebug("Task {Id}: mergeable-resume budget exhausted; stays operator-decision", task.Id);
-            return null;
-        }
-
         PullRequest pr;
         try
         {
@@ -768,6 +819,22 @@ public sealed partial class PRWatcher
             _logger.LogDebug(ex, "Task {Id}: mergeable-resume PR fetch failed; skipping", task.Id);
             return null;
         }
+        if (pr.Merged)
+        {
+            // Observe completed delivery even after the recovery retry budget was
+            // exhausted. This does not initiate a new merge or consume a retry.
+            await PollWatchedTaskCoreAsync(task, cancellationToken,
+                reviewsOverride is null ? null : number => reviewsOverride(number).ToList(),
+                headShaOverride, mergeableOverride, null);
+            return null;
+        }
+        var attempts = int.TryParse(task.GetMetadata("autoResumeAttempts"), out var a) ? a : 0;
+        if (attempts >= MaxAutoResumeAttempts)
+        {
+            _logger.LogDebug("Task {Id}: mergeable-resume budget exhausted; stays operator-decision", task.Id);
+            return null;
+        }
+
         // Octokit fakes in tests leave State unset; a PR we just
         // fetched for a live watch is treated as open unless the API
         // says otherwise.
@@ -798,19 +865,25 @@ public sealed partial class PRWatcher
         }
         if (ci != CommitState.Success) return null;
 
+        if (_gitHub.RequireFormalReview && reviewsOverride is null)
+        {
+            var gate = await TryReadFormalGateAsync(task, pr, sha, cancellationToken);
+            if (gate is null || !gate.Approved || gate.Requests.Count > 0) return null;
+        }
+
         // Approval at head: recorded reviewer verdict, or a formal
         // review at the current head.
         var recordedApprove =
             string.Equals(task.GetMetadata("reviewSha"), sha, StringComparison.Ordinal)
             && task.GetMetadata("reviewVerdict") == "Approve";
-        var formalApprove = false;
+        var formalApprove = _gitHub.RequireFormalReview && reviewsOverride is null;
         try
         {
             if (reviewsOverride is not null)
             {
                 formalApprove = reviewsOverride(prNumber).Contains(PullRequestReviewState.Approved);
             }
-            else
+            else if (!_gitHub.RequireFormalReview)
             {
                 var reviews = await _gitHub.GetReviewsAsync(prNumber, cancellationToken);
                 formalApprove = reviews.Any(r => r.State.Value == PullRequestReviewState.Approved
@@ -821,7 +894,7 @@ public sealed partial class PRWatcher
         {
             _logger.LogDebug(ex, "Task {Id}: mergeable-resume reviews fetch failed; using recorded verdict only", task.Id);
         }
-        if (!recordedApprove && !formalApprove) return null;
+        if ((!_gitHub.RequireFormalReview || reviewsOverride is not null) && !recordedApprove && !formalApprove) return null;
 
         _logger.LogInformation(
             "PR #{PrNumber} (task {Id}): blockage cleared externally — mergeable + CI green + approved at {Sha}; resuming watch",
@@ -936,6 +1009,13 @@ public sealed partial class PRWatcher
         // metadata merge below must not clobber the machine's fresh
         // state writes with stale seeded values.
         var current = await _issues.GetAsync(taskId, cancellationToken) ?? task;
+        // A worker owns this response through verification and publication, not
+        // merely until its final model message. Never revoke it because an old
+        // verdict was observed again, even if legacy accounting lost its SHA.
+        if ((_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
+            || (_runs is not null && (await _runs.ListActiveAsync(cancellationToken)).Any(r =>
+                r.TaskId == taskId && r.Role is "CoreDev" or "ClientDev")))
+            return WatchPollOutcome.Pending;
         var attempts = 0;
         {
             var raw = current.GetMetadata("reworkAttempts");
@@ -978,13 +1058,18 @@ public sealed partial class PRWatcher
         _logger.LogInformation(
             "PR watch (task {TaskId}): rework round {N}/{Max} — {Reason}",
             taskId, attempts, MaxReworkAttempts, reason);
-        await ReportLifecycleAsync(task, Forge.Core.TaskEvent.ReworkFired, cancellationToken,
-            extraMetadata: new Dictionary<string, object> { ["reworkForSha"] = headSha });
-        var metadata = ParseMetadataDict(current.MetadataJson);
+        // Commit the lifecycle stamp, budget and queue transition together.
+        // Copying the old metadata after ReportAsync used to restore the old
+        // reworkForSha and consume another strike on every poll of one verdict.
+        var metadata = new Dictionary<string, object> { ["reworkForSha"] = headSha };
         metadata["reworkAttempts"] = attempts.ToString();
         metadata["reworkReason"] = reason;
         metadata["reworkContext"] = context.Length > 3000 ? context[..3000] : context;
-        await _issues.TransitionAsync(taskId, IssueStatus.Pending, error: null, metadata: metadata, ct: cancellationToken);
+        if (_lifecycle is not null)
+            await _lifecycle.ReportAsync(_issues, current, Forge.Core.TaskEvent.ReworkFired,
+                watch: null, hasActiveDevRun: false, cancellationToken, metadata, issueStatus: IssueStatus.Pending);
+        else
+            await _issues.TransitionAsync(taskId, IssueStatus.Pending, error: null, metadata: metadata, ct: cancellationToken);
 
         // The round record lives on the TASK via the machine
         // (state=ReworkQueued + reworkForSha, written by the

@@ -1,0 +1,108 @@
+using Forge.Agents;
+using Forge.Core;
+using Forge.Reviewer;
+using Microsoft.Extensions.Logging.Abstractions;
+using Octokit;
+using NewIssue = Forge.Core.NewIssue;
+using Xunit;
+
+namespace Forge.Tests;
+
+public sealed class FormalReviewPublicationTests
+{
+    [Theory]
+    [InlineData("Looks approved", ReviewerVerdict.Error)]
+    [InlineData("REVIEWER_VERDICT: APPROVE\nMore text", ReviewerVerdict.Error)]
+    [InlineData("Do not REQUEST_CHANGES for nits\nREVIEWER_VERDICT: APPROVE", ReviewerVerdict.Approve)]
+    [InlineData("REVIEWER_VERDICT: REQUEST_CHANGES\n", ReviewerVerdict.RequestChanges)]
+    public void VerdictMustBeExplicitAndTerminal(string output, ReviewerVerdict expected) => Assert.Equal(expected, ReviewFindings.ParseVerdict(output));
+
+    [Fact]
+    public void FindingsUseExactDiffSideAndUnanchorableFindingsStayInSummary()
+    {
+        const string diff = "diff --git a/a.cs b/a.cs\n--- a/a.cs\n+++ b/a.cs\n@@ -5,2 +5,2 @@\n-old\n+new\n context\n";
+        var output = "REVIEWER_FINDING: {\"path\":\"a.cs\",\"line\":5,\"side\":\"LEFT\",\"body\":\"Removed check is needed\"}\n"
+            + "REVIEWER_FINDING: {\"path\":\"a.cs\",\"line\":400,\"side\":\"RIGHT\",\"body\":\"Cross-file issue\"}\nREVIEWER_VERDICT: REQUEST_CHANGES";
+        var draft = ReviewFindings.Create(2, "head", "RequestChanges", output, diff);
+        Assert.Single(draft.Findings);
+        Assert.Equal("LEFT", draft.Findings[0].Side);
+        Assert.Contains("Cross-file issue", draft.Summary);
+        Assert.DoesNotContain("REVIEWER_VERDICT", draft.Summary);
+        Assert.NotEqual(ReviewFindings.Marker(draft), ReviewFindings.Marker(draft with { HeadSha = "other" }));
+    }
+
+    private sealed class Runner : IAgentRunner
+    {
+        public int Calls;
+        public string Output = "Assessment\nREVIEWER_VERDICT: APPROVE";
+        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context = null, CancellationToken ct = default)
+        { Calls++; return Task.FromResult(new AgentRunResult(Output, null, 0, 0, TimeSpan.Zero)); }
+    }
+
+    [Fact]
+    public async Task InvalidModelVerdictsCannotSpendIndefinitelyAtSameHead()
+    {
+        var directory = TempRoot.Instance.NewDirectory("review-errors");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        { ["prNumber"] = 7, ["worktreePath"] = directory }));
+        var runner = new Runner { Output = "No usable verdict" };
+        var dispatcher = new ReviewerDispatcher(issues, new PublicationGitHub(), runner, NullLogger<ReviewerDispatcher>.Instance);
+        for (var i = 0; i < 6; i++) await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        Assert.Equal(3, runner.Calls);
+        Assert.Equal("3", (await issues.GetAsync(task.Id))!.GetMetadata("reviewErrorAttempts"));
+    }
+
+    private sealed class PublicationGitHub : GitHubService
+    {
+        public PublicationGitHub() : base("o", "r", null) { }
+        public override string? ReviewerLogin => "reviewer[bot]";
+        public int Publications;
+        public bool MissingIdentity, DiscoverPublished = true;
+        private PublishedReview? _published;
+        public override Task EnsureReviewerIdentityAsync(int pr, CancellationToken ct) => MissingIdentity ? Task.FromException(new InvalidOperationException("missing reviewer App")) : Task.CompletedTask;
+        public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult(new PullRequest(number));
+        public override Task<string> GetPullRequestDiffAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult("");
+        public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
+        public override Task<IReadOnlyList<PrComment>> GetIssueCommentsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PrComment>>([]);
+        public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult(CommitState.Success);
+        public override Task<PublishedReview?> FindPublishedReviewAsync(int pr, ReviewDraft draft, string marker, CancellationToken ct) => Task.FromResult(DiscoverPublished ? _published : null);
+        public override Task<PublishedReview> PublishFormalReviewAsync(int pr, ReviewDraft draft, string marker, CancellationToken ct)
+        {
+            Publications++;
+            _published = new(draft.Round, draft.HeadSha, draft.Verdict, draft.Summary, ReviewerLogin!, "https://github.com/o/r/pull/7#pullrequestreview-1", DateTimeOffset.UtcNow, draft.Findings);
+            throw new IOException("Response lost after GitHub accepted review");
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task UncertainPublicationReconcilesWithoutAnotherModelRunOrPost(bool visible)
+    {
+        var directory = TempRoot.Instance.NewDirectory("formal-review");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object> { ["prNumber"] = 7, ["worktreePath"] = directory }));
+        var github = new PublicationGitHub { DiscoverPublished = visible };
+        var runner = new Runner();
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        Assert.Equal(ReviewerVerdict.Error, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head"))!.Verdict);
+        Assert.NotNull((await issues.GetAsync(task.Id))!.GetMetadata("reviewDraft"));
+        var next = await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        Assert.Equal(visible ? ReviewerVerdict.Approve : ReviewerVerdict.Error, next!.Verdict);
+        Assert.Equal(1, runner.Calls);
+        Assert.Equal(1, github.Publications);
+    }
+
+    [Fact]
+    public async Task MissingReviewerIdentityStopsBeforePaidWork()
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("missing-reviewer"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object> { ["prNumber"] = 7 }));
+        var runner = new Runner();
+        var dispatcher = new ReviewerDispatcher(issues, new PublicationGitHub { MissingIdentity = true }, runner, NullLogger<ReviewerDispatcher>.Instance);
+        var result = await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        Assert.Equal(ReviewerVerdict.Error, result!.Verdict);
+        Assert.Equal(0, runner.Calls);
+    }
+}

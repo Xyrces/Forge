@@ -283,6 +283,7 @@ public sealed class OrchestratorAgent : IAgent
                     // method repeats this check before claim to fence later changes.
                     if (await CheckSprintAdmissionAsync(dev, bundle, cancellationToken) is not null)
                         continue;
+                    await bundle.IssueStore.ObserveDispatchEligibleAsync(dev, activeSprint.Id, cancellationToken);
                     var role = ResolveRoleName(dev.Type);
                     // Triage model escalation (phase 3): a task
                     // carrying an unconsumed marker acquires ONLY its

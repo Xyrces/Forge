@@ -7,7 +7,8 @@ public sealed record SprintHistoryResponse(string ProjectId, DateTime GeneratedA
     long Total, IReadOnlyList<ViewSprint> History, string? NextCursor);
 public sealed record SprintCardRow(string Id, string Title, string Type, string Status, string? State,
     int Priority, string? Assignee, string? PrNumber, string? ReworkAttempts, bool Boosted,
-    long BlockerCount, IReadOnlyList<string> BlockedBy, string? Situation, string? SituationTone);
+    long BlockerCount, IReadOnlyList<string> BlockedBy, string? Situation, string? SituationTone,
+    string? Label = null, string? NextActor = null, bool HumanReviewRequired = false, bool AwaitingHumanReview = false, string? NominatedHuman = null, bool HumanReviewTaskHold = false);
 public sealed record SprintBoardResponse(string ProjectId, DateTime GeneratedAt, ViewSprint? Sprint,
     long Total, long Done, IReadOnlyList<SprintCardRow> Members, string? NextCursor);
 

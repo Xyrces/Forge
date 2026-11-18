@@ -188,6 +188,7 @@ public sealed class EmptyPrVerificationTests : IDisposable
 
     private sealed class FakeGitHub() : GitHubService("owner", "repo", null)
     {
+        public override bool RequireFormalReview => false;
         public string Head = new('a', 40), Base = new('b', 40);
         public bool Closed, LoseCloseAck;
         public int CloseCalls, DeleteCalls, ReadCalls;

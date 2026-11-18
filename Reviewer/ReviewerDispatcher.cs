@@ -3,32 +3,15 @@ using Octokit;
 using Forge.Agents;
 using Forge.Core;
 using Forge.Dashboard;
-using static Octokit.PullRequestReviewState;
+using System.Text.Json;
 
 namespace Forge.Reviewer;
 
 /// <summary>
-/// The reviewer stage of the sprint review loop. For a pr-watch
-/// issue: fetch the PR's diff, run the Reviewer role against it,
-/// post the assessment as a GitHub comment (human-readable audit),
-/// and record the structured verdict in the watch's metadata —
-/// <c>reviewSha</c>, <c>reviewVerdict</c> (Approved |
-/// ChangesRequested | Error), <c>reviewNotes</c>, <c>reviewRound</c>.
-///
-/// <para>
-/// The queue metadata is the machine record the PRWatcher merges
-/// on; the GitHub comment is the audit trail. A formal GitHub
-/// review submission is attempted opportunistically (works when the
-/// engine identity differs from the PR author; GitHub hard-blocks
-/// formal self-reviews with a 422, which is tolerated — the local
-/// verdict is authoritative in the solo-identity model).
-/// </para>
-///
-/// <para>
-/// Reviews are per-head-SHA: a watch whose PR head moved since the
-/// last review gets re-reviewed (rework round). The watcher owns
-/// all issue transitions; this class only writes verdict metadata.
-/// </para>
+/// Reviews an exact PR revision, durably prepares the decision, and publishes a formal
+/// review through the separate reviewer identity. An uncertain publication is reconciled
+/// before any retry; it never becomes a metadata-only approval or an issue-comment fallback.
+/// The watcher owns task transitions and the final merge decision.
 /// </summary>
 public sealed class ReviewerDispatcher
 {
@@ -129,6 +112,22 @@ public sealed class ReviewerDispatcher
         // the e2e harness keeps SHA in a side channel); tests supply
         // the head SHA directly.
         var headSha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+        try { await _gitHub.EnsureReviewerIdentityAsync(prNumber, cancellationToken); }
+        catch (Exception ex)
+        {
+            await UpdateWatchMetadataAsync(task, m => { m["reviewIntegrationError"] = ex.Message; return m; }, cancellationToken);
+            return new(ReviewerVerdict.Error, "", headSha, ex.Message);
+        }
+        ReviewDraft? pending;
+        try { pending = JsonSerializer.Deserialize<ReviewDraft>(task.GetMetadata("reviewDraft") ?? "null", ReviewFindings.Json); }
+        catch (JsonException ex)
+        {
+            var draftError = "Saved review draft is invalid; operator reconciliation is required: " + ex.Message;
+            await UpdateWatchMetadataAsync(task, m => { m["reviewIntegrationError"] = draftError; return m; }, cancellationToken);
+            return new(ReviewerVerdict.Error, "", headSha, draftError);
+        }
+        if (pending is not null && pending.HeadSha == headSha)
+            return await CompleteDraftAsync(task, prNumber, pending, cancellationToken, headShaOverride);
 
         // Per-SHA dedupe: the watch sweep calls this every pass; only
         // a head move (rework push) triggers a fresh round. An Error
@@ -136,9 +135,13 @@ public sealed class ReviewerDispatcher
         // watcher's circuit breaker bounds the retries).
         var reviewedSha = task.GetMetadata("reviewSha");
         var recordedVerdict = task.GetMetadata("reviewVerdict");
+        if (_gitHub.RequireFormalReview && reviewedSha == headSha && recordedVerdict == nameof(ReviewerVerdict.Error)
+            && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var errorAttempts) && errorAttempts >= 3)
+            return null; // Bounded paid attempts; a new head or explicit operator reconciliation is required.
         if (string.Equals(reviewedSha, headSha, StringComparison.Ordinal)
             && !string.IsNullOrEmpty(recordedVerdict)
-            && recordedVerdict != nameof(ReviewerVerdict.Error))
+            && recordedVerdict != nameof(ReviewerVerdict.Error)
+            && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha))
         {
             return null;
         }
@@ -265,6 +268,7 @@ public sealed class ReviewerDispatcher
         var prompt = incremental
             ? BuildReReviewPrompt(pr, diff, task, previousReviewSha!, recordedVerdict!, task.GetMetadata("reviewNotes"), worktreePath, reviewContext)
             : BuildReviewerPrompt(pr, diff, task, worktreePath, headSha, reviewContext);
+        prompt += "\n\n" + ReviewFindings.Instructions;
         ReviewerVerdict verdict;
         string body;
         string? error = null;
@@ -306,6 +310,7 @@ public sealed class ReviewerDispatcher
             var result = await _agentRunner.RunAsync(
                 AgentType.Reviewer, prompt, sessionId: null, context: runnerContext, ct: timeoutCts.Token);
             (verdict, body) = ParseReviewerOutput(result.Text);
+            if (verdict == ReviewerVerdict.Error) error = "Reviewer output did not end with an explicit valid verdict.";
         }
         catch (OperationCanceledException) when (_agentRunner is IReviewWorkerLifecycle)
         {
@@ -327,41 +332,26 @@ public sealed class ReviewerDispatcher
         if (_agentRunner is IReviewWorkerLifecycle && consumed is null)
             return null; // Uncertain/in-flight worker is not a completed review attempt.
 
-        // Audit trail on GitHub (comments are allowed on own PRs;
-        // only formal reviews are identity-restricted).
         if (verdict != ReviewerVerdict.Error)
         {
-            try
-            {
-                await _gitHub.CreateIssueCommentAsync(prNumber,
-                    $"**[Forge Reviewer — round {round}]** {verdict}\n\n{body}", cancellationToken);
-            }
+            // Anchors always use the full PR diff, even when the model reviewed an incremental diff.
+            string fullDiff;
+            try { fullDiff = incremental ? await _gitHub.GetPullRequestDiffAsync(prNumber, cancellationToken) : diff; }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "PR #{Pr}: review comment post failed", prNumber);
+                _logger.LogWarning(ex, "Full PR diff unavailable for #{Pr}; retaining findings in the review summary without anchors", prNumber);
+                fullDiff = "";
             }
-            // Opportunistic formal review: works when the engine
-            // identity differs from the PR author; the solo-identity
-            // 422 is expected and tolerated (local verdict rules).
-            try
+            var draft = ReviewFindings.Create(round, headSha, verdict.ToString(), body, fullDiff);
+            await UpdateWatchMetadataAsync(task, m =>
             {
-                await _gitHub.SubmitReviewAsync(prNumber, headSha, body,
-                    verdict == ReviewerVerdict.Approve ? Approved : ChangesRequested,
-                    cancellationToken);
-            }
-            catch (Octokit.ApiValidationException ex)
-                when (ex.Message.Contains("own pull request", StringComparison.OrdinalIgnoreCase)
-                    || ex.Message.Contains("Can not request changes", StringComparison.OrdinalIgnoreCase)
-                    || ex.Message.Contains("Can not approve", StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogDebug("PR #{Pr}: formal self-review blocked (expected solo-identity 422)", prNumber);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "PR #{Pr}: formal review submit failed", prNumber);
-            }
+                m["reviewDraft"] = JsonSerializer.Serialize(draft, ReviewFindings.Json);
+                m["reviewPublishStarted"] = false;
+                m["reviewWorkerConsumed"] = consumed!;
+                return m;
+            }, cancellationToken);
+            return await CompleteDraftAsync(task, prNumber, draft, cancellationToken, headShaOverride);
         }
-
         // Record the verdict in the task metadata — the PRWatcher's
         // merge/rework decision reads this. The verdict landing
         // clears the "reviewing…" marker (metadata is upsert-merge
@@ -371,6 +361,11 @@ public sealed class ReviewerDispatcher
             m["reviewWorkerConsumed"] = consumed!;
             m["reviewSha"] = headSha;
             m["reviewVerdict"] = verdict.ToString();
+            var priorErrors = task.GetMetadata("reviewSha") == headSha
+                && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var parsedErrors) ? parsedErrors : 0;
+            m["reviewErrorAttempts"] = priorErrors + 1;
+            if (_gitHub.RequireFormalReview && priorErrors + 1 >= 3)
+                m["reviewIntegrationError"] = "Automated review produced no usable verdict after three attempts at this revision. Further paid attempts are paused for operator reconciliation.";
             m["reviewNotes"] = body.Length > 2000 ? body[..2000] : body;
             m["reviewRound"] = round;
             m["reviewStartedAt"] = null!;
@@ -422,6 +417,83 @@ public sealed class ReviewerDispatcher
         return new ReviewOutcome(verdict, body, headSha, error);
     }
 
+    private async Task<ReviewOutcome> CompleteDraftAsync(IssueRecord task, int prNumber, ReviewDraft draft,
+        CancellationToken ct, Func<PullRequest, string>? headOverride)
+    {
+        if (!Enum.TryParse<ReviewerVerdict>(draft.Verdict, out var verdict) || verdict == ReviewerVerdict.Error)
+            return new(ReviewerVerdict.Error, "", draft.HeadSha, "Saved draft has no publishable verdict.");
+        var marker = ReviewFindings.Marker(draft);
+        try
+        {
+            var published = await _gitHub.FindPublishedReviewAsync(prNumber, draft, marker, ct);
+            if (published is null)
+            {
+                var fresh = await _issues.GetAsync(task.Id, ct) ?? throw new InvalidOperationException("Task no longer exists.");
+                if (bool.TryParse(fresh.GetMetadata("reviewPublishStarted"), out var uncertain) && uncertain)
+                    throw new InvalidOperationException("Review publication is unconfirmed. No matching formal review was found; automatic duplicate submission is held for reconciliation.");
+                var currentPr = await _gitHub.GetPullRequestAsync(prNumber, ct);
+                var currentHead = headOverride is null ? currentPr.Head.Sha : headOverride(currentPr);
+                if (currentHead != draft.HeadSha || currentPr.Merged || currentPr.State == ItemState.Closed)
+                    throw new InvalidOperationException("PR changed or closed before review publication; the saved review was not submitted.");
+                await UpdateWatchMetadataAsync(task, m => { m["reviewPublishStarted"] = true; return m; }, ct);
+                try { published = await _gitHub.PublishFormalReviewAsync(prNumber, draft, marker, ct); }
+                catch (ApiValidationException)
+                {
+                    // GitHub rejected the request without creating a review. Keep the draft, not a new paid run.
+                    await UpdateWatchMetadataAsync(task, m => { m["reviewPublishStarted"] = false; return m; }, ct);
+                    throw;
+                }
+            }
+            await UpdateWatchMetadataAsync(task, m =>
+            {
+                var history = new List<PublishedReview>();
+                if (m.TryGetValue("reviewHistory", out var raw))
+                    history = JsonSerializer.Deserialize<List<PublishedReview>>(raw.ToString()!, ReviewFindings.Json) ?? [];
+                if (history.Count == 0 && m.TryGetValue("reviewSha", out var oldHead) && m.TryGetValue("reviewVerdict", out var oldVerdict)
+                    && oldVerdict.ToString() is "Approve" or "RequestChanges")
+                {
+                    var oldRound = m.TryGetValue("reviewRound", out var number) && int.TryParse(number.ToString(), out var parsedRound) ? parsedRound : 0;
+                    history.Add(new(oldRound, oldHead.ToString()!, oldVerdict.ToString()!,
+                        m.GetValueOrDefault("reviewNotes")?.ToString() ?? "No notes retained.",
+                        "Legacy Forge verdict · formal publication not recorded", "", null, []));
+                }
+                if (!history.Any(r => r.HeadSha == published.HeadSha && r.Round == published.Round && r.Url == published.Url)) history.Add(published);
+                m["reviewHistory"] = JsonSerializer.Serialize(history, ReviewFindings.Json);
+                m["reviewSha"] = draft.HeadSha; m["reviewVerdict"] = draft.Verdict;
+                m["reviewNotes"] = draft.Summary; m["reviewRound"] = draft.Round;
+                m["reviewPublishedHead"] = draft.HeadSha; m["reviewDraft"] = null!;
+                m["reviewPublishStarted"] = null!; m["reviewStartedAt"] = null!;
+                m["reviewError"] = null!; m["reviewIntegrationError"] = null!;
+                m["reviewErrorAttempts"] = null!;
+                return m;
+            }, ct);
+            if (_eventPublisher is not null) await _eventPublisher.PublishAsync(new Forge.Core.Messaging.ReviewVerdictRecorded
+            {
+                MessageId = Forge.Core.Messaging.ReviewVerdictRecorded.IdFor(_projectId ?? "default", task.Id, prNumber, draft.HeadSha, draft.Round),
+                ProjectId = _projectId ?? "default", TaskId = task.Id, PrNumber = prNumber,
+                Verdict = draft.Verdict, ReviewSha = draft.HeadSha, ReviewRound = draft.Round
+            }, ct);
+            var latestPr = await _gitHub.GetPullRequestAsync(prNumber, ct);
+            var latestHead = headOverride is null ? latestPr.Head.Sha : headOverride(latestPr);
+            if (latestHead != draft.HeadSha) return new(ReviewerVerdict.Error, draft.Summary, draft.HeadSha, "Head changed after publication; review retained as historical evidence.");
+            if (_lifecycle is not null)
+            {
+                var fresh = await _issues.GetAsync(task.Id, ct);
+                if (fresh is not null) await _lifecycle.ReportAsync(_issues, fresh,
+                    verdict == ReviewerVerdict.Approve ? Forge.Core.TaskEvent.ReviewApproved : Forge.Core.TaskEvent.ReviewChangesRequested,
+                    null, false, ct);
+            }
+            return new(verdict, draft.Summary, draft.HeadSha);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "PR #{Pr}: formal review publication/reconciliation failed", prNumber);
+            if (!ct.IsCancellationRequested)
+                await UpdateWatchMetadataAsync(task, m => { m["reviewIntegrationError"] = ex.Message; m["reviewStartedAt"] = null!; return m; }, ct);
+            return new(ReviewerVerdict.Error, draft.Summary, draft.HeadSha, "Review publication: " + ex.Message);
+        }
+    }
+
     /// <summary>
     /// Back-compat wrapper for the HTTP endpoint: review once and
     /// return a process-style exit code.
@@ -440,7 +512,7 @@ public sealed class ReviewerDispatcher
         CancellationToken ct)
     {
         var cur = await _issues.GetAsync(task.Id, ct);
-        if (cur is null) return;
+        if (cur is null) throw new InvalidOperationException("Task disappeared before review evidence could be saved.");
         var current = new Dictionary<string, object>();
         if (!string.IsNullOrWhiteSpace(cur.MetadataJson))
         {
@@ -458,10 +530,16 @@ public sealed class ReviewerDispatcher
                     }
                 }
             }
-            catch { /* malformed metadata: start fresh */ }
+            catch (JsonException ex) { throw new InvalidDataException("Task metadata is malformed; review publication was not advanced.", ex); }
         }
+        var before = new Dictionary<string, object>(current);
         var next = mutate(current);
-        await _issues.TransitionAsync(cur.Id, cur.Status, error: null, metadata: next, ct: ct);
+        var patch = next.Where(pair => !before.TryGetValue(pair.Key, out var old) || !Equals(old, pair.Value))
+            .ToDictionary(pair => pair.Key, pair => pair.Value);
+        foreach (var key in before.Keys.Except(next.Keys)) patch[key] = null!;
+        if (_issues is IssueStore concrete)
+            await concrete.PatchReviewMetadataAsync(cur.Id, patch, null, ct);
+        else await _issues.TransitionAsync(cur.Id, cur.Status, error: null, metadata: patch, ct: ct);
     }
 
     /// <summary>Full PR context assembled programmatically for the
@@ -765,12 +843,8 @@ public sealed class ReviewerDispatcher
 
     private static (ReviewerVerdict Verdict, string Body) ParseReviewerOutput(string text)
     {
-        if (string.IsNullOrEmpty(text))
-            return (ReviewerVerdict.Error, "Reviewer produced no output.");
-        var verdict = ReviewerVerdict.Approve;
-        if (text.Contains("REQUEST_CHANGES", StringComparison.OrdinalIgnoreCase))
-            verdict = ReviewerVerdict.RequestChanges;
-        return (verdict, text.Length > 4000 ? text.Substring(0, 4000) + "\n...[truncated]..." : text);
+        var verdict = ReviewFindings.ParseVerdict(text);
+        return (verdict, text);
     }
 }
 

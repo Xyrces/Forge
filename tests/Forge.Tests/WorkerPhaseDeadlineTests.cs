@@ -12,6 +12,19 @@ public sealed class WorkerPhaseDeadlineTests
     private static AgentRunResult Result => new("done", null, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task EligibilityLatencyUsesRecordedAdmissionAndClaimNotTaskAge()
+    {
+        var eligible = DateTimeOffset.UtcNow.AddMinutes(-3);
+        var started = eligible.AddSeconds(27);
+        var result = await WorkerHost.RunPhasesAsync(new Runner(_ => Task.FromResult(Result)), Invocation,
+            new Dictionary<string, object> { ["dispatchEligibleAt"] = eligible.ToString("O"), ["workerStartedAt"] = started.ToString("O") },
+            null, _ => Task.FromResult(Receipt), default);
+        Assert.Equal(eligible, result.Phases!.EligibleAt);
+        Assert.Equal(started, result.Phases.WorkerStartedAt);
+        Assert.Equal(TimeSpan.FromSeconds(27), result.Phases.WorkerStartedAt - result.Phases.EligibleAt);
+    }
+
+    [Fact]
     public async Task ModelDeadlineStopsModelAndCannotPublishOrRunVerification()
     {
         var verified = false;

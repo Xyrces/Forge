@@ -34,8 +34,12 @@ public static class ControllerHost
             var registered = await projects.ListAsync(ct);
             if (registered.Count == 0) throw new InvalidOperationException("No project is registered in the initialized dataset.");
             foreach (var project in registered)
+            {
                 await VerifySchemaAsync(ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id),
                     initializeSchema: false), ct);
+                await MemoryAuthoritySql.VerifyAsync(ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id),
+                    initializeSchema: false), options.Bootstrap.WorkerPrincipal, ct);
+            }
             var config = Agents.LlmConfigAdapter.FromOptions(options.Llm);
             _ = config.Resolve(AgentType.CoreDev);
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
@@ -79,7 +83,11 @@ public static class ControllerHost
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls(options.Controller.ListenUrl);
         var app = builder.Build();
-        app.MapGet("/healthz", () => Results.Ok(new { live = true }));
+        app.MapGet("/healthz", async (CancellationToken ct) =>
+        {
+            try { await VerifyReviewAuthorityAsync(options, ct); return Results.Ok(new { live = true, reviewAuthorityReady = true }); }
+            catch (InvalidOperationException) { return Results.StatusCode(503); }
+        });
         app.Use(async (context, next) =>
         {
             if (context.Request.Path.StartsWithSegments("/api/controller"))
@@ -93,15 +101,36 @@ public static class ControllerHost
         app.MapGet("/api/controller/status", async (CancellationToken ct) =>
         {
             var schemaVersion = await VerifySchemaAsync(factory, ct);
-            return Results.Ok((await runtime.StatusAsync(ct)) with { SchemaVersion = schemaVersion });
+            var status = (await runtime.StatusAsync(ct)) with { SchemaVersion = schemaVersion };
+            try { await VerifyReviewAuthorityAsync(options, ct); }
+            catch (InvalidOperationException) { return Results.Ok(status with { Ready = false, AdmissionOpen = false }); }
+            return Results.Ok(status);
         });
         app.MapPost("/api/controller/activate", async (Activation activation, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(activation.OperationId)) return Results.BadRequest();
             await VerifySchemaAsync(factory, ct);
+            await VerifyReviewAuthorityAsync(options, ct);
             return await runtime.ActivateAsync(activation.OperationId, activation.ExpectedPreviousOwner, ct)
                 ? Results.Accepted(value: await runtime.StatusAsync(ct))
                 : Results.Conflict(new { error = "ownership_conflict" });
+        });
+        app.MapPost("/api/controller/merge-fence", async (Activation activation, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(activation.OperationId)) return Results.BadRequest();
+            await VerifySchemaAsync(factory, ct);
+            await using var registryIssues = new IssueStore(factory);
+            await using var projects = new ProjectStore(registryIssues);
+            var registered = await projects.ListAsync(ct);
+            if (registered.Count == 0) return Results.Conflict(new { error = "no_registered_projects" });
+            foreach (var project in registered)
+            {
+                var projectDb = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id), initializeSchema: false);
+                await VerifySchemaAsync(projectDb, ct);
+                await using var memory = new MemoryStore(projectDb);
+                await new DeploymentMergeFence(memory).HoldAsync(activation.OperationId, ct);
+            }
+            return Results.Ok(new { held = true, operationId = activation.OperationId, projects = registered.Count });
         });
         app.MapPost("/api/controller/drain", async (Activation activation, CancellationToken ct) =>
         {
@@ -135,6 +164,18 @@ public static class ControllerHost
         if (!RuntimeSchemaCompatibility.CanRead(version))
             throw new InvalidOperationException("Database schema is outside this release's tested compatibility version.");
         return version;
+    }
+
+    internal static async Task VerifyReviewAuthorityAsync(AgentOptions options, CancellationToken ct)
+    {
+        var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema, ForgeSchemaProfile.Core, initializeSchema: false);
+        await using var issues = new IssueStore(registry);
+        await using var projects = new ProjectStore(issues);
+        var registered = await projects.ListAsync(ct);
+        if (registered.Count == 0) throw new InvalidOperationException("No initialized project is registered.");
+        foreach (var project in registered)
+            await MemoryAuthoritySql.VerifyAsync(ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id), initializeSchema: false),
+                options.Bootstrap.WorkerPrincipal, ct);
     }
 
     public static void Validate(AgentOptions options)

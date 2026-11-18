@@ -221,6 +221,7 @@ public sealed class ExistingImplementationVerifierTests : IDisposable
     }
     private sealed class FakeGitHub() : GitHubService("test", "repo", null)
     {
+        public override bool RequireFormalReview => false;
         public string Source = "";
         public override Task<Octokit.PullRequest> CreatePullRequestAsync(string title, string body, string headBranch,
             string baseBranch = "main", CancellationToken cancellationToken = default)

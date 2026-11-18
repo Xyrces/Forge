@@ -2842,7 +2842,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
     }
 
     private async Task<IssueEventRecord> InsertEventAsync(
-        DbConnection conn, DbTransaction? tx, string issueId, string kind, string? detail, CancellationToken ct)
+        DbConnection conn, DbTransaction? tx, string issueId, string kind, string? detail, CancellationToken ct, string? actor = null)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
@@ -2859,11 +2859,11 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
                 """;
         cmd.AddParam("@id", issueId);
         cmd.AddParam("@ts", DateTime.UtcNow.ToString(DateFormat));
-        cmd.AddParam("@actor", "orchestrator");
+        cmd.AddParam("@actor", actor ?? "orchestrator");
         cmd.AddParam("@kind", kind);
         cmd.AddParam("@detail", (object?)detail ?? DBNull.Value);
         var id = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
-        return new IssueEventRecord(id, issueId, DateTime.UtcNow, "orchestrator", kind, detail);
+        return new IssueEventRecord(id, issueId, DateTime.UtcNow, actor ?? "orchestrator", kind, detail);
     }
 
     internal static IssueRecord ReadIssue(DbDataReader rd)

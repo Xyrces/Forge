@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Linq;
 using System.Diagnostics;
 using Octokit;
+using Forge.Reviewer;
 
 namespace Forge;
 
@@ -36,7 +37,50 @@ namespace Forge;
 /// </remarks>
 public sealed class LocalGitHubService : GitHubService
 {
-    public override string? ReviewerLogin => null;
+    public override bool RequireFormalReview => false;
+    public override string? ReviewerLogin => "local-reviewer[bot]";
+
+    public override Task EnsureReviewerIdentityAsync(int prNumber, CancellationToken ct) => Task.CompletedTask;
+
+    public override Task<PublishedReview?> FindPublishedReviewAsync(int prNumber, ReviewDraft draft, string marker, CancellationToken ct)
+        => Task.FromResult(_prStore.ReviewReceipts.GetValueOrDefault((prNumber, marker)));
+
+    public override Task<PublishedReview> PublishFormalReviewAsync(int prNumber, ReviewDraft draft, string marker, CancellationToken ct)
+    {
+        var receipt = _prStore.ReviewReceipts.GetOrAdd((prNumber, marker), _ => new(draft.Round,
+            draft.HeadSha, draft.Verdict, draft.Summary, ReviewerLogin!, "", DateTimeOffset.UtcNow, draft.Findings));
+        return Task.FromResult(receipt);
+    }
+
+    public override Task<IReadOnlyList<FormalDecision>> GetAuthorizedDecisionsAsync(int number, string? author, CancellationToken ct = default)
+    {
+        var decisions = _prStore.ReviewReceipts.Where(pair => pair.Key.Number == number).Select(pair => pair.Value)
+            .Select(review => new FormalDecision(review.Reviewer, review.HeadSha,
+                review.Verdict == nameof(ReviewerVerdict.Approve) ? PullRequestReviewState.Approved : PullRequestReviewState.ChangesRequested,
+                true, review.Round, review.Summary, review.Url)).ToList();
+        return Task.FromResult<IReadOnlyList<FormalDecision>>(decisions);
+    }
+
+    public override Task<bool> HasHumanReviewLabelAsync(int number, CancellationToken ct = default)
+        => Task.FromResult(_prStore.HumanReviewLabels.ContainsKey(number));
+
+    public override Task SetHumanReviewLabelAsync(int number, bool required, CancellationToken ct = default)
+    {
+        if (required) _prStore.HumanReviewLabels.TryAdd(number, true);
+        else _prStore.HumanReviewLabels.TryRemove(number, out _);
+        return Task.CompletedTask;
+    }
+
+    public override Task<string> GetReviewReworkContextAsync(int number, IReadOnlyList<FormalDecision> requests, CancellationToken ct = default)
+        => Task.FromResult(string.Join("\n", requests.Select(request => request.Body)));
+
+    public override Task<LegacyReviewHistoryPage> ReadReviewHistoryAsync(int prNumber, CancellationToken ct) => ReadLegacyReviewHistoryAsync(prNumber, ct);
+
+    public override Task<LegacyReviewHistoryPage> ReadLegacyReviewHistoryAsync(int prNumber, CancellationToken ct)
+        => Task.FromResult(new LegacyReviewHistoryPage([], false, []));
+
+    public override Task<ReviewCodeExcerpt?> ReadReviewExcerptAsync(string sha, string path, int first, int last, CancellationToken ct)
+        => Task.FromResult<ReviewCodeExcerpt?>(null);
     private readonly LocalPrStore _prStore;
     private readonly string _localRemotePath;
 
@@ -204,6 +248,8 @@ public sealed class LocalGitHubService : GitHubService
 /// </summary>
 public sealed class LocalPrStore
 {
+    internal ConcurrentDictionary<(int Number, string Marker), PublishedReview> ReviewReceipts { get; } = new();
+    internal ConcurrentDictionary<int, bool> HumanReviewLabels { get; } = new();
     private readonly ConcurrentDictionary<int, PullRequest> _prs = new();
     private readonly ConcurrentDictionary<string, string> _branchShas = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<string>> _branchShaWaiters = new();

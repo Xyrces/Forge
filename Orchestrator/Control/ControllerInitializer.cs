@@ -12,6 +12,8 @@ public static class ControllerInitializer
     public static async Task<int> RunAsync(AgentOptions options, ILoggerFactory logs, CancellationToken ct = default)
     {
         ControllerHost.Validate(options);
+        if (options.Bootstrap.ReviewAuthorityOnly)
+            return await ReviewAuthorityInitializer.RunAsync(options, ct);
         ValidateMigrationContract(options.Bootstrap);
         // Validate both configured identities before acquiring a connection or running DDL.
         var reconciliationPermissions = BudgetReconciliationPermissionsSql(
@@ -122,6 +124,10 @@ public static class ControllerInitializer
                 + InitiativeWorkerPermissionsSql(principal);
             await grants.ExecuteNonQueryAsync(ct);
         }
+        // Install even when the dataset was already initialized. Older controllers
+        // retain these same memory keys, so downgrade does not remove enforcement.
+        await ReviewAuthorityInitializer.InstallAsync(ForgeDb.SqlServer(options.Db.ConnectionString, "proj_forge", initializeSchema: false),
+            options.Bootstrap.WorkerPrincipal, options.Bootstrap.ControllerPrincipal, ct);
         if (!completed) await memory.RememberAsync(completionKey, "complete", ttlDays: null, ct);
         logs.CreateLogger("Forge.Initialize").LogInformation("Initialized dataset {Dataset}; project Forge, SQL schema {Version}; no dispatch started.",
             options.Controller.DatasetId, SqlServerMigrations.ExpectedVersion);

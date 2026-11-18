@@ -38,6 +38,9 @@ class FakeKube:
         if kind == "deployments":
             self.states[name.removeprefix("forge-")] = "standby"
             self.events.append(("create", name))
+        if kind == "jobs" and name.startswith("forge-authority-"):
+            value["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+            self.events.append(("authority", name))
         return copy.deepcopy(value)
 
     def patch(self, kind, name, body):
@@ -72,6 +75,9 @@ class FakeKube:
         deployment = self.get("deployments", "forge-" + slot)
         return [{}] if deployment and deployment["spec"]["replicas"] else []
 
+    def selected_pods(self, selector):
+        return []
+
 
 class FakeControllers:
     def __init__(self, kube):
@@ -82,14 +88,21 @@ class FakeControllers:
         self.busy = False
         self.lease_owner = None
         self.activations = []
+        self.legacy_slots = set()
+        self.fail_fence = False
+        self.merge_held = False
 
     def call(self, slot, action, operation, expected_previous_owner=None):
         if action == "status":
             state = self.kube.states.get(slot)
             return {"ready": slot not in self.not_ready and state not in ("stopped", "failed"), "mode": state,
                     "instanceId": "instance-" + slot, "leaseOwner": self.lease_owner,
-                    "admissionOpen": state == "active", "activeRuns": 1 if self.busy else 0}
+                    "admissionOpen": state == "active", "activeRuns": 1 if self.busy else 0, "reviewHoldProtocolVersion": 0 if slot in self.legacy_slots else 1}
         self.kube.events.append((action, slot))
+        if action == "merge-fence":
+            if self.fail_fence: raise RuntimeError("fence failed")
+            self.merge_held = True
+            return {"held": True, "operationId": operation, "projects": 1}
         if action == "activate":
             self.activations.append((slot, operation, expected_previous_owner))
             if slot in self.fail_activate:
@@ -111,6 +124,54 @@ class ReleaseTests(unittest.TestCase):
         release = Release(kube, controllers, "test-release", IMAGE, DATASET, "job-pod", "uid-1",
                           timeout=2, sleep=lambda _: None, clock=lambda: next(timer))
         return release, kube, controllers
+
+    def test_legacy_rollback_keeps_durable_merge_fence(self):
+        release, kube, controllers = self.make()
+        controllers.legacy_slots.add("blue")
+        controllers.fail_activate.add("green")
+        with self.assertRaisesRegex(RuntimeError, "activation failed"): release.run()
+        self.assertTrue(controllers.merge_held)
+        self.assertLess(kube.events.index(("scale", "blue", 0)), kube.events.index(("merge-fence", "green")))
+        self.assertLess(kube.events.index(("merge-fence", "green")), kube.events.index(("activate", "green")))
+        self.assertEqual("true", kube.get("configmaps", release.journal_name)["data"]["mergeFenceConfirmed"])
+        self.assertEqual("blue", kube.get("services", "forge")["spec"]["selector"]["slot"])
+
+    def test_replacement_supervisor_preserves_legacy_fence_during_rollback(self):
+        release, kube, controllers = self.make()
+        controllers.legacy_slots.add("blue")
+        release.run()
+        kube.patch("configmaps", release.journal_name, {"data": {"phase": "rolling-back"}})
+        replacement = Release(kube, controllers, "test-release", IMAGE, DATASET, "new-pod", "uid-2")
+        with self.assertRaisesRegex(RuntimeError, "interrupted rollback completed"): replacement.run()
+        self.assertTrue(controllers.merge_held)
+        self.assertEqual("blue", kube.get("services", "forge")["spec"]["selector"]["slot"])
+        self.assertEqual("true", kube.get("configmaps", release.journal_name)["data"]["mergeFenceConfirmed"])
+
+    def test_missing_fence_proof_never_reactivates_legacy_controller(self):
+        release, kube, controllers = self.make()
+        controllers.legacy_slots.add("blue")
+        release.run()
+        release.journal["data"]["mergeFenceConfirmed"] = "false"
+        kube.events.clear()
+        with self.assertRaisesRegex(RuntimeError, "Downgrade blocked"): release.rollback("green", "blue")
+        self.assertNotIn(("activate", "blue"), kube.events)
+        self.assertEqual("none", kube.get("services", "forge")["spec"]["selector"]["slot"])
+
+    def test_failed_fence_never_activates_new_work(self):
+        release, kube, controllers = self.make()
+        controllers.legacy_slots.add("blue")
+        controllers.fail_fence = True
+        with self.assertRaisesRegex(RuntimeError, "fence failed"): release.run()
+        self.assertNotIn(("activate", "green"), kube.events)
+        self.assertEqual("blue", kube.get("services", "forge")["spec"]["selector"]["slot"])
+        self.assertEqual("active", kube.states["blue"])
+
+    def test_successful_first_upgrade_keeps_prior_controller_fenced(self):
+        release, kube, controllers = self.make()
+        controllers.legacy_slots.add("blue")
+        release.run()
+        self.assertTrue(controllers.merge_held)
+        self.assertEqual("committed", kube.get("configmaps", release.journal_name)["data"]["phase"])
 
     def test_cutover_stops_old_before_activation_and_switches_last(self):
         release, kube, _ = self.make()

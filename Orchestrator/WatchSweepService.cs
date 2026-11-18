@@ -168,9 +168,11 @@ public sealed class WatchSweepService
     /// then the merge/rework decision (PRWatcher.PollWatchedTaskAsync).
     /// A 429 aborts the sweep early and arms the cooldown.
     /// </summary>
-    public async Task SweepProjectAsync(ProjectDispatchBundle bundle, CancellationToken cancellationToken)
+    public async Task SweepProjectAsync(ProjectDispatchBundle bundle, CancellationToken cancellationToken,
+        Func<IssueRecord, bool>? includeTask = null)
     {
         var watchedTasks = await DiscoverWatchedTasksAsync(bundle, cancellationToken);
+        if (includeTask is not null) watchedTasks = watchedTasks.Where(includeTask).ToList();
         if (watchedTasks.Count == 0) return;
         if (DateTime.UtcNow < _githubRateLimitedUntil)
         {
@@ -217,11 +219,20 @@ public sealed class WatchSweepService
                 var poll = await bundle.PrWatcher.PollWatchedTaskAsync(polled, cancellationToken);
                 _logger.LogDebug("Watch (task {Id}): {Outcome}", watched.Id, poll);
             }
-            catch (Octokit.RateLimitExceededException)
+            catch (Octokit.ApiException ex) when (ex is Octokit.RateLimitExceededException or Octokit.SecondaryRateLimitExceededException)
             {
-                _githubRateLimitedUntil = DateTime.UtcNow + GitHubRateLimitCooldown;
+                var now = DateTime.UtcNow;
+                var until = ex is Octokit.RateLimitExceededException primary && primary.Reset.UtcDateTime > now
+                    ? primary.Reset.UtcDateTime : now + GitHubRateLimitCooldown;
+                if (ex.HttpResponse?.Headers is { } headers)
+                {
+                    var retry = headers.FirstOrDefault(h => h.Key.Equals("Retry-After", StringComparison.OrdinalIgnoreCase)).Value;
+                    if (int.TryParse(retry, out var seconds) && seconds > 0) until = now.AddSeconds(seconds);
+                    else if (DateTimeOffset.TryParse(retry, out var date) && date.UtcDateTime > now) until = date.UtcDateTime;
+                }
+                _githubRateLimitedUntil = until;
                 _logger.LogWarning("Watch sweep: GitHub rate limit exceeded; backing off for {Cooldown} (project={Project})",
-                    GitHubRateLimitCooldown, bundle.Project.Id);
+                    _githubRateLimitedUntil - now, bundle.Project.Id);
                 return;
             }
             catch (Exception ex)
@@ -304,6 +315,10 @@ public sealed class WatchSweepService
     /// marker is fresh (covers pre-restart reviews).</summary>
     internal bool ShouldLaunchReview(IssueRecord task, string projectId)
     {
+        if (task.GetMetadata("reviewVerdict") == "Error"
+            && task.GetMetadata("reviewSha") == task.GetMetadata("watchHeadSha")
+            && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var failures) && failures >= 3)
+            return false;
         var key = projectId + "/" + task.Id;
         if (_reviewsInFlight.TryGetValue(key, out var inFlight) && !inFlight.IsCompleted)
         {
@@ -327,10 +342,11 @@ public sealed class WatchSweepService
         IssueRecord task, ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
         task = await PublishedRunLifecycle.ReconcileAsync(bundle.IssueStore, _lifecycle, task, cancellationToken);
+        if (await bundle.PrWatcher.HasOwnedWorkerAsync(task.Id, cancellationToken)) return;
         var reviewEnabled = _workflow is null
             || Core.Workflow.WorkflowExtensions.IsStepEnabled(
                 await _workflow.ResolveAsync(cancellationToken), "review");
-        if (!reviewEnabled) return;
+
 
         var key = bundle.Project.Id + "/" + task.Id;
 
@@ -349,6 +365,9 @@ public sealed class WatchSweepService
             TryLaunchBackgroundQaAsync(task, bundle, cancellationToken);
             return;
         }
+
+        if (!reviewEnabled || await new PullRequestReviewPolicy(new MemoryStore(bundle.IssueStore.Db))
+            .GetModeAsync(cancellationToken) == RequiredReview.Human) return;
 
         if (!ShouldLaunchReview(task, bundle.Project.Id))
         {

@@ -24,7 +24,7 @@ namespace Forge.Core;
 /// A background sweep (out of scope for v1) would purge them.
 /// </para>
 /// </summary>
-public sealed class MemoryStore : IAsyncDisposable
+public sealed partial class MemoryStore : IAsyncDisposable
 {
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
@@ -70,7 +70,16 @@ public sealed class MemoryStore : IAsyncDisposable
 
         var now = DateTime.UtcNow;
         await using var conn = await _db.OpenAsync(ct);
+        await UpsertAsync(conn, null, key, body, ttlDays, now, ct);
+        var expiresAt = ttlDays is null ? (DateTime?)null : now.AddDays(ttlDays.Value);
+        return new MemoryRecord(Id: 0, Key: key, Body: body, CreatedAt: now, TtlDays: ttlDays, ExpiresAt: expiresAt);
+    }
+
+    private async Task UpsertAsync(DbConnection conn, DbTransaction? transaction, string key,
+        string body, int? ttlDays, DateTime now, CancellationToken ct)
+    {
         await using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = _db.Provider == ForgeDbProvider.SqlServer
             ? $"""
                 MERGE {T("memory")} WITH (HOLDLOCK) AS t
@@ -91,9 +100,6 @@ public sealed class MemoryStore : IAsyncDisposable
         cmd.AddParam("@body", body);
         cmd.AddParam("@ttl", (object?)ttlDays ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
-
-        var expiresAt = ttlDays is null ? (DateTime?)null : now.AddDays(ttlDays.Value);
-        return new MemoryRecord(Id: 0, Key: key, Body: body, CreatedAt: now, TtlDays: ttlDays, ExpiresAt: expiresAt);
     }
 
     /// <summary>
