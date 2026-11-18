@@ -18,6 +18,17 @@ public sealed class MergeRequirementsTests
             using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
             Queries.Add(json.RootElement.GetProperty("query").GetString()!);
             var body = reply(json.RootElement, request.Headers.Authorization!.Parameter!);
+            if (Queries[^1].Contains("node(id:$id)"))
+            {
+                using var response = JsonDocument.Parse(body);
+                if (response.RootElement.GetProperty("data").TryGetProperty("repository", out var repository))
+                {
+                    var id = json.RootElement.GetProperty("variables").GetProperty("id").GetString();
+                    var thread = repository.GetProperty("pullRequest").GetProperty("reviewThreads").GetProperty("nodes")
+                        .EnumerateArray().Single(t => t.GetProperty("id").GetString() == id);
+                    body = JsonSerializer.Serialize(new { data = new { node = new { comments = thread.GetProperty("latest") } } });
+                }
+            }
             return new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         }
     }
@@ -29,13 +40,13 @@ public sealed class MergeRequirementsTests
         new ProductHeaderValue("test"), new HttpClientAdapter(() => handler))) { Credentials = new Credentials(token) };
     private static object Thread(string id, string author = "reviewer", string actorType = "Bot",
         bool other = false, bool resolved = false, bool truncated = false, string last = "comment", string body = "Original finding",
-        string originalHead = "older-head", string? lastAuthor = null, string? lastActorType = null) => new
+        string originalHead = "older-head", string? lastAuthor = null, string? lastActorType = null, bool append = false) => new
         {
             id, isResolved = resolved, viewerCanResolve = true, path = "File.cs",
             comments = new { pageInfo = new { hasNextPage = truncated },
-                nodes = other ? new[] { new { id = "comment", body = "Original finding", author = new { login = author, __typename = actorType } },
-                    new { id = last, body, author = new { login = lastAuthor ?? "human", __typename = lastActorType ?? "User" } } }
-                : new[] { new { id = last, body, author = new { login = author, __typename = actorType } } } },
+                nodes = other || append ? new[] { new { id = "comment", updatedAt = "2026-01-01T00:00:00Z", body = "Original finding", author = new { login = author, __typename = actorType } },
+                    new { id = last, updatedAt = "2026-01-01T00:00:00Z", body, author = new { login = lastAuthor ?? (append ? author : "human"), __typename = lastActorType ?? (append ? actorType : "User") } } }
+                : new[] { new { id = last, updatedAt = "2026-01-01T00:00:00Z", body, author = new { login = author, __typename = actorType } } } },
             original = new { nodes = new[] { new { body = "Original finding", originalCommit = new { oid = originalHead } } } },
             latest = new { nodes = new[] { new { id = last, body, author = new { login = lastAuthor ?? (other ? "human" : author),
                 __typename = lastActorType ?? (other ? "User" : actorType) } } } }
@@ -46,6 +57,8 @@ public sealed class MergeRequirementsTests
             headRefOid = head, isDraft = false, mergeStateStatus = state,
             reviewThreads = new { pageInfo = new { hasNextPage = next is not null, endCursor = next }, nodes = threads }
         } } } });
+
+    private static string Version() => ReviewFindings.VersionOf(new[] { new ReviewCommentVersion("comment", "reviewer[bot]", "2026-01-01T00:00:00Z") });
 
     [Fact]
     public async Task ReadsEveryPageAndCanonicalizesBotIdentityWithoutTrustingHumanSlug()
@@ -65,6 +78,8 @@ public sealed class MergeRequirementsTests
         Assert.True(GitHubService.CanResolveConversation(result.Conversations[0], service.ReviewerLogin));
         Assert.All(result.Conversations.Skip(1), t => Assert.False(GitHubService.CanResolveConversation(t, service.ReviewerLogin)));
         Assert.Equal(2, handler.Queries.Count);
+        Assert.All(handler.Queries, query => Assert.DoesNotContain("body", query));
+        Assert.All(result.Conversations, t => Assert.Empty(t.Body));
     }
 
     [Theory]
@@ -102,7 +117,7 @@ public sealed class MergeRequirementsTests
             {
                 Assert.Equal("publisher", token);
                 return Page([Thread("thread", resolved: resolved, last: replied ? "reply" : "comment",
-                    body: replied ? replyBody! : "finding")]);
+                    body: replied ? replyBody! : "finding", append: replied)]);
             }
             Assert.Equal("reviewer", token);
             if (query.Contains("addPullRequestReviewThreadReply"))
@@ -116,7 +131,7 @@ public sealed class MergeRequirementsTests
             throw new IOException("Lost response after mutation");
         });
         var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
-        var draft = new ReviewDraft(2, "head", "Approve", "Verified correction", [], [new("thread", "comment", "The corrected guard rejects an empty path.")]);
+        var draft = new ReviewDraft(2, "head", "Approve", "Verified correction", [], [new("thread", "comment", "The corrected guard rejects an empty path.", Version())]);
         await Assert.ThrowsAsync<IOException>(() => service.ResolveReviewedConversationsAsync(1, draft));
         await service.ResolveReviewedConversationsAsync(1, draft);
         Assert.Equal(1, replies);
@@ -146,7 +161,7 @@ public sealed class MergeRequirementsTests
         {
             var query = request.GetProperty("query").GetString()!;
             if (query.StartsWith("query"))
-                return Page([Thread("thread", last: posted is null ? "comment" : "receipt", body: posted ?? "Finding")]);
+                return Page([Thread("thread", last: posted is null ? "comment" : "receipt", body: posted ?? "Finding", append: posted is not null)]);
             if (query.Contains("addPullRequestReviewThreadReply"))
             {
                 posted = request.GetProperty("variables").GetProperty("body").GetString();
@@ -157,7 +172,7 @@ public sealed class MergeRequirementsTests
             return "{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}";
         });
         var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
-        var draft = new ReviewDraft(2, "head", "Approve", "Verified", [], [new("thread", "comment", "Guard corrected")]);
+        var draft = new ReviewDraft(2, "head", "Approve", "Verified", [], [new("thread", "comment", "Guard corrected", Version())]);
         await Assert.ThrowsAsync<IOException>(() => service.ResolveReviewedConversationsAsync(1, draft));
         await service.ResolveReviewedConversationsAsync(1, draft);
         Assert.Equal(1, posts);
@@ -220,16 +235,17 @@ public sealed class MergeRequirementsTests
             throw new IOException("Lost accepted reply response");
         });
         var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        var initial = await service.GetMergeRequirementsAsync(1, "head");
         var draft = new ReviewDraft(2, "head", "Approve", "Fixed", [],
+            HumanThreadVersions: ReviewFindings.HumanConversationVersions(initial.Conversations, "head"),
             EvidenceReplies: [new("human-thread", "comment", "The validation now rejects invalid paths; regression passes.")]);
         await Assert.ThrowsAsync<IOException>(() => service.ResolveReviewedConversationsAsync(1, draft));
-        await service.ResolveReviewedConversationsAsync(1, draft);
+        var receipts = await service.ResolveReviewedConversationsAsync(1, draft);
         Assert.Equal(1, posts);
         var snapshot = await service.GetMergeRequirementsAsync(1, "head");
         Assert.Equal(1, snapshot.Unresolved);
         Assert.False(snapshot.AllowsMerge);
-        Assert.True(GitHubService.HasCurrentHumanEvidence(snapshot.Conversations[0], "head", "reviewer[bot]"));
-        Assert.Null(ReviewFindings.HumanConversationCheckpoint(snapshot.Conversations, "head", "reviewer[bot]"));
+        Assert.Equal(snapshot.Conversations[0].Version, receipts["human-thread"]);
         Assert.DoesNotContain(handler.Queries, q => q.Contains("resolveReviewThread(input"));
     }
 
@@ -261,10 +277,59 @@ public sealed class MergeRequirementsTests
             Assert.Throws<InvalidOperationException>(() => ReviewFindings.Create(2, "head", "Approve", output, "", [ineligible], "reviewer[bot]"));
         Assert.Throws<InvalidOperationException>(() => ReviewFindings.Create(2, "head", "Approve",
             output.Replace("REVIEWER_ADDRESSED_THREAD:", "REVIEWER_RESOLVED_THREAD:"), "", [human], "reviewer[bot]"));
-        Assert.False(GitHubService.HasCurrentHumanEvidence(human with
-        {
-            LastAuthor = "alice",
-            LastBody = "copied " + ReviewFindings.EvidenceMarker(draft, "human")
-        }, "head", "reviewer[bot]"));
+
     }
+    [Fact]
+    public async Task DiscussionInputsArePaginatedBoundedAndNeverReadResolvedHistory()
+    {
+        var calls = 0;
+        var versions = Enumerable.Range(0, 21).Select(i => new ReviewCommentVersion($"c{i}", "reviewer[bot]", "date")).ToArray();
+        using var handler = new Handler((request, _) =>
+        {
+            calls++;
+            Assert.Equal("open", request.GetProperty("variables").GetProperty("id").GetString());
+            var first = request.GetProperty("variables").GetProperty("cursor").ValueKind == JsonValueKind.Null;
+            return JsonSerializer.Serialize(new { data = new { node = new { comments = new {
+                pageInfo = new { hasNextPage = first, endCursor = first ? "next" : null },
+                nodes = versions.Skip(first ? 0 : 20).Take(first ? 20 : 1).Select(v => new {
+                    id = v.Id, updatedAt = v.UpdatedAt, body = "Evidence", author = new { login = "reviewer", __typename = "Bot" } })
+            } } } });
+        });
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        var observed = new ReviewConversation("open", false, true, "File.cs", "reviewer[bot]", "c20", false, "", Versions: versions, AssessmentComplete: false);
+        var inputs = await service.GetReviewConversationInputsAsync([observed with { Id = "resolved", Resolved = true }, observed], "head");
+        Assert.Equal(2, calls);
+        Assert.True(Assert.Single(inputs).AssessmentComplete);
+        Assert.Equal(21, inputs[0].Body.Split("Evidence").Length - 1);
+    }
+
+    [Fact]
+    public async Task OversizedDiscussionStaysOpenAndCannotAuthorizeResolution()
+    {
+        using var handler = new Handler((_, _) => JsonSerializer.Serialize(new { data = new { node = new { comments = new {
+            pageInfo = new { hasNextPage = false, endCursor = (string?)null },
+            nodes = new[] { new { id = "comment", updatedAt = "date", body = new string('x', 80_001), author = new { login = "reviewer", __typename = "Bot" } } }
+        } } } }));
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        var observed = new ReviewConversation("large", false, true, "File.cs", "reviewer[bot]", "comment", false, "");
+        var inputs = await service.GetReviewConversationInputsAsync([observed], "head");
+        Assert.False(inputs[0].AssessmentComplete);
+        Assert.Empty(inputs[0].Body);
+        var draft = ReviewFindings.Create(1, "head", "Approve", "Approved", "", inputs, "reviewer[bot]");
+        Assert.Equal("large", Assert.Single(draft.LimitedConversations!));
+        Assert.Null(draft.Resolutions);
+        Assert.Throws<InvalidOperationException>(() => ReviewFindings.Create(1, "head", "Approve",
+            "REVIEWER_RESOLVED_THREAD: {\"threadId\":\"large\",\"lastCommentId\":\"comment\",\"reason\":\"verified\"}", "", inputs, "reviewer[bot]"));
+    }
+
+    [Fact]
+    public async Task SameIdEditAfterAssessmentCannotBeResolved()
+    {
+        using var handler = new Handler((_, _) => Page([Thread("thread")]).Replace("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"));
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ResolveReviewedConversationsAsync(1,
+            new(1, "head", "Approve", "Verified", [], [new("thread", "comment", "corrected", Version())])));
+        Assert.DoesNotContain(handler.Queries, q => q.StartsWith("mutation"));
+    }
+
 }

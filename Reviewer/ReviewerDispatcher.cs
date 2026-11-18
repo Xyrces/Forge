@@ -200,6 +200,17 @@ public sealed class ReviewerDispatcher
             }
         }
 
+        if (_gitHub.RequireFormalReview)
+        {
+            try { conversations = await _gitHub.GetReviewConversationInputsAsync(conversations, headSha, cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, "", headSha, "Review conversation evidence unavailable: " + ex.Message);
+            }
+        }
+
         // Worktree access is MANDATORY (operator rule 2026-07-30): the
         // reviewer cannot do its job from a diff paste — it needs the
         // branch checkout for full context. No usable worktree →
@@ -293,16 +304,10 @@ public sealed class ReviewerDispatcher
             ? BuildReReviewPrompt(pr, diff, task, previousReviewSha!, recordedVerdict!, task.GetMetadata("reviewNotes"), worktreePath, reviewContext)
             : BuildReviewerPrompt(pr, diff, task, worktreePath, headSha, reviewContext);
         prompt += "\n\n" + ReviewFindings.Instructions;
-        foreach (var conversation in conversations.Where(t => !t.Resolved))
-            prompt += "\n\nReview conversation " + JsonSerializer.Serialize(new
-            {
-                threadId = conversation.Id, lastCommentId = conversation.LastCommentId, path = conversation.Path,
-                eligible = GitHubService.CanResolveConversation(conversation, _gitHub.ReviewerLogin),
-                originalHead = conversation.OriginalHead,
-                evidenceReplyAllowed = GitHubService.CanReplyToHumanConversation(conversation, headSha)
-                    && !GitHubService.HasCurrentHumanEvidence(conversation, headSha, _gitHub.ReviewerLogin),
-                discussion = conversation.Body
-            }, ReviewFindings.Json);
+        foreach (var conversation in conversations.Where(t => !t.Resolved && t.AssessmentComplete))
+            prompt += "\n\n" + ReviewFindings.ConversationPrompt(conversation, headSha, _gitHub.ReviewerLogin);
+        if (conversations.Any(t => !t.Resolved && !t.AssessmentComplete))
+            prompt += "\n\nSome discussions exceed the bounded review input. They stay unresolved for their participants. Do not claim those findings are verified.";
         ReviewerVerdict verdict;
         string body;
         string? error = null;
@@ -489,7 +494,10 @@ public sealed class ReviewerDispatcher
                     throw;
                 }
             }
-            await _gitHub.ResolveReviewedConversationsAsync(prNumber, draft, ct);
+            var conversationReceipts = await _gitHub.ResolveReviewedConversationsAsync(prNumber, draft, ct);
+            var humanVersions = draft.HumanThreadVersions is null ? null : new Dictionary<string, string>(draft.HumanThreadVersions);
+            if (humanVersions is not null)
+                foreach (var receipt in conversationReceipts) humanVersions[receipt.Key] = receipt.Value;
             await UpdateWatchMetadataAsync(task, m =>
             {
                 var history = new List<PublishedReview>();
@@ -510,7 +518,10 @@ public sealed class ReviewerDispatcher
                 m["reviewNotes"] = draft.Summary; m["reviewRound"] = draft.Round;
                 m["reviewPublishedHead"] = draft.HeadSha; m["reviewDraft"] = null!;
                 m["reviewThreadCheckpoint"] = draft.ThreadCheckpoint!;
-                m["reviewHumanThreadCheckpoint"] = draft.HumanThreadCheckpoint!;
+                m["reviewHumanThreadCheckpoint"] = (humanVersions is null ? draft.HumanThreadCheckpoint : ReviewFindings.HumanCheckpoint(humanVersions))!;
+                m["reviewConversationInputLimited"] = draft.LimitedConversations?.Count ?? 0;
+                m["reviewConversationInputHead"] = draft.HeadSha;
+                m["reviewConversationLimitedIds"] = draft.LimitedConversations is null ? null! : JsonSerializer.Serialize(draft.LimitedConversations);
                 m["reviewPublishStarted"] = null!; m["reviewStartedAt"] = null!;
                 m["reviewError"] = null!; m["reviewIntegrationError"] = null!;
                 m["reviewErrorAttempts"] = null!;

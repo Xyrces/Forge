@@ -58,6 +58,10 @@ public static class TaskSituation
             _ => "",
         };
         var alsoThreads = openThreads > 0 ? " " + threadSummary : "";
+        if (openThreads > 0 && int.TryParse(issue.GetMetadata("reviewConversationInputLimited"), out var limited) && limited > 0)
+            return Result("Review discussion needs a participant",
+                "A complete discussion exceeded Forge's review input limit. Review the conversation on GitHub and resolve it when satisfied.",
+                "PR participants", "action");
         if (bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting
             && (humanPending || openThreads == 0 || protection is "ReviewRequired" or "ChangesRequested"))
         {

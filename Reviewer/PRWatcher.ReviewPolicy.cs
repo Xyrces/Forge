@@ -68,7 +68,14 @@ public sealed partial class PRWatcher
         catch (Exception ex) { _logger.LogWarning(ex, "Task {TaskId}: GitHub merge requirements unavailable", task.Id); }
         var humanPending = effective.OutstandingHumanObjection || (human && !effective.HumanApproved);
         var mergeSatisfied = merge is { Unresolved: 0 } && (merge.AllowsMerge || merge.State is "BEHIND" or "DIRTY");
-        var humanThreads = merge?.Conversations.Count(t => !t.Resolved && !GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin)) ?? 0;
+        HashSet<string> limitedConversations = [];
+        if (task.GetMetadata("reviewConversationInputHead") == head)
+        {
+            try { limitedConversations = System.Text.Json.JsonSerializer.Deserialize<HashSet<string>>(task.GetMetadata("reviewConversationLimitedIds") ?? "[]") ?? []; }
+            catch (System.Text.Json.JsonException ex) { _logger.LogWarning(ex, "Task {TaskId}: invalid retained conversation limit receipt", task.Id); }
+        }
+        var humanThreads = merge?.Conversations.Count(t => !t.Resolved
+            && (!GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin) || limitedConversations.Contains(t.Id))) ?? 0;
         var humanWaiting = humanPending || protection is ProtectionReviewDecision.ReviewRequired or ProtectionReviewDecision.ChangesRequested || humanThreads > 0;
         var waiting = humanWaiting || !protectionSatisfied || !mergeSatisfied
             || task.GetMetadata("reviewMergeRefusedHead") == head;
@@ -83,7 +90,8 @@ public sealed partial class PRWatcher
             ["reviewHumanPending"] = humanPending,
             ["reviewMergeState"] = merge?.State ?? "Unavailable",
             ["reviewUnresolvedThreads"] = merge?.Unresolved ?? -1,
-            ["reviewHumanThreads"] = humanThreads
+            ["reviewHumanThreads"] = humanThreads,
+            ["reviewConversationInputLimited"] = merge?.Conversations.Count(t => !t.Resolved && limitedConversations.Contains(t.Id)) ?? 0
         };
         await store.PatchReviewMetadataAsync(task.Id, fields, null, ct);
         return new((!automated || effective.AutomatedApproved) && (!human || effective.HumanApproved)

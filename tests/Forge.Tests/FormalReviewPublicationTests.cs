@@ -63,9 +63,16 @@ public sealed class FormalReviewPublicationTests
         public bool LoseEvidenceReplyResponse;
         public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
             => Task.FromResult(Requirements);
-        public override Task ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
+        public int DiscussionLoads;
+        public override Task<IReadOnlyList<ReviewConversation>> GetReviewConversationInputsAsync(
+            IReadOnlyList<ReviewConversation> observations, string head, CancellationToken ct = default)
         {
-            if (draft.EvidenceReplies is { Count: > 0 } && !Requirements.Conversations.All(t => GitHubService.HasCurrentHumanEvidence(t, draft.HeadSha, ReviewerLogin)))
+            DiscussionLoads++;
+            return Task.FromResult(observations);
+        }
+        public override Task<IReadOnlyDictionary<string, string>> ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
+        {
+            if (draft.EvidenceReplies is { Count: > 0 } && !Requirements.Conversations.All(t => t.LastBody == ReviewFindings.EvidenceMarker(draft, t.Id)))
             {
                 HumanEvidenceReplies++;
                 Requirements = new("BLOCKED", Requirements.Conversations.Select(t => t with
@@ -81,7 +88,8 @@ public sealed class FormalReviewPublicationTests
                 Resolutions++;
                 Requirements = new("CLEAN", []);
             }
-            return Task.CompletedTask;
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(Requirements.Conversations
+                .Where(t => draft.EvidenceReplies?.Any(r => r.ThreadId == t.Id) == true).ToDictionary(t => t.Id, t => t.Version));
         }
         public int Publications;
         public bool MissingIdentity, DiscoverPublished = true;
@@ -192,6 +200,7 @@ public sealed class FormalReviewPublicationTests
         Assert.Equal(1, runner.Calls);
         Assert.Equal(1, github.Publications);
         Assert.Equal(actualCorrection ? 1 : 0, github.HumanEvidenceReplies);
+        Assert.Equal(1, github.DiscussionLoads);
         Assert.Equal(0, github.Resolutions);
         Assert.Equal(1, github.Requirements.Unresolved);
     }
