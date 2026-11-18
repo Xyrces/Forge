@@ -48,6 +48,9 @@ public sealed class DesignArtifactStore
 
     private string T(string name) => _db.Dialect.Table(name);
 
+    internal bool UsesDatabase(IDbConnectionFactory db) => _db.Provider == db.Provider && _db.Qualifier == db.Qualifier
+        && _db.ConnectionString == db.ConnectionString;
+
     public string DbPath => _dbPath;
 
     public async Task<DesignArtifact> CreateAsync(NewDesignArtifact req, CancellationToken ct = default)

@@ -243,7 +243,7 @@ public sealed class ArtistAgent
                 description: "Fetch a spec by id. Returns the full spec record."),
 
             AIFunctionFactory.Create(
-                ([Description("Spec id.")] string specId) => DbGetDesignArtifacts(specId),
+                ([Description("This run's spec id.")] string specId) => DbGetDesignArtifacts(spec.Id, specId),
                 name: "db_get_design_artifacts",
                 description: "List the Designer's approved design_artifacts for the spec (wireframes, mockups, component-specs, visual-rules). Use these to ground your art submissions."),
 
@@ -290,10 +290,11 @@ public sealed class ArtistAgent
         return JsonSerializer.Serialize(spec);
     }
 
-    private async Task<string> DbGetDesignArtifacts(string specId)
+    private async Task<string> DbGetDesignArtifacts(string expectedSpecId, string specId)
     {
-        if (string.IsNullOrWhiteSpace(specId)) return "[]";
-        var list = await _designArtifacts.ListBySpecAsync(specId, DesignArtifactStatus.Approved);
+        if (specId != expectedSpecId) return "{\"error\":\"Design artifacts must belong to this run's specification.\"}";
+        var list = (await DesignerStoreRouting.ListArtifactsAsync(_specs, _designArtifacts, specId, false))
+            .Where(a => a.Status == DesignArtifactStatus.Approved).ToArray();
         return JsonSerializer.Serialize(list.Select(a => new
         {
             a.Id, a.SpecId, Kind = a.Kind.ToString(),

@@ -39,10 +39,17 @@ public static class SpecEndpoints
         IEventPublisher? eventPublisher = null,
         DesignerRunStore? designerRuns = null)
     {
-        bool HasLocalDesignEvidence(IIssueStore? candidate) => candidate is IssueStore target && issues is IssueStore primary
-            && target.ProjectId == primary.ProjectId && target.Db.Provider == primary.Db.Provider
-            && target.Db.Qualifier == primary.Db.Qualifier && target.Db.ConnectionString == primary.Db.ConnectionString
-            && designerRuns is not null && designerRuns.UsesDatabase(target.Db);
+        DesignerRunStore? LocalDesignRuns(IIssueStore? candidate)
+        {
+            if (designerRuns is null || candidate is not IssueStore target) return null;
+            if (designerRuns.UsesDatabase(target.Db)) return designerRuns;
+            // A secondary project's registered context establishes its own evidence boundary.
+            // An inconsistent injected primary store must still fail closed.
+            if (issues is not IssueStore primary || new DesignerRunStore(primary.Db).UsesDatabase(target.Db)
+                || projectContexts?.Find(target.ProjectId)?.Issues is not IssueStore registered
+                || !new DesignerRunStore(registered.Db).UsesDatabase(target.Db)) return null;
+            return new DesignerRunStore(target.Db);
+        }
 
         // Multi-project: when ?project= names a registered project and the
         // factory is available, read from THAT project's spec store (spec
@@ -467,9 +474,10 @@ public static class SpecEndpoints
             if (owned is null) return Results.NotFound();
             var spec = await owned.Value.Specs.GetAsync(id, ct);
             if (spec is null) return Results.NotFound();
-            // Designer evidence is currently primary-store owned; never bind another project's same spec ID.
+            // Repair requires a receipt in the specification's own database.
+            // Historical primary-store receipts are visible but cannot authorize another owner's repair.
             if (initiativeApprovals is null || designerRuns is null || owned.Value.Issues is not IssueStore target
-                || !HasLocalDesignEvidence(target)) return Results.Conflict(new { error = "Design repair is not configured for this owning project store." });
+                || LocalDesignRuns(target) is null) return Results.Conflict(new { error = "Design repair is not configured for this owning project store." });
             try
             {
                 return await initiativeApprovals.RepairHygieneAsync(spec.ProjectId, request.ProposalId, request.Revision, request.Hash,
@@ -492,13 +500,14 @@ public static class SpecEndpoints
                 ? await concrete.GetInitiativeRefinementAsync(id, ct)
                 : null;
             var refinementBlocked = receipt is not null && receipt.RefinementState != "Completed";
-            var design = designerRuns is not null && HasLocalDesignEvidence(owned.Value.Issues)
-                ? (await designerRuns.ListAsync(spec.Id, 1, ct)).FirstOrDefault() : null;
+            var localDesignRuns = LocalDesignRuns(owned.Value.Issues);
+            var design = localDesignRuns is not null
+                ? (await localDesignRuns.ListAsync(spec.Id, 1, ct)).FirstOrDefault() : null;
             var designFailure = design?.Status == DesignerRunStatus.HygieneFailed && design.Ts >= spec.UpdatedAt;
             var proposal = receipt is not null && initiativeApprovals is not null
                 ? await initiativeApprovals.Proposals.GetAsync(spec.ProjectId, receipt.ProposalId, ct) : null;
             var canRepair = designFailure && receipt?.RefinementState == "Completed" && proposal?.ApprovedAt is not null
-                && owned.Value.Issues is IssueStore repairStore && HasLocalDesignEvidence(repairStore)
+                && owned.Value.Issues is IssueStore repairStore && localDesignRuns is not null
                 && await new InitiativeIngestionStore(repairStore).CanRepairHygieneAsync(receipt.ProposalId, receipt.Revision, proposal.Hash,
                     new HygieneRepairRequest(spec.Id, spec.CurrentVersion, design!.Id), ct);
             var canApprove = !refinementBlocked && SpecActions.CanApprove(spec.Status);

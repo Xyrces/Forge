@@ -188,6 +188,7 @@ public interface ISpecStore
 
 public sealed partial class SpecStore : ISpecStore, IAsyncDisposable
 {
+    internal Forge.Core.Db.IDbConnectionFactory Database => _issues.Db;
     private readonly IssueStore _issues;
     private readonly SpecBodyExtractor _extractor;
     private readonly DesignArtifactStore? _designArtifacts;

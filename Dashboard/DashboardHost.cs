@@ -591,7 +591,7 @@ if (_groomerRuns is not null)
                 if (_designerFactory is not null && _designerRuns is not null && _designArtifacts is not null)
                 {
                     DesignerEndpoints.MapDesignerEndpoints(
-                        _app, _specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
+                        _app, _designerFactory.Specs, _designerFactory, _designerRuns, _designArtifacts, _logger);
                 }
                 if (_artistFactory is not null && _artistRuns is not null && _artOutputs is not null && _meshy is not null)
                 {
@@ -618,7 +618,7 @@ if (_groomerRuns is not null)
             if (_designArtifacts is not null && _artOutputs is not null)
             {
                 DesignArtEndpoints.MapDesignArtEndpoints(
-                    _app, _designArtifacts, _artOutputs, _designerRuns, _artistRuns, _logger);
+                    _app, _designArtifacts, _artOutputs, _designerRuns, _artistRuns, _logger, _designerFactory?.Specs ?? _specs);
             }
 
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)

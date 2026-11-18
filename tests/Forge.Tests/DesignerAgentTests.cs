@@ -174,6 +174,7 @@ public class DesignerAgentTests : IDisposable
         private readonly string _finalText;
         public Func<Task>? AfterTool { get; init; }
         public int CallCount;
+        public string ToolOutput = "";
 
         public ScriptedToolCallClient(string toolName, Dictionary<string, object?> args, string finalText)
         {
@@ -186,6 +187,8 @@ public class DesignerAgentTests : IDisposable
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             CallCount++;
+            ToolOutput += string.Join("\n", messages.SelectMany(m => m.Contents)
+                .OfType<FunctionResultContent>().Select(r => r.Result?.ToString()));
             if (CallCount == 1)
             {
                 var call = new FunctionCallContent("c1", _toolName, _args);
@@ -201,6 +204,84 @@ public class DesignerAgentTests : IDisposable
 
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
         public void Dispose() { }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProductionRoutingFactory_BindsSpecReceiptAndArtifactsToOwner(bool secondary)
+    {
+        await using var secondIssues = new IssueStore(Path.Combine(_workDir, "second.db"));
+        var registry = new ProjectStore(_issues);
+        await registry.UpsertAsync(new NewProject("P", "Primary", "https://github.com/example/primary"));
+        await using var projects = new Forge.Projects.ProjectContextFactory(registry, _workDir,
+            dbResolver: (id, _) => id == "P" ? _issues.Db : secondIssues.Db);
+        var routing = new ProjectRoutingSpecStore(_specs,
+            id => projects.Find(id)?.Specs,
+            () => projects.KnownProjects.Select(p => projects.Find(p.Id)!.Specs).ToArray());
+        // Register the second project after the router exists, like production hot-add.
+        await registry.UpsertAsync(new NewProject("second", "Second", "https://github.com/example/second"));
+        var ownerIssues = secondary ? secondIssues : _issues;
+        var spec = await routing.CreateAsync(new NewSpec(secondary ? "second" : "P", "qualification", HealthyBody));
+        await routing.SetStatusAsync(spec.Id, SpecStatus.ReadyForDesign);
+        // Historical runs lived in primary even for a secondary project's spec.
+        var historical = await _runs.StartAsync(spec.Id, DesignerTriggerKind.Manual);
+        await _runs.FinishAsync(historical.Id, DesignerRunStatus.LlmFailed, null, null, null,
+            "historical failure", TimeSpan.FromSeconds(1));
+        var client = new TwoStepClient(
+            ("db_save_design_artifact", new() { ["specId"] = spec.Id, ["kind"] = "wireframe",
+                ["title"] = "owner artifact", ["body"] = "# Evidence", ["bodyKind"] = "markdown" }, "saved"),
+            ("db_set_spec_status", new() { ["specId"] = spec.Id, ["status"] = "Designed" }, "ok"), "Done");
+        var factory = new DesignerAgentFactory(routing, _artifacts, _runs, _memory,
+            new DesignHygieneChecker(routing, _graphCache, _graphBuilder, _workDir),
+            new SingleClientFactory(client), new LlmConfig(new ProviderConfig("stub", "", null, null, "stub-model")),
+            new RoleAgentRegistry(), _events, NullLoggerFactory.Instance);
+        var result = await factory.Create().DesignSpecAsync(spec.Id, DesignerTriggerKind.Scheduled);
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(SpecStatus.Designed, (await routing.GetAsync(spec.Id))!.Status);
+        var ownerRuns = await new DesignerRunStore(ownerIssues.Db).ListAsync(spec.Id);
+        Assert.Equal(DesignerRunStatus.Succeeded, ownerRuns[0].Status);
+        Assert.Single(await new DesignArtifactStore(ownerIssues.Db).ListBySpecAsync(spec.Id));
+        if (secondary)
+        {
+            Assert.Equal(historical.Id, ownerRuns[0].Id); // collisions must not identify the wrong store
+            Assert.Equal(DesignerRunStatus.LlmFailed, Assert.Single(await _runs.ListAsync(spec.Id)).Status);
+            Assert.Empty(await _artifacts.ListBySpecAsync(spec.Id));
+        }
+        var history = await DesignerStoreRouting.ListRunsAsync(routing, _runs, spec.Id, 10);
+        Assert.Equal(2, history.Count);
+        Assert.Equal(DesignerRunStatus.Succeeded, history[0].Status);
+        Assert.Equal(DesignerRunStatus.LlmFailed, history[1].Status);
+        Assert.Single(await DesignerStoreRouting.ListArtifactsAsync(routing, _artifacts, spec.Id, false));
+        Assert.Single(await DesignerStoreRouting.ListArtifactsAsync(routing, _artifacts, spec.ProjectId, true));
+        if (secondary)
+        {
+            var oldArtifact = await _artifacts.CreateAsync(new NewDesignArtifact(spec.Id, DesignArtifactKind.Wireframe,
+                "Historical artifact", "# Historical", "markdown"));
+            var visible = await DesignerStoreRouting.ListArtifactsAsync(routing, _artifacts, spec.Id, false);
+            Assert.Equal(2, visible.Count);
+            Assert.Contains(visible, a => a.Id == oldArtifact.Id);
+        }
+        var callsBeforeMissingSpec = client.CallCount;
+        var missing = await factory.Create().DesignSpecAsync("spec-missing", DesignerTriggerKind.Scheduled);
+        Assert.False(missing.Success);
+        Assert.Equal("Spec not found", missing.Error);
+        Assert.Equal(callsBeforeMissingSpec, client.CallCount);
+        Assert.Equal(2, (await DesignerStoreRouting.ListRunsAsync(routing, _runs, spec.Id, 10)).Count);
+    }
+
+    [Fact]
+    public async Task DesignArtifactToolRejectsAnotherSpecificationBeforeReadingItsArtifacts()
+    {
+        var current = await CreateSpecAsync();
+        var other = await CreateSpecAsync();
+        await _artifacts.CreateAsync(new NewDesignArtifact(other.Id, DesignArtifactKind.Wireframe,
+            "unrelated-private-artifact", "# unrelated", "markdown", Status: DesignArtifactStatus.Approved));
+        var client = new ScriptedToolCallClient("db_get_existing_design_artifacts",
+            new() { ["specId"] = other.Id }, "Done");
+        await NewAgent(client).DesignSpecAsync(current.Id, DesignerTriggerKind.Manual);
+        Assert.Contains("must belong to this run", client.ToolOutput);
+        Assert.DoesNotContain("unrelated-private-artifact", client.ToolOutput);
     }
 
     [Theory]
