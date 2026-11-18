@@ -22,8 +22,13 @@
     "mode": "Desktop browsing, no mobile emulation; sidebar open",
     "layout": {
       "id": "D1",
-      "steps": "Open the sidebar with Toggle navigation if needed. Capture the sidebar, the sprint goal and the Sprint task board. If they do not fit in one capture, scroll vertically and take consecutive captures without changing width or sidebar state.",
-      "expected": "The sidebar remains open. The goal and board occupy separate vertical bands in the main area, with the goal above the board, not beside it."
+      "steps": "Open the sidebar with Toggle navigation if needed. Capture the sidebar, sprint goal and Sprint task board. Use consecutive captures if vertical scrolling is needed, but capture the entire lane row together at the same width and sidebar state. Do not scroll horizontally to bring lanes into view.",
+      "measurements": [
+        "In browser devtools, record getBoundingClientRect() for the main panel (.app-main), the board (#sprint-tasks), and all five direct .sprint-lane children in board order. Compare lane top edges to check for wrapping and compare left/right edges with the board, main panel and usable viewport (0 to document.documentElement.clientWidth).",
+        "For every rendered .sprint-task in a populated lane, compare its getBoundingClientRect() left/right edges with that lane's left/right edges. Checking only document width can miss a clipped card.",
+        "Record scrollWidth and clientWidth on document.scrollingElement, the main panel and the board to check for horizontal overflow."
+      ],
+      "expected": "The goal sits above the board in a separate vertical band. With the sidebar open, all five lanes fit side by side in the listed order on one row: their tops align, their widths are nonzero, and they do not overlap. The board and every lane fit horizontally within the visible main area and viewport. Every populated card stays within its lane. None of the measured containers has scrollWidth greater than clientWidth. Wrapping, clipping or needing horizontal scroll fails D1 even if each lane can be reached separately."
     },
     "laneCheck": {
       "steps": "Use Jump to task cards. For each desktop checkpoint in lanes, reach the named heading. Open a card by its title and return to the board; if the lane is empty on this page, inspect its empty state.",
