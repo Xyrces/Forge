@@ -416,7 +416,7 @@ public sealed partial class PRWatcher
                 || string.Equals(qaVerdict, QaDispatcher.VerdictNotApplicable, StringComparison.Ordinal)));
         var qaFailed = _qaEnabled && qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal);
         if (formalGate is not null)
-            await RecordHumanWaitAsync(task, formalGate.Waiting && formalGate.AutomatedSatisfied
+            await RecordHumanWaitAsync(task, formalGate.Waiting && (!formalGate.ProtectionUnavailable || formalGate.HumanPending) && formalGate.AutomatedSatisfied
                 && formalGate.Requests.Count == 0 && ciGreen && qaPassed
                 && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
 
@@ -549,7 +549,11 @@ public sealed partial class PRWatcher
             if (formalRequired)
             {
                 var refused = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
-                await TryReadFormalGateAsync(task, refused, refused.Head.Sha, cancellationToken);
+                var refusedGate = await TryReadFormalGateAsync(task, refused, refused.Head.Sha, cancellationToken);
+                await RecordHumanWaitAsync(task, refused.Head.Sha == sha && refusedGate is { Waiting: true, AutomatedSatisfied: true }
+                    && (!refusedGate.ProtectionUnavailable || refusedGate.HumanPending) && refusedGate.Requests.Count == 0
+                    && qaPassed && refused.Mergeable != false
+                    && await _gitHub.GetCommitStatusAsync(sha, cancellationToken) == CommitState.Success, cancellationToken);
                 return WatchPollOutcome.Pending;
             }
             // Merge refused with mergeable previously unknown: the
