@@ -20,7 +20,7 @@ public class TaskSituationTests
         var s = TaskSituation.Describe(Task(IssueStatus.Failed, ("lastError", "pre-push verification failed: `dotnet test` exited 1")));
         Assert.Equal("action", s.Tone);
         Assert.Contains("build/tests failed", s.Text);
-        Assert.Contains("requeue", s.Text);
+        Assert.Contains("retry", s.Text);
     }
 
     [Fact]
@@ -55,7 +55,8 @@ public class TaskSituationTests
             ("reworkReason", "PR conflicts with the base branch")));
         Assert.Equal("action", s.Tone);
         Assert.Contains("conflict syncs", s.Text);
-        Assert.Contains("clear strikes", s.Text);
+        Assert.Contains("retrying", s.Text);
+        Assert.DoesNotContain("×3", s.Text);
     }
 
     [Fact]
@@ -64,8 +65,9 @@ public class TaskSituationTests
         var s = TaskSituation.Describe(Task(IssueStatus.Pending,
             ("prNumber", "742"), ("reworkAttempts", "2"), ("reworkReason", "CI failed for abc: Failure")));
         Assert.Equal("info", s.Tone);
-        Assert.Contains("R2/3", s.Text);
-        Assert.Contains("CI red", s.Text);
+        Assert.Equal("Queued", s.Label);
+        Assert.Contains("CI failed", s.Text);
+        Assert.DoesNotContain("R2/3", s.Text);
     }
 
     [Theory]
@@ -86,7 +88,8 @@ public class TaskSituationTests
         Assert.Equal(observed.ToString(), after.GetMetadata("lastEvent"));
         Assert.Null(after.GetMetadata("stateViolation"));
         var situation = TaskSituation.Describe(after);
-        Assert.Equal("awaiting final merge checks", situation.Text);
+        Assert.Equal("Final merge checks", situation.Label);
+        Assert.Contains("checking", situation.Text);
         Assert.Equal("info", situation.Tone);
     }
 
@@ -107,8 +110,8 @@ public class TaskSituationTests
     }
 
     [Fact]
-    public void Completed_HasNoSituation()
+    public void CompletedWithoutMergeEvidence_IsExplicitAboutRecordedCompletion()
     {
-        Assert.Equal("", TaskSituation.Describe(Task(IssueStatus.Completed)).Text);
+        Assert.Equal("Completion recorded", TaskSituation.Describe(Task(IssueStatus.Completed)).Label);
     }
 }

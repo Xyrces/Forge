@@ -16,12 +16,16 @@ public sealed class GitWorktreeService
     // GITHUB_TOKEN in its environment; git honors it for github.com
     // remote operations even with no credential helper present.
     private readonly string? _githubToken;
+    private readonly Func<Task<string?>>? _publisherToken;
+    private readonly string? _publisherRepository;
 
-    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger, string? githubToken = null)
+    public GitWorktreeService(WorkspaceOptions options, ILogger<GitWorktreeService> logger, string? githubToken = null, Func<Task<string?>>? publisherToken = null, string? publisherRepository = null)
     {
         _options = options;
         _logger = logger;
         _githubToken = githubToken;
+        _publisherToken = publisherToken;
+        _publisherRepository = publisherRepository;
     }
 
     public string WorkspaceRoot => Path.GetFullPath(_options.Root);
@@ -76,6 +80,8 @@ public sealed class GitWorktreeService
         // refspec). When the issue carries an explicit branch in its
         // metadata, honor it here; otherwise the canonical agent/<id>.
         var branch = branchOverride ?? $"agent/{Sanitize(taskId)}";
+        ValidateGitComponent(branch, "branch");
+        ValidateGitComponent(baseBranch, "base branch");
         var worktreePath = WorktreePathFor(taskId);
 
         Directory.CreateDirectory(WorktreeRoot);
@@ -568,6 +574,8 @@ public sealed class GitWorktreeService
 
     private async Task<GitResult> RunGitInAsync(string workingDir, string arguments, CancellationToken cancellationToken, IReadOnlyList<string>? argumentList = null)
     {
+        using var isolation = _publisherToken is null && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+            ? null : new IsolatedGitMetadata(workingDir, _publisherRepository, WorktreeRoot, WorkspaceRoot);
         var psi = new ProcessStartInfo
         {
             FileName = "git",
@@ -595,6 +603,48 @@ public sealed class GitWorktreeService
             psi.Environment["GITHUB_TOKEN"] = _githubToken;
         }
 
+        isolation?.Configure(psi);
+        // App credentials exist only in this trusted controller child process. Never persist them in a shared worktree.
+        string? authorization = null;
+        var network = (argumentList?.FirstOrDefault() ?? arguments.Split(' ', 2)[0]) is "fetch" or "push" or "pull" or "ls-remote";
+        if (isolation is not null && network && _publisherToken is null)
+            throw new InvalidOperationException("App-enabled controller network Git requires an explicitly configured publisher.");
+        if (_publisherToken is not null && network)
+        {
+            if (_publisherRepository is null) throw new InvalidOperationException("Publisher repository scope is missing.");
+            IsolatedGitMetadata.ValidateRepository(_publisherRepository);
+            if (argumentList is not null)
+            {
+                if (argumentList.Count(a => a == "origin") != 1)
+                    throw new InvalidOperationException("Authenticated Git must target the configured origin explicitly.");
+                psi.ArgumentList.Clear();
+                foreach (var argument in argumentList) psi.ArgumentList.Add(argument == "origin" ? _publisherRepository : argument);
+            }
+            else
+            {
+                if (System.Text.RegularExpressions.Regex.Matches(arguments, @"(?<!\S)origin(?!\S)").Count != 1)
+                    throw new InvalidOperationException("Authenticated Git must target the configured origin explicitly.");
+                psi.Arguments = System.Text.RegularExpressions.Regex.Replace(arguments, @"(?<!\S)origin(?!\S)", _publisherRepository);
+            }
+            if ((argumentList?.FirstOrDefault() ?? arguments.Split(' ', 2)[0]) == "push")
+            {
+                var validate = ControllerGitRunner.NewProcess();
+                isolation!.Configure(validate);
+                validate.ArgumentList.Add("fsck"); validate.ArgumentList.Add("--full"); validate.ArgumentList.Add("--no-reflogs");
+                if ((await ControllerGitRunner.ExecuteAsync(validate, cancellationToken)).ExitCode != 0)
+                    throw new InvalidOperationException("Imported Git objects failed integrity validation before publication.");
+            }
+            var token = await _publisherToken() ?? throw new InvalidOperationException("Publisher App token unavailable.");
+            authorization = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:" + token));
+            psi.Environment.Remove("GITHUB_TOKEN");
+            psi.Environment["GIT_CONFIG_COUNT"] = "3";
+            psi.Environment["GIT_CONFIG_KEY_0"] = "credential.helper";
+            psi.Environment["GIT_CONFIG_VALUE_0"] = "";
+            psi.Environment["GIT_CONFIG_KEY_1"] = "http." + _publisherRepository + ".extraheader";
+            psi.Environment["GIT_CONFIG_VALUE_1"] = "AUTHORIZATION: " + authorization;
+            psi.Environment["GIT_CONFIG_KEY_2"] = "http." + _publisherRepository + ".git.extraheader";
+            psi.Environment["GIT_CONFIG_VALUE_2"] = "AUTHORIZATION: " + authorization;
+        }
         using var proc = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start git process");
         var stdoutTask = proc.StandardOutput.ReadToEndAsync();
@@ -609,6 +659,8 @@ public sealed class GitWorktreeService
         }
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
+        if (authorization is not null) { stdout = stdout.Replace(authorization, "[redacted]", StringComparison.Ordinal); stderr = stderr.Replace(authorization, "[redacted]", StringComparison.Ordinal); }
+        if (proc.ExitCode == 0) isolation?.PublishData();
         return new GitResult(proc.ExitCode, stdout, stderr);
     }
 
@@ -628,9 +680,15 @@ public sealed class GitWorktreeService
             throw new InvalidOperationException($"GitWorktreeService: {label} must not start with '-' (got '{component}')");
         foreach (var c in component)
         {
-            if (char.IsWhiteSpace(c))
+            if (char.IsWhiteSpace(c) || c is '"' or '\\' or '\0')
                 throw new InvalidOperationException($"GitWorktreeService: {label} must not contain whitespace (got '{component}')");
         }
+    }
+
+    private static string NormalizeRepositoryUrl(Uri uri)
+    {
+        var value = uri.GetLeftPart(UriPartial.Path).TrimEnd('/');
+        return value.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? value[..^4] : value;
     }
 
     private static string Sanitize(string s)

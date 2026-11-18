@@ -1,0 +1,120 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+@inject ILogger<ProjectReviewPolicy> Logger
+@implements IDisposable
+
+<section class="card overview-section" aria-labelledby="project-review-policy-title">
+    <h2 id="project-review-policy-title">Pull request approvals</h2>
+    <p>Choose who must approve changes before Forge merges them. CI and verification remain required in every mode.</p>
+    @if (_loading)
+    {
+        <p role="status">Loading review policy…</p>
+    }
+    else if (_savedMode is null)
+    {
+        <p class="banner banner--warn" role="alert">@_error</p>
+        <button class="btn" @onclick="LoadAsync">Retry loading policy</button>
+    }
+    else
+    {
+        @if (_configurationIssue is not null) { <p class="banner banner--warn" role="alert">@_configurationIssue</p> }
+        <form class="form-grid" @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
+            <label class="form-grid__full">
+                <span>Required approval</span>
+                <select @bind="_mode" disabled="@_saving" aria-describedby="review-policy-description">
+                    <option value="Automated">Forge reviewer</option>
+                    <option value="Human">Human reviewer</option>
+                    <option value="Both">Forge and human reviewers</option>
+                </select>
+            </label>
+            <label class="form-grid__full"><span>Nominated human GitHub login (optional)</span><input type="text" @bind="_nominee" @bind:event="oninput" disabled="@_saving" maxlength="39" placeholder="Any eligible human" /></label>
+            <p class="form-grid__full">When a project policy or task hold requires human approval, only this eligible person's current-revision approval qualifies. Leave blank to accept any eligible human. Every eligible human's changes requested still blocks. Authors and bots cannot satisfy human approval.</p>
+            <p id="review-policy-description" class="form-grid__full">@Description</p>
+            <p class="form-grid__full">Applies to this project's open and future pull requests. Task-level review holds and outstanding human change requests continue to apply.</p>
+            <div class="form-grid__actions">
+                <button class="btn btn--primary" type="submit" disabled="@(_saving || (_mode == _savedMode && _nominee.Trim() == (_savedNominee ?? "")))">@(_saving ? "Saving…" : "Save review policy")</button>
+            </div>
+        </form>
+        @if (_error is not null) { <p class="banner banner--warn" role="alert">@_error</p> }
+        @if (_notice is not null) { <p class="banner banner--ok" role="status">@_notice</p> }
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public string ProjectId { get; set; } = "";
+    private string? _loadedProject, _savedMode, _error, _notice, _configurationIssue;
+    private string _mode = "Automated", _nominee = "";
+    private string? _savedNominee;
+    private bool _loading, _saving;
+    private CancellationTokenSource _lifetime = new();
+    private sealed record PolicyDto(string Mode, string? NominatedHuman = null, string? ConfigurationIssue = null);
+    private sealed record PolicyError(string Error);
+    private string Description => _mode switch
+    {
+        "Human" => "An eligible human must approve the current revision on GitHub. Forge still runs engineering and CI checks.",
+        "Both" => "Forge's reviewer and an eligible human must each approve the current revision on GitHub.",
+        _ => "Forge's reviewer must approve the current revision. You can still require human review for an individual task during its sprint.",
+    };
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedProject == ProjectId) return;
+        _lifetime.Cancel(); _lifetime.Dispose(); _lifetime = new();
+        _loadedProject = ProjectId;
+        _savedMode = null; _notice = null; _saving = false;
+        await LoadAsync();
+    }
+    private async Task LoadAsync()
+    {
+        var project = ProjectId; var ct = _lifetime.Token;
+        _loading = true; _error = null;
+        try
+        {
+            var policy = await Http.GetFromJsonAsync<PolicyDto>($"/api/projects/{Uri.EscapeDataString(project)}/review-policy", ct)
+                ?? throw new InvalidOperationException("Review policy response was empty.");
+            if (ct.IsCancellationRequested || project != ProjectId) return;
+            _mode = _savedMode = policy.Mode;
+            _configurationIssue = policy.ConfigurationIssue;
+            _nominee = policy.NominatedHuman ?? ""; _savedNominee = policy.NominatedHuman;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load review policy for {Project}", project);
+            if (project == ProjectId) _error = "Couldn't load review policy. Retry before making changes.";
+        }
+        finally { if (project == ProjectId) _loading = false; }
+    }
+    private async Task SaveAsync()
+    {
+        if (_saving || _savedMode is null || (_mode == _savedMode && _nominee.Trim() == (_savedNominee ?? ""))) return;
+        var project = ProjectId; var ct = _lifetime.Token;
+        _saving = true; _error = null; _notice = null;
+        try
+        {
+            using var response = await Http.PutAsJsonAsync($"/api/projects/{Uri.EscapeDataString(project)}/review-policy", new { mode = _mode, nominatedHuman = _nominee.Trim() }, ct);
+            if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+            {
+                var reason = await response.Content.ReadFromJsonAsync<PolicyError>(ct);
+                if (project == ProjectId && !ct.IsCancellationRequested)
+                    _error = reason?.Error ?? "The repository cannot use this review policy yet.";
+                return;
+            }
+            response.EnsureSuccessStatusCode();
+            var policy = await response.Content.ReadFromJsonAsync<PolicyDto>(ct)
+                ?? throw new InvalidOperationException("Review policy response was empty.");
+            if (ct.IsCancellationRequested || project != ProjectId) return;
+            _mode = _savedMode = policy.Mode;
+            _nominee = policy.NominatedHuman ?? ""; _savedNominee = policy.NominatedHuman;
+            _notice = "Review policy saved. Open pull requests will be checked against this policy.";
+            _configurationIssue = policy.ConfigurationIssue;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not save review policy for {Project}", project);
+            if (project == ProjectId) _error = "Couldn't confirm the policy change. Reload the project to check the saved policy before trying again.";
+        }
+        finally { if (project == ProjectId) _saving = false; }
+    }
+    public void Dispose() { _lifetime.Cancel(); _lifetime.Dispose(); }
+}

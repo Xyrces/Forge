@@ -41,5 +41,6 @@ public sealed partial class SprintCompletionStore
             ("@json", JsonSerializer.Serialize(abandonment)), ("@now", Now()), ("@id", id));
         await update.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
+        await PublishOutcomeChangedAsync(receipt, "Abandoned", ct);
     }
 }

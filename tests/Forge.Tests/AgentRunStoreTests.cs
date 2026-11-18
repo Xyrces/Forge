@@ -29,6 +29,16 @@ public class AgentRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task TaskScopedActiveReadExcludesOtherTasks()
+    {
+        await _runs.StartAsync("mine", "task'one", "CoreDev", "model");
+        await _runs.StartAsync("other", "task-two", "CoreDev", "model");
+        Assert.Equal("mine", Assert.Single(await _runs.ListActiveAsync(taskId: "task'one")).Id);
+        Assert.Empty(await _runs.ListActiveAsync(taskId: "missing"));
+        Assert.Equal(2, (await _runs.ListActiveAsync()).Count);
+    }
+
+    [Fact]
     public async Task UpdateProgress_Heartbeat_SetsCountsAndActivity()
     {
         await _runs.StartAsync("run-hb", "task-1", "CoreDev", "minimax-m3");

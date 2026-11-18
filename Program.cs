@@ -704,6 +704,7 @@ Console.Error.WriteLine(ex.ToString());
             var primaryFactory = FactoryFor(options.Db, primary.Id, primaryDb);
             await using var issues = new IssueStore(primaryFactory);
             var recoveryReports = new RecoveryReportStore(primaryFactory);
+            var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
             var worktrees = new GitWorktreeService(
                 new WorkspaceOptions
                 {
@@ -711,8 +712,9 @@ Console.Error.WriteLine(ex.ToString());
                     WorktreeRoot = options.Workspace.WorktreeRoot,
                     DefaultBranch = options.Workspace.DefaultBranch,
                 },
-                loggerFactory.CreateLogger<GitWorktreeService>());
-            var gitHub = BuildGitHubService(options.GitHub, loggerFactory.CreateLogger<GitHubService>());
+                loggerFactory.CreateLogger<GitWorktreeService>(),
+                publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+                publisherRepository: gitHub.UsesAppIdentity ? $"https://github.com/{options.GitHub.Owner}/{options.GitHub.Repo}" : null);
             var recovery = new Orchestrator.StartupRecovery(
                 issues, recoveryReports, worktrees,
                 new Orchestrator.GitHubRecoveryAdapter(gitHub),
@@ -929,73 +931,17 @@ Console.Error.WriteLine(ex.ToString());
             }
         }
 
-        // 5. GitHub token + repo. The token is operator-managed per
-        //    project via the dashboard Secrets page ('github_token');
-        //    appsettings.json github.token carries only a placeholder.
-        //    Resolve the DB secret first (same pattern as the kilo
-        //    gateway key above) and probe the owning project's repo
-        //    (owner/repo parsed from its registered RepoUrl).
-        var ghToken = options.GitHub.Token;
-        var ghOwner = options.GitHub.Owner;
-        var ghRepo = options.GitHub.Repo;
-        if (string.IsNullOrEmpty(ghToken) || ghToken.StartsWith("GITHUB_TOKEN"))
+        // Probe the actual per-repository identity route. App failures must not
+        // be concealed by a still-valid legacy personal token.
+        using (var githubHttp = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+            { Timeout = TimeSpan.FromSeconds(15) })
         {
-            foreach (var project in projects)
-            {
-                string? secret;
-                try
-                {
-                    secret = await secretStore.GetPlaintextAsync(
-                        project.Id, SecretKinds.GitHubToken, CancellationToken.None);
-                }
-                catch
-                {
-                    continue;
-                }
-                if (string.IsNullOrEmpty(secret)) continue;
-
-                ghToken = secret;
-                if (ProjectDispatchBundleFactory.ParseGitHubOwnerRepo(project.RepoUrl) is { } parsed)
-                {
-                    ghOwner = parsed.Owner;
-                    ghRepo = parsed.Repo;
-                }
-                break;
-            }
-        }
-        if (string.IsNullOrEmpty(ghToken) || ghToken.StartsWith("GITHUB_TOKEN"))
-        {
-            failures.Add("github.token looks unset (still a placeholder) and no per-project 'github_token' secret is stored");
-        }
-        else
-        {
-            try
-            {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", ghToken);
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("Forge-Check");
-                var resp = await http.GetAsync($"https://api.github.com/repos/{ghOwner}/{ghRepo}");
-                if (resp.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"  [ok] GitHub repo {ghOwner}/{ghRepo} reachable");
-                }
-                else if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    failures.Add($"GitHub repo {ghOwner}/{ghRepo} not found (or token lacks access)");
-                }
-                else if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-                {
-                    failures.Add("GitHub token rejected (HTTP 401) — token expired or wrong scope");
-                }
-                else
-                {
-                    failures.Add($"GitHub returned HTTP {(int)resp.StatusCode} — {resp.ReasonPhrase}");
-                }
-            }
-            catch (Exception ex)
-            {
-                failures.Add($"GitHub unreachable: {ex.GetType().Name}: {ex.Message}");
-            }
+            var githubCheck = new GitHubPreflight(githubHttp,
+                new GitHubPreflightCredentials(options.GitHub, secretStore,
+                    id => FactoryFor(options.Db, id, dbByProject[id])));
+            var result = await githubCheck.CheckAsync(projects, options.GitHub, CancellationToken.None);
+            foreach (var message in result.Passed) Console.WriteLine("  [ok] " + message);
+            failures.AddRange(result.Failed);
         }
 
         // NuGet feed probe: the Talaria packages restore from the

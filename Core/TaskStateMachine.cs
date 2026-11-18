@@ -262,7 +262,8 @@ public sealed class TaskStateMachine
         IssueRecord? watch,
         bool hasActiveDevRun,
         CancellationToken ct,
-        IReadOnlyDictionary<string, object>? extraMetadata = null)
+        IReadOnlyDictionary<string, object>? extraMetadata = null,
+        IssueStatus? issueStatus = null)
     {
         var now = DateTime.UtcNow;
         // Authority semantics (Phase 3): the machine's own recorded
@@ -305,7 +306,7 @@ public sealed class TaskStateMachine
         {
             foreach (var kv in extraMetadata) metadata[kv.Key] = kv.Value;
         }
-        await issues.TransitionAsync(task.Id, task.Status, error: null, metadata: metadata, ct: ct);
+        await issues.TransitionAsync(task.Id, issueStatus ?? task.Status, error: null, metadata: metadata, ct: ct);
         return next;
     }
 }

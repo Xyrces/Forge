@@ -92,3 +92,90 @@ the narrow layout kept the content within the viewport. Screenshots
 the private preview directory. The Mermaid block remains readable fenced
 source; this check does not claim an interactive diagram renderer. No
 scheduler, provider call or production data mutation occurred in the preview.
+
+## Sprint and task review redesign
+
+The [accepted design](task-review-ux-plan.md) calls for an active sprint’s goal
+and acceptance progress above its five card lanes, readable task and review
+history, and human review during an ongoing sprint.
+
+### Production reference from November 18, 2026
+
+At 05:01 UTC Linux Chrome opened Sprint 3 and the task for PR #150 on production
+revision `30a6ec9f8b740dd4bd2775b26edac0db7ee48997`. At a viewport width of
+1280 pixels, all three completed cards began at x=1131 and ended at x=1309.
+The document width was 1280, which hid 29 pixels of clipping from an overflow
+check that measured only the page. At a width of 390 pixels those cards spanned
+x=23 to x=367. All three historical sprints had finished before this capture.
+
+The task title, PR link and original review text appeared after 1.98 seconds
+on desktop and 1.02 seconds on mobile. Each number is a single navigation
+sample. The screenshots and input measurements are in the Linux sprint-review
+directory under `baseline-pr150-stable/receipt.json`.
+
+| PR #150 delivery interval | Duration | Source |
+| --- | ---: | --- |
+| CI on the final PR revision `263bbfe` | 186 s | GitHub check run |
+| CI on merged revision `30a6ec9` | 194 s | GitHub check run |
+| Image packaging | 257 s | GitHub Actions run |
+| Image workflow completion to rollout Job start | 163 s | Actions completion and K3s Job start |
+| K3s rollout Job | 80 s | Job start and completion |
+
+Main CI and image packaging overlapped. The retained release receipt links the
+deployed digest to the source revision. The old controller did not record
+separate dispatch eligibility, model/tool work, verification or human wait
+boundaries for this task. The Linux `timing/pr150` directory contains the
+source records used by the read-only collector.
+
+### Linux browser evidence
+
+The following receipts are under `task-browser-20261117` in the Linux
+qualification directory. They exercise real Blazor components against a
+loopback fixture API, without schedulers or paid model calls.
+
+| Receipt | What the browser observed |
+| --- | --- |
+| `browser-qualified/receipt.json` | The goal, acceptance criteria and five lanes render in one desktop flow with the sidebar open. Card bounds stay inside each lane. On mobile, all five lanes and their actions are reachable. A hold during rework leaves the card in Running. |
+| `browser-qualified-runs/receipt.json` | The run title and metadata fit a 390-pixel viewport. The test checks the document width after the exact run has loaded. |
+| `browser-task-performance-final/receipt.json` | Task detail fetches the task record once across prerender and hydration. It waits until History & runs opens to fetch activity. The PR #150 fixture includes the four criteria assigned to this task, the verified revision `263bbfe` and observed merge `30a6ec9`. Browser acceptance remains separate. |
+| `browser-nomination-final/receipt.json` | Project policy saves a nominated human. A running card offers the action by name, and the nominated person becomes the next actor when review is ready. The name belongs to this fixture. |
+| `browser-native-history/receipt.json` | A human requests changes inline, another review approves the corrected revision, and both records remain visible with their original authors and links. The view distinguishes advisory comments, dismissed decisions and older Forge comments. Long paths wrap at 390 pixels. |
+| `browser-review-prose-final/receipt.json` | The PR #150 view shows the historical reviewer's findings without protocol markers. Human-authored text stays verbatim. Seven-character revision links expose the full commit hash and work in both review and delivery evidence. |
+| `browser-navigation/navigation.json` | Six journeys exercise browser Back, app links, keyboard focus, scroll position, lane and sprint selection, paged task searches, and separate project histories. |
+
+The component runner captures populated content after hydration and checks the
+visible text again after saving each screenshot. This replaced an earlier
+`browser-final` capture that showed a loading screen. Separate source and SQL
+tests cover existing-code verification, cancellation, unauthorized changes,
+review gating, and persisted hold behavior. See the
+[SQL qualification record](review-sql-qualification.md).
+
+### Browser check with the actual handlers and stores
+
+`browser-real-handlers/receipt.json` covers the actual DashboardHost with
+isolated task, sprint and worker-attempt stores, operator authentication, and
+synthetic GitHub read responses. A card action persisted a human-review
+requirement. The task stayed Running with its worker and showed the
+configured reviewer, the anchored finding and its stored history on both
+desktop and mobile. Reopening the stores confirmed the saved requirement
+and running worker. An unauthenticated write returned HTTP 401.
+
+This run exposed two hosting issues. Task and history routes now register
+independently of the optional codebase service. A host with a configured
+dashboard port and no explicit Kestrel endpoint now binds to that port.
+An integration test starts a real host and checks those routes.
+
+A protected PR with installed production Apps, an actual human decision, and
+browser observations of the deployed revision are still required for live
+acceptance.
+
+### Worker timing in the task history
+
+At 1280 and 390 CSS pixels, the Linux browser rehearsal showed a 250 ms
+requeue-to-admission interval, a model timeout at 17 seconds, and an
+interrupted attempt with a start time and an unknown finish time. The
+queue interval can include intentional waits. The history linked the
+activation event to its sprint in the selected project. Historical PR #150
+remained readable with its older records. The browser reported zero page or
+request failures. The receipt and screenshots are under
+`sprint-review/ui-timing-browser/evidence-sprint-links/` on the Linux host.

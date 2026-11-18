@@ -30,6 +30,8 @@ public static class RunVerification
         CancellationToken ct,
         TimeSpan? timeout = null)
     {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+            throw new InvalidOperationException("Repository verification must run in an uncredentialed worker, never in the App-enabled controller.");
         var failures = new List<string>();
         var flakyPasses = new List<string>();
         foreach (var command in commands)

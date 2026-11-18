@@ -3,11 +3,21 @@ using Forge.Configuration;
 
 namespace Forge;
 
-public class GitHubService
+public partial class GitHubService
 {
     private readonly GitHubClient _client;
+    internal readonly GitHubClient? _reviewClient;
+    private readonly GitHubAppIdentities.InstallationCredentials? _publisherCredentials;
+    public virtual string? ReviewerLogin { get; }
+    public bool UsesAppIdentity => _publisherCredentials is not null;
+    public async Task<string?> GetPublisherTokenAsync() => _publisherCredentials is null ? null : await _publisherCredentials.GetTokenAsync();
     private readonly string _owner;
     private readonly string _repo;
+
+    internal GitHubService(string owner, string repo, GitHubClient publisher, GitHubClient reviewer)
+    {
+        _owner = owner; _repo = repo; _client = publisher; _reviewClient = reviewer;
+    }
 
     public GitHubService(GitHubOptions options)
         : this(options.Owner, options.Repo, options.Token) { }
@@ -16,6 +26,15 @@ public class GitHubService
     {
         _owner = owner;
         _repo = repo;
+        var apps = GitHubAppIdentities.Find(owner, repo);
+        if (apps is not null)
+        {
+            _publisherCredentials = GitHubAppIdentities.CredentialsFor(apps, reviewer: false);
+            _client = new GitHubClient(new ProductHeaderValue("Forge"), _publisherCredentials);
+            _reviewClient = new GitHubClient(new ProductHeaderValue("Forge-Reviewer"), GitHubAppIdentities.CredentialsFor(apps, reviewer: true));
+            ReviewerLogin = apps.Reviewer.Slug + "[bot]";
+            return;
+        }
         _client = new GitHubClient(new ProductHeaderValue("Forge"));
         if (!string.IsNullOrEmpty(token))
             _client.Credentials = new Credentials(token);
@@ -41,6 +60,10 @@ public class GitHubService
         string title, string body, string headBranch, string baseBranch = "main",
         CancellationToken cancellationToken = default)
     {
+        // Make the human-review control available in GitHub's label picker
+        // as soon as an App-managed pull request opens.
+        if (_reviewClient is not null)
+            await EnsureHumanReviewLabelAsync(cancellationToken);
         var pr = new NewPullRequest(title, headBranch, baseBranch) { Body = body, MaintainerCanModify = true };
         return await _client.PullRequest.Create(_owner, _repo, pr);
     }
@@ -126,19 +149,29 @@ public class GitHubService
 
     public virtual async Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default)
     {
-        // GitHub Actions reports via CHECK RUNS, not legacy commit
-        // statuses — the combined-status endpoint returns 'pending'
-        // forever for check-run-only CI (observed 2026-07-23:
-        // approved PRs never auto-merged, CI failures never fed the
-        // rework loop). Read check runs first; fall back to legacy
-        // statuses for repos that still use them.
-        var checkRuns = await _client.Check.Run.GetAllForReference(_owner, _repo, sha);
-        if (checkRuns.TotalCount > 0)
-        {
-            return ClassifyCheckRuns(checkRuns.CheckRuns.Select(r => (r.Status.Value, r.Conclusion?.Value)));
-        }
-        var response = await _client.Repository.Status.GetCombined(_owner, _repo, sha);
-        return response.State.Value;
+        // GitHub Actions checks and external commit statuses may coexist on the
+        // same revision. Zero legacy contexts also report "pending".
+        var checksRead = _client.Check.Run.GetAllForReference(_owner, _repo, sha);
+        var statusesRead = _client.Repository.Status.GetCombined(_owner, _repo, sha);
+        await Task.WhenAll(checksRead, statusesRead).WaitAsync(cancellationToken);
+        var checks = await checksRead;
+        var statuses = await statusesRead;
+        var checkedState = ClassifyCheckRuns(checks.CheckRuns.Select(r => (r.Status.Value, r.Conclusion?.Value)));
+        return CombineCiSignals(checks.TotalCount, checks.CheckRuns.Count, checkedState, statuses.TotalCount, statuses.State.Value);
+    }
+
+    internal static CommitState CombineCiSignals(int reportedChecks, int observedChecks, CommitState checkState,
+        int statusContexts, CommitState statusState)
+    {
+        if (statusContexts > 0 && statusState is CommitState.Failure or CommitState.Error)
+            return statusState;
+        if (observedChecks > 0 && checkState is CommitState.Failure or CommitState.Error)
+            return checkState;
+        if (observedChecks != reportedChecks || (statusContexts == 0 && reportedChecks == 0))
+            return CommitState.Pending;
+        if ((observedChecks > 0 && checkState != CommitState.Success) || (statusContexts > 0 && statusState != CommitState.Success))
+            return CommitState.Pending;
+        return CommitState.Success;
     }
 
     internal static CommitState ClassifyCheckRuns(IEnumerable<(CheckStatus Status, CheckConclusion? Conclusion)> checks)
@@ -219,7 +252,8 @@ public class GitHubService
                 _ => PullRequestReviewEvent.Comment,
             },
         };
-        var result = await _client.PullRequest.Review.Create(_owner, _repo, prNumber, review);
+        var reviewer = _reviewClient ?? (UsesAppIdentity ? throw new InvalidOperationException("Configured reviewer identity is unavailable.") : _client);
+        var result = await reviewer.PullRequest.Review.Create(_owner, _repo, prNumber, review);
         return result.Id;
     }
 

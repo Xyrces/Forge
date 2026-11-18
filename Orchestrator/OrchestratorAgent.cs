@@ -253,6 +253,11 @@ public sealed class OrchestratorAgent : IAgent
                     && (i.ParentIssueId is not null
                         || string.Equals(i.GetMetadata("groomed"), "true", StringComparison.OrdinalIgnoreCase)))
                     .ToList();
+                if (ready.Count > 0 && await ReviewConfigurationIssueAsync(bundle, cancellationToken) is { } reviewIssue)
+                {
+                    _logger.LogWarning("Engineering held for project {Project}: {Reason}", bundle.Project.Id, reviewIssue);
+                    continue;
+                }
                 // Per-(provider, model) 429 cooldowns: skip only the
                 // tasks whose model is cooling down. A minimax 429
                 // must not starve a task that would run on kimi-k3.
@@ -283,6 +288,7 @@ public sealed class OrchestratorAgent : IAgent
                     // method repeats this check before claim to fence later changes.
                     if (await CheckSprintAdmissionAsync(dev, bundle, cancellationToken) is not null)
                         continue;
+                    await bundle.IssueStore.ObserveDispatchEligibleAsync(dev, activeSprint.Id, cancellationToken);
                     var role = ResolveRoleName(dev.Type);
                     // Triage model escalation (phase 3): a task
                     // carrying an unconsumed marker acquires ONLY its
@@ -432,6 +438,14 @@ public sealed class OrchestratorAgent : IAgent
     }
 
 
+    private static async Task<string?> ReviewConfigurationIssueAsync(ProjectDispatchBundle bundle, CancellationToken ct)
+    {
+        if (!bundle.GitHub.RequireFormalReview || !string.IsNullOrWhiteSpace(bundle.GitHub.ReviewerLogin)) return null;
+        await using var memory = new MemoryStore(bundle.IssueStore.Db);
+        var mode = await new PullRequestReviewPolicy(memory).GetModeAsync(ct);
+        return PullRequestReviewPolicy.ReviewerConfigurationIssue(mode, false);
+    }
+
     private async Task<string?> CheckSprintAdmissionAsync(IssueRecord issue,
         ProjectDispatchBundle bundle, CancellationToken cancellationToken)
     {
@@ -456,6 +470,8 @@ public sealed class OrchestratorAgent : IAgent
             return new Result(false, "already-claimed");
         if (await CheckSprintAdmissionAsync(issue, bundle, cancellationToken) is { } scopeGap)
             return new Result(false, "sprint-scope-gap: " + scopeGap);
+        if (await ReviewConfigurationIssueAsync(bundle, cancellationToken) is { } reviewIssue)
+            return new Result(false, reviewIssue);
         try
         {
             // P3 (final wiring): dispatch is now driven by the MAF

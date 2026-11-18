@@ -8,7 +8,18 @@ namespace Forge.Tests;
 
 public sealed class CompletionEvidenceTests : IDisposable
 {
-    private readonly IssueStore issues = new(TempRoot.Instance.NewDbPath("completion-proof"), "project");
+    private readonly IssueStore issues;
+    private readonly OutcomeEvents events = new();
+    public CompletionEvidenceTests() => issues = new(TempRoot.Instance.NewDbPath("completion-proof"), "project", events);
+    private sealed class OutcomeEvents : Forge.Core.Messaging.IEventPublisher
+    {
+        public List<Forge.Core.Messaging.SprintOutcomeChanged> Outcomes { get; } = [];
+        public Task PublishAsync<T>(T evt, CancellationToken ct = default) where T : Forge.Core.Messaging.IForgeEvent
+        {
+            if (evt is Forge.Core.Messaging.SprintOutcomeChanged outcome) Outcomes.Add(outcome);
+            return Task.CompletedTask;
+        }
+    }
     private SprintCompletionStore Store => new(issues);
     private static readonly string Head = new('a', 40);
     private static readonly string Source = new('b', 40);
@@ -56,12 +67,18 @@ public sealed class CompletionEvidenceTests : IDisposable
             await command.ExecuteNonQueryAsync();
         }
         Assert.False(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        Assert.Empty(events.Outcomes);
         Assert.Single(await Store.ListAwaitingDeliveryOutcomeAsync());
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.RecordOperatorEvidenceAsync(receipt.Id, evidence with { SourceSha = Head }, "authenticated operator"));
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.RecordOperatorEvidenceAsync(receipt.Id, evidence with { CriterionId = "invented" }, "authenticated operator"));
         await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => Store.RecordOperatorEvidenceAsync(receipt.Id, evidence, "authenticated operator")));
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.RecordOperatorEvidenceAsync(receipt.Id, evidence with { ProofReference = "different" }, "authenticated operator"));
         Assert.True(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        Assert.False(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        var accepted = Assert.Single(events.Outcomes);
+        Assert.Equal("Satisfied", accepted.Outcome);
+        Assert.Equal("project", accepted.ProjectId);
+        Assert.Equal(sprint.Id, accepted.SprintId);
         Assert.Empty(await Store.ListAwaitingDeliveryOutcomeAsync());
         Assert.Equal(EngineeringOutcome.Satisfied, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
     }
@@ -102,6 +119,7 @@ public sealed class CompletionEvidenceTests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.AbandonAsync(receipt.Id, "different-plan", "Stop this scope", "authenticated operator"));
         await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop this scope", "authenticated operator");
         await Store.AbandonAsync(receipt.Id, plan.Hash, "Stop this scope", "authenticated operator");
+        Assert.Equal("Abandoned", Assert.Single(events.Outcomes).Outcome);
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.AbandonAsync(receipt.Id, plan.Hash, "Changed reason", "authenticated operator"));
         await Store.MarkBookkeepingCompleteAsync(receipt.Id); // stale reconciliation cannot overwrite the explicit stop
         Assert.Equal("Stopped", (await Store.GetAsync(receipt.Id))!.BookkeepingState);

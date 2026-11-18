@@ -39,6 +39,7 @@ public class PRWatcherQaGateTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public CommitState Ci = CommitState.Success;
         public int MergeCalls;
         public FakeGitHub() : base("o", "r", null) { }

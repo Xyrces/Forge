@@ -18,6 +18,7 @@ import uuid
 from manifests import foundation, job, obj
 from release import validate_image
 from catalog import register, validate_receipt
+from github_apps import app_bundle, webhook_bundle
 
 
 def command(args, data=None, optional=False):
@@ -171,6 +172,10 @@ class Installer:
         self.immutable_secret("forge-worker-runtime", {"sql-connection-string": Path(args.worker_sql_file).read_bytes().strip()})
         self.immutable_secret("forge-worker-packages", worker_packages(Path(args.worker_packages_file)))
         self.immutable_secret("forge-config", {"appsettings.json": Path(args.config).read_bytes()})
+        if getattr(args, "github_apps_directory", None):
+            self.immutable_secret("forge-github-apps", app_bundle(args.github_apps_directory))
+        if getattr(args, "github_webhook_secret_file", None):
+            self.immutable_secret("forge-github-events", webhook_bundle(args.github_webhook_secret_file))
         service = self.get("service", "forge")
         current_slot = service["spec"].get("selector", {}).get("slot", "none")
         # Initialization is explicit and never runs alongside an active controller.
@@ -210,6 +215,8 @@ def main():
     for flag in ("image", "source-sha", "image-receipt", "dataset", "operation", "sql-file", "initialize-sql-file", "worker-sql-file", "worker-packages-file", "config"):
         parser.add_argument("--" + flag, required=True)
     parser.add_argument("--namespace", default="forge")
+    parser.add_argument("--github-apps-directory", help="Private directory containing App config.json and referenced PEM keys; controller only")
+    parser.add_argument("--github-webhook-secret-file", help="Private signature secret for /hooks/github; controller only, does not expose ingress")
     parser.add_argument("--k3s-version")
     parser.add_argument("--k3s-sha256")
     parser.add_argument("--pull-secret", help="Existing registry image-pull Secret in target namespace")
@@ -230,6 +237,8 @@ def main():
         raise ValueError("invalid namespace")
     configuration = json.loads(Path(args.config).read_text(encoding="utf-8-sig"))
     validate_shared_configuration(configuration)
+    if args.github_apps_directory: app_bundle(args.github_apps_directory)
+    if args.github_webhook_secret_file: webhook_bundle(args.github_webhook_secret_file)
     worker_packages(Path(args.worker_packages_file))
     for connection_file in (args.sql_file, args.initialize_sql_file, args.worker_sql_file):
         if not Path(connection_file).is_file() or not Path(connection_file).read_bytes().strip():

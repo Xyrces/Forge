@@ -38,6 +38,7 @@ public class PRWatcherReworkTests : IDisposable
     /// <summary>GitHub fake: scriptable CI state, no real API calls.</summary>
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public CommitState Ci = CommitState.Pending;
         public int CiSignalCount = 1;   // zero models "CI never fired for this head"
         public CommitState BaseCi = CommitState.Success;   // base branch (main) head check state
@@ -100,7 +101,8 @@ public class PRWatcherReworkTests : IDisposable
     private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
         Forge.Core.AgentRunStore? runs = null,
-        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null) => new(
+        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null,
+        Func<string, CancellationToken, Task<bool>>? joinTaskWorkers = null) => new(
         gh,
         worktrees: new AgentTools.GitWorktreeService(
             new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -113,7 +115,8 @@ public class PRWatcherReworkTests : IDisposable
         gates: gates,
         lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
         workflow: workflow,
-        runs: runs, hasDurableWorker: hasDurableWorker);
+        runs: runs, hasDurableWorker: hasDurableWorker, joinTaskWorkers: joinTaskWorkers,
+        projectId: _workDir); // Each isolated store models a distinct project.
 
     private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
     {
@@ -157,6 +160,48 @@ public class PRWatcherReworkTests : IDisposable
     }
 
     private static PullRequest Pr(int n) => new(n);
+
+    [Fact]
+    public async Task NewHeadRework_PreservesLifecycleStamp_AcrossConcurrentPollsAndRestart()
+    {
+        var task = await SeedAsync(new()
+        {
+            ["state"] = "PROpen", ["reworkForSha"] = "previous-head", ["reworkAttempts"] = "1",
+        });
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var watcher = NewWatcher(gh);
+        var results = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => watcher.PollWatchedTaskAsync(
+            task, reviewsOverride: _ => [PullRequestReviewState.ChangesRequested], headShaOverride: _ => "corrected-head")));
+        Assert.Single(results.Where(r => r == PRWatcher.WatchPollOutcome.Reworking));
+        var queued = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.Pending, queued.Status);
+        Assert.Equal("ReworkQueued", queued.GetMetadata("state"));
+        Assert.Equal("corrected-head", queued.GetMetadata("reworkForSha"));
+        Assert.Equal("2", queued.GetMetadata("reworkAttempts"));
+
+        // A new watcher has no in-memory dedupe. The persisted round is enough.
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await NewWatcher(gh).PollWatchedTaskAsync(
+            task, reviewsOverride: _ => [PullRequestReviewState.ChangesRequested], headShaOverride: _ => "corrected-head"));
+        Assert.Equal("2", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task ActiveDurableWorker_WithLegacyWrongSha_CannotLosePublicationAuthority()
+    {
+        var task = await SeedAsync(new()
+        {
+            ["state"] = "ReworkRunning", ["reworkForSha"] = "old-head", ["reworkAttempts"] = "3",
+        });
+        var gh = new FakeGitHub { Ci = CommitState.Success };
+        var watcher = NewWatcher(gh, hasDurableWorker: (_, _) => Task.FromResult(true));
+        for (var i = 0; i < 5; i++)
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await watcher.PollWatchedTaskAsync(
+                task, reviewsOverride: _ => [PullRequestReviewState.ChangesRequested], headShaOverride: _ => "new-head"));
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(IssueStatus.InProgress, current.Status);
+        Assert.Equal("ReworkRunning", current.GetMetadata("state"));
+        Assert.Equal("3", current.GetMetadata("reworkAttempts"));
+    }
 
     [Fact]
     public async Task MissingCi_ThreeZeroSignalPolls_FiresNoStrikeRetrigger()
@@ -740,8 +785,9 @@ public class PRWatcherReworkTests : IDisposable
     {
         var gh = new FakeGitHub { Ci = CommitState.Success };
         var task = await SeedAsync();
+        await _issues.SetCheckpointAsync(task.Id, DispatchCheckpoint.PrOpened);
 
-        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+        var outcome = await NewWatcher(gh, joinTaskWorkers: (_, _) => Task.FromResult(true)).PollWatchedTaskAsync(
             task, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123",
@@ -751,6 +797,24 @@ public class PRWatcherReworkTests : IDisposable
         Assert.Equal(0, gh.CloseCalls);
         var after = (await _issues.GetAsync(task.Id))!;
         Assert.Equal(IssueStatus.Blocked, after.Status);
+    }
+
+    [Fact]
+    public async Task EmptyDiff_UnrelatedProjectReviewDoesNotDiscardObservation()
+    {
+        var task = await SeedAsync();
+        await _issues.SetCheckpointAsync(task.Id, DispatchCheckpoint.PrOpened);
+        // A different fixture/project may legitimately use exactly the same task ID.
+        var unrelated = ReviewWorkerAttempt.Gate(_workDir + "-other", task.Id, AgentType.Reviewer);
+        await unrelated.WaitAsync();
+        try
+        {
+            var outcome = await NewWatcher(new FakeGitHub(), joinTaskWorkers: (_, _) => Task.FromResult(true))
+                .PollWatchedTaskAsync(task, headShaOverride: _ => "abc123", changedFilesOverride: _ => 0);
+            Assert.Equal(PRWatcher.WatchPollOutcome.Blocked, outcome);
+            Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(task.Id))!.Status);
+        }
+        finally { unrelated.Release(); }
     }
 
     [Fact]
@@ -821,7 +885,7 @@ public class PRWatcherReworkTests : IDisposable
         // working (queue + 30-min run). With an active run in the
         // registry, the guard must NOT re-fire regardless of age.
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var task = await SeedAsync();
+        var task = await SeedAsync(new() { ["reworkAttempts"] = "1", ["reworkForSha"] = "abc123" });
         // The agent_run table lives in IssueStore's schema — bootstrap it.
         await using (var bootstrap = new IssueStore(Path.Combine(_workDir, "runs.db"))) { }
         var runs = new Forge.Core.AgentRunStore(Path.Combine(_workDir, "runs.db"));
@@ -858,7 +922,7 @@ public class PRWatcherReworkTests : IDisposable
         // working (queue + 30-min run). With an active run in the
         // registry, the guard must NOT re-fire regardless of age.
         var gh = new FakeGitHub { Ci = CommitState.Failure };
-        var task = await SeedAsync();
+        var task = await SeedAsync(new() { ["reworkAttempts"] = "1", ["reworkForSha"] = "abc123" });
         // The agent_run table lives in IssueStore's schema — bootstrap it.
         await using (var bootstrap = new IssueStore(Path.Combine(_workDir, "runs.db"))) { }
         var runs = new Forge.Core.AgentRunStore(Path.Combine(_workDir, "runs.db"));

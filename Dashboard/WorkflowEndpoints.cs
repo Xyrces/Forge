@@ -79,6 +79,9 @@ public static class WorkflowEndpoints
             {
                 return Results.BadRequest(new { error = "validation_failed", errors });
             }
+            if (await WouldDisableRollbackFenceAsync(memory, draft, ct))
+                return Results.Conflict(new { error = "merge_gate_required_for_rollback",
+                    detail = "Keep the merge gate on an enabled step so the prior controller honors saved human review holds during rollback." });
 
             // Snapshot the previous live definition (empty body marks
             // "was the built-in default") before overwriting.
@@ -120,6 +123,10 @@ public static class WorkflowEndpoints
             {
                 return Results.BadRequest(new { error = "unknown_version", request.Key });
             }
+            if (await WouldDisableRollbackFenceAsync(memory,
+                WorkflowResolver.TryParse(version.Body) ?? WorkflowDefaults.Definition, ct))
+                return Results.Conflict(new { error = "merge_gate_required_for_rollback",
+                    detail = "This version removes the merge gate used to protect saved human review holds during rollback." });
 
             var previousLive = (await memory.RecallAsync(WorkflowResolver.LiveKey, ct)).FirstOrDefault()?.Body ?? "";
             await SnapshotAsync(memory, previousLive, ct);
@@ -145,6 +152,10 @@ public static class WorkflowEndpoints
             return Results.Json(new { ok = true, live }, DashboardJson.Options);
         });
     }
+
+    private static async Task<bool> WouldDisableRollbackFenceAsync(MemoryStore memory, WorkflowDefinition candidate, CancellationToken ct)
+        => !Core.Control.DeploymentMergeFence.LegacyWorkflowHonorsFence(candidate)
+            && await memory.GetAsync(Core.Control.DeploymentMergeFence.AuditKey, ct) is not null;
 
     private static async Task SnapshotAsync(MemoryStore memory, string previousLiveBody, CancellationToken ct)
     {

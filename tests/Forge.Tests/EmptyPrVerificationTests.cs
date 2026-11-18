@@ -40,9 +40,85 @@ public sealed class EmptyPrVerificationTests : IDisposable
             new Dictionary<string, object> { ["prNumber"] = 12, ["branch"] = "agent/task", ["state"] = blocked ? "BlockedOperator" : "PROpen",
                 ["reviewSha"] = _github.Head, ["reviewVerdict"] = "Approve", ["qaVerdict"] = "pass", ["reworkAttempts"] = 2 });
     }
-    private PRWatcher Watch(Func<string, CancellationToken, Task<bool>>? joined = null) => new(_github, _worktrees, _issues,
+    private PRWatcher Watch(Func<string, CancellationToken, Task<bool>>? joined = null,
+        Func<string, CancellationToken, Task<bool>>? durable = null, AgentRunStore? runs = null) => new(_github, _worktrees, _issues,
         TimeSpan.FromSeconds(1), TimeSpan.FromHours(24), new InMemoryDashboardEventBus(), NullLogger<PRWatcher>.Instance,
-        lifecycle: new(true, NullLogger.Instance), joinTaskWorkers: joined ?? ((_, _) => Task.FromResult(true)), projectId: "project");
+        lifecycle: new(true, NullLogger.Instance), joinTaskWorkers: joined ?? ((_, _) => Task.FromResult(true)),
+        hasDurableWorker: durable, runs: runs, projectId: "project");
+
+    [Theory]
+    [InlineData(SprintEvidenceKind.MergedAndVerified, "durable", false)]
+    [InlineData(SprintEvidenceKind.MergedAndVerified, "active", false)]
+    [InlineData(SprintEvidenceKind.MergedAndVerified, "checkpoint", false)]
+    [InlineData(SprintEvidenceKind.ImplementationVerified, "durable", false)]
+    [InlineData(SprintEvidenceKind.ImplementationVerified, "active", false)]
+    [InlineData(SprintEvidenceKind.ImplementationVerified, "checkpoint", false)]
+    [InlineData(SprintEvidenceKind.MergedAndVerified, "durable", true)]
+    [InlineData(SprintEvidenceKind.MergedAndVerified, "active", true)]
+    [InlineData(SprintEvidenceKind.MergedAndVerified, "checkpoint", true)]
+    [InlineData(SprintEvidenceKind.ImplementationVerified, "durable", true)]
+    [InlineData(SprintEvidenceKind.ImplementationVerified, "active", true)]
+    [InlineData(SprintEvidenceKind.ImplementationVerified, "checkpoint", true)]
+    public async Task RightfulWorkerDefersBeforeScopeDecisionOrJoining(SprintEvidenceKind kind, string ownership, bool sameBranchTask)
+    {
+        var task = await Seed(kind);
+        var owner = task;
+        if (sameBranchTask)
+        {
+            owner = await _issues.CreateAsync(new("coredev", "Same branch repair", Metadata: new Dictionary<string, object> { ["branch"] = "agent/task" }));
+            owner = (await _issues.ClaimAsync(owner.Id, "coredev"))!;
+            await _issues.SetCheckpointAsync(owner.Id, DispatchCheckpoint.PrOpened);
+        }
+        if (ownership == "checkpoint") await _issues.SetCheckpointAsync(owner.Id, DispatchCheckpoint.WorktreeAcquired);
+        var runs = new AgentRunStore(_issues.Db);
+        if (ownership == "active") await runs.StartAsync("repair-run", owner.Id, "CoreDev", "fixture", projectId: "project");
+        task = (await _issues.GetAsync(task.Id))!;
+        var joinCalls = 0;
+        var watcher = Watch((_, _) => { joinCalls++; return Task.FromResult(true); },
+            (id, _) => Task.FromResult(ownership == "durable" && id == owner.Id), runs);
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await watcher.PollWatchedTaskAsync(task));
+        Assert.Equal(task.MetadataJson, (await _issues.GetAsync(task.Id))!.MetadataJson);
+        Assert.Equal(task.Status, (await _issues.GetAsync(task.Id))!.Status);
+        Assert.Equal(0, joinCalls); Assert.Equal(0, _github.CloseCalls); Assert.Equal(0, _github.DeleteCalls);
+    }
+
+    [Theory]
+    [InlineData(SprintEvidenceKind.MergedAndVerified)]
+    [InlineData(SprintEvidenceKind.ImplementationVerified)]
+    public async Task BlockedResumeDoesNotRetireOrJoinRightfulWorker(SprintEvidenceKind kind)
+    {
+        var task = await Seed(kind, blocked: true);
+        var joined = false;
+        Assert.Null(await Watch((_, _) => { joined = true; return Task.FromResult(true); },
+            (_, _) => Task.FromResult(true)).TryResumeMergeableBlockedAsync(task));
+        Assert.False(joined); Assert.Equal(0, _github.CloseCalls);
+        Assert.Equal(task.MetadataJson, (await _issues.GetAsync(task.Id))!.MetadataJson);
+    }
+
+    [Fact]
+    public async Task WorkerObservedAfterHistoricalJoinStillPreventsScopeBlock()
+    {
+        var task = await Seed(SprintEvidenceKind.MergedAndVerified);
+        var active = false;
+        var watcher = Watch((_, _) => { active = true; return Task.FromResult(true); }, (_, _) => Task.FromResult(active));
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await watcher.PollWatchedTaskAsync(task));
+        Assert.Equal(task.MetadataJson, (await _issues.GetAsync(task.Id))!.MetadataJson);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task UnrelatedBranchWorkerDoesNotHoldEmptyPrVerification()
+    {
+        var task = await Seed();
+        var unrelated = await _issues.CreateAsync(new("coredev", "Other branch", Metadata: new Dictionary<string, object> { ["branch"] = "agent/unrelated" }));
+        await _issues.ClaimAsync(unrelated.Id, "coredev");
+        var runs = new AgentRunStore(_issues.Db);
+        await runs.StartAsync("unrelated-run", unrelated.Id, "CoreDev", "fixture", projectId: "project");
+        var watcher = Watch(durable: (id, _) => Task.FromResult(id == unrelated.Id), runs: runs);
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, await watcher.PollWatchedTaskAsync(task));
+        Assert.Equal(1, _github.CloseCalls);
+        Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(unrelated.Id))!.Status);
+    }
 
     [Theory]
     [InlineData(false)] [InlineData(true)]
@@ -188,6 +264,7 @@ public sealed class EmptyPrVerificationTests : IDisposable
 
     private sealed class FakeGitHub() : GitHubService("owner", "repo", null)
     {
+        public override bool RequireFormalReview => false;
         public string Head = new('a', 40), Base = new('b', 40);
         public bool Closed, LoseCloseAck;
         public int CloseCalls, DeleteCalls, ReadCalls;

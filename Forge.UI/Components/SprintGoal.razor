@@ -1,18 +1,13 @@
 @if (!string.IsNullOrWhiteSpace(Goal))
 {
-    @if (Goal.Length > 240 || Goal.Contains('\n'))
-    {
-        <details class="sprint-goal">
-            <summary>Full sprint goal and acceptance criteria</summary>
-            <div class="sprint-hero__goal sprint-goal__text">@Goal</div>
-        </details>
-    }
-    else
-    {
-        <div class="sprint-hero__goal sprint-goal__text">@Goal</div>
-    }
+    <section class="sprint-objective" aria-label="Sprint objective">
+        <h2>Sprint objective</h2>
+        <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(DisplayGoal))</div>
+    </section>
 }
-
 @code {
     [Parameter] public string? Goal { get; set; }
+    private string? DisplayGoal => Goal is null ? null : System.Text.RegularExpressions.Regex.Replace(Goal,
+        @"\A\s*#{1,6}\s+(?:Goal|Sprint goal|Sprint objective)\s*\r?\n", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
 }

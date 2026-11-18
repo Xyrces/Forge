@@ -69,6 +69,9 @@ public sealed class SpecStatusChangedConsumer : EventConsumer<SpecStatusChanged>
         _wakeups.Groom.Signal();
         _wakeups.Design.Signal();
         _wakeups.Artist.Signal();
+        // Groomed tasks may have been enqueued while their spec was still
+        // Approved. Wake again at the actual eligibility boundary.
+        if (evt.ToStatus == nameof(Core.SpecStatus.Groomed)) _wakeups.Assemble.Signal();
         return Task.CompletedTask;
     }
 }

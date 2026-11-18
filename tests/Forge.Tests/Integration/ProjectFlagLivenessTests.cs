@@ -262,6 +262,7 @@ public sealed class WatchSweepQaOrderingTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public string HeadSha = CodeHead;
         public FakeGitHub() : base("o", "r", null) { }
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
@@ -441,6 +442,7 @@ public sealed class WatchHeadShaRecordingTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public FakeGitHub() : base("o", "r", null) { }
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
         {

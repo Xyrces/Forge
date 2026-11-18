@@ -45,6 +45,8 @@ public static class MemoryEndpoints
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
             if (body is null || string.IsNullOrWhiteSpace(body.Key) || body.Body is null)
                 return Results.BadRequest(new { error = "key and body required" });
+            if (AuthorityMemoryKeys.IsProtected(body.Key))
+                return Results.Problem("Use the dedicated operator control for this setting.", statusCode: 403);
             if (body.TtlDays is { } d && (d < 1 || d > 3650))
                 return Results.BadRequest(new { error = "ttlDays must be between 1 and 3650" });
 
@@ -62,6 +64,8 @@ public static class MemoryEndpoints
 
         app.MapDelete("/api/memory/{key}", async (string key, CancellationToken ct) =>
         {
+            if (AuthorityMemoryKeys.IsProtected(key))
+                return Results.Problem("Use the dedicated operator control for this setting.", statusCode: 403);
             var removed = await memory.ForgetAsync(key, ct);
             if (!removed) return Results.NotFound();
             logger.LogInformation("Memory forget: key={Key}", key);

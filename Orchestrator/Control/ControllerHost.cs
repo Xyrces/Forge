@@ -4,6 +4,8 @@ using Forge.Configuration;
 using Forge.Core;
 using Forge.Core.Control;
 using Forge.Core.Db;
+using Forge.Projects;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -17,25 +19,24 @@ public static class ControllerHost
     public sealed record Activation(string OperationId, string? ExpectedPreviousOwner = null);
 
     /// <summary>Read-only deployed-state check: no schema initialization, ownership acquisition, or model generation.</summary>
-    public static async Task<int> CheckAsync(AgentOptions options, ILoggerFactory loggers, CancellationToken ct = default)
+    public static Task<int> CheckAsync(AgentOptions options, ILoggerFactory loggers, CancellationToken ct = default)
+        => CheckAsync(options, loggers, token => ReadCheckStateAsync(options, token),
+            (projects, token) => CheckGitHubAsync(options, loggers, projects, token), ct);
+
+    // The production entrypoint and tests share orchestration; only external read boundaries vary.
+    internal static async Task<int> CheckAsync(AgentOptions options, ILoggerFactory loggers,
+        Func<CancellationToken, Task<(int Schema, IReadOnlyList<ProjectOptions> Projects)>> readState,
+        Func<IReadOnlyList<ProjectOptions>, CancellationToken, Task<GitHubPreflight.Result>> checkGitHub,
+        CancellationToken ct = default)
     {
         var logger = loggers.CreateLogger("Forge.Check");
         try
         {
-            if (!options.Db.IsSqlServer || !Guid.TryParse(options.Controller.DatasetId, out _))
-                throw new InvalidOperationException("Distributed check requires SQL Server and a stable dataset UUID.");
-            var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema,
-                ForgeSchemaProfile.Core, initializeSchema: false);
-            var registryVersion = await VerifySchemaAsync(registry, ct);
-            if (await new ControlLeaseStore(registry).ReadAsync(options.Controller.DatasetId, ct) is null)
-                throw new InvalidOperationException("Configured dataset is not initialized in this database.");
-            await using var issues = new IssueStore(registry);
-            await using var projects = new ProjectStore(issues);
-            var registered = await projects.ListAsync(ct);
-            if (registered.Count == 0) throw new InvalidOperationException("No project is registered in the initialized dataset.");
-            foreach (var project in registered)
-                await VerifySchemaAsync(ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id),
-                    initializeSchema: false), ct);
+            var (registryVersion, registered) = await readState(ct);
+            var github = await checkGitHub(registered, ct);
+            foreach (var message in github.Passed) logger.LogInformation("{Detail}", message);
+            foreach (var message in github.Failed) logger.LogError("{Detail}", message);
+            if (github.Failed.Count > 0) return 1;
             var config = Agents.LlmConfigAdapter.FromOptions(options.Llm);
             _ = config.Resolve(AgentType.CoreDev);
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
@@ -63,6 +64,53 @@ public static class ControllerHost
         }
     }
 
+    private static async Task<(int Schema, IReadOnlyList<ProjectOptions> Projects)> ReadCheckStateAsync(
+        AgentOptions options, CancellationToken ct)
+    {
+        if (!options.Db.IsSqlServer || !Guid.TryParse(options.Controller.DatasetId, out _))
+            throw new InvalidOperationException("Distributed check requires SQL Server and a stable dataset UUID.");
+        var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema,
+            ForgeSchemaProfile.Core, initializeSchema: false);
+        var registryVersion = await VerifySchemaAsync(registry, ct);
+        if (await new ControlLeaseStore(registry).ReadAsync(options.Controller.DatasetId, ct) is null)
+            throw new InvalidOperationException("Configured dataset is not initialized in this database.");
+        await using var issues = new IssueStore(registry);
+        await using var projects = new ProjectStore(issues);
+        var registered = await projects.ListAsync(ct);
+        if (registered.Count == 0) throw new InvalidOperationException("No project is registered in the initialized dataset.");
+        foreach (var project in registered)
+        {
+            await VerifySchemaAsync(ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id),
+                initializeSchema: false), ct);
+            await MemoryAuthoritySql.VerifyAsync(ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id),
+                initializeSchema: false), options.Bootstrap.WorkerPrincipal, ct);
+        }
+        return (registryVersion, registered.Select(project => new ProjectOptions
+        {
+            Id = project.Id,
+            RepoUrl = project.RepoUrl
+        }).ToArray());
+    }
+
+    private static async Task<GitHubPreflight.Result> CheckGitHubAsync(AgentOptions options,
+        ILoggerFactory loggers, IReadOnlyList<ProjectOptions> projects, CancellationToken ct)
+    {
+        var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema,
+            ForgeSchemaProfile.Core, initializeSchema: false);
+        await using var issues = new IssueStore(registry);
+        // Read existing ciphertext only: check must never create a new keyring or encryption key.
+        var protection = DataProtectionProvider.Create(new DirectoryInfo(options.Controller.KeyringPath),
+            builder => builder.SetApplicationName("forge.secrets").DisableAutomaticKeyGeneration());
+        var secrets = new SecretStore(issues, protection, loggers.CreateLogger<SecretStore>());
+        using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
+        return await new GitHubPreflight(http, new GitHubPreflightCredentials(options.GitHub, secrets,
+                id => ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(id), initializeSchema: false)))
+            .CheckAsync(projects, options.GitHub, ct);
+    }
+
     public static async Task<int> RunAsync(AgentOptions options, ILoggerFactory loggers,
         Func<Action, Func<CancellationToken, Task>, CancellationToken, Task> run)
     {
@@ -79,7 +127,11 @@ public static class ControllerHost
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls(options.Controller.ListenUrl);
         var app = builder.Build();
-        app.MapGet("/healthz", () => Results.Ok(new { live = true }));
+        app.MapGet("/healthz", async (CancellationToken ct) =>
+        {
+            try { await VerifyReviewAuthorityAsync(options, ct); return Results.Ok(new { live = true, reviewAuthorityReady = true }); }
+            catch (InvalidOperationException) { return Results.StatusCode(503); }
+        });
         app.Use(async (context, next) =>
         {
             if (context.Request.Path.StartsWithSegments("/api/controller"))
@@ -93,15 +145,36 @@ public static class ControllerHost
         app.MapGet("/api/controller/status", async (CancellationToken ct) =>
         {
             var schemaVersion = await VerifySchemaAsync(factory, ct);
-            return Results.Ok((await runtime.StatusAsync(ct)) with { SchemaVersion = schemaVersion });
+            var status = (await runtime.StatusAsync(ct)) with { SchemaVersion = schemaVersion };
+            try { await VerifyReviewAuthorityAsync(options, ct); }
+            catch (InvalidOperationException) { return Results.Ok(status with { Ready = false, AdmissionOpen = false }); }
+            return Results.Ok(status);
         });
         app.MapPost("/api/controller/activate", async (Activation activation, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(activation.OperationId)) return Results.BadRequest();
             await VerifySchemaAsync(factory, ct);
+            await VerifyReviewAuthorityAsync(options, ct);
             return await runtime.ActivateAsync(activation.OperationId, activation.ExpectedPreviousOwner, ct)
                 ? Results.Accepted(value: await runtime.StatusAsync(ct))
                 : Results.Conflict(new { error = "ownership_conflict" });
+        });
+        app.MapPost("/api/controller/merge-fence", async (Activation activation, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(activation.OperationId)) return Results.BadRequest();
+            await VerifySchemaAsync(factory, ct);
+            await using var registryIssues = new IssueStore(factory);
+            await using var projects = new ProjectStore(registryIssues);
+            var registered = await projects.ListAsync(ct);
+            if (registered.Count == 0) return Results.Conflict(new { error = "no_registered_projects" });
+            foreach (var project in registered)
+            {
+                var projectDb = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id), initializeSchema: false);
+                await VerifySchemaAsync(projectDb, ct);
+                await using var memory = new MemoryStore(projectDb);
+                await new DeploymentMergeFence(memory).HoldAsync(activation.OperationId, ct);
+            }
+            return Results.Ok(new { held = true, operationId = activation.OperationId, projects = registered.Count });
         });
         app.MapPost("/api/controller/drain", async (Activation activation, CancellationToken ct) =>
         {
@@ -135,6 +208,25 @@ public static class ControllerHost
         if (!RuntimeSchemaCompatibility.CanRead(version))
             throw new InvalidOperationException("Database schema is outside this release's tested compatibility version.");
         return version;
+    }
+
+    internal static async Task VerifyReviewAuthorityAsync(AgentOptions options, CancellationToken ct)
+    {
+        var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema, ForgeSchemaProfile.Core, initializeSchema: false);
+        await VerifyRegisteredProjectAuthorityAsync(registry,
+            id => ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(id), initializeSchema: false),
+            options.Bootstrap.WorkerPrincipal, ct);
+    }
+
+    internal static async Task VerifyRegisteredProjectAuthorityAsync(IDbConnectionFactory registry,
+        Func<string, IDbConnectionFactory> workload, string worker, CancellationToken ct)
+    {
+        await using var issues = new IssueStore(registry);
+        await using var projects = new ProjectStore(issues);
+        var registered = await projects.ListAsync(ct);
+        if (registered.Count == 0) throw new InvalidOperationException("No initialized project is registered.");
+        foreach (var project in registered)
+            await MemoryAuthoritySql.VerifyAsync(workload(project.Id), worker, ct);
     }
 
     public static void Validate(AgentOptions options)

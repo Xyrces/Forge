@@ -22,5 +22,6 @@ public sealed record AgentRunResult(
     long InputTokens,
     long OutputTokens,
     TimeSpan Elapsed,
-    Core.VerificationReceipt? Verification = null);
+    Core.VerificationReceipt? Verification = null,
+    Core.Execution.WorkerPhaseTiming? Phases = null);
 

@@ -7,8 +7,35 @@ namespace Forge.Reviewer;
 
 public sealed partial class PRWatcher
 {
-    private static readonly SemaphoreSlim[] PollGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
-    private SemaphoreSlim PollGate(string taskId) => PollGates[(StringComparer.Ordinal.GetHashCode($"{_projectId}/{taskId}") & int.MaxValue) % PollGates.Length];
+    // Do not stripe these gates: a busy unrelated task would discard a valid
+    // event with WaitAsync(0), losing counter progress and adding reconciliation latency.
+    // Callers retain strong references through Release, including policy batches.
+    // Weak cache entries can therefore expire only after holders and waiters are
+    // gone; never remove a live gate or dispose a semaphore another caller owns.
+    private static readonly Dictionary<string, WeakReference<SemaphoreSlim>> PollGates = new(StringComparer.Ordinal);
+    private static readonly object PollGateCacheLock = new();
+    private static int PollGateCacheReads;
+    private static string PollGateKey(string? projectId, string taskId) => $"{projectId}/{taskId}";
+    private static SemaphoreSlim GetPollGateByKey(string key)
+    {
+        lock (PollGateCacheLock)
+        {
+            if (++PollGateCacheReads % 256 == 0)
+                foreach (var stale in PollGates.Where(pair => !pair.Value.TryGetTarget(out _)).Select(pair => pair.Key).ToArray())
+                    PollGates.Remove(stale);
+            if (PollGates.TryGetValue(key, out var weak) && weak.TryGetTarget(out var existing)) return existing;
+            var created = new SemaphoreSlim(1, 1);
+            PollGates[key] = new(created);
+            return created;
+        }
+    }
+    internal static SemaphoreSlim GetPollGate(string? projectId, string taskId) => GetPollGateByKey(PollGateKey(projectId, taskId));
+    internal static IReadOnlyList<SemaphoreSlim> GetPollGatesForTasks(string? projectId, IEnumerable<string> taskIds)
+        => taskIds.Select(id => PollGateKey(projectId, id)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)
+            .Select(GetPollGateByKey).ToArray();
+    private sealed class LocalPollScope { public string Id { get; } = Guid.NewGuid().ToString("N"); }
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IIssueStore, LocalPollScope> LocalPollScopes = new();
+    private SemaphoreSlim PollGate(string taskId) => GetPollGate(_projectId ?? LocalPollScopes.GetOrCreateValue(_issues).Id, taskId);
 
     public async Task<WatchPollOutcome> PollWatchedTaskAsync(IssueRecord task, CancellationToken cancellationToken = default,
         Func<int, IReadOnlyList<PullRequestReviewState>>? reviewsOverride = null,
@@ -17,7 +44,14 @@ public sealed partial class PRWatcher
     {
         var gate = PollGate(task.Id);
         if (!await gate.WaitAsync(0, cancellationToken)) return WatchPollOutcome.Pending;
-        try { return await PollWatchedTaskCoreAsync(task, cancellationToken, reviewsOverride, headShaOverride, mergeableOverride, changedFilesOverride); }
+        try
+        {
+            var current = await _issues.GetAsync(task.Id, cancellationToken);
+            if (current is null || current.GetMetadata("prNumber") != task.GetMetadata("prNumber"))
+                return WatchPollOutcome.Pending;
+            task = current;
+            return await PollWatchedTaskCoreAsync(task, cancellationToken, reviewsOverride, headShaOverride, mergeableOverride, changedFilesOverride);
+        }
         finally { gate.Release(); }
     }
 
@@ -51,8 +85,15 @@ public sealed partial class PRWatcher
                 return WatchPollOutcome.Pending;
             if (task.Status is not (IssueStatus.InProgress or IssueStatus.Blocked))
                 return WatchPollOutcome.Pending;
+            // An empty remote diff can be a transient observation while its rightful
+            // worker is repairing the same branch. Do not reinterpret scope, block the
+            // task, or join historical attempts until current ownership is absent.
+            if (await EmptyPrHasWorkerOwnerAsync(task, ct)) return WatchPollOutcome.Pending;
+            if (_joinTaskWorkers is null || !await _joinTaskWorkers(task.Id, ct)) return WatchPollOutcome.Pending;
+            if (await EmptyPrHasWorkerOwnerAsync(task, ct)) return WatchPollOutcome.Pending;
             if (_issues is not IssueStore concrete || !await concrete.CanVerifyEmptyPrAsync(task.Id, ct))
             {
+                if (await EmptyPrHasWorkerOwnerAsync(task, ct)) return WatchPollOutcome.Pending;
                 const string reason = "Empty PR is not acceptance evidence. The committed scope requires a merged PR or an explicit approved existing-implementation criterion; inspect the scope before retrying.";
                 if (task.Status != IssueStatus.Blocked)
                 {
@@ -63,13 +104,9 @@ public sealed partial class PRWatcher
             }
             // False is not pod absence. This seam joins every historical role attempt;
             // unavailable state or unconfirmed termination leaves all artifacts untouched.
-            if (task.Status == IssueStatus.InProgress && task.DispatchCheckpoint is null or < DispatchCheckpoint.PushDone)
-                return WatchPollOutcome.Pending;
-            if (_joinTaskWorkers is null || !await _joinTaskWorkers(task.Id, ct)) return WatchPollOutcome.Pending;
-            if (_runs is not null && (await _runs.ListActiveAsync(ct)).Any(run => run.TaskId == task.Id))
-                return WatchPollOutcome.Pending;
             var latest = await _gitHub.GetPullRequestAsync(number, ct);
             if (!SameEmptyPr(observed, latest, task)) return WatchPollOutcome.Pending;
+            if (await EmptyPrHasWorkerOwnerAsync(task, ct)) return WatchPollOutcome.Pending;
             if (latest.State.Value == ItemState.Open) await _gitHub.ClosePullRequestAsync(number, ct);
             var closed = await _gitHub.GetPullRequestAsync(number, ct);
             if (closed.State.Value != ItemState.Closed || !SameEmptyPr(latest, closed, task)) return WatchPollOutcome.Pending;
@@ -89,6 +126,29 @@ public sealed partial class PRWatcher
         {
             for (var index = acquired.Count - 1; index >= 0; index--) acquired[index].Release();
         }
+    }
+
+    private async Task<bool> EmptyPrHasWorkerOwnerAsync(IssueRecord observedTask, CancellationToken ct)
+    {
+        var task = await _issues.GetAsync(observedTask.Id, ct);
+        if (task is null || task.GetMetadata("prNumber") != observedTask.GetMetadata("prNumber")
+            || task.GetMetadata("branch") != observedTask.GetMetadata("branch")
+            || task.Status is not (IssueStatus.InProgress or IssueStatus.Blocked)) return true;
+        var branch = task.GetMetadata("branch");
+        var owners = (await _issues.ListAsync(new Forge.Core.IssueFilter(), ct))
+            .Where(candidate => candidate.Id == task.Id || (!string.IsNullOrWhiteSpace(branch)
+                && candidate.GetMetadata("branch") == branch)).ToList();
+        var ownerIds = owners.Select(candidate => candidate.Id).ToHashSet(StringComparer.Ordinal);
+        if (_runs is not null && (await _runs.ListActiveAsync(ct)).Any(run => run.TaskId is not null
+            && ownerIds.Contains(run.TaskId) && (_projectId is null || run.ProjectId is null || run.ProjectId == _projectId)))
+            return true;
+        foreach (var owner in owners)
+        {
+            if (_hasDurableWorker is not null && await _hasDurableWorker(owner.Id, ct)) return true;
+            if (owner.Status == IssueStatus.InProgress && owner.DispatchCheckpoint is null or < DispatchCheckpoint.PushDone)
+                return true;
+        }
+        return false;
     }
 
     private bool SameEmptyPr(PullRequest before, PullRequest after, IssueRecord task) =>

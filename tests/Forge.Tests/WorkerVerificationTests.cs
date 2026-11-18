@@ -24,6 +24,8 @@ public sealed class WorkerVerificationTests : IDisposable
         var receipt = await WorkerVerification.VerifyAsync("attempt", _root, [], NullLogger.Instance, default);
         Assert.Equal(stagedBefore, Git("diff", "--cached", "--name-only"));
         Assert.True(await WorkerVerification.MatchesAsync(receipt, _root, [], default));
+        if (OperatingSystem.IsLinux())
+            Assert.True(await WorkerVerification.MatchesAsync(receipt, _root, [], default, _root));
         Assert.False(await WorkerVerification.MatchesAsync(receipt, _root, ["different-command"], default));
         File.WriteAllText(Path.Combine(_root, "new.txt"), "changed after verification");
         Assert.False(await WorkerVerification.MatchesAsync(receipt, _root, [], default));

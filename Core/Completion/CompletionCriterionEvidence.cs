@@ -114,6 +114,15 @@ public sealed partial class SprintCompletionStore
             ("@now", Now()), ("@id", id));
         await update.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
+        await PublishOutcomeChangedAsync(receipt, "Satisfied", ct);
         return true;
     }
+
+    private Task PublishOutcomeChangedAsync(SprintCompletionRecord receipt, string outcome, CancellationToken ct)
+        => issues.Events.PublishAsync(new Messaging.SprintOutcomeChanged
+        {
+            MessageId = $"sprint-outcome:{issues.ProjectId}:{receipt.Id}:{outcome}",
+            ProjectId = issues.ProjectId, SprintId = receipt.SprintId,
+            CompletionId = receipt.Id, Outcome = outcome,
+        }, ct);
 }

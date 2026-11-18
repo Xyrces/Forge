@@ -3,8 +3,10 @@
 @using Forge.Dashboard.Features.Sprints
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject HttpClient Http
+@inject IJSRuntime JS
 @inject ILogger<Sprints> Logger
 @inject NavigationManager Nav
+@inject IDispatcher Dispatch
 @inject Forge.Dashboard.Services.DashboardEventStream Events
 @using System.Net.Http.Json
 @using System.Text.Json
@@ -12,11 +14,12 @@
 @using Forge.Dashboard.Features.View
 
 <PageTitle>Sprints</PageTitle>
-<div class="page">
+<div class="page sprint-workspace">
     <div class="page-header">
         <h1>Sprints</h1>
         <div class="page-header__meta">@(_summary is null ? "Sprint totals not loaded" : $"{_summary.Total} total · {(_summary.Active is null ? 0 : 1)} active")@(_refreshing ? " · updating…" : "")</div>
         <div class="page-header__actions">
+            <a class="btn" href="#sprint-tasks">Jump to task cards</a>
             <button class="btn btn--primary" @onclick="RefreshAsync">Refresh</button>
         </div>
     </div>
@@ -122,7 +125,7 @@
                     <div class="page-subtitle" style="margin:8px 0 4px">In grooming (@_build.PendingGroom.Count):</div>
                     @foreach (var p in _build.PendingGroom)
                     {
-                        <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{p.Id}"))">
+                        <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo(TaskUrl(p.Id)))">
                             <span class="mono">@p.Id</span>
                             <span>@p.Title</span>
                             <span class="pill pill--pending">awaiting groom</span>
@@ -134,7 +137,7 @@
                     <div class="page-subtitle" style="margin:8px 0 4px">Holding the backlog (@_build.HeldWork.Count):</div>
                     @foreach (var h in _build.HeldWork)
                     {
-                        <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{h.Id}"))">
+                        <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo(TaskUrl(h.Id)))">
                             <span class="mono">@h.Id</span>
                             <span>@h.Title</span>
                             <span class="pill pill--failed">failed · @h.AgeDays d</span>
@@ -158,7 +161,7 @@
 
         @if (selected is not null)
         {
-            <SprintCompletionPanel ProjectId="@_loadedProject" SprintId="@selected.Id" RefreshAt="_board.GeneratedAt" />
+
 
             var members = EnrichMembers(selected);
             var done = _board?.Done ?? 0;
@@ -182,6 +185,7 @@
             <div class="sprint-progress"><div class="sprint-progress__fill" style="width:@pct%"></div></div>
         </div>
 
+        <SprintCompletionPanel ProjectId="@_loadedProject" SprintId="@selected.Id" RefreshAt="@(_board?.GeneratedAt ?? DateTime.MinValue)" />
         <div class="picker-bar">
             <span>Showing @members.Count of @total tasks. Column counts cover this page.</span>
             <button class="btn" disabled="@(_memberPages.Count == 0 || _refreshing)" @onclick="PreviousMembersAsync">Previous tasks</button>
@@ -193,10 +197,7 @@
            Blocked tasks are absent by construction. *@
         @if (selected.Status == "Active")
         {
-            <div class="card" style="margin-bottom:14px">
-                <div class="page-subtitle" style="margin-bottom:8px">
-                    Dispatch queue (@_queueTotal waiting) — claim order:
-                </div>
+            <details class="sprint-operations"><summary>Dispatch queue · @_queueTotal waiting</summary>
                 @if (_queueError is null && _queueTotal == 0 && _blocked.Count == 0)
                 {
                     <div class="meta-text" style="padding:2px 0">Nothing waiting to claim — every member is in flight, in review, or blocked.</div>
@@ -207,7 +208,7 @@
                 }
                 @foreach (var q in _queue)
                 {
-                    <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{q.Id}"))">
+                    <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo(TaskUrl(q.Id)))">
                         <span class="mono">#@q.Position</span>
                         <span class="mono">@q.Id</span>
                         <span class="mono">P@(q.Priority)</span>
@@ -229,7 +230,7 @@
                     <div class="page-subtitle" style="margin:8px 0 4px">Blocked (@_blockedTotal total, showing @_blocked.Count) — enters the queue when these land:</div>
                     @foreach (var b in _blocked)
                     {
-                        <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{b.Id}"))">
+                        <div class="kanban__card-meta" style="padding:2px 0;cursor:pointer" @onclick="@(() => Nav.NavigateTo(TaskUrl(b.Id)))">
                             <span class="mono">@b.Id</span>
                             <span class="mono">P@(b.Priority)</span>
                             <span>@b.Title</span>
@@ -237,7 +238,7 @@
                         </div>
                     }
                 }
-            </div>
+            </details>
         }
 
         @* Tracked follow-ups (operator model 2026-07-31): findings
@@ -270,90 +271,46 @@
                 <div class="page-subtitle" style="margin:8px 0">Viewing a past sprint. The task board is read-only; completion review actions remain available.</div>
             }
 
-            @* Scrum board: every task in the sprint, grouped by state. *@
-            <div class="kanban">
+            <div class="sprint-lane-picker">
+                <label for="sprint-lane">Task lane</label>
+                <select id="sprint-lane" value="@_lane" @onchange="SelectLaneAsync">
+                    @foreach (var col in Columns)
+                    { <option value="@col.Title">@col.Title (@members.Count(col.Match))</option> }
+                </select>
+            </div>
+            @if (_holdError is not null) { <p role="alert">@_holdError</p> }
+            @if (_holdNotice is not null) { <p role="status">@_holdNotice</p> }
+            <div id="sprint-tasks" class="sprint-board" aria-label="Sprint task board">
                 @foreach (var col in Columns)
                 {
-                    @* Active cards first in every lane; the Queued lane
-                       additionally mirrors the dispatch claim order
-                       (blockers of open work → priority → FIFO, blocked
-                       cards last — they can't claim until their
-                       blockers land). @key keeps DOM identity stable
-                       so background store updates diff in place. *@
-                    var cards = members.Where(col.Match)
-                        .OrderByDescending(c => c.Active)
+                    var cards = members.Where(col.Match).OrderByDescending(c => c.Active)
                         .ThenBy(c => col.Title == "Queued" && c.IsBlocked ? 1 : 0)
                         .ThenByDescending(c => col.Title == "Queued" && c.Boosted)
-                        .ThenBy(c => col.Title == "Queued" ? c.Priority : 3)
-                        .ThenBy(c => c.Id, StringComparer.Ordinal)
-                        .ToList();
-                    <div class="kanban__col">
-                        <div class="kanban__col-header">
-                            <span>@col.Title</span>
-                            <span class="mono kanban__col-count">@cards.Count</span>
-                        </div>
-                        @if (cards.Count == 0)
-                        {
-                            <div class="kanban__empty">—</div>
-                        }
+                        .ThenBy(c => c.Priority).ThenBy(c => c.Id, StringComparer.Ordinal).ToList();
+                    <section class="sprint-lane @(col.Title == _lane ? "sprint-lane--selected" : "")" aria-label="@col.Title">
+                        <h2>@col.Title <span>@cards.Count</span></h2>
+                        @if (cards.Count == 0) { <p class="sprint-empty">No tasks in this lane</p> }
                         @foreach (var card in cards)
                         {
-                            <div @key="card.Id" class="kanban__card @(card.Active ? "kanban__card--active" : "")" style="cursor:pointer" @onclick="@(() => Nav.NavigateTo($"/tasks/{card.Id}"))">
-                                <div class="kanban__card-top">
-                                    <span class="mono kanban__card-id">@card.Id</span>
-                                    <span style="display:flex;gap:6px;align-items:center">
-                                        @if (card.Active)
-                                        {
-                                            <span class="kanban__card-live" title="A run is live on this task right now">@card.Role live</span>
-                                        }
-                                        @if (card.ReworkAttempts is not null)
-                                        {
-                                            <span class="pill pill--blocked" title="Rework round @card.ReworkAttempts in the review loop">R@(card.ReworkAttempts)</span>
-                                        }
-                                        @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
-                                        {
-                                            <a href="@url" target="_blank" rel="noopener" @onclick:stopPropagation="true">PR #@card.PrNumber</a>
-                                        }
-                                    </span>
-                                </div>
-                                <div class="kanban__card-title">@card.Title</div>
-                                @if (!string.IsNullOrEmpty(card.Situation))
+                            <article @key="(_loadedProject, card.Id)" class="sprint-task @(card.Active ? "sprint-task--active" : "")">
+                                <h3><a href="@TaskUrl(card.Id)">@card.Title</a></h3>
+                                <p class="sprint-task__status">@(card.Label ?? card.Situation ?? "Status evidence unavailable")</p>
+                                @if (card.Situation is not null && card.Situation != card.Label) { <p>@card.Situation</p> }
+                                @if (card.NextActor is not null) { <p class="sprint-task__actor">Next: @card.NextActor</p> }
+                                @if (card.HumanReviewRequired) { <p class="sprint-task__requirement">@(card.NominatedHuman is null ? "Human review required before merge" : $"Review by @{card.NominatedHuman} required before merge")</p> }
+                                @if (card.IsBlocked) { <p>Waiting for @card.BlockerCount prerequisite task(s). <a href="@TaskUrl(card.Id)">View dependencies</a></p> }
+                                @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
+                                { <a href="@url" target="_blank" rel="noopener">@(card.AwaitingHumanReview ? "Review" : "Open") PR #@card.PrNumber ↗</a> }
+                                @if (selected.Status == "Active" && card.Status is not ("Completed" or "Closed"))
                                 {
-                                    <div class="kanban__card-meta">
-                                        <span class="situation situation--@card.SituationTone">@card.Situation</span>
-                                    </div>
+                                    <details class="sprint-task__actions"><summary>Task actions</summary>
+                                        <button class="btn" disabled="@(_holdBusy is not null)" @onclick="() => SetReviewHoldAsync(card)">@(card.HumanReviewTaskHold ? "Release additional review hold" : card.NominatedHuman is null ? "Require human review" : $"Require review by @{card.NominatedHuman}")</button>
+                                        <a href="@TaskUrl(card.Id)">Open task history</a>
+                                    </details>
                                 }
-                                @if (card.Boosted && !card.Active)
-                                {
-                                    <div class="kanban__card-meta">
-                                        <span class="pill pill--primary" title="Blocks open work — claims ahead of non-blockers">blocks work</span>
-                                    </div>
-                                }
-                                @if (card.BlockedBy is { Count: > 0 } blockers)
-                                {
-                                    <div class="kanban__card-meta">
-                                        <span class="pill pill--blocked" title="Cannot proceed until these land (injected into this sprint)">
-                                            blocked by @string.Join(", ", blockers)@(card.BlockerCount > blockers.Count ? $" (+{card.BlockerCount - blockers.Count} more)" : "")
-                                        </span>
-                                    </div>
-                                }
-                                <div class="kanban__card-meta">
-                                    @if (card.State is not null && card.Status is not ("Completed" or "Closed" or "Failed" or "Blocked"))
-                                    {
-                                        <span class="pill pill--primary" title="Lifecycle state (state machine)">@card.State</span>
-                                    }
-                                    else
-                                    {
-                                        <span class="pill pill--@card.Status.ToLowerInvariant()">@card.Status</span>
-                                    }
-                                    @if (card.Assignee is not null)
-                                    {
-                                        <span class="mono">@card.Assignee</span>
-                                    }
-                                </div>
-                            </div>
+                            </article>
                         }
-                    </div>
+                    </section>
                 }
             </div>
         }
@@ -361,6 +318,49 @@
 </div>
 
 @code {
+    private string _lane = "Queued";
+    [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
+    [Parameter][SupplyParameterFromQuery(Name = "sprint")] public string? Sprint { get; set; }
+    private IJSObjectReference? _boardBrowser;
+    private bool _restoreBoard, _chooseLane;
+    private int _restoreGeneration;
+    private string? _holdBusy, _holdError, _holdNotice;
+    private sealed record BoardLocation(string? SprintId, string? Lane, string? MemberCursor, string? HistoryCursor, string?[]? MemberPages, string?[]? HistoryPages);
+    private string TaskUrl(string id) => $"/tasks/{Uri.EscapeDataString(id)}?project={Uri.EscapeDataString(_loadedProject ?? "")}";
+    private async Task SetReviewHoldAsync(Card card)
+    {
+        if (_holdBusy is not null || _loadedProject is null) return;
+        var project = _loadedProject;
+        _holdBusy = card.Id; _holdError = null; _holdNotice = null;
+        try
+        {
+            using var response = await Http.PutAsJsonAsync($"/api/tasks/{Uri.EscapeDataString(card.Id)}/human-review?projectId={Uri.EscapeDataString(project)}", new { required = !card.HumanReviewTaskHold });
+            response.EnsureSuccessStatusCode();
+            if (project != _loadedProject) return;
+            _holdNotice = card.HumanReviewTaskHold ? "Additional hold released. Project review requirements and formal objections still apply." : "Human review required before merge. Engineering and checks may continue.";
+            await RefreshAsync();
+        }
+        catch (Exception ex) { Logger.LogWarning(ex, "Task review requirement could not be saved"); if (project == _loadedProject) _holdError = "Could not confirm the review requirement. Refresh and retry."; }
+        finally { _holdBusy = null; }
+    }
+    private async Task SelectLaneAsync(ChangeEventArgs e)
+    {
+        if (_disposed) return;
+        ++_restoreGeneration;
+        var lane = e.Value?.ToString();
+        if (Columns.Any(c => c.Title == lane))
+        {
+            _lane = lane!;
+            _chooseLane = false;
+        }
+        await SaveBoardLocationAsync();
+        if (_loading) await RefreshAsync();
+    }
+    private async Task SaveBoardLocationAsync()
+    {
+        if (_boardBrowser is not null && _loadedProject is not null)
+            await _boardBrowser.InvokeVoidAsync("remember", _loadedProject, _selectedSprintId ?? _board?.Sprint?.Id, _lane, _memberCursor, _historyCursor, _memberPages.ToArray(), _historyPages.ToArray());
+    }
     private string? _loadedProject;
     private string? _selectedSprintId;
     private SprintHistoryResponse? _summary;
@@ -404,7 +404,7 @@
     // record a machine event, leaving a stale intermediate state
     // (observed live 2026-07-27: task-210, Closed, sat in the
     // Running column forever because its record said StalledRework).
-    private static string Bucket(Card c) => c.Status switch
+    private static string Bucket(Card c) => c.AwaitingHumanReview && c.Status is not ("Completed" or "Closed") && c.State is not ("Dispatching" or "AgentRunning" or "ReworkRunning" or "StalledRework") ? "blocked" : c.Status switch
     {
         "Completed" or "Closed" => "done",
         "Failed" => "failed",
@@ -428,7 +428,7 @@
         new("Completed / closed", c => Bucket(c) == "done"),
     };
 
-    private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts, IReadOnlyList<string>? BlockedBy, string? Situation, string? SituationTone, bool Active, string? Role, int Priority, bool IsBlocked, bool Boosted, long BlockerCount);
+    private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts, IReadOnlyList<string>? BlockedBy, string? Situation, string? SituationTone, bool Active, string? Role, int Priority, bool IsBlocked, bool Boosted, long BlockerCount, string? Label, string? NextActor, bool HumanReviewRequired, bool AwaitingHumanReview, string? NominatedHuman, bool HumanReviewTaskHold);
 
     /// <summary>Task type → owning role. Mirrors
     /// Agents/RoleAgentRegistry.FromTaskType — duplicated client-side
@@ -599,7 +599,7 @@
         .Select(m => new Card(m.Id, m.Title, m.Status, m.State, m.Assignee, m.PrNumber, m.ReworkAttempts,
             m.BlockedBy, m.Situation, m.SituationTone,
             m.Status == "InProgress" && m.Assignee is not null && m.State is null or "Dispatching" or "AgentRunning" or "ReworkRunning",
-            RoleFor(m.Type), m.Priority, m.BlockerCount > 0, m.Boosted, m.BlockerCount)).ToList();
+            RoleFor(m.Type), m.Priority, m.BlockerCount > 0, m.Boosted, m.BlockerCount, m.Label, m.NextActor, m.HumanReviewRequired, m.AwaitingHumanReview, m.NominatedHuman, m.HumanReviewTaskHold)).ToList();
 
     private string? PrUrl(string prNumber) =>
         RepositoryLinks.PullRequest(_repoUrl, prNumber);
@@ -640,14 +640,27 @@
     protected override void OnInitialized()
     {
         ShellStore.StateChanged += OnShellChanged;
-        _ = ChangeProjectAsync();
+
         _gateTimer = new System.Threading.Timer(_ => InvokeAsync(RefreshAsync), null,
             TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (firstRender) { Events.Received += OnServerEvent; await Events.StartAsync(); }
+        if (firstRender)
+        {
+            _boardBrowser = await JS.InvokeAsync<IJSObjectReference>("import", "./sprint-board.js");
+            if (Project is not null && Project != ShellStore.Value.CurrentProjectId)
+                Dispatch.Dispatch(new Forge.Dashboard.Features.AppShell.AppShellActions.SelectProjectAction(Project));
+            Events.Received += OnServerEvent;
+            await Events.StartAsync();
+            await ChangeProjectAsync();
+        }
+        if (!_loading && !_refreshing && _board?.Sprint is not null && _boardBrowser is not null)
+        {
+            await SaveBoardLocationAsync();
+            if (_restoreBoard) { _restoreBoard = false; await _boardBrowser.InvokeVoidAsync("restoreScroll", _loadedProject); }
+        }
     }
     private CancellationTokenSource? _reloadDebounce;
     private void OnServerEvent(string kind)
@@ -690,6 +703,12 @@
                     var board = await client.BoardAsync(projectId, sprintId, memberCursor, token);
                     if (!_selection.IsCurrent(generation)) continue;
                     _summary = history; _board = board; _error = null;
+                    if (_chooseLane && board.Sprint is not null)
+                    {
+                        var cards = EnrichMembers(board.Sprint);
+                        _lane = Columns.FirstOrDefault(c => cards.Any(c.Match))?.Title ?? "Queued";
+                        _chooseLane = false;
+                    }
                     await LoadGatesAsync();
                     if (!_selection.IsCurrent(generation)) continue;
                     if (board.Sprint?.Status == "Active") await LoadQueueAsync();
@@ -715,24 +734,55 @@
     }
     private async Task ChangeProjectAsync()
     {
-        _loading = true;
-        _loadedProject = ShellStore.Value.CurrentProjectId;
-        _selection.Select(_loadedProject, null);
-        _selectedSprintId = null; _historyCursor = null; _memberCursor = null;
-        _historyPages.Clear(); _memberPages.Clear(); _summary = null; _board = null; _repoUrl = null;
-        _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null; _queueTotal = 0; _error = null; _queueError = null;
+        if (!await RestoreProjectLocationAsync()) return;
         StateHasChanged();
+        var generation = _restoreGeneration;
         await LoadRepoUrlAsync();
+        if (_disposed || generation != _restoreGeneration) return;
         await RefreshAsync();
+    }
+    private async Task<bool> RestoreProjectLocationAsync()
+    {
+        if (_disposed) return false;
+        var generation = ++_restoreGeneration;
+        var project = ShellStore.Value.CurrentProjectId;
+        _loading = true;
+        _loadedProject = project;
+        _selectedSprintId = null;
+        _historyCursor = null; _memberCursor = null;
+        _historyPages.Clear(); _memberPages.Clear();
+        _restoreBoard = false;
+        _selection.Select(project, null);
+        _summary = null; _board = null; _repoUrl = null;
+        _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null;
+        var remembered = _boardBrowser is null || _loadedProject is null ? null
+            : await _boardBrowser.InvokeAsync<BoardLocation?>("begin", project);
+        if (_disposed || generation != _restoreGeneration || project != ShellStore.Value.CurrentProjectId)
+            return false;
+        _selectedSprintId = Project == _loadedProject && !string.IsNullOrEmpty(Sprint) ? Sprint : remembered?.SprintId;
+        _lane = Columns.Any(c => c.Title == remembered?.Lane) ? remembered!.Lane! : "Queued";
+        _restoreBoard = true; _chooseLane = remembered is null;
+        _holdError = null; _holdNotice = null;
+        _selection.Select(_loadedProject, _selectedSprintId); _historyCursor = remembered?.HistoryCursor; _memberCursor = remembered?.MemberCursor;
+        _historyPages.Clear(); _memberPages.Clear();
+        foreach (var cursor in (remembered?.HistoryPages ?? []).Reverse()) _historyPages.Push(cursor);
+        foreach (var cursor in (remembered?.MemberPages ?? []).Reverse()) _memberPages.Push(cursor); _summary = null; _board = null; _repoUrl = null;
+        _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null; _queueTotal = 0; _error = null; _queueError = null;
+        return true;
     }
     private void OnShellChanged(object? sender, EventArgs e)
     {
+        if (Project is not null && ShellStore.Value.CurrentProjectId is { } selected && selected != Project)
+            Nav.NavigateTo("/sprints?project=" + Uri.EscapeDataString(selected));
         if (ShellStore.Value.CurrentProjectId != _loadedProject) _ = InvokeAsync(ChangeProjectAsync);
     }
     private async Task SelectSprintAsync(ChangeEventArgs e)
     {
+        if (_disposed) return;
+        ++_restoreGeneration;
         _selectedSprintId = e.Value?.ToString(); _memberCursor = null; _memberPages.Clear();
         _selection.Select(_loadedProject, _selectedSprintId); _board = null; _drafts.Clear();
+        await SaveBoardLocationAsync();
         await RefreshAsync();
     }
     private Task ShowActiveAsync() => SelectSprintAsync(new ChangeEventArgs { Value = null });
@@ -746,10 +796,11 @@
         _memberPages.Push(_memberCursor); _memberCursor = _board?.NextCursor; await RefreshSelectionAsync();
     }
     private async Task PreviousMembersAsync() { _memberCursor = _memberPages.Pop(); await RefreshSelectionAsync(); }
-    private async Task RefreshSelectionAsync() { _selection.Select(_loadedProject, _selectedSprintId); await RefreshAsync(); }
+    private async Task RefreshSelectionAsync() { ++_restoreGeneration; _selection.Select(_loadedProject, _selectedSprintId); await RefreshAsync(); }
     public void Dispose()
     {
         _disposed = true;
+        ++_restoreGeneration;
         _gateTimer?.Dispose(); _selection.Dispose();
         _reloadDebounce?.Cancel(); _reloadDebounce?.Dispose();
         Events.Received -= OnServerEvent; ShellStore.StateChanged -= OnShellChanged;

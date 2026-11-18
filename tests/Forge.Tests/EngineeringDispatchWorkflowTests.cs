@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Forge.AgentTools;
@@ -100,6 +100,7 @@ public class EngineeringDispatchWorkflowTests : IDisposable
 
     private sealed class StubGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public int NextPrNumber { get; set; } = 7;
         public StubGitHub() : base(new AgentOptions().GitHub) { }
         public override Task<Octokit.PullRequest> CreatePullRequestAsync(

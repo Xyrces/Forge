@@ -57,6 +57,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly ProjectContextFactory? _projectFactory;
     private readonly SlotTable? _slots;
     private readonly IProjectStore? _projectStore;
+    private readonly IProjectProvisioner? _projectProvisioner;
     private readonly ProjectCloner? _projectCloner;
     private readonly Forge.Core.SecretStore? _secretStore;
     private readonly AgentRunStore? _agentRuns;
@@ -66,6 +67,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Forge.Core.ModelRateLimitTracker? _modelRateLimits;
     private readonly Func<string, GitHubService?>? _gitHubForProject;
     private readonly Func<string, string, CancellationToken, Task<bool>>? _hasActiveWorker;
+    private readonly Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? _workerHistory;
     private readonly Core.Control.IDurableBudgetStore? _budgetStore;
     private readonly string? _budgetDatasetId;
     private readonly Forge.Agents.ProviderApiKeyResolver? _providerApiKeys;
@@ -137,9 +139,13 @@ public sealed class DashboardHost : IAsyncDisposable
         Core.Control.IDurableBudgetStore? budgetStore = null,
         string? budgetDatasetId = null,
         Agents.InitiativeApprovalService? initiativeApprovals = null,
-        string? mutationTokenFile = null)
+        string? mutationTokenFile = null,
+        Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null,
+        IProjectProvisioner? projectProvisioner = null)
     {
+        _projectProvisioner = projectProvisioner;
         _mutationTokenFile = mutationTokenFile;
+        _workerHistory = workerHistory;
         _initiativeApprovals = initiativeApprovals;
         _options = options;
         _headroom = headroom;
@@ -256,6 +262,7 @@ public sealed class DashboardHost : IAsyncDisposable
         if (_slots is not null) builder.Services.AddSingleton(_slots);
         if (_projectFactory is not null) builder.Services.AddSingleton<Forge.Deploy.DeploymentExecutorFactory>();
         if (_projectStore is not null) builder.Services.AddSingleton(_projectStore);
+        if (_projectProvisioner is not null) builder.Services.AddSingleton(_projectProvisioner);
         if (_projectCloner is not null) builder.Services.AddSingleton(_projectCloner);
         if (_githubOptions is not null) builder.Services.AddSingleton(_githubOptions);
         // Messaging pass-through: the SAME transport + publisher
@@ -310,6 +317,8 @@ public sealed class DashboardHost : IAsyncDisposable
  _app = builder.Build();
         mutationAuthentication?.Protect(_app);
         _app.Urls.Clear();
+        if (_options.Kestrel is not { Endpoints.Count: > 0 })
+            _app.Urls.Add(publicBaseUrl);
         // Kestrel already binds the configured endpoints via the
         // ConfigureKestrel calls above. Clearing Urls prevents the
         // generic host from also binding Hostname:Port (which would
@@ -463,6 +472,14 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         DashboardEndpoints.MapP1Endpoints(_app, _issues, _agents, _skills, _sprints, _messageBus, _logger, _projectFactory,
             _memory is null ? null : new StageGates(_memory, new Forge.Core.Workflow.WorkflowResolver(_memory)), _sprintPropose?.Planning);
 
+        if (!string.IsNullOrWhiteSpace(_githubOptions?.WebhookSecretFile))
+        {
+            if (_projectStore is null || _eventPublisher is null)
+                throw new InvalidOperationException("GitHub webhook ingress requires the project registry and event publisher.");
+            var webhookSecret = (await File.ReadAllTextAsync(_githubOptions.WebhookSecretFile, cancellationToken)).Trim();
+            GitHubWebhookEndpoints.MapGitHubWebhookEndpoints(_app, webhookSecret, _projectStore, _eventPublisher);
+        }
+
         if (_projectFactory is not null && _slots is not null)
         {
             ProjectsEndpoints.MapProjectsEndpoints(_app);
@@ -539,7 +556,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         BudgetEndpoints.MapBudgetEndpoints(_app, _budgetStore, _budgetDatasetId, _logger);
         if (_agentRuns is not null)
         {
-            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory);
+            AgentRunEndpoints.MapAgentRunEndpoints(_app, _agentRuns, _projectFactory, _issues);
         }
         AgentsEndpoints.MapAgentsEndpoints(_app, new Agents.RoleAgentRegistry(),
             _llmConfig, _roleModelOverrides, _slots, _agentRuns, _projectFactory,
@@ -549,6 +566,23 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
         SprintReadEndpoints.MapSprintReadEndpoints(_app, _issues, _projectFactory);
         var runningRevision = new RunningRevisionReader(_logger);
         CompletionEndpoints.MapCompletionEndpoints(_app, _issues, _projectFactory, runningRevision.ReadAsync);
+        string? ReviewConfigurationIssue(string projectId, RequiredReview mode)
+        {
+            var repo = ProjectDispatchBundleFactory.ParseGitHubOwnerRepo(_projectFactory?.Find(projectId)?.Options.RepoUrl);
+            var owner = repo?.Owner ?? _githubOptions?.Owner ?? "";
+            var name = repo?.Repo ?? _githubOptions?.Repo ?? "";
+            try
+            {
+                var hasReviewer = _gitHub is LocalGitHubService || GitHubAppIdentities.Find(owner, name) is not null;
+                return PullRequestReviewPolicy.ReviewerConfigurationIssue(mode, hasReviewer);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Invalid GitHub App configuration for project {Project}", projectId);
+                return "The GitHub App configuration could not be read. Correct it and rerun the Forge preflight check.";
+            }
+        }
+        TaskReviewEndpoints.MapTaskReviewEndpoints(_app, _issues, _projectFactory, _eventPublisher, _logger, ReviewConfigurationIssue);
         TriageEndpoints.MapTriageEndpoints(_app, _issues, _logger, _projectFactory, _slots);
 
 if (_groomerRuns is not null)
@@ -590,16 +624,16 @@ if (_groomerRuns is not null)
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
         {
             CodebaseGraphEndpoints.MapCodebaseGraphEndpoints(_app, _codebaseBuilderOverride, _codebaseCacheOverride, _issues, _logger);
-
-            if (_sprintPropose is not null && _sprintProposalAudit is not null)
-            {
-                SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger, _projectFactory, _issues);
-            }
-
-            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
-                _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
-                _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker);
         }
+
+        if (_sprintPropose is not null && _sprintProposalAudit is not null)
+        {
+            SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger, _projectFactory, _issues);
+        }
+
+        TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
+            _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
+            _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker, workerHistory: _workerHistory);
 
         _app.MapBuildInfoEndpoint(runningRevision);
 

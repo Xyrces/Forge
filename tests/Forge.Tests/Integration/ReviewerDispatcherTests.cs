@@ -35,6 +35,7 @@ public class ReviewerDispatcherTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public int CommentCalls;
         public (string Base, string Head)? CompareCall;
         public FakeGitHub() : base("o", "r", null) { }
@@ -217,7 +218,7 @@ public class ReviewerDispatcherTests : IDisposable
         Assert.Equal("Approve", after.GetMetadata("reviewVerdict"));
         Assert.Equal("1", after.GetMetadata("reviewRound"));
         Assert.NotNull(after.GetMetadata("reviewSha"));
-        Assert.Equal(1, gh.CommentCalls);
+        Assert.Equal(0, gh.CommentCalls); // Formal review is the single audit; no monolithic issue comment.
     }
 
     [Fact]

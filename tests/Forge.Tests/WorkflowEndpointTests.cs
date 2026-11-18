@@ -105,6 +105,25 @@ public class WorkflowEndpointTests : IDisposable
     }
 
     [Fact]
+    public async Task PublishAndRestorePreserveCompatibilityWithFencedController()
+    {
+        var definition = WorkflowDefaults.Definition;
+        var detached = definition with { Steps = definition.Steps.Select(step => step with
+        {
+            Gates = step.Gates.Where(gate => gate != StageGates.Merge).ToArray()
+        }).ToArray() };
+        var body = WorkflowResolver.Serialize(detached);
+        await _memory.RememberAsync(WorkflowResolver.DraftKey, body);
+        var version = WorkflowResolver.VersionsPrefix + "legacy";
+        await _memory.RememberAsync(version, body);
+        await new Forge.Core.Control.DeploymentMergeFence(_memory).HoldAsync("cutover");
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PostAsync("/api/workflow/publish", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await _client.PostAsJsonAsync("/api/workflow/versions/restore", new { key = version })).StatusCode);
+        Assert.Null(await _memory.GetAsync(WorkflowResolver.LiveKey));
+        Assert.NotNull(await _memory.GetAsync(WorkflowResolver.DraftKey));
+    }
+
+    [Fact]
     public async Task Publish_NoDraft_400()
     {
         var resp = await _client.PostAsync("/api/workflow/publish", null);

@@ -131,6 +131,7 @@ public sealed class QaDispatcherTests : IDisposable
 
     private sealed class FakeGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public FakeGitHub() : base("o", "r", null) { }
         public List<string> Comments { get; } = new();
         public bool ThrowOnComment;

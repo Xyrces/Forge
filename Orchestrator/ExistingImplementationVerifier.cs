@@ -129,7 +129,7 @@ public sealed class ExistingImplementationVerifier(IssueStore issues, ISprintSto
         if (source.Length != 40 || source.Any(c => !char.IsAsciiHexDigit(c))
             || source != await worktrees.GetHeadShaAsync(path, ct)
             || verification.TreeSha != await worktrees.GetCommitTreeShaAsync(path, source, ct)
-            || !await WorkerVerification.MatchesAsync(verification, path, commands, ct))
+            || !await WorkerVerification.MatchesAsync(verification, path, commands, ct, worktrees.WorkspaceRoot))
             throw new InvalidOperationException("Existing implementation must match the fresh configured source and trusted worker verification exactly.");
         return source;
     }

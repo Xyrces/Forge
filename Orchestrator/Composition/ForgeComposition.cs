@@ -130,6 +130,8 @@ public static class ForgeComposition
         services.AddSingleton<ISprintStore>(sprints);
         var messageBus = new AgentMessageBus();
         services.AddSingleton(messageBus);
+        var gitHub = Program.BuildGitHubService(
+            options.GitHub ?? new GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         var worktrees = new GitWorktreeService(
             new WorkspaceOptions
             {
@@ -138,10 +140,10 @@ public static class ForgeComposition
                 DefaultBranch = options.Workspace.DefaultBranch,
             },
             loggerFactory.CreateLogger<GitWorktreeService>(),
-            githubToken: options.GitHub?.Token);
+            githubToken: gitHub.UsesAppIdentity ? null : options.GitHub?.Token,
+            publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+            publisherRepository: $"https://github.com/{gitHub.Owner}/{gitHub.Repo}");
         services.AddSingleton(worktrees);
-        var gitHub = Program.BuildGitHubService(
-            options.GitHub ?? new GitHubOptions(), loggerFactory.CreateLogger<GitHubService>());
         services.AddSingleton(gitHub);
         var roleRegistry = new RoleAgentRegistry();
         services.AddSingleton(roleRegistry);
@@ -191,7 +193,7 @@ public static class ForgeComposition
         services.AddSingleton<Forge.Deploy.IRoutineReleaseSource>(_ => new Forge.Deploy.TrustedGitHubReleaseSource(
             new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
             new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }),
-            (project, ct) => GitHubTokenResolver.ResolveTokenAsync(null, project, options.GitHub, secretStore, ct),
+            (project, ct) => GitHubTokenResolver.ResolveReleaseTokenAsync(project, options.GitHub, secretStore, ct),
             () => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "source-revision"))));
         services.AddSingleton(provider => new Forge.Deploy.RoutineDeploymentCoordinator(
             () => projectFactory.KnownProjects.Select(project => projectFactory.Find(project.Id))
@@ -336,6 +338,8 @@ public static class ForgeComposition
             modelOverrides: roleModelOverrides,
             gates: options.Gates);
         IAgentRunner agentRunner = localAgentRunner;
+        if (!options.Worker.Enabled && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+            throw new InvalidOperationException("GitHub App credentials require isolated Kubernetes workers.");
         if (options.Worker.Enabled)
         {
             if (!options.Controller.Enabled || !options.Db.IsSqlServer || admission is null)
@@ -441,6 +445,7 @@ public static class ForgeComposition
             secrets: secretStore, gates: stageGates, lifecycle: lifecycle,
             eventPublisher: eventPublisher, hasDurableWorker: hasDurableWorker);
         services.AddSingleton(dispatchBundleFactory);
+        services.AddSingleton<IProjectDispatchBundleFactory>(dispatchBundleFactory);
 
         // Watch pipeline + scheduler triggers: ONE consumer per topic
         // (the in-memory transport is competing-consumer) fanning out
@@ -468,6 +473,19 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.SprintStatusChangedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.TaskStatusChangedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
+            sp.GetRequiredService<ILogger<Consumers.TaskStatusChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TaskStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.SprintOutcomeChangedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
+            sp.GetRequiredService<ILogger<Consumers.SprintOutcomeChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintOutcomeChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.PrWatchRequestedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<IProjectDispatchBundleFactory>(),
+            sp.GetRequiredService<IProjectStore>(), sp.GetRequiredService<WatchSweepService>(),
+            sp.GetRequiredService<ILogger<Consumers.PrWatchRequestedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.PrWatchRequestedConsumer>());
         services.AddSingleton(sp => new Consumers.FollowUpFiledConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.FollowUpFiledConsumer>>()));
@@ -763,7 +781,11 @@ public static class ForgeComposition
             budgetStore: options.Controller.Enabled ? new Core.Control.DurableBudgetStore(registryIssues.Db) : null,
             budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
             initiativeApprovals: initiativeApprovals,
-            mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null));
+            mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null,
+            projectProvisioner: options.Controller.Enabled
+                ? new Control.KubernetesProjectProvisioner(() => sp.GetRequiredService<HttpClient>(), options) : null,
+            workerHistory: options.Worker.Enabled ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
+                .ListSummariesAsync(options.Controller.DatasetId, projectId, taskId, ct) : null));
 
         // Schedulers: trigger events kick via the wakeup signals; the
         // interval is now the 15-MINUTE BACKSTOP (the 5m cadence is

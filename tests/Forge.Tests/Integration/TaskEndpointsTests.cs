@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
@@ -59,6 +59,31 @@ public class TaskEndpointsTests : IDisposable
         _host.Dispose();
         _issues.Dispose();
         try { Directory.Delete(_workDir, recursive: true); } catch { }
+    }
+
+    [Fact]
+    public async Task OverviewCanOmitHistoryWithoutChangingDefaultReadContract()
+    {
+        var task = await _issues.CreateAsync(new NewIssue("client", "Readable task"));
+        await _issues.AddEventAsync(task.Id, "note", "historical observation");
+        var overview = await _client.GetFromJsonAsync<JsonElement>($"/api/tasks/{task.Id}?includeEvents=false");
+        Assert.Empty(overview.GetProperty("events").EnumerateArray());
+        var complete = await _client.GetFromJsonAsync<JsonElement>($"/api/tasks/{task.Id}");
+        Assert.NotEmpty(complete.GetProperty("events").EnumerateArray());
+        Assert.Equal("Readable task", overview.GetProperty("title").GetString());
+    }
+
+    [Fact]
+    public async Task TaskList_HistoryDoesNotInventMergeAndSearchFindsPr()
+    {
+        var issue = await _issues.CreateAsync(new NewIssue("client", "Dashboard fix", Metadata: new Dictionary<string, object> { ["prNumber"] = 150 }));
+        await _issues.TransitionAsync(issue.Id, IssueStatus.Completed, "historical completion");
+        var history = await _client.GetFromJsonAsync<JsonElement>("/api/tasks/list?view=history&search=%23150");
+        var rows = history.GetProperty("items");
+        Assert.Equal(1, rows.GetArrayLength());
+        Assert.Equal("Completion recorded", rows[0].GetProperty("situation").GetProperty("label").GetString());
+        var active = await _client.GetFromJsonAsync<JsonElement>("/api/tasks/list?view=active");
+        Assert.Equal(0, active.GetProperty("items").GetArrayLength());
     }
 
     [Fact]
@@ -493,6 +518,7 @@ public class TaskEndpointsTests : IDisposable
 
     private sealed class CloseCapturingGitHub : GitHubService
     {
+        public override bool RequireFormalReview => false;
         public static int? LastClosedPr;
         public string? Problem;
         public override Task<Octokit.PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)

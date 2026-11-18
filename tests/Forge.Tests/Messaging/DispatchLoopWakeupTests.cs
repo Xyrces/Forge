@@ -53,7 +53,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         _messageBus = new AgentMessageBus();
         _events = new InMemoryDashboardEventBus();
         _roleRegistry = new RoleAgentRegistry();
-        _github = new GitHubService("", "", "");
+        _github = new LocalGitHubService(_workDir, "local", "wakeup");
         _prWatcher = new PRWatcher(
             _github, _worktrees, _issues,
             TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(30), _events,

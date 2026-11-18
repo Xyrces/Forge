@@ -28,6 +28,8 @@ public sealed class WorkerOptions
 
 public sealed class BootstrapOptions
 {
+    public bool ReviewAuthorityOnly { get; set; }
+    public bool ProjectProvisionOnly { get; set; }
     public string ProjectId { get; set; } = "forge";
     public string RepoUrl { get; set; } = "https://github.com/Xyrces/Forge.git";
     public string DefaultBranch { get; set; } = "main";

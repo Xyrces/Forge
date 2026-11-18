@@ -34,20 +34,24 @@ public static class SprintReadEndpoints
             {
                 var page = await new SprintReadStore(issues.Db).BoardAsync(projectId, sprintId, limit ?? 100, cursor, ct);
                 if (sprintId is not null && page.Sprint is null) return Results.NotFound(new { error = "sprint not found" });
+                await using var memory = new MemoryStore(issues.Db);
+                var nominee = (await new PullRequestReviewPolicy(memory).GetSettingsAsync(ct)).NominatedHuman;
                 return Results.Ok(new SprintBoardResponse(projectId, DateTime.UtcNow, Header(page.Sprint), page.Total,
-                    page.Done, page.Members.Select(Card).ToArray(), page.NextCursor));
+                    page.Done, page.Members.Select(row => Card(row, nominee)).ToArray(), page.NextCursor));
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
         });
     }
     private static ViewSprint? Header(SprintRecord? sprint) => sprint is null ? null : new(sprint.Id, sprint.Name,
         sprint.Goal, sprint.StartDate, sprint.EndDate, sprint.Status.ToString());
-    private static SprintCardRow Card(SprintMemberRead row)
+    private static SprintCardRow Card(SprintMemberRead row, string? nominee)
     {
         var issue = row.Issue;
-        var situation = TaskSituation.Describe(issue);
+        var situation = TaskSituation.Describe(issue, nominatedHuman: nominee);
         return new(issue.Id, issue.Title, issue.Type, issue.Status.ToString(), issue.GetMetadata("state"), issue.Priority,
             issue.Assignee, issue.GetMetadata("prNumber"), issue.GetMetadata("reworkAttempts"), row.Boosted,
-            row.BlockerCount, row.BlockedBy, situation.Text, situation.Tone);
+            row.BlockerCount, row.BlockedBy, situation.Text, situation.Tone, situation.Label, situation.NextActor,
+            situation.HumanReviewRequired, bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting, nominee,
+            bool.TryParse(issue.GetMetadata("humanReviewTaskHold"), out var held) && held);
     }
 }

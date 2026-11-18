@@ -1,0 +1,28 @@
+@using System.Text.Json
+@using Forge.Dashboard.Services
+@if (Fields.Count > 0)
+{
+    <dl class="task-facts">@foreach (var field in Fields) { <dt>@WorkPresentation.EventName(field.Key)</dt><dd>@field.Value</dd> }</dl>
+    <details><summary>Original event payload</summary><pre class="task-source">@Detail</pre></details>
+}
+else
+{
+    <RecordedMarkdown Text="@Detail" />
+}
+@code {
+    [Parameter] public string? Detail { get; set; }
+    private IReadOnlyList<KeyValuePair<string, string>> Fields
+    {
+        get
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(Detail ?? "null");
+                if (doc.RootElement.ValueKind != JsonValueKind.Object) return [];
+                return doc.RootElement.EnumerateObject().Where(p => p.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False)
+                    .Select(p => new KeyValuePair<string, string>(p.Name, p.Value.ToString())).Take(12).ToList();
+            }
+            catch (JsonException) { return []; }
+        }
+    }
+}

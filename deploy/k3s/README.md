@@ -285,3 +285,30 @@ The journal and initializer Job are immutable-input bound. A replacement supervi
 An initializer timeout or uncertain transport result leaves both controllers stopped and the operation resumable. It never triggers rollback while initializer execution might continue. A terminal initializer failure can restore the qualified bridge only after its pods are nonexecuting. A candidate failure after migration also restores that bridge without downgrading the database. The schema39/40 bridge is a maintenance fallback: it preserves the older feature set and is not feature-equivalent to new schema40 initiative workflows. Keep workflow gates held throughout qualification and rollback.
 
 The installer invokes the target's independent release Job; it does not orchestrate a host-side migration sequence. Full rollback/restart qualification must precede policy publication. Unit fault tests do not establish actual SQL migration or live bridge compatibility on their own.
+
+## Review identity and rollback qualification
+
+`--github-apps-directory` optionally packages the privately staged App config and referenced PEMs into `forge-github-apps`. `--github-webhook-secret-file` optionally packages the independent signature secret into `forge-github-events`. Existing Secret contents are never silently replaced. Both blue/green controller templates mount these read-only; initializers, release supervisors and workers do not receive these mounts. Neither option exposes a Service, ingress or network port. The controller and initializer continue using distinct Azure SQL principals.
+
+A controller advertises `reviewHoldProtocolVersion: 1` on its authenticated status endpoint. On an upgrade from an older revision the supervisor drains and stops the old controller, then calls the candidate's authenticated `merge-fence` endpoint before activation. For each project a single database transaction preserves the operator's prior merge setting under `review/operator-merge-gate`, writes the legacy `gate/merge=hold` and records the release operation in `deployment/merge-fence`. The supervisor verifies the receipt and records it in the release journal.
+
+After promotion the new controller honors the operator's existing stage setting and individual review holds. Operators can hold and release the stage normally in Flow. The old controller still reads a held gate if a rollback is needed. SQL enforcement prevents the old dashboard from reopening or deleting that gate or removing its fence receipt, and prevents a workflow override from disabling merge-gate enforcement. Restoring the default workflow remains supported. Upgrade to a controller that understands the saved review controls to reconcile outstanding reviews and resume automatic merges; the old release endpoint is not an override. If fence acknowledgement is missing after candidate activation, rollback stops the candidate and leaves the Service unrouted for operator recovery.
+
+Build/test and deployment remain separate: GitHub-hosted Ubuntu workflows test source and produce a digest-bound controller image; the release catalog verifies repository/workflow/source/run/artifact provenance. The initializer alone owns schema changes. Controller SQL leases fence concurrent owners, the release supervisor stops old pods before activating the candidate, and the stable Service changes only after activation. Locally signed webhook probes qualify private ingress only; real GitHub delivery and external HTTPS routing require separate proof.
+# SQL review authority prerequisite
+
+Ordinary immutable-image releases, including source-SHA self-releases on an existing
+schema42 dataset, run a short initializer Job before creating the candidate controller.
+This uses the existing initializer SQL secret and `Bootstrap__ReviewAuthorityOnly=true`;
+automatic migration is disabled. It only installs/enables and verifies the project-scoped
+operator-memory guard and grants the controller visibility of that guard's definition.
+It does not reseed data, change schema versions, acquire a controller lease, or drain the
+old runtime. Fresh initialization and schema upgrades install the same guard.
+
+The Job is bound to the release operation, dataset and immutable image, and must finish
+with no running initializer pod before candidate qualification. Failed or changed Jobs
+prevent activation. Controller health, status, activation and read-only deployment checks
+also verify the exact enabled guard body and configured worker identity; an absent,
+disabled or mismatched guard is not ready. Existing policy values and old-controller
+rollback keys remain in place. An older deployment is not modified by a failed candidate
+qualification, and the security guard remains installed across rollback.

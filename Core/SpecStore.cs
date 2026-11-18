@@ -178,11 +178,15 @@ public interface ISpecStore
     Task<SpecRecord> UpdateBodyAsync(string id, UpdateSpecBody update, CancellationToken ct = default);
     /// <summary>Move a spec to a new status. Does NOT create a new version.</summary>
     Task<SpecRecord> SetStatusAsync(string id, SpecStatus status, CancellationToken ct = default);
+    /// <summary>Commit the designer's handoff and run receipt in one transaction.</summary>
+    Task CommitDesignDecisionAsync(string id, SpecStatus status, long runId,
+        IReadOnlyList<string> artifactIds, string hygieneJson, TimeSpan duration, CancellationToken ct = default)
+        => throw new NotSupportedException("This spec store does not support durable designer handoffs.");
     Task<IReadOnlyList<SpecVersionRecord>> ListVersionsAsync(string id, CancellationToken ct = default);
     Task DeleteAsync(string id, CancellationToken ct = default);
 }
 
-public sealed class SpecStore : ISpecStore, IAsyncDisposable
+public sealed partial class SpecStore : ISpecStore, IAsyncDisposable
 {
     private readonly IssueStore _issues;
     private readonly SpecBodyExtractor _extractor;

@@ -154,6 +154,8 @@ public sealed record VisionOptions
 
 public sealed record GitHubOptions
 {
+    /// <summary>Optional mounted secret file. Empty disables the signed /hooks/github ingress.</summary>
+    public string WebhookSecretFile { get; set; } = string.Empty;
     public string Owner { get; set; } = string.Empty;
     public string Repo { get; set; } = string.Empty;
     public string Token { get; set; } = string.Empty;
