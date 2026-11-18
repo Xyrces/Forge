@@ -43,6 +43,13 @@ References: [installation tokens](https://docs.github.com/en/apps/creating-githu
 
 ## Guided private setup
 
+With the App configuration mounted, `--check` uses the registered project's
+repository and resolves both installation credentials. It reads repository and
+pull request metadata with each role and reads workflow metadata with the
+publisher. A failed App check identifies the repository, role and stage and
+returns a failing exit code. The check creates no PR or review. A protected
+pilot is still needed to exercise publishing, inline review and merge.
+
 `scripts/github-app-setup.py --directory <new-private-directory> --port 18743` runs on the Linux host and binds only `127.0.0.1`. Forward that exact loopback port through SSH. Open the URL in the private `session-url` file. The page first links to existing owned App registrations so suitable Apps can be reused instead of creating duplicates. Creation requires an explicit GitHub confirmation for each role.
 
 The helper uses GitHub's manifest exchange with one-use CSRF state and a private browser cookie. It stores each generated PEM with mode0600 in a mode0700 directory; unused OAuth secrets are discarded. On installation it validates App identity, owner and explicit repository selection, obtains a metadata-only audit token to verify the entire installation contains exactly `Xyrces/Forge`, and revokes that token immediately. Only after both roles validate does it stage `config.json`. It never applies a Kubernetes Secret or deploys. The session ends after two hours. Temporary forwarding allowances must be removed when setup ends (the operator's setup schedules that cleanup).

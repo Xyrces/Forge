@@ -192,6 +192,7 @@ public static class TaskEndpoints
                 recoveryAttempts = t.RecoveryAttempts,
                 situation = TaskSituation.Describe(t, plan, nominee),
                 delivery = TaskDeliveryPresenter.For(t, plan),
+                queueWakeup = DispatchWakeupTiming.Read(t),
                 metadata = TaskEndpoints.ParseMetadata(t.MetadataJson),
                 sprint = sprint is null ? null : new { id = sprint.Id, name = sprint.Name, status = sprint.Status.ToString() },
                 events = events.Select(e => new TaskEventDto(e.Kind, e.Timestamp, e.Detail, e.Actor, e.Id)).ToArray(),

@@ -182,6 +182,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             }
             if (issue.GetMetadata("dispatchEligibleAt") is { Length: > 0 } eligibleAt)
                 context["dispatchEligibleAt"] = eligibleAt;
+            if (issue.GetMetadata("dispatchWakeup") is { Length: > 0 } queueWakeup)
+                context["dispatchWakeup"] = queueWakeup;
             // Triage model escalation (phase 3): the dispatch path
             // consumed the task's llm/taskModel marker and stamped
             // modelEscalatedTo — this run rides THAT provider+model

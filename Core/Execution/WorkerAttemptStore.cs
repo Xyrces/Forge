@@ -117,10 +117,42 @@ public sealed class WorkerAttemptStore(IDbConnectionFactory db)
             throw new OperationCanceledException("Worker attempt is cancelled or not owned by this pod.", ct);
     }
 
-    public Task<bool> CompleteAsync(string id, string podUid, string token, string? resultJson, string? error,
-        CancellationToken ct = default) => UpdateAsync(
-            "state=CASE WHEN cancel_requested=1 THEN 'cancelled' WHEN @error IS NULL THEN 'succeeded' ELSE 'failed' END, result_json=COALESCE(@result,result_json), error=@error",
-            "id=@id AND state='running' AND pod_uid=@pod AND attempt_token=@token", id, podUid, token, resultJson, error, ct);
+    public async Task<bool> CompleteAsync(string id, string podUid, string token, string? resultJson, string? error,
+        CancellationToken ct = default)
+    {
+        // Cancellation and result publication share this CAS boundary. A cancellation that
+        // wins after the worker's final ownership check must also win in its timing payload.
+        while (true)
+        {
+            var current = await GetAsync(id, ct);
+            if (current is null || current.State != "running" || current.PodUid != podUid || current.AttemptToken != token)
+                return false;
+            var payload = current.CancelRequested ? resultJson ?? current.ResultJson : resultJson;
+            if (current.CancelRequested && payload is not null)
+            {
+                try
+                {
+                    var node = System.Text.Json.Nodes.JsonNode.Parse(payload);
+                    if (node is System.Text.Json.Nodes.JsonObject root
+                        && root["Phases"] is System.Text.Json.Nodes.JsonObject phases)
+                    {
+                        phases["WorkerOutcome"] = "cancelled";
+                        payload = root.ToJsonString();
+                    }
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // Historical opaque results have no typed timing evidence to amend.
+                    // Retain them unchanged; the row's authoritative state still cancels.
+                }
+            }
+            if (await UpdateAsync(
+                "state=CASE WHEN cancel_requested=1 THEN 'cancelled' WHEN @error IS NULL THEN 'succeeded' ELSE 'failed' END, result_json=COALESCE(@result,result_json), error=@error",
+                $"id=@id AND state='running' AND pod_uid=@pod AND attempt_token=@token AND cancel_requested={(current.CancelRequested ? 1 : 0)}",
+                id, podUid, token, payload, current.CancelRequested ? "cancelled" : error, ct))
+                return true;
+        }
+    }
 
     /// <summary>Durable phase evidence does not complete a worker or authorize publication.</summary>
     public Task<bool> RecordProgressAsync(string id, string podUid, string token, string resultJson,
