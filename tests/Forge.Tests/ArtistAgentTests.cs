@@ -317,6 +317,8 @@ public class ArtistAgentTests : IDisposable
         var local = await new ArtOutputStore(ownerIssues.Db).CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Current", spec.Id + "/current.glb", "glb"));
         await File.WriteAllTextAsync(Path.Combine(meshy.ArtOutputRoot, local.Body), "current bytes");
         var registry = new ProjectStore(_issues);
+        await registry.UpsertAsync(new("removed-writer", "Former primary", "https://example.invalid/old.git"));
+        await registry.DeleteAsync("removed-writer");
         await registry.UpsertAsync(new("next", "Next", "https://example.invalid/next.git"));
         await registry.UpsertAsync(new("owner", "Owner", "https://example.invalid/owner.git"));
         await using var projects = new Forge.Projects.ProjectContextFactory(registry, _workDir,
@@ -365,6 +367,22 @@ public class ArtistAgentTests : IDisposable
             () => throw new InvalidOperationException("No project initialization is needed"),
             () => projects.GetInitializedHistoryStores(owner));
         Assert.Equal(old.Id, (await routing.ReadHistoricalArtAcrossProjectsAsync(old.Id, default))!.Artifact.Id);
+        await using var otherIssues = new IssueStore(Path.Combine(_workDir, "other-owner.db"), "other");
+        var other = new SpecStore(otherIssues);
+        await other.CreateAsync(new("other", "Duplicate ownership", "body"));
+        await using (var connection = await otherIssues.Db.OpenAsync())
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE spec SET id=@id";
+            var parameter = command.CreateParameter(); parameter.ParameterName = "@id"; parameter.Value = spec.Id;
+            command.Parameters.Add(parameter);
+            await command.ExecuteNonQueryAsync();
+        }
+        await new OwnedArtifactHistoryStore(otherIssues.Db).ImportAsync(new("writer", _issues.Db, _workDir), other);
+        var conflictingOwners = new ProjectRoutingSpecStore(owner, _ => null, () => [owner, other],
+            () => [owner, other]);
+        await Assert.ThrowsAsync<ArtifactHistoryAmbiguousException>(() =>
+            conflictingOwners.ReadHistoricalArtAcrossProjectsAsync(old.Id, default));
         await history.ImportAsync(new("different-writer", _issues.Db, _workDir), owner);
         await Assert.ThrowsAsync<ArtifactHistoryAmbiguousException>(() =>
             routing.ReadHistoricalArtAcrossProjectsAsync(old.Id, default));

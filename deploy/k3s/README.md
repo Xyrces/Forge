@@ -278,7 +278,11 @@ Same-schema releases retain the ordinary blue/green path. Fresh installs also us
 
 The supervisor first binds the observed previous image, dataset, and verified schema version to that policy. It journals the operation, drains admission and active runs, requires the SQL owner to be released, scales both controller slots to zero, and waits until every controller pod (including terminating pods) is gone and no live worker pods remain. Only then can its deterministic initializer Job run. The release service account gets Jobs create/get, not Secret read; only the initializer mounts the privileged database Secret, and that pod has no Kubernetes API token.
 
-Initializer preflight runs under the existing exclusive SQL schema lock before any DDL. It requires the same initialized dataset and budget, no lease owner, no queued/running worker attempts, exactly the registered Forge project with the configured repository/branch, and both `core` and `proj_forge` at the declared source or target version. The target must equal the initializer binary's expected version. Additional registered projects fail closed; this first upgrade coordinator does not silently leave their workload schemas behind.
+Initializer preflight holds the exclusive SQL schema lock. It checks the dataset, budget, Forge repository and branch, and requires a released lease and zero queued or running worker attempts. It checks the registry and every registered project's workload schema against the declared source and target versions before migration. The target must match the initializer binary. The initializer upgrades each workload and installs its worker permissions and review guard.
+
+For the 42 → 43 upgrade, first promote the rollback image pinned in `schema-upgrade.json` while the database is still on 42. Verify the active slot's digest and schema version before submitting the schema 43 release. The supervisor uses that slot if the candidate fails after migration. The fallback reads both versions and continues to write the schema 42 record format. A rollback leaves the database on 43. [Rollback image build and immutable deployment receipt](https://github.com/Xyrces/Forge/actions/runs/44403998494)
+
+At startup the upgraded controller copies historical design and art records for a spec to its owner's workload database. Removing a registered writer also runs this copy before removing its registry entry. Keep the original art-output files on the shared volume because the retained records reference those files. A writer removed before the first copy must have its original storage made available for recovery.
 
 The journal and initializer Job are immutable-input bound. A replacement supervisor resumes the same operation and adopts the same Job. A different operation cannot take over an unfinished schema upgrade, even after its owner pod dies; the compatibility bridge includes that guard too. Supervisor Jobs allow three new-pod retries, with `restartPolicy: Never`. Initializer Jobs have zero automatic retries. Kubernetes Job retry behavior is documented in the [official Job guide](https://kubernetes.io/docs/concepts/workloads/controllers/job/); database side effects are protected separately by the schema lock and version checks.
 
@@ -297,8 +301,8 @@ After promotion the new controller honors the operator's existing stage setting 
 Build/test and deployment remain separate: GitHub-hosted Ubuntu workflows test source and produce a digest-bound controller image; the release catalog verifies repository/workflow/source/run/artifact provenance. The initializer alone owns schema changes. Controller SQL leases fence concurrent owners, the release supervisor stops old pods before activating the candidate, and the stable Service changes only after activation. Locally signed webhook probes qualify private ingress only; real GitHub delivery and external HTTPS routing require separate proof.
 # SQL review authority prerequisite
 
-Ordinary immutable-image releases, including source-SHA self-releases on an existing
-schema42 dataset, run a short initializer Job before creating the candidate controller.
+Ordinary immutable-image releases, including source-SHA self-releases on a dataset
+already at the target schema version, run a short initializer Job before creating the candidate controller.
 This uses the existing initializer SQL secret and `Bootstrap__ReviewAuthorityOnly=true`;
 automatic migration is disabled. It only installs/enables and verifies the project-scoped
 operator-memory guard and grants the controller visibility of that guard's definition.
