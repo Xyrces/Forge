@@ -135,6 +135,34 @@ public sealed class MergeRequirementsTests
     }
 
     [Fact]
+    public async Task LostReplyResponseReusesAuthenticatedLatestReceipt()
+    {
+        string? posted = null;
+        var posts = 0;
+        var resolves = 0;
+        using var handler = new Handler((request, _) =>
+        {
+            var query = request.GetProperty("query").GetString()!;
+            if (query.StartsWith("query"))
+                return Page([Thread("thread", last: posted is null ? "comment" : "receipt", body: posted ?? "Finding")]);
+            if (query.Contains("addPullRequestReviewThreadReply"))
+            {
+                posted = request.GetProperty("variables").GetProperty("body").GetString();
+                posts++;
+                throw new IOException("Reply accepted but response lost");
+            }
+            resolves++;
+            return "{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}";
+        });
+        var service = new Service(Client(handler, "publisher"), Client(handler, "reviewer"));
+        var draft = new ReviewDraft(2, "head", "Approve", "Verified", [], [new("thread", "comment", "Guard corrected")]);
+        await Assert.ThrowsAsync<IOException>(() => service.ResolveReviewedConversationsAsync(1, draft));
+        await service.ResolveReviewedConversationsAsync(1, draft);
+        Assert.Equal(1, posts);
+        Assert.Equal(1, resolves);
+    }
+
+    [Fact]
     public async Task NewCommentFromSameAppAfterVerificationReplyRemainsUnresolved()
     {
         var replied = false;
