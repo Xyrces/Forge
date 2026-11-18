@@ -69,7 +69,8 @@ public sealed partial class PRWatcher
         var mergeSatisfied = merge is { Unresolved: 0 } && (merge.AllowsMerge || merge.State is "BEHIND" or "DIRTY");
         var humanThreads = merge?.Conversations.Count(t => !t.Resolved && !GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin)) ?? 0;
         var humanWaiting = humanPending || protection is ProtectionReviewDecision.ReviewRequired or ProtectionReviewDecision.ChangesRequested || humanThreads > 0;
-        var waiting = humanWaiting || !protectionSatisfied || !mergeSatisfied;
+        var waiting = humanWaiting || !protectionSatisfied || !mergeSatisfied
+            || task.GetMetadata("reviewMergeRefusedHead") == head;
         var fields = new Dictionary<string, object>
         {
             ["humanReviewNominee"] = settings.NominatedHuman ?? "",

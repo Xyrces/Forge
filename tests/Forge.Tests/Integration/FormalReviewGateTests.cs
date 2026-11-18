@@ -485,6 +485,24 @@ public sealed class FormalReviewGateTests : IDisposable
     }
 
     [Fact]
+    public async Task ReleasingLongExternalGateKeepsWatchLiveAndDoesNotChargeHumanWait()
+    {
+        var task = await Seed();
+        var before = DateTimeOffset.UtcNow.AddDays(-2);
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object>
+        {
+            ["prOpenedAt"] = before.ToString("O"),
+            ["reviewExternalWaitStartedAt"] = before.AddMinutes(2).ToString("O")
+        });
+        var github = new GitHub();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(1, github.Merges);
+        Assert.True(ReviewWaitTiming.ExternalSeconds(current) > 86400);
+        Assert.Equal(0, ReviewWaitTiming.CompletedSeconds(current));
+    }
+
+    [Fact]
     public async Task ReleasingLongHumanWaitDoesNotImmediatelyExpireTheWatch()
     {
         var task = await Seed();
