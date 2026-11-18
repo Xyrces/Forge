@@ -386,6 +386,17 @@
                 ? delivery.Deserialize<TaskDeliveryRead>(JsonSerializerOptions.Web) : null;
             _sprint = snapshot.Task.TryGetProperty("sprint", out var sprint) && sprint.ValueKind == JsonValueKind.Object ? sprint : null;
             _loadedRecoveryTarget = RecoveryTarget;
+            if (snapshot.Review is { } review)
+            {
+                _legacyReviews = review.Legacy; _nativeReviews = review.Native; _legacyNotes = review.Notes;
+                _legacyError = review.Error; _legacyLoaded = true;
+            }
+            if (snapshot.Activity is { } activity)
+            {
+                _events = activity.Events; _workers = activity.Workers; _runs = activity.Runs; _state = activity.State;
+                _historyCursor = activity.Cursor; _historyError = activity.HistoryError;
+                _workerError = activity.WorkerError; _runsError = activity.RunsError; _activityLoaded = true;
+            }
             if (_section == "History & runs") await LoadActivityAsync();
             else if (_section == "Review" && !_legacyLoaded && !_legacyLoading) await LoadLegacyReviewsAsync();
             return;
@@ -395,12 +406,21 @@
 
     private PersistingComponentStateSubscription _persisting;
     private sealed record OverviewSnapshot(JsonElement Task, string? Repository, bool HoldLoaded,
-        bool ExplicitHold, string? HumanPolicy, string? HoldError);
+        bool ExplicitHold, string? HumanPolicy, string? HoldError, ReviewSnapshot? Review = null, ActivitySnapshot? Activity = null);
+    private sealed record ReviewSnapshot(List<LegacyReview> Legacy, List<NativeReview> Native, List<string> Notes, string? Error);
+    private sealed record ActivitySnapshot(List<EventVm> Events, List<WorkerSummary> Workers, List<RunVm> Runs,
+        StateVm? State, string? Cursor, string? HistoryError, string? WorkerError, string? RunsError);
+    private OverviewSnapshot CaptureOverviewSnapshot(JsonElement task) => new(task, _repoUrl, _holdLoaded, _explicitHumanHold,
+        _humanPolicy, _holdError,
+        !_legacyLoading && (_legacyLoaded || _legacyError is not null)
+            ? new(_legacyReviews, _nativeReviews, _legacyNotes, _legacyError) : null,
+        _activityLoaded && !_activityLoading
+            ? new(_events, _workers, _runs, _state, _historyCursor, _historyError, _workerError, _runsError) : null);
     protected override void OnInitialized() => _persisting = PersistentState.RegisterOnPersisting(() =>
     {
         if (_task is { } task && _loadedRecoveryTarget == RecoveryTarget && _error is null)
             PersistentState.PersistAsJson("forge-task-overview:" + RecoveryTarget,
-                new OverviewSnapshot(task, _repoUrl, _holdLoaded, _explicitHumanHold, _humanPolicy, _holdError));
+                CaptureOverviewSnapshot(task));
         return Task.CompletedTask;
     });
     public void Dispose() { _persisting.Dispose(); ++_recoveryLoadGeneration; ++_legacyGeneration; InvalidateActivity(); }

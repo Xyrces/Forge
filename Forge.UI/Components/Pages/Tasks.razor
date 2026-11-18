@@ -9,25 +9,25 @@
 @using Forge.Dashboard.Services
 <PageTitle>Tasks</PageTitle>
 <div class="page task-detail task-list-workspace">
-    <div class="page-header"><h1>Tasks</h1><button class="btn" @onclick="() => LoadAsync(false)">Refresh</button></div>
+    <div class="page-header"><h1>Tasks</h1><button class="btn" @onclick="() => LoadFromUserAsync(false)">Refresh</button></div>
     <div class="task-controls">
         @foreach (var choice in new[] { ("active", "Active work"), ("attention", "Needs attention"), ("history", "History") })
         { <button class="btn @(_view == choice.Item1 ? "btn--primary" : "")" aria-pressed="@((_view == choice.Item1).ToString().ToLowerInvariant())" @onclick="() => SelectView(choice.Item1)">@choice.Item2</button> }
-        <label>Find task <input @bind="_search" placeholder="Title, task ID or PR number" /></label><button class="btn" @onclick="() => LoadAsync(false)">Search</button>
+        <label>Find task <input @bind="_search" placeholder="Title, task ID or PR number" /></label><button class="btn" @onclick="() => LoadFromUserAsync(false)">Search</button>
     </div>
     @if (_error is not null) { <p class="banner banner--error" role="alert">Couldn’t load tasks: @_error</p> }
     @if (_loading) { <p role="status">Loading…</p> }
     <p class="meta-text">@_items.Count shown · @_total matching tasks</p>
     <div class="task-run-list">@foreach (var task in _items) { <article><div><a href="@($"/tasks/{Uri.EscapeDataString(task.Id)}?project={Uri.EscapeDataString(_loadedProject ?? "")}")">@task.Title</a><strong>@task.Situation.Label</strong></div><p>@task.Situation.Text</p><p class="meta-text">@WorkPresentation.Role(task.Type)@(task.Situation.NextActor is { } actor ? $" · Next: {actor}" : "")@(task.PrNumber is { } pr ? $" · PR #{pr}" : "")</p>@if (task.Situation.HumanReviewRequired) { <p>Human review required before merge</p> }</article> }</div>
     @if (!_loading && _error is null && _items.Count == 0) { <p>No matching tasks.</p> }
-    @if (_cursor is not null) { <button class="btn" disabled="@_loading" @onclick="() => LoadAsync(true)">Load more tasks</button> }
+    @if (_cursor is not null) { <button class="btn" disabled="@_loading" @onclick="() => LoadFromUserAsync(true)">Load more tasks</button> }
 </div>
 @code {
     [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
     private string _view = "active", _search = "";
     private string? _loadedProject, _cursor, _error;
     private bool _loading, _restoreScroll;
-    private int _generation, _total, _pages;
+    private int _generation, _restoreGeneration, _total, _pages;
     private IJSObjectReference? _browser;
     private sealed record ListLocation(string? View, string? Search, int Pages);
     private List<TaskRow> _items = new();
@@ -57,16 +57,29 @@
     private async Task RestoreAsync()
     {
         var project = Project ?? ShellStore.Value.CurrentProjectId;
+        var restoreGeneration = ++_restoreGeneration;
         if (project is null || _browser is null) return;
+        bool Current() => restoreGeneration == _restoreGeneration && project == (Project ?? ShellStore.Value.CurrentProjectId);
         var saved = await _browser.InvokeAsync<ListLocation?>("begin", "tasks:" + project);
+        if (!Current()) return;
         _view = saved?.View is "history" or "attention" ? saved.View : "active";
         _search = saved?.Search ?? "";
         await LoadAsync(false);
-        for (var page = 1; page < Math.Clamp(saved?.Pages ?? 1, 1, 100) && _cursor is not null && _error is null && project == (Project ?? ShellStore.Value.CurrentProjectId); page++) await LoadAsync(true);
-        if (project != (Project ?? ShellStore.Value.CurrentProjectId)) return;
+        for (var page = 1; Current() && page < Math.Clamp(saved?.Pages ?? 1, 1, 100) && _cursor is not null && _error is null; page++) await LoadAsync(true);
+        if (!Current()) return;
         _restoreScroll = true;
     }
-    private async Task SelectView(string view) { _view = view; await LoadAsync(false); }
+    private async Task SelectView(string view)
+    {
+        _view = view;
+        await LoadFromUserAsync(false);
+    }
+    private Task LoadFromUserAsync(bool append)
+    {
+        ++_restoreGeneration;
+        _restoreScroll = false;
+        return LoadAsync(append);
+    }
     private async Task LoadAsync(bool append)
     {
         var project = Project ?? ShellStore.Value.CurrentProjectId;
@@ -83,7 +96,12 @@
         catch (Exception ex) { if (generation == _generation) _error = ex.Message; }
         finally { if (generation == _generation) _loading = false; }
     }
-    public void Dispose() => ShellStore.StateChanged -= ShellChanged;
+    public void Dispose()
+    {
+        ++_restoreGeneration;
+        ++_generation;
+        ShellStore.StateChanged -= ShellChanged;
+    }
     private sealed record TaskPage(List<TaskRow> Items, string? NextCursor, int Total);
     private sealed record TaskRow(string Id, string Title, string Type, string Status, string? PrNumber, SituationRow Situation);
     private sealed record SituationRow(string Label, string Text, string? NextActor, bool HumanReviewRequired);

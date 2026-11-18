@@ -161,15 +161,21 @@
     private string? _loadedTarget;
     private string Target => (Project ?? ShellStore.Value.CurrentProjectId) + "|" + RunId;
     private int _loadGeneration;
+    private bool _disposed, _terminal;
 
     protected override async Task OnParametersSetAsync()
     {
-        if (_loadedTarget == Target) return;
+        if (_disposed || _loadedTarget == Target) return;
         _loadedTarget = Target;
         _pollCts.Cancel(); _pollCts.Dispose(); _pollCts = new();
-        _run = null; _notFound = false; _loadError = null;
-        await LoadAsync();
-        _ = PollLoopAsync(_pollCts.Token);
+        var owner = _pollCts;
+        var token = owner.Token;
+        _run = null; _notFound = false; _loadError = null; _terminal = false;
+        await LoadAsync(token);
+        // An old navigation may finish after a new run has loaded. It must
+        // never borrow the new run's cancellation source and start another loop.
+        if (!_disposed && ReferenceEquals(owner, _pollCts) && !token.IsCancellationRequested && !_terminal)
+            _ = PollLoopAsync(token);
     }
 
     private async Task PollLoopAsync(CancellationToken token)
@@ -178,15 +184,23 @@
         try
         {
             while (await timer.WaitForNextTickAsync(token))
-                await LoadAsync();
+            {
+                if (_disposed || _terminal) return;
+                await LoadAsync(token);
+                if (_terminal) return;
+            }
         }
         catch (OperationCanceledException) { }
     }
 
-    private async Task LoadAsync()
+    private Task LoadAsync() => _disposed ? Task.CompletedTask : LoadAsync(_pollCts.Token);
+
+    private async Task LoadAsync(CancellationToken token)
     {
+        if (_disposed || token.IsCancellationRequested) return;
         var target = Target;
         var generation = ++_loadGeneration;
+        bool Current() => !_disposed && !token.IsCancellationRequested && target == Target && generation == _loadGeneration;
         try
         {
             // Run rows live in the OWNING project's store — read
@@ -199,29 +213,26 @@
             var lens = effectiveProject is { } pid
                 ? $"?projectId={Uri.EscapeDataString(pid)}"
                 : string.Empty;
-            var resp = await Http.GetAsync($"/api/agent-runs/{RunId}" + lens);
-            if (target != Target || generation != _loadGeneration) return;
+            using var resp = await Http.GetAsync($"/api/agent-runs/{Uri.EscapeDataString(RunId)}" + lens, token);
+            if (!Current()) return;
             if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
                 _notFound = true;
-                _pollCts.Cancel();
+                _terminal = true;
                 await InvokeAsync(StateHasChanged);
                 return;
             }
             resp.EnsureSuccessStatusCode();
-            var result = await resp.Content.ReadFromJsonAsync<RunDto>();
-            if (target != Target || generation != _loadGeneration) return;
+            var result = await resp.Content.ReadFromJsonAsync<RunDto>(token);
+            if (!Current()) return;
             _run = result;
-            _loadError = null;
+            _loadError = null; _notFound = false;
             // Terminal runs don't need the 3s poll loop anymore.
-            if (_run?.View.Status is "succeeded" or "failed")
-            {
-                _pollCts.Cancel();
-            }
+            _terminal = _run?.View.Status is "succeeded" or "failed";
             await InvokeAsync(StateHasChanged);
         }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { if (target == Target && generation == _loadGeneration) { _loadError = ex.Message; await InvokeAsync(StateHasChanged); } }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) { if (Current()) { _loadError = ex.Message; await InvokeAsync(StateHasChanged); } }
     }
 
     private bool _notFound;
@@ -229,6 +240,8 @@
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true; ++_loadGeneration;
         _pollCts.Cancel();
         _pollCts.Dispose();
     }
