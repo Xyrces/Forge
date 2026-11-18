@@ -172,6 +172,7 @@ public class DesignerAgentTests : IDisposable
         private readonly string _toolName;
         private readonly Dictionary<string, object?> _args;
         private readonly string _finalText;
+        public Func<Task>? AfterTool { get; init; }
         public int CallCount;
 
         public ScriptedToolCallClient(string toolName, Dictionary<string, object?> args, string finalText)
@@ -181,16 +182,17 @@ public class DesignerAgentTests : IDisposable
             _finalText = finalText;
         }
 
-        public Task<ChatResponse> GetResponseAsync(
+        public async Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             CallCount++;
             if (CallCount == 1)
             {
                 var call = new FunctionCallContent("c1", _toolName, _args);
-                return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, new[] { (AIContent)call })));
+                return new ChatResponse(new ChatMessage(ChatRole.Assistant, new[] { (AIContent)call }));
             }
-            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _finalText)));
+            if (AfterTool is not null) await AfterTool();
+            return new ChatResponse(new ChatMessage(ChatRole.Assistant, _finalText));
         }
 
         public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
@@ -199,6 +201,57 @@ public class DesignerAgentTests : IDisposable
 
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
         public void Dispose() { }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ImmediateGroomingOrFinalModelError_CannotEraseCommittedHandoff(bool finalTurnThrows)
+    {
+        var spec = await CreateSpecAsync();
+        var client = new ScriptedToolCallClient("db_set_spec_status",
+            new() { ["specId"] = spec.Id, ["status"] = "Approved" }, "Approved")
+        {
+            AfterTool = async () =>
+            {
+                // Receipt is committed before the next stage can see Approved.
+                var receipt = Assert.Single(await _runs.ListAsync(spec.Id));
+                Assert.Equal(DesignerRunStatus.Succeeded, receipt.Status);
+                Assert.Equal(SpecStatus.Approved, receipt.NewSpecStatus);
+                await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming);
+                await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed);
+                if (finalTurnThrows) throw new InvalidOperationException("provider disconnected after handoff");
+            },
+        };
+        var result = await NewAgent(client).DesignSpecAsync(spec.Id, DesignerTriggerKind.Manual);
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(SpecStatus.Approved, result.NewSpecStatus);
+        Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(spec.Id))!.Status);
+        Assert.Equal(DesignerRunStatus.Succeeded, Assert.Single(await _runs.ListAsync(spec.Id)).Status);
+    }
+
+    [Fact]
+    public async Task HandoffReceiptFailure_RollsBackSpec_AndReplayNeverRegressesGroomedSpec()
+    {
+        var spec = await CreateSpecAsync();
+        var run = await _runs.StartAsync(spec.Id, DesignerTriggerKind.Manual);
+        await using var conn = await _issues.Db.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "CREATE TRIGGER reject_design_receipt BEFORE UPDATE ON designer_run BEGIN SELECT RAISE(ABORT, 'receipt unavailable'); END";
+        await cmd.ExecuteNonQueryAsync();
+        await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(() => _specs.CommitDesignDecisionAsync(
+            spec.Id, SpecStatus.Approved, run.Id, [], "{}", TimeSpan.FromSeconds(2)));
+        Assert.Equal(SpecStatus.ReadyForDesign, (await _specs.GetAsync(spec.Id))!.Status);
+        Assert.Equal(DesignerRunStatus.Started, Assert.Single(await _runs.ListAsync(spec.Id)).Status);
+        cmd.CommandText = "DROP TRIGGER reject_design_receipt";
+        await cmd.ExecuteNonQueryAsync();
+        await _specs.CommitDesignDecisionAsync(spec.Id, SpecStatus.Approved, run.Id, [], "{}", TimeSpan.FromSeconds(2));
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Grooming);
+        await _specs.SetStatusAsync(spec.Id, SpecStatus.Groomed);
+        await _specs.CommitDesignDecisionAsync(spec.Id, SpecStatus.Approved, run.Id, [], "{}", TimeSpan.FromSeconds(2));
+        Assert.Equal(SpecStatus.Groomed, (await _specs.GetAsync(spec.Id))!.Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _specs.CommitDesignDecisionAsync(
+            spec.Id, SpecStatus.NeedsRevision, run.Id, [], "{}", TimeSpan.FromSeconds(2)));
     }
 
     [Fact]

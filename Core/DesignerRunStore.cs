@@ -180,6 +180,19 @@ public sealed class DesignerRunStore
         return list;
     }
 
+    /// <summary>Read this run's output independently of the spec's later pipeline state.</summary>
+    public async Task<DesignerCommittedDecision?> ReadCommittedDecisionAsync(long runId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT new_spec_status,design_artifact_ids FROM {T("designer_run")} WHERE id=@id AND status='succeeded' AND new_spec_status IS NOT NULL";
+        cmd.AddParam("@id", runId);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return new DesignerCommittedDecision(Enum.Parse<SpecStatus>(reader.GetString(0)),
+            reader.IsDBNull(1) ? [] : JsonSerializer.Deserialize<List<string>>(reader.GetString(1)) ?? []);
+    }
+
     private static string StatusToDb(DesignerRunStatus s) => s switch
     {
         DesignerRunStatus.Started => "started",
@@ -207,6 +220,8 @@ public sealed class DesignerRunStore
 }
 
 public enum DesignerTriggerKind { Manual, Scheduled }
+
+public sealed record DesignerCommittedDecision(SpecStatus Status, IReadOnlyList<string> ArtifactIds);
 
 public enum DesignerRunStatus { Started, Succeeded, HygieneFailed, LlmFailed }
 

@@ -12,6 +12,40 @@ public sealed record WorkerAssignment(string Id, string DatasetId, string Adopti
 /// <summary>Durable attempt ownership. A pod claim is single-use; running attempts are never automatically reclaimed.</summary>
 public sealed class WorkerAttemptStore(IDbConnectionFactory db)
 {
+    public sealed record AttemptSummary(string Id, string Role, string State, string CreatedAt, string UpdatedAt,
+        bool VerificationRecorded, string? Outcome, WorkerPhaseTiming? Phases = null);
+
+    // Deliberately returns no assignment, token, raw result text or credentials.
+    public async Task<IReadOnlyList<AttemptSummary>> ListSummariesAsync(string datasetId, string projectId, string taskId, CancellationToken ct = default)
+    {
+        await using var connection = await db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT {db.Dialect.Top(100)}id,role,state,created_at,updated_at,result_json,error FROM {Table} WHERE dataset_id=@dataset AND project_id=@project AND task_id=@task ORDER BY created_at DESC,id DESC{db.Dialect.Limit(100)}";
+        Add(command, "@dataset", datasetId); Add(command, "@project", projectId); Add(command, "@task", taskId);
+        var summaries = new List<AttemptSummary>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var verified = false;
+            WorkerPhaseTiming? phases = null;
+            if (!reader.IsDBNull(5))
+            {
+                try
+                {
+                    using var result = System.Text.Json.JsonDocument.Parse(reader.GetString(5));
+                    verified = result.RootElement.TryGetProperty("Verification", out var receipt) && receipt.ValueKind == System.Text.Json.JsonValueKind.Object;
+                    if (result.RootElement.TryGetProperty("Phases", out var timing) && timing.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        phases = System.Text.Json.JsonSerializer.Deserialize<WorkerPhaseTiming>(timing.GetRawText());
+                }
+                catch (System.Text.Json.JsonException) { /* Historical malformed result is not verification evidence. */ }
+            }
+            var state = reader.GetString(2);
+            var outcome = state switch { "succeeded" => "Worker completed", "cancelled" => "Worker cancelled", "failed" => "Worker stopped before completion", "running" => "Worker executing", _ => "Worker queued" };
+            summaries.Add(new(reader.GetString(0), reader.GetString(1), state, reader.GetString(3), reader.GetString(4), verified, outcome, phases));
+        }
+        return summaries;
+    }
+
     private string Table => db.Dialect.Table("worker_attempt");
     public async Task<bool> HasActiveAsync(string datasetId, string projectId, string taskId, CancellationToken ct = default)
     {
@@ -85,8 +119,14 @@ public sealed class WorkerAttemptStore(IDbConnectionFactory db)
 
     public Task<bool> CompleteAsync(string id, string podUid, string token, string? resultJson, string? error,
         CancellationToken ct = default) => UpdateAsync(
-            "state=CASE WHEN cancel_requested=1 THEN 'cancelled' WHEN @error IS NULL THEN 'succeeded' ELSE 'failed' END, result_json=@result, error=@error",
+            "state=CASE WHEN cancel_requested=1 THEN 'cancelled' WHEN @error IS NULL THEN 'succeeded' ELSE 'failed' END, result_json=COALESCE(@result,result_json), error=@error",
             "id=@id AND state='running' AND pod_uid=@pod AND attempt_token=@token", id, podUid, token, resultJson, error, ct);
+
+    /// <summary>Durable phase evidence does not complete a worker or authorize publication.</summary>
+    public Task<bool> RecordProgressAsync(string id, string podUid, string token, string resultJson,
+        CancellationToken ct = default) => UpdateAsync("result_json=@result",
+            "id=@id AND state='running' AND cancel_requested=0 AND pod_uid=@pod AND attempt_token=@token",
+            id, podUid, token, resultJson, null, ct);
 
     public Task<bool> MarkJobFailedAsync(string id, string error, CancellationToken ct = default) =>
         UpdateAsync("state='failed', error=@error", "id=@id AND state IN ('queued','running')",

@@ -464,6 +464,14 @@ public static class ForgeComposition
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.SpecStatusChangedConsumer>>()));
         services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SpecStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.TaskStatusChangedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
+            sp.GetRequiredService<ILogger<Consumers.TaskStatusChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.TaskStatusChangedConsumer>());
+        services.AddSingleton(sp => new Consumers.SprintOutcomeChangedConsumer(
+            sp.GetRequiredService<ITransport>(), sp.GetRequiredService<Consumers.SchedulerWakeups>(),
+            sp.GetRequiredService<ILogger<Consumers.SprintOutcomeChangedConsumer>>()));
+        services.AddSingleton<IEventConsumerService>(sp => sp.GetRequiredService<Consumers.SprintOutcomeChangedConsumer>());
         services.AddSingleton(sp => new Consumers.SprintStatusChangedConsumer(
             sp.GetRequiredService<ITransport>(), wakeups,
             sp.GetRequiredService<ILogger<Consumers.SprintStatusChangedConsumer>>()));

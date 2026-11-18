@@ -2282,6 +2282,15 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         await tx.CommitAsync(ct);
         await PublishLifecycleTransitionAsync(current, metadataJson, ct);
         await PublishFailureSignalAsync(current, to, error, metadataJson, ct);
+        if (current.Status != to)
+        {
+            await _events.PublishAsync(new Messaging.TaskStatusChanged
+            {
+                MessageId = $"task-status:{_projectId}:{id}:{to}:{now:O}",
+                ProjectId = _projectId, TaskId = id, FromStatus = current.Status,
+                ToStatus = to, ChangedAt = new DateTimeOffset(now, TimeSpan.Zero),
+            }, ct);
+        }
         return (await GetAsync(id, ct))!;
     }
 

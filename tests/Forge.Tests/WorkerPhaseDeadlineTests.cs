@@ -51,6 +51,9 @@ public sealed class WorkerPhaseDeadlineTests
             }, default);
         Assert.Equal(1, calls);
         Assert.Equal(Receipt, result.Verification);
+        Assert.NotNull(result.Phases);
+        Assert.True(result.Phases.ModelCompletedAt >= result.Phases.ModelStartedAt);
+        Assert.True(result.Phases.VerificationCompletedAt >= result.Phases.VerificationStartedAt);
     }
 
     [Fact]
@@ -73,6 +76,38 @@ public sealed class WorkerPhaseDeadlineTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => WorkerHost.RunPhasesAsync(
             new Runner(_ => Task.FromResult(Result)), Invocation, new Dictionary<string, object>(), null,
             _ => throw new InvalidOperationException("full suite failed"), default));
+    }
+
+    [Fact]
+    public async Task VerificationFailureRetainsMeasuredModelProgressWithoutVerificationSuccess()
+    {
+        var recorded = new List<AgentRunResult>();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => WorkerHost.RunPhasesAsync(
+            new Runner(_ => Task.FromResult(Result)), Invocation, new Dictionary<string, object>(), null,
+            _ => throw new InvalidOperationException("verification failed"), default,
+            (progress, _) => { recorded.Add(progress); return Task.CompletedTask; }));
+        var model = Assert.Single(recorded);
+        Assert.Null(model.Verification);
+        Assert.NotNull(model.Phases);
+        Assert.NotNull(model.Phases.VerificationStartedAt);
+        Assert.Null(model.Phases.VerificationCompletedAt);
+    }
+
+    [Fact]
+    public async Task FailedWorkerPreservesProgressAndRejectsLateOrForeignPhaseWrites()
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("worker-phases"));
+        var store = new Forge.Core.Execution.WorkerAttemptStore(issues.Db);
+        await store.CreateOrGetAsync(new("attempt", "dataset", "key", "forge", "task", "CoreDev", "dispatch",
+            new string('a', 40), "/work", "{}", "token"));
+        await store.ClaimAsync("attempt", "pod");
+        Assert.False(await store.RecordProgressAsync("attempt", "other-pod", "token", "{}"));
+        Assert.True(await store.RecordProgressAsync("attempt", "pod", "token", "{\"measured\":true}"));
+        Assert.True(await store.CompleteAsync("attempt", "pod", "token", null, "verification failed"));
+        var failed = (await store.GetAsync("attempt"))!;
+        Assert.Equal("failed", failed.State);
+        Assert.Equal("{\"measured\":true}", failed.ResultJson);
+        Assert.False(await store.RecordProgressAsync("attempt", "pod", "token", "{}"));
     }
 
     private sealed class Runner(Func<CancellationToken, Task<AgentRunResult>> run) : IAgentRunner

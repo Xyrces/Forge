@@ -46,7 +46,12 @@ public static class WorkerHost
                     await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, token);
                     return await AgentTools.WorkerVerification.VerifyAsync(assignment.Id, assignment.WorktreePath,
                         runtime.VerifyCommands, logger, token);
-                }, runCancellation.Token);
+                }, runCancellation.Token, async (progress, token) =>
+                {
+                    if (!await attempts.RecordProgressAsync(assignment.Id, worker.PodUid,
+                        assignment.AttemptToken, JsonSerializer.Serialize(progress), token))
+                        throw new OperationCanceledException("Worker phase recording lost ownership.", token);
+                });
             await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, runCancellation.Token);
             using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             if (!await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, JsonSerializer.Serialize(result), null, finalize.Token))
@@ -90,9 +95,11 @@ public static class WorkerHost
     /// Verification keeps RunVerification's per-command deadline and the Job's overall hard ceiling.</summary>
     internal static async Task<AgentRunResult> RunPhasesAsync(IAgentRunner runner, WorkerInvocation invocation,
         IReadOnlyDictionary<string, object> context, TimeSpan? modelTimeout,
-        Func<CancellationToken, Task<VerificationReceipt>> verify, CancellationToken ct)
+        Func<CancellationToken, Task<VerificationReceipt>> verify, CancellationToken ct,
+        Func<AgentRunResult, CancellationToken, Task>? recordProgress = null)
     {
         AgentRunResult result;
+        var modelStarted = DateTimeOffset.UtcNow;
         using (var model = CancellationTokenSource.CreateLinkedTokenSource(ct))
         {
             if (modelTimeout is { } timeout) model.CancelAfter(timeout);
@@ -105,8 +112,18 @@ public static class WorkerHost
             { throw new TimeoutException($"Worker model phase timed out after {modelTimeout}."); }
         }
         ct.ThrowIfCancellationRequested();
-        if (invocation.Role is AgentType.CoreDev or AgentType.ClientDev)
-            result = result with { Verification = await verify(ct) };
+        var engineering = invocation.Role is AgentType.CoreDev or AgentType.ClientDev;
+        var modelCompleted = DateTimeOffset.UtcNow;
+        result = result with { Phases = new WorkerPhaseTiming(modelStarted, modelCompleted,
+            engineering ? modelCompleted : null) };
+        if (recordProgress is not null) await recordProgress(result, ct);
+        if (engineering)
+        {
+            var verification = await verify(ct);
+            result = result with { Verification = verification,
+                Phases = result.Phases! with { VerificationCompletedAt = DateTimeOffset.UtcNow } };
+            if (recordProgress is not null) await recordProgress(result, ct);
+        }
         ct.ThrowIfCancellationRequested();
         return result;
     }

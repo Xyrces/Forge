@@ -11,6 +11,8 @@ public static class Topics
 {
     public const string TaskEnqueued = "forge.task-enqueued";
     public const string TaskTransitioned = "forge.task-transitioned";
+    public const string TaskStatusChanged = "forge.task-status-changed";
+    public const string SprintOutcomeChanged = "forge.sprint-outcome-changed";
     public const string PrOpened = "forge.pr-opened";
     public const string ReviewVerdictRecorded = "forge.review-verdict";
     public const string SpecStatusChanged = "forge.spec-status-changed";
@@ -26,6 +28,8 @@ public static class Topics
     {
         nameof(Core.Messaging.TaskEnqueued) => TaskEnqueued,
         nameof(Core.Messaging.TaskTransitioned) => TaskTransitioned,
+        nameof(Core.Messaging.TaskStatusChanged) => TaskStatusChanged,
+        nameof(Core.Messaging.SprintOutcomeChanged) => SprintOutcomeChanged,
         nameof(Core.Messaging.PrOpened) => PrOpened,
         nameof(Core.Messaging.ReviewVerdictRecorded) => ReviewVerdictRecorded,
         nameof(Core.Messaging.SpecStatusChanged) => SpecStatusChanged,
