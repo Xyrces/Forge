@@ -4,8 +4,9 @@ These follow-ups come from the November 18 review of [PR #155](https://github.co
 The numbers match the original findings. File locations refer to the reviewed
 revision `1f798bde8c83308375fbdb5eeced9a9d92d1fef2`.
 
-The ten backlog items below await prioritization. Findings #7 and #11 have
-separate dispositions at the end. Findings #1–4 and #16 are tracked in the
+The first review contributed ten backlog items. A [second review](#second-review) added
+five more on the corrected revision. Findings #7 and #11 have separate dispositions
+below. Findings #1–4 and #16 are tracked in the
 [five inline review threads](https://github.com/Xyrces/Forge/pull/155#pullrequestreview-5957748467).
 
 ## #5 — Measure and reduce repeated private Git imports
@@ -215,3 +216,80 @@ then test operator success and worker refusal across every write path, including
 memory extraction and direct storage access. An in-process guard alone cannot
 protect SQLite from a process that can write the database file. Keep the current
 support boundary and SQL qualification documentation explicit.
+
+## Second review
+
+Findings #18–22 refer to [`3318015`](https://github.com/Xyrces/Forge/commit/33180158785cee89c6fb643409fa6c3a984c996c).
+All five are deferred. The scope and acceptance checks below are based on source review.
+
+### #18 — Show when a second project is still provisioning
+
+The registration request stops waiting after 75 seconds. The supervisor Job allows 900 seconds
+and its Python loop allows 840. If the HTTP wait expires first, the endpoint returns the same
+503 as a terminal Job failure. The Job can keep running. Retrying the same registration can
+adopt it, but the operator has no way to tell when that is the appropriate next step.
+[Controller wait](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Orchestrator/Control/KubernetesProjectProvisioner.cs#L24)
+· [Supervisor wait](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/deploy/k3s/project_provision.py#L27)
+· [HTTP outcomes](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Dashboard/ProjectsEndpoints.cs#L128)
+
+**Acceptance.** Give ongoing provisioning a distinct response and UI state that preserves the form.
+Account for the UI client's own timeout. Exercise a healthy Job that takes more than 75 seconds,
+retrying that Job, and a terminal failure. Keep the registry row hidden until attestation succeeds.
+Preserve the existing `202` outcome for a project whose registration succeeded but whose clone failed.
+
+### #19 — Align project provisioning with Kubernetes client availability
+
+A controller creates the provisioner with workers disabled, but only the workers-enabled path
+registers its Kubernetes HTTP client. In a configuration that reaches the dashboard, the missing
+dependency first surfaces as a 503 during registration. The shipped K3s manifest enables workers.
+`RuntimeFactory` is a separate, optional test hook. Production already falls back to the
+configured SQL connection with automatic schema initialization disabled.
+[Service registration](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Orchestrator/Composition/ForgeComposition.cs#L341)
+· [Provisioner wiring](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Orchestrator/Composition/ForgeComposition.cs#L785)
+· [SQL fallback](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Orchestrator/Control/KubernetesProjectProvisioner.cs#L70)
+
+**Acceptance.** Test controller mode with workers enabled and disabled. A supported configuration
+must have the client and immutable image needed for provisioning. An unsupported configuration
+must identify the missing capability before an operator submits a registration. Both paths must
+enforce the storage checks before publishing a project.
+
+### #20 — Bound contention when retrying a review
+
+Retry acquires the task's poll gate and reviewer gate in sequence. Request cancellation releases
+acquired gates, but there is no server deadline for acquiring both. The review gate was available
+when the watcher blocked the task. Another operation can hold it by the time the operator retries.
+This is the task-level counterpart to #13's project-policy save.
+[Retry endpoint](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Dashboard/TaskEndpoints.cs#L328)
+
+**Acceptance.** Use one acquisition deadline across both gates. Return a retryable busy response
+when it expires. Exercise each gate under contention, client cancellation, and a successful later
+retry. A timed-out request must release any acquired gate and preserve the task, counters and
+publication evidence. A successful retry must wake the watcher after releasing both gates.
+
+### #21 — Name the review retry action in the triage ledger
+
+The ledger already stores `operator-retry-review`. The shared `FailureTriageActions` vocabulary
+lacks a constant for it. The transition from Blocked to InProgress already signals clearance.
+[Retry metadata](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Core/ReviewIntegrationState.cs#L25)
+· [Ledger consumer](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Orchestrator/Consumers/FailureTriageConsumer.cs#L96)
+
+**Acceptance.** Use a declared constant with the existing stored spelling and verify that one
+retry records the expected operator action. Existing entries must remain readable.
+
+### #22 — Match the retry button to the recovery the server will perform
+
+Task Detail chooses its label and POST route from `blockedKind`. The endpoint also requires
+the task to be Blocked. Guided triage can move a task to Pending with the old kind intact.
+If engineering subsequently fails, the Failed task advertises **Retry review** but takes
+the generic engineering requeue path. That can reset engineering strikes while retaining
+exhausted review attempts. If the watcher blocks the task again on the same revision, the
+review-specific action becomes available again.
+[Task action](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Forge.UI/Components/Pages/TaskDetail.razor#L683)
+· [Server predicate](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Core/ReviewIntegrationState.cs#L8)
+· [Guided requeue](https://github.com/Xyrces/Forge/blob/33180158785cee89c6fb643409fa6c3a984c996c/Agents/TriageTools.cs#L79)
+
+**Acceptance.** Use the same recovery decision for the displayed action and server mutation.
+Test a genuinely review-blocked task, a Failed task with an old marker, an ordinary engineering
+failure, and a task whose status changes after the page loads. Cover exhausted model attempts
+and publication attempts separately. A review-only retry must preserve the saved draft,
+uncertain publication state, human hold and engineering strikes.
