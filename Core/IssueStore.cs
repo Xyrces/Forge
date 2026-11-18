@@ -2010,7 +2010,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 
         await InsertEventAsync(conn, tx, id, "created", spec.Description, ct);
         return new IssueRecord(id, shortIdStr, spec.Type, spec.Title, spec.Description,
-            IssueStatus.Pending, spec.Priority, spec.Assignee, now, now, null, metadataJson);
+            IssueStatus.Pending, spec.Priority, spec.Assignee, now, now, null, metadataJson, ParentIssueId: spec.ParentId);
     }
 
     internal async Task PublishCreatedAsync(IssueRecord issue, CancellationToken ct)
