@@ -131,7 +131,7 @@ public sealed class DesignArtifactStore
                        references_json, parent_artifact_id, status, author, created_at, updated_at
                 FROM {T("design_artifact")}
                 WHERE spec_id = @spec
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """;
         }
         else
@@ -141,7 +141,7 @@ public sealed class DesignArtifactStore
                        references_json, parent_artifact_id, status, author, created_at, updated_at
                 FROM {T("design_artifact")}
                 WHERE spec_id = @spec AND status = @status
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """;
             cmd.AddParam("@status", status.Value.ToString().ToLowerInvariant());
         }
@@ -164,7 +164,7 @@ public sealed class DesignArtifactStore
             FROM {T("design_artifact")} da
             JOIN {T("spec")} s ON s.id = da.spec_id
             WHERE s.project_id = @project
-            ORDER BY da.created_at ASC
+            ORDER BY da.created_at ASC, da.id ASC
             """;
         cmd.AddParam("@project", projectId);
         var list = new List<DesignArtifact>();
@@ -190,13 +190,13 @@ public sealed class DesignArtifactStore
                        references_json, parent_artifact_id, status, author, created_at, updated_at
                 FROM {T("design_artifact")}
                 WHERE spec_id IN ({string.Join(",", parameters.Select(p => p.Name))})
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """;
             foreach (var parameter in parameters) cmd.AddParam(parameter.Name, parameter.Id);
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct)) list.Add(ReadRow(reader));
         }
-        return list.OrderBy(a => a.CreatedAt).ToArray();
+        return list.OrderBy(a => a.CreatedAt).ThenBy(a => a.Id, StringComparer.Ordinal).ToArray();
     }
 
     public async Task<int> DeleteBySpecAsync(string specId, CancellationToken ct = default)

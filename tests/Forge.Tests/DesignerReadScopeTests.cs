@@ -15,6 +15,81 @@ namespace Forge.Tests;
 public sealed class DesignerReadScopeTests
 {
     [Fact]
+    public async Task EqualArtifactTimestampsSortByIdAndPreserveOwnerCopies()
+    {
+        await using var primary = new IssueStore(TempRoot.Instance.NewDbPath("artifact-tie-history"), "primary");
+        await using var owner = new IssueStore(TempRoot.Instance.NewDbPath("artifact-tie-owner"), "owner");
+        var specs = new SpecStore(owner);
+        var spec = await specs.CreateAsync(new("owner", "Owned", "body"));
+        var historical = new DesignArtifactStore(primary.Db);
+        var local = new DesignArtifactStore(owner.Db);
+        var first = "design-" + new string('0', 31) + "1";
+        var second = "design-" + new string('0', 31) + "2";
+        var third = "design-" + new string('0', 31) + "3";
+        async Task Add(IssueStore database, DesignArtifactStore store, string id, string body)
+        {
+            var row = await store.CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Equal time", body, "markdown"));
+            await using var connection = await database.Db.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE design_artifact SET id=@id,created_at='2026-11-18 00:00:00.001' WHERE id=@old";
+            var replacement = command.CreateParameter(); replacement.ParameterName = "@id"; replacement.Value = id;
+            var old = command.CreateParameter(); old.ParameterName = "@old"; old.Value = row.Id;
+            command.Parameters.Add(replacement); command.Parameters.Add(old);
+            await command.ExecuteNonQueryAsync();
+        }
+        // Insert in reverse ID order and place the same ID in both databases.
+        await Add(owner, local, third, "current owner body");
+        await Add(owner, local, first, "first body");
+        await Add(primary, historical, third, "obsolete historical body");
+        await Add(primary, historical, second, "unique historical body");
+        var localIds = new[] { first, third };
+        Assert.Equal(localIds, (await local.ListBySpecAsync(spec.Id)).Select(a => a.Id));
+        Assert.Equal(localIds, (await local.ListBySpecAsync(spec.Id, DesignArtifactStatus.Draft)).Select(a => a.Id));
+        Assert.Equal(localIds, (await local.ListByProjectAsync("owner")).Select(a => a.Id));
+        Assert.Equal(localIds, (await local.ListBySpecsAsync([spec.Id], default)).Select(a => a.Id));
+        var primarySpecs = new SpecStore(primary);
+        var routing = new ProjectRoutingSpecStore(primarySpecs,
+            id => id == "owner" ? specs : primarySpecs, () => [primarySpecs, specs]);
+        foreach (var byProject in new[] { false, true })
+        {
+            var rows = await DesignerStoreRouting.ListArtifactsAsync(routing, historical,
+                byProject ? "owner" : spec.Id, byProject);
+            Assert.Equal(new[] { first, second, third }, rows.Select(a => a.Id));
+            Assert.Equal("current owner body", rows[^1].Body);
+        }
+    }
+
+    [Fact]
+    public async Task ScopedHistoryPrefersThePhysicalOwnerWhenTimestampAndNumericIdCollide()
+    {
+        await using var primary = new IssueStore(TempRoot.Instance.NewDbPath("history-tie-primary"), "primary");
+        await using var secondary = new IssueStore(TempRoot.Instance.NewDbPath("history-tie-owner"), "secondary");
+        var ownerSpecs = new SpecStore(secondary);
+        var spec = await ownerSpecs.CreateAsync(new NewSpec("stale-project", "Owned", "body"));
+        var primaryRuns = new DesignerRunStore(primary.Db);
+        var ownerRuns = new DesignerRunStore(secondary.Db);
+        var historical = await primaryRuns.StartAsync(spec.Id, DesignerTriggerKind.Manual);
+        var current = await ownerRuns.StartAsync(spec.Id, DesignerTriggerKind.Manual);
+        Assert.Equal(historical.Id, current.Id);
+        await primaryRuns.FinishAsync(historical.Id, DesignerRunStatus.LlmFailed, null, null, null, "historical", TimeSpan.Zero);
+        await ownerRuns.FinishAsync(current.Id, DesignerRunStatus.Succeeded, SpecStatus.Designed, null, null, null, TimeSpan.Zero);
+        foreach (var store in new[] { primary, secondary })
+        {
+            await using var connection = await store.Db.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE designer_run SET ts='2026-11-18 00:00:00.000'";
+            await command.ExecuteNonQueryAsync();
+        }
+        var primarySpecs = new SpecStore(primary);
+        var routing = new ProjectRoutingSpecStore(primarySpecs,
+            id => id == "secondary" ? ownerSpecs : primarySpecs, () => [primarySpecs, ownerSpecs]);
+        var history = await DesignerStoreRouting.ListRunsAsync(routing, primaryRuns, spec.Id, 2);
+        Assert.Equal(new[] { DesignerRunStatus.Succeeded, DesignerRunStatus.LlmFailed }, history.Select(run => run.Status));
+        Assert.Equal(DesignerRunStatus.Succeeded,
+            Assert.Single(await DesignerStoreRouting.ListRunsAsync(routing, primaryRuns, spec.Id, 1)).Status);
+    }
+
+    [Fact]
     public async Task HistoricalListingsSurviveAControllerRestartWithANewPrimary()
     {
         await using var oldPrimary = new IssueStore(TempRoot.Instance.NewDbPath("old-primary"), "primary");
@@ -85,6 +160,14 @@ public sealed class DesignerReadScopeTests
             command.CommandText = "UPDATE design_artifact SET id=@id WHERE id=@old";
             var id = command.CreateParameter(); id.ParameterName = "@id"; id.Value = historical.Id; command.Parameters.Add(id);
             var old = command.CreateParameter(); old.ParameterName = "@old"; old.Value = duplicate.Id; command.Parameters.Add(old);
+            await command.ExecuteNonQueryAsync();
+            command.CommandText = """
+                UPDATE design_artifact SET created_at =
+                CASE WHEN id=@current THEN '2026-11-18 00:00:00.001' ELSE '2026-11-18 00:00:00.002' END
+                """;
+            command.Parameters.Clear();
+            var currentId = command.CreateParameter(); currentId.ParameterName = "@current"; currentId.Value = current.Id;
+            command.Parameters.Add(currentId);
             await command.ExecuteNonQueryAsync();
         }
         var builder = WebApplication.CreateBuilder();

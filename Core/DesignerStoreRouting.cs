@@ -7,13 +7,19 @@ public static class DesignerStoreRouting
         DesignerRunStore primary, string? specId, int limit, CancellationToken ct = default)
     {
         if (specId is null) return await primary.ListAsync(null, limit, ct);
-        if (specs is ProjectRoutingSpecStore scope && scope.ResolveOwner(specId) is null) return [];
-        var history = new List<DesignerRun>(await primary.ListAsync(specId, limit, ct));
+        var owner = specs is ProjectRoutingSpecStore scope ? scope.ResolveOwner(specId) : specs;
+        if (specs is ProjectRoutingSpecStore && owner is null) return [];
+        var ownerRuns = owner is SpecStore physical ? new DesignerRunStore(physical.Database) : primary;
+        // Stable ordering favors the physical owner when historical databases have
+        // the same timestamp and numeric run ID. IDs are allocated per database.
+        var history = new List<DesignerRun>(await ownerRuns.ListAsync(specId, limit, ct));
+        if (owner is SpecStore owned && !primary.UsesDatabase(owned.Database))
+            history.AddRange(await primary.ListAsync(specId, limit, ct));
         var owners = specs is ProjectRoutingSpecStore routing
             ? routing.ArtifactStores
             : specs is SpecStore single ? [single] : Enumerable.Empty<SpecStore>();
         foreach (var store in owners)
-            if (!primary.UsesDatabase(store.Database))
+            if (!primary.UsesDatabase(store.Database) && !ownerRuns.UsesDatabase(store.Database))
                 history.AddRange(await new DesignerRunStore(store.Database).ListAsync(specId, limit, ct));
         // Numeric run IDs are local to their database.
         return history.OrderByDescending(run => run.Ts).ThenByDescending(run => run.Id).Take(limit).ToArray();
@@ -36,7 +42,7 @@ public static class DesignerStoreRouting
                 historical.AddRange(await new DesignArtifactStore(store.Database).ListBySpecsAsync(ids, ct));
             }
             return ArtifactHistory.IncludeUnambiguousHistory(owned, historical, artifact => artifact.Id)
-                .OrderBy(artifact => artifact.CreatedAt).ToArray();
+                .OrderBy(artifact => artifact.CreatedAt).ThenBy(artifact => artifact.Id, StringComparer.Ordinal).ToArray();
         }
         var results = new List<DesignArtifact>(byProject
             ? await primary.ListByProjectAsync(id, ct) : await primary.ListBySpecAsync(id, ct: ct));
@@ -45,6 +51,7 @@ public static class DesignerStoreRouting
             var scoped = new DesignArtifactStore(local.Database);
             results.AddRange(byProject ? await scoped.ListByProjectAsync(id, ct) : await scoped.ListBySpecAsync(id, ct: ct));
         }
-        return results.DistinctBy(artifact => artifact.Id).OrderBy(artifact => artifact.CreatedAt).ToArray();
+        return results.DistinctBy(artifact => artifact.Id).OrderBy(artifact => artifact.CreatedAt)
+            .ThenBy(artifact => artifact.Id, StringComparer.Ordinal).ToArray();
     }
 }

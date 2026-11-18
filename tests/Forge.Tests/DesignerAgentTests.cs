@@ -258,6 +258,18 @@ public class DesignerAgentTests : IDisposable
         {
             var oldArtifact = await _artifacts.CreateAsync(new NewDesignArtifact(spec.Id, DesignArtifactKind.Wireframe,
                 "Historical artifact", "# Historical", "markdown"));
+            // Chronology is explicit; sub-millisecond fixture inserts may persist the same timestamp.
+            foreach (var (store, timestamp) in new[]
+                { (ownerIssues, "2026-11-18 00:00:00.001"), (_issues, "2026-11-18 00:00:00.002") })
+            {
+                await using var connection = await store.Db.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "UPDATE design_artifact SET created_at=@timestamp";
+                var parameter = command.CreateParameter();
+                parameter.ParameterName = "@timestamp"; parameter.Value = timestamp;
+                command.Parameters.Add(parameter);
+                await command.ExecuteNonQueryAsync();
+            }
             var otherProjectSpec = await _specs.CreateAsync(new NewSpec("P", "Other project", HealthyBody));
             var unrelated = await _artifacts.CreateAsync(new NewDesignArtifact(otherProjectSpec.Id, DesignArtifactKind.Wireframe,
                 "Other project's artifact", "# Private", "markdown"));
