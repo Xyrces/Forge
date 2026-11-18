@@ -15,9 +15,10 @@ public sealed class BudgetReleaseSchemaTests
     [InlineData(40, false)]
     [InlineData(41, false)]
     [InlineData(42, true)]
-    [InlineData(43, false)]
+    [InlineData(43, true)]
+    [InlineData(44, false)]
     [InlineData(0, false)]
-    public async Task CurrentReleaseRequires42AndCannotInheritBridgeCompatibility(int version, bool allowed)
+    public async Task OwnerHistoryBridgeReads42And43WithoutInitializingTheCatalog(int version, bool allowed)
     {
         Assert.Equal(42, IssueStore.CurrentSchemaVersion);
         Assert.Equal(42, SqlServerMigrations.ExpectedVersion);
@@ -38,7 +39,7 @@ public sealed class BudgetReleaseSchemaTests
         var factory = new ReadOnlyCatalogFactory(path);
         await using var runtimeStore = new IssueStore(factory);
         runtimeStore.EnsureSchema(); // runtime construction must not initialize even this minimal fixture
-        if (allowed) Assert.Equal(42, await ControllerHost.VerifySchemaAsync(factory, default));
+        if (allowed) Assert.Equal(version, await ControllerHost.VerifySchemaAsync(factory, default));
         else await Assert.ThrowsAsync<InvalidOperationException>(() => ControllerHost.VerifySchemaAsync(factory, default));
         await using var connection = await factory.OpenAsync();
         using var verify = connection.CreateCommand();
