@@ -782,6 +782,8 @@ public static class ForgeComposition
             budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
             initiativeApprovals: initiativeApprovals,
             mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null,
+            projectProvisioner: options.Controller.Enabled
+                ? new Control.KubernetesProjectProvisioner(() => sp.GetRequiredService<HttpClient>(), options) : null,
             workerHistory: options.Worker.Enabled ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
                 .ListSummariesAsync(options.Controller.DatasetId, projectId, taskId, ct) : null));
 

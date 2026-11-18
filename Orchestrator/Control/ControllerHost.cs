@@ -213,13 +213,20 @@ public static class ControllerHost
     internal static async Task VerifyReviewAuthorityAsync(AgentOptions options, CancellationToken ct)
     {
         var registry = ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.RegistrySchema, ForgeSchemaProfile.Core, initializeSchema: false);
+        await VerifyRegisteredProjectAuthorityAsync(registry,
+            id => ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(id), initializeSchema: false),
+            options.Bootstrap.WorkerPrincipal, ct);
+    }
+
+    internal static async Task VerifyRegisteredProjectAuthorityAsync(IDbConnectionFactory registry,
+        Func<string, IDbConnectionFactory> workload, string worker, CancellationToken ct)
+    {
         await using var issues = new IssueStore(registry);
         await using var projects = new ProjectStore(issues);
         var registered = await projects.ListAsync(ct);
         if (registered.Count == 0) throw new InvalidOperationException("No initialized project is registered.");
         foreach (var project in registered)
-            await MemoryAuthoritySql.VerifyAsync(ForgeDb.SqlServer(options.Db.ConnectionString, ForgeDb.SchemaForProject(project.Id), initializeSchema: false),
-                options.Bootstrap.WorkerPrincipal, ct);
+            await MemoryAuthoritySql.VerifyAsync(workload(project.Id), worker, ct);
     }
 
     public static void Validate(AgentOptions options)
