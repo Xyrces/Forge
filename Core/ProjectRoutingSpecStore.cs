@@ -60,7 +60,7 @@ public sealed class ProjectRoutingSpecStore : ISpecStore
         return _findByProject(projectId) ?? _primary;
     }
 
-    internal IEnumerable<ISpecStore> ProjectStores => new[] { _primary }.Concat(_allProjectStores()).Distinct();
+    internal ISpecStore? FindRegisteredStore(string projectId) => _findByProject(projectId);
 
     internal ISpecStore? ResolveOwner(string id)
     {
