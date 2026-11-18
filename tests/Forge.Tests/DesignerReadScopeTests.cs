@@ -15,6 +15,41 @@ namespace Forge.Tests;
 public sealed class DesignerReadScopeTests
 {
     [Fact]
+    public async Task HistoricalListingsSurviveAControllerRestartWithANewPrimary()
+    {
+        await using var oldPrimary = new IssueStore(TempRoot.Instance.NewDbPath("old-primary"), "primary");
+        await using var owner = new IssueStore(TempRoot.Instance.NewDbPath("history-owner"), "second");
+        await using var newPrimary = new IssueStore(TempRoot.Instance.NewDbPath("new-primary"), "aaa");
+        var ownerSpecs = new SpecStore(owner);
+        var spec = await ownerSpecs.CreateAsync(new NewSpec("stale-field", "Owned", "body"));
+        var artifact = await new DesignArtifactStore(oldPrimary.Db).CreateAsync(
+            new(spec.Id, DesignArtifactKind.Wireframe, "Historical", "historical body", "html"));
+        await new DesignerRunStore(oldPrimary.Db).StartAsync(spec.Id, DesignerTriggerKind.Manual);
+        var stores = new Dictionary<string, ISpecStore>
+        {
+            ["aaa"] = new SpecStore(newPrimary), ["primary"] = new SpecStore(oldPrimary), ["second"] = ownerSpecs,
+        };
+        var routing = new ProjectRoutingSpecStore(stores["aaa"], id => stores.GetValueOrDefault(id), () => stores.Values.ToArray());
+        var listed = await DesignerStoreRouting.ListArtifactsAsync(routing, new DesignArtifactStore(newPrimary.Db), "second", true);
+        Assert.Equal(artifact.Id, Assert.Single(listed).Id);
+        var scoped = await DesignerStoreRouting.ListRunsAsync(routing, new DesignerRunStore(newPrimary.Db), spec.Id, 10);
+        Assert.Equal(spec.Id, Assert.Single(scoped).SpecId);
+        Assert.Empty(await DesignerStoreRouting.ListRunsAsync(routing, new DesignerRunStore(newPrimary.Db), null, 10));
+        await new DesignerRunStore(oldPrimary.Db).StartAsync("orphan-spec", DesignerTriggerKind.Manual);
+        Assert.Empty(await DesignerStoreRouting.ListRunsAsync(routing, new DesignerRunStore(newPrimary.Db), "orphan-spec", 10));
+    }
+
+    [Fact]
+    public void ArtifactListsPreferLocalRowsAndOmitOnlyAmbiguousHistoricalIds()
+    {
+        var rows = ArtifactHistory.IncludeUnambiguousHistory(
+            new[] { (Id: "owned", Body: "current") },
+            new[] { (Id: "owned", Body: "old"), (Id: "duplicate", Body: "one"),
+                (Id: "duplicate", Body: "two"), (Id: "history", Body: "unique") }, row => row.Id);
+        Assert.Equal(new[] { ("owned", "current"), ("history", "unique") }, rows);
+    }
+
+    [Fact]
     public async Task EndpointsPreservePrimaryHistoryAndPhysicalProjectArtifactOwnership()
     {
         await using var primary = new IssueStore(TempRoot.Instance.NewDbPath("design-read-primary"), "primary");
@@ -72,9 +107,9 @@ public sealed class DesignerReadScopeTests
         Assert.Equal(0, missingRuns.GetArrayLength());
         async Task<string[]> ArtifactIds(string path) => (await http.GetFromJsonAsync<JsonElement>(path))
             .EnumerateArray().Select(a => a.GetProperty("id").GetString()!).ToArray();
-        Assert.Equal(new[] { historical.Id, current.Id }, await ArtifactIds("/api/designs?projectId=secondary"));
+        Assert.Equal(new[] { current.Id, historical.Id }, await ArtifactIds("/api/designs?projectId=secondary"));
         Assert.Equal(new[] { primaryArtifact.Id }, await ArtifactIds("/api/designs?projectId=primary"));
-        Assert.Equal(new[] { historical.Id, current.Id }, await ArtifactIds($"/api/specs/{second.Id}/design-artifacts"));
+        Assert.Equal(new[] { current.Id, historical.Id }, await ArtifactIds($"/api/specs/{second.Id}/design-artifacts"));
         Assert.Empty(await ArtifactIds("/api/designs?projectId=missing"));
         Assert.Empty(await ArtifactIds("/api/specs/missing/design-artifacts"));
         await app.StopAsync();

@@ -51,7 +51,8 @@ public sealed class EngineeringDispatchWorkflow
         Core.Workflow.WorkflowResolver? workflow = null,
         IReadOnlyList<string>? verifyCommands = null,
         Func<IssueRecord, CancellationToken, Task>? onPrOpened = null,
-        Slots.SlotTable? reviewSlots = null)
+        Slots.SlotTable? reviewSlots = null,
+        Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? artifactSources = null)
     {
         // Executor loggers: production passes the real factory so
         // executor diagnostics (checkpoint advances, push/PR steps)
@@ -62,7 +63,7 @@ public sealed class EngineeringDispatchWorkflow
             nullFactory.CreateLogger<WorktreeExecutor>());
         _runAgent = new RunAgentExecutor(issues, agentRunner, roleRegistry,
             drainMessageBus, events, designArtifacts, artOutputs,
-            nullFactory.CreateLogger<RunAgentExecutor>(), projectId, sprints, timeoutMinutes, lifecycle);
+            nullFactory.CreateLogger<RunAgentExecutor>(), projectId, sprints, timeoutMinutes, lifecycle, artifactSources);
         ExistingImplementationVerifier? existingVerifier = issues is IssueStore concrete && sprints is not null
             && reviewSlots is not null && !string.IsNullOrWhiteSpace(projectId)
             ? new(concrete, sprints, worktrees, gitHub, agentRunner, reviewSlots, projectId, workspaceOptions.DefaultBranch)

@@ -6,7 +6,6 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Forge.AgentTools;
 using Forge.Core;
-using Forge.Core.Db;
 
 namespace Forge.Agents;
 
@@ -45,7 +44,8 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<DesignArtifactStore?>? _designArtifactsFactory;
     private readonly Func<ISpecStore?>? _specsFactory;
     private readonly Func<ArtOutputStore?>? _artOutputsFactory;
-    private readonly IDbConnectionFactory? _workerArtifactHistory;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? _artifactHistorySources;
+    private readonly Func<string, string?>? _artOutputRoot;
     private readonly ISecretStore? _secrets;
     private readonly IIssueStore? _issues;
     private readonly AgentRunStore? _runs;
@@ -115,7 +115,8 @@ public sealed class MafAgentRunner : IAgentRunner
         Func<string?, IIssueStore?>? issueStoreLookup = null,
         RoleModelOverrides? modelOverrides = null,
         Configuration.GateOptions? gates = null,
-        IDbConnectionFactory? workerArtifactHistory = null)
+        Func<string, CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? artifactHistorySources = null,
+        Func<string, string?>? artOutputRoot = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -131,7 +132,8 @@ public sealed class MafAgentRunner : IAgentRunner
         _designArtifactsFactory = designArtifacts;
         _specsFactory = specs;
         _artOutputsFactory = artOutputs;
-        _workerArtifactHistory = workerArtifactHistory;
+        _artifactHistorySources = artifactHistorySources;
+        _artOutputRoot = artOutputRoot;
         _secrets = secrets;
         _issues = issues;
         _runs = runs;
@@ -274,7 +276,11 @@ public async Task<AgentRunResult> RunAsync(
                     tools.Add(new ArtifactReadTool(
                         new DesignArtifactStore(owner.Db), new SpecStore(owner), new ArtOutputStore(owner.Db),
                         new ContextHandoffStore(owner.Db), requireOwnedSpec: true,
-                        historicalDesignArtifacts: designArtifacts, historicalArtOutputs: artOutputs).AsAIFunction());
+                        historicalDesignArtifacts: _artifactHistorySources is null ? designArtifacts : null,
+                        historicalArtOutputs: _artifactHistorySources is null ? artOutputs : null,
+                        history: _artifactHistorySources is null ? null
+                            : new ArtifactHistory(new SpecStore(owner), token => _artifactHistorySources(projectId, token)),
+                        artOutputRoot: _artOutputRoot?.Invoke(projectId)).AsAIFunction());
             }
             else if (specs is SpecStore && (!isWorker || projectId is not null)
                 && (_issues is not IssueStore local || projectId is null || local.ProjectId == projectId))
@@ -282,10 +288,10 @@ public async Task<AgentRunResult> RunAsync(
                 // Workers and legacy single-project constructors already supply a
                 // concrete owner-local spec store. No routing lookup is needed;
                 // artifact IDs must still resolve to a spec in that physical store.
-                var history = isWorker ? _workerArtifactHistory : null;
                 tools.Add(new ArtifactReadTool(designArtifacts, specs, artOutputs, _handoffs, requireOwnedSpec: true,
-                    historicalDesignArtifacts: history is null ? null : new DesignArtifactStore(history),
-                    historicalArtOutputs: history is null ? null : new ArtOutputStore(history)).AsAIFunction());
+                    history: projectId is null || _artifactHistorySources is null ? null
+                        : new ArtifactHistory(specs, token => _artifactHistorySources(projectId, token)),
+                    artOutputRoot: projectId is null ? null : _artOutputRoot?.Invoke(projectId)).AsAIFunction());
             }
         }
 

@@ -14,6 +14,78 @@ namespace Forge.Tests.Integration;
 public sealed class EngineeringArtifactScopeTests
 {
     [Fact]
+    public async Task RestartAfterRegisteringEarlierProjectRetainsOriginalWriterArtifacts()
+    {
+        var root = TempRoot.Instance.NewDirectory("artifact-controller-restart");
+        var repo = Path.Combine(root, "repo");
+        Directory.CreateDirectory(repo);
+        await using var registryIssues = new IssueStore(ForgesystemPaths.IssuesDb(root, "default"));
+        var registry = new ProjectStore(registryIssues);
+        async Task Register(string id)
+        {
+            await registry.UpsertAsync(new NewProject(id, id, repo));
+            await registry.UpdateLocalPathAsync(id, repo);
+        }
+        await Register("primary");
+        await Register("second");
+        var options = new AgentOptions
+        {
+            Forgesystem = new ForgesystemOptions { DataRoot = root },
+            GitHub = new GitHubOptions { Owner = "fixture", Repo = "fixture", Token = "fixture" },
+            Dashboard = new DashboardOptions { Enabled = false },
+            Llm = new LlmOptions
+            {
+                DefaultProvider = "fixture",
+                Providers = [new LlmProviderOptions
+                {
+                    Name = "fixture", BaseUrl = "http://127.0.0.1:1", ApiKey = "fixture",
+                    DefaultModel = "fixture-model", Api = "openai",
+                }],
+            },
+        };
+        DesignArtifact historical;
+        ArtOutput asset;
+        byte[] bytes = [0x67, 0x6c, 0x54, 0x46, 0, 42, 255];
+        string originalPath;
+        await using (var original = await ForgeComposition.BuildAsync(options, NullLoggerFactory.Instance))
+        {
+            Assert.Equal("primary", original.GetRequiredService<IssueStore>().ProjectId);
+            var owner = Assert.IsType<IssueStore>(original.GetRequiredService<ProjectContextFactory>().Find("second")!.Issues);
+            var spec = await new SpecStore(owner).CreateAsync(new("stale-project", "Secondary spec", "body"));
+            historical = await original.GetRequiredService<DesignArtifactStore>()
+                .CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Original writer", "original design body", "html"));
+            asset = await original.GetRequiredService<ArtOutputStore>()
+                .CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Original asset", spec.Id + "/mesh.glb", "glb"));
+            originalPath = Path.Combine(ForgesystemPaths.ArtOutputDir(root, "primary"), asset.Body);
+            Directory.CreateDirectory(Path.GetDirectoryName(originalPath)!);
+            await File.WriteAllBytesAsync(originalPath, bytes);
+            await ReadAndVerify(original);
+        }
+
+        await Register("aaa-new-primary");
+        await using var restarted = await ForgeComposition.BuildAsync(options, NullLoggerFactory.Instance);
+        Assert.Equal("aaa-new-primary", restarted.GetRequiredService<IssueStore>().ProjectId);
+        Assert.Null(await restarted.GetRequiredService<DesignArtifactStore>().GetAsync(historical.Id));
+        Assert.Null(await restarted.GetRequiredService<ArtOutputStore>().GetAsync(asset.Id));
+        await ReadAndVerify(restarted);
+
+        async Task ReadAndVerify(IServiceProvider services)
+        {
+            var client = new ArtifactReadClient([historical.Id, asset.Id]);
+            var factory = Assert.IsType<OpenAICompatibleChatClientFactory>(services.GetRequiredService<IChatClientFactory>());
+            factory.RequestPolicy = (_, _) => client;
+            await services.GetRequiredService<IAgentRunner>().RunAsync(AgentType.Reviewer, "Read historical assets",
+                null, new Dictionary<string, object> { ["projectId"] = "second" }, default);
+            using var design = JsonDocument.Parse(client.Results[historical.Id]);
+            using var art = JsonDocument.Parse(client.Results[asset.Id]);
+            Assert.Equal(historical.Body, design.RootElement.GetProperty("body").GetString());
+            var returned = art.RootElement.GetProperty("body").GetString()!;
+            Assert.Equal(originalPath, returned);
+            Assert.Equal(bytes, await File.ReadAllBytesAsync(returned));
+        }
+    }
+
+    [Fact]
     public async Task NormalInProcessCompositionReadsOwnerAndHistoryButRejectsGuessedForeignIds()
     {
         var root = TempRoot.Instance.NewDirectory("artifact-composition");
@@ -58,14 +130,21 @@ public sealed class EngineeringArtifactScopeTests
         var foreign = await primaryDesigns.CreateAsync(new(foreignSpec.Id, DesignArtifactKind.Wireframe, "Foreign", "foreign design body", "html"));
         var misplaced = await ownerDesigns.CreateAsync(new(foreignSpec.Id, DesignArtifactKind.Wireframe, "Misplaced", "misplaced foreign body", "html"));
         var orphan = await primaryDesigns.CreateAsync(new("spec-unknown", DesignArtifactKind.Wireframe, "Orphan", "orphan body", "html"));
-        var art = await ownerArt.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Owned", "owned/model.glb", "glb"));
-        var legacyArt = await primaryArt.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Historical", "historical/model.glb", "glb"));
+        var art = await ownerArt.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Owned", spec.Id + "/owned.glb", "glb"));
+        var legacyArt = await primaryArt.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Historical", spec.Id + "/historical.glb", "glb"));
         var foreignArt = await primaryArt.CreateAsync(new(foreignSpec.Id, ArtOutputKind.Mesh, "Foreign", "foreign/model.glb", "glb"));
+        var currentPath = Path.Combine(ForgesystemPaths.ArtOutputDir(root, "second"), art.Body);
+        var historicalPath = Path.Combine(ForgesystemPaths.ArtOutputDir(root, "primary"), legacyArt.Body);
+        foreach (var path in new[] { currentPath, historicalPath })
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllTextAsync(path, "artifact bytes");
+        }
         var expected = new Dictionary<string, string?>
         {
             [spec.Id] = spec.Body, [stale.Id] = stale.Body,
             [design.Id] = design.Body, [legacy.Id] = legacy.Body,
-            [art.Id] = art.Body, [legacyArt.Id] = legacyArt.Body,
+            [art.Id] = currentPath, [legacyArt.Id] = historicalPath,
             [foreignSpec.Id] = null, [foreign.Id] = null, [foreignArt.Id] = null,
             [misplaced.Id] = null, [orphan.Id] = null,
         };

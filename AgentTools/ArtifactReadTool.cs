@@ -20,8 +20,9 @@ namespace Forge.AgentTools;
 ///   <item><c>spec-</c> — spec body (markdown). Returns the most
 ///   recent version of the spec.</item>
 ///   <item><c>art-</c> — art_output body (file path, e.g.
-///   <c>spec-1/calc.glb</c>). Returns the relative path; the
-///   consuming agent's <c>bash</c> tool reads the file.</item>
+///   <c>spec-1/calc.glb</c>). When runtime storage roots are supplied,
+///   returns a validated absolute path for the consuming agent's
+///   <c>bash</c> tool, independent of its task working directory.</item>
 /// </list>
 /// </para>
 ///
@@ -42,6 +43,8 @@ public sealed class ArtifactReadTool
     private readonly bool _requireOwnedSpec;
     private readonly DesignArtifactStore? _historicalDesignArtifacts;
     private readonly ArtOutputStore? _historicalArtOutputs;
+    private readonly ArtifactHistory? _history;
+    private readonly string? _artOutputRoot;
 
     public ArtifactReadTool(
         DesignArtifactStore designArtifacts,
@@ -51,7 +54,9 @@ public sealed class ArtifactReadTool
         ILogger<ArtifactReadTool>? logger = null,
         bool requireOwnedSpec = false,
         DesignArtifactStore? historicalDesignArtifacts = null,
-        ArtOutputStore? historicalArtOutputs = null)
+        ArtOutputStore? historicalArtOutputs = null,
+        ArtifactHistory? history = null,
+        string? artOutputRoot = null)
     {
         if (requireOwnedSpec && specs is ProjectRoutingSpecStore)
             throw new ArgumentException("Scoped artifact reads require the project's physical spec store.", nameof(specs));
@@ -63,6 +68,8 @@ public sealed class ArtifactReadTool
         _requireOwnedSpec = requireOwnedSpec;
         _historicalDesignArtifacts = historicalDesignArtifacts;
         _historicalArtOutputs = historicalArtOutputs;
+        _history = history;
+        _artOutputRoot = artOutputRoot;
     }
 
     /// <summary>
@@ -86,6 +93,15 @@ public sealed class ArtifactReadTool
         if (artifactId.StartsWith("design-", StringComparison.Ordinal))
         {
             var row = await _designArtifacts.GetAsync(artifactId, cancellationToken);
+            if (row is null && _history is not null)
+            {
+                try { row = (await _history.FindDesignAsync(artifactId, cancellationToken))?.Artifact; }
+                catch (ArtifactHistoryAmbiguousException ex)
+                {
+                    _logger?.LogWarning(ex, "Artifact history is ambiguous for {Id}", artifactId);
+                    return JsonSerializer.Serialize(new { error = "ambiguous_history", id = artifactId });
+                }
+            }
             row ??= _historicalDesignArtifacts is null ? null
                 : await _historicalDesignArtifacts.GetAsync(artifactId, cancellationToken);
             if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
@@ -106,15 +122,41 @@ public sealed class ArtifactReadTool
         else if (artifactId.StartsWith("art-", StringComparison.Ordinal))
         {
             var row = await _artOutputs.GetAsync(artifactId, cancellationToken);
-            row ??= _historicalArtOutputs is null ? null
-                : await _historicalArtOutputs.GetAsync(artifactId, cancellationToken);
+            var root = _artOutputRoot;
+            if (row is null && _history is not null)
+            {
+                try
+                {
+                    var found = await _history.FindArtAsync(artifactId, cancellationToken);
+                    row = found?.Artifact;
+                    root = found?.Source.ArtOutputRoot;
+                }
+                catch (ArtifactHistoryAmbiguousException ex)
+                {
+                    _logger?.LogWarning(ex, "Artifact history is ambiguous for {Id}", artifactId);
+                    return JsonSerializer.Serialize(new { error = "ambiguous_history", id = artifactId });
+                }
+            }
+            if (row is null && _historicalArtOutputs is not null)
+            {
+                row = await _historicalArtOutputs.GetAsync(artifactId, cancellationToken);
+                root = null;
+            }
             if (row is not null && await OwnsSpecAsync(row.SpecId, cancellationToken))
             {
-                // The body of an art_output is a relative file
-                // path. Returning the path (not the file content)
-                // is the contract: the agent uses its `bash` tool
-                // to read the file.
-                body = row.Body;
+                try
+                {
+                    if (root is not null)
+                        body = ArtifactFilePath.Resolve(root, row.SpecId, row.Body);
+                    else if (_artOutputRoot is null && _history is null)
+                        body = row.Body;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                    _logger?.LogWarning(ex, "Art output file is unavailable for {Id}", artifactId);
+                }
+                if (body is null)
+                    return JsonSerializer.Serialize(new { error = "art_file_unavailable", id = artifactId });
                 kind = "art";
             }
         }

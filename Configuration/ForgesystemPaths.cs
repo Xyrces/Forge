@@ -60,4 +60,10 @@ public static class ForgesystemPaths
 
     public static string ArtOutputDir(string dataRoot, string projectId)
         => Path.Combine(ProjectDir(dataRoot, projectId), ".forge", "art-output");
+
+    public static string ArtistOutputRoot(string dataRoot, string projectId, string? projectRoot)
+        => projectId == "default"
+            ? Path.Combine(string.IsNullOrWhiteSpace(projectRoot) ? ProjectDir(dataRoot, projectId) : projectRoot,
+                ".portHorizon", "art-output")
+            : ArtOutputDir(dataRoot, projectId);
 }

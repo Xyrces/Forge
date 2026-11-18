@@ -53,6 +53,9 @@ public sealed class DesignArtifactStore
 
     public string DbPath => _dbPath;
 
+    internal Task<IReadOnlyList<ArtifactReference>> ListReferencesAsync(string specId, CancellationToken ct) =>
+        ArtifactReferenceIndex.ReadAsync(_db, "design_artifact", specId, ct);
+
     public async Task<DesignArtifact> CreateAsync(NewDesignArtifact req, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(req.SpecId))
@@ -105,6 +108,15 @@ public sealed class DesignArtifactStore
         cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? ReadRow(rd) : null;
+    }
+
+    internal async Task<string?> GetSpecIdAsync(string id, CancellationToken ct)
+    {
+        await using var connection = await _db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT spec_id FROM {T("design_artifact")} WHERE id=@id";
+        command.AddParam("@id", id);
+        return await command.ExecuteScalarAsync(ct) as string;
     }
 
     public async Task<IReadOnlyList<DesignArtifact>> ListBySpecAsync(

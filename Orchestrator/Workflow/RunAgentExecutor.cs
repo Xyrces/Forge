@@ -39,10 +39,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         string? projectId = null,
         ISprintStore? sprints = null,
         double timeoutMinutes = 15.0,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? artifactSources = null)
         : base(
             "run-agent",
-            ExecutorFaultGuard.Wrap<WorktreeReady, AgentCompleted>("run-agent", logger, (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle)),
+            ExecutorFaultGuard.Wrap<WorktreeReady, AgentCompleted>("run-agent", logger, (input, ctx, ct) => HandleAsync(input, issues, runner, roleRegistry, drainMessageBus, events, designArtifacts, artOutputs, logger, projectId, sprints, ct, timeoutMinutes, lifecycle, artifactSources)),
             null,
             new[] { typeof(WorktreeReady) },
             new[] { typeof(AgentCompleted) })
@@ -73,7 +74,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         ISprintStore? sprints,
         CancellationToken ct,
         double timeoutMinutes = 15.0,
-        Core.TaskStateMachine? lifecycle = null)
+        Core.TaskStateMachine? lifecycle = null,
+        Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? artifactSources = null)
     {
         if (input.Result == WorktreeResult.AlreadyClaimed)
         {
@@ -89,8 +91,8 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             DateTime.UtcNow, DashboardEventKind.AgentSessionStarted,
             issue.Id, $"role={roleAgent.AgentName} worktree={worktreePath}"));
 
-        var designRefs = await LoadDesignArtifactRefsAsync(issues, designArtifacts, issue, ct);
-        var artRefs = await LoadArtOutputRefsAsync(issues, artOutputs, issue, ct);
+        var (designRefs, artRefs) = await LoadArtifactReferencesAsync(
+            issues, issue, designArtifacts, artOutputs, artifactSources, ct);
         var prompt = BuildPrompt(issue, role, worktreePath, branch, input.BaseBranch, designRefs, artRefs);
         if (!string.IsNullOrWhiteSpace(issue.GetMetadata("existingVerificationRequest")))
             prompt += "\n\nThe former PR was closed unmerged because it contained no changes. That is not acceptance evidence. " +
@@ -408,7 +410,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
 
                 Design artifacts (P2.a): the parent spec has {designArtifacts.Count} design artifact(s):
                 {refs}
-                Each one is at GET /api/specs/{issue.ParentIssueId ?? issue.Id}/design-artifacts. Use `curl` to fetch them BEFORE writing code. The artifact body IS the visual source of truth.
+                Call read_artifact with each design ID before implementing its visual requirements.
                 """;
         }
 
@@ -416,12 +418,11 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         if (artOutputs is { Count: > 0 })
         {
             var refs = string.Join(", ", artOutputs.Select(a => $"{a.Id} [{a.Kind}:{a.BodyKind}]"));
-            var artFileApi = $"/api/specs/{issue.ParentIssueId ?? issue.Id}/art-output";
             artSection = $$"""
 
                 Art outputs (P2.b): the parent spec has {{artOutputs.Count}} art output(s):
                 {{refs}}
-                Each one is at GET {{artFileApi}}. The body is a relative path under .portHorizon/art-output/. The file is served at GET /api/art-output/{id}/file (use `curl` to download). Use these for the actual asset payloads in your implementation.
+                Call read_artifact with the art ID. Its body gives the filesystem path to open from your task worktree.
                 """;
         }
 
@@ -452,65 +453,42 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
             """;
     }
 
-    /// <summary>
-    /// Looks up the spec associated with the issue (via parent_issue_id)
-    /// and returns its design_artifact rows as refs. P2.a: the
-    /// engineering agent prompt references these so the model can
-    /// fetch the visual artifacts before writing code.
-    /// </summary>
-    private static async Task<IReadOnlyList<DesignArtifactRef>?> LoadDesignArtifactRefsAsync(
-        IIssueStore issues, DesignArtifactStore designArtifacts,
-        IssueRecord issue, CancellationToken ct)
+    internal static async Task<(IReadOnlyList<DesignArtifactRef>, IReadOnlyList<ArtOutputRef>)> LoadArtifactReferencesAsync(
+        IIssueStore issues, IssueRecord task, DesignArtifactStore designs, ArtOutputStore art,
+        Func<CancellationToken, Task<IReadOnlyList<ArtifactStoreSource>>>? sources, CancellationToken ct)
     {
-        // Issue's parent_issue_id is the epic; the spec that was created
-        // from that epic has parent_issue_id = epic. For stories/tasks,
-        // the spec parent_issue_id may be the story's parent epic.
-        // Try the issue itself first, then walk up the parent chain.
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string? current = issue.Id;
-        while (!string.IsNullOrEmpty(current) && seen.Add(current))
+        if (issues is not IssueStore owner) return ([], []);
+        // Groomed tasks parent to a story and stories parent to a spec, which lives
+        // outside the issue table. Never resolve project-local issue IDs in another store.
+        var parentId = task.ParentIssueId;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        while (parentId is not null)
         {
-            var all = await issues.ListAsync(new IssueFilter(), ct);
-            var spec = all.FirstOrDefault(s => s.ParentIssueId == current);
-            if (spec is null) break;
-            var arts = await designArtifacts.ListBySpecAsync(spec.Id, status: null, ct);
-            if (arts.Count > 0)
-            {
-                return arts.Select(a => new DesignArtifactRef(a.Id, a.Kind.ToString().ToLowerInvariant(), a.Title)).ToList();
-            }
-            current = spec.ParentIssueId;
+            if (!seen.Add(parentId)) return ([], []);
+            var parent = await issues.GetAsync(parentId, ct);
+            if (parent is null) break;
+            parentId = parent.ParentIssueId;
         }
-        return null;
-    }
+        if (parentId is null || await new SpecStore(owner).GetAsync(parentId, ct) is null) return ([], []);
 
-    /// <summary>
-    /// P2.b: walks the same parent chain as
-    /// <see cref="LoadDesignArtifactRefsAsync"/> and returns
-    /// the spec's <c>art_output</c> rows. Mirrors the design
-    /// ref loader; the prompt builder renders an
-    /// "Art outputs" section the engineering agent can
-    /// <c>curl</c> before writing code.
-    /// </summary>
-    private static async Task<IReadOnlyList<ArtOutputRef>?> LoadArtOutputRefsAsync(
-        IIssueStore issues, ArtOutputStore artOutputs,
-        IssueRecord issue, CancellationToken ct)
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        string? current = issue.Id;
-        while (!string.IsNullOrEmpty(current) && seen.Add(current))
+        var local = new List<ArtifactReference>(await designs.ListReferencesAsync(parentId, ct));
+        local.AddRange(await art.ListReferencesAsync(parentId, ct));
+        var historical = new List<ArtifactReference>();
+        if (sources is not null)
         {
-            var all = await issues.ListAsync(new IssueFilter(), ct);
-            var spec = all.FirstOrDefault(s => s.ParentIssueId == current);
-            if (spec is null) break;
-            var arts = await artOutputs.ListBySpecAsync(spec.Id, status: null, ct);
-            if (arts.Count > 0)
+            foreach (var source in await sources(ct))
             {
-                return arts.Select(a => new ArtOutputRef(
-                    a.Id, a.Kind.ToString().ToLowerInvariant(), a.BodyKind, a.Title)).ToList();
+                if (designs.UsesDatabase(source.Database)) continue;
+                historical.AddRange(await new DesignArtifactStore(source.Database).ListReferencesAsync(parentId, ct));
+                historical.AddRange(await new ArtOutputStore(source.Database).ListReferencesAsync(parentId, ct));
             }
-            current = spec.ParentIssueId;
         }
-        return null;
+        var refs = ArtifactHistory.IncludeUnambiguousHistory(local, historical, r => r.Id)
+            .OrderBy(r => r.Id, StringComparer.Ordinal).ToList();
+        return (refs.Where(r => r.Id.StartsWith("design-", StringComparison.Ordinal))
+                .Select(r => new DesignArtifactRef(r.Id, r.Kind, r.Title)).ToArray(),
+            refs.Where(r => r.Id.StartsWith("art-", StringComparison.Ordinal))
+                .Select(r => new ArtOutputRef(r.Id, r.Kind, r.BodyKind, r.Title)).ToArray());
     }
 }
 

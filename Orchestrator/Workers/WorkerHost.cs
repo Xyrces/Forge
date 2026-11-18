@@ -198,21 +198,12 @@ public static class WorkerHost
         var project = await projects.GetAsync(assignment.ProjectId, ct) ?? throw new InvalidOperationException("Worker project is not registered.");
         if (string.IsNullOrEmpty(project.LocalPath)) throw new InvalidOperationException("Worker project has no clone path.");
         var workload = projectDatabase(project.Id);
-        var invocation = JsonSerializer.Deserialize<WorkerInvocation>(assignment.AssignmentJson)
-            ?? throw new InvalidOperationException("Invalid worker assignment.");
-        // Old assignments predate the captured primary. Use the controller's registry order
-        // for those only. A removed, explicitly named primary must never select another store.
-        var historyProject = invocation.HistoricalProjectId switch
-        {
-            null => (await projects.ListAsync(ct)).FirstOrDefault(),
-            var id when id == project.Id => project,
-            var id => await projects.GetAsync(id, ct),
-        };
-        if (historyProject is null && invocation.HistoricalProjectId is { } missing)
-            logs.CreateLogger("Forge.Worker").LogWarning(
-                "Historical project {Project} for worker attempt {Attempt} is no longer registered", missing, assignment.Id);
-        var history = historyProject is not null && historyProject.Id != project.Id
-            ? projectDatabase(historyProject.Id) : null;
+        var dataRoot = ForgesystemPaths.ResolveDataRoot(options.Forgesystem.DataRoot);
+        string ArtRoot(ProjectRecord source) =>
+            ForgesystemPaths.ArtistOutputRoot(dataRoot, source.Id, source.LocalPath);
+        async Task<IReadOnlyList<ArtifactStoreSource>> HistorySources(string ownerId, CancellationToken token)
+            => (await projects.ListAsync(token)).Where(source => source.Id != ownerId)
+                .Select(source => new ArtifactStoreSource(source.Id, projectDatabase(source.Id), ArtRoot(source))).ToArray();
         var issues = new IssueStore(workload, project.Id);
         var memory = new MemoryStore(workload);
         var secrets = new SecretStore(registryIssues, Program.CreateSecretProtection(options), logs.CreateLogger<SecretStore>());
@@ -240,7 +231,7 @@ public static class WorkerHost
             memory: memory, handoffs: new ContextHandoffStore(workload), designArtifacts: () => artifacts,
             specs: () => new SpecStore(issues, designArtifacts: artifacts), artOutputs: () => new ArtOutputStore(workload),
             secrets: secrets, issues: issues, runs: new AgentRunStore(workload), modelOverrides: overrides, gates: options.Gates,
-            workerArtifactHistory: history);
+            artifactHistorySources: HistorySources, artOutputRoot: id => id == project.Id ? ArtRoot(project) : null);
         return new(runner, factory, project.VerifyCommands ?? AgentTools.RunVerification.DefaultCommands(assignment.WorktreePath));
     }
 }

@@ -122,6 +122,39 @@ public class RunAgentExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task PromptDiscoversCurrentAndHistoricalRefsThroughTheTasksOwnStoryAndSpec()
+    {
+        await using var history = new IssueStore(TempRoot.Instance.NewDbPath("artifact-prompt-writer"), "writer");
+        var spec = await new SpecStore(_issues).CreateAsync(new("stale-project", "Approved design", "Body"));
+        var story = await _issues.CreateAsync(new("story", "Groomed story", ParentId: spec.Id));
+        var task = await _issues.CreateAsync(new("task", "Implement the design", ParentId: story.Id));
+        var designs = new DesignArtifactStore(_issues.Db);
+        var art = new ArtOutputStore(_issues.Db);
+        var local = await designs.CreateAsync(new(spec.Id, DesignArtifactKind.Wireframe, "Local", "private body", "html"));
+        var pastArt = new ArtOutputStore(history.Db);
+        var historical = await pastArt.CreateAsync(new(spec.Id, ArtOutputKind.Mesh, "Mesh", "stored/path.glb", "glb"));
+        var foreign = await pastArt.CreateAsync(new("other-spec", ArtOutputKind.Mesh, "Foreign", "foreign.glb", "glb"));
+        var (designRefs, artRefs) = await RunAgentExecutor.LoadArtifactReferencesAsync(_issues, task, designs, art,
+            _ => Task.FromResult<IReadOnlyList<ArtifactStoreSource>>(
+                [new("writer", history.Db, null), new("owner", _issues.Db, null)]), default);
+        var prompt = RunAgentExecutor.BuildPrompt(task, AgentType.CoreDev, _workDir, "feature", "main", designRefs, artRefs);
+        Assert.Equal(local.Id, Assert.Single(designRefs).Id);
+        Assert.Equal(historical.Id, Assert.Single(artRefs).Id);
+        Assert.Contains(historical.Id, prompt);
+        Assert.Contains("read_artifact", prompt);
+        Assert.DoesNotContain("curl", prompt);
+        Assert.DoesNotContain(foreign.Id, prompt);
+        Assert.DoesNotContain("private body", prompt);
+        Assert.DoesNotContain("stored/path.glb", prompt);
+
+        var orphan = task with { ParentIssueId = "other-spec" };
+        var empty = await RunAgentExecutor.LoadArtifactReferencesAsync(_issues, orphan, designs, art,
+            _ => throw new InvalidOperationException("Unowned specs must not probe historical stores"), default);
+        Assert.Empty(empty.Item1);
+        Assert.Empty(empty.Item2);
+    }
+
+    [Fact]
     public async Task RunAgent_SkippedForAlreadyClaimed()
     {
         var issue = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "x"));

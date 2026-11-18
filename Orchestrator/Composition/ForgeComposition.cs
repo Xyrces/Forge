@@ -305,6 +305,19 @@ public static class ForgeComposition
         var specStoreRef = new SpecStoreHolder();
         services.AddSingleton(specStoreRef);
 
+        async Task<IReadOnlyList<ArtifactStoreSource>> ArtifactSources(CancellationToken token)
+        {
+            var registered = await projectStore.ListAsync(token);
+            return registered.Select(source =>
+            {
+                var dbPath = orchDbByProject.TryGetValue(source.Id, out var assigned) ? assigned
+                    : ProjectStateDirs.IssuesDbFor(source.ToProjectOptions(
+                        source.LocalPath ?? ForgesystemPaths.ProjectDir(orchDataRoot, source.Id)), orchDataRoot);
+                return new ArtifactStoreSource(source.Id, Program.FactoryFor(options.Db, source.Id, dbPath),
+                    ForgesystemPaths.ArtistOutputRoot(orchDataRoot, source.Id, source.LocalPath));
+            }).ToArray();
+        }
+
         MafAgentRunner.DiagnosticLogPath = Path.Combine(orchDataRoot, "logs", "agent.log");
         var localAgentRunner = new MafAgentRunner(
             chatClientFactory, llmConfig, roleRegistry,
@@ -336,7 +349,11 @@ public static class ForgeComposition
                 ? null
                 : projectFactory.Find(pid)?.Issues,
             modelOverrides: roleModelOverrides,
-            gates: options.Gates);
+            gates: options.Gates,
+            artifactHistorySources: async (ownerId, token) =>
+                (await ArtifactSources(token)).Where(source => source.ProjectId != ownerId).ToArray(),
+            artOutputRoot: id => ForgesystemPaths.ArtistOutputRoot(orchDataRoot, id,
+                id == "default" ? ProjectRootLookup(id) : null));
         IAgentRunner agentRunner = localAgentRunner;
         if (!options.Worker.Enabled && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
             throw new InvalidOperationException("GitHub App credentials require isolated Kubernetes workers.");
@@ -348,8 +365,7 @@ public static class ForgeComposition
             services.AddSingleton(kubeClient);
             agentRunner = new Workers.KubernetesAgentRunner(
                 new Core.Execution.WorkerAttemptStore(registryIssues.Db),
-                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission,
-                historicalProjectId: primary.Id);
+                new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission);
         }
         services.AddSingleton(localAgentRunner);
         services.AddSingleton<IAgentRunner>(agentRunner);
@@ -378,7 +394,7 @@ public static class ForgeComposition
                 lifecycle: lifecycle,
                 workflow: workflowResolver,
                 verifyCommands: primary.VerifyCommands,
-                sprints: new SprintStore(issues), reviewSlots: slots)
+                sprints: new SprintStore(issues), reviewSlots: slots, artifactSources: ArtifactSources)
                 .Build();
             var durableServices = new ServiceCollection()
                 .AddSingleton(workflow)
@@ -413,6 +429,7 @@ public static class ForgeComposition
                         workflow: workflowResolver,
                         verifyCommands: bundle.Project.VerifyCommands,
                         reviewSlots: slots,
+                        artifactSources: ArtifactSources,
                         // Message-driven review trigger: publish
                         // PrOpened — the PrOpenedConsumer launches the
                         // background review on the pushed head while CI
@@ -698,9 +715,7 @@ public static class ForgeComposition
             new SocketsHttpHandler(),
             meshyOptions,
             loggerFactory.CreateLogger<Forge.Meshy.MeshyClient>(),
-            artOutputRoot: primary.Id == "default"
-                ? Path.Combine(primary.Root, ".portHorizon", "art-output")
-                : ForgesystemPaths.ArtOutputDir(orchDataRoot, primary.Id));
+            artOutputRoot: ForgesystemPaths.ArtistOutputRoot(orchDataRoot, primary.Id, primary.Root));
         services.AddSingleton(meshy);
         var artistAgentFactory = new ArtistAgentFactory(
             routingSpecStore, designArtifacts, artOutputs, artistRuns, memoryStore, meshy,

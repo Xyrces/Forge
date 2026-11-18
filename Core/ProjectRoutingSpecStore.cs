@@ -61,6 +61,8 @@ public sealed class ProjectRoutingSpecStore : ISpecStore
     }
 
     internal ISpecStore? FindRegisteredStore(string projectId) => _findByProject(projectId);
+    internal IEnumerable<SpecStore> ArtifactStores => new[] { _primary }.Concat(_allProjectStores())
+        .OfType<SpecStore>().DistinctBy(store => (store.Database.Provider, store.Database.ConnectionString, store.Database.Qualifier));
 
     internal ISpecStore? ResolveOwner(string id)
     {

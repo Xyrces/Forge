@@ -49,6 +49,9 @@ public sealed class ArtOutputStore
 
     public string DbPath => _dbPath;
 
+    internal Task<IReadOnlyList<ArtifactReference>> ListReferencesAsync(string specId, CancellationToken ct) =>
+        ArtifactReferenceIndex.ReadAsync(_db, "art_output", specId, ct);
+
     public async Task<ArtOutput> CreateAsync(NewArtOutput req, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(req.SpecId))
@@ -101,6 +104,15 @@ public sealed class ArtOutputStore
         cmd.AddParam("@id", id);
         await using var rd = await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct) ? ReadRow(rd) : null;
+    }
+
+    internal async Task<string?> GetSpecIdAsync(string id, CancellationToken ct)
+    {
+        await using var connection = await _db.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT spec_id FROM {T("art_output")} WHERE id=@id";
+        command.AddParam("@id", id);
+        return await command.ExecuteScalarAsync(ct) as string;
     }
 
     public async Task<IReadOnlyList<ArtOutput>> ListBySpecAsync(

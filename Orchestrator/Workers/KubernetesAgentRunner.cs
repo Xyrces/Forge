@@ -14,6 +14,7 @@ namespace Forge.Orchestrator.Workers;
 
 public sealed class WorkerExecutionUncertainException(string message, Exception? inner = null) : Exception(message, inner);
 
+// HistoricalProjectId remains readable for existing assignments; artifact records determine their actual source.
 public sealed record WorkerInvocation(AgentType Role, string Prompt, string? SessionId, Dictionary<string, string> Context,
     string? HistoricalProjectId = null);
 
@@ -26,7 +27,7 @@ public interface IWorkerJobs
 
 /// <summary>Wait cancellation detaches the controller; only a persisted cancellation request stops a worker.</summary>
 public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs jobs, string datasetId,
-    Func<CancellationToken, Task>? ensureAdmission = null, string? historicalProjectId = null) : IAgentRunner, IReviewWorkerLifecycle
+    Func<CancellationToken, Task>? ensureAdmission = null) : IAgentRunner, IReviewWorkerLifecycle
 {
     public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
         IReadOnlyDictionary<string, object>? context, CancellationToken ct)
@@ -54,9 +55,7 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
             var sourceSha = values.GetValueOrDefault("sourceSha");
             if (string.IsNullOrWhiteSpace(sourceSha)) sourceSha = await ReadHeadAsync(worktree, ct);
             values["sourceSha"] = sourceSha;
-            // Capture the controller's historical store once. Registering another project
-            // or adopting this attempt later must not redirect its artifact reads.
-            var invocation = new WorkerInvocation(role, prompt, sessionId, values, historicalProjectId);
+            var invocation = new WorkerInvocation(role, prompt, sessionId, values);
             assignment = await store.CreateOrGetAsync(new(id, datasetId, key, project, task, role.ToString(), dispatch,
                 sourceSha, worktree, JsonSerializer.Serialize(invocation), Guid.NewGuid().ToString("N")), ct);
         }
