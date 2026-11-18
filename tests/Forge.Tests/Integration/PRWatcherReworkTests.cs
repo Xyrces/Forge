@@ -101,7 +101,8 @@ public class PRWatcherReworkTests : IDisposable
     private PRWatcher NewWatcher(FakeGitHub gh, Forge.Core.StageGates? gates = null,
         Forge.Core.Workflow.WorkflowResolver? workflow = null,
         Forge.Core.AgentRunStore? runs = null,
-        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null) => new(
+        Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null,
+        Func<string, CancellationToken, Task<bool>>? joinTaskWorkers = null) => new(
         gh,
         worktrees: new AgentTools.GitWorktreeService(
             new Configuration.WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
@@ -114,7 +115,7 @@ public class PRWatcherReworkTests : IDisposable
         gates: gates,
         lifecycle: new Forge.Core.TaskStateMachine(writeAuthority: false, NullLogger.Instance),
         workflow: workflow,
-        runs: runs, hasDurableWorker: hasDurableWorker);
+        runs: runs, hasDurableWorker: hasDurableWorker, joinTaskWorkers: joinTaskWorkers);
 
     private Forge.Core.Workflow.WorkflowResolver ResolverWithPolicy(string key, string value)
     {
@@ -783,8 +784,9 @@ public class PRWatcherReworkTests : IDisposable
     {
         var gh = new FakeGitHub { Ci = CommitState.Success };
         var task = await SeedAsync();
+        await _issues.SetCheckpointAsync(task.Id, DispatchCheckpoint.PrOpened);
 
-        var outcome = await NewWatcher(gh).PollWatchedTaskAsync(
+        var outcome = await NewWatcher(gh, joinTaskWorkers: (_, _) => Task.FromResult(true)).PollWatchedTaskAsync(
             task, CancellationToken.None,
             reviewsOverride: _ => Array.Empty<PullRequestReviewState>(),
             headShaOverride: _ => "abc123",

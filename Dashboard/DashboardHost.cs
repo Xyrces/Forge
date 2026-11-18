@@ -313,6 +313,8 @@ public sealed class DashboardHost : IAsyncDisposable
  _app = builder.Build();
         mutationAuthentication?.Protect(_app);
         _app.Urls.Clear();
+        if (_options.Kestrel is not { Endpoints.Count: > 0 })
+            _app.Urls.Add(publicBaseUrl);
         // Kestrel already binds the configured endpoints via the
         // ConfigureKestrel calls above. Clearing Urls prevents the
         // generic host from also binding Hostname:Port (which would
@@ -602,16 +604,16 @@ if (_groomerRuns is not null)
         if (_codebaseBuilderOverride is not null && _codebaseCacheOverride is not null)
         {
             CodebaseGraphEndpoints.MapCodebaseGraphEndpoints(_app, _codebaseBuilderOverride, _codebaseCacheOverride, _issues, _logger);
-
-            if (_sprintPropose is not null && _sprintProposalAudit is not null)
-            {
-                SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger, _projectFactory, _issues);
-            }
-
-            TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
-                _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
-                _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker, workerHistory: _workerHistory);
         }
+
+        if (_sprintPropose is not null && _sprintProposalAudit is not null)
+        {
+            SprintProposeEndpoints.MapSprintProposeEndpoints(_app, _sprintPropose, _sprintProposalAudit, _logger, _projectFactory, _issues);
+        }
+
+        TaskEndpoints.MapTaskEndpoints(_app, _issues, _messageBus, _startupRecovery, _logger, _projectFactory, _sprints, _agentRuns,
+            _memory is not null ? new Forge.Core.Workflow.WorkflowResolver(_memory) : null,
+            _lifecycle, _gitHubForProject, hasActiveWorker: _hasActiveWorker, workerHistory: _workerHistory);
 
         _app.MapBuildInfoEndpoint(runningRevision);
 
