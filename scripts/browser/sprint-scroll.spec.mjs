@@ -105,6 +105,28 @@ function assertPosition(before, after, scenario) {
   }
 }
 
+async function waitForRestoredPosition(expected, scenario) {
+  try {
+    await page.waitForFunction(({scroll, windowScroll, focusHref}) => {
+      const main = document.querySelector('.app-main');
+      if (!main) return false;
+      const target = Math.min(scroll, Math.max(0, main.scrollHeight - main.clientHeight));
+      return Math.abs(main.scrollTop - target) < 2
+        && Math.abs(window.scrollY - windowScroll) < 2
+        && document.activeElement?.getAttribute('href') === focusHref;
+    }, expected, {timeout: 10000});
+  } catch (error) {
+    const observed = await page.evaluate(() => ({
+      scroll: document.querySelector('.app-main')?.scrollTop,
+      windowScroll: window.scrollY,
+      focusHref: document.activeElement?.getAttribute('href'),
+      saved: JSON.parse(sessionStorage.getItem('forge:sprint-board:forge') || 'null'),
+    }));
+    throw new Error(`${scenario}: restoration timed out; expected ${JSON.stringify(expected)}; observed ${JSON.stringify(observed)}`,
+      {cause: error});
+  }
+}
+
 try {
   await put({
     '/api/projects': [{id: 'forge', name: 'Forge'}],
@@ -180,7 +202,8 @@ try {
           }).click();
         }
         await completionReady(status).waitFor();
-        await page.waitForTimeout(200);
+        await waitForRestoredPosition({...before, focusHref: '/tasks/scroll-task?project=forge'},
+          `${width}/${status}/${route}`);
         const after = await sample();
         assertPosition(before, after, `${width}/${status}/${route}`);
         const focusHref = await page.evaluate(() => document.activeElement?.getAttribute('href'));
@@ -323,7 +346,10 @@ try {
     } else if (gesture === 'task-link') {
       await page.goBack();
       await completionReady(200).waitFor();
-      await page.waitForTimeout(200);
+      await waitForRestoredPosition({
+        scroll: operator.saved.scroll, windowScroll: operator.saved.windowScroll,
+        focusHref: '/tasks/scroll-task?project=forge',
+      }, 'delayed task link / Back');
       assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('href')),
         '/tasks/scroll-task?project=forge', 'Back restores the newly opened task, not the obsolete target');
       assert.ok(Math.abs(await page.locator('.app-main').evaluate(element => element.scrollTop)
@@ -344,7 +370,9 @@ try {
       await page.locator('.app-nav .nav-group__label').first().click();
     }
     await completionReady(200).waitFor();
-    await page.waitForTimeout(200);
+    await waitForRestoredPosition({
+      scroll: 2500, windowScroll: 0, focusHref: '/tasks/scroll-task?project=forge',
+    }, `${unrelated} preserves restoration`);
     assert.ok(await page.locator('.app-main').evaluate(element => element.scrollTop > 100));
     assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('href')),
       '/tasks/scroll-task?project=forge', `${unrelated} must not cancel a valid pending restore`);
