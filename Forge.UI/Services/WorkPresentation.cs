@@ -64,6 +64,7 @@ public static class WorkPresentation
     public static string EventName(string kind) => kind switch
     {
         "created" => "Task created",
+        "sprint_activated" => "Sprint activated",
         "claimed" => "Worker claimed task",
         "transition" => "Task state changed",
         "checkpoint" => "Work checkpoint recorded",

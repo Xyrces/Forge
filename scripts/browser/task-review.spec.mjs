@@ -123,8 +123,37 @@ try {
   '/api/tasks/synthetic-rework':synthetic,
   '/api/tasks/synthetic-rework/state':{state:'ReworkRunning',waitingOn:'worker',strikes:1,maxStrikes:3},
   '/api/tasks/synthetic-rework/human-review':{required:false,syncPending:false,mode:'Automated'},
-  '/api/tasks/synthetic-rework/history':{events:[{at:now,kind:'review',actor:'Synthetic reviewer',detail:JSON.stringify({verdict:'RequestChanges',summary:'Keep the correction within scope'})}],nextCursor:null},
-  '/api/tasks/synthetic-rework/workers':{available:true,attempts:[{id:'synthetic-attempt',role:'clientdev',state:'Succeeded',createdAt:now,updatedAt:now,outcome:'Worker completed; delivery tracked separately',verificationRecorded:true,phases:{eligibleAt:'2026-11-18T02:02:30Z',workerStartedAt:'2026-11-18T02:03:00Z',modelStartedAt:'2026-11-18T02:03:00Z',modelCompletedAt:'2026-11-18T02:04:00Z',verificationStartedAt:'2026-11-18T02:04:00Z',verificationCompletedAt:'2026-11-18T02:04:20Z'}}]},
+  '/api/tasks/synthetic-rework/history':{events:[
+   {at:now,kind:'review',actor:'Synthetic reviewer',detail:JSON.stringify({verdict:'RequestChanges',summary:'Keep the correction within scope'})},
+   {at:'2026-11-18T01:58:59Z',kind:'sprint_activated',actor:'orchestrator',detail:'sprint-fixture-history'}
+  ],nextCursor:null},
+  '/api/tasks/synthetic-rework/workers': {
+   available: true,
+   attempts: [
+    {
+     id: 'synthetic-attempt', role: 'clientdev', state: 'Succeeded', createdAt: now, updatedAt: now,
+     outcome: 'Worker completed; delivery tracked separately', verificationRecorded: true,
+     phases: {
+      eligibleAt: '2026-11-18T02:02:30Z', workerStartedAt: '2026-11-18T02:03:00Z',
+      modelStartedAt: '2026-11-18T02:03:00Z', modelCompletedAt: '2026-11-18T02:04:00Z',
+      verificationStartedAt: '2026-11-18T02:04:00Z', verificationCompletedAt: '2026-11-18T02:04:20Z',
+      queueWakeup: {cause: 'task-status-returned-to-pending', eventAt: '2026-11-18T02:02:29.750Z', observedAdmissionAt: '2026-11-18T02:02:30Z'}
+     }
+    },
+    {
+     id: 'synthetic-timeout', role: 'clientdev', state: 'Failed', createdAt: now, updatedAt: now,
+     outcome: 'Worker failed', verificationRecorded: false,
+     phases: {
+      modelStartedAt: '2026-11-18T02:00:00Z', modelCompletedAt: '2026-11-18T02:00:17Z', modelOutcome: 'timed-out'
+     }
+    },
+    {
+     id: 'synthetic-partial', role: 'clientdev', state: 'Failed', createdAt: now, updatedAt: now,
+     outcome: 'Worker interrupted', verificationRecorded: false,
+     phases: {modelStartedAt: '2026-11-18T01:59:00Z', modelCompletedAt: null, modelOutcome: 'running'}
+    }
+   ]
+  },
   '/api/agent-runs':{active:[],recent:[run]}, '/api/agent-runs/synthetic-run':{view:run,transcript:[]}
  });
  for(const width of [1280,390]) {
@@ -134,7 +163,18 @@ try {
   await page.getByText('Review gate unavailable.',{exact:true}).waitFor();
   await page.getByText('Review publication needs attention.',{exact:true}).waitFor();
   await page.getByRole('button',{name:'History & runs',exact:true}).click();
-  await page.getByText('Eligible to worker start',{exact:true}).waitFor();
+  const completedAttempt = page.locator('.task-run-list article').filter({hasText: 'Worker completed; delivery tracked separately'});
+  await completedAttempt.getByText('Dispatch admission to worker start', {exact: true}).waitFor();
+  await completedAttempt.getByText('Requeue to dispatch admission', {exact: true}).waitFor();
+  assert.match(await completedAttempt.innerText(), /250 ms/);
+  const timedOut = page.locator('.task-run-list article').filter({hasText: 'Worker failed'});
+  await timedOut.getByText('Timed out after 17s', {exact: true}).waitFor();
+  await timedOut.getByText('Start time not recorded', {exact: true}).waitFor();
+  const interrupted = page.locator('.task-run-list article').filter({hasText: 'Worker interrupted'});
+  await interrupted.getByText('Started · finish time not recorded', {exact: true}).waitFor();
+  const activation = page.locator('.task-timeline li').filter({hasText: 'Sprint activated'});
+  const sprint = activation.getByRole('link', {name: 'Open sprint', exact: true});
+  assert.equal(await sprint.getAttribute('href'), '/sprints?project=forge&sprint=sprint-fixture-history');
   await page.getByText('125s',{exact:false}).waitFor();
   await page.locator('.task-run-list').first().scrollIntoViewIfNeeded();
   await capture(page,{path:`${output}/synthetic-rework-${width}.png`,fullPage:true});

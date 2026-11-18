@@ -168,3 +168,14 @@ An integration test starts a real host and checks those routes.
 A protected PR with installed production Apps, an actual human decision, and
 browser observations of the deployed revision are still required for live
 acceptance.
+
+### Worker timing in the task history
+
+At 1280 and 390 CSS pixels, the Linux browser rehearsal showed a 250 ms
+requeue-to-admission interval, a model timeout at 17 seconds, and an
+interrupted attempt with a start time and an unknown finish time. The
+queue interval can include intentional waits. The history linked the
+activation event to its sprint in the selected project. Historical PR #150
+remained readable with its older records. The browser reported zero page or
+request failures. The receipt and screenshots are under
+`sprint-review/ui-timing-browser/evidence-sprint-links/` on the Linux host.

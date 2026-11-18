@@ -169,7 +169,22 @@
                 {
                     <h3>Worker attempts</h3><p class="meta-text">Latest 100 attempts. Earlier agent runs without an attempt association remain below.</p>
                     <div class="task-run-list">@foreach (var worker in _workers) { <article><div><strong>@worker.Outcome</strong><span>@WorkPresentation.Role(worker.Role)</span></div><p class="meta-text">@FmtDate(worker.CreatedAt) → @FmtDate(worker.UpdatedAt)</p><p>@(worker.VerificationRecorded ? "Verification receipt recorded" : "No verification receipt recorded")</p>
-                        @if (worker.Phases is { } timing) { <dl class="task-facts"><dt>Eligible to worker start</dt><dd>@(timing.EligibleAt is { } eligible && timing.WorkerStartedAt is { } started ? Duration(eligible, started) : "Not recorded")</dd><dt>Model &amp; tools</dt><dd>@Duration(timing.ModelStartedAt, timing.ModelCompletedAt)</dd><dt>Verification</dt><dd>@(timing.VerificationStartedAt is { } began && timing.VerificationCompletedAt is { } ended ? Duration(began, ended) : timing.VerificationStartedAt is not null ? "Started; completion not recorded" : "Not started in this receipt")</dd></dl> }
+                        @if (worker.Phases is { } timing)
+                        {
+                            <dl class="task-facts">
+                                @if (timing.QueueWakeup is { } queue)
+                                {
+                                    <dt>@queue.Label</dt>
+                                    <dd>@Duration(queue.EventAt, queue.ObservedAdmissionAt) <span class="meta-text">Can include time waiting for dependencies or holds.</span></dd>
+                                }
+                                <dt>Dispatch admission to worker start</dt>
+                                <dd>@(timing.EligibleAt is { } admitted && timing.WorkerStartedAt is { } started ? Duration(admitted, started) : "Not recorded")</dd>
+                                <dt>Model &amp; tools</dt>
+                                <dd>@PhaseDuration(timing.ModelStartedAt, timing.ModelCompletedAt, timing.ModelOutcome)</dd>
+                                <dt>Verification</dt>
+                                <dd>@PhaseDuration(timing.VerificationStartedAt, timing.VerificationCompletedAt, timing.VerificationOutcome)</dd>
+                            </dl>
+                        }
                         else { <p class="meta-text">Phase timings were not recorded for this attempt.</p> }
                         <details><summary>Attempt identifier</summary><code>@worker.Id</code></details></article> }</div>
                 }
@@ -182,7 +197,25 @@
             <section class="card"><h2>Task timeline</h2><p class="meta-text">Repeated identical observations are grouped; they are not separate fix attempts.</p>
                 @if (_historyError is not null) { <p class="banner banner--error">Couldn’t load task history: @_historyError <button class="btn" @onclick="() => LoadHistoryAsync(false)">Retry</button></p> }
                 @if (_historyCursor is not null) { <button class="btn" disabled="@_historyLoading" @onclick="() => LoadHistoryAsync(true)">Load earlier events</button> }
-                <ol class="task-timeline">@foreach (var g in GroupedEvents()) { <li><div class="task-timeline-head"><strong>@WorkPresentation.EventName(g.Kind)</strong><time>@FmtDate(g.At)</time></div><p class="meta-text">@g.Actor</p><TaskEventDetail Detail="@g.Detail" />@if (g.Count > 1) { <p class="meta-text">@g.Count observations · @FmtDate(g.FirstAt) to @FmtDate(g.At)</p> }<details><summary>Event source</summary><code>@g.Kind</code></details></li> }</ol>
+                <ol class="task-timeline">
+                    @foreach (var g in GroupedEvents())
+                    {
+                        <li>
+                            <div class="task-timeline-head"><strong>@WorkPresentation.EventName(g.Kind)</strong><time>@FmtDate(g.At)</time></div>
+                            <p class="meta-text">@g.Actor</p>
+                            @if (g.Kind == "sprint_activated" && !string.IsNullOrEmpty(g.Detail))
+                            {
+                                <a href="@SprintLinkFor(g.Detail)">@(g.Detail == Prop(_sprint, "id") ? Prop(_sprint, "name") ?? "Open sprint" : "Open sprint")</a>
+                            }
+                            else
+                            {
+                                <TaskEventDetail Detail="@g.Detail" />
+                            }
+                            @if (g.Count > 1) { <p class="meta-text">@g.Count observations · @FmtDate(g.FirstAt) to @FmtDate(g.At)</p> }
+                            <details><summary>Event source</summary><code>@g.Kind</code></details>
+                        </li>
+                    }
+                </ol>
                 @if (!_historyLoading && _events.Count == 0) { <p>No events recorded.</p> }
             </section>
         }
@@ -268,8 +301,50 @@
     private string? _workerError;
     private List<WorkerSummary> _workers = [];
     private sealed record WorkerSummary(string Id, string Role, string State, string CreatedAt, string UpdatedAt, bool VerificationRecorded, string? Outcome, PhaseTimes? Phases);
-    private sealed record PhaseTimes(DateTimeOffset ModelStartedAt, DateTimeOffset ModelCompletedAt, DateTimeOffset? VerificationStartedAt, DateTimeOffset? VerificationCompletedAt, DateTimeOffset? EligibleAt = null, DateTimeOffset? WorkerStartedAt = null);
-    private static string Duration(DateTimeOffset start, DateTimeOffset end) => end < start ? "Timing unavailable" : $"{(end-start).TotalSeconds:0}s";
+    private sealed record PhaseTimes(
+        DateTimeOffset? ModelStartedAt,
+        DateTimeOffset? ModelCompletedAt,
+        DateTimeOffset? VerificationStartedAt,
+        DateTimeOffset? VerificationCompletedAt,
+        DateTimeOffset? EligibleAt = null,
+        DateTimeOffset? WorkerStartedAt = null,
+        string? ModelOutcome = null,
+        string? VerificationOutcome = null,
+        QueueObservation? QueueWakeup = null);
+
+    private sealed record QueueObservation(string Cause, DateTimeOffset EventAt, DateTimeOffset ObservedAdmissionAt)
+    {
+        public string Label => Cause switch
+        {
+            "active-sprint-selection" => "Sprint activation to dispatch admission",
+            "task-status-returned-to-pending" => "Requeue to dispatch admission",
+            _ => "Queue event to dispatch admission"
+        };
+    }
+
+    private static string PhaseDuration(DateTimeOffset? start, DateTimeOffset? end, string? outcome)
+    {
+        if (start is null) return "Start time not recorded";
+        if (end is null) return "Started · finish time not recorded";
+        if (end < start) return "Timing unavailable";
+
+        var duration = Duration(start.Value, end.Value);
+        return outcome switch
+        {
+            "failed" => $"Failed after {duration}",
+            "cancelled" => $"Cancelled after {duration}",
+            "timed-out" => $"Timed out after {duration}",
+            _ => duration
+        };
+    }
+    private static string Duration(DateTimeOffset start, DateTimeOffset end)
+    {
+        var elapsed = end - start;
+        if (elapsed < TimeSpan.Zero) return "Timing unavailable";
+        if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromMilliseconds(1)) return "Under 1 ms";
+        if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromSeconds(1)) return $"{elapsed.TotalMilliseconds:0} ms";
+        return $"{elapsed.TotalSeconds:0.#}s";
+    }
     private sealed record WorkerPage(bool Available, List<WorkerSummary> Attempts);
     private async Task LoadHistoryAsync(bool earlier)
     {
@@ -290,7 +365,8 @@
         finally { if (generation == _activityGeneration) _historyLoading = false; }
     }
     private string? EffectiveProject => Project ?? ShellStore.Value.CurrentProjectId;
-    private string SprintLink => "/sprints?project=" + Uri.EscapeDataString(EffectiveProject ?? "") + "&sprint=" + Uri.EscapeDataString(Prop(_sprint, "id") ?? "");
+    private string SprintLink => SprintLinkFor(Prop(_sprint, "id"));
+    private string SprintLinkFor(string? sprintId) => "/sprints?project=" + Uri.EscapeDataString(EffectiveProject ?? "") + "&sprint=" + Uri.EscapeDataString(sprintId ?? "");
     private string? NominatedHuman => Situation("nominatedHuman");
     private bool HumanReviewRequired => bool.TryParse(Meta("humanReviewRequired"), out var held) && held;
     private string? Situation(string key) => _task is { } task && task.TryGetProperty("situation", out var situation) ? Prop(situation, key) : key == "label" ? Prop(_task, "status") : null;
