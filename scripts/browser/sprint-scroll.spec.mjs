@@ -13,7 +13,7 @@ const browser = await chromium.launch({
   executablePath: process.env.FORGE_BROWSER_EXECUTABLE,
   args: ['--no-sandbox'],
 });
-const page = await browser.newPage();
+const page = await browser.newPage({hasTouch: true});
 const base = 'http://127.0.0.1:5123';
 const api = 'http://127.0.0.1:5124';
 const errors = [];
@@ -237,8 +237,115 @@ try {
     assert.equal(stored.scroll, 120, 'Explicit selection releases the browser save guard');
     checks.push({selection, lateRestoreCancelled: true, scrollSavingResumed: true});
   }
+  // Real input while evidence is loading wins over a pending saved viewport.
+  // No input is synthesized by the app and no controller/database is involved.
+  await page.setViewportSize({width: 1280, height: 900});
+  await put({
+    '/api/sprints/scroll-fixture/completion': {status: 200, body: completion, delayMs: 2500},
+    '/api/sprints/board': {
+      projectId: 'forge', generatedAt: at, sprint,
+      total: 2, done: 2, members: [member], nextCursor: 'page-two',
+    },
+    '/api/sprints/board?projectId=forge&sprintId=scroll-fixture&cursor=page-two': {
+      projectId: 'forge', generatedAt: at, sprint,
+      total: 2, done: 2, members: [{...member, id: 'second-task', title: 'Second page task'}], nextCursor: null,
+    },
+  });
+  for (const gesture of ['wheel', 'keyboard', 'tab-entry', 'pointer', 'touch', 'pagination', 'task-link']) {
+    await page.setViewportSize({width: gesture === 'touch' ? 390 : 1280, height: 900});
+    await page.evaluate(gesture => sessionStorage.setItem('forge:sprint-board:forge', JSON.stringify({
+      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0,
+      focusHref: gesture === 'task-link' ? '/tasks/obsolete-task?project=forge' : '/tasks/scroll-task?project=forge',
+    })), gesture);
+    await page.goto(base + '/sprints?project=forge&sprint=scroll-fixture');
+    await page.getByText('Loading completion evidence…', {exact: true}).waitFor();
+    if (gesture === 'wheel') {
+      await page.mouse.move(600, 400); await page.mouse.wheel(0, 200);
+    } else if (gesture === 'keyboard') {
+      await page.getByRole('button', {name: 'Refresh', exact: true}).focus();
+      await page.keyboard.press('PageDown');
+    } else if (gesture === 'tab-entry') {
+      await page.locator('.app-nav a').last().focus();
+      await page.keyboard.press('Tab');
+      assert.ok(await page.evaluate(() => !!document.activeElement?.closest('.app-main')),
+        'Tab crosses from the sidebar into the main viewport');
+    } else if (gesture === 'pointer') {
+      await page.getByRole('heading', {name: 'Sprints', exact: true}).click();
+      await page.locator('.app-main').evaluate(element => { element.scrollTop = 120; });
+    } else if (gesture === 'touch') {
+      const input = await page.context().newCDPSession(page);
+      await input.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x: 200, y: 650}]});
+      await input.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: 200, y: 350}]});
+      await input.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []});
+      await input.detach();
+    } else if (gesture === 'pagination') {
+      await page.getByRole('button', {name: 'Next tasks', exact: true}).click();
+      await page.getByRole('link', {name: 'Second page task', exact: true}).waitFor();
+    } else {
+      await page.locator('.sprint-task h3 a').click();
+      await page.getByRole('heading', {name: task.title, exact: true}).waitFor();
+    }
+    await page.waitForTimeout(300);
+    const operator = await page.evaluate(() => ({
+      scroll: document.querySelector('.app-main').scrollTop,
+      focus: [document.activeElement?.tagName, document.activeElement?.id, document.activeElement?.getAttribute('href')],
+      saved: JSON.parse(sessionStorage.getItem('forge:sprint-board:forge')),
+    }));
+    if (gesture !== 'task-link') {
+      if (gesture !== 'tab-entry') assert.ok(operator.scroll > 0, `${gesture} exercises a real operator scroll`);
+      assert.ok(Math.abs(operator.saved.scroll - operator.scroll) < 2, `${gesture} saves the operator viewport`);
+      await completionReady(200).waitFor();
+    }
+    await page.waitForTimeout(2700);
+    const final = await page.evaluate(() => ({
+      scroll: document.querySelector('.app-main').scrollTop,
+      focus: [document.activeElement?.tagName, document.activeElement?.id, document.activeElement?.getAttribute('href')],
+      saved: JSON.parse(sessionStorage.getItem('forge:sprint-board:forge')),
+    }));
+    if (gesture === 'task-link') {
+      assert.ok(page.url().includes('/tasks/scroll-task'));
+      assert.equal(final.saved.scroll, operator.saved.scroll, 'Late completion does not replace the departing viewport');
+      assert.equal(final.saved.focusHref, '/tasks/scroll-task?project=forge', 'The clicked task replaces any old focus target');
+    } else {
+      assert.ok(Math.abs(final.scroll - operator.scroll) < 2, `${gesture}: late restore cannot jump`);
+      assert.ok(Math.abs(final.saved.scroll - final.scroll) < 2, `${gesture}: position continues to be saved`);
+    }
+    assert.deepEqual(final.focus, operator.focus, `${gesture}: late restore cannot steal focus`);
+    checks.push({gesture, viewport: page.viewportSize(), operator, final, lateRestoreCancelled: true});
+    if (gesture === 'pagination') {
+      assert.equal(final.saved.focusHref, null, 'Pagination clears the obsolete card focus');
+      await page.reload();
+      await page.getByRole('link', {name: 'Second page task', exact: true}).waitFor();
+      await completionReady(200).waitFor();
+      await page.waitForTimeout(200);
+      assert.notEqual(await page.evaluate(() => document.activeElement?.getAttribute('href')),
+        '/tasks/scroll-task?project=forge', 'Returning to page two does not refocus the old page card');
+    }
+  }
+  for (const unrelated of ['modifier', 'sidebar']) {
+    await page.evaluate(() => sessionStorage.setItem('forge:sprint-board:forge', JSON.stringify({
+      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0,
+      focusHref: '/tasks/scroll-task?project=forge',
+    })));
+    await page.goto(base + '/sprints?project=forge&sprint=scroll-fixture');
+    await page.getByText('Loading completion evidence…', {exact: true}).waitFor();
+    if (unrelated === 'modifier') {
+      await page.getByRole('button', {name: 'Refresh', exact: true}).focus();
+      await page.keyboard.press('Shift');
+    } else {
+      await page.locator('.app-nav .nav-group__label').first().click();
+    }
+    await completionReady(200).waitFor();
+    await page.waitForTimeout(200);
+    assert.ok(await page.locator('.app-main').evaluate(element => element.scrollTop > 100));
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('href')),
+      '/tasks/scroll-task?project=forge', `${unrelated} must not cancel a valid pending restore`);
+    checks.push({unrelated, automaticRestorePreserved: true});
+  }
   assert.deepEqual(errors, []);
 } finally {
   await fs.writeFile(output + '/sprint-scroll.json', JSON.stringify({checks, errors}, null, 2));
+  await fs.writeFile(output + '/last-page.txt', await page.locator('body').innerText());
+  await page.screenshot({path: output + '/last-page.png'});
   await browser.close();
 }

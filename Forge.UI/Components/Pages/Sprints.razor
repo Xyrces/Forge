@@ -812,7 +812,13 @@
         _memberPages.Push(_memberCursor); _memberCursor = _board?.NextCursor; await RefreshSelectionAsync();
     }
     private async Task PreviousMembersAsync() { _memberCursor = _memberPages.Pop(); await RefreshSelectionAsync(); }
-    private async Task RefreshSelectionAsync() { ++_restoreGeneration; _selection.Select(_loadedProject, _selectedSprintId); await RefreshAsync(); }
+    private async Task RefreshSelectionAsync()
+    {
+        ++_restoreGeneration;
+        await CancelBoardRestoreAsync();
+        _selection.Select(_loadedProject, _selectedSprintId);
+        await RefreshAsync();
+    }
     public void Dispose()
     {
         _disposed = true;
