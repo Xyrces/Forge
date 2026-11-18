@@ -7,6 +7,7 @@ using Forge.Dashboard;
 using Forge.Orchestrator;
 using Forge.Orchestrator.Workflow;
 using Forge.Reviewer;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -88,10 +89,20 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         try { Directory.Delete(_dataRoot, recursive: true); } catch { }
     }
 
-    private sealed class ScriptedRunner(string response) : IAgentRunner
+    private sealed class DispatchObserver : ILogger<OrchestratorAgent>
     {
-        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
-            => Task.FromResult(new AgentRunResult(response, null, 1, 1, TimeSpan.FromMilliseconds(1)));
+        public TaskCompletionSource EmptyCycleObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource EventWakeObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            if (message.StartsWith("Dispatch cycle: no active sprint", StringComparison.Ordinal))
+                EmptyCycleObserved.TrySetResult();
+            if (message == "Dispatch loop woke on event signal") EventWakeObserved.TrySetResult();
+        }
     }
 
     private sealed class DrainingRunner : IAgentRunner
@@ -116,7 +127,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         public ProjectDispatchBundle Build(ProjectOptions project) => bundle;
     }
 
-    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner)
+    private OrchestratorAgent BuildOrchestrator(IAgentRunner runner, ILogger<OrchestratorAgent>? logger = null)
     {
         var orch = new OrchestratorAgent(
             _projectStore,
@@ -128,7 +139,7 @@ public sealed class DispatchLoopWakeupTests : IDisposable
                 (issue, bundle, ct) => RunWorkflowInProcess(runner, issue, ct),
                 NullLogger<InProcessDispatcher>.Instance),
             _events,
-            NullLogger<OrchestratorAgent>.Instance,
+            logger ?? NullLogger<OrchestratorAgent>.Instance,
             wakeup: _wakeup);
         orch.BindOptions(new AgentOptions
         {
@@ -166,39 +177,42 @@ public sealed class DispatchLoopWakeupTests : IDisposable
         await _projectStore.UpsertAsync(new NewProject(
             Id: "test", Name: "Test", RepoUrl: _workDir, DefaultBranch: "main"));
 
-        var orch = BuildOrchestrator(new ScriptedRunner("ok. NO_CHANGES_NEEDED"));
+        var runner = new DrainingRunner();
+        var observer = new DispatchObserver();
+        var orch = BuildOrchestrator(runner, observer);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var loop = orch.ExecuteAsync(cts.Token);
 
-        // The loop runs its first cycle immediately, then parks on the
-        // wakeup signal (PollIntervalSeconds is deliberately huge —
-        // unreachable in this test — so only the signal can wake it).
-        // Give the first cycle a moment to park.
-        await Task.Delay(500, cts.Token);
-
-        var task = await _issues.CreateAsync(new NewIssue(
-            Type: "dev", Title: "late work", Description: "enqueued after the loop parked",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        await ActivateApprovedAsync(task);
-
-        // The kick (production: TaskEnqueuedConsumer on the bus).
-        _wakeup.Signal();
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            var t = await _issues.GetAsync(task.Id, cts.Token);
-            if (t!.Status != IssueStatus.Pending) break;
-            await Task.Delay(100, cts.Token);
+            // Observe the empty first cycle instead of guessing when it has run.
+            // Its no-sprint branch cannot admit the task created below.
+            await observer.EmptyCycleObserved.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            Assert.False(runner.Started.Task.IsCompleted);
+            var task = await _issues.CreateAsync(new NewIssue(
+                Type: "dev", Title: "late work", Description: "enqueued after the empty first cycle",
+                Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+            await ActivateApprovedAsync(task);
+
+            // Production's TaskEnqueuedConsumer supplies this kick. Observe its
+            // consumption AND the real engineering workflow entering the runner.
+            _wakeup.Signal();
+            await observer.EventWakeObserved.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            await runner.Started.Task.WaitAsync(TimeSpan.FromSeconds(15), cts.Token);
+            Assert.False(loop.IsFaulted, loop.Exception?.GetBaseException().ToString());
+            Assert.False(runner.CancellationObserved.Task.IsCompleted);
+            Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(task.Id, cts.Token))!.Status);
         }
-
-        cts.Cancel();
-        try { await loop; } catch (OperationCanceledException) { }
-
-        var after = (await _issues.GetAsync(task.Id))!;
-        Assert.NotEqual(IssueStatus.Pending, after.Status);
+        finally
+        {
+            // Cancellation is cleanup, not the observation under test: cancelling
+            // after a transient claim can requeue interrupted work before this read.
+            cts.Cancel();
+            runner.AllowExit.TrySetResult();
+            try { await loop.WaitAsync(TimeSpan.FromSeconds(20)); }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
+        }
     }
 
     [Fact]
