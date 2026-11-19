@@ -19,7 +19,7 @@ const row={id:'synthetic-uat',projectId:'forge',commitSha:sha,commitSummary:'Sel
 try {
  const initialWrites=(await (await page.request.get(api+'/__writes')).json()).length;
  await put({'/__promotion_result':{status:409,body:{error:'Synthetic release no longer qualifies'}}});
- await put({'/api/projects':[{id:'forge',name:'Forge offline environment fixture',roles:{},slots:[],defaultRoleCaps:{}}],'/api/projects/forge/review-policy':{mode:'Automated'},'/api/projects/forge/environments':envs,'/api/now':{items:[]},'/api/state':{tasks:[],agents:[],skills:[],sprints:[]},'/api/meta/buildinfo':{},'/api/health/heartbeat':{status:'healthy'},'/api/deployments':[row,{...row,id:'synthetic-legacy',commitSummary:'Historical deployment',environmentName:null},{...row,id:'synthetic-failed',commitSummary:'Failed deployment',status:'DeployFailed',deployLog:'Synthetic target health check failed'}]});
+ await put({'/api/projects':[{id:'forge',name:'Forge offline environment fixture',roles:{},slots:[],defaultRoleCaps:{}}],'/api/projects/forge/review-policy':{mode:'Automated'},'/api/projects/forge/environments':envs,'/api/now':{items:[]},'/api/state':{tasks:[],agents:[],skills:[],sprints:[]},'/api/meta/buildinfo':{},'/api/health/heartbeat':{status:'healthy'},'/api/deployments':[row,{...row,id:'synthetic-incompatible',commitSummary:'Historical schema release',promotionUnavailableReason:'The artifact schema is incompatible with this controller.'},{...row,id:'synthetic-legacy',commitSummary:'Historical deployment',environmentName:null},{...row,id:'synthetic-failed',commitSummary:'Failed deployment',status:'DeployFailed',deployLog:'Synthetic target health check failed'}]});
  await page.goto(base+'/deployments?project=forge');
  const card=page.locator('#release-synthetic-uat');
  await card.getByLabel('Promote aaaaaaaa to').selectOption('prod');
@@ -27,6 +27,8 @@ try {
  assert.equal(await page.getByRole('button',{name:'Request deployment',exact:true}).count(),0);
  assert.equal(await page.locator('#release-synthetic-legacy').locator('select').count(),0);
  assert.equal(await page.locator('#release-synthetic-failed').locator('select').count(),0);
+ assert.equal(await page.locator('#release-synthetic-incompatible').locator('select').count(),0);
+ await page.locator('#release-synthetic-incompatible').getByText('Promotion unavailable:',{exact:false}).waitFor();
  await card.getByRole('button',{name:'Confirm promotion to Production',exact:true}).click();
  await card.getByRole('alert').filter({hasText:'no longer qualifies'}).waitFor();
  assert.equal(await card.getByText('Promotion requested.',{exact:false}).count(),0);
@@ -91,6 +93,6 @@ try {
  await page.locator('.sprint-acceptance__toggle').click();
  await page.getByText('No deployment required. This sprint closes after required engineering verification.',{exact:true}).waitFor();
  assert.deepEqual(errors,[]);
- receipt.result='passed';receipt.checks=['Exact source candidate, SHA and artifact sent on promotion','Direct UAT to production permitted by routes','Failed request visible without success notice, safe retry','Legacy/failed releases cannot promote','Named projects hide arbitrary commit request','Project policy saves revision, routes and gate settings with read-only target bindings','Concurrent policy update fails visibly','Clearing project removes promotion actions','Desktop/mobile rendered, mobile no horizontal overflow','Captured active-sprint target visible before receipt','Explicit approval posts exact bound plan','Optional observation does not say awaiting gate','Missed check displayed as exception, never passed','No-target setting saves null and displays engineering-only closure'];
+ receipt.result='passed';receipt.checks=['Exact source candidate, SHA and artifact sent on promotion','Direct UAT to production permitted by routes','Failed request visible without success notice, safe retry','Legacy/failed/incompatible releases cannot promote; incompatibility is explained','Named projects hide arbitrary commit request','Project policy saves revision, routes and gate settings with read-only target bindings','Concurrent policy update fails visibly','Clearing project removes promotion actions','Desktop/mobile rendered, mobile no horizontal overflow','Captured active-sprint target visible before receipt','Explicit approval posts exact bound plan','Optional observation does not say awaiting gate','Missed check displayed as exception, never passed','No-target setting saves null and displays engineering-only closure'];
 } catch(e){receipt.result='failed';receipt.error=String(e.stack||e);process.exitCode=1;await page.screenshot({path:output+'/failure.png'}).catch(()=>{});}
 finally {await fs.writeFile(output+'/receipt.json',JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt,null,2));await browser.close();}

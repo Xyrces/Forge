@@ -69,7 +69,7 @@
                     <p>Automatic sprint delivery · <a href="/sprints">View sprint checks &amp; explicit gates</a></p>
                 }
                 <ReleasePromotion Release="release" Policy="@(release.ProjectId == _projectId && DeployStore.Value.Error is null ? _policy : null)" OnPromoted="RefreshAsync" />
-                @if (_projectId.Length == 0 && release.Status == "Deployed" && release.EnvironmentName is not null) { <button class="btn btn--small" @onclick="() => SelectProjectAsync(release.ProjectId)">Select project to promote</button> }
+                @if (_projectId.Length == 0 && release.Status == "Deployed" && release.EnvironmentName is not null && string.IsNullOrEmpty(release.PromotionUnavailableReason)) { <button class="btn btn--small" @onclick="() => SelectProjectAsync(release.ProjectId)">Select project to promote</button> }
                 @if (!string.IsNullOrEmpty(release.BuildLog) || !string.IsNullOrEmpty(release.DeployLog))
                 {
                     <details class="release-evidence"><summary>@(release.Status is "Failed" or "BuildFailed" or "DeployFailed" ? "Failure details" : "Deployment evidence & logs")</summary>

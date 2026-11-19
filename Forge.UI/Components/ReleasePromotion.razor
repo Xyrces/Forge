@@ -45,6 +45,10 @@ else if (Release.Status == "Deployed")
 }
 @if (_error is not null) { <p role="alert" class="banner banner--warn">@_error</p> }
 @if (_notice is not null) { <p role="status" class="banner banner--ok">@_notice</p> }
+@if (Release.PromotionUnavailableReason is { Length: > 0 } unavailable)
+{
+    <p class="banner banner--warn">Promotion unavailable: @unavailable</p>
+}
 
 @code {
     [Parameter, EditorRequired] public DeploymentRow Release { get; set; } = default!;
@@ -77,7 +81,7 @@ else if (Release.Status == "Deployed")
     private IEnumerable<EnvironmentTarget> Destinations => Policy?.Environments.Where(e => e.Name != Release.EnvironmentName && Source?.PromoteTo.Contains(e.Name) == true) ?? Enumerable.Empty<EnvironmentTarget>();
     private EnvironmentTarget? SelectedTarget => Destinations.FirstOrDefault(e => e.Name == _destination);
     private string ShortSha => Release.CommitSha[..Math.Min(8, Release.CommitSha.Length)];
-    private bool CanPromote => Release.Status == "Deployed" && Target is { } target && target.Name == Release.EnvironmentName && Receipt is { BuildPassed: true, TestPassed: true } receipt && receipt.SourceSha == Release.CommitSha && !string.IsNullOrEmpty(receipt.ImageDigest) && Destinations.Any();
+    private bool CanPromote => string.IsNullOrEmpty(Release.PromotionUnavailableReason) && Release.Status == "Deployed" && Target is { } target && target.Name == Release.EnvironmentName && Receipt is { BuildPassed: true, TestPassed: true } receipt && receipt.SourceSha == Release.CommitSha && !string.IsNullOrEmpty(receipt.ImageDigest) && Destinations.Any();
     protected override void OnParametersSet()
     {
         var identity = $"{Release.ProjectId}/{Release.Id}/{Policy?.Revision}/{Release.Status}";

@@ -41,7 +41,8 @@ public sealed record DeploymentRow(
     string? ReceiptJson = null,
     string? EnvironmentName = null,
     string? SourceCandidateId = null,
-    string? TargetJson = null);
+    string? TargetJson = null,
+    string? PromotionUnavailableReason = null);
 
 public sealed record CommitRow(string Sha, string ShortSha, string Subject, string Author, string DateIso);
 
