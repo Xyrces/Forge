@@ -299,6 +299,31 @@ public class MafAgentRunnerSessionTests : IDisposable
         Assert.Null(unpinnedResult.SessionId);
     }
 
+    [Theory]
+    [InlineData(AgentType.Reviewer)]
+    [InlineData(AgentType.CoreDev)]
+    public async Task GeneralInstructionsExcludeAuditRecordsButPreserveProjectAndSprintGuidance(AgentType role)
+    {
+        var excluded = new[] { "operator-acceptance-repair/spec/2/7", "breaker/task-1/638990000000000000", "session/another/task/Reviewer" };
+        foreach (var key in excluded) await _memory.RememberAsync(key, "INTERNAL_AUDIT_SENTINEL");
+        await _memory.ObserveReviewOriginsAsync("owner/repo/10/100", 159, new string('a', 40), DateTimeOffset.UtcNow, []);
+        var included = new[] { "vision/master", "playbook/review", "extraction/lesson", "operator-acceptance-repair-notes", "breaker-advice", "review/guidance", "sprint/current/lesson" };
+        foreach (var key in included) await _memory.RememberAsync(key, "GUIDANCE_" + key);
+        await _memory.RememberAsync("sprint/other/lesson", "OTHER_SPRINT_SENTINEL");
+        var client = new EchoClient();
+        var context = ContextFor("memory-filter");
+        context["sprintId"] = "current";
+        context["sourceSha"] = new string('a', 40);
+        await NewRunner(client).RunAsync(role, "TASK_PROMPT_SENTINEL", null, context, CancellationToken.None);
+        Assert.False(client.SawText("INTERNAL_AUDIT_SENTINEL"));
+        Assert.False(client.SawText("review/origins/v1/"));
+        Assert.False(client.SawText("OTHER_SPRINT_SENTINEL"));
+        foreach (var key in included) Assert.True(client.SawText("GUIDANCE_" + key));
+        Assert.True(client.SawText("TASK_PROMPT_SENTINEL"));
+        foreach (var key in excluded) Assert.Equal("INTERNAL_AUDIT_SENTINEL", (await _memory.GetAsync(key))!.Body);
+        Assert.NotNull(await _memory.GetAsync("review/origins/v1/owner/repo/10/100/159"));
+    }
+
     private sealed class SingleFactory : IChatClientFactory
     {
         private readonly IChatClient _client;
@@ -312,16 +337,19 @@ public class MafAgentRunnerSessionTests : IDisposable
     private sealed class EchoClient : IChatClient
     {
         private readonly List<IReadOnlyList<ChatMessage>> _calls = new();
+        private readonly List<string> _instructions = new();
 
         public Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
             _calls.Add(messages.ToList());
+            if (options?.Instructions is { } instructions) _instructions.Add(instructions);
             return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "done")));
         }
 
         public bool SawText(string text) =>
-            _calls.SelectMany(c => c).Any(m => m.Text?.Contains(text, StringComparison.Ordinal) == true);
+            _calls.SelectMany(c => c).Any(m => m.Text?.Contains(text, StringComparison.Ordinal) == true)
+            || _instructions.Any(i => i.Contains(text, StringComparison.Ordinal));
 
         public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
