@@ -11,7 +11,7 @@ public static class ImplementationEvidenceFormat
 
     public static void RejectReservedProofKeys(IEnumerable<string>? keys)
     {
-        if (keys?.Any(key => key.Equals("trustedExistingImplementation", StringComparison.OrdinalIgnoreCase)) == true)
+        if (keys?.Any(key => (key.Equals("trustedExistingImplementation", StringComparison.OrdinalIgnoreCase) || key.Equals("trustedIntegrationVerification", StringComparison.OrdinalIgnoreCase))) == true)
             throw new InvalidOperationException("Existing implementation proof can only be written by canonical independent evidence admission.");
     }
 

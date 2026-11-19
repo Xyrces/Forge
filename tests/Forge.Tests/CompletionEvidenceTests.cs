@@ -24,6 +24,30 @@ public sealed class CompletionEvidenceTests : IDisposable
     private static readonly string Head = new('a', 40);
     private static readonly string Source = new('b', 40);
 
+    [Fact]
+    public async Task IntegratedHeadAdmissionPreservesOriginalPublicationAndRequiresExactBindings()
+    {
+        var seeded = await Seed(); var task = seeded.Task;
+        var original = task.GetMetadata("trustedPublication");
+        var integratedHead = new string('e', 40);
+        await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+        { ["observedMerge"] = JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 10, integratedHead, Source, DateTimeOffset.UtcNow)) });
+        task = (await issues.GetAsync(task.Id))!;
+        Assert.False(TaskDeliveryEvidence.IsMergedAndVerified(task));
+        var proof = new IntegratedHeadVerificationEvidence(task.Id, "project", "owner/repo", 10, Head, integratedHead,
+            "attempt", new string('f', 40), new("isolated-verifier", new string('1', 40), new string('d', 64), DateTimeOffset.UtcNow));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => issues.AdmitIntegrationVerificationAsync(task.Id, proof with { ProjectId = "other" }, default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => issues.AdmitIntegrationVerificationAsync(task.Id, proof with { OriginalAttemptId = "wrong" }, default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => issues.TransitionAsync(task.Id, IssueStatus.Completed, null,
+            new Dictionary<string, object> { ["trustedIntegrationVerification"] = JsonSerializer.Serialize(proof) }));
+        await issues.AdmitIntegrationVerificationAsync(task.Id, proof, default);
+        task = (await issues.GetAsync(task.Id))!;
+        Assert.True(TaskDeliveryEvidence.IsMergedAndVerified(task));
+        Assert.Equal(original, task.GetMetadata("trustedPublication"));
+        Assert.Equal(Head, task.GetMetadata("branchSha"));
+        Assert.Null(TaskDeliveryEvidence.Integration(task, new string('2', 40)));
+    }
+
     private async Task<(SprintRecord Sprint, IssueRecord Task, SprintPlan Plan, long Audit)> Seed()
     {
         var task = await issues.CreateAsync(new NewIssue("task", "Verified implementation"));
