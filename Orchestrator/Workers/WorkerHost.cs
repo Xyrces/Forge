@@ -90,6 +90,10 @@ public static class WorkerHost
         {
             logger.LogError(ex, "Worker attempt {Attempt} failed", assignment.Id);
             using var finalize = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            if (observed.Phases?.VerificationStartedAt is not null && observed.Phases.VerificationCompletedAt is null)
+                observed = observed with { Phases = observed.Phases with
+                    { VerificationCompletedAt = DateTimeOffset.UtcNow,
+                      VerificationOutcome = ex is OperationCanceledException ? "cancelled" : "failed" } };
             observed = observed with { Phases = observed.Phases! with
                 { WorkerCompletedAt = DateTimeOffset.UtcNow, WorkerOutcome = ex is OperationCanceledException ? "cancelled" : "failed" } };
             await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, JsonSerializer.Serialize(observed),

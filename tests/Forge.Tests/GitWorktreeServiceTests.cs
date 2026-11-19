@@ -49,6 +49,38 @@ public class GitWorktreeServiceTests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => _service.VerifyCleanIntegrationAsync(published, head, new string('a', 40), default));
     }
 
+    [Fact]
+    public async Task DefaultVerificationProfileUsesPinnedSourceRatherThanCurrentCheckout()
+    {
+        File.WriteAllText(Path.Combine(_workDir, "project.csproj"), "<Project />");
+        RunGit(_workDir, "add -A"); RunGit(_workDir, "commit -qm dotnet"); RunGit(_workDir, "push origin main");
+        var head = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        var expected = RunVerification.DefaultCommands(_workDir);
+        RunGit(_workDir, "checkout HEAD~1");
+        Assert.Empty(RunVerification.DefaultCommands(_workDir));
+        Assert.Equal(expected, await _service.DefaultVerificationCommandsAtHeadAsync(head, default));
+    }
+
+    [Fact]
+    public async Task MergedIntegrationCannotUseItsOwnHistoryAsEvidenceOfTrustedBase()
+    {
+        RunGit(_workDir, "checkout -b feature");
+        File.WriteAllText(Path.Combine(_workDir, "feature.txt"), "published");
+        RunGit(_workDir, "add -A"); RunGit(_workDir, "commit -qm feature");
+        var original = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        var tree = RunGitForResult(_workDir, "rev-parse HEAD^{tree}").Stdout;
+        RunGit(_workDir, "checkout -b side main");
+        File.WriteAllText(Path.Combine(_workDir, "side.txt"), "not previously on main");
+        RunGit(_workDir, "add -A"); RunGit(_workDir, "commit -qm side");
+        RunGit(_workDir, "checkout feature"); RunGit(_workDir, "merge --no-ff side -m integrated");
+        var head = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        RunGit(_workDir, "push origin feature");
+        RunGit(_workDir, "checkout main"); RunGit(_workDir, "merge --no-ff feature -m merged-pr");
+        var merged = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        RunGit(_workDir, "push origin main");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.VerifyCleanIntegrationAsync(original, head, tree, default, merged));
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_workDir, recursive: true); } catch { }

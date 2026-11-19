@@ -179,9 +179,13 @@ public static class RunVerification
     /// $verify: dotnet build + test for dotnet repos, nothing otherwise.</summary>
     public static IReadOnlyList<string> DefaultCommands(string workDir)
     {
-        var isDotnet = Directory.EnumerateFiles(workDir, "*.sln").Any()
-            || Directory.EnumerateFiles(workDir, "*.slnx").Any()
-            || Directory.EnumerateFiles(workDir, "*.csproj").Any();
+        return DefaultCommandsForRootFiles(Directory.EnumerateFiles(workDir).Select(Path.GetFileName)!);
+    }
+
+    public static IReadOnlyList<string> DefaultCommandsForRootFiles(IEnumerable<string?> files)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var isDotnet = files.Any(file => new[] { ".sln", ".slnx", ".csproj" }.Any(extension => string.Equals(Path.GetExtension(file), extension, comparison)));
         return isDotnet
             ? new[] { "dotnet build -c Release --nologo", "dotnet test -c Release --nologo" }
             : Array.Empty<string>();

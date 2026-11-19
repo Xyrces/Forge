@@ -35,6 +35,12 @@ public sealed class IntegratedHeadVerifierTests
         var basis = await Git(root, "rev-parse", "HEAD");
         await Git(root, "checkout", "feature"); await Git(root, "merge", "--no-ff", "main", "-m", "integration");
         await Git(root, "push", "origin", "feature"); var head = await Git(root, "rev-parse", "HEAD");
+        var mergeSha = head;
+        if (alreadyMerged)
+        {
+            await Git(root, "checkout", "main"); await Git(root, "merge", "--no-ff", "feature", "-m", "merge-pr");
+            mergeSha = await Git(root, "rev-parse", "HEAD"); await Git(root, "push", "origin", "main");
+        }
         IReadOnlyList<string> commands = ["git diff --exit-code"];
         await using var issues = new IssueStore(Path.Combine(root, "state.db"), "forge");
         // Exclude task DB and snapshots from prospective verification trees.
@@ -47,10 +53,10 @@ public sealed class IntegratedHeadVerifierTests
         await issues.TransitionAsync(task.Id, alreadyMerged ? IssueStatus.Completed : IssueStatus.InProgress, null,
             new Dictionary<string, object> { ["trustedPublication"] = JsonSerializer.Serialize(new TrustedPublicationEvidence(task.Id, original,
                 new("original-attempt", originalTree, WorkerVerification.CommandsHash(commands), DateTimeOffset.UtcNow))),
-                ["observedMerge"] = alreadyMerged ? JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 9, head, head, DateTimeOffset.UtcNow)) : null! });
+                ["observedMerge"] = alreadyMerged ? JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 9, head, mergeSha, DateTimeOffset.UtcNow)) : null! });
         task = (await issues.GetAsync(task.Id))!; var originalJson = task.GetMetadata("trustedPublication");
         var attempts = new WorkerAttemptStore(issues.Db); var jobs = new Jobs(attempts);
-        var github = new GitHub(head, basis, alreadyMerged);
+        var github = new GitHub(head, basis, alreadyMerged, mergeSha);
         var worktrees = new GitWorktreeService(new WorkspaceOptions { Root = root, WorktreeRoot = ".wt", DefaultBranch = "main" }, NullLogger<GitWorktreeService>.Instance);
         IntegratedHeadVerifier Verifier() => new(issues, worktrees, github, new KubernetesAgentRunner(attempts, jobs, "dataset"), "forge", commands, NullLogger<IntegratedHeadVerifier>.Instance);
         Assert.False(await Verifier().EnsureAsync(task, alreadyMerged ? null : head, default));
@@ -80,7 +86,7 @@ public sealed class IntegratedHeadVerifierTests
         public Task<string?> GetFailureAsync(string id, CancellationToken ct) => Task.FromResult<string?>(null);
         public Task CancelAndWaitAsync(string id, CancellationToken ct) => Task.CompletedTask;
     }
-    private sealed class GitHub(string head, string basis, bool merged) : GitHubService("owner", "repo", null)
+    private sealed class GitHub(string head, string basis, bool merged, string mergeSha) : GitHubService("owner", "repo", null)
     {
         public override Task<PullRequest> GetPullRequestAsync(int number, CancellationToken cancellationToken = default)
         {
@@ -88,7 +94,7 @@ public sealed class IntegratedHeadVerifierTests
             Set(pr, "Head", new GitReference(null!, null!, null!, "feature", head, null!, repo));
             Set(pr, "Base", new GitReference(null!, null!, null!, "main", basis, null!, repo));
             Set(pr, "State", new StringEnum<ItemState>(merged ? ItemState.Closed : ItemState.Open));
-            if (merged) Set(pr, "MergedAt", DateTimeOffset.UtcNow); Set(pr, "MergeCommitSha", merged ? head : null!); return Task.FromResult(pr);
+            if (merged) Set(pr, "MergedAt", DateTimeOffset.UtcNow); Set(pr, "MergeCommitSha", merged ? mergeSha : null!); return Task.FromResult(pr);
         }
     }
     private static void Set(object target, string property, object value) => target.GetType().GetProperty(property)!.SetValue(target, value);

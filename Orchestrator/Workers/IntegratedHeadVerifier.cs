@@ -11,7 +11,7 @@ namespace Forge.Orchestrator.Workers;
 
 /// <summary>Adopts a clean upstream integration only after isolated, zero-model exact-head verification.</summary>
 public sealed class IntegratedHeadVerifier(IIssueStore issues, GitWorktreeService worktrees, GitHubService github,
-    KubernetesAgentRunner workers, string projectId, IReadOnlyList<string> verifyCommands, ILogger<IntegratedHeadVerifier> logger)
+    KubernetesAgentRunner workers, string projectId, IReadOnlyList<string>? verifyCommands, ILogger<IntegratedHeadVerifier> logger)
 {
     private sealed record Pending(string Head, string Dispatch, string Path, string Original, string Commands);
     private static readonly SemaphoreSlim[] Gates = Enumerable.Range(0, 128).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
@@ -37,15 +37,16 @@ public sealed class IntegratedHeadVerifier(IIssueStore issues, GitWorktreeServic
                 || !int.TryParse(task.GetMetadata("prNumber"), out var number))
                 throw new InvalidOperationException("Task publication binding is incomplete.");
             if (expectedHead == original.PublishedHeadSha) return true;
-            var commands = WorkerVerification.CommandsHash(verifyCommands);
-            if (verifyCommands.Count == 0 || original.Verification.CommandsSha != commands)
-                throw new InvalidOperationException("Current verification profile differs from the original publication; independent reconciliation is required.");
             var pr = await github.GetPullRequestAsync(number, ct);
             var head = pr.Head?.Sha ?? throw new InvalidOperationException("PR head is unavailable.");
             Validate(pr, task, expectedHead);
             if (head == original.PublishedHeadSha) return true;
+            var resolvedCommands = verifyCommands ?? await worktrees.DefaultVerificationCommandsAtHeadAsync(head, ct);
+            var commands = WorkerVerification.CommandsHash(resolvedCommands);
+            if (resolvedCommands.Count == 0 || original.Verification.CommandsSha != commands)
+                throw new InvalidOperationException("Current verification profile differs from the original publication; independent reconciliation is required.");
             if (TaskDeliveryEvidence.Integration(task, head) is { } existing
-                && existing.ProjectId == projectId && existing.Repository == github.Owner + "/" + github.Repo
+                && existing.ProjectId == projectId && string.Equals(existing.Repository, github.Owner + "/" + github.Repo, StringComparison.OrdinalIgnoreCase)
                 && existing.Verification.CommandsSha == commands
                 && issues is IssueStore authorityStore
                 && (await new MemoryStore(authorityStore.Db).GetAsync(TaskDeliveryEvidence.IntegrationAuthorityKey(projectId, task.Id, head), ct))?.Body == JsonSerializer.Serialize(existing))
@@ -60,7 +61,7 @@ public sealed class IntegratedHeadVerifier(IIssueStore issues, GitWorktreeServic
                 }
                 return true;
             }
-            var lineage = await worktrees.VerifyCleanIntegrationAsync(original.PublishedHeadSha, head, original.Verification.TreeSha, ct);
+            var lineage = await worktrees.VerifyCleanIntegrationAsync(original.PublishedHeadSha, head, original.Verification.TreeSha, ct, pr.Merged ? pr.MergeCommitSha : null);
             var pending = JsonSerializer.Deserialize<Pending>(task.GetMetadata(PendingKey) ?? "null");
             if (pending is not null && (pending.Head != head || pending.Original != original.PublishedHeadSha || pending.Commands != commands))
             {
@@ -90,7 +91,7 @@ public sealed class IntegratedHeadVerifier(IIssueStore issues, GitWorktreeServic
             if (result is null) return false;
             var receipt = result.Verification ?? throw new InvalidOperationException("Integration worker returned no verification receipt.");
             if (receipt.CommandsSha != commands || receipt.TreeSha != lineage.Tree
-                || !await WorkerVerification.MatchesAsync(receipt, pending.Path, verifyCommands, ct, worktrees.WorkspaceRoot))
+                || !await WorkerVerification.MatchesAsync(receipt, pending.Path, resolvedCommands, ct, worktrees.WorkspaceRoot))
                 throw new InvalidOperationException("Integration verification content or commands changed.");
             var current = await github.GetPullRequestAsync(number, ct);
             Validate(current, task, head);
@@ -114,8 +115,9 @@ public sealed class IntegratedHeadVerifier(IIssueStore issues, GitWorktreeServic
     private void Validate(PullRequest pr, IssueRecord task, string? expected)
     {
         var repository = github.Owner + "/" + github.Repo;
-        if (pr.Number.ToString(System.Globalization.CultureInfo.InvariantCulture) != task.GetMetadata("prNumber")
-            || pr.Head?.Repository?.FullName != repository || pr.Base?.Repository?.FullName != repository
+        if (pr.Head is null || pr.Base is null || pr.Number.ToString(System.Globalization.CultureInfo.InvariantCulture) != task.GetMetadata("prNumber")
+            || !string.Equals(pr.Head.Repository?.FullName, repository, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(pr.Base.Repository?.FullName, repository, StringComparison.OrdinalIgnoreCase)
             || pr.Head.Ref != task.GetMetadata("branch") || pr.Base.Ref != worktrees.DefaultBranch
             || expected is not null && pr.Head.Sha != expected
             || pr.State.Value != ItemState.Open && !pr.Merged)

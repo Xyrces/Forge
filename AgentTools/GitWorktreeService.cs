@@ -73,9 +73,22 @@ public sealed class GitWorktreeService
 
     }
 
+    public async Task<IReadOnlyList<string>> DefaultVerificationCommandsAtHeadAsync(string head, CancellationToken ct)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(head, "\\A[0-9a-f]{40}\\z"))
+            throw new InvalidOperationException("Default verification requires an exact source revision.");
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(TimeSpan.FromMinutes(2)); ct = bounded.Token;
+        var fetch = await RunGitInAsync(WorkspaceRoot, "", ct, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", head]);
+        if (fetch.ExitCode != 0) throw new InvalidOperationException("Cannot fetch verification source profile.");
+        var tree = await RunGitInAsync(WorkspaceRoot, "", ct, ["ls-tree", "-z", "--format=%(objecttype)%x09%(path)", head]);
+        if (tree.ExitCode != 0) throw new InvalidOperationException("Cannot inspect exact source verification profile.");
+        return RunVerification.DefaultCommandsForRootFiles(tree.Stdout.Split('\0').Where(row => row.StartsWith("blob\t", StringComparison.Ordinal)).Select(row => row[5..]));
+    }
+
     /// <summary>Prove a clean two-parent GitHub integration of the last published source with registered base history.</summary>
     public async Task<(string Tree, string BaseParent)> VerifyCleanIntegrationAsync(string original, string head,
-        string originalTree, CancellationToken ct)
+        string originalTree, CancellationToken ct, string? observedMergeSha = null)
     {
         foreach (var sha in new[] { original, head, originalTree })
             if (!System.Text.RegularExpressions.Regex.IsMatch(sha, "\\A[0-9a-f]{40}\\z"))
@@ -99,7 +112,19 @@ public sealed class GitWorktreeService
         {
             await Git("check-ref-format", "refs/heads/" + DefaultBranch);
             await Git("fetch", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/" + DefaultBranch + ":" + baseRef);
-            await Git("merge-base", "--is-ancestor", parents[2], baseRef);
+            var acceptedBase = baseRef;
+            if (observedMergeSha is not null)
+            {
+                if (!System.Text.RegularExpressions.Regex.IsMatch(observedMergeSha, "\\A[0-9a-f]{40}\\z"))
+                    throw new InvalidOperationException("Merged integration requires an exact merge object.");
+                await Git("fetch", "--no-tags", "--no-write-fetch-head", "origin", observedMergeSha);
+                var mergeParents = (await Git("rev-list", "--parents", "-n", "1", observedMergeSha)).Split(' ');
+                if (mergeParents.Length != 3 || mergeParents[2] != head)
+                    throw new InvalidOperationException("Recorded merge does not integrate the exact verified PR head.");
+                await Git("merge-base", "--is-ancestor", observedMergeSha, baseRef);
+                acceptedBase = mergeParents[1]; // Never let the PR's own ancestry prove its historical base.
+            }
+            await Git("merge-base", "--is-ancestor", parents[2], acceptedBase);
             var expected = (await Git("merge-tree", "--write-tree", original, parents[2])).Split('\n')[0];
             var tree = await Git("rev-parse", head + "^{tree}");
             if (tree != expected) throw new InvalidOperationException("Integration tree differs from the clean merge result.");
