@@ -24,6 +24,31 @@ public class GitWorktreeServiceTests : IDisposable
         InitRepo(_workDir);
     }
 
+    [Fact]
+    public async Task CleanIntegrationRequiresExactPublishedFirstParentAndUntamperedMergeTree()
+    {
+        Assert.Equal(0, RunGit(_workDir, "checkout -b feature"));
+        File.WriteAllText(Path.Combine(_workDir, "feature.txt"), "published");
+        RunGit(_workDir, "add -A"); RunGit(_workDir, "commit -qm feature");
+        var published = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        var tree = RunGitForResult(_workDir, "rev-parse HEAD^{tree}").Stdout;
+        RunGit(_workDir, "checkout main");
+        File.WriteAllText(Path.Combine(_workDir, "upstream.txt"), "upstream");
+        RunGit(_workDir, "add -A"); RunGit(_workDir, "commit -qm upstream");
+        RunGit(_workDir, "push origin main");
+        RunGit(_workDir, "checkout feature"); RunGit(_workDir, "merge --no-ff main -m integrated");
+        RunGit(_workDir, "push origin feature");
+        var head = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        var proof = await _service.VerifyCleanIntegrationAsync(published, head, tree, default);
+        Assert.Equal(RunGitForResult(_workDir, "rev-parse HEAD^{tree}").Stdout, proof.Tree);
+        File.WriteAllText(Path.Combine(_workDir, "feature.txt"), "unverified resolution edit");
+        RunGit(_workDir, "add -A"); RunGit(_workDir, "commit --amend --no-edit");
+        RunGit(_workDir, "push --force origin feature");
+        var edited = RunGitForResult(_workDir, "rev-parse HEAD").Stdout;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.VerifyCleanIntegrationAsync(published, edited, tree, default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.VerifyCleanIntegrationAsync(published, head, new string('a', 40), default));
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_workDir, recursive: true); } catch { }

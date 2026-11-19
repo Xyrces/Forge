@@ -16,7 +16,7 @@ public sealed class WorkerExecutionUncertainException(string message, Exception?
 
 // HistoricalProjectId remains readable for existing assignments; artifact records determine their actual source.
 public sealed record WorkerInvocation(AgentType Role, string Prompt, string? SessionId, Dictionary<string, string> Context,
-    string? HistoricalProjectId = null);
+    string? HistoricalProjectId = null, bool VerificationOnly = false);
 
 public interface IWorkerJobs
 {
@@ -30,7 +30,19 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
     Func<CancellationToken, Task>? ensureAdmission = null) : IAgentRunner, IReviewWorkerLifecycle
 {
     public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId,
-        IReadOnlyDictionary<string, object>? context, CancellationToken ct)
+        IReadOnlyDictionary<string, object>? context, CancellationToken ct) =>
+        await RunCoreAsync(role, prompt, sessionId, context, false, ct)
+            ?? throw new InvalidOperationException("Worker returned no terminal result.");
+
+    public Task<AgentRunResult?> StartOrObserveVerificationAsync(IReadOnlyDictionary<string, object> context, CancellationToken ct)
+    {
+        var bound = context.ToDictionary(x => x.Key, x => x.Value);
+        bound["trustedVerificationOnly"] = "true";
+        return RunCoreAsync(AgentType.QA, "Trusted exact-head verification; no model execution.", null, bound, true, ct);
+    }
+
+    private async Task<AgentRunResult?> RunCoreAsync(AgentType role, string prompt, string? sessionId,
+        IReadOnlyDictionary<string, object>? context, bool observeOnly, CancellationToken ct)
     {
         var values = context?.ToDictionary(x => x.Key, x => x.Value?.ToString() ?? "") ?? [];
         string Required(string key) => values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
@@ -55,7 +67,8 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
             var sourceSha = values.GetValueOrDefault("sourceSha");
             if (string.IsNullOrWhiteSpace(sourceSha)) sourceSha = await ReadHeadAsync(worktree, ct);
             values["sourceSha"] = sourceSha;
-            var invocation = new WorkerInvocation(role, prompt, sessionId, values);
+            var invocation = new WorkerInvocation(role, prompt, sessionId, values,
+                VerificationOnly: values.GetValueOrDefault("trustedVerificationOnly") == "true");
             assignment = await store.CreateOrGetAsync(new(id, datasetId, key, project, task, role.ToString(), dispatch,
                 sourceSha, worktree, JsonSerializer.Serialize(invocation), Guid.NewGuid().ToString("N")), ct);
         }
@@ -83,8 +96,15 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
                 { throw new WorkerExecutionUncertainException("Worker recorded a result but pod termination is unconfirmed; preserve checkout.", ex); }
             }
             if (assignment.State == "succeeded")
-                return JsonSerializer.Deserialize<AgentRunResult>(assignment.ResultJson!)
+            {
+                var result = JsonSerializer.Deserialize<AgentRunResult>(assignment.ResultJson!)
                     ?? throw new InvalidOperationException("Worker result was empty.");
+                if (observeOnly && (result.Verification?.AttemptId != assignment.Id
+                    || JsonSerializer.Deserialize<WorkerInvocation>(assignment.AssignmentJson)?.VerificationOnly != true
+                    || assignment.SourceSha != values.GetValueOrDefault("sourceSha")))
+                    throw new InvalidOperationException("Verification receipt is not bound to this exact durable assignment.");
+                return result;
+            }
             if (assignment.State == "failed"
                 && Forge.Core.Control.BudgetAdmissionDeniedException.FromWorkerError(assignment.Error) is { } denied)
                 throw denied;
@@ -100,6 +120,7 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
             }
             catch (Exception ex) when (ex is not (OperationCanceledException or WorkerExecutionUncertainException))
             { throw new WorkerExecutionUncertainException("Worker Job observation failed; preserve checkout before retry.", ex); }
+            if (observeOnly) return null; // Next ordinary reconciliation adopts the same durable assignment.
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         }
     }

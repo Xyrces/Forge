@@ -73,6 +73,49 @@ public sealed class GitWorktreeService
 
     }
 
+    /// <summary>Prove a clean two-parent GitHub integration of the last published source with registered base history.</summary>
+    public async Task<(string Tree, string BaseParent)> VerifyCleanIntegrationAsync(string original, string head,
+        string originalTree, CancellationToken ct)
+    {
+        foreach (var sha in new[] { original, head, originalTree })
+            if (!System.Text.RegularExpressions.Regex.IsMatch(sha, "\\A[0-9a-f]{40}\\z"))
+                throw new InvalidOperationException("Integration evidence requires exact object IDs.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2)); ct = timeout.Token;
+        async Task<string> Git(params string[] args)
+        {
+            var result = await RunGitInAsync(WorkspaceRoot, "", ct, args);
+            if (result.ExitCode != 0) throw new InvalidOperationException("Clean integration provenance could not be established.");
+            return result.Stdout.Trim();
+        }
+        await Git("fetch", "--no-tags", "--no-write-fetch-head", "origin", original, head);
+        if (await Git("rev-parse", original + "^{tree}") != originalTree)
+            throw new InvalidOperationException("Original publication tree does not match its receipt.");
+        var parents = (await Git("rev-list", "--parents", "-n", "1", head)).Split(' ');
+        if (parents.Length != 3 || parents[1] != original)
+            throw new InvalidOperationException("Current head is not a direct integration of the verified publication.");
+        var baseRef = "refs/forge/integration/" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await Git("check-ref-format", "refs/heads/" + DefaultBranch);
+            await Git("fetch", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/" + DefaultBranch + ":" + baseRef);
+            await Git("merge-base", "--is-ancestor", parents[2], baseRef);
+            var expected = (await Git("merge-tree", "--write-tree", original, parents[2])).Split('\n')[0];
+            var tree = await Git("rev-parse", head + "^{tree}");
+            if (tree != expected) throw new InvalidOperationException("Integration tree differs from the clean merge result.");
+            return (tree, parents[2]);
+        }
+        finally
+        {
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var removed = await RunGitInAsync(WorkspaceRoot, "", cleanup.Token, ["update-ref", "-d", baseRef]);
+            if (removed.ExitCode != 0) _logger.LogWarning("Could not retire integration source ref {Ref}", baseRef);
+        }
+    }
+
+    public string ReviewSnapshotPath(string taskId, string attemptId) => WorktreePathFor("review-" +
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(taskId + "\n" + attemptId))).ToLowerInvariant());
+
     /// <summary>A separate, immutable review checkout; never moves or cleans engineering work.</summary>
     public async Task<string> CreateReviewSnapshotAsync(string taskId, string attemptId, string headSha, CancellationToken ct = default)
     {

@@ -37,6 +37,31 @@ public static class WorkerHost
             await RecordAsync(observed, runCancellation.Token);
             if (!string.Equals(await KubernetesAgentRunner.ReadHeadAsync(assignment.WorktreePath, runCancellation.Token), assignment.SourceSha, StringComparison.Ordinal))
                 throw new InvalidOperationException("Worker source changed before pod execution.");
+            if (invocation.VerificationOnly)
+            {
+                // This durable assignment is controller-authored; load no model clients, keys or prompts.
+                var projects = new ProjectStore(new IssueStore(registry));
+                var project = await projects.GetAsync(assignment.ProjectId, runCancellation.Token)
+                    ?? throw new InvalidOperationException("Verification project is not registered.");
+                var commands = project.VerifyCommands ?? AgentTools.RunVerification.DefaultCommands(assignment.WorktreePath);
+                if (commands.Count == 0) throw new InvalidOperationException("Integration verification requires configured checks.");
+                observed = observed with { Phases = observed.Phases! with
+                    { VerificationStartedAt = DateTimeOffset.UtcNow, VerificationOutcome = "running" } };
+                await RecordAsync(observed, runCancellation.Token);
+                var proof = await AgentTools.WorkerVerification.VerifyAsync(assignment.Id, assignment.WorktreePath,
+                    commands, logger, runCancellation.Token);
+                if (await KubernetesAgentRunner.ReadHeadAsync(assignment.WorktreePath, runCancellation.Token) != assignment.SourceSha)
+                    throw new InvalidOperationException("Integration verification moved its source revision.");
+                await attempts.EnsureOwnerAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, runCancellation.Token);
+                observed = observed with { Verification = proof, Phases = observed.Phases! with
+                    { VerificationCompletedAt = DateTimeOffset.UtcNow, VerificationOutcome = "succeeded",
+                      WorkerCompletedAt = DateTimeOffset.UtcNow, WorkerOutcome = "succeeded" } };
+                using var finish = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                if (!await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken,
+                    JsonSerializer.Serialize(observed), null, finish.Token))
+                    throw new InvalidOperationException("Verification worker lost publication ownership.");
+                return 0;
+            }
             using var runtime = await BuildRunner(options, assignment, attempts, loggerFactory, runCancellation.Token);
             var context = invocation.Context.ToDictionary(x => x.Key, x => (object)x.Value);
             context["workerAttemptId"] = assignment.Id;
