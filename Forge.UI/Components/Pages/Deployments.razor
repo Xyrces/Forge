@@ -64,11 +64,13 @@
                 {
                     <p>Promotion of <a href="@($"#release-{source}")">@SourceLabel(source)</a>. The artifact is reused without rebuilding.</p>
                 }
+                @if (release.RetryOfCandidateId is { } retrySource) { <p>Retry of <a href="@($"#release-{retrySource}")">@SourceLabel(retrySource)</a>. Earlier evidence is retained.</p> }
                 @if (release.CompletionId is not null && release.Status is "Pending" or "BuildPassed")
                 {
                     <p>Automatic sprint delivery · <a href="/sprints">View sprint checks &amp; explicit gates</a></p>
                 }
                 <ReleasePromotion Release="release" Policy="@(release.ProjectId == _projectId && DeployStore.Value.Error is null ? _policy : null)" OnPromoted="RefreshAsync" />
+                <ReleaseRecovery Release="release" Enabled="@(DeployStore.Value.Error is null)" OnChanged="RefreshAsync" />
                 @if (_projectId.Length == 0 && release.Status == "Deployed" && release.EnvironmentName is not null && string.IsNullOrEmpty(release.PromotionUnavailableReason)) { <button class="btn btn--small" @onclick="() => SelectProjectAsync(release.ProjectId)">Select project to promote</button> }
                 @if (!string.IsNullOrEmpty(release.BuildLog) || !string.IsNullOrEmpty(release.DeployLog))
                 {
@@ -80,7 +82,6 @@
                 @if (_policy is { Environments.Count: 0 } && release.ProjectId == _projectId && release.CompletionId is null && release.Status is "Pending" or "BuildPassed")
                 {
                     <button class="btn" @onclick="() => Dispatch.Dispatch(new DeploymentsActions.ApproveDeploymentAction(release.Id, release.ProjectId))">Approve legacy deployment</button>
-                    <button class="btn btn--danger" @onclick="() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(release.Id, release.ProjectId))">Reject</button>
                 }
                 @if (DeployStore.Value.PendingInFlightWarning is { } warning && warning.DeploymentId == release.Id) { <p role="alert" class="banner banner--warn">@warning.Message</p> }
             </article>

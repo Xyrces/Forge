@@ -42,7 +42,8 @@ public sealed record DeploymentRow(
     string? EnvironmentName = null,
     string? SourceCandidateId = null,
     string? TargetJson = null,
-    string? PromotionUnavailableReason = null);
+    string? PromotionUnavailableReason = null,
+    string? RetryOfCandidateId = null);
 
 public sealed record CommitRow(string Sha, string ShortSha, string Subject, string Author, string DateIso);
 

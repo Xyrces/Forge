@@ -57,6 +57,17 @@ class Handler(BaseHTTPRequestHandler):
             writes.append({'method': 'POST', 'path': self.path, 'body': body})
             result = fixtures.get('/__promotion_result', {'status': 409, 'body': {'error': 'Synthetic release no longer qualifies'}})
             return self.send(result['status'], result['body'])
+        if path == '/api/deployments/synthetic-failed/retry':
+            body = self.read_body()
+            writes.append({'method': 'POST', 'path': self.path, 'body': body})
+            result = fixtures.get('/__retry_result', {'status': 409, 'body': {'error': 'Rollback has not been verified.'}})
+            return self.send(result['status'], result['body'])
+        if path == '/api/deployments/synthetic-pending/reject':
+            writes.append({'method': 'POST', 'path': self.path})
+            for row in fixtures.get('/api/deployments', []):
+                if row.get('id') == 'synthetic-pending':
+                    row['status'] = 'Rejected'
+            return self.send(200, {'status': 'Rejected'})
         if path == '/api/sprints/environment-fixture/completion/approve-deployment':
             body = self.read_body()
             writes.append({'method': 'POST', 'path': self.path, 'body': body})
