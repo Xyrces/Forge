@@ -1,0 +1,36 @@
+{
+  "source": "https://github.com/Xyrces/Forge/pull/150",
+  "method": "Read-only GitHub connector fetch_pr",
+  "pullRequest": {
+    "created_at": "2026-11-18T01:33:13Z",
+    "merged_at": "2026-11-18T02:20:08Z",
+    "head_sha": "263bbfeb44a12565e3738b01ae08bbc92283ae63",
+    "merge_commit_sha": "30a6ec9f8b740dd4bd2775b26edac0db7ee48997"
+  },
+  "comments": [
+    {
+      "url": "https://github.com/Xyrces/Forge/pull/150#issuecomment-6966317332",
+      "id": 6966317332,
+      "actor": "Xyrces",
+      "created_at": "2026-11-18T01:35:15Z",
+      "review": null,
+      "body": "**[Forge Reviewer — round 1]** Approve\n\nReviewed `66ca85f8`. Production no longer renders the obsolete `reduxDevTools.js` reference, and the existing `IsDevelopment()` guard keeps DevTools middleware out of Production. Development retains Fluxor’s built-in extension bridge through `StoreInitializer`, which remains active in every environment.\n\nI reran all five `DashboardFluxorRegistrationTests` in Release. They passed, covering the rendered shell, Development-only bridge registration, and ordinary dispatch in Development, Production, and Staging. The PR correctly leaves the browser extension handshake to the separate operator check. No pilot evidence or unrelated dashboard features changed.\n\nREVIEWER_NOTES: No findings.\n\nREVIEWER_VERDICT: APPROVE"
+    },
+    {
+      "url": "https://github.com/Xyrces/Forge/pull/150#issuecomment-6966646881",
+      "id": 6966646881,
+      "actor": "Xyrces",
+      "created_at": "2026-11-18T01:55:21Z",
+      "review": null,
+      "body": "**[Forge Reviewer — round 2]** RequestChanges\n\nAt `190d128`, the approved Redux DevTools implementation and its tests are unchanged. All five dashboard tests and the modified orchestration test passed locally in Release. The only blocker is the scope of the new commit.\n\nREVIEWER_NOTES:\n- `tests/Forge.Tests/Integration/OrchestratorAgentTests.cs:160–170,350–411` — Restore this file to its `66ca85f` version. The new dispatcher lets the escalation-slot test hold and release claims without running the engineering workflow. That changes what the orchestration test exercises, but it neither implements nor verifies the dashboard’s DevTools behavior. The test stabilization is tracked separately as `draft-3`; no dashboard rework is needed.\n\nREVIEWER_VERDICT: REQUEST_CHANGES"
+    },
+    {
+      "url": "https://github.com/Xyrces/Forge/pull/150#issuecomment-6966990156",
+      "id": 6966990156,
+      "actor": "Xyrces",
+      "created_at": "2026-11-18T02:16:37Z",
+      "review": null,
+      "body": "**[Forge Reviewer — round 3]** Approve\n\nThe scope blocker is resolved at `263bbfe`. I verified that the rework restores `OrchestratorAgentTests.cs` exactly: `git diff 66ca85f HEAD` is empty. The PR contains only the previously approved dashboard wiring and its focused tests. Current-head CI and the separate operator-led Development extension check are still pending.\n\nREVIEWER_NOTES: No remaining findings.\n\nREVIEWER_VERDICT: APPROVE"
+    }
+  ]
+}

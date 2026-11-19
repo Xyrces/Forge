@@ -20,6 +20,7 @@ Operator handoff (live observations pending):
 
 Reports:
 
+- [PR #150 historical recovery, reviews and bounded timing](pr150-history.md)
 - [Final UI-originated live qualification](unattended-live-qualification.md#final-qualification-2026-11-17)
 - [Implemented bounded outcome planning](planner-design.md)
 - [Routine deployment authority](routine-deployment.md)
