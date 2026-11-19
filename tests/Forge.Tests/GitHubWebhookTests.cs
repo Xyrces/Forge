@@ -76,6 +76,8 @@ public sealed class GitHubWebhookTests : IAsyncLifetime
     [Theory]
     [InlineData("pull_request_review", "{\"action\":\"dismissed\",\"pull_request\":{\"number\":150}}", 150, null, null)]
     [InlineData("pull_request_review", "{\"action\":\"submitted\",\"pull_request\":{\"number\":150}}", 150, null, null)]
+    [InlineData("pull_request_review_thread", "{\"action\":\"resolved\",\"pull_request\":{\"number\":150},\"thread\":{\"id\":12}}", 150, null, null)]
+    [InlineData("pull_request_review_thread", "{\"action\":\"unresolved\",\"pull_request\":{\"number\":150},\"thread\":{\"id\":12}}", 150, null, null)]
     [InlineData("push", "{\"ref\":\"refs/heads/main\",\"after\":\"head\"}", null, "head", "main")]
     [InlineData("status", "{\"sha\":\"head\"}", null, "head", null)]
     [InlineData("check_suite", "{\"check_suite\":{\"head_sha\":\"head\",\"head_branch\":\"feature\"}}", null, "head", "feature")]
@@ -85,7 +87,11 @@ public sealed class GitHubWebhookTests : IAsyncLifetime
         var payload = "{\"repository\":{\"full_name\":\"Xyrces/Forge\"}," + fields[1..];
         Assert.Equal(HttpStatusCode.Accepted, (await Send(payload, kind)).StatusCode);
         Assert.Contains(events.Hints, h => h.PrNumber == pr && h.HeadSha == sha && h.Branch == branch);
-        Assert.All(events.Hints, h => Assert.Equal("forge", h.ProjectId));
+        Assert.All(events.Hints, h =>
+        {
+            Assert.Equal("forge", h.ProjectId);
+            Assert.Equal("github:" + kind, h.Reason);
+        });
     }
 
     [Fact]

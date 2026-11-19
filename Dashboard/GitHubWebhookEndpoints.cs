@@ -90,14 +90,15 @@ public static class GitHubWebhookEndpoints
 
     internal static WebhookRoute? Parse(string kind, byte[] bytes)
     {
-        if (kind is not ("pull_request" or "pull_request_review" or "pull_request_review_comment"
-            or "check_run" or "check_suite" or "status" or "push")) return null;
+        var prEvent = kind is "pull_request" or "pull_request_review" or "pull_request_review_comment"
+            or "pull_request_review_thread";
+        if (!prEvent && kind is not ("check_run" or "check_suite" or "status" or "push")) return null;
         using var doc = JsonDocument.Parse(bytes);
         var root = doc.RootElement;
         var repo = Text(Child(root, "repository"), "full_name");
         if (repo is null || repo.Length > 256 || repo.Split('/').Length != 2) return null;
         var hints = new List<WatchHint>();
-        if (kind is "pull_request" or "pull_request_review" or "pull_request_review_comment")
+        if (prEvent)
         {
             var pr = Child(root, "pull_request");
             var number = Number(pr, "number") ?? Number(root, "number");

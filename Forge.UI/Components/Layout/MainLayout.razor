@@ -73,7 +73,8 @@
             <BuildRevision BuildInfo="@ShellState.Value.BuildInfo" />
             @if (ShellState.Value.ActiveSprintName is not null)
             {
-                <span class="pill pill--primary">@ShellState.Value.ActiveSprintName</span>
+                <span class="pill pill--primary app-active-sprint"
+                      title="@($"Active sprint: {ShellState.Value.ActiveSprintName}")">@ShellState.Value.ActiveSprintName</span>
             }
             <AlertInbox />
             <span class="heartbeat">

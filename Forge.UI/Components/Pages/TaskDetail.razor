@@ -189,7 +189,8 @@
                         else { <p class="meta-text">Phase timings were not recorded for this attempt.</p> }
                         <details><summary>Attempt identifier</summary><code>@worker.Id</code></details></article> }</div>
                 }
-                @if (HumanWait is { } humanWait) { <dl class="task-facts"><dt>Human review wait</dt><dd>@humanWait <span class="meta-text">Measured from review-gate observations.</span></dd></dl> }
+                @if (WaitDuration("humanReviewWait") is { } humanWait) { <dl class="task-facts"><dt>Human review wait</dt><dd>@humanWait <span class="meta-text">Measured from review-gate observations.</span></dd></dl> }
+                @if (WaitDuration("reviewExternalWait") is { } externalWait) { <dl class="task-facts"><dt>GitHub merge requirement wait</dt><dd>@externalWait</dd></dl> }
                 <h3>Agent runs</h3>
                 @if (_runsError is not null) { <p class="banner banner--error" role="alert">Couldn’t load run history: @_runsError <button class="btn" @onclick="LoadAsync">Retry</button></p> }
                 else if (!_activityLoading && _runs.Count == 0) { <p>No agent runs recorded.</p> }
@@ -223,16 +224,13 @@
     }
 </div>
 @code {
-    private string? HumanWait
+    private string? WaitDuration(string prefix)
     {
-        get
-        {
-            var recorded = double.TryParse(Meta("humanReviewWaitSeconds"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && double.IsFinite(seconds) && seconds >= 0;
-            var active = DateTimeOffset.TryParse(Meta("humanReviewWaitStartedAt"), out var start) && string.IsNullOrEmpty(Meta("humanReviewWaitEndedAt"));
-            if (!recorded && !active) return null;
-            var total = (recorded ? seconds : 0) + (active ? Math.Max(0, (DateTimeOffset.UtcNow - start).TotalSeconds) : 0);
-            return $"{total:0}s{(active ? " · still waiting at this refresh" : "")}";
-        }
+        var recorded = double.TryParse(Meta(prefix + "Seconds"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && double.IsFinite(seconds) && seconds >= 0;
+        var active = DateTimeOffset.TryParse(Meta(prefix + "StartedAt"), out var start) && string.IsNullOrEmpty(Meta(prefix + "EndedAt"));
+        if (!recorded && !active) return null;
+        var total = (recorded ? seconds : 0) + (active ? Math.Max(0, (DateTimeOffset.UtcNow - start).TotalSeconds) : 0);
+        return $"{total:0}s{(active ? " · still waiting at this refresh" : "")}";
     }
 
     private bool _legacyLoaded, _legacyLoading, _laterCode;

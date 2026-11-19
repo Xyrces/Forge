@@ -84,12 +84,12 @@ public class PRWatcherReworkTests : IDisposable
             => Task.FromResult(FailedChecks);
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default)
             => Task.FromResult((IReadOnlyList<PullRequestReview>)Reviews);
-        public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        public override Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
         {
             MergeCalls++;
             ExpectedMergeSha = expectedHeadSha;
             if (MergeResult && !StaleAfterMerge) Merged = true;
-            return Task.FromResult(MergeResult);
+            return Task.FromResult(new PullRequestMergeAttempt(MergeResult));
         }
         public override Task<bool> DeleteBranchAsync(string branch, CancellationToken cancellationToken = default)
         {

@@ -140,6 +140,7 @@ public sealed class RunAgentExecutor : FunctionExecutor<WorktreeReady, AgentComp
         // would waste tokens. The gate still records the plan.
         var planFastPath = (issue.GetMetadata("reworkReason") ?? "") is { } reason
             && (reason.Contains("conflicts with the base branch", StringComparison.OrdinalIgnoreCase)
+                || reason == Forge.Reviewer.PRWatcher.BaseRefreshReason
                 || reason.Contains("base-branch CI recovered", StringComparison.OrdinalIgnoreCase));
         var queued = drainMessageBus(roleAgent.AgentName);
         var fullPrompt = string.IsNullOrEmpty(queued)

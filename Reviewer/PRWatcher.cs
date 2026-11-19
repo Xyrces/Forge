@@ -14,13 +14,22 @@ public sealed partial class PRWatcher
     private static bool HasMergeEvidence(PullRequest pr) => pr.Merged
         && !string.IsNullOrWhiteSpace(pr.MergeCommitSha) && !string.IsNullOrWhiteSpace(pr.Head?.Sha);
 
-    private static Dictionary<string, object> MergeEvidence(string taskId, PullRequest pr)
+    private async Task<Dictionary<string, object>> MergeEvidenceAsync(string taskId, PullRequest pr, CancellationToken ct)
     {
         var observed = pr.Merged && !string.IsNullOrWhiteSpace(pr.MergeCommitSha) && !string.IsNullOrWhiteSpace(pr.Head?.Sha)
             ? System.Text.Json.JsonSerializer.Serialize(new Core.Completion.ObservedMergeEvidence(
                 taskId, pr.Number, pr.Head.Sha, pr.MergeCommitSha, DateTimeOffset.UtcNow))
             : null;
-        return new Dictionary<string, object> { ["observedMerge"] = observed! };
+        var fields = new Dictionary<string, object> { ["observedMerge"] = observed! };
+        if (await _issues.GetAsync(taskId, ct) is { } task)
+        {
+            var mergedAt = pr.MergedAt ?? DateTimeOffset.UtcNow;
+            foreach (var field in ReviewWaitTiming.Observe(task, false, mergedAt)
+                .Concat(ReviewWaitTiming.ObserveExternal(task, false, mergedAt)))
+                fields[field.Key] = field.Value;
+            fields["awaitingHumanReview"] = false;
+        }
+        return fields;
     }
     /// <summary>Grace window for a consumed rework round to move the
     /// PR head before the round is treated as stalled (no-op
@@ -188,7 +197,7 @@ public sealed partial class PRWatcher
             await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
             await _issues.TransitionAsync(taskId, IssueStatus.Completed,
-                "PR merged externally after the breaker tripped", MergeEvidence(taskId, prFailed), cancellationToken);
+                "PR merged externally after the breaker tripped", await MergeEvidenceAsync(taskId, prFailed, cancellationToken), cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally after failure; task completed"));
@@ -211,7 +220,7 @@ public sealed partial class PRWatcher
             _logger.LogInformation("PR #{PrNumber} was merged externally; closing task {TaskId}", prNumber, taskId);
             await ReportAsync(Forge.Core.TaskEvent.ExternallyMerged);
             await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, MergeEvidence(taskId, pr), cancellationToken);
+            await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, await MergeEvidenceAsync(taskId, pr, cancellationToken), cancellationToken);
             await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
             _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                 taskId, $"PR #{prNumber} merged externally; task completed"));
@@ -258,17 +267,23 @@ public sealed partial class PRWatcher
         {
             formalGate = await TryReadFormalGateAsync(task, pr, sha, cancellationToken);
             if (formalGate is null) return WatchPollOutcome.Pending;
+            // Close a released gate's observed interval before evaluating the stale deadline.
+            if (!formalGate.Waiting || formalGate.HumanWaiting || !formalGate.AutomatedSatisfied
+                || formalGate.AutomationPending || formalGate.Requests.Count > 0)
+                await RecordExternalWaitAsync(task, false, cancellationToken);
             if (!formalGate.Waiting) await RecordHumanWaitAsync(task, false, cancellationToken);
         }
         if (_hasDurableWorker is not null && await _hasDurableWorker(taskId, cancellationToken))
         {
             if (formalRequired) await RecordHumanWaitAsync(task, false, cancellationToken);
+            if (formalRequired) await RecordExternalWaitAsync(task, false, cancellationToken);
             return WatchPollOutcome.Pending;
         }
         if (_runs is not null && (await _runs.ListActiveAsync(cancellationToken))
             .Any(r => r.TaskId == taskId && r.Role is "CoreDev" or "ClientDev"))
         {
             if (formalRequired) await RecordHumanWaitAsync(task, false, cancellationToken);
+            if (formalRequired) await RecordExternalWaitAsync(task, false, cancellationToken);
             return WatchPollOutcome.Pending;
         }
         // Human decisions have no expiry or paid retry budget. Current-head findings
@@ -282,7 +297,8 @@ public sealed partial class PRWatcher
             var anchor = DateTimeOffset.TryParse(prOpenedRaw, out var openedAt)
                 ? openedAt.UtcDateTime : task.CreatedAt;
             var timingTask = await _issues.GetAsync(taskId, cancellationToken) ?? task;
-            if (DateTime.UtcNow - anchor - TimeSpan.FromSeconds(ReviewWaitTiming.CompletedSeconds(timingTask)) > _staleAfter)
+            var waitSeconds = ReviewWaitTiming.CompletedSeconds(timingTask) + ReviewWaitTiming.ExternalSeconds(timingTask);
+            if (DateTime.UtcNow - anchor - TimeSpan.FromSeconds(waitSeconds) > _staleAfter)
             {
                 _logger.LogWarning("PR #{PrNumber} timed out after {Minutes:F0} minutes", prNumber, _staleAfter.TotalMinutes);
                 await _issues.TransitionAsync(taskId, IssueStatus.Failed, "pr-stale", ct: cancellationToken);
@@ -441,9 +457,16 @@ public sealed partial class PRWatcher
                 || string.Equals(qaVerdict, QaDispatcher.VerdictNotApplicable, StringComparison.Ordinal)));
         var qaFailed = _qaEnabled && qaCurrent && string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal);
         if (formalGate is not null)
-            await RecordHumanWaitAsync(task, formalGate.Waiting && (!formalGate.ProtectionUnavailable || formalGate.HumanPending) && formalGate.AutomatedSatisfied
+        {
+            await RecordHumanWaitAsync(task, formalGate.HumanWaiting && formalGate.AutomatedSatisfied
                 && formalGate.Requests.Count == 0 && ciGreen && qaPassed
+                && formalGate.MergeState is not ("BEHIND" or "DIRTY")
                 && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
+            await RecordExternalWaitAsync(task, formalGate.Waiting && !formalGate.HumanWaiting
+                && formalGate.AutomatedSatisfied && !formalGate.AutomationPending && formalGate.Requests.Count == 0
+                && ciGreen && qaPassed && formalGate.MergeState is not ("BEHIND" or "DIRTY")
+                && (mergeableOverride?.Invoke(pr) ?? pr.Mergeable) != false, cancellationToken);
+        }
 
         // Rework guard: a rework round was already queued FOR THIS
         // HEAD. The guard reads the MACHINE's record on the task
@@ -508,17 +531,20 @@ public sealed partial class PRWatcher
             // round instead. Mergeable==null means "still computing"
             // — attempt the merge and re-check on failure.
             var mergeableGreen = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
-            if (mergeableGreen == false)
+            if (mergeableGreen == false || formalGate?.MergeState is "BEHIND" or "DIRTY")
             {
-                await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
+                if (formalGate?.MergeState != "BEHIND") await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
                 return await ReworkOrTripAsync(
                     task, worktreePath, sha,
-                    reason: ConflictReworkReason,
-                    context: ConflictContext,
+                    reason: formalGate?.MergeState == "BEHIND" ? BaseRefreshReason : ConflictReworkReason,
+                    context: formalGate?.MergeState == "BEHIND"
+                        ? "GitHub requires this PR branch to include the current base branch. Fetch and merge the base branch into this SAME branch, run the verification suite, and push. Preserve the existing changes and PR."
+                        : ConflictContext,
                     terminalStatus: IssueStatus.Blocked,
                     terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                     terminalOutcome: WatchPollOutcome.Blocked,
                     cancellationToken,
+                    countAsStrike: formalGate?.MergeState != "BEHIND",
                     maxStrikes: maxStrikes);
             }
 
@@ -544,17 +570,27 @@ public sealed partial class PRWatcher
                 var current = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
                 if (current.Merged || current.State.Value != ItemState.Open || current.Head.Sha != sha)
                     return WatchPollOutcome.Pending;
+                // GitHub can refuse a merge even with clean checks (for example, a required queue).
+                // Continue reading gates on every turn. Back off only an identical write attempt.
+                if (task.GetMetadata("reviewMergeRefusedHead") == sha
+                    && task.GetMetadata("reviewMergeRefusedBase") == (current.Base?.Sha ?? "")
+                    && task.GetMetadata("reviewMergeRefusedPrUpdatedAt") == current.UpdatedAt.ToString("O")
+                    && DateTimeOffset.TryParse(task.GetMetadata("reviewMergeRetryAfter"), out var retryAfter)
+                    && retryAfter > DateTimeOffset.UtcNow)
+                    return WatchPollOutcome.Pending;
                 var currentGate = await TryReadFormalGateAsync(task, current, sha, cancellationToken);
                 if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0
+                    || currentGate.MergeState is "BEHIND" or "DIRTY"
                     || await _gitHub.GetCommitStatusAsync(sha, cancellationToken) != CommitState.Success)
                     return WatchPollOutcome.Pending;
                 // Read decisions after CI as well, minimizing the last-read/merge race.
                 currentGate = await TryReadFormalGateAsync(task, current, sha, cancellationToken);
-                if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0)
+                if (currentGate is null || !currentGate.Approved || currentGate.Requests.Count > 0
+                    || currentGate.MergeState is "BEHIND" or "DIRTY")
                     return WatchPollOutcome.Pending;
             }
-            var merged = await _gitHub.MergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
-            if (merged)
+            var attempt = await _gitHub.TryMergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha: sha);
+            if (attempt.Merged)
             {
                 var observedMerged = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
                 if (!HasMergeEvidence(observedMerged))
@@ -564,7 +600,7 @@ public sealed partial class PRWatcher
                 }
                 await ReportAsync(Forge.Core.TaskEvent.Merged);
                 await _gitHub.DeleteBranchAsync(branch, cancellationToken);
-                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, MergeEvidence(taskId, observedMerged), cancellationToken);
+                await _issues.TransitionAsync(taskId, IssueStatus.Completed, null, await MergeEvidenceAsync(taskId, observedMerged, cancellationToken), cancellationToken);
                 await TryRemoveWorktreeAsync(worktreePath, cancellationToken);
                 _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.PrMerged,
                     taskId, $"PR #{prNumber} merged and branch deleted"));
@@ -575,8 +611,21 @@ public sealed partial class PRWatcher
             {
                 var refused = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);
                 var refusedGate = await TryReadFormalGateAsync(task, refused, refused.Head.Sha, cancellationToken);
-                await RecordHumanWaitAsync(task, refused.Head.Sha == sha && refusedGate is { Waiting: true, AutomatedSatisfied: true }
-                    && (!refusedGate.ProtectionUnavailable || refusedGate.HumanPending) && refusedGate.Requests.Count == 0
+                if (!refused.Merged && refused.Head.Sha == sha && refusedGate is { Approved: true } && _issues is IssueStore issueStore)
+                {
+                    var message = string.IsNullOrWhiteSpace(attempt.Reason) ? "GitHub declined the attempt. Check the PR merge box for the outstanding requirement." : attempt.Reason.Trim();
+                    await issueStore.PatchReviewMetadataAsync(task.Id, new Dictionary<string, object>
+                    {
+                        ["reviewMergeRefusedHead"] = sha,
+                        ["reviewMergeRefusedReason"] = message[..Math.Min(message.Length, 1000)],
+                        ["reviewMergeRefusedBase"] = refused.Base?.Sha ?? "",
+                        ["reviewMergeRefusedPrUpdatedAt"] = refused.UpdatedAt.ToString("O"),
+                        ["reviewMergeRetryAfter"] = DateTimeOffset.UtcNow.AddMinutes(1).ToString("O"),
+                    }, null, cancellationToken);
+                }
+                await RecordHumanWaitAsync(task, refused.Head.Sha == sha && refusedGate is { HumanWaiting: true, AutomatedSatisfied: true }
+                    && refusedGate.Requests.Count == 0
+                    && refusedGate.MergeState is not ("BEHIND" or "DIRTY")
                     && qaPassed && refused.Mergeable != false
                     && await _gitHub.GetCommitStatusAsync(sha, cancellationToken) == CommitState.Success, cancellationToken);
                 return WatchPollOutcome.Pending;
@@ -765,17 +814,20 @@ public sealed partial class PRWatcher
         //     Mergeable is null while GitHub computes — skip those
         //     sweeps rather than firing spurious rounds.
         var mergeable = mergeableOverride?.Invoke(pr) ?? pr.Mergeable;
-        if (mergeable == false)
+        if (mergeable == false || formalGate?.MergeState is "BEHIND" or "DIRTY")
         {
-            await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
+            if (formalGate?.MergeState != "BEHIND") await ReportAsync(Forge.Core.TaskEvent.ConflictDetected);
             return await ReworkOrTripAsync(
                 task, worktreePath, sha,
-                reason: ConflictReworkReason,
-                context: ConflictContext,
+                reason: formalGate?.MergeState == "BEHIND" ? BaseRefreshReason : ConflictReworkReason,
+                context: formalGate?.MergeState == "BEHIND"
+                    ? "GitHub requires this PR branch to include the current base branch. Fetch and merge the base branch into this SAME branch, run the verification suite, and push. Preserve the existing changes and PR."
+                    : ConflictContext,
                 terminalStatus: IssueStatus.Blocked,
                 terminalError: "PR conflicts with base branch (circuit breaker tripped after max rework attempts)",
                 terminalOutcome: WatchPollOutcome.Blocked,
                 cancellationToken,
+                countAsStrike: formalGate?.MergeState != "BEHIND",
                 maxStrikes: maxStrikes);
         }
 
@@ -809,6 +861,7 @@ public sealed partial class PRWatcher
     /// the conflict mutex keys on it, so it must be a single
     /// literal.</summary>
     internal const string ConflictReworkReason = "PR conflicts with the base branch";
+    internal const string BaseRefreshReason = "GitHub requires an up-to-date branch";
 
     /// <summary>Shared context for conflict sync rounds (used by the
     /// green+approved-conflicting route and the non-green conflict
@@ -963,7 +1016,7 @@ public sealed partial class PRWatcher
         var claimed = (await _issues.ListAsync(
                 new Forge.Core.IssueFilter { Status = IssueStatus.InProgress }, ct))
             .Where(t => t.Id != selfTaskId
-                && t.GetMetadata("reworkReason") == ConflictReworkReason)
+                && t.GetMetadata("reworkReason") is ConflictReworkReason or BaseRefreshReason)
             .ToList();
         if (claimed.Count == 0) return false;
         if (_runs is null) return true;   // no registry — conservative
@@ -1026,7 +1079,7 @@ public sealed partial class PRWatcher
         // conflict-sync round is claimed, wait — the strike fires
         // once the base stops moving. Single choke point: every
         // conflict branch (MergeReady, CI-red, 2b) routes here.
-        if (reason == ConflictReworkReason
+        if (reason is ConflictReworkReason or BaseRefreshReason
             && await ConflictSyncInFlightAsync(taskId, cancellationToken))
         {
             _logger.LogInformation(

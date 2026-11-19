@@ -135,19 +135,37 @@ public sealed class ReviewerDispatcher
                 || bool.TryParse(task.GetMetadata("reviewPublishStarted"), out var uncertain) && uncertain
                 ? await CompleteDraftAsync(task, prNumber, pending, cancellationToken, headShaOverride) : null;
 
+        IReadOnlyList<ReviewConversation> conversations = [];
+        if (_gitHub.RequireFormalReview)
+        {
+            try { conversations = (await _gitHub.GetMergeRequirementsAsync(prNumber, headSha, cancellationToken)).Conversations; }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, "", headSha, "Review conversations unavailable: " + ex.Message);
+            }
+        }
+
         // Per-SHA dedupe: the watch sweep calls this every pass; only
         // a head move (rework push) triggers a fresh round. An Error
         // verdict does NOT dedupe — the sweep retries the review (the
         // watcher's circuit breaker bounds the retries).
         var reviewedSha = task.GetMetadata("reviewSha");
         var recordedVerdict = task.GetMetadata("reviewVerdict");
+        var humanCheckpoint = ReviewFindings.HumanConversationCheckpoint(conversations, headSha, _gitHub.ReviewerLogin);
         if (_gitHub.RequireFormalReview && reviewedSha == headSha && recordedVerdict == nameof(ReviewerVerdict.Error)
             && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var errorAttempts) && errorAttempts >= 3)
             return null; // Bounded paid attempts; a new head or explicit operator reconciliation is required.
         if (string.Equals(reviewedSha, headSha, StringComparison.Ordinal)
             && !string.IsNullOrEmpty(recordedVerdict)
             && recordedVerdict != nameof(ReviewerVerdict.Error)
-            && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha))
+            && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha)
+            && !(recordedVerdict == nameof(ReviewerVerdict.Approve)
+                && conversations.Any(t => GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin))
+                && ReviewFindings.ConversationCheckpoint(conversations, _gitHub.ReviewerLogin) != task.GetMetadata("reviewThreadCheckpoint"))
+            && !(recordedVerdict == nameof(ReviewerVerdict.Approve) && humanCheckpoint is not null
+                && humanCheckpoint != task.GetMetadata("reviewHumanThreadCheckpoint")))
         {
             return null;
         }
@@ -179,6 +197,17 @@ public sealed class ReviewerDispatcher
                 || string.Equals(qaVerdict, QaDispatcher.VerdictFail, StringComparison.Ordinal))
             {
                 return null;
+            }
+        }
+
+        if (_gitHub.RequireFormalReview)
+        {
+            try { conversations = await _gitHub.GetReviewConversationInputsAsync(conversations, headSha, cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, "", headSha, "Review conversation evidence unavailable: " + ex.Message);
             }
         }
 
@@ -275,6 +304,10 @@ public sealed class ReviewerDispatcher
             ? BuildReReviewPrompt(pr, diff, task, previousReviewSha!, recordedVerdict!, task.GetMetadata("reviewNotes"), worktreePath, reviewContext)
             : BuildReviewerPrompt(pr, diff, task, worktreePath, headSha, reviewContext);
         prompt += "\n\n" + ReviewFindings.Instructions;
+        foreach (var conversation in conversations.Where(t => !t.Resolved && t.AssessmentComplete))
+            prompt += "\n\n" + ReviewFindings.ConversationPrompt(conversation, headSha, _gitHub.ReviewerLogin);
+        if (conversations.Any(t => !t.Resolved && !t.AssessmentComplete))
+            prompt += "\n\nSome discussions exceed the bounded review input. They stay unresolved for their participants. Do not claim those findings are verified.";
         ReviewerVerdict verdict;
         string body;
         string? error = null;
@@ -348,7 +381,13 @@ public sealed class ReviewerDispatcher
                 _logger.LogWarning(ex, "Full PR diff unavailable for #{Pr}; retaining findings in the review summary without anchors", prNumber);
                 fullDiff = "";
             }
-            var draft = ReviewFindings.Create(round, headSha, verdict.ToString(), body, fullDiff);
+            ReviewDraft draft;
+            try { draft = ReviewFindings.Create(round, headSha, verdict.ToString(), body, fullDiff, conversations, _gitHub.ReviewerLogin); }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, body, headSha, ex.Message);
+            }
             await UpdateWatchMetadataAsync(task, m =>
             {
                 m["reviewDraft"] = JsonSerializer.Serialize(draft, ReviewFindings.Json);
@@ -455,6 +494,10 @@ public sealed class ReviewerDispatcher
                     throw;
                 }
             }
+            var conversationReceipts = await _gitHub.ResolveReviewedConversationsAsync(prNumber, draft, ct);
+            var humanVersions = draft.HumanThreadVersions is null ? null : new Dictionary<string, string>(draft.HumanThreadVersions);
+            if (humanVersions is not null)
+                foreach (var receipt in conversationReceipts) humanVersions[receipt.Key] = receipt.Value;
             await UpdateWatchMetadataAsync(task, m =>
             {
                 var history = new List<PublishedReview>();
@@ -474,6 +517,11 @@ public sealed class ReviewerDispatcher
                 m["reviewSha"] = draft.HeadSha; m["reviewVerdict"] = draft.Verdict;
                 m["reviewNotes"] = draft.Summary; m["reviewRound"] = draft.Round;
                 m["reviewPublishedHead"] = draft.HeadSha; m["reviewDraft"] = null!;
+                m["reviewThreadCheckpoint"] = draft.ThreadCheckpoint!;
+                m["reviewHumanThreadCheckpoint"] = (humanVersions is null ? draft.HumanThreadCheckpoint : ReviewFindings.HumanCheckpoint(humanVersions))!;
+                m["reviewConversationInputLimited"] = draft.LimitedConversations?.Count ?? 0;
+                m["reviewConversationInputHead"] = draft.HeadSha;
+                m["reviewConversationLimitedIds"] = draft.LimitedConversations is null ? null! : JsonSerializer.Serialize(draft.LimitedConversations);
                 m["reviewPublishStarted"] = null!; m["reviewStartedAt"] = null!;
                 m["reviewError"] = null!; m["reviewIntegrationError"] = null!;
                 m["reviewErrorAttempts"] = null!;
