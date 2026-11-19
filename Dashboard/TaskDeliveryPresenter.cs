@@ -23,7 +23,8 @@ internal static class TaskDeliveryPresenter
         var publication = TaskDeliveryEvidence.IsMergedAndVerified(task)
             ? JsonSerializer.Deserialize<TrustedPublicationEvidence>(task.GetMetadata("trustedPublication")!) : null;
         var existing = plan is not null && ExistingImplementationEvidence.TryGet(task, plan, out var verified) ? verified : null;
-        return new(criteria, publication?.PublishedHeadSha, publication?.Verification.CompletedAt,
+        var integrated = merge is not null && publication is not null ? TaskDeliveryEvidence.Integration(task, merge.HeadSha) : null;
+        return new(criteria, integrated?.VerifiedHeadSha ?? publication?.PublishedHeadSha, integrated?.Verification.CompletedAt ?? publication?.Verification.CompletedAt,
             merge?.MergeSha, merge?.ObservedAt, existing?.SourceSha, existing?.Verification.CompletedAt, existing?.Review.ReviewedAt);
     }
 }

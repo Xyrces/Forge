@@ -153,6 +153,50 @@ public sealed class WorkerAttemptTests : IDisposable
             return new(System.Net.HttpStatusCode.NotFound);
         }
     }
+    [Fact]
+    public async Task VerificationOnlyDispatchReturnsPendingAndAdoptsWithoutAnotherJob()
+    {
+        var jobs = new PendingVerificationJobs(_store);
+        var context = new Dictionary<string, object> { ["projectId"] = "forge", ["issueId"] = "task", ["dispatchId"] = "integration",
+            ["worktreePath"] = Path.GetFullPath("."), ["sourceSha"] = new string('a', 40) };
+        var runner = new KubernetesAgentRunner(_store, jobs, "dataset");
+        Assert.Null(await runner.StartOrObserveVerificationAsync(context, default));
+        Assert.True(JsonSerializer.Deserialize<WorkerInvocation>(jobs.Assignment!.AssignmentJson)!.VerificationOnly);
+        var proof = new VerificationReceipt(jobs.Assignment.Id, new string('b', 40), new string('c', 64), DateTimeOffset.UtcNow);
+        await _store.CompleteAsync(jobs.Assignment.Id, "pod", jobs.Assignment.AttemptToken,
+            JsonSerializer.Serialize(new AgentRunResult("", null, 0, 0, TimeSpan.Zero, Verification: proof)), null);
+        var result = await new KubernetesAgentRunner(_store, jobs, "dataset").StartOrObserveVerificationAsync(context, default);
+        Assert.Equal(proof, result!.Verification);
+        Assert.Equal(1, jobs.Created);
+    }
+
+    [Fact]
+    public async Task VerificationRejectsReceiptFromAnotherAttemptAndDoesNotCreateRetryJobs()
+    {
+        var jobs = new PendingVerificationJobs(_store);
+        var context = new Dictionary<string, object> { ["projectId"] = "forge", ["issueId"] = "task", ["dispatchId"] = "integration-wrong",
+            ["worktreePath"] = Path.GetFullPath("."), ["sourceSha"] = new string('a', 40) };
+        var runner = new KubernetesAgentRunner(_store, jobs, "dataset");
+        Assert.Null(await runner.StartOrObserveVerificationAsync(context, default));
+        var a = jobs.Assignment!;
+        await _store.CompleteAsync(a.Id, "pod", a.AttemptToken,
+            JsonSerializer.Serialize(new AgentRunResult("", null, 0, 0, TimeSpan.Zero,
+                Verification: new("other-attempt", new string('b', 40), new string('c', 64), DateTimeOffset.UtcNow))), null);
+        for (var i = 0; i < 2; i++)
+            await Assert.ThrowsAsync<InvalidOperationException>(() => runner.StartOrObserveVerificationAsync(context, default));
+        Assert.Equal(1, jobs.Created);
+    }
+
+    private sealed class PendingVerificationJobs(WorkerAttemptStore store) : IWorkerJobs
+    {
+        public WorkerAssignment? Assignment;
+        public int Created;
+        public async Task EnsureJobAsync(WorkerAssignment assignment, CancellationToken ct)
+        { Assignment = assignment; Created++; await store.ClaimAsync(assignment.Id, "pod", ct); }
+        public Task<string?> GetFailureAsync(string id, CancellationToken ct) => Task.FromResult<string?>(null);
+        public Task CancelAndWaitAsync(string id, CancellationToken ct) => Task.CompletedTask;
+    }
+
     private sealed class DetachingJobs(CancellationTokenSource stop) : IWorkerJobs
     {
         public string? Id;

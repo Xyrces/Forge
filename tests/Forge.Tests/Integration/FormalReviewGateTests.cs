@@ -91,10 +91,11 @@ public sealed class FormalReviewGateTests : IDisposable
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
     }
     private static FormalDecision Decision(string user, bool bot, PullRequestReviewState state, string head = "head", long id = 0) => new(user, head, state, bot, id == 0 ? (bot ? 1 : user == "another-writer" ? 3 : 2) : id, "finding", "url", ReviewTime);
-    private PRWatcher Watch(GitHub github, bool activeWorker = false) => new(github,
+    private PRWatcher Watch(GitHub github, bool activeWorker = false,
+        Func<IssueRecord, string, CancellationToken, Task<bool>>? verifyMergeHead = null) => new(github,
         new AgentTools.GitWorktreeService(new Configuration.WorkspaceOptions { Root = _root, WorktreeRoot = ".wt", DefaultBranch = "main" }, NullLogger<AgentTools.GitWorktreeService>.Instance),
         _issues, TimeSpan.FromSeconds(1), TimeSpan.FromDays(1), new InMemoryDashboardEventBus(), NullLogger<PRWatcher>.Instance,
-        hasDurableWorker: (_, _) => Task.FromResult(activeWorker));
+        hasDurableWorker: (_, _) => Task.FromResult(activeWorker), verifyMergeHead: verifyMergeHead);
     private async Task<IssueRecord> Seed(bool observed = true)
     {
         if (observed) await new MemoryStore(_issues.Db).ObserveReviewOriginsAsync("owner/repo/1/42", 42, "head", ReviewTime.AddSeconds(-1), []);
@@ -166,6 +167,34 @@ public sealed class FormalReviewGateTests : IDisposable
         Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(changed));
         Assert.Equal("0", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
         Assert.Equal(0, github.Merges);
+    }
+
+    [Fact]
+    public async Task IntegratedHeadVerificationPrecedesFinalReviewAndMergeChecks()
+    {
+        var github = new GitHub();
+        var task = await Seed();
+        var verified = false;
+        var introduceThread = false;
+        var watcher = Watch(github, verifyMergeHead: (member, head, _) =>
+        {
+            Assert.Equal(task.Id, member.Id);
+            Assert.Equal("head", head);
+            if (introduceThread)
+                github.Requirements = new("CLEAN",
+                    [new("new-thread", false, true, "File.cs", "human", "comment", false, "Hold for review")]);
+            return Task.FromResult(verified);
+        });
+        await watcher.PollWatchedTaskAsync(task);
+        Assert.Equal(0, github.Merges);
+        verified = true;
+        introduceThread = true;
+        await watcher.PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!);
+        Assert.Equal(0, github.Merges);
+        introduceThread = false;
+        github.Requirements = new("CLEAN", []);
+        await watcher.PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!);
+        Assert.Equal(1, github.Merges);
     }
 
     [Fact]

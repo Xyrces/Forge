@@ -349,8 +349,12 @@ public static class ForgeComposition
                 throw new InvalidOperationException("Kubernetes workers require the SQL-backed controller admission guard.");
             var kubeClient = Workers.KubernetesWorkerJobs.CreateInClusterClient();
             services.AddSingleton(kubeClient);
+            var workerAttempts = new Core.Execution.WorkerAttemptStore(registryIssues.Db);
+            services.AddSingleton(new Workers.VerificationJobEvents(kubeClient, options.Worker.Namespace,
+                options.Controller.DatasetId, workerAttempts.GetAsync, eventPublisher,
+                loggerFactory.CreateLogger<Workers.VerificationJobEvents>()));
             agentRunner = new Workers.KubernetesAgentRunner(
-                new Core.Execution.WorkerAttemptStore(registryIssues.Db),
+                workerAttempts,
                 new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission);
         }
         services.AddSingleton(localAgentRunner);
@@ -830,6 +834,11 @@ public static class ForgeComposition
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
             eventPublisher: eventPublisher, initiativeProposals: initiativeProposals, planning: options.SprintPlanning,
+            deliveryEvidenceReconciler: options.Worker.Enabled
+                ? (id, task, ct) => projectFactory.Find(id) is { } project
+                    ? dispatchBundleFactory.VerifyCompletedHeadAsync(project, task, ct)
+                    : Task.FromResult(false)
+                : null,
             routineDeploymentEnabled: projectId => projectFactory.Find(projectId)?.Options.Deployment
                 is { Kind: DeploymentKind.Kubernetes, RoutineEnabled: true }));
 

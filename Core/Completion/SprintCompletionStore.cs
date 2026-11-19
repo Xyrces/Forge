@@ -124,6 +124,9 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
             if ((evidence.ReadyForDeployment || evidence.Outcome == EngineeringOutcome.Satisfied)
                 && members.Any(m => !TaskDeliveryEvidence.IsImplementationVerified(m, plan)))
                 throw new InvalidOperationException("Every implementation requires exact-plan trusted verification and independent delivery evidence.");
+            if ((evidence.ReadyForDeployment || evidence.Outcome == EngineeringOutcome.Satisfied)
+                && !await HasCanonicalIntegrationProofsAsync(connection, tx, members, plan, ct))
+                throw new InvalidOperationException("Controller-owned integration verification is required for delivery.");
             deliveryRequired |= plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved);
             if (evidence.Outcome == EngineeringOutcome.Satisfied && plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved))
                 throw new InvalidOperationException("Deployment criteria require the linked deployment outcome.");

@@ -69,6 +69,7 @@ public sealed partial class PRWatcher
     private readonly Func<string, CancellationToken, Task<bool>>? _hasDurableWorker;
     private readonly Func<string, CancellationToken, Task<bool>>? _joinTaskWorkers;
     private readonly string? _projectId;
+    private readonly Func<IssueRecord, string, CancellationToken, Task<bool>>? _verifyMergeHead;
 
     public PRWatcher(
         GitHubService gitHub,
@@ -86,7 +87,8 @@ public sealed partial class PRWatcher
         bool qaEnabled = false,
         Func<string, CancellationToken, Task<bool>>? hasDurableWorker = null,
         Func<string, CancellationToken, Task<bool>>? joinTaskWorkers = null,
-        string? projectId = null)
+        string? projectId = null,
+        Func<IssueRecord, string, CancellationToken, Task<bool>>? verifyMergeHead = null)
     {
         _gitHub = gitHub;
         _worktrees = worktrees;
@@ -104,6 +106,7 @@ public sealed partial class PRWatcher
         _hasDurableWorker = hasDurableWorker;
         _joinTaskWorkers = joinTaskWorkers;
         _projectId = projectId;
+        _verifyMergeHead = verifyMergeHead;
     }
 
     /// <summary>
@@ -568,6 +571,10 @@ public sealed partial class PRWatcher
                 _logger.LogInformation("PR #{PrNumber}: merge held by operator gate", prNumber);
                 return WatchPollOutcome.Pending;
             }
+            // A base-branch update can replace the verified worker head without a new publication.
+            // Complete verification before the final GitHub reads, which must stay adjacent to merge.
+            if (_verifyMergeHead is not null && !await _verifyMergeHead(task, sha, cancellationToken))
+                return WatchPollOutcome.Pending;
             if (formalRequired)
             {
                 var current = await _gitHub.GetPullRequestAsync(prNumber, cancellationToken);

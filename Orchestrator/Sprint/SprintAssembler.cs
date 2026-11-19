@@ -73,9 +73,11 @@ public sealed class SprintAssembler
         TimeSpan? failureAgingWindow = null,
         InitiativeProposalStore? initiativeProposals = null,
         Func<string, bool>? routineDeploymentEnabled = null,
-        Forge.Configuration.SprintPlanningOptions? planning = null)
+        Forge.Configuration.SprintPlanningOptions? planning = null,
+        Func<string, IssueRecord, CancellationToken, Task<bool>>? deliveryEvidenceReconciler = null)
     {
         _routineDeploymentEnabled = routineDeploymentEnabled;
+        _deliveryEvidenceReconciler = deliveryEvidenceReconciler;
         _initiativeProposals = initiativeProposals;
         _planning = planning ?? new();
         _projects = projects;
@@ -89,6 +91,7 @@ public sealed class SprintAssembler
     }
 
     private readonly Func<string, bool>? _routineDeploymentEnabled;
+    private readonly Func<string, IssueRecord, CancellationToken, Task<bool>>? _deliveryEvidenceReconciler;
     private readonly InitiativeProposalStore? _initiativeProposals;
     private readonly Forge.Configuration.SprintPlanningOptions _planning;
     private readonly Dictionary<string, (string Capacities, SprintPlanBuilder Builder)> _planners = new();
@@ -247,7 +250,8 @@ public sealed class SprintAssembler
         string projectId, IIssueStore issues, ISprintStore sprints, ISpecStore specs, CancellationToken ct)
     {
         if (!completionCoordinators.TryGetValue(projectId, out var completion))
-            completionCoordinators[projectId] = completion = new CompletionCoordinator((IssueStore)issues, _followUpTriage, _initiativeProposals, _logger, _events);
+            completionCoordinators[projectId] = completion = new CompletionCoordinator((IssueStore)issues, _followUpTriage, _initiativeProposals, _logger, _events,
+                _deliveryEvidenceReconciler is null ? null : (task, token) => _deliveryEvidenceReconciler(projectId, task, token));
         await RecoverProposalSourcesAsync(projectId, issues, ct);
         await completion.ReconcileAsync(ct);
         var prevState = await ReadBuildStateAsync(issues, ct);

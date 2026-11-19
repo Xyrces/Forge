@@ -211,6 +211,37 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         return parts.Length >= 2 ? (parts[0], parts[1]) : null;
     }
 
+    private (GitHubService GitHub, GitWorktreeService Worktrees) CreateRepositoryServices(ProjectOptions project)
+    {
+        var gitHub = new GitHubService(BuildGitHubOptions(project));
+        var worktrees = new GitWorktreeService(
+            new WorkspaceOptions
+            {
+                Root = project.Root,
+                WorktreeRoot = ForgesystemPaths.WorktreeDir(_dataRoot, project.Id),
+                DefaultBranch = string.IsNullOrWhiteSpace(project.DefaultBranch) ? "main" : project.DefaultBranch,
+            },
+            _loggerFactory.CreateLogger<GitWorktreeService>(),
+            githubToken: gitHub.UsesAppIdentity ? null : ResolveGitHubToken(project.Id),
+            publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
+            publisherRepository: $"https://github.com/{gitHub.Owner}/{gitHub.Repo}");
+        return (gitHub, worktrees);
+    }
+
+    private Workers.IntegratedHeadVerifier? CreateIntegratedHeadVerifier(ProjectOptions project,
+        IIssueStore issues, GitHubService gitHub, GitWorktreeService worktrees)
+        => _runner is Workers.KubernetesAgentRunner workers
+            ? new Workers.IntegratedHeadVerifier(issues, worktrees, gitHub, workers, project.Id,
+                project.VerifyCommands, _loggerFactory.CreateLogger<Workers.IntegratedHeadVerifier>())
+            : null;
+
+    internal Task<bool> VerifyCompletedHeadAsync(Projects.ProjectContext project, IssueRecord task, CancellationToken ct)
+    {
+        var (gitHub, worktrees) = CreateRepositoryServices(project.Options);
+        var verifier = CreateIntegratedHeadVerifier(project.Options, project.Issues, gitHub, worktrees);
+        return verifier?.EnsureAsync(task, null, ct) ?? Task.FromResult(false);
+    }
+
     /// <summary>
     /// Construct a bundle for the given project. The bootstrap is
     /// idempotent (runs `git clone` if RepoUrl set, else falls back
@@ -236,18 +267,8 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         var designArtifacts = new DesignArtifactStore(issueStore.Db);
         var artOutputs = new ArtOutputStore(issueStore.Db);
 
-        var gitHub = new GitHubService(BuildGitHubOptions(ensured.Project));
-        var worktrees = new GitWorktreeService(
-            new WorkspaceOptions
-            {
-                Root = ensured.Project.Root,
-                WorktreeRoot = ForgesystemPaths.WorktreeDir(_dataRoot, project.Id),
-                DefaultBranch = string.IsNullOrWhiteSpace(ensured.Project.DefaultBranch) ? "main" : ensured.Project.DefaultBranch,
-            },
-            _loggerFactory.CreateLogger<GitWorktreeService>(),
-            githubToken: gitHub.UsesAppIdentity ? null : ResolveGitHubToken(project.Id),
-            publisherToken: gitHub.UsesAppIdentity ? gitHub.GetPublisherTokenAsync : null,
-            publisherRepository: $"https://github.com/{gitHub.Owner}/{gitHub.Repo}");
+        var (gitHub, worktrees) = CreateRepositoryServices(ensured.Project);
+        var verifier = CreateIntegratedHeadVerifier(ensured.Project, issueStore, gitHub, worktrees);
 
         var prWatcher = new PRWatcher(
             gitHub, worktrees, issueStore,
@@ -284,7 +305,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
                 foreach (var role in new[] { AgentType.CoreDev, AgentType.ClientDev, AgentType.QA, AgentType.Reviewer })
                     if (await lifecycle.HasUntrackedReviewWorkerAsync(role, project.Id, id, ct)) return false;
                 return true;
-            }, projectId: project.Id);
+            }, projectId: project.Id, verifyMergeHead: verifier is null ? null : verifier.EnsureAsync);
 
         return new ProjectDispatchBundle(
             ensured.Project,

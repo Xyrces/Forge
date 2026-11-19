@@ -10,10 +10,12 @@ namespace Forge.Orchestrator.Sprint;
 
 /// <summary>Resumes durable completion work. The active sprint is not its retry queue.</summary>
 internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? triage,
-    InitiativeProposalStore? proposals, ILogger logger, IDashboardEventBus? events = null)
+    InitiativeProposalStore? proposals, ILogger logger, IDashboardEventBus? events = null,
+    Func<IssueRecord, CancellationToken, Task<bool>>? deliveryEvidenceReconciler = null)
 {
     private readonly SprintCompletionStore store = new(issues);
     private bool recovered;
+    private string? deliveryCursor;
     private readonly Dictionary<string, string> failureAcknowledgements = new();
 
     public async Task<SprintCompletionRecord> CompleteAsync(SprintRecord sprint, ISprintStore sprints, CancellationToken ct, bool routineDeploymentEnabled = false)
@@ -39,13 +41,16 @@ internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? 
                 context.Add(reference, resolved);
         }
         var incomplete = members.Any(m => !IssueResolution.IsSatisfied(m, context));
-        var verified = members.Count > 0 && members.All(m => TaskDeliveryEvidence.IsImplementationVerified(m, plan));
+        var verifiedTasks = members.Where(m => TaskDeliveryEvidence.IsImplementationVerified(m, plan)).Select(m => m.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var member in members.Where(m => m.GetMetadata("trustedIntegrationVerification") is not null))
+            if (plan is null || !await store.HasRecordedIntegrationProofAsync(member, plan, ct)) verifiedTasks.Remove(member.Id);
+        var verified = members.Count > 0 && verifiedTasks.Count == members.Count;
         var outcome = incomplete ? EngineeringOutcome.Incomplete
             : plan is null ? EngineeringOutcome.LegacyTerminalOnly
             : !verified || routineDeploymentEnabled || plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved)
                 ? EngineeringOutcome.PendingEvidence : EngineeringOutcome.Satisfied;
         return await store.BeginCompletionAsync(sprint.Id, members, new(auditId, plan?.Hash, outcome,
-            JsonSerializer.Serialize(new { verifiedTasks = members.Where(m => TaskDeliveryEvidence.IsImplementationVerified(m, plan)).Select(m => m.Id),
+            JsonSerializer.Serialize(new { verifiedTasks,
                 unresolvedTasks = members.Where(m => !IssueResolution.IsSatisfied(m, context)).Select(m => m.Id),
                 deploymentPending = plan?.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved) ?? false }),
             ReadyForDeployment: plan is not null && verified && !incomplete,
@@ -55,6 +60,44 @@ internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? 
     public async Task ReconcileAsync(CancellationToken ct)
     {
         if (!recovered) { await store.RecoverRunningAsync(ct); recovered = true; }
+        // One bounded page per sweep; old unresolved outcomes cannot starve newer ones.
+        var waiting = await store.ListAwaitingImplementationEvidenceAsync(afterId: deliveryCursor, ct: ct);
+        foreach (var receipt in waiting)
+        {
+            try
+            {
+                var plan = await store.GetBoundPlanAsync(receipt, ct);
+                var frozen = JsonSerializer.Deserialize<IssueRecord[]>(receipt.MembersJson) ?? [];
+                var members = new List<IssueRecord>();
+                string? waitingOn = null;
+                foreach (var original in frozen)
+                {
+                    var current = await issues.GetAsync(original.Id, ct) ?? throw new InvalidOperationException("Frozen member missing.");
+                    if ((!TaskDeliveryEvidence.IsImplementationVerified(current, plan) || current.GetMetadata("trustedIntegrationVerification") is not null) && deliveryEvidenceReconciler is not null)
+                    {
+                        var verified = await deliveryEvidenceReconciler(current, ct);
+                        if (!verified && !await store.HasRecordedIntegrationProofAsync(current, plan, ct)) waitingOn ??= $"Awaiting controller-owned exact-revision verification of {current.Id}: {current.Title}.";
+                        current = await issues.GetAsync(original.Id, ct) ?? throw new InvalidOperationException("Verified member missing.");
+                    }
+                    if (current.GetMetadata("trustedIntegrationVerification") is not null && !await store.HasRecordedIntegrationProofAsync(current, plan, ct))
+                        waitingOn ??= $"Awaiting controller-owned exact-revision verification of {current.Id}: {current.Title}.";
+                    if (waitingOn is not null || !TaskDeliveryEvidence.IsImplementationVerified(current, plan))
+                        waitingOn = current.GetMetadata("reviewIntegrationVerificationError") is { Length: > 0 } failure
+                            ? $"Exact-revision verification of {current.Id} ({current.Title}) failed: {failure}"
+                            : waitingOn ?? $"Awaiting exact-revision verification of {current.Id}: {current.Title}.";
+                    members.Add(current);
+                }
+                if (waitingOn is not null)
+                {
+                    if (receipt.DeliveryNote != waitingOn) await store.RecordImplementationWaitAsync(receipt.Id, waitingOn, ct);
+                    continue;
+                }
+                await store.ReconcileImplementationEvidenceAsync(receipt.Id, members, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { logger.LogWarning(ex, "Completion {Completion} still awaits exact implementation evidence", receipt.Id); }
+        }
+        deliveryCursor = waiting.Count == 20 ? waiting[^1].Id : null;
         foreach (var (id, error) in failureAcknowledgements.ToArray())
         {
             await store.RecordTriageFailureAsync(id, error, ct);

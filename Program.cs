@@ -1243,6 +1243,8 @@ Console.Error.WriteLine(ex.ToString());
                 // admission opens. Its joined lifetime also fences shutdown.
                 backgroundLoops.Add(provider.GetRequiredService<Agents.ProductRefinementQueue>()
                     .RunAsync(shutdownCts.Token));
+                if (provider.GetService<Orchestrator.Workers.VerificationJobEvents>() is { } verificationJobs)
+                    backgroundLoops.Add(verificationJobs.RunAsync(shutdownCts.Token));
                 backgroundLoops.Add(provider.GetRequiredService<Forge.Deploy.RoutineDeploymentCoordinator>()
                     .RunAsync(shutdownCts.Token));
                 await provider.GetRequiredService<OrchestratorAgent>().ExecuteAsync(shutdownCts.Token);
