@@ -830,6 +830,11 @@ public static class ForgeComposition
             followUpTriage: followUpTriage,
             wakeup: wakeups.Assemble,
             eventPublisher: eventPublisher, initiativeProposals: initiativeProposals, planning: options.SprintPlanning,
+            deliveryEvidenceReconciler: options.Worker.Enabled
+                ? (id, task, ct) => projectFactory.Find(id) is { } project
+                    ? dispatchBundleFactory.VerifyCompletedHeadAsync(project, task, ct)
+                    : Task.FromResult(false)
+                : null,
             routineDeploymentEnabled: projectId => projectFactory.Find(projectId)?.Options.Deployment
                 is { Kind: DeploymentKind.Kubernetes, RoutineEnabled: true }));
 
