@@ -78,7 +78,12 @@ public static class Program
             if (options.Controller.Mode.Equals("initialize", StringComparison.OrdinalIgnoreCase))
                 return await Orchestrator.Control.ControllerInitializer.RunAsync(options, loggerFactory);
             if (options.Controller.Mode.Equals("worker", StringComparison.OrdinalIgnoreCase))
+            {
+                var workerRegistry = Core.Db.ForgeDb.SqlServer(options.Db.ConnectionString, Core.Db.ForgeDb.RegistrySchema, Core.Db.ForgeSchemaProfile.Core, initializeSchema: false);
+                if (await Orchestrator.Control.ControllerHost.VerifySchemaAsync(workerRegistry, CancellationToken.None) != Core.IssueStore.CurrentSchemaVersion)
+                    throw new InvalidOperationException("Recovery image cannot execute workers against the newer environment schema.");
                 return await RunWorkerWithSignalsAsync(options, loggerFactory);
+            }
             if (!options.Controller.Mode.Equals("standby", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Controller.Mode must be initialize, standby, or worker.");
             return await Orchestrator.Control.ControllerHost.RunAsync(options, loggerFactory, async (ready, admission, ct) =>
@@ -1111,6 +1116,11 @@ Console.Error.WriteLine(ex.ToString());
         CancellationToken externalStop = default, Action? ready = null,
         Func<CancellationToken, Task>? admission = null, bool maintenance = false)
     {
+        if (maintenance)
+        {
+            await Forge.Dashboard.RecoveryDashboard.RunAsync(options, ready, externalStop);
+            return 0;
+        }
         ServiceProvider provider;
         try
         {
