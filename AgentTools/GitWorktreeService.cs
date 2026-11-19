@@ -73,6 +73,30 @@ public sealed class GitWorktreeService
 
     }
 
+    /// <summary>A separate, immutable review checkout; never moves or cleans engineering work.</summary>
+    public async Task<string> CreateReviewSnapshotAsync(string taskId, string attemptId, string headSha, CancellationToken ct = default)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(headSha, "\\A[0-9a-f]{40}\\z"))
+            throw new InvalidOperationException("Review source must be an exact commit SHA.");
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(TimeSpan.FromMinutes(2));
+        ct = bounded.Token;
+        var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes(taskId + "\n" + attemptId))).ToLowerInvariant();
+        var path = WorktreePathFor("review-" + identity);
+        if (Directory.Exists(path) || File.Exists(path))
+            throw new InvalidOperationException("Review snapshot already exists without an adopted worker; refusing to overwrite it.");
+        Directory.CreateDirectory(WorktreeRoot);
+        var fetched = await RunGitInAsync(WorkspaceRoot, "", ct,
+            ["fetch", "--no-tags", "--no-write-fetch-head", "origin", headSha]);
+        if (fetched.ExitCode != 0) throw new InvalidOperationException("Cannot fetch the exact review source.");
+        var created = await RunGitInAsync(WorkspaceRoot, "", ct, ["worktree", "add", "--detach", path, headSha]);
+        if (created.ExitCode != 0) throw new InvalidOperationException("Cannot create isolated review snapshot.");
+        if (await GetHeadShaAsync(path, ct) != headSha)
+            throw new InvalidOperationException("Review snapshot does not match its pinned source.");
+        return path;
+    }
+
     public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null, bool preserveExistingBranch = false)
     {
         // The worktree branch must equal the branch the rest of the

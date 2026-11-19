@@ -87,6 +87,31 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReviewSnapshotPinsExternalHeadWithoutChangingDirtyEngineeringCheckout()
+    {
+        var engineering = await _service.CreateAsync("engineering", "main");
+        var oldHead = await GetHeadShaAsync(engineering);
+        File.WriteAllText(Path.Combine(engineering, "README.md"), "uncommitted engineering work");
+        File.WriteAllText(Path.Combine(_workDir, "external.txt"), "new remote revision");
+        Assert.Equal(0, RunGit(_workDir, "add external.txt"));
+        Assert.Equal(0, RunGit(_workDir, "commit -qm external"));
+        Assert.Equal(0, RunGit(_workDir, "push origin main"));
+        var head = await GetHeadShaAsync(_workDir);
+        var snapshot = await _service.CreateReviewSnapshotAsync("engineering", "attempt-1", head);
+        Assert.Equal(head, await GetHeadShaAsync(snapshot));
+        Assert.Equal("HEAD", RunGitForResult(snapshot, "rev-parse --abbrev-ref HEAD").Stdout);
+        Assert.Equal("new remote revision", File.ReadAllText(Path.Combine(snapshot, "external.txt")));
+        Assert.Equal(oldHead, await GetHeadShaAsync(engineering));
+        Assert.Equal("uncommitted engineering work", File.ReadAllText(Path.Combine(engineering, "README.md")));
+        File.WriteAllText(Path.Combine(snapshot, "README.md"), "do not overwrite");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.CreateReviewSnapshotAsync("engineering", "attempt-1", head));
+        Assert.Equal("do not overwrite", File.ReadAllText(Path.Combine(snapshot, "README.md")));
+        var next = await _service.CreateReviewSnapshotAsync("engineering", "attempt-2", head);
+        Assert.NotEqual(snapshot, next);
+        Assert.Equal(head, await GetHeadShaAsync(next));
+    }
+
+    [Fact]
     public async Task ConfiguredPublisherRefusesInvalidScopeBeforeMintingToken()
     {
         var tokenRequested = false;
