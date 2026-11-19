@@ -164,7 +164,7 @@ public sealed class ReviewerDispatcher
         // the e2e harness keeps SHA in a side channel); tests supply
         // the head SHA directly.
         var headSha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
-        if (task.GetMetadata("reviewBudgetDeniedHead") == headSha) return null;
+        if (ReviewIntegrationState.IsBudgetDenied(task, headSha)) return null;
         if (_gitHub.RequireFormalReview && ReviewIntegrationState.Exhausted(task, headSha)
             && task.GetMetadata("reviewDraft") is null) return null;
         try { await _gitHub.EnsureReviewerIdentityAsync(prNumber, cancellationToken); }
@@ -490,13 +490,13 @@ public sealed class ReviewerDispatcher
         {
             verdict = ReviewerVerdict.Error;
             body = "";
-            error = ex.Message;
+            error = ex.Message + " Choose Retry review when the request fits the available budget.";
             await UpdateWatchMetadataAsync(task, m =>
             {
                 m["reviewBudgetDeniedHead"] = headSha;
                 m["reviewBudgetRequestedUsd"] = ex.RequestedUsd;
                 m["reviewBudgetAvailableUsd"] = ex.AvailableUsd;
-                m["reviewIntegrationError"] = ex.Message;
+                m["reviewIntegrationError"] = error;
                 return m;
             }, cancellationToken);
         }

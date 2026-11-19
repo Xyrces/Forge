@@ -30,7 +30,10 @@
         </div>
         @if (HumanReviewRequired) { <p class="banner banner--info">@(NominatedHuman is null ? "Human review required before merge." : $"Review by @{NominatedHuman} required before merge.")@(Meta("humanReviewSyncPending")?.Equals("true", StringComparison.OrdinalIgnoreCase) == true ? " Synchronizing with GitHub; merge remains held." : "")</p> }
         @if (Meta("reviewGateError") is { Length: > 0 } gateError) { <p class="banner banner--error" role="alert"><strong>Review gate unavailable.</strong> @gateError</p> }
-        @if (Meta("reviewIntegrationError") is { Length: > 0 } publicationError) { <p class="banner banner--error" role="alert"><strong>Review publication needs attention.</strong> @publicationError</p> }
+        @if (Meta("reviewIntegrationError") is { Length: > 0 } publicationError && (Meta("reviewBudgetDeniedHead") is not { Length: > 0 } budgetHead || budgetHead != Meta("reviewSha")))
+        {
+            <p class="banner banner--error" role="alert"><strong>Review publication needs attention.</strong> @publicationError</p>
+        }
         <div class="task-controls">
             @foreach (var section in new[] { "Overview", "Review", "Plan & checks", "History & runs" })
             { <button class="btn @(_section == section ? "btn--primary" : "")" aria-pressed="@(_section == section)" @onclick="() => SelectSectionAsync(section)">@section</button> }

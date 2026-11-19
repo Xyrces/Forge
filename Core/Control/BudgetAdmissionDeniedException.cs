@@ -4,7 +4,7 @@ namespace Forge.Core.Control;
 
 /// <summary>A confirmed ledger refusal before provider generation, not a billed cost or uncertain publication.</summary>
 public sealed class BudgetAdmissionDeniedException(decimal requestedUsd, decimal availableUsd)
-    : InvalidOperationException(FormattableString.Invariant($"Budget admission denied: requested reservation ${requestedUsd:0.######}, available ${availableUsd:0.######}. These are authorization amounts, not billed usage. No provider generation was admitted for this request. Reconcile the budget, then choose Retry review."))
+    : InvalidOperationException(FormattableString.Invariant($"This request needs a ${requestedUsd:0.######} reservation. The available budget is ${availableUsd:0.######}. Forge stopped this request before generation."))
 {
     public decimal RequestedUsd { get; } = requestedUsd;
     public decimal AvailableUsd { get; } = availableUsd;

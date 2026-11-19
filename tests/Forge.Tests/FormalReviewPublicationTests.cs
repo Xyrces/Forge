@@ -70,7 +70,7 @@ public sealed class FormalReviewPublicationTests
         Assert.True(ReviewIntegrationState.Exhausted(denied, "head"));
         Assert.False(ReviewIntegrationState.Exhausted(denied, "new-head"));
         Assert.Equal("1", denied.GetMetadata("reviewErrorAttempts"));
-        Assert.Contains("not billed usage", denied.GetMetadata("reviewIntegrationError"));
+        Assert.Contains("before generation", denied.GetMetadata("reviewIntegrationError"));
         Assert.Null(denied.GetMetadata("reviewDraft"));
         Assert.Equal(0, github.Publications);
         await issues.TransitionAsync(task.Id, denied.Status, "operator retry", ReviewIntegrationState.RetryMetadata());

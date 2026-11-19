@@ -240,7 +240,8 @@ public sealed partial class PRWatcher
         // Stop impossible automated review visibly, even while GitHub legitimately
         // waits for a human. Do not interfere with a rightful engineering worker.
         var integrationTask = await _issues.GetAsync(taskId, cancellationToken) ?? task;
-        if (formalRequired && ReviewIntegrationState.Exhausted(integrationTask, sha)
+        if ((formalRequired || ReviewIntegrationState.IsBudgetDenied(integrationTask, sha))
+            && ReviewIntegrationState.Exhausted(integrationTask, sha)
             && !await HasOwnedWorkerAsync(taskId, cancellationToken)
             && _issues is IssueStore integrationStore
             && await new PullRequestReviewPolicy(new MemoryStore(integrationStore.Db)).GetModeAsync(cancellationToken) != RequiredReview.Human)
@@ -255,8 +256,10 @@ public sealed partial class PRWatcher
                     || await HasOwnedWorkerAsync(taskId, cancellationToken)) return WatchPollOutcome.Pending;
                 await RecordHumanWaitAsync(integrationTask, false, cancellationToken);
                 await ReportAsync(Forge.Core.TaskEvent.OperatorBlocked);
-                await _issues.TransitionAsync(taskId, IssueStatus.Blocked,
-                    "Review integration needs attention. Fix the connection or verdict issue, then Retry review; an uncertain submission will only be reconciled.",
+                var reason = ReviewIntegrationState.IsBudgetDenied(integrationTask, sha)
+                    ? integrationTask.GetMetadata("reviewIntegrationError") ?? "Review paused for budget. Choose Retry review when funds are available."
+                    : "Review integration needs attention. Fix the connection or verdict issue, then Retry review; an uncertain submission will only be reconciled.";
+                await _issues.TransitionAsync(taskId, IssueStatus.Blocked, reason,
                     new Dictionary<string, object> { ["blockedKind"] = ReviewIntegrationState.BlockedKind }, cancellationToken);
                 return WatchPollOutcome.Blocked;
             }

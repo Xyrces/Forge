@@ -35,6 +35,18 @@ public class TaskSituationTests
     }
 
     [Fact]
+    public void BudgetDenialShowsTheOperatorTheRecordedReservation()
+    {
+        const string reason = "The request needs a $4.20 reservation. $3.70 is available.";
+        var result = TaskSituation.Describe(Task(IssueStatus.Blocked,
+            ("blockedKind", "review-integration"), ("reviewSha", "head"),
+            ("reviewBudgetDeniedHead", "head"), ("reviewIntegrationError", reason)));
+        Assert.Equal("Review paused for budget", result.Label);
+        Assert.Equal(reason, result.Text);
+        Assert.Equal("Operator", result.NextActor);
+    }
+
+    [Fact]
     public void FailedHygiene_HasOwnClass()
     {
         var s = TaskSituation.Describe(Task(IssueStatus.Failed, ("lastError", "pre-push hygiene check failed (junk/oversized files added)")));

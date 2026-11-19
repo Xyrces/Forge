@@ -26,6 +26,9 @@ public static class TaskSituation
         var held = bool.TryParse(issue.GetMetadata("humanReviewRequired"), out var required) && required;
         Situation Result(string label, string reason, string? actor = null, string tone = "info") =>
             new(reason, tone) { Label = label, NextActor = actor, HumanReviewRequired = held, NominatedHuman = nominatedHuman };
+        if (ReviewIntegrationState.IsBlocked(issue) && ReviewIntegrationState.IsBudgetDenied(issue, issue.GetMetadata("reviewSha")))
+            return Result("Review paused for budget", issue.GetMetadata("reviewIntegrationError")
+                ?? "Choose Retry review when the request fits the available budget.", "Operator", "action");
         if (ReviewIntegrationState.IsBlocked(issue))
             return Result("Review integration needs attention", "Resolve the review connection or verdict problem, then choose Retry review. Saved publication evidence and engineering work are retained.", "Operator", "action");
         if (issue.Status == IssueStatus.Completed)

@@ -6,8 +6,10 @@ public static class ReviewIntegrationState
     public const string BlockedKind = "review-integration";
     public const int MaxAttempts = 3;
     public static bool IsBlocked(IssueRecord task) => task.Status == IssueStatus.Blocked && task.GetMetadata("blockedKind") == BlockedKind;
+    public static bool IsBudgetDenied(IssueRecord task, string? head) =>
+        !string.IsNullOrEmpty(head) && task.GetMetadata("reviewBudgetDeniedHead") == head;
     public static bool Exhausted(IssueRecord task, string head) =>
-        (task.GetMetadata("reviewBudgetDeniedHead") == head)
+        IsBudgetDenied(task, head)
         || (task.GetMetadata("reviewSha") == head && task.GetMetadata("reviewVerdict") == "Error"
             && int.TryParse(task.GetMetadata("reviewErrorAttempts"), out var model) && model >= MaxAttempts)
         || (task.GetMetadata("reviewIntegrationHead") == head
