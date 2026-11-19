@@ -235,7 +235,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
                 project.VerifyCommands, _loggerFactory.CreateLogger<Workers.IntegratedHeadVerifier>())
             : null;
 
-    internal Task<bool> VerifyCompletedHeadAsync(ProjectContext project, IssueRecord task, CancellationToken ct)
+    internal Task<bool> VerifyCompletedHeadAsync(Projects.ProjectContext project, IssueRecord task, CancellationToken ct)
     {
         var (gitHub, worktrees) = CreateRepositoryServices(project.Options);
         var verifier = CreateIntegratedHeadVerifier(project.Options, project.Issues, gitHub, worktrees);
