@@ -84,6 +84,9 @@ public static class BudgetRequestPolicy
                 string.IsNullOrEmpty(options.Worker.AttemptId) ? options.Controller.InstanceId : options.Worker.AttemptId,
                 context.Provider, context.Model, bound);
             var reservation = await ledger.ReserveAsync(request, ct);
+            if (!reservation.Admitted && reservation.Reason == "budget_exhausted"
+                && reservation.RequestedUsd is { } requested && reservation.AvailableUsd is { } available)
+                throw new BudgetAdmissionDeniedException(requested, available);
             if (!reservation.Admitted || !reservation.IsNew)
                 throw new InvalidOperationException("Model request denied by durable budget admission: " + reservation.Reason);
             return requestId;

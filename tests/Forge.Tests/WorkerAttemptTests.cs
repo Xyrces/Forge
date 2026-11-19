@@ -78,6 +78,19 @@ public sealed class WorkerAttemptTests : IDisposable
     }
 
     [Fact]
+    public async Task ConfirmedBudgetDenialSurvivesWorkerPersistenceWithoutUncertainty()
+    {
+        var denied = new Forge.Core.Control.BudgetAdmissionDeniedException(4m, 3m);
+        var jobs = new CompletingJobs(_store) { Failure = denied.ToWorkerError() };
+        var context = new Dictionary<string, object> { ["projectId"] = "forge", ["issueId"] = "task", ["dispatchId"] = "budget",
+            ["worktreePath"] = Path.GetFullPath("."), ["sourceSha"] = new string('a', 40) };
+        var error = await Assert.ThrowsAsync<Forge.Core.Control.BudgetAdmissionDeniedException>(() =>
+            new KubernetesAgentRunner(_store, jobs, "dataset").RunAsync(AgentType.Reviewer, "review", null, context, default));
+        Assert.Equal(denied.Message, error.Message);
+        Assert.Equal(1, jobs.Created);
+    }
+
+    [Fact]
     public async Task CancellingControllerWaitDoesNotCancelDurableWorker()
     {
         using var stop = new CancellationTokenSource();
@@ -149,13 +162,14 @@ public sealed class WorkerAttemptTests : IDisposable
     }
     private sealed class CompletingJobs(WorkerAttemptStore store) : IWorkerJobs
     {
+        public string? Failure;
         public int Created;
         public bool TerminationFails;
         public async Task EnsureJobAsync(WorkerAssignment a, CancellationToken ct)
         {
             Created++;
             await store.ClaimAsync(a.Id, "pod", ct);
-            await store.CompleteAsync(a.Id, "pod", a.AttemptToken, JsonSerializer.Serialize(new AgentRunResult("done", null, 1, 2, TimeSpan.Zero)), null, ct);
+            await store.CompleteAsync(a.Id, "pod", a.AttemptToken, JsonSerializer.Serialize(new AgentRunResult("done", null, 1, 2, TimeSpan.Zero)), Failure, ct);
         }
         public Task<string?> GetFailureAsync(string attemptId, CancellationToken ct) => Task.FromResult<string?>(null);
         public Task CancelAndWaitAsync(string attemptId, CancellationToken ct) => TerminationFails

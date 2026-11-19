@@ -7,7 +7,7 @@ namespace Forge.Core.Control;
 public sealed record BudgetReservationRequest(string DatasetId, string RequestId, string ProjectId,
     string RunId, string Provider, string Model, decimal ReservationUsd);
 public sealed record BudgetReservation(BudgetReservationRequest Request, string Status, decimal? ActualUsd, string? UsageJson = null, string? PricingBasis = null);
-public sealed record BudgetReservationResult(bool Admitted, bool IsNew, BudgetReservation? Reservation, string? Reason);
+public sealed record BudgetReservationResult(bool Admitted, bool IsNew, BudgetReservation? Reservation, string? Reason, decimal? RequestedUsd = null, decimal? AvailableUsd = null);
 /// <summary>Authorization accounting, not an invoice. SpentUsd includes legacy conservative settlements.</summary>
 public sealed record BudgetSnapshot(decimal LimitUsd, decimal SpentUsd, decimal OutstandingUsd,
     decimal UsageEstimatedUsd = 0m, decimal ConservativeSettledUsd = 0m, long UncertainRequestCount = 0,
@@ -52,7 +52,8 @@ public sealed partial class DurableBudgetStore : IDurableBudgetStore
         }
         var budget = (await ReadAsync(connection, transaction, request.DatasetId, ct))!;
         if (budget.SpentUsd + budget.OutstandingUsd + normalized.ReservationUsd > budget.LimitUsd)
-            return new(false, false, null, "budget_exhausted");
+            return new(false, false, null, "budget_exhausted", normalized.ReservationUsd,
+                budget.LimitUsd - budget.SpentUsd - budget.OutstandingUsd);
         using var insert = ControlDb.Command(connection, transaction, $"""
             INSERT INTO {_db.Dialect.Table("budget_reservation")}
                 (request_id,dataset_id,project_id,run_id,provider,model,reservation_microusd,status,created_at,updated_at)

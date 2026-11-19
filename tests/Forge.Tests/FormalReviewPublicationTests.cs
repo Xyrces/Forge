@@ -34,9 +34,10 @@ public sealed class FormalReviewPublicationTests
     private sealed class Runner : IAgentRunner
     {
         public int Calls;
+        public Exception? Failure;
         public string Output = "Assessment\nREVIEWER_VERDICT: APPROVE";
         public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context = null, CancellationToken ct = default)
-        { Calls++; return Task.FromResult(new AgentRunResult(Output, null, 0, 0, TimeSpan.Zero)); }
+        { Calls++; if (Failure is not null) throw Failure; return Task.FromResult(new AgentRunResult(Output, null, 0, 0, TimeSpan.Zero)); }
     }
 
     [Fact]
@@ -51,6 +52,30 @@ public sealed class FormalReviewPublicationTests
         for (var i = 0; i < 6; i++) await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
         Assert.Equal(3, runner.Calls);
         Assert.Equal("3", (await issues.GetAsync(task.Id))!.GetMetadata("reviewErrorAttempts"));
+    }
+
+    [Fact]
+    public async Task ConfirmedBudgetDenialStopsAfterOneAttemptUntilOperatorRetry()
+    {
+        var directory = TempRoot.Instance.NewDirectory("review-budget-denied");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        { ["prNumber"] = 7, ["worktreePath"] = directory }));
+        var runner = new Runner { Failure = new Forge.Core.Control.BudgetAdmissionDeniedException(4.2m, 3.7m) };
+        var github = new PublicationGitHub();
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        for (var i = 0; i < 4; i++) await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        var denied = (await issues.GetAsync(task.Id))!;
+        Assert.Equal(1, runner.Calls);
+        Assert.True(ReviewIntegrationState.Exhausted(denied, "head"));
+        Assert.False(ReviewIntegrationState.Exhausted(denied, "new-head"));
+        Assert.Equal("1", denied.GetMetadata("reviewErrorAttempts"));
+        Assert.Contains("before generation", denied.GetMetadata("reviewIntegrationError"));
+        Assert.Null(denied.GetMetadata("reviewDraft"));
+        Assert.Equal(0, github.Publications);
+        await issues.TransitionAsync(task.Id, denied.Status, "operator retry", ReviewIntegrationState.RetryMetadata());
+        await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "head");
+        Assert.Equal(2, runner.Calls);
     }
 
     private sealed class PublicationGitHub : GitHubService

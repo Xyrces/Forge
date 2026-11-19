@@ -192,6 +192,22 @@ public sealed class BudgetRequestPolicyTests
     }
 
     [Fact]
+    public async Task ConfirmedLedgerDenialCarriesAtomicAmountsAndNeverSettles()
+    {
+        var ledger = new Ledger { BudgetDenied = true }; var transport = new Transport(ledger);
+        using var client = Client(Options(), ledger, transport);
+        var error = await Assert.ThrowsAsync<BudgetAdmissionDeniedException>(() => client.GetResponseAsync(Input()));
+        Assert.Equal(.0115m, error.RequestedUsd);
+        Assert.Equal(.01m, error.AvailableUsd);
+        var restored = BudgetAdmissionDeniedException.FromWorkerError(error.ToWorkerError());
+        Assert.Equal(error.Message, restored!.Message);
+        Assert.Null(BudgetAdmissionDeniedException.FromWorkerError("budget_exhausted"));
+        Assert.Null(BudgetAdmissionDeniedException.FromWorkerError("forge-budget-denied-v1:invalid"));
+        Assert.Equal(0, transport.Calls);
+        Assert.Empty(ledger.Settlements);
+    }
+
+    [Fact]
     public async Task AdmissionRecheckAfterReservationPreventsLostOwnerCall()
     {
         var ledger = new Ledger(); var transport = new Transport(ledger); var calls = 0;
@@ -257,10 +273,11 @@ public sealed class BudgetRequestPolicyTests
     private sealed class Ledger : IDurableBudgetStore
     {
         public bool Admit = true;
+        public bool BudgetDenied;
         public List<BudgetReservationRequest> Reservations = [];
         public List<decimal?> Settlements = [];
         public Task<BudgetReservationResult> ReserveAsync(BudgetReservationRequest request, CancellationToken ct = default)
-        { Reservations.Add(request); return Task.FromResult(new BudgetReservationResult(Admit, true, null, "test")); }
+        { Reservations.Add(request); return Task.FromResult(BudgetDenied ? new BudgetReservationResult(false, false, null, "budget_exhausted", .0115m, .01m) : new BudgetReservationResult(Admit, true, null, "test")); }
         public Task<bool> CompleteAsync(string datasetId, string requestId, decimal? actualCostUsd, CancellationToken ct = default)
         { Settlements.Add(actualCostUsd); return Task.FromResult(true); }
         public Task<BudgetSnapshot?> ReadAsync(string datasetId, CancellationToken ct = default) => Task.FromResult<BudgetSnapshot?>(null);

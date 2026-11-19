@@ -30,7 +30,10 @@
         </div>
         @if (HumanReviewRequired) { <p class="banner banner--info">@(NominatedHuman is null ? "Human review required before merge." : $"Review by @{NominatedHuman} required before merge.")@(Meta("humanReviewSyncPending")?.Equals("true", StringComparison.OrdinalIgnoreCase) == true ? " Synchronizing with GitHub; merge remains held." : "")</p> }
         @if (Meta("reviewGateError") is { Length: > 0 } gateError) { <p class="banner banner--error" role="alert"><strong>Review gate unavailable.</strong> @gateError</p> }
-        @if (Meta("reviewIntegrationError") is { Length: > 0 } publicationError) { <p class="banner banner--error" role="alert"><strong>Review publication needs attention.</strong> @publicationError</p> }
+        @if (Meta("reviewIntegrationError") is { Length: > 0 } publicationError && (Meta("reviewBudgetDeniedHead") is not { Length: > 0 } budgetHead || budgetHead != Meta("reviewSha")))
+        {
+            <p class="banner banner--error" role="alert"><strong>Review publication needs attention.</strong> @publicationError</p>
+        }
         <div class="task-controls">
             @foreach (var section in new[] { "Overview", "Review", "Plan & checks", "History & runs" })
             { <button class="btn @(_section == section ? "btn--primary" : "")" aria-pressed="@(_section == section)" @onclick="() => SelectSectionAsync(section)">@section</button> }
@@ -495,8 +498,15 @@
     protected override void OnInitialized() => _persisting = PersistentState.RegisterOnPersisting(() =>
     {
         if (_task is { } task && _loadedRecoveryTarget == RecoveryTarget && _error is null)
-            PersistentState.PersistAsJson("forge-task-overview:" + RecoveryTarget,
-                CaptureOverviewSnapshot(task));
+        {
+            var snapshot = CaptureOverviewSnapshot(task);
+            // Persisted prerender state travels back in the initial circuit-start message.
+            // Large review/history payloads must use normal interactive reads instead of
+            // disconnecting the entire page. Keep room for framework encoding/other state;
+            // do not truncate task data or increase the global transport limit.
+            if (JsonSerializer.SerializeToUtf8Bytes(snapshot).Length <= 8 * 1024)
+                PersistentState.PersistAsJson("forge-task-overview:" + RecoveryTarget, snapshot);
+        }
         return Task.CompletedTask;
     });
     public void Dispose() { _persisting.Dispose(); ++_recoveryLoadGeneration; ++_legacyGeneration; InvalidateActivity(); }

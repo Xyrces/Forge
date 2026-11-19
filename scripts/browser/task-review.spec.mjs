@@ -55,6 +55,12 @@ try {
   const readsBefore=(await (await page.request.get(api+'/__reads')).json()).length;
   await page.goto(base+'/tasks/client-2?project=forge');
   await page.getByRole('heading',{name:task.title,exact:true}).waitFor();
+  // Oversized history intentionally reloads after circuit start. Establish interactive
+  // section navigation before asserting the settled overview, not its prerender copy.
+  await page.getByRole('button',{name:'Plan & checks',exact:true}).click();
+  await page.waitForURL(url=>url.searchParams.get('section')==='Plan & checks');
+  await page.getByRole('button',{name:'Overview',exact:true}).click();
+  await page.waitForURL(url=>url.searchParams.get('section')==='Overview');
   await page.getByText('Merge observed.',{exact:false}).waitFor();
   assert.equal(await page.getByText('1/3 strikes',{exact:false}).count(),0);
   assert.equal(await page.getByRole('link',{name:'Open PR #150 ↗'}).getAttribute('href'),'https://github.com/Xyrces/Forge/pull/150');
@@ -67,7 +73,7 @@ try {
   assert.equal(overviewReads.filter(url=>url.startsWith('/api/agent-runs')||/\/(history|workers|state|review-history)\?/.test(url)).length,0,'Overview must not fetch activity/history/review sources');
   const taskReads=overviewReads.filter(url=>url.startsWith('/api/tasks/client-2?'));
   assert.ok(taskReads.every(url=>url.includes('includeEvents=false')));
-  assert.equal(taskReads.length,1,'Prerender snapshot prevents duplicate overview read during hydration');
+  assert.equal(taskReads.length,2,'Large historical task uses one prerender read and one interactive read instead of an oversized circuit bootstrap');
   (receipt.overviewReads??=[]).push({width,requests:overviewReads});
   await page.locator('.task-criteria').scrollIntoViewIfNeeded();
   await capture(page,{path:`${output}/task-criteria-${width}.png`,fullPage:true});

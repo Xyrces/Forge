@@ -164,6 +164,7 @@ public sealed class ReviewerDispatcher
         // the e2e harness keeps SHA in a side channel); tests supply
         // the head SHA directly.
         var headSha = headShaOverride is not null ? headShaOverride(pr) : pr.Head.Sha;
+        if (ReviewIntegrationState.IsBudgetDenied(task, headSha)) return null;
         if (_gitHub.RequireFormalReview && ReviewIntegrationState.Exhausted(task, headSha)
             && task.GetMetadata("reviewDraft") is null) return null;
         try { await _gitHub.EnsureReviewerIdentityAsync(prNumber, cancellationToken); }
@@ -454,6 +455,7 @@ public sealed class ReviewerDispatcher
             var runnerContext = new Dictionary<string, object>
             {
                 ["issueId"] = task.Id,
+                ["sourceSha"] = headSha,
             };
             if (!string.IsNullOrWhiteSpace(_projectId))
             {
@@ -483,6 +485,20 @@ public sealed class ReviewerDispatcher
                 AgentType.Reviewer, prompt, sessionId: null, context: runnerContext, ct: timeoutCts.Token);
             (verdict, body) = ParseReviewerOutput(result.Text);
             if (verdict == ReviewerVerdict.Error) error = "Reviewer output did not end with an explicit valid verdict.";
+        }
+        catch (Forge.Core.Control.BudgetAdmissionDeniedException ex)
+        {
+            verdict = ReviewerVerdict.Error;
+            body = "";
+            error = ex.Message + " Choose Retry review when the request fits the available budget.";
+            await UpdateWatchMetadataAsync(task, m =>
+            {
+                m["reviewBudgetDeniedHead"] = headSha;
+                m["reviewBudgetRequestedUsd"] = ex.RequestedUsd;
+                m["reviewBudgetAvailableUsd"] = ex.AvailableUsd;
+                m["reviewIntegrationError"] = error;
+                return m;
+            }, cancellationToken);
         }
         catch (OperationCanceledException) when (_agentRunner is IReviewWorkerLifecycle)
         {
