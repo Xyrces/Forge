@@ -107,6 +107,12 @@ public sealed class GitWorktreeService
         path = Path.GetFullPath(path);
         if (!IsReviewSnapshotPath(path))
             throw new InvalidOperationException("Review cleanup is outside the authorized snapshot root.");
+        if (_publisherToken is not null || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+        {
+            ct.ThrowIfCancellationRequested();
+            IsolatedGitMetadata.RemoveDetachedReviewSnapshot(WorkspaceRoot, WorktreeRoot, path);
+            return;
+        }
         if (!Directory.Exists(path)) return;
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidOperationException("Review cleanup refuses a linked directory.");

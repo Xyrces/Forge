@@ -127,6 +127,67 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AppIsolatedReviewCleanupPreservesOtherWorkAndSupportsSubsequentRounds()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var engineering = await _service.CreateAsync("engineering", "main");
+        var head = await GetHeadShaAsync(engineering);
+        var isolated = new GitWorktreeService(
+            new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+            NullLogger<GitWorktreeService>.Instance,
+            publisherToken: () => throw new InvalidOperationException("Cleanup must not request credentials"),
+            publisherRepository: "https://github.com/Xyrces/Forge");
+        var configPath = Path.Combine(_workDir, ".git", "config");
+        var config = File.ReadAllText(configPath);
+        var outside = Path.Combine(_workDir, "outside-review");
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "preserve.txt"), "keep");
+        for (var round = 0; round < 2; round++)
+        {
+            var snapshot = await _service.CreateReviewSnapshotAsync("engineering", "isolated-" + round, head);
+            var registration = Path.Combine(_workDir, ".git", "worktrees", Path.GetFileName(snapshot));
+            Directory.CreateSymbolicLink(Path.Combine(snapshot, "outside-link"), outside);
+            // Invalid shared config proves cleanup never executes Git against repository configuration.
+            File.WriteAllText(configPath, "[broken configuration");
+            try { await isolated.RemoveReviewSnapshotAsync(snapshot); }
+            finally { File.WriteAllText(configPath, config); }
+            await isolated.RemoveReviewSnapshotAsync(snapshot);
+            Assert.False(Directory.Exists(snapshot));
+            Assert.False(Directory.Exists(registration));
+            Assert.Equal("keep", File.ReadAllText(Path.Combine(outside, "preserve.txt")));
+            Assert.Equal(head, await GetHeadShaAsync(engineering));
+            Assert.Contains(engineering, RunGitForResult(_workDir, "worktree list --porcelain").Stdout);
+            Assert.DoesNotContain(snapshot, RunGitForResult(_workDir, "worktree list --porcelain").Stdout);
+        }
+        var interrupted = await _service.CreateReviewSnapshotAsync("engineering", "interrupted", head);
+        var remainingRegistration = Path.Combine(_workDir, ".git", "worktrees", Path.GetFileName(interrupted));
+        Directory.Delete(interrupted, recursive: true);
+        await isolated.RemoveReviewSnapshotAsync(interrupted);
+        Assert.False(Directory.Exists(remainingRegistration));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => isolated.RemoveReviewSnapshotAsync(engineering));
+    }
+
+    [Fact]
+    public async Task AppIsolatedReviewCleanupRejectsChangedBacklinkAndLinkedParent()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var head = await GetHeadShaAsync(_workDir);
+        var snapshot = await _service.CreateReviewSnapshotAsync("engineering", "backlink", head);
+        var registration = Path.Combine(_workDir, ".git", "worktrees", Path.GetFileName(snapshot));
+        var backlink = Path.Combine(registration, "gitdir");
+        var original = File.ReadAllText(backlink);
+        File.WriteAllText(backlink, Path.Combine(_workDir, "unrelated", ".git"));
+        Assert.Throws<InvalidOperationException>(() => IsolatedGitMetadata.RemoveDetachedReviewSnapshot(_workDir, _service.WorktreeRoot, snapshot));
+        Assert.True(Directory.Exists(snapshot));
+        File.WriteAllText(backlink, original);
+        var linked = Path.Combine(_workDir, "linked-worktrees");
+        Directory.CreateSymbolicLink(linked, _service.WorktreeRoot);
+        Assert.Throws<InvalidOperationException>(() => IsolatedGitMetadata.RemoveDetachedReviewSnapshot(_workDir, linked, Path.Combine(linked, Path.GetFileName(snapshot))));
+        Assert.True(Directory.Exists(snapshot));
+        IsolatedGitMetadata.RemoveDetachedReviewSnapshot(_workDir, _service.WorktreeRoot, snapshot);
+    }
+
+    [Fact]
     public async Task ConfiguredPublisherRefusesInvalidScopeBeforeMintingToken()
     {
         var tokenRequested = false;

@@ -96,6 +96,51 @@ internal sealed class IsolatedGitMetadata : IDisposable
         }
     }
 
+    /// <summary>Retire one joined review worker's checkout without loading shared Git configuration.
+    /// Git's worktree remove cannot operate on copied metadata: its backlink correctly points
+    /// at the original registry. Validate that exact registration instead; never prune siblings.</summary>
+    internal static void RemoveDetachedReviewSnapshot(string repositoryRoot, string worktreeRoot, string path)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Private controller Git requires Linux isolation.");
+        repositoryRoot = Path.GetFullPath(repositoryRoot).TrimEnd('/');
+        worktreeRoot = Path.GetFullPath(worktreeRoot).TrimEnd('/');
+        path = Path.GetFullPath(path);
+        var name = Path.GetFileName(path);
+        if (Path.GetDirectoryName(path) != worktreeRoot || !Regex.IsMatch(name, "\\Areview-[0-9a-f]{64}\\z")
+            || !worktreeRoot.StartsWith(repositoryRoot + "/", StringComparison.Ordinal))
+            throw new InvalidOperationException("Review cleanup is outside the authorized repository.");
+        var common = Path.Combine(repositoryRoot, ".git");
+        var registration = Path.Combine(common, "worktrees", name);
+        static void RejectLinkedAncestors(string candidate)
+        {
+            for (var current = candidate; current is not null; current = Path.GetDirectoryName(current))
+                if (Path.Exists(current)) RejectLink(current);
+        }
+        RejectLinkedAncestors(path);
+        RejectLinkedAncestors(registration);
+        var checkoutExists = Directory.Exists(path);
+        if (!Directory.Exists(registration))
+        {
+            if (checkoutExists) throw new InvalidOperationException("Review checkout has no matching registration.");
+            return;
+        }
+        if (File.Exists(Path.Combine(registration, "locked"))
+            || Path.GetFullPath(ReadText(Path.Combine(registration, "gitdir")).Trim()) != Path.Combine(path, ".git")
+            || Path.GetFullPath(ReadText(Path.Combine(registration, "commondir")).Trim(), registration) != common
+            || !Regex.IsMatch(ReadText(Path.Combine(registration, "HEAD")).Trim(), "\\A[0-9a-f]{40}\\z"))
+            throw new InvalidOperationException("Review cleanup requires an unlocked, detached, exactly registered snapshot.");
+        if (checkoutExists)
+        {
+            if (ResolveGitFile(Path.Combine(path, ".git")) != registration)
+                throw new InvalidOperationException("Review checkout points to another registration.");
+            // Directory.Delete unlinks contained symlinks; it never traverses their targets.
+            Directory.Delete(path, recursive: true);
+        }
+        // An interruption after checkout removal leaves the validated registration for this
+        // same operation to retire on retry. No branch refs or sibling metadata are touched.
+        Directory.Delete(registration, recursive: true);
+    }
+
     public static void ValidateRepository(string url)
     {
         if (!Regex.IsMatch(url, @"\Ahttps://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z", RegexOptions.CultureInvariant))
