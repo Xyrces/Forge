@@ -59,6 +59,7 @@
                     <span class="dpill dpill--@release.Status.ToLowerInvariant()">@StatusLabel(release)</span>
                 </header>
                 <p class="muted">Requested @release.RequestedAt.ToLocalTime().ToString("g") @if (release.DeployedAt is { } deployed) { <span> · Deployed @deployed.ToLocalTime().ToString("g")</span> }</p>
+                @if (HasOperatorHold(release)) { <p class="banner banner--warn">Operator deployment gate is held. <a href="/sprints">Release the deployment gate</a> to start this approved release.</p> }
                 @if (release.EnvironmentName is null) { <p class="muted">Historical or single-target release. No named environment was recorded.</p> }
                 @if (release.SourceCandidateId is { } source)
                 {
@@ -102,7 +103,8 @@
     private string ProjectName(string id) => ProjectsStore.Value.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id;
     private string EnvironmentLabel(DeploymentRow row) => (row.ProjectId == _projectId ? _policy?.Environments.FirstOrDefault(e => e.Name == row.EnvironmentName)?.DisplayName : null) ?? row.EnvironmentName ?? "Environment unspecified";
     private string SourceLabel(string id) => DeployStore.Value.Candidates.FirstOrDefault(r => r.Id == id) is { } row ? $"{EnvironmentLabel(row)} · {Short(row.CommitSha)}" : "source release (outside loaded history)";
-    private static string StatusLabel(DeploymentRow row) => row.Status switch { "Deployed" => "Deployment passed", "BuildPassed" => "Checks passed · awaiting delivery", "Pending" when row.CompletionId is not null => "Awaiting qualification / gate", "Deploying" => "Deploying · checks pending", _ => row.Status };
+    private static bool HasOperatorHold(DeploymentRow row) => row.Status == "Approved" && row.DeployLog?.Contains("The operator deployment gate is held.", StringComparison.Ordinal) == true;
+    private static string StatusLabel(DeploymentRow row) => HasOperatorHold(row) ? "Held by operator" : row.Status switch { "Deployed" => "Deployment passed", "BuildPassed" => "Checks passed · awaiting delivery", "Pending" when row.CompletionId is not null => "Awaiting qualification / gate", "Deploying" => "Deploying · checks pending", _ => row.Status };
     protected override void OnInitialized()
     {
         DeployStore.StateChanged += OnStateChanged; ProjectsStore.StateChanged += OnStateChanged;
