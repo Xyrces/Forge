@@ -14,6 +14,11 @@
             <dt>Build</dt><dd>@(receipt.BuildPassed ? "Passed" : "Not passed")</dd>
             <dt>Tests</dt><dd>@(receipt.TestPassed ? "Passed" : "Not passed")</dd>
             <dt>Deployment health</dt><dd>@(Release.Status == "Deployed" ? "Passed at deployment" : "Not yet confirmed")</dd>
+            @if (Target is { } target)
+            {
+                <dt>Recorded target</dt><dd>@target.DisplayName · @target.KubernetesNamespace</dd>
+                <dt>Dataset</dt><dd><code>@target.KubernetesDatasetId</code></dd>
+            }
         </dl>
     </details>
 }
@@ -50,6 +55,15 @@ else if (Release.Status == "Deployed")
     private bool _busy;
     private CancellationTokenSource _lifetime = new();
     private sealed record ImageReceipt(string SourceSha, string ImageDigest, bool BuildPassed, bool TestPassed);
+    private sealed record TargetSnapshot(string Name, string DisplayName, string KubernetesNamespace, string KubernetesDatasetId);
+    private TargetSnapshot? Target
+    {
+        get
+        {
+            try { return JsonSerializer.Deserialize<TargetSnapshot>(Release.TargetJson ?? "null", new JsonSerializerOptions(JsonSerializerDefaults.Web)); }
+            catch (JsonException) { return null; }
+        }
+    }
     private ImageReceipt? Receipt
     {
         get
@@ -63,7 +77,7 @@ else if (Release.Status == "Deployed")
     private IEnumerable<EnvironmentTarget> Destinations => Policy?.Environments.Where(e => e.Name != Release.EnvironmentName && Source?.PromoteTo.Contains(e.Name) == true) ?? Enumerable.Empty<EnvironmentTarget>();
     private EnvironmentTarget? SelectedTarget => Destinations.FirstOrDefault(e => e.Name == _destination);
     private string ShortSha => Release.CommitSha[..Math.Min(8, Release.CommitSha.Length)];
-    private bool CanPromote => Release.Status == "Deployed" && Receipt is { BuildPassed: true, TestPassed: true } receipt && receipt.SourceSha == Release.CommitSha && !string.IsNullOrEmpty(receipt.ImageDigest) && Destinations.Any();
+    private bool CanPromote => Release.Status == "Deployed" && Target is { } target && target.Name == Release.EnvironmentName && Receipt is { BuildPassed: true, TestPassed: true } receipt && receipt.SourceSha == Release.CommitSha && !string.IsNullOrEmpty(receipt.ImageDigest) && Destinations.Any();
     protected override void OnParametersSet()
     {
         var identity = $"{Release.ProjectId}/{Release.Id}/{Policy?.Revision}/{Release.Status}";

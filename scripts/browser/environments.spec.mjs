@@ -15,7 +15,7 @@ const envs={revision:1,sprintEnvironment:'uat',environments:[
  {name:'uat',displayName:'UAT',kubernetesNamespace:'fixture-uat',kubernetesDatasetId:'fixture-uat-data',promoteTo:['staging','prod'],requireApproval:false},
  {name:'staging',displayName:'Staging',kubernetesNamespace:'fixture-staging',kubernetesDatasetId:'fixture-staging-data',promoteTo:['prod'],requireApproval:true},
  {name:'prod',displayName:'Production',kubernetesNamespace:'fixture-prod',kubernetesDatasetId:'fixture-prod-data',promoteTo:[],requireApproval:true}]};
-const row={id:'synthetic-uat',projectId:'forge',commitSha:sha,commitSummary:'Selected immutable release',status:'Deployed',requestedAt:'2026-11-19T12:00:00Z',deployedAt:'2026-11-19T12:03:00Z',environmentName:'uat',receiptJson:JSON.stringify({sourceSha:sha,imageDigest:image,buildPassed:true,testPassed:true})};
+const row={id:'synthetic-uat',projectId:'forge',commitSha:sha,commitSummary:'Selected immutable release',status:'Deployed',requestedAt:'2026-11-19T12:00:00Z',deployedAt:'2026-11-19T12:03:00Z',environmentName:'uat',targetJson:JSON.stringify({name:'uat',displayName:'UAT',kubernetesNamespace:'fixture-uat',kubernetesDatasetId:'fixture-uat-data'}),receiptJson:JSON.stringify({sourceSha:sha,imageDigest:image,buildPassed:true,testPassed:true})};
 try {
  const initialWrites=(await (await page.request.get(api+'/__writes')).json()).length;
  await put({'/__promotion_result':{status:409,body:{error:'Synthetic release no longer qualifies'}}});
@@ -83,4 +83,3 @@ try {
  receipt.result='passed';receipt.checks=['Exact source candidate, SHA and artifact sent on promotion','Direct UAT to production permitted by routes','Failed request visible without success notice, safe retry','Legacy/failed releases cannot promote','Named projects hide arbitrary commit request','Project policy saves revision, routes and gate settings with read-only target bindings','Concurrent policy update fails visibly','Clearing project removes promotion actions','Desktop/mobile rendered, mobile no horizontal overflow','Captured active-sprint target visible before receipt','Explicit approval posts exact bound plan','Optional observation does not say awaiting gate','Missed check displayed as exception, never passed'];
 } catch(e){receipt.result='failed';receipt.error=String(e.stack||e);process.exitCode=1;await page.screenshot({path:output+'/failure.png'}).catch(()=>{});}
 finally {await fs.writeFile(output+'/receipt.json',JSON.stringify(receipt,null,2));console.log(JSON.stringify(receipt,null,2));await browser.close();}
-
