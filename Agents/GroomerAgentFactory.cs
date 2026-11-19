@@ -17,6 +17,7 @@ public sealed class GroomerAgentFactory
     private readonly LlmConfig _config;
     private readonly ILoggerFactory _loggerFactory;
     private readonly MemoryStore? _memory;
+    private readonly string? _legacyVisionOwnerProjectId;
     private readonly string? _projectRoot;
     private readonly Func<string, string?>? _projectRootLookup;
     private readonly Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? _roleCapacitiesLookup;
@@ -47,7 +48,8 @@ public sealed class GroomerAgentFactory
         Func<string, IIssueStore?>? issueStoreLookup = null,
         Func<string, CancellationToken, Task>? refreshContext = null,
         Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null,
-        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? roleTerritoriesLookup = null)
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? roleTerritoriesLookup = null,
+        string? legacyVisionOwnerProjectId = null)
     {
         _issues = issues;
         _specs = specs;
@@ -56,6 +58,7 @@ public sealed class GroomerAgentFactory
         _config = config;
         _loggerFactory = loggerFactory;
         _memory = memory;
+        _legacyVisionOwnerProjectId = legacyVisionOwnerProjectId;
         _projectRoot = projectRoot;
         _projectRootLookup = projectRootLookup;
         _roleCapacitiesLookup = roleCapacitiesLookup;
@@ -83,6 +86,7 @@ public sealed class GroomerAgentFactory
         return new(issues, _specs, _events, _chatClientFactory, _config,
             _loggerFactory.CreateLogger<GroomerAgent>(),
             runId: runId, memory: _memory, projectRoot: _projectRoot,
-            projectId: projectId, projectRootLookup: _projectRootLookup, roleCapacitiesLookup: _roleCapacitiesLookup, roleTerritoriesLookup: _roleTerritoriesLookup);
+            projectId: projectId, projectRootLookup: _projectRootLookup, roleCapacitiesLookup: _roleCapacitiesLookup,
+            roleTerritoriesLookup: _roleTerritoriesLookup, legacyVisionOwnerProjectId: _legacyVisionOwnerProjectId);
     }
 }

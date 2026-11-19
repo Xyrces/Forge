@@ -62,6 +62,7 @@ public sealed class IntakeAgent
     private readonly string _defaultModel;
     private readonly Func<string, string?>? _projectRootLookup;
     private readonly Core.MemoryStore? _memory;
+    private readonly string? _legacyVisionOwnerProjectId;
     private string? _repoBriefCache;
     private DateTime _repoBriefBuiltAt = DateTime.MinValue;
     private static readonly TimeSpan RepoBriefTtl = TimeSpan.FromMinutes(10);
@@ -82,7 +83,8 @@ public sealed class IntakeAgent
         string defaultModel = "minimax-m2",
         Func<string, string?>? projectRootLookup = null,
         Core.MemoryStore? memory = null,
-        InitiativeApprovalService? initiatives = null)
+        InitiativeApprovalService? initiatives = null,
+        string? legacyVisionOwnerProjectId = null)
     {
         _initiatives = initiatives;
         _projectId = projectId;
@@ -98,6 +100,7 @@ public sealed class IntakeAgent
         _defaultModel = defaultModel;
         _projectRootLookup = projectRootLookup;
         _memory = memory;
+        _legacyVisionOwnerProjectId = legacyVisionOwnerProjectId;
     }
 
     public string ProjectId => _projectId;
@@ -499,7 +502,7 @@ public sealed class IntakeAgent
     /// What the project IS: the operator's vision memory (when one
     /// exists) + a brief built from the local clone (stack, layout,
     /// README). Same vision keys as the groomer
-    /// (vision/&lt;projectId&gt;, fallback vision/master). Missing
+    /// (exact vision/&lt;projectId&gt;, owner-bound legacy fallback). Missing
     /// pieces degrade to explicit markers, never silence — a new
     /// project with no clone yet must not hallucinate a stack
     /// (observed live 2026-08-09: the talaria intake asked the
@@ -513,9 +516,8 @@ public sealed class IntakeAgent
         {
             try
             {
-                vision = (await _memory.RecallAsync($"vision/{_projectId}", ct)).FirstOrDefault()?.Body;
-                if (string.IsNullOrWhiteSpace(vision))
-                    vision = (await _memory.RecallAsync("vision/master", ct)).FirstOrDefault()?.Body;
+                vision = (await VisionMemory.ReadAsync(
+                    _memory, _projectId, _legacyVisionOwnerProjectId, ct))?.Body;
             }
             catch (Exception ex)
             {

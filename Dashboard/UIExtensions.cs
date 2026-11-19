@@ -29,7 +29,9 @@ public static class UIExtensions
                     builder.AdditionalHandlers.Add(mutationAuthentication.CreateHandler(localBaseAddress))));
         var uiAssembly = typeof(App).Assembly;
         services.AddRazorComponents()
-            .AddInteractiveServerComponents();
+            .AddInteractiveServerComponents()
+            .AddHubOptions(options =>
+                options.MaximumReceiveMessageSize = Forge.Dashboard.Services.VisionUiLimits.MaxHubMessageBytes);
         services.Configure<Microsoft.AspNetCore.Components.Server.CircuitOptions>(o => o.DetailedErrors = true);
         services.AddFluxor(options =>
         {

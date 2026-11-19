@@ -41,6 +41,7 @@ public sealed class GroomerAgent
     private readonly LlmConfig _config;
     private readonly ILogger<GroomerAgent> _logger;
     private readonly MemoryStore? _memory;
+    private readonly string? _legacyVisionOwnerProjectId;
     private readonly string? _projectRoot;
     private readonly string? _projectId;
     private readonly Func<string, string?>? _projectRootLookup;
@@ -61,7 +62,8 @@ public sealed class GroomerAgent
         string? projectId = null,
         Func<string, string?>? projectRootLookup = null,
         Func<string, CancellationToken, Task<IReadOnlyDictionary<string, int>>>? roleCapacitiesLookup = null,
-        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? roleTerritoriesLookup = null)
+        Func<string, CancellationToken, Task<IReadOnlyDictionary<string, RoleTerritory>>>? roleTerritoriesLookup = null,
+        string? legacyVisionOwnerProjectId = null)
     {
         _issues = issues;
         _specs = specs;
@@ -70,6 +72,7 @@ public sealed class GroomerAgent
         _config = config;
         _logger = logger;
         _memory = memory;
+        _legacyVisionOwnerProjectId = legacyVisionOwnerProjectId;
         _projectRoot = projectRoot;
         _projectId = projectId;
         _projectRootLookup = projectRootLookup;
@@ -738,16 +741,13 @@ public sealed class GroomerAgent
         sb.AppendLine("Worker commands/results and a pending operator handoff can be recorded in the run transcript; that is not a substitute for an explicitly required repository document. Assign any required repository collation to an authorized implementation owner. Actual visual/running-image qualification and final operator acceptance remain operator-owned and pending until observed; workers must not fabricate them.");
         sb.AppendLine();
         sb.AppendLine("## Project vision");
-        // Per-project vision wins (vision/<projectId>); the legacy
-        // global vision/master is the fallback so single-project
-        // deployments need no re-keying.
+        // Shared planning memory contains multiple projects. The legacy
+        // alias is available only to its explicitly identified owner.
         string? vision = null;
         if (_memory is not null)
         {
-            if (!string.IsNullOrWhiteSpace(projectId))
-                vision = (await _memory.RecallAsync($"vision/{projectId}", ct)).FirstOrDefault()?.Body;
-            if (string.IsNullOrWhiteSpace(vision))
-                vision = (await _memory.RecallAsync("vision/master", ct)).FirstOrDefault()?.Body;
+            vision = (await VisionMemory.ReadAsync(
+                _memory, projectId, _legacyVisionOwnerProjectId, ct))?.Body;
         }
         sb.AppendLine(string.IsNullOrWhiteSpace(vision)
             ? "(no vision document — the operator has not written one; judge against the spec/task text alone)"

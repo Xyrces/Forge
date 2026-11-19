@@ -324,6 +324,27 @@ public class MafAgentRunnerSessionTests : IDisposable
         Assert.NotNull(await _memory.GetAsync("review/origins/v1/owner/repo/10/100/159"));
     }
 
+    [Theory]
+    [InlineData(AgentType.Reviewer)]
+    [InlineData(AgentType.CoreDev)]
+    public async Task ProjectInstructionsContainOnlyItsExactVision(AgentType role)
+    {
+        await _memory.RememberAsync("vision/master", "STALE_PRIMARY_VISION");
+        await _memory.RememberAsync("vision/forge", "ANOTHER_PROJECT_VISION");
+        await _memory.RememberAsync("vision/second-extra", "PREFIX_COLLISION_VISION");
+        await _memory.RememberAsync("vision/second/history", "OLD_HISTORY_VISION");
+        await _memory.RememberAsync("vision/second", "SECOND_CURRENT_VISION");
+        var client = new EchoClient();
+        var context = ContextFor("vision-isolation");
+        context["projectId"] = "second";
+        context["sourceSha"] = new string('b', 40);
+        await NewRunner(client).RunAsync(role, "Check the work.", null, context, CancellationToken.None);
+        Assert.True(client.SawText("SECOND_CURRENT_VISION"));
+        foreach (var forbidden in new[] { "STALE_PRIMARY_VISION", "ANOTHER_PROJECT_VISION",
+                     "PREFIX_COLLISION_VISION", "OLD_HISTORY_VISION" })
+            Assert.False(client.SawText(forbidden));
+    }
+
     private sealed class SingleFactory : IChatClientFactory
     {
         private readonly IChatClient _client;
