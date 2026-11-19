@@ -20,6 +20,19 @@ namespace Forge.Tests;
 /// </summary>
 public class MemoryEndpointTests : IDisposable
 {
+    [Fact]
+    public async Task GenericMemoryCannotReplaceOrDeleteReviewProvenance()
+    {
+        await _memory.ObserveReviewOriginsAsync("repo", 1, "head", DateTimeOffset.UtcNow, []);
+        const string key = "review-origins/v1/repo/1";
+        var before = await _memory.GetAsync(key);
+        var result = await _client.PostAsJsonAsync("/api/memory", new { key, body = "forged" });
+        Assert.Equal(HttpStatusCode.Forbidden, result.StatusCode);
+        var removed = await _client.DeleteAsync("/api/memory/" + Uri.EscapeDataString(key));
+        Assert.True(removed.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound);
+        Assert.Equal(before, await _memory.GetAsync(key));
+    }
+
     [Theory]
     [InlineData("review/project-mode")]
     [InlineData("review/task-hold/task-1")]
