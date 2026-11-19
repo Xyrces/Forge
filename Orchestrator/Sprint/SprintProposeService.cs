@@ -12,14 +12,17 @@ public sealed class SprintProposeService
     private readonly SprintProposalAuditStore _audit;
     private readonly SprintActivationValidator _activation;
     private readonly SprintPlanBuilder _planner;
+    private readonly IssueStore _issues;
+    private readonly ProjectOptions? _projectOptions;
     internal StageGates? Gates { get; }
     internal SprintPlanningOptions Planning { get; }
 
     public SprintProposeService(IIssueStore issues, ISprintStore sprints, IScorer scorer, SprintProposalAuditStore audit,
         StageGates? gates = null, ISpecStore? specs = null, string? projectId = null,
-        SprintPlanningOptions? planning = null, IReadOnlyDictionary<string, int>? roleCaps = null)
+        SprintPlanningOptions? planning = null, IReadOnlyDictionary<string, int>? roleCaps = null, ProjectOptions? projectOptions = null)
     {
         var concrete = issues as IssueStore ?? throw new ArgumentException("Approved sprint planning requires the owning project store.");
+        _issues = concrete; _projectOptions = projectOptions;
         specs ??= new SpecStore(concrete); projectId ??= concrete.ProjectId;
         _sprints = sprints; _audit = audit; Gates = gates; Planning = planning ?? new();
         _activation = new(issues, sprints, specs, projectId, gates, planning, roleCaps);
@@ -70,7 +73,17 @@ public sealed class SprintProposeService
             throw new InvalidOperationException("Proposal is stale; generate a new proposal.");
         snapshot = snapshot with { Plan = plan, ProposalAuditId = auditId, CommittedBy = committedBy };
         var start = DateTime.UtcNow;
-        var sprint = await _sprints.CreateWithIssuesAsync(new(plan.Objective, plan.Objective, start, start.AddDays(14)), snapshot, ct);
+        Forge.Core.Completion.CompletionPolicySnapshot? policy = null;
+        if (_projectOptions is not null)
+        {
+            var project = await new Forge.Deploy.DeploymentStore(_issues.Db).GetEffectiveProjectAsync(_projectOptions, ct);
+            if (project.Deployment is { } deployment && deployment.Environments.Count > 0)
+            {
+                var target = deployment.SprintEnvironment is { } name ? DeploymentEnvironmentResolver.Capture(project, name) : null;
+                policy = new(target?.Name, target is not null && deployment.Environments[target.Name].RequireApproval, target is null ? null : System.Text.Json.JsonSerializer.Serialize(target));
+            }
+        }
+        var sprint = await _sprints.CreateWithIssuesAsync(new(plan.Objective, plan.Objective, start, start.AddDays(14), CompletionPolicy: policy), snapshot, ct);
         return sprint.Id;
     }
 }

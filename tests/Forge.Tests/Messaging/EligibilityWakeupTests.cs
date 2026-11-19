@@ -77,6 +77,7 @@ public sealed class EligibilityWakeupTests
             });
             await wakeups.Assemble.WaitAsync(timeout.Token);
             await wakeups.Groom.WaitAsync(timeout.Token);
+            await wakeups.Deploy.WaitAsync(timeout.Token);
         }
         finally { await consumer.StopAsync(CancellationToken.None); }
     }

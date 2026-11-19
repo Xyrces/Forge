@@ -15,7 +15,7 @@ public sealed record SprintRecord(
 public sealed record NewSprint(
     string Name, string Goal,
     DateTime StartDate, DateTime EndDate,
-    SprintStatus Status = SprintStatus.Active);
+    SprintStatus Status = SprintStatus.Active, Completion.CompletionPolicySnapshot? CompletionPolicy = null);
 
 public sealed record SprintActivationSnapshot(
     IReadOnlyList<IssueRecord> Issues, IReadOnlyList<SpecRecord> Specs, IReadOnlyList<string> TaskIds,
@@ -95,8 +95,8 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
         {
             cmd.Transaction = tx;
             cmd.CommandText = $"""
-                INSERT INTO {T("sprint")} (id, name, goal, start_date, end_date, status, created_at, updated_at)
-                VALUES (@id, @name, @goal, @start, @end, @status, @now, @now)
+                INSERT INTO {T("sprint")} (id, name, goal, start_date, end_date, status, created_at, updated_at, completion_policy_json)
+                VALUES (@id, @name, @goal, @start, @end, @status, @now, @now, @policy)
                 """;
             cmd.AddParam("@id", id);
             cmd.AddParam("@name", name);
@@ -104,6 +104,7 @@ public sealed partial class SprintStore : ISprintStore, IAsyncDisposable
             cmd.AddParam("@start", IssueStore.DateFormatTime(spec.StartDate));
             cmd.AddParam("@end", IssueStore.DateFormatTime(spec.EndDate));
             cmd.AddParam("@status", spec.Status.ToString());
+            cmd.AddParam("@policy", spec.CompletionPolicy is null ? DBNull.Value : System.Text.Json.JsonSerializer.Serialize(spec.CompletionPolicy));
             cmd.AddParam("@now", IssueStore.DateFormatTime(now));
             await cmd.ExecuteNonQueryAsync(ct);
         }

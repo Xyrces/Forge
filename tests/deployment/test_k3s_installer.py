@@ -25,6 +25,16 @@ class FakeInstaller(Installer):
 
 
 class InstallerGuardTests(unittest.TestCase):
+    def test_environment_manager_is_bound_only_in_target_namespace(self):
+        objects = foundation("forge-prod", manager_namespace="forge")
+        binding = next(x for x in objects if x["kind"] == "RoleBinding" and x["metadata"]["name"] == "forge-deployment-manager")
+        self.assertEqual("forge-prod", binding["metadata"]["namespace"])
+        self.assertEqual([{"kind": "ServiceAccount", "name": "forge-controller", "namespace": "forge"}], binding["subjects"])
+        role = next(x for x in objects if x["kind"] == "Role" and x["metadata"]["name"] == "forge-deployment-manager")
+        self.assertEqual({"jobs", "configmaps"}, {resource for rule in role["rules"] for resource in rule["resources"]})
+        self.assertFalse(any(x["kind"] in ("ClusterRole", "ClusterRoleBinding") for x in objects))
+        self.assertEqual("forge-prod", next(x for x in objects if x["kind"] == "PersistentVolumeClaim")["metadata"]["namespace"])
+
     def test_shared_configuration_cannot_distribute_sql_credentials(self):
         for configuration in ({"Db": {"ConnectionString": "private"}},
                               {"db:ConnectionString": "private"}, {"DB__CONNECTIONSTRING": "private"}):
@@ -88,7 +98,7 @@ class InstallerGuardTests(unittest.TestCase):
         self.assertEqual("initialize", values["Controller__Mode"])
         self.assertEqual("sqlserver", values["Db__Provider"])
         self.assertEqual("/var/lib/forge/keyring", values["Controller__KeyringPath"])
-        self.assertEqual("forge-k3s-worker", values["Bootstrap__WorkerPrincipal"])
+        self.assertNotIn("Bootstrap__WorkerPrincipal", values)  # Target config owns its isolated SQL principal.
 
     def test_only_initializer_gets_schema_owner_secret(self):
         image = "registry/forge@sha256:" + "a" * 64

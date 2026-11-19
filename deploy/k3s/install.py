@@ -139,7 +139,7 @@ class Installer:
         if legacy_active():
             raise RuntimeError("legacy service still active; no Forge workloads were launched")
         pull_secret = args.pull_secret or ("forge-registry" if args.registry_config else None)
-        for item in foundation(args.namespace, pull_secret=pull_secret):
+        for item in foundation(args.namespace, pull_secret=pull_secret, manager_namespace=getattr(args, "manager_namespace", None)):
             if item["kind"] == "Service" and item["metadata"]["name"] == "forge" and self.get("service", "forge"):
                 continue  # Never reset live traffic to 'none' during an upgrade.
             self.apply(item)
@@ -188,7 +188,8 @@ class Installer:
                 self.apply(job(args.namespace, args.image, args.dataset, args.operation, init_name, initialize=True))
             self.wait_job(init_name)
         name = "forge-release-" + args.operation + "-" + uuid.uuid4().hex[:6]
-        self.apply(job(args.namespace, args.image, args.dataset, args.operation, name))
+        self.apply(job(args.namespace, args.image, args.dataset, args.operation, name,
+                       environment=getattr(args, "environment", None), source_sha=args.source_sha))
         print(json.dumps({"releaseJob": name, "namespace": args.namespace, "image": args.image}), flush=True)
         self.wait_job(name)
         print("Release completed. Verify application through a loopback port-forward before opening work gates.")
@@ -215,6 +216,8 @@ def main():
     for flag in ("image", "source-sha", "image-receipt", "dataset", "operation", "sql-file", "initialize-sql-file", "worker-sql-file", "worker-packages-file", "config"):
         parser.add_argument("--" + flag, required=True)
     parser.add_argument("--namespace", default="forge")
+    parser.add_argument("--environment", help="Named project environment; verifies the routed dashboard and source before release completion")
+    parser.add_argument("--manager-namespace", help="Namespace of the Forge controller allowed to deploy into this isolated target")
     parser.add_argument("--github-apps-directory", help="Private directory containing App config.json and referenced PEM keys; controller only")
     parser.add_argument("--github-webhook-secret-file", help="Private signature secret for /hooks/github; controller only, does not expose ingress")
     parser.add_argument("--k3s-version")
@@ -235,6 +238,10 @@ def main():
         raise ValueError("invalid operation")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", args.namespace):
         raise ValueError("invalid namespace")
+    if args.manager_namespace and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", args.manager_namespace):
+        raise ValueError("invalid manager namespace")
+    if args.environment and not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", args.environment):
+        raise ValueError("invalid environment name")
     configuration = json.loads(Path(args.config).read_text(encoding="utf-8-sig"))
     validate_shared_configuration(configuration)
     if args.github_apps_directory: app_bundle(args.github_apps_directory)
@@ -251,6 +258,7 @@ def main():
             raise ValueError("registry config must contain explicit auths, not a machine-local credential helper")
     if not args.apply:
         print(json.dumps({"mode": "plan", "namespace": args.namespace, "dataset": args.dataset,
+            "environment": args.environment, "managerNamespace": args.manager_namespace, "sourceSha": args.source_sha,
             "image": args.image, "operation": args.operation, "legacyAction": "stop" if args.retire_legacy else "require stopped",
             "clusterDatastore": "embedded-etcd", "applicationDatastore": "Azure SQL"}, indent=2))
         return

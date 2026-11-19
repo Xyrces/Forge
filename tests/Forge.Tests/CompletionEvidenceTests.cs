@@ -308,6 +308,134 @@ public sealed class CompletionEvidenceTests : IDisposable
         Assert.Equal(EngineeringOutcome.PendingEvidence, ready.EngineeringOutcome);
     }
 
+    private async Task SeedDeploymentAsync(string completionId, string? environment = null, string? target = null)
+    {
+        await Store.RecordSourceAsync(completionId, Source, "{}");
+        await Store.BindDeploymentAsync(completionId, "deployment");
+        await using var connection = await issues.Db.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO deployment(id,project_id,commit_sha,status,requested_at,completion_id,receipt_json,environment_name,target_json) VALUES('deployment','project',@sha,'Deployed','now',@completion,'{}',@environment,@target)";
+        command.AddParam("@sha", Source); command.AddParam("@completion", completionId);
+        command.AddParam("@environment", (object?)environment ?? DBNull.Value); command.AddParam("@target", (object?)target ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    [Fact]
+    public async Task SprintActivationCapturesPolicyAtomicallyAndNoDeliveryCanComplete()
+    {
+        var policy = new CompletionPolicySnapshot("uat", true, "{}");
+        var sprint = await new SprintStore(issues).CreateAsync(new("Target", "Target", DateTime.UtcNow, DateTime.UtcNow.AddDays(1), CompletionPolicy: policy));
+        Assert.Equal(policy, await Store.ReadSprintPolicyAsync(sprint.Id));
+    }
+
+    [Fact]
+    public async Task ExplicitNoDeliveryPolicyDoesNotTurnAgentObservationIntoDeploymentRequirement()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, false, new(null, false, null)));
+        Assert.Equal(EngineeringOutcome.PendingEvidence, receipt.EngineeringOutcome);
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
+        Assert.False(receipt.DeliveryRequired);
+        Assert.Empty(await Store.ListAwaitingDeploymentAsync());
+        Assert.Null(await new SprintStore(issues).GetActiveAsync());
+    }
+
+    [Fact]
+    public async Task ConfiguredTargetClosesSprintWithoutInventingOperatorObservation()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var policy = new CompletionPolicySnapshot("uat", false, "{\"Name\":\"uat\"}");
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, true, policy));
+        Assert.NotNull(await new SprintStore(issues).GetActiveAsync());
+        Assert.False(await Store.CanAdmitDeploymentAsync(receipt.Id));
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.True(await Store.CanAdmitDeploymentAsync(receipt.Id));
+        Assert.False(Assert.Single(await Store.ReadCriteriaAsync(receipt.Id)).Blocking);
+        await SeedDeploymentAsync(receipt.Id, "uat", policy.TargetJson);
+        Assert.True(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        Assert.Null(await new SprintStore(issues).GetActiveAsync());
+        Assert.Null(Assert.Single(await Store.ReadCriteriaAsync(receipt.Id)).ProofReference);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
+    }
+
+    [Fact]
+    public async Task WrongEnvironmentCannotSatisfyCapturedTarget()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var policy = new CompletionPolicySnapshot("uat", false, "{}");
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, true, policy));
+        await SeedDeploymentAsync(receipt.Id, "prod", "{}");
+        Assert.False(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        Assert.NotNull(await new SprintStore(issues).GetActiveAsync());
+    }
+
+    [Fact]
+    public async Task ConfiguredApprovalIsExplicitAndBoundToCompletionPlan()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, true, new("uat", true, "{}")));
+        Assert.False(await Store.CanAdmitDeploymentAsync(receipt.Id));
+        Assert.Empty(await Store.ListAwaitingDeploymentAsync());
+        Assert.True(Assert.Single(await Store.ListOverviewAsync(waitingOnly: false)).DeploymentApprovalRequired);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ApproveDeploymentAsync(receipt.Id, "wrong-plan", "operator"));
+        await Store.ApproveDeploymentAsync(receipt.Id, plan.Hash, "operator");
+        Assert.False(await Store.CanAdmitDeploymentAsync(receipt.Id));
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.True(await Store.CanAdmitDeploymentAsync(receipt.Id));
+        Assert.Single(await Store.ListAwaitingDeploymentAsync());
+        Assert.False(Assert.Single(await Store.ListOverviewAsync(waitingOnly: false)).DeploymentApprovalRequired);
+    }
+
+    [Fact]
+    public async Task LateFollowupsBecomeBacklogWithoutReopeningDeliveredSprint()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var policy = new CompletionPolicySnapshot("uat", false, "{}");
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, true, policy));
+        Assert.Empty(await Store.ListAwaitingDeploymentAsync());
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.Single(await Store.ListAwaitingDeploymentAsync());
+        await SeedDeploymentAsync(receipt.Id, "uat", "{}");
+        Assert.True(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        var drafts = new FollowUpDraftStore(issues);
+        var id = await drafts.FileAsync(new(0, sprint.Id, task.Id, "reviewer", "Late finding", "Detail", 2, null, DateTime.UtcNow, null));
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        var batch = await Store.ClaimBatchAsync(receipt.Id, [(await drafts.GetAsync(id))!]);
+        Assert.Equal("Completed", (await Store.GetAsync(receipt.Id))!.BookkeepingState);
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        Assert.Single(await Store.ListPendingBookkeepingAsync());
+        await Store.TryBeginTriageAsync(batch.Id);
+        await Store.SaveDecisionAsync(batch.Id, new([new("create", [id])]));
+        var result = await Store.MaterializeItemWithResultAsync(batch.Id, 0);
+        Assert.NotNull(result.TargetId);
+        Assert.Equal(IssueStatus.Pending, (await issues.GetAsync(result.TargetId!))!.Status);
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
+    }
+
+    [Fact]
+    public async Task LegacyExceptionRecordsMissedCriterionWithoutFalseProofOrChangedEvidence()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{\"original\":true}", true));
+        await SeedDeploymentAsync(receipt.Id);
+        var request = new ReconcileDeliveredCompletionRequest(plan.Hash, Source, "deployment", ["visual"], "Preflight was missed; operator accepts the deployed release.");
+        Assert.False(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ReconcileDeliveredAsync(receipt.Id, request with { MissedCriterionIds = ["invented"] }, "operator"));
+        await Store.ReconcileDeliveredAsync(receipt.Id, request, "operator");
+        await Store.ReconcileDeliveredAsync(receipt.Id, request, "operator");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ReconcileDeliveredAsync(receipt.Id, request with { Reason = "Different claim" }, "operator"));
+        var closed = (await Store.GetAsync(receipt.Id))!;
+        Assert.Equal(receipt.EvidenceJson, closed.EvidenceJson);
+        Assert.Equal(receipt.MembersJson, closed.MembersJson);
+        Assert.Equal(EngineeringOutcome.Satisfied, closed.EngineeringOutcome);
+        var criterion = Assert.Single(await Store.ReadCriteriaAsync(receipt.Id));
+        Assert.True(criterion.MissedWithException);
+        Assert.Null(criterion.ProofReference);
+        Assert.Equal(request.Reason, Assert.Single(await Store.ListOverviewAsync(waitingOnly: false)).Reconciliation!.Reason);
+    }
+
     [Fact]
     public async Task ExactDeployedCriterionRequiresExplicitImmutableOperatorEvidence()
     {

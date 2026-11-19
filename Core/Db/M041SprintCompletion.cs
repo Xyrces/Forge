@@ -74,8 +74,8 @@ public sealed class M041SprintCompletion : ISqlServerMigration
         }
         using var index = connection.CreateCommand();
         index.CommandText = sqlServer
-            ? $"IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'{d.Table("deployment")}') AND name='ux_deployment_completion') CREATE UNIQUE INDEX ux_deployment_completion ON {d.Table("deployment")}(completion_id) WHERE completion_id IS NOT NULL;"
-            : "CREATE UNIQUE INDEX IF NOT EXISTS ux_deployment_completion ON deployment(completion_id) WHERE completion_id IS NOT NULL;";
+            ? $"IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'{d.Table("deployment")}') AND name='ux_deployment_active_completion') CREATE UNIQUE INDEX ux_deployment_active_completion ON {d.Table("deployment")}(completion_id) WHERE completion_id IS NOT NULL AND status <> 'DeployFailed' AND status <> 'Rejected';"
+            : "CREATE UNIQUE INDEX IF NOT EXISTS ux_deployment_active_completion ON deployment(completion_id) WHERE completion_id IS NOT NULL AND status <> 'DeployFailed' AND status <> 'Rejected';";
         index.ExecuteNonQuery();
     }
 }

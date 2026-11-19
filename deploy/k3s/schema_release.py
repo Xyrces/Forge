@@ -117,6 +117,14 @@ class SchemaRelease(Release):
             return False
         self.wait(terminal, "initializer still running; resume this schema operation, never restart writers")
 
+    def routed_dashboard_ready(self, slot, rollback):
+        if super().routed_dashboard_ready(slot, rollback):
+            return True
+        # safe_rollback already verified the exact bridge digest. After migration the
+        # bridge exposes /api/recovery and deliberately refuses /api/meta/buildinfo.
+        return (rollback and self.status(slot).get("schemaVersion") == self.policy["toVersion"]
+                and self.controllers.verify_dashboard(None, recovery=True))
+
     def safe_rollback(self, candidate, previous):
         existing = self.kube.get("jobs", self.migration_name)
         if existing is not None:
@@ -132,6 +140,7 @@ class SchemaRelease(Release):
         super().rollback(candidate, previous)
 
     def run(self):
+        self.verify_target()
         self.acquire()
         self.journal = self.kube.get("configmaps", self.journal_name)
         if self.journal is None:
@@ -152,15 +161,20 @@ class SchemaRelease(Release):
             self.journal = self.kube.create("configmaps", {"apiVersion": "v1", "kind": "ConfigMap",
                 "metadata": {"name": self.journal_name}, "data": {"kind": "schema-upgrade", "phase": "created",
                     "image": self.image, "dataset": self.dataset, "previous": current, "candidate": other,
-                    "policy": json.dumps(self.policy, sort_keys=True), "knownOwners": json.dumps([status["instanceId"]])}})
+                    "policy": json.dumps(self.policy, sort_keys=True), "knownOwners": json.dumps([status["instanceId"]]),
+                    **({"environment": self.environment, "sourceSha": self.source_sha, "namespace": self.kube.namespace}
+                       if self.environment is not None else {})}})
         data = self.journal["data"]
         if data.get("kind") != "schema-upgrade" or data["image"] != self.image or data["dataset"] != self.dataset or json.loads(data["policy"]) != self.policy:
             raise RuntimeError("schema operation id already binds different immutable inputs")
+        if self.environment is not None and (data.get("environment") != self.environment or
+                                            data.get("sourceSha") != self.source_sha or data.get("namespace") != self.kube.namespace):
+            raise RuntimeError("schema operation id already binds another environment or source")
         if self.journal["data"]["phase"] == "committed":
             return
         if self.journal["data"]["phase"] == "rolled-back":
             raise RuntimeError("schema operation rolled back; use a new qualified operation")
-        if self.journal["data"]["phase"] not in {"created", "draining", "drained", "migration-stopped", "migrating", "migrated", "qualified", "activated", "rolling-back"}:
+        if self.journal["data"]["phase"] not in {"created", "draining", "drained", "migration-stopped", "migrating", "migrated", "qualified", "activated", "rolling-back", "verifying-target"}:
             raise RuntimeError("unknown schema upgrade journal phase")
         candidate, previous = data["candidate"], data["previous"]
         bridge = self.kube.get("deployments", "forge-" + previous)
@@ -216,7 +230,8 @@ class SchemaRelease(Release):
             self.activate(candidate)
             self.record("activated")
             self.route(candidate)
-            self.record("committed")
+            self.verify_route(candidate)
         except Exception:
             self.safe_rollback(candidate, previous)
             raise
+        self.record("committed")

@@ -223,7 +223,7 @@ public interface IIssueStore
 /// </summary>
 public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 43;
+    public const int CurrentSchemaVersion = 44;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1028,6 +1028,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         M041SprintCompletion.Create(conn, SqliteDialect.Instance);
         M042ImplementationEvidence.ApplySqlite(conn);
         M043OwnedArtifactHistory.Create(conn, SqliteDialect.Instance);
+        M044DeploymentEnvironments.Create(conn, SqliteDialect.Instance);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;
@@ -1062,6 +1063,13 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         var d = (SqlServerDialect)_db.Dialect;
         var q = d.Qualifier;
         using var conn = _db.Open();
+        using (var version = conn.CreateCommand())
+        {
+            var table = d.Table("schema_version");
+            version.CommandText = $"IF OBJECT_ID(N'{table}',N'U') IS NOT NULL SELECT COALESCE(MAX(version),0) FROM {table}; ELSE SELECT 0;";
+            if (Convert.ToInt32(version.ExecuteScalar()) > CurrentSchemaVersion)
+                throw new InvalidOperationException("This release cannot initialize a newer database schema.");
+        }
         // Fresh-create runs ~26 tables + indexes of DDL; under Azure
         // SQL DTU pressure a single batch can exceed the 30s default
         // (observed live 2026-08-09: a new project's store init timed
@@ -1650,6 +1658,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         M040InitiativeApproval.Create(conn, d);
         if (_db.Profile == ForgeSchemaProfile.Workload) M041SprintCompletion.Create(conn, d);
         if (_db.Profile == ForgeSchemaProfile.Workload) M043OwnedArtifactHistory.Create(conn, d);
+        if (_db.Profile == ForgeSchemaProfile.Workload) M044DeploymentEnvironments.Create(conn, d);
 
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the

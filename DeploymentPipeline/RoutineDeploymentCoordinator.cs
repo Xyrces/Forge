@@ -11,12 +11,17 @@ public interface IRoutineReleaseSource
     Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project, IReadOnlyList<IssueRecord> members, CancellationToken ct);
     Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project, IReadOnlyList<IssueRecord> members, SprintPlan plan, CancellationToken ct)
         => ObserveMergedFrontierAsync(project, members, ct);
+    Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project, IReadOnlyList<IssueRecord> members,
+        SprintPlan plan, string servingRevision, CancellationToken ct) => ObserveMergedFrontierAsync(project, members, plan, ct);
+    Task ValidateForwardAsync(ProjectOptions project, string sha, string servingRevision, CancellationToken ct) => ValidateForwardAsync(project, sha, ct);
     Task<TrustedImageReceipt?> FindReceiptAsync(ProjectOptions project, string sha, CancellationToken ct);
     Task ValidateForwardAsync(ProjectOptions project, string sha, CancellationToken ct);
 }
 
 public interface IIndependentDeploymentExecutor : IDeploymentExecutor
 {
+    Task<string> ReadTargetRevisionAsync(DeploymentTargetSnapshot target, CancellationToken ct)
+        => throw new InvalidOperationException("The deployment executor cannot verify this environment's serving revision.");
     Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct, Func<CancellationToken, Task<bool>>? canStart = null);
 }
 
@@ -25,7 +30,7 @@ public sealed record RoutineDeploymentProject(ProjectOptions Options, SprintComp
 /// <summary>Durable completion is the trigger; dashboard reads are not a scheduler.</summary>
 public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeploymentProject>> projects,
     IRoutineReleaseSource source, Func<ProjectOptions, IIndependentDeploymentExecutor> executor,
-    StageGates gates, ILogger<RoutineDeploymentCoordinator> logger)
+    StageGates gates, ILogger<RoutineDeploymentCoordinator> logger, Orchestrator.WakeupSignal? wakeup = null)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -36,8 +41,15 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
             try { await ReconcileAsync(ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception ex) { logger.LogError(ex, "Routine deployment reconciliation will retry from durable state"); }
-            try { await Task.Delay(TimeSpan.FromSeconds(15), ct); }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            using var next = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            next.CancelAfter(TimeSpan.FromSeconds(15));
+            try
+            {
+                if (wakeup is null) await Task.Delay(Timeout.InfiniteTimeSpan, next.Token);
+                else await wakeup.WaitAsync(next.Token);
+            }
+            catch (OperationCanceledException) when (next.IsCancellationRequested) { }
+
         }
     }
 
@@ -46,7 +58,7 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
         foreach (var project in projects())
         {
             if (project.Options.Deployment?.Kind != DeploymentKind.Kubernetes) continue;
-            if (project.Options.Deployment.RoutineEnabled)
+            if (project.Options.Deployment.RoutineEnabled || project.Options.Deployment.Environments.Count > 0)
             {
                 string? cursor = null;
                 do
@@ -58,12 +70,17 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
                         {
                             if (receipt.ProjectId != project.Options.Id || !receipt.ReadyForDeployment)
                                 throw new InvalidOperationException("Completion is not authorized for this project's routine delivery.");
+                            if (!await project.Completions.CanAdmitDeploymentAsync(receipt.Id, ct)) continue;
+                            if (receipt.CompletionPolicy is null && project.Options.Deployment.Environments.Count > 0 && receipt.DeploymentCandidateId is null)
+                                throw new InvalidOperationException("Legacy sprint has no captured target. Review its historical delivery before releasing.");
                             var sha = receipt.SourceSha;
                             if (sha is null)
                             {
                                 var members = await project.Completions.ReadDeliveryMembersAsync(receipt, ct);
                                 var plan = await project.Completions.GetBoundPlanAsync(receipt, ct);
-                                var observed = await source.ObserveMergedFrontierAsync(project.Options, members, plan, ct);
+                                var observed = receipt.CompletionPolicy?.TargetJson is { } targetJson
+                                    ? await source.ObserveMergedFrontierAsync(project.Options, members, plan, await ReadRevisionAsync(project, targetJson, ct), ct)
+                                    : await source.ObserveMergedFrontierAsync(project.Options, members, plan, ct);
                                 await project.Completions.RecordSourceAsync(receipt.Id, observed.Sha, observed.Evidence, ct);
                                 sha = observed.Sha;
                             }
@@ -121,11 +138,20 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
         }
     }
 
+    private Task<string> ReadRevisionAsync(RoutineDeploymentProject project, string targetJson, CancellationToken ct)
+    {
+        var snapshot = JsonSerializer.Deserialize<DeploymentTargetSnapshot>(targetJson, Json)
+            ?? throw new InvalidOperationException("The sprint has no valid deployment target.");
+        var target = DeploymentEnvironmentResolver.Apply(project.Options, snapshot);
+        return executor(target).ReadTargetRevisionAsync(snapshot, ct);
+    }
+
     private async Task ReconcileCandidateAsync(RoutineDeploymentProject project, DeploymentCandidate candidate, CancellationToken ct)
     {
         if (candidate.CompletionId is not null && candidate.Status is DeploymentStatus.Pending or DeploymentStatus.BuildPassed)
         {
-            if (!project.Options.Deployment!.RoutineEnabled) return;
+            if (candidate.EnvironmentName is null && !project.Options.Deployment!.RoutineEnabled) return;
+            if (!await project.Completions.CanAdmitDeploymentAsync(candidate.CompletionId, ct)) return;
             var completion = await project.Completions.GetAsync(candidate.CompletionId, ct);
             if (completion is null || !completion.ReadyForDeployment || completion.DeploymentCandidateId != candidate.Id ||
                 completion.SourceSha != candidate.CommitSha || completion.ProjectId != project.Options.Id)
@@ -147,9 +173,16 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
                 await project.Completions.RecordDeliveryWaitAsync(completion.Id, "Routine deployment is held by the operator deploy gate.", ct);
                 return;
             }
-            await source.ValidateForwardAsync(project.Options, candidate.CommitSha, ct);
+            if (candidate.TargetJson is { } target)
+                await source.ValidateForwardAsync(project.Options, candidate.CommitSha, await ReadRevisionAsync(project, target, ct), ct);
+            else
+                await source.ValidateForwardAsync(project.Options, candidate.CommitSha, ct);
             await project.Completions.RecordDeliveryWaitAsync(completion.Id, null, ct);
-            if (!await project.Deployments.TryApproveAsync(candidate.Id, "approved initiative routine deployment policy", ct)) return;
+            if (!await project.Deployments.TryApproveTargetAsync(candidate, "approved initiative routine deployment policy", ct))
+            {
+                await project.Completions.RecordDeliveryWaitAsync(completion.Id, "Waiting for the active release in this environment.", ct);
+                return;
+            }
             // The following durable Approved row is sufficient to recover a
             // process stop before the independent Job is created.
             candidate = candidate with { Status = DeploymentStatus.Approved };
@@ -157,6 +190,6 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
         if (candidate.Status is not (DeploymentStatus.Approved or DeploymentStatus.Deploying)) return;
         var release = executor(project.Options);
         var progress = await release.ReadProgressAsync(project.Options, candidate, ct, async token => !await gates.IsHeldAsync(StageGates.Deploy, token));
-        await project.Deployments.MarkIndependentProgressAsync(candidate.Id, progress, ct);
+        await project.Deployments.MarkIndependentProgressAsync(candidate, progress, project.Completions, ct);
     }
 }

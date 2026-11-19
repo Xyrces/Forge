@@ -6,7 +6,7 @@ namespace Forge.Core.Completion;
 public sealed record OperatorCriterionEvidence(string PlanHash, string CriterionId, string SourceSha,
     string DeploymentId, string ProofReference, string ProofSha256);
 public sealed record CompletionCriterionStatus(string Id, string Text, string EvidenceKind,
-    string? ProofReference, string? OperatorIdentity);
+    string? ProofReference, string? OperatorIdentity, bool Blocking = true, bool MissedWithException = false);
 
 public sealed partial class SprintCompletionStore
 {
@@ -25,7 +25,9 @@ public sealed partial class SprintCompletionStore
             while (await reader.ReadAsync(ct)) proofs.Add(reader.GetString(0), (reader.GetString(1), reader.GetString(2)));
         return plan.Criteria.Select(c => new CompletionCriterionStatus(c.Id, c.Text, c.EvidenceKind.ToString(),
             proofs.TryGetValue(c.Id, out var proof) ? proof.Reference : null,
-            proofs.TryGetValue(c.Id, out proof) ? proof.Operator : null)).ToArray();
+            proofs.TryGetValue(c.Id, out proof) ? proof.Operator : null,
+            c.EvidenceKind != SprintEvidenceKind.OperatorObserved || receipt.CompletionPolicy is null && receipt.ReconciliationJson is null,
+            receipt.ReconciliationJson is { } reconciliation && System.Text.Json.JsonSerializer.Deserialize<CompletionException>(reconciliation)!.MissedCriterionIds.Contains(c.Id))).ToArray();
     }
 
     private async Task<SprintPlan> ReadBoundPlanAsync(DbConnection connection, DbTransaction tx,
@@ -45,9 +47,14 @@ public sealed partial class SprintCompletionStore
         SprintCompletionRecord receipt, CancellationToken ct)
     {
         using var command = Command(connection, tx,
-            $"SELECT COUNT(*) FROM {T("deployment")} WHERE id=@deployment AND completion_id=@completion AND commit_sha=@source AND status='Deployed' AND receipt_json IS NOT NULL",
+            $"SELECT environment_name,target_json,source_candidate_id FROM {T("deployment")} WHERE id=@deployment AND completion_id=@completion AND commit_sha=@source AND status='Deployed' AND receipt_json IS NOT NULL",
             ("@deployment", receipt.DeploymentCandidateId), ("@completion", receipt.Id), ("@source", receipt.SourceSha));
-        return Convert.ToInt32(await command.ExecuteScalarAsync(ct)) == 1;
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return false;
+        var policy = receipt.CompletionPolicy;
+        return policy is null || !reader.IsDBNull(0) && !reader.IsDBNull(1) && reader.IsDBNull(2)
+            && string.Equals(reader.GetString(0), policy.EnvironmentName, StringComparison.Ordinal)
+            && string.Equals(reader.GetString(1), policy.TargetJson, StringComparison.Ordinal);
     }
 
     /// <summary>Explicit external verification, never an automatic visual check or generic success stamp.</summary>
@@ -97,11 +104,30 @@ public sealed partial class SprintCompletionStore
         await using var connection = await issues.Db.OpenAsync(ct);
         await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         await LockAsync(connection, tx, ct);
+        return await FinishDeploymentTransactionAsync(connection, tx, id, ct);
+    }
+
+    internal async Task CommitVerifiedTargetAsync(string id, string deploymentId, string log, CancellationToken ct)
+    {
+        await using var connection = await issues.Db.OpenAsync(ct);
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        await LockAsync(connection, tx, ct);
+        using var status = Command(connection, tx,
+            $"UPDATE {T("deployment")} SET status='Deployed',deployed_at=@now,deploy_log=@log WHERE id=@deploy AND project_id=@project AND completion_id=@id AND environment_name IS NOT NULL AND status IN ('Approved','Deploying')",
+            ("@now", Now()), ("@log", log), ("@deploy", deploymentId), ("@project", issues.ProjectId), ("@id", id));
+        if (await status.ExecuteNonQueryAsync(ct) == 0) return; // Concurrent reconciliation already won.
+        if (!await FinishDeploymentTransactionAsync(connection, tx, id, ct))
+            throw new InvalidOperationException("Verified target does not match the authorized sprint completion. The deployment transaction was rolled back.");
+    }
+
+    private async Task<bool> FinishDeploymentTransactionAsync(DbConnection connection, DbTransaction tx, string id, CancellationToken ct)
+    {
         var receipt = await GetAsync(connection, tx, id, ct);
         if (receipt is null || receipt.EngineeringOutcome != EngineeringOutcome.PendingEvidence
-            || !receipt.ReadyForDeployment || !await IsQualifiedDeploymentAsync(connection, tx, receipt, ct)) return false;
+            || !receipt.ReadyForDeployment || receipt.CompletionPolicy is not null && receipt.BookkeepingState != "Completed"
+            || !await IsQualifiedDeploymentAsync(connection, tx, receipt, ct)) return false;
         var plan = await ReadBoundPlanAsync(connection, tx, receipt, ct);
-        foreach (var criterion in plan.Criteria.Where(c => c.EvidenceKind == SprintEvidenceKind.OperatorObserved))
+        foreach (var criterion in plan.Criteria.Where(c => receipt.CompletionPolicy is null && c.EvidenceKind == SprintEvidenceKind.OperatorObserved))
         {
             using var evidence = Command(connection, tx,
                 $"SELECT COUNT(*) FROM {T("completion_criterion_evidence")} WHERE completion_id=@id AND criterion_id=@criterion AND plan_hash=@plan AND source_sha=@source AND deployment_id=@deployment",
@@ -110,9 +136,14 @@ public sealed partial class SprintCompletionStore
             if (Convert.ToInt32(await evidence.ExecuteScalarAsync(ct)) != 1) return false;
         }
         using var update = Command(connection, tx,
-            $"UPDATE {T("sprint_completion")} SET outcome='Satisfied',delivery_note='Required deployment and explicit observation evidence recorded.',updated_at=@now WHERE id=@id",
+            $"UPDATE {T("sprint_completion")} SET outcome='Satisfied',delivery_note='Required deployment and acceptance checks passed.',updated_at=@now WHERE id=@id",
             ("@now", Now()), ("@id", id));
         await update.ExecuteNonQueryAsync(ct);
+        if (receipt.CompletionPolicy is not null)
+        {
+            using var finish = Command(connection, tx, $"UPDATE {T("sprint")} SET status='Completed',updated_at=@now WHERE id=@sprint AND status='Active'", ("@now", Now()), ("@sprint", receipt.SprintId));
+            await finish.ExecuteNonQueryAsync(ct);
+        }
         await tx.CommitAsync(ct);
         await PublishOutcomeChangedAsync(receipt, "Satisfied", ct);
         return true;

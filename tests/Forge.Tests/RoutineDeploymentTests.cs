@@ -23,7 +23,7 @@ public sealed class RoutineDeploymentTests : IDisposable
         _ => executor, Gates, NullLogger<RoutineDeploymentCoordinator>.Instance);
     public void Dispose() => issues.Dispose();
 
-    private async Task<SprintCompletionRecord> Complete(bool ready = true)
+    private async Task<SprintCompletionRecord> Complete(bool ready = true, CompletionPolicySnapshot? policy = null)
     {
         var task = await issues.CreateAsync(new NewIssue("task", "deliver", Metadata: new Dictionary<string, object> { ["prNumber"] = 1 }));
         var sprints = new SprintStore(issues);
@@ -47,7 +47,66 @@ public sealed class RoutineDeploymentTests : IDisposable
         command.AddParam("@sprint", sprint.Id);
         var audit = Convert.ToInt64(await command.ExecuteScalarAsync());
         return await Completions.BeginCompletionAsync(sprint.Id, [(await issues.GetAsync(task.Id))!],
-            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", ready, DeliveryRequired: true));
+            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", ready, DeliveryRequired: true, CompletionPolicy: policy));
+    }
+
+    [Fact]
+    public async Task FailedNamedRetryPreservesAuditAdoptsBindingHonorsHoldAndClosesSprint()
+    {
+        var snapshot = new DeploymentTargetSnapshot("uat", "UAT", "forge-uat", Guid.NewGuid().ToString());
+        var completion = await Complete(policy: new("uat", false, JsonSerializer.Serialize(snapshot, DeploymentStore.EnvironmentJson)));
+        await Completions.MarkBookkeepingCompleteAsync(completion.Id);
+        await Coordinator().ReconcileAsync(default);
+        var original = Assert.Single(await Deployments.ListAsync());
+        await Deployments.MarkIndependentProgressAsync(original, new(false, "rolled-back"), Completions, default);
+        var failed = (await Deployments.GetAsync(original.Id))!;
+        var receipt = JsonSerializer.Deserialize<TrustedImageReceipt>(failed.ReceiptJson!, DeploymentStore.EnvironmentJson)!;
+        var request = new RetryReleaseRequest(receipt.SourceSha, receipt.ImageDigest);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Deployments.RetryRoutineAsync(Project, failed, request with { ExpectedImage = "wrong" }, "operator", default));
+        var retries = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Deployments.RetryRoutineAsync(Project, failed, request, "operator", default)));
+        var retry = retries[0];
+        Assert.Equal(retry.Id, retries[1].Id);
+        Assert.NotEqual(failed.Id, retry.Id);
+        Assert.Equal(failed.Id, retry.RetryOfCandidateId);
+        Assert.Equal(failed.ReceiptJson, retry.ReceiptJson);
+        Assert.Equal(failed.TargetJson, retry.TargetJson);
+        Assert.Equal(failed, await Deployments.GetAsync(failed.Id));
+        Assert.Equal(completion.Id, failed.CompletionId);
+        Assert.Equal(retry.Id, (await Deployments.CreateOrGetRoutineAsync("forge", completion.Id, FakeSource.Sha)).Id);
+        await using (var connection = await issues.Db.OpenAsync())
+        {
+            M041SprintCompletion.Create(connection, issues.Db.Dialect);
+            M044DeploymentEnvironments.Create(connection, issues.Db.Dialect);
+            M044DeploymentEnvironments.Create(connection, issues.Db.Dialect);
+        }
+        await Gates.HoldAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.BuildPassed, (await Deployments.GetAsync(retry.Id))!.Status);
+        await Gates.ReleaseAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        await Deployments.MarkIndependentProgressAsync((await Deployments.GetAsync(retry.Id))!, new(true, "verified target"), Completions, default);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        Assert.Equal(SprintStatus.Completed, (await new SprintStore(issues).GetAsync(completion.SprintId))!.Status);
+        Assert.Equal(DeploymentStatus.DeployFailed, (await Deployments.GetAsync(failed.Id))!.Status);
+        Assert.Equal(2, (await Deployments.ListAsync()).Count);
+    }
+
+    [Fact]
+    public async Task SuccessfulNamedDeploymentAndSprintClosureShareOneCommit()
+    {
+        var snapshot = new DeploymentTargetSnapshot("uat", "UAT", "forge-uat", Guid.NewGuid().ToString());
+        var policy = new CompletionPolicySnapshot("uat", false, JsonSerializer.Serialize(snapshot, DeploymentStore.EnvironmentJson));
+        var completion = await Complete(policy: policy);
+        await Completions.MarkBookkeepingCompleteAsync(completion.Id);
+        await Coordinator().ReconcileAsync(default);
+        var candidate = Assert.Single(await Deployments.ListAsync());
+        Assert.Equal(policy.TargetJson, candidate.TargetJson);
+        Assert.Equal("uat", candidate.EnvironmentName);
+        Assert.Equal(EngineeringOutcome.PendingEvidence, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        await Deployments.MarkIndependentProgressAsync(candidate, new(true, "verified target"), Completions, default);
+        Assert.Equal(DeploymentStatus.Deployed, (await Deployments.GetAsync(candidate.Id))!.Status);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        Assert.Equal(SprintStatus.Completed, (await new SprintStore(issues).GetAsync(completion.SprintId))!.Status);
     }
 
     [Fact]
@@ -223,6 +282,7 @@ public sealed class RoutineDeploymentTests : IDisposable
     }
     private sealed class FakeExecutor : IIndependentDeploymentExecutor
     {
+        public Task<string> ReadTargetRevisionAsync(DeploymentTargetSnapshot target, CancellationToken ct) => Task.FromResult(FakeSource.Sha);
         public int Calls;
         private bool started;
         public DeploymentExecutionResult Result = new(false, "running", true);

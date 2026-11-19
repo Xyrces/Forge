@@ -20,9 +20,10 @@ namespace Forge.Dashboard;
 // docs/deployment-pipeline.md for the full flow.
 public static class DeploymentsEndpoints
 {
-    public static IEndpointRouteBuilder MapDeploymentsEndpoints(this IEndpointRouteBuilder endpoints)
+    public static IEndpointRouteBuilder MapDeploymentsEndpoints(this IEndpointRouteBuilder endpoints, Action? wakeDelivery = null)
     {
         var group = endpoints.MapGroup("/api/deployments");
+        DeploymentEnvironmentEndpoints.Map(endpoints, group, wakeDelivery);
 
         group.MapGet("/", ListAsync)
              .WithName("ListDeployments")
@@ -55,7 +56,7 @@ public static class DeploymentsEndpoints
             var ctx = factory.Find(projectId);
             if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
             await ReconcileKubernetesAsync(ctx, executors, loggerFactory, ct);
-            return Results.Ok(await ctx.Deployments.ListAsync(projectId, ct: ct));
+            return Results.Ok((await ctx.Deployments.ListAsync(projectId, ct: ct)).Select(row => KubernetesDeploymentExecutor.WithPromotionEligibility(ctx.Options, row)));
         }
 
         var all = new List<DeploymentCandidate>();
@@ -64,7 +65,7 @@ public static class DeploymentsEndpoints
             var ctx = factory.Find(p.Id);
             if (ctx is null) continue;
             await ReconcileKubernetesAsync(ctx, executors, loggerFactory, ct);
-            all.AddRange(await ctx.Deployments.ListAsync(p.Id, ct: ct));
+            all.AddRange((await ctx.Deployments.ListAsync(p.Id, ct: ct)).Select(row => KubernetesDeploymentExecutor.WithPromotionEligibility(ctx.Options, row)));
         }
         return Results.Ok(all.OrderByDescending(d => d.RequestedAt).ToList());
     }
@@ -80,7 +81,8 @@ public static class DeploymentsEndpoints
             {
                 if (candidate.Status is not (DeploymentStatus.Approved or DeploymentStatus.Deploying)) continue;
                 var progress = await executor.ReadProgressAsync(ctx.Options, candidate, ct);
-                await ctx.Deployments.MarkIndependentProgressAsync(candidate.Id, progress, ct);
+                if (progress.AdmissionHeld) continue; // Observational reads cannot determine a live admission hold.
+                await ctx.Deployments.MarkIndependentProgressAsync(candidate, progress, new Core.Completion.SprintCompletionStore((Core.IssueStore)ctx.Issues), ct);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -125,6 +127,9 @@ public static class DeploymentsEndpoints
         var ctx = factory.Find(body.ProjectId);
         if (ctx is null) return Results.NotFound(new { error = "project not found", projectId = body.ProjectId });
 
+        if (ctx.Options.Deployment?.Environments.Count > 0)
+            return Results.Conflict(new { error = "Use sprint delivery or promote an existing verified release from Deployments." });
+
         var summary = await GetCommitSummaryAsync(ctx.Options.Root, body.CommitSha, ct);
         var candidate = await ctx.Deployments.CreateAsync(body.ProjectId, body.CommitSha, summary, body.RequestedBy, ct);
 
@@ -168,6 +173,8 @@ public static class DeploymentsEndpoints
             return Results.BadRequest(new { error = $"cannot approve a deployment in status {candidate.Status}" });
 
         var project = ownerCtx.Options;
+        if (candidate.CompletionId is not null || candidate.SourceCandidateId is not null || project.Deployment?.Environments.Count > 0)
+            return Results.Conflict(new { error = "This release is admitted by sprint policy or explicit promotion. Check the sprint for required approvals." });
         if (project.Deployment?.Kind == DeploymentKind.Kubernetes)
         {
             if (candidate.Status != DeploymentStatus.BuildPassed)

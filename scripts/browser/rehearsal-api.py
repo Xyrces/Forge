@@ -52,6 +52,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip('/')
+        if path.startswith('/api/deployments/') and path.endswith('/promote'):
+            body = self.read_body()
+            writes.append({'method': 'POST', 'path': self.path, 'body': body})
+            result = fixtures.get('/__promotion_result', {'status': 409, 'body': {'error': 'Synthetic release no longer qualifies'}})
+            return self.send(result['status'], result['body'])
+        if path == '/api/deployments/synthetic-failed/retry':
+            body = self.read_body()
+            writes.append({'method': 'POST', 'path': self.path, 'body': body})
+            result = fixtures.get('/__retry_result', {'status': 409, 'body': {'error': 'Rollback has not been verified.'}})
+            return self.send(result['status'], result['body'])
+        if path == '/api/deployments/synthetic-pending/reject':
+            writes.append({'method': 'POST', 'path': self.path})
+            for row in fixtures.get('/api/deployments', []):
+                if row.get('id') == 'synthetic-pending':
+                    row['status'] = 'Rejected'
+            return self.send(200, {'status': 'Rejected'})
+        if path == '/api/sprints/environment-fixture/completion/approve-deployment':
+            body = self.read_body()
+            writes.append({'method': 'POST', 'path': self.path, 'body': body})
+            completion = fixtures.get('/api/sprints/environment-fixture/completion', {})
+            if body.get('planHash') != completion.get('receipt', {}).get('planHash'):
+                return self.send(409, {'error': 'Synthetic plan changed'})
+            completion['receipt']['deploymentApprovalRequired'] = False
+            return self.send(200, {'message': 'Synthetic approval recorded'})
         if path == '/api/projects':
             body = self.read_body()
             writes.append({'method': 'POST', 'path': self.path, 'body': body})
@@ -90,6 +114,13 @@ class Handler(BaseHTTPRequestHandler):
             writes.append({'path': path, 'body': body})
             fixtures[path] = body
             return self.send(200, body)
+        if path.endswith('/environments'):
+            writes.append({'method': 'PUT', 'path': path, 'body': body})
+            current = fixtures.get(path, {})
+            if current.get('revision') != body.get('revision'):
+                return self.send(409, {'error': 'Environment policy changed. Reload before saving.'})
+            fixtures[path] = {**body, 'revision': body['revision'] + 1}
+            return self.send(200, fixtures[path])
         if path.endswith('/human-review'):
             writes.append({'path': path, 'body': body})
             required = body['required']

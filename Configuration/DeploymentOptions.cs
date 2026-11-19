@@ -56,7 +56,23 @@ public sealed record DeploymentOptions
     public string RoutineWorkflow { get; set; } = "controller-image.yml";
     public string RoutineValidationWorkflow { get; set; } = "ci.yml";
     public string RoutineImageRepository { get; set; } = "ghcr.io/xyrces/forge";
+
+    // Physical bindings are host-controlled. Dashboard policy edits may select these
+    // bindings but cannot introduce arbitrary cluster destinations.
+    public string? SprintEnvironment { get; set; }
+    public Dictionary<string, DeploymentEnvironmentOptions> Environments { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
+
+public sealed record DeploymentEnvironmentOptions
+{
+    public string DisplayName { get; set; } = string.Empty;
+    public string KubernetesNamespace { get; set; } = string.Empty;
+    public string KubernetesDatasetId { get; set; } = string.Empty;
+    public List<string> PromoteTo { get; set; } = [];
+    public bool RequireApproval { get; set; } = true;
+}
+
+public sealed record DeploymentTargetSnapshot(string Name, string DisplayName, string KubernetesNamespace, string KubernetesDatasetId);
 
 public enum DeploymentKind
 {

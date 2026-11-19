@@ -19,9 +19,12 @@
                 @if (_detail is { } detail)
                 {
                     var receipt = detail.Receipt;
-                    var observations = detail.Criteria.Where(c => c.EvidenceKind == "OperatorObserved").ToList();
+                    var observations = detail.Criteria.Where(c => c.EvidenceKind == "OperatorObserved" && c.Blocking && !c.MissedWithException).ToList();
                     <span>@(receipt.AbandonedAt is null ? CompletionPresentation.Outcome(receipt.Outcome) : "Stopped by operator")</span>
                     <span>@DeploymentLabel(receipt)</span>
+                    @if (detail.Receipt.CompletionPolicy?.EnvironmentName is { } environment) { <span>Target: @environment</span> }
+                    @if (detail.Receipt.DeploymentApprovalRequired) { <span>Human deployment approval required</span> }
+                    @if (detail.Receipt.Reconciliation is not null) { <span>Closed with recorded exception</span> }
                     @if (observations.Count > 0)
                     {
                         <span>@observations.Count(c => c.ProofReference is not null) of @observations.Count operator observations recorded</span>
@@ -33,7 +36,12 @@
                 }
                 else if (_error is null)
                 {
-                    <span>@(_loading ? "Loading evidence…" : "No completion evidence yet")</span>
+                    @if (_activePolicy is { } activePolicy)
+                    {
+                        <span>@(activePolicy.EnvironmentName is null ? "No deployment required" : $"Target: {activePolicy.EnvironmentName}")</span>
+                        <span>@(activePolicy.RequireApproval ? "Human deployment approval required" : "Automatic after required checks")</span>
+                    }
+                    else { <span>@(_loading ? "Loading evidence…" : "No completion evidence yet")</span> }
                 }
             </span>
             <span class="sprint-acceptance__chevron" aria-hidden="true"></span>
@@ -52,6 +60,15 @@
     else if (_detail is null)
     {
         <p class="page-subtitle">No completion evidence has been recorded for this sprint yet.</p>
+        @if (_activePolicy is { } policy)
+        {
+            @if (policy.EnvironmentName is null) { <p>No deployment required. This sprint closes after required engineering verification.</p> }
+            else
+            {
+                <p>This sprint closes when deployment to <strong>@policy.EnvironmentName</strong> passes its required checks.</p>
+                <p>@(policy.RequireApproval ? "Explicit gate: human approval before deployment." : "Delivery is automatic after required checks. No human deployment approval gate.")</p>
+            }
+        }
     }
     else
     {
@@ -66,6 +83,28 @@
             <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
             <dt>Deployment</dt><dd>@DeploymentLabel(receipt)</dd>
         </dl>
+        @if (_detail.Receipt.CompletionPolicy is { } policy)
+        {
+            @if (policy.EnvironmentName is null) { <p>No deployment required. This sprint closes after required engineering verification.</p> }
+            else
+            {
+                <p>Completion target: <strong>@policy.EnvironmentName</strong>. Deployment checks must pass before this sprint closes.</p>
+                <p>@(policy.RequireApproval ? "Explicit gate: human approval before deployment." : "Automatic deployment after required checks. No human deployment approval gate.")</p>
+            }
+        }
+        @if (_detail.Receipt.DeploymentApprovalRequired)
+        {
+            <div class="banner banner--warn"><p>Human deployment approval is required by this sprint's environment policy.</p>
+                @if (!receipt.ReadyForDeployment) { <p>Engineering verification must pass before deployment approval is available.</p> }
+                <button class="btn btn--primary" disabled="@(_retrying || _loading || _error is not null || !receipt.ReadyForDeployment)" @onclick="ApproveDeploymentAsync">Approve deployment to @_detail.Receipt.CompletionPolicy?.EnvironmentName</button>
+            </div>
+        }
+        @if (_detail.Receipt.Reconciliation is { } exception)
+        {
+            <section class="banner banner--warn"><strong>Closed with an explicit exception</strong><p>@exception.Reason</p>
+                <p>Recorded by @exception.OperatorIdentity at @exception.RecordedAt.ToLocalTime().ToString("g"). Missed checks remain marked as missed below.</p>
+            </section>
+        }
         @if (!string.IsNullOrWhiteSpace(receipt.DeliveryNote))
         {
             <p class="banner banner--info">@receipt.DeliveryNote</p>
@@ -107,19 +146,20 @@
             <section class="acceptance-criterion">
                 <h4>@criterion.Text</h4>
                 <p class="page-subtitle">@CompletionPresentation.Evidence(criterion.EvidenceKind)</p>
+                @if (criterion.MissedWithException) { <p class="banner banner--warn">Missed — recorded in the completion exception. This check was not passed.</p> }
                 @if (criterion.EvidenceKind == "ImplementationVerified")
                 {
                     <p class="page-subtitle">Merged changes or existing code must have independent verification and review against this requirement at a recorded revision.</p>
                 }
                 @if (criterion.EvidenceKind == "OperatorObserved")
                 {
-                    <p>@(criterion.ProofReference is not null ? "Operator observation recorded for this deployed version." : receipt.AbandonedAt is not null ? "Not verified; this outcome was stopped." : "Awaiting explicit operator observation of the exact deployed version.")</p>
+                    <p>@(criterion.ProofReference is not null ? "Operator observation recorded for this deployed version." : criterion.MissedWithException ? "Observation was not performed." : !criterion.Blocking ? "Optional operator observation. It does not block sprint completion." : receipt.AbandonedAt is not null ? "Not verified; this outcome was stopped." : "Awaiting explicit operator observation of the exact deployed version.")</p>
                     @if (criterion.ProofReference is not null)
                     {
                         <dl><dt>Recorded by</dt><dd>@(criterion.OperatorIdentity ?? "Identity not recorded")</dd>
                         <dt>Evidence reference</dt><dd>@criterion.ProofReference</dd></dl>
                     }
-                    else if (receipt.AbandonedAt is null && receipt.ReadyForDeployment && receipt.DeploymentStatus == "Deployed"
+                    else if (!criterion.MissedWithException && receipt.AbandonedAt is null && receipt.ReadyForDeployment && receipt.DeploymentStatus == "Deployed"
                         && receipt.PlanHash is not null && receipt.SourceSha is not null && receipt.DeploymentCandidateId is not null
                         && ProjectId is not null && SprintId is not null)
                     {
@@ -165,6 +205,7 @@
     private string _stopReason = "";
     private DateTime _refreshAt;
     private CompletionDetail? _detail;
+    private CompletionPolicyDto? _activePolicy;
     private CancellationTokenSource? _request;
     private int _generation;
     private bool _loading, _retrying;
@@ -201,6 +242,7 @@
         _request = new();
         var token = _request.Token;
         var generation = ++_generation;
+        _activePolicy = null;
         _loading = true;
         _layoutReadyNotified = false;
         _error = null;
@@ -222,6 +264,16 @@
                     throw new JsonException("Completion evidence does not match the selection.");
             }
             if (generation == _generation) _detail = detail;
+            if (detail is null)
+            {
+                using var policyResponse = await Http.GetAsync($"/api/sprints/{Uri.EscapeDataString(SprintId)}/completion-policy?projectId={Uri.EscapeDataString(ProjectId)}", token);
+                if (policyResponse.StatusCode != HttpStatusCode.NotFound)
+                {
+                    policyResponse.EnsureSuccessStatusCode();
+                    var policy = await policyResponse.Content.ReadFromJsonAsync<CapturedPolicyDto>(cancellationToken: token);
+                    if (generation == _generation) _activePolicy = policy?.Policy;
+                }
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception ex)
@@ -280,18 +332,38 @@
         }
         finally { _retrying = false; }
     }
+    private async Task ApproveDeploymentAsync()
+    {
+        if (_retrying || _detail?.Receipt.DeploymentApprovalRequired != true || _detail.Receipt.PlanHash is not { } planHash || ProjectId is null || SprintId is null) return;
+        var generation = _generation; var token = _request?.Token ?? CancellationToken.None;
+        _retrying = true; _actionError = null; _notice = null;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync($"/api/sprints/{Uri.EscapeDataString(SprintId)}/completion/approve-deployment?projectId={Uri.EscapeDataString(ProjectId)}", new { planHash }, token);
+            await Forge.Dashboard.Features.Deployments.EnvironmentPolicyClient.EnsureSuccessAsync(response, token);
+            if (generation != _generation) return;
+            _notice = "Deployment approval recorded. Delivery will proceed when all required checks pass.";
+            await LoadAsync();
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) { if (generation == _generation) _actionError = ex.Message; }
+        finally { if (generation == _generation) _retrying = false; }
+    }
     private async Task FirstPageAsync() { _cursor = null; await LoadAsync(); }
     private async Task NextPageAsync() { _cursor = _detail?.NextCursor; await LoadAsync(); }
     public void Dispose() { ++_generation; _request?.Cancel(); _request?.Dispose(); }
     private sealed record CompletionSummary(string Id, string ProjectId, string SprintId, string Outcome,
         string BookkeepingState, bool ReadyForDeployment, string? SourceSha, string? DeploymentCandidateId,
         string? DeploymentStatus, string? DeliveryNote, string? PlanHash, string? SprintName = null,
-        string? AbandonmentReason = null, DateTimeOffset? AbandonedAt = null, bool? DeliveryRequired = null);
+        string? AbandonmentReason = null, DateTimeOffset? AbandonedAt = null, bool? DeliveryRequired = null, CompletionPolicyDto? CompletionPolicy = null, bool DeploymentApprovalRequired = false, CompletionExceptionDto? Reconciliation = null);
     private sealed record CompletionBatch(string Id, string State, string? Error);
     private static string DeploymentLabel(CompletionSummary receipt) =>
         receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus)
         : receipt.DeliveryRequired == false ? "No deployment required"
         : receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release";
-    private sealed record CompletionCriterion(string Id, string Text, string EvidenceKind, string? ProofReference, string? OperatorIdentity);
+    private sealed record CompletionCriterion(string Id, string Text, string EvidenceKind, string? ProofReference, string? OperatorIdentity, bool Blocking = true, bool MissedWithException = false);
+    private sealed record CompletionPolicyDto(string? EnvironmentName, bool RequireApproval, string? TargetJson);
+    private sealed record CapturedPolicyDto(CompletionPolicyDto? Policy);
+    private sealed record CompletionExceptionDto(string Reason, string OperatorIdentity, DateTimeOffset RecordedAt);
     private sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatch> Batches, string? NextCursor, IReadOnlyList<CompletionCriterion> Criteria);
 }

@@ -7,7 +7,7 @@ public sealed class InitiativePermissionTests
     public void WorkerCannotWriteAnyApprovalAuthorityTableButRetainsReads()
     {
         var sql=ControllerInitializer.InitiativeWorkerPermissionsSql("worker-principal");
-        foreach(var table in new[]{"initiative_proposal","initiative_revision","initiative_ingestion","initiative_lock"})
+        foreach(var table in new[]{"initiative_proposal","initiative_revision","initiative_ingestion","initiative_lock","sprint","sprint_completion","deployment_environment_policy"})
         {
             Assert.Contains($"IF OBJECT_ID(N'proj_forge.{table}',N'U') IS NOT NULL",sql);
             Assert.Contains($"GRANT SELECT ON OBJECT::[proj_forge].[{table}] TO [worker-principal]",sql);

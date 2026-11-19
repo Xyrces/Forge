@@ -18,7 +18,7 @@ internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? 
     private string? deliveryCursor;
     private readonly Dictionary<string, string> failureAcknowledgements = new();
 
-    public async Task<SprintCompletionRecord> CompleteAsync(SprintRecord sprint, ISprintStore sprints, CancellationToken ct, bool routineDeploymentEnabled = false)
+    public async Task<SprintCompletionRecord> CompleteAsync(SprintRecord sprint, ISprintStore sprints, CancellationToken ct, bool routineDeploymentEnabled = false, CompletionPolicySnapshot? completionPolicy = null)
     {
         var members = new List<IssueRecord>();
         foreach (var id in await sprints.GetIssueIdsAsync(sprint.Id, ct))
@@ -45,16 +45,19 @@ internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? 
         foreach (var member in members.Where(m => m.GetMetadata("trustedIntegrationVerification") is not null))
             if (plan is null || !await store.HasRecordedIntegrationProofAsync(member, plan, ct)) verifiedTasks.Remove(member.Id);
         var verified = members.Count > 0 && verifiedTasks.Count == members.Count;
+        var deliveryRequired = completionPolicy is null
+            ? routineDeploymentEnabled || (plan?.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved) ?? false)
+            : completionPolicy.EnvironmentName is not null;
         var outcome = incomplete ? EngineeringOutcome.Incomplete
             : plan is null ? EngineeringOutcome.LegacyTerminalOnly
-            : !verified || routineDeploymentEnabled || plan.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved)
+            : !verified || deliveryRequired || completionPolicy is not null
                 ? EngineeringOutcome.PendingEvidence : EngineeringOutcome.Satisfied;
         return await store.BeginCompletionAsync(sprint.Id, members, new(auditId, plan?.Hash, outcome,
             JsonSerializer.Serialize(new { verifiedTasks,
                 unresolvedTasks = members.Where(m => !IssueResolution.IsSatisfied(m, context)).Select(m => m.Id),
                 deploymentPending = plan?.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved) ?? false }),
             ReadyForDeployment: plan is not null && verified && !incomplete,
-            DeliveryRequired: routineDeploymentEnabled || (plan?.Criteria.Any(c => c.EvidenceKind is SprintEvidenceKind.DeploymentHealthy or SprintEvidenceKind.OperatorObserved) ?? false)), ct);
+            DeliveryRequired: deliveryRequired, CompletionPolicy: completionPolicy), ct);
     }
 
     public async Task ReconcileAsync(CancellationToken ct)

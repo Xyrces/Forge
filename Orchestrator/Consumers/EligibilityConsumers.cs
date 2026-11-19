@@ -25,6 +25,7 @@ public sealed class SprintOutcomeChangedConsumer(ITransport transport, Scheduler
     {
         wakeups.Assemble.Signal();
         wakeups.Groom.Signal();
+        wakeups.Deploy.Signal();
         return Task.CompletedTask;
     }
 }

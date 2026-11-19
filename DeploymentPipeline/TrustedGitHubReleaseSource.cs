@@ -30,7 +30,11 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
 
     public Task ValidateForwardAsync(ProjectOptions project, string sha, CancellationToken ct)
     {
-        var running = runningRevision()?.Trim();
+        return ValidateForwardAsync(project, sha, runningRevision()?.Trim() ?? "", ct);
+    }
+
+    public Task ValidateForwardAsync(ProjectOptions project, string sha, string running, CancellationToken ct)
+    {
         if (!Sha(running)) throw new InvalidOperationException("Running controller source revision is unavailable; routine deployment cannot prove forward ancestry.");
         return RequireAncestor(project, Repository(project), running!, sha, ct);
     }
@@ -49,14 +53,17 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
 
     public Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project,
         IReadOnlyList<IssueRecord> members, CancellationToken ct)
-        => ObserveFrontierAsync(project, members, null, ct);
+        => ObserveFrontierAsync(project, members, null, runningRevision()?.Trim(), ct);
 
     public Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project,
         IReadOnlyList<IssueRecord> members, SprintPlan plan, CancellationToken ct)
-        => ObserveFrontierAsync(project, members, plan, ct);
+        => ObserveFrontierAsync(project, members, plan, runningRevision()?.Trim(), ct);
+
+    public Task<(string Sha, string Evidence)> ObserveMergedFrontierAsync(ProjectOptions project, IReadOnlyList<IssueRecord> members,
+        SprintPlan plan, string servingRevision, CancellationToken ct) => ObserveFrontierAsync(project, members, plan, servingRevision, ct);
 
     private async Task<(string Sha, string Evidence)> ObserveFrontierAsync(ProjectOptions project,
-        IReadOnlyList<IssueRecord> members, SprintPlan? plan, CancellationToken ct)
+        IReadOnlyList<IssueRecord> members, SprintPlan? plan, string? running, CancellationToken ct)
     {
         var repo = Repository(project);
         if (plan is not null && (plan.ProjectId != project.Id || !plan.HasValidHash
@@ -100,7 +107,6 @@ public sealed class TrustedGitHubReleaseSource(HttpClient api, HttpClient downlo
         }
         foreach (var observation in observations)
             await RequireAncestor(project, repo, observation.Sha, frontier, ct);
-        var running = runningRevision()?.Trim();
         if (!Sha(running))
             throw new InvalidOperationException("Running controller source revision is unavailable; routine deployment cannot prove forward ancestry.");
         using var branch = await GetJson(project, $"repos/{repo}/branches/{Uri.EscapeDataString(project.DefaultBranch)}", ct);

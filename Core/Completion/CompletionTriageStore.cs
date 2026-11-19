@@ -25,8 +25,27 @@ public sealed partial class SprintCompletionStore
     public async Task MarkBookkeepingCompleteAsync(string completionId, CancellationToken ct = default)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND abandonment_json IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed') AND NOT EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", ("@now", Now()), ("@id", completionId));
-        await command.ExecuteNonQueryAsync(ct);
+        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND bookkeeping_state<>'Completed' AND abandonment_json IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed') AND NOT EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", ("@now", Now()), ("@id", completionId));
+        var newlyReady = await command.ExecuteNonQueryAsync(ct) == 1;
+        var receipt = await GetAsync(completionId, ct);
+        if (newlyReady && receipt is { ReadyForDeployment: true, DeliveryRequired: true, CompletionPolicy: not null })
+            await PublishOutcomeChangedAsync(receipt, "BookkeepingCompleted", ct);
+        if (receipt?.CompletionPolicy is not null && !receipt.DeliveryRequired && receipt.ReadyForDeployment
+            && receipt.BookkeepingState == "Completed" && receipt.EngineeringOutcome == EngineeringOutcome.PendingEvidence)
+        {
+            await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+            await LockAsync(connection, tx, ct);
+            using var finish = Command(connection, tx,
+                $"UPDATE {T("sprint_completion")} SET outcome='Satisfied',updated_at=@now WHERE id=@id AND outcome='PendingEvidence' AND bookkeeping_state='Completed' AND {CompletionPlanningBarrier.BookkeepingReadyPredicate(issues.Db.Dialect)}",
+                ("@now", Now()), ("@id", completionId));
+            if (await finish.ExecuteNonQueryAsync(ct) == 1)
+            {
+                using var close = Command(connection, tx, $"UPDATE {T("sprint")} SET status='Completed',updated_at=@now WHERE id=@sprint AND status='Active'", ("@now", Now()), ("@sprint", receipt.SprintId));
+                await close.ExecuteNonQueryAsync(ct);
+                await tx.CommitAsync(ct);
+                await PublishOutcomeChangedAsync(receipt, "Satisfied", ct);
+            }
+        }
     }
     public async Task RecordMaterializationFailureAsync(string batchId, string error, CancellationToken ct = default)
     {
@@ -98,7 +117,7 @@ public sealed partial class SprintCompletionStore
         using var insert = Command(connection, tx, $"INSERT INTO {T("completion_triage")}(id,completion_id,state,sources_json,updated_at) VALUES(@id,@completion,'Pending',@sources,@now)",
             ("@id", id), ("@completion", completionId), ("@sources", JsonSerializer.Serialize(drafts.OrderBy(d => d.Id))), ("@now", Now()));
         await insert.ExecuteNonQueryAsync(ct);
-        using var reopen = Command(connection, tx, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Pending',updated_at=@now WHERE id=@id", ("@now", Now()), ("@id", completionId));
+        using var reopen = Command(connection, tx, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Pending',updated_at=@now WHERE id=@id AND (completion_policy_json IS NULL OR (deployment_candidate_id IS NULL AND outcome <> 'Satisfied'))", ("@now", Now()), ("@id", completionId));
         await reopen.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
         return (await GetBatchAsync(connection, null, id, ct))!;

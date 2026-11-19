@@ -91,13 +91,21 @@ class FakeControllers:
         self.legacy_slots = set()
         self.fail_fence = False
         self.merge_held = False
+        self.fail_dashboard = False
+
+    def verify_dashboard(self, source_sha, *, recovery=False):
+        if recovery:
+            return False
+        self.kube.events.append(("verify-dashboard", source_sha))
+        return not self.fail_dashboard or source_sha is None
 
     def call(self, slot, action, operation, expected_previous_owner=None):
         if action == "status":
             state = self.kube.states.get(slot)
             return {"ready": slot not in self.not_ready and state not in ("stopped", "failed"), "mode": state,
                     "instanceId": "instance-" + slot, "leaseOwner": self.lease_owner,
-                    "admissionOpen": state == "active", "activeRuns": 1 if self.busy else 0, "reviewHoldProtocolVersion": 0 if slot in self.legacy_slots else 1}
+                    "admissionOpen": state == "active", "activeRuns": 1 if self.busy else 0, "datasetId": DATASET,
+                    "reviewHoldProtocolVersion": 0 if slot in self.legacy_slots else 1}
         self.kube.events.append((action, slot))
         if action == "merge-fence":
             if self.fail_fence: raise RuntimeError("fence failed")
@@ -117,6 +125,103 @@ class FakeControllers:
 
 
 class ReleaseTests(unittest.TestCase):
+    def named(self, previous="blue"):
+        release, kube, controllers = self.make(previous)
+        release.environment, release.source_sha = "uat", "c" * 40
+        kube.objects[("configmaps", "forge-dataset")] = {"data": {"id": DATASET}}
+        return release, kube, controllers
+
+    def test_named_release_requires_target_identity_before_any_mutation(self):
+        release, kube, _ = self.named()
+        kube.objects[("configmaps", "forge-dataset")]["data"]["id"] = "wrong"
+        with self.assertRaisesRegex(RuntimeError, "approved dataset"):
+            release.run()
+        self.assertEqual([], kube.events)
+
+    def test_named_release_verifies_routed_revision_before_committing(self):
+        release, kube, _ = self.named()
+        release.run()
+        data = kube.get("configmaps", release.journal_name)["data"]
+        self.assertEqual("true", data["targetVerified"])
+        self.assertEqual("uat", data["environment"])
+        self.assertEqual("c" * 40, data["sourceSha"])
+        self.assertLess(kube.events.index(("route", "green")), kube.events.index(("verify-dashboard", "c" * 40)))
+
+    def test_named_smoke_failure_rolls_back_only_its_target_and_verifies_restoration(self):
+        release, kube, controllers = self.named()
+        untouched = FakeKube()
+        baseline = copy.deepcopy(untouched.objects)
+        controllers.fail_dashboard = True
+        with self.assertRaisesRegex(TimeoutError, "dashboard revision"):
+            release.run()
+        data = kube.get("configmaps", release.journal_name)["data"]
+        self.assertEqual("rolled-back", data["phase"])
+        self.assertEqual("true", data["rollbackVerified"])
+        self.assertEqual("blue", kube.get("services", "forge")["spec"]["selector"]["slot"])
+        self.assertEqual(baseline, untouched.objects)
+
+    def test_named_fresh_target_smoke_failure_closes_route(self):
+        release, kube, controllers = self.named(previous="")
+        controllers.fail_dashboard = True
+        with self.assertRaises(TimeoutError):
+            release.run()
+        self.assertEqual("none", kube.get("services", "forge")["spec"]["selector"]["slot"])
+        self.assertEqual("rolled-back", kube.get("configmaps", release.journal_name)["data"]["phase"])
+
+    def test_named_release_resumes_interrupted_routed_verification(self):
+        class LostJob(BaseException):
+            pass
+        release, kube, controllers = self.named()
+        verify = controllers.verify_dashboard
+        def crash(_):
+            raise LostJob()
+        controllers.verify_dashboard = crash
+        with self.assertRaises(LostJob):
+            release.run()
+        self.assertEqual("verifying-target", kube.get("configmaps", release.journal_name)["data"]["phase"])
+        controllers.verify_dashboard = verify
+        release.pod_uid = "replacement"
+        release.run()
+        self.assertEqual("committed", kube.get("configmaps", release.journal_name)["data"]["phase"])
+
+    def test_named_release_resumes_interrupted_rollback_verification(self):
+        class LostJob(BaseException):
+            pass
+        release, kube, controllers = self.named()
+        verify = controllers.verify_dashboard
+        def fail_then_crash(source):
+            if source is None:
+                raise LostJob()
+            return False
+        controllers.verify_dashboard = fail_then_crash
+        with self.assertRaises(LostJob):
+            release.run()
+        self.assertEqual("rolling-back", kube.get("configmaps", release.journal_name)["data"]["phase"])
+        controllers.verify_dashboard = verify
+        release.pod_uid = "replacement"
+        with self.assertRaisesRegex(RuntimeError, "interrupted rollback completed"):
+            release.run()
+        self.assertEqual("rolled-back", kube.get("configmaps", release.journal_name)["data"]["phase"])
+        self.assertEqual("blue", kube.get("services", "forge")["spec"]["selector"]["slot"])
+
+    def test_lost_commit_acknowledgement_does_not_roll_back_an_accepted_release(self):
+        release, kube, _ = self.named()
+        patch = kube.patch
+        def lose_response(kind, name, body):
+            result = patch(kind, name, body)
+            if body.get("data", {}).get("phase") == "committed":
+                raise OSError("response lost after server committed")
+            return result
+        kube.patch = lose_response
+        with self.assertRaisesRegex(OSError, "response lost"):
+            release.run()
+        self.assertEqual("green", kube.get("services", "forge")["spec"]["selector"]["slot"])
+        self.assertEqual("committed", kube.get("configmaps", release.journal_name)["data"]["phase"])
+        kube.patch = patch
+        release.pod_uid = "replacement"
+        release.run()
+        self.assertEqual("green", kube.get("services", "forge")["spec"]["selector"]["slot"])
+
     def make(self, previous="blue"):
         kube = FakeKube(previous)
         controllers = FakeControllers(kube)
