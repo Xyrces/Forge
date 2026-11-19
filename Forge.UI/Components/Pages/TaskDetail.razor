@@ -498,8 +498,15 @@
     protected override void OnInitialized() => _persisting = PersistentState.RegisterOnPersisting(() =>
     {
         if (_task is { } task && _loadedRecoveryTarget == RecoveryTarget && _error is null)
-            PersistentState.PersistAsJson("forge-task-overview:" + RecoveryTarget,
-                CaptureOverviewSnapshot(task));
+        {
+            var snapshot = CaptureOverviewSnapshot(task);
+            // Persisted prerender state travels back in the initial circuit-start message.
+            // Large review/history payloads must use normal interactive reads instead of
+            // disconnecting the entire page. Keep room for framework encoding/other state;
+            // do not truncate task data or increase the global transport limit.
+            if (JsonSerializer.SerializeToUtf8Bytes(snapshot).Length <= 8 * 1024)
+                PersistentState.PersistAsJson("forge-task-overview:" + RecoveryTarget, snapshot);
+        }
         return Task.CompletedTask;
     });
     public void Dispose() { _persisting.Dispose(); ++_recoveryLoadGeneration; ++_legacyGeneration; InvalidateActivity(); }

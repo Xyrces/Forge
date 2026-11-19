@@ -57,3 +57,10 @@ pending restore and resume scroll saving. Wheel, keyboard, pointer, touch,
 pagination and task navigation during delayed loading must likewise retain
 operator control without a late jump or focus change. Run separately from
 other fixture suites.
+
+`node scripts/browser/task-bootstrap.spec.mjs /tmp/forge-task-bootstrap` checks
+large direct task, Review and History URLs at desktop/mobile sizes. It verifies
+that Retry actually reaches the isolated fixture API, full evidence remains
+readable, compact task hydration performs one read, and oversized tasks use
+normal interactive reads. ASCII and escaping-heavy boundary probes measure
+retained startup frames against the unchanged transport limit.
