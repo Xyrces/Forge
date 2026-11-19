@@ -212,7 +212,7 @@ public sealed partial class DeploymentStore
         SELECT id, project_id, commit_sha, commit_summary, status,
                requested_at, requested_by, build_log, approved_at,
                approved_by, deployed_at, deploy_log, completion_id, receipt_json,
-               environment_name, target_json, source_candidate_id
+               environment_name, target_json, source_candidate_id, retry_of_candidate_id
         FROM {T("deployment")}
         """;
 
@@ -220,7 +220,7 @@ public sealed partial class DeploymentStore
         SELECT {_db.Dialect.TopParam("@limit")}id, project_id, commit_sha, commit_summary, status,
                requested_at, requested_by, build_log, approved_at,
                approved_by, deployed_at, deploy_log, completion_id, receipt_json,
-               environment_name, target_json, source_candidate_id
+               environment_name, target_json, source_candidate_id, retry_of_candidate_id
         FROM {T("deployment")}
         """;
 
@@ -241,7 +241,8 @@ public sealed partial class DeploymentStore
         ReceiptJson: rd.IsDBNull(13) ? null : rd.GetString(13),
         EnvironmentName: rd.IsDBNull(14) ? null : rd.GetString(14),
         TargetJson: rd.IsDBNull(15) ? null : rd.GetString(15),
-        SourceCandidateId: rd.IsDBNull(16) ? null : rd.GetString(16));
+        SourceCandidateId: rd.IsDBNull(16) ? null : rd.GetString(16),
+        RetryOfCandidateId: rd.IsDBNull(17) ? null : rd.GetString(17));
 }
 
 [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<DeploymentStatus>))]
@@ -275,7 +276,8 @@ public sealed record DeploymentCandidate(
     string? ReceiptJson = null,
     string? EnvironmentName = null,
     string? TargetJson = null,
-    string? SourceCandidateId = null)
+    string? SourceCandidateId = null,
+    string? RetryOfCandidateId = null)
 {
     public string? PromotionUnavailableReason { get; init; }
 }

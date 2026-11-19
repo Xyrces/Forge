@@ -20,11 +20,12 @@ public sealed partial class DeploymentStore
         using (var authority = conn.CreateCommand())
         {
             authority.Transaction = tx;
-            authority.CommandText = $"SELECT completion_policy_json,completion_gate_approval_json FROM {T("sprint_completion")} WHERE id=@completion AND project_id=@project AND (completion_policy_json IS NULL OR deployment_candidate_id IS NOT NULL OR {Forge.Core.CompletionPlanningBarrier.BookkeepingReadyPredicate(_db.Dialect)})";
+            authority.CommandText = $"SELECT completion_policy_json,completion_gate_approval_json,deployment_candidate_id FROM {T("sprint_completion")} WHERE id=@completion AND project_id=@project AND (completion_policy_json IS NULL OR deployment_candidate_id IS NOT NULL OR {Forge.Core.CompletionPlanningBarrier.BookkeepingReadyPredicate(_db.Dialect)})";
             authority.AddParam("@completion", completionId); authority.AddParam("@project", projectId);
             await using var reader = await authority.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct)) throw new InvalidOperationException("Sprint delivery authority was not found.");
             policy = reader.IsDBNull(0) ? null : JsonSerializer.Deserialize<CompletionPolicySnapshot>(reader.GetString(0));
+            if (!reader.IsDBNull(2)) id = reader.GetString(2);
             if (policy is not null && (string.IsNullOrWhiteSpace(policy.EnvironmentName) || string.IsNullOrWhiteSpace(policy.TargetJson)
                 || policy.RequireApproval && reader.IsDBNull(1)))
                 throw new InvalidOperationException("Sprint deployment requires a target and all explicit approvals.");

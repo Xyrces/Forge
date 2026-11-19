@@ -148,13 +148,13 @@ public sealed partial class DeploymentStore
         DeploymentCandidate source;
         await using (var reader = await cmd.ExecuteReaderAsync(ct))
             source = await reader.ReadAsync(ct) ? Read(reader) : throw new KeyNotFoundException("Release not found in this project.");
-        var receipt = JsonSerializer.Deserialize<TrustedImageReceipt>(source.ReceiptJson ?? "null", EnvironmentJson);
-        if (source.Status != DeploymentStatus.Deployed || source.EnvironmentName is null || source.TargetJson is null
-            || receipt is null || !receipt.BuildPassed || !receipt.TestPassed || receipt.SourceSha != source.CommitSha
-            || receipt.SourceSha != request.ExpectedSourceSha || receipt.ImageDigest != request.ExpectedImage)
-            throw new InvalidOperationException("Only the selected, verified environment release can be promoted. Refresh its details.");
+        if (source.Status != DeploymentStatus.Deployed || source.EnvironmentName is null || source.TargetJson is null)
+            throw new InvalidOperationException("Only a verified environment release can be promoted.");
         if (KubernetesDeploymentExecutor.WithPromotionEligibility(effective, source).PromotionUnavailableReason is { } reason)
             throw new InvalidOperationException(reason);
+        var receipt = JsonSerializer.Deserialize<TrustedImageReceipt>(source.ReceiptJson!, EnvironmentJson)!;
+        if (receipt.SourceSha != request.ExpectedSourceSha || receipt.ImageDigest != request.ExpectedImage)
+            throw new InvalidOperationException("The selection does not match this release's verified source and image. Refresh its details.");
         if (!effective.Deployment!.Environments.TryGetValue(source.EnvironmentName, out var origin)
             || !origin.PromoteTo.Contains(request.TargetEnvironment, StringComparer.Ordinal))
             throw new InvalidOperationException("This promotion route is not enabled for the source environment.");

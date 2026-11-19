@@ -55,6 +55,29 @@ internal static class DeploymentEnvironmentEndpoints
             try { return Results.Ok(await project.Deployments.SaveEnvironmentPolicyAsync(project.Options, policy, actor, ct)); }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
         });
+        deployments.MapPost("/{id}/retry", async (string id, string projectId, RetryReleaseRequest request,
+            ProjectContextFactory projects, DeploymentExecutorFactory executors, HttpContext http, CancellationToken ct) =>
+        {
+            if (http.Items[DashboardMutationAuthentication.AuthenticatedOperatorItem] is not string actor) return Results.Unauthorized();
+            var project = projects.Find(projectId);
+            if (project is null) return Results.NotFound();
+            var candidate = await project.Deployments.GetAsync(id, ct);
+            if (candidate is null || candidate.ProjectId != projectId) return Results.NotFound();
+            if (candidate.CompletionId is null || candidate.EnvironmentName is null
+                || candidate.Status is not (DeploymentStatus.DeployFailed or DeploymentStatus.Rejected))
+                return Results.Conflict(new { error = "Only a failed or rejected named sprint deployment can be retried." });
+            try
+            {
+                var executor = executors.Create(project.Options) as KubernetesDeploymentExecutor
+                    ?? throw new InvalidOperationException("Retry requires the configured Kubernetes release executor.");
+                if (!await executor.IsRetrySafeAsync(project.Options, candidate, ct))
+                    return Results.Conflict(new { error = "The previous rollout has not confirmed safe termination or rollback. Resolve its deployment operation before retrying." });
+                var retry = await project.Deployments.RetryRoutineAsync(project.Options, candidate, request, actor, ct);
+                wakeDelivery?.Invoke();
+                return Results.Ok(retry);
+            }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
         deployments.MapPost("/{id}/promote", async (string id, string projectId, PromoteReleaseRequest request,
             ProjectContextFactory projects, HttpContext http, CancellationToken ct) =>
         {

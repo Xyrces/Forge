@@ -24,7 +24,7 @@ public sealed class M044DeploymentEnvironments : ISqlServerMigration
         cmd.ExecuteNonQuery();
         foreach (var (name, column, type) in new[] {
             ("sprint", "completion_policy_json", text), ("deployment", "environment_name", key), ("deployment", "target_json", text),
-            ("deployment", "source_candidate_id", key), ("sprint_completion", "completion_policy_json", text),
+            ("deployment", "source_candidate_id", key), ("deployment", "retry_of_candidate_id", key), ("sprint_completion", "completion_policy_json", text),
             ("sprint_completion", "completion_gate_approval_json", text), ("sprint_completion", "reconciliation_json", text) })
         {
             var table = dialect.Table(name);
@@ -38,5 +38,16 @@ public sealed class M044DeploymentEnvironments : ISqlServerMigration
             }
             cmd.ExecuteNonQuery();
         }
+        var deployment = dialect.Table("deployment");
+        // Install the replacement before retiring the old stricter index. Repeated
+        // initialization must not remove the live uniqueness guarantee.
+        cmd.CommandText = sql
+            ? $"IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'{deployment}') AND name='ux_deployment_active_completion') CREATE UNIQUE INDEX ux_deployment_active_completion ON {deployment}(completion_id) WHERE completion_id IS NOT NULL AND status <> 'DeployFailed' AND status <> 'Rejected';"
+            : $"CREATE UNIQUE INDEX IF NOT EXISTS ux_deployment_active_completion ON {deployment}(completion_id) WHERE completion_id IS NOT NULL AND status <> 'DeployFailed' AND status <> 'Rejected';";
+        cmd.ExecuteNonQuery();
+        cmd.CommandText = sql
+            ? $"IF EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'{deployment}') AND name='ux_deployment_completion') DROP INDEX ux_deployment_completion ON {deployment};"
+            : "DROP INDEX IF EXISTS ux_deployment_completion;";
+        cmd.ExecuteNonQuery();
     }
 }

@@ -18,6 +18,28 @@ public sealed class KubernetesDeploymentExecutorTests
     private static DeploymentCandidate Candidate(DeploymentStatus status = DeploymentStatus.BuildPassed) => new(
         "deploy-" + new string('c', 32), "forge", Sha, null, status, DateTime.UtcNow, null, null, null, null, null, null);
 
+    [Theory]
+    [InlineData("rolled-back", true, true)]
+    [InlineData("rolling-back", true, false)]
+    [InlineData("committed", true, false)]
+    [InlineData("rolled-back", false, false)]
+    public async Task RetryRequiresStoppedJournalWithExactIdentity(string phase, bool matches, bool expected)
+    {
+        var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };
+        project.Deployment!.RoutineImageRepository = "registry/forge";
+        var target = new DeploymentTargetSnapshot("uat", "UAT", "forge", project.Deployment.KubernetesDatasetId!);
+        var receipt = new TrustedImageReceipt(Sha, Image, true, true, "controller-image.yml", "92", "Xyrces/Forge", "main",
+            "93", "sha256:" + new string('d', 64), Forge.Core.IssueStore.CurrentSchemaVersion, "ci.yml", "91");
+        var candidate = Candidate(DeploymentStatus.DeployFailed) with { CompletionId = "completion", EnvironmentName = "uat", TargetJson = JsonSerializer.Serialize(target), ReceiptJson = JsonSerializer.Serialize(receipt) };
+        var body = JsonSerializer.Serialize(new { data = new { phase, image = Image, dataset = target.KubernetesDatasetId,
+            environment = "uat", @namespace = "forge", sourceSha = matches ? Sha : new string('f', 40) } });
+        var executor = new KubernetesDeploymentExecutor(Client(new FakeHandler(body)));
+        Assert.Equal(expected, await executor.IsRetrySafeAsync(project, candidate, default));
+        executor = new KubernetesDeploymentExecutor(Client(new FakeHandler("{}") { MissingJournal = true, MissingJob = true }));
+        Assert.False(await executor.IsRetrySafeAsync(project, candidate, default));
+        Assert.True(await executor.IsRetrySafeAsync(project, candidate with { Status = DeploymentStatus.Rejected }, default));
+    }
+
     [Fact]
     public void NamedReleaseManifestUsesCapturedTargetAndRequiresRoutedVerification()
     {

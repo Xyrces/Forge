@@ -145,6 +145,35 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
         return new(false, "Independent release Job accepted; durable progress is available in the deployment list.", true);
     }
 
+    internal async Task<bool> IsRetrySafeAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct)
+    {
+        project = await ResolveProfileAsync(project, candidate, ct);
+        var ns = project.Deployment!.KubernetesNamespace;
+        using var response = await http.GetAsync($"api/v1/namespaces/{ns}/configmaps/forge-release-{candidate.Id}", ct);
+        if (response.IsSuccessStatusCode)
+        {
+            using var journal = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            if (!journal.RootElement.TryGetProperty("data", out var data)
+                || new[] { "phase", "image", "dataset", "environment", "namespace", "sourceSha" }.Any(key => !data.TryGetProperty(key, out _))) return false;
+            return data.GetProperty("phase").GetString() == "rolled-back"
+                && data.GetProperty("image").GetString() == ResolveImage(project, candidate)
+                && data.GetProperty("dataset").GetString() == project.Deployment.KubernetesDatasetId
+                && data.GetProperty("environment").GetString() == candidate.EnvironmentName
+                && data.GetProperty("namespace").GetString() == ns
+                && data.GetProperty("sourceSha").GetString() == candidate.CommitSha;
+        }
+        if (response.StatusCode != HttpStatusCode.NotFound) response.EnsureSuccessStatusCode();
+        using var jobResponse = await http.GetAsync($"apis/batch/v1/namespaces/{ns}/jobs/forge-release-{candidate.Id}", ct);
+        if (jobResponse.StatusCode == HttpStatusCode.NotFound)
+            return candidate.Status == DeploymentStatus.Rejected && candidate.ApprovedAt is null;
+        jobResponse.EnsureSuccessStatusCode();
+        using var job = await JsonDocument.ParseAsync(await jobResponse.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+        var status = job.RootElement.GetProperty("status");
+        return (!status.TryGetProperty("active", out var active) || active.GetInt32() == 0)
+            && status.TryGetProperty("conditions", out var conditions)
+            && conditions.EnumerateArray().Any(c => c.GetProperty("type").GetString() == "Failed" && c.GetProperty("status").GetString() == "True");
+    }
+
     public async Task<DeploymentExecutionResult> ReadProgressAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct, Func<CancellationToken, Task<bool>>? canStart = null)
     {
         project = await ResolveProfileAsync(project, candidate, ct);

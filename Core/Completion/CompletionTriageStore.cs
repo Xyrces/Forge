@@ -25,9 +25,11 @@ public sealed partial class SprintCompletionStore
     public async Task MarkBookkeepingCompleteAsync(string completionId, CancellationToken ct = default)
     {
         await using var connection = await issues.Db.OpenAsync(ct);
-        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND abandonment_json IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed') AND NOT EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", ("@now", Now()), ("@id", completionId));
-        await command.ExecuteNonQueryAsync(ct);
+        using var command = Command(connection, null, $"UPDATE {T("sprint_completion")} SET bookkeeping_state='Completed',updated_at=@now WHERE id=@id AND bookkeeping_state<>'Completed' AND abandonment_json IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_triage")} b WHERE b.completion_id=@id AND b.state <> 'Completed') AND NOT EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id)))", ("@now", Now()), ("@id", completionId));
+        var newlyReady = await command.ExecuteNonQueryAsync(ct) == 1;
         var receipt = await GetAsync(completionId, ct);
+        if (newlyReady && receipt is { ReadyForDeployment: true, DeliveryRequired: true, CompletionPolicy: not null })
+            await PublishOutcomeChangedAsync(receipt, "BookkeepingCompleted", ct);
         if (receipt?.CompletionPolicy is not null && !receipt.DeliveryRequired && receipt.ReadyForDeployment
             && receipt.BookkeepingState == "Completed" && receipt.EngineeringOutcome == EngineeringOutcome.PendingEvidence)
         {

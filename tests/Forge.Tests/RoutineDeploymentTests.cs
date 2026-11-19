@@ -51,6 +51,47 @@ public sealed class RoutineDeploymentTests : IDisposable
     }
 
     [Fact]
+    public async Task FailedNamedRetryPreservesAuditAdoptsBindingHonorsHoldAndClosesSprint()
+    {
+        var snapshot = new DeploymentTargetSnapshot("uat", "UAT", "forge-uat", Guid.NewGuid().ToString());
+        var completion = await Complete(policy: new("uat", false, JsonSerializer.Serialize(snapshot, DeploymentStore.EnvironmentJson)));
+        await Completions.MarkBookkeepingCompleteAsync(completion.Id);
+        await Coordinator().ReconcileAsync(default);
+        var original = Assert.Single(await Deployments.ListAsync());
+        await Deployments.MarkIndependentProgressAsync(original, new(false, "rolled-back"), Completions, default);
+        var failed = (await Deployments.GetAsync(original.Id))!;
+        var receipt = JsonSerializer.Deserialize<TrustedImageReceipt>(failed.ReceiptJson!, DeploymentStore.EnvironmentJson)!;
+        var request = new RetryReleaseRequest(receipt.SourceSha, receipt.ImageDigest);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Deployments.RetryRoutineAsync(Project, failed, request with { ExpectedImage = "wrong" }, "operator", default));
+        var retries = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Deployments.RetryRoutineAsync(Project, failed, request, "operator", default)));
+        var retry = retries[0];
+        Assert.Equal(retry.Id, retries[1].Id);
+        Assert.NotEqual(failed.Id, retry.Id);
+        Assert.Equal(failed.Id, retry.RetryOfCandidateId);
+        Assert.Equal(failed.ReceiptJson, retry.ReceiptJson);
+        Assert.Equal(failed.TargetJson, retry.TargetJson);
+        Assert.Equal(failed, await Deployments.GetAsync(failed.Id));
+        Assert.Equal(completion.Id, failed.CompletionId);
+        Assert.Equal(retry.Id, (await Deployments.CreateOrGetRoutineAsync("forge", completion.Id, FakeSource.Sha)).Id);
+        await using (var connection = await issues.Db.OpenAsync())
+        {
+            M041SprintCompletion.Create(connection, issues.Db.Dialect);
+            M044DeploymentEnvironments.Create(connection, issues.Db.Dialect);
+            M044DeploymentEnvironments.Create(connection, issues.Db.Dialect);
+        }
+        await Gates.HoldAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        Assert.Equal(DeploymentStatus.BuildPassed, (await Deployments.GetAsync(retry.Id))!.Status);
+        await Gates.ReleaseAsync(StageGates.Deploy);
+        await Coordinator().ReconcileAsync(default);
+        await Deployments.MarkIndependentProgressAsync((await Deployments.GetAsync(retry.Id))!, new(true, "verified target"), Completions, default);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        Assert.Equal(SprintStatus.Completed, (await new SprintStore(issues).GetAsync(completion.SprintId))!.Status);
+        Assert.Equal(DeploymentStatus.DeployFailed, (await Deployments.GetAsync(failed.Id))!.Status);
+        Assert.Equal(2, (await Deployments.ListAsync()).Count);
+    }
+
+    [Fact]
     public async Task SuccessfulNamedDeploymentAndSprintClosureShareOneCommit()
     {
         var snapshot = new DeploymentTargetSnapshot("uat", "UAT", "forge-uat", Guid.NewGuid().ToString());
