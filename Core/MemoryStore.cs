@@ -57,6 +57,17 @@ public sealed partial class MemoryStore : IAsyncDisposable
 
     private string T(string name) => _db.Dialect.Table(name);
 
+    public static bool IsReservedReviewOriginKey(string key)
+        => System.Globalization.CultureInfo.InvariantCulture.CompareInfo.IsPrefix(key.TrimStart(), "review/origins/",
+            System.Globalization.CompareOptions.IgnoreCase | System.Globalization.CompareOptions.IgnoreNonSpace
+            | System.Globalization.CompareOptions.IgnoreWidth | System.Globalization.CompareOptions.IgnoreKanaType);
+
+    private static void RequireMutableMemoryKey(string key)
+    {
+        if (IsReservedReviewOriginKey(key))
+            throw new ArgumentException("Review provenance is controller-owned and cannot be edited through project memory.", nameof(key));
+    }
+
     /// <summary>
     /// Upsert by <paramref name="key"/>. Returns the row after the write.
     /// If <paramref name="ttlDays"/> is null, the row never expires;
@@ -66,6 +77,7 @@ public sealed partial class MemoryStore : IAsyncDisposable
         string key, string body, int? ttlDays = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(key)) throw new ArgumentException("key required", nameof(key));
+        RequireMutableMemoryKey(key);
         if (body is null) throw new ArgumentNullException(nameof(body));
 
         var now = DateTime.UtcNow;
@@ -115,6 +127,7 @@ public sealed partial class MemoryStore : IAsyncDisposable
             throw new ArgumentException("key required", nameof(key));
         if (body is null)
             throw new ArgumentNullException(nameof(body));
+        RequireMutableMemoryKey(key);
 
         // Exact-key probe — a full-table RecallAsync here read 72MB
         // PER SEED at boot once the forge memory table grew
@@ -228,6 +241,7 @@ public sealed partial class MemoryStore : IAsyncDisposable
     /// </summary>
     public async Task<bool> ForgetAsync(string key, CancellationToken ct = default)
     {
+        RequireMutableMemoryKey(key);
         await using var conn = await _db.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"DELETE FROM {T("memory")} WHERE [key] = @key";
@@ -251,7 +265,7 @@ public sealed partial class MemoryStore : IAsyncDisposable
         var now = DateTime.UtcNow;
         await using (var read = conn.CreateCommand())
         {
-            read.CommandText = $"SELECT id, ts, ttl_days FROM {T("memory")} WHERE ttl_days IS NOT NULL";
+            read.CommandText = $"SELECT id, ts, ttl_days FROM {T("memory")} WHERE ttl_days IS NOT NULL AND LOWER(LTRIM([key])) NOT LIKE 'review/origins/%'";
             await using var rd = await read.ExecuteReaderAsync(ct);
             while (await rd.ReadAsync(ct))
             {

@@ -1,6 +1,6 @@
 # Evidence index: deployed sprint board and protected PR
 
-**Live qualification: Pending operator observation.** This is the blank ledger
+**Reusable template — not the live run record.** This is the blank ledger
 for the [operator runbook](sprint-board-protected-pr-runbook.md), not permission
 to execute. Copy it per authorized run. Give each receipt a stable ID, record
 UTC timestamps with timezone, and link the source (permalink, read-only export,
@@ -8,6 +8,13 @@ or original capture accessible to the next authorized operator). Record the
 event time and collection time separately when they differ. Keep credentials,
 session data and connection strings out of all records. Use full SHAs from the
 sources; checkpoint names and example field names are not evidence.
+
+The populated [Sprint 4 operator receipt on PR #159](https://github.com/Xyrces/Forge/pull/159#issuecomment-6997942208)
+records the in-progress qualification and links its native evidence. Follow that
+ledger for subsequent observations and the final verdict; the Pending cells in
+this archived template are unfilled examples, not the current run's status.
+The ledger identifies Codex's delegated operator actions separately from a
+personal review by the nominated human.
 
 ## Run index
 
@@ -208,6 +215,10 @@ applicable, serving SHA and PR head when relevant, UTC, source IDs and impact.
 Keep source gaps or unsafe prerequisites as blockers, not presumed defects.
 
 ## PR #150 history
+
+The separate [historical reconstruction and source snapshots](pr150-history.md)
+provide the dated recovery sequence and bounded timing. They do not establish
+any live PR #159 gate or outcome.
 
 Read-only historical context for [PR #150](https://github.com/Xyrces/Forge/pull/150),
 not live PR or native-review proof. The retained

@@ -136,6 +136,35 @@ public sealed class FormalReviewPublicationTests
         Assert.Equal(1, github.Publications);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SupersededUncertainDraftIsArchivedBeforeNewHeadReview(bool oldPublicationVisible)
+    {
+        var directory = TempRoot.Instance.NewDirectory("superseded-review");
+        await using var issues = new IssueStore(Path.Combine(directory, "state.db"));
+        var task = await issues.CreateAsync(new NewIssue("client", "Review", Metadata: new Dictionary<string, object>
+        { ["prNumber"] = 7, ["worktreePath"] = directory }));
+        var github = new PublicationGitHub();
+        var runner = new Runner();
+        var dispatcher = new ReviewerDispatcher(issues, github, runner, NullLogger<ReviewerDispatcher>.Instance);
+        Assert.Equal(ReviewerVerdict.Error, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "old"))!.Verdict);
+        github.DiscoverPublished = oldPublicationVisible;
+        github.LoseResponse = false;
+        Assert.Equal(ReviewerVerdict.Approve, (await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "new"))!.Verdict);
+        var after = (await issues.GetAsync(task.Id))!;
+        Assert.Null(after.GetMetadata("reviewDraft"));
+        Assert.Null(after.GetMetadata("reviewPublishStarted"));
+        Assert.Equal("new", after.GetMetadata("reviewPublishedHead"));
+        Assert.Contains("old", after.GetMetadata("reviewSupersededDraft"));
+        Assert.Equal(oldPublicationVisible ? "published" : "unconfirmed", after.GetMetadata("reviewSupersededPublication"));
+        Assert.Equal(2, runner.Calls);
+        Assert.Equal(2, github.Publications);
+        if (oldPublicationVisible) Assert.Contains("old", after.GetMetadata("reviewHistory"));
+        Assert.Null(await dispatcher.ReviewOnceAsync(task, headShaOverride: _ => "new"));
+        Assert.Equal(2, runner.Calls);
+    }
+
     [Fact]
     public async Task PreviouslyApprovedHeadReviewsNewConversationsOnceAndDeduplicatesUnchangedEvidence()
     {

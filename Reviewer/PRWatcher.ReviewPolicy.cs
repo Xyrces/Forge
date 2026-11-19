@@ -46,7 +46,31 @@ public sealed partial class PRWatcher
         var automated = mode is RequiredReview.Automated or RequiredReview.Both;
         if (automated && string.IsNullOrWhiteSpace(_gitHub.ReviewerLogin))
             throw new InvalidOperationException("Configure the independent Forge reviewer identity before automated review can approve merges.");
-        var effective = EffectiveReview.Evaluate(await _gitHub.GetAuthorizedDecisionsAsync(pr.Number, pr.User?.Login, ct), head, settings.NominatedHuman, pr.User?.Login);
+        var observedDecisions = await _gitHub.GetAuthorizedDecisionsAsync(pr.Number, pr.User?.Login, ct);
+        var observedAt = await _gitHub.GetReviewObservationTimeAsync(pr.Number, head, ct);
+        var authored = new List<VerifiedReviewOrigin>();
+        if (task.GetMetadata("reviewHistory") is { } history)
+        {
+            var published = System.Text.Json.JsonSerializer.Deserialize<List<PublishedReview>>(history, ReviewFindings.Json)
+                ?? throw new InvalidOperationException("Published review provenance is unreadable.");
+            foreach (var review in published)
+                if (string.Equals(review.Reviewer, _gitHub.ReviewerLogin, StringComparison.OrdinalIgnoreCase)
+                    && Uri.TryCreate(review.Url, UriKind.Absolute, out var url) && url.Host == "github.com"
+                    && url.AbsolutePath.Equals($"/{_gitHub.Owner}/{_gitHub.Repo}/pull/{pr.Number}", StringComparison.OrdinalIgnoreCase)
+                    && url.Fragment.StartsWith("#pullrequestreview-", StringComparison.Ordinal)
+                    && long.TryParse(url.Fragment["#pullrequestreview-".Length..], out var id))
+                    authored.Add(new(id, review.Reviewer, review.HeadSha, review.SubmittedAt));
+        }
+        var origins = await new MemoryStore(store.Db).ObserveReviewOriginsAsync($"{_gitHub.Owner}/{_gitHub.Repo}/{observedAt.RepositoryId}/{observedAt.PullRequestId}", pr.Number,
+            head, observedAt.ServerTime, observedDecisions.Select(d => new ReviewOriginObservation(d.Id, d.Login, d.Head, d.SubmittedAt)).ToArray(), authored, ct, observedAt.ResetMarker);
+        var decisions = observedDecisions.Select(d => d with { Head = origins[d.Id] ?? "" }).ToArray();
+        var effective = EffectiveReview.Evaluate(decisions, head, settings.NominatedHuman, pr.User?.Login);
+        var latest = observedDecisions.GroupBy(d => d.Login, StringComparer.OrdinalIgnoreCase).Select(EffectiveReview.Latest);
+        var humanProvenancePending = human && !effective.HumanApproved && latest.Any(d => !d.Automated
+            && d.State == PullRequestReviewState.Approved && d.Head == head && origins[d.Id] != head
+            && (string.IsNullOrWhiteSpace(settings.NominatedHuman) || string.Equals(d.Login, settings.NominatedHuman, StringComparison.OrdinalIgnoreCase)));
+        var automatedProvenancePending = automated && !effective.AutomatedApproved && latest.Any(d => d.Automated
+            && d.State == PullRequestReviewState.Approved && d.Head == head && origins[d.Id] != head);
         var requests = effective.CurrentRequests.Where(r => !r.Automated || automated).ToArray();
         ProtectionReviewDecision? protection = null;
         try { protection = await _gitHub.GetProtectionReviewDecisionAsync(pr.Number, head, ct); }
@@ -88,6 +112,9 @@ public sealed partial class PRWatcher
             ["reviewProtectionDecision"] = protection?.ToString() ?? "Unavailable",
             ["reviewProtectionHead"] = head,
             ["reviewHumanPending"] = humanPending,
+            ["reviewProvenancePending"] = humanProvenancePending || automatedProvenancePending,
+            ["reviewHumanProvenancePending"] = humanProvenancePending,
+            ["reviewAutomatedProvenancePending"] = automatedProvenancePending,
             ["reviewMergeState"] = merge?.State ?? "Unavailable",
             ["reviewUnresolvedThreads"] = merge?.Unresolved ?? -1,
             ["reviewHumanThreads"] = humanThreads,

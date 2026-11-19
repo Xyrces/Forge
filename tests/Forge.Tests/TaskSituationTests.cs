@@ -139,6 +139,19 @@ public class TaskSituationTests
         Assert.Equal(actor, situation.NextActor);
     }
 
+    [Theory]
+    [InlineData("reviewHumanProvenancePending", "Fresh approval required", "@reviewer")]
+    [InlineData("reviewAutomatedProvenancePending", "Fresh automated review required", "Forge reviewer")]
+    public void EarlierApprovalWithUnknownRevisionIdentifiesTheReviewer(string field, string label, string actor)
+    {
+        var issue = Task(IssueStatus.InProgress, ("state", "MergeReady"), (field, "True"),
+            ("reviewProtectionDecision", "Approved"), ("reviewUnresolvedThreads", "1"));
+        var situation = TaskSituation.Describe(issue, nominatedHuman: "reviewer");
+        Assert.Equal(label, situation.Label);
+        Assert.Equal(actor, situation.NextActor);
+        Assert.Contains("1 review conversation is open.", situation.Text);
+    }
+
     [Fact]
     public void ConversationsAccompanyApprovalButDoNotHideReworkOrCompletion()
     {

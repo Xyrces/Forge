@@ -13,13 +13,15 @@ The reports below preserve the original source audit, offline reproductions,
 measured performance and dated intermediate outcomes. Historical findings are
 not a list of defects still present in the qualified release.
 
-Operator handoff (live observations pending):
+Sprint-board qualification handoff:
 
 - [Deployed sprint board and protected PR runbook](sprint-board-protected-pr-runbook.md)
-- [Evidence index and pending verdict](sprint-board-protected-pr-evidence.md)
+- [Reusable evidence template](sprint-board-protected-pr-evidence.md)
+- [Populated Sprint 4 operator receipt and current verdict](https://github.com/Xyrces/Forge/pull/159#issuecomment-6997942208) — the in-progress run is recorded separately from the template; follow this ledger for subsequent results and final outcome.
 
 Reports:
 
+- [PR #150 historical recovery, reviews and bounded timing](pr150-history.md)
 - [Final UI-originated live qualification](unattended-live-qualification.md#final-qualification-2026-11-17)
 - [Implemented bounded outcome planning](planner-design.md)
 - [Routine deployment authority](routine-deployment.md)

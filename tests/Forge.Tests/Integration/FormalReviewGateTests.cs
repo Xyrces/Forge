@@ -44,11 +44,14 @@ public sealed class FormalReviewGateTests : IDisposable
     public FormalReviewGateTests() => _issues = new IssueStore(Path.Combine(_root, "state.db"));
     public void Dispose() => _issues.Dispose();
 
+    private static readonly DateTimeOffset ReviewTime = new(2026, 11, 19, 4, 0, 0, TimeSpan.Zero);
     private sealed class GitHub : GitHubService
     {
         public GitHub() : base("owner", "repo") { }
         public override string? ReviewerLogin => "reviewer[bot]";
         public int Reads, Merges;
+        public override Task<ReviewObservationBoundary> GetReviewObservationTimeAsync(int number, string head, CancellationToken ct = default)
+            => Task.FromResult(new ReviewObservationBoundary(ReviewTime, 1, number));
         public MergeRequirements Requirements = new("CLEAN", []);
         public bool MergeRequirementsUnavailable;
         public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
@@ -87,16 +90,35 @@ public sealed class FormalReviewGateTests : IDisposable
         }
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
     }
-    private static FormalDecision Decision(string user, bool bot, PullRequestReviewState state, string head = "head", long id = 1) => new(user, head, state, bot, id, "finding", "url");
+    private static FormalDecision Decision(string user, bool bot, PullRequestReviewState state, string head = "head", long id = 0) => new(user, head, state, bot, id == 0 ? (bot ? 1 : user == "another-writer" ? 3 : 2) : id, "finding", "url", ReviewTime);
     private PRWatcher Watch(GitHub github, bool activeWorker = false) => new(github,
         new AgentTools.GitWorktreeService(new Configuration.WorkspaceOptions { Root = _root, WorktreeRoot = ".wt", DefaultBranch = "main" }, NullLogger<AgentTools.GitWorktreeService>.Instance),
         _issues, TimeSpan.FromSeconds(1), TimeSpan.FromDays(1), new InMemoryDashboardEventBus(), NullLogger<PRWatcher>.Instance,
         hasDurableWorker: (_, _) => Task.FromResult(activeWorker));
-    private async Task<IssueRecord> Seed()
+    private async Task<IssueRecord> Seed(bool observed = true)
     {
+        if (observed) await new MemoryStore(_issues.Db).ObserveReviewOriginsAsync("owner/repo/1/42", 42, "head", ReviewTime.AddSeconds(-1), []);
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "review", Metadata: new Dictionary<string, object>
         { ["prNumber"] = "42", ["branch"] = "branch", ["reviewVerdict"] = "Approve", ["reviewSha"] = "head" }));
         return await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null);
+    }
+
+    [Fact]
+    public async Task LegacyReboundHumanApprovalWaitsForNewReviewWithoutSpendingReworkAttempts()
+    {
+        var task = await Seed(observed: false);
+        await new PullRequestReviewPolicy(new MemoryStore(_issues.Db)).SetAsync(RequiredReview.Human, "Xyrces", "operator", default);
+        var github = new GitHub { Decisions = _ => [Decision("Xyrces", false, PullRequestReviewState.Approved, id: 5968427154)] };
+        for (var i = 0; i < 3; i++)
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        var pending = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(0, github.Merges);
+        Assert.Equal("True", pending.GetMetadata("reviewHumanProvenancePending"));
+        Assert.Equal("True", pending.GetMetadata("reviewHumanPending"));
+        Assert.Null(pending.GetMetadata("reworkAttempts"));
+        github.Decisions = _ => [Decision("Xyrces", false, PullRequestReviewState.Approved, id: 5968427155)];
+        await Watch(github).PollWatchedTaskAsync(pending);
+        Assert.Equal(1, github.Merges);
     }
 
     [Theory]
@@ -547,7 +569,7 @@ public sealed class FormalReviewGateTests : IDisposable
         var objection = Decision("human", false, PullRequestReviewState.ChangesRequested, "old");
         Assert.True(EffectiveReview.Evaluate([objection], "head").OutstandingHumanObjection);
         Assert.Empty(EffectiveReview.Evaluate([objection], "head").CurrentRequests);
-        Assert.False(EffectiveReview.Evaluate([objection, Decision("human", false, PullRequestReviewState.Dismissed, "old", 2)], "head").OutstandingHumanObjection);
+        Assert.False(EffectiveReview.Evaluate([objection, Decision("human", false, PullRequestReviewState.Dismissed, "old", 3)], "head").OutstandingHumanObjection);
     }
 
     [Theory]

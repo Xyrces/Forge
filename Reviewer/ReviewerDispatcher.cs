@@ -18,6 +18,7 @@ public sealed class ReviewerDispatcher
     private readonly IIssueStore _issues;
     private readonly GitHubService _gitHub;
     private readonly IAgentRunner _agentRunner;
+    private readonly Forge.AgentTools.GitWorktreeService? _worktrees;
     private readonly Forge.Core.TaskStateMachine? _lifecycle;
     private readonly IDashboardEventBus? _events;
     private readonly string? _projectId;
@@ -49,7 +50,8 @@ public sealed class ReviewerDispatcher
         IDashboardEventBus? events = null,
         string? projectId = null,
         Forge.Core.Messaging.IEventPublisher? eventPublisher = null,
-        bool qaEnabled = false)
+        bool qaEnabled = false,
+        Forge.AgentTools.GitWorktreeService? worktrees = null)
     {
         _issues = issues;
         _gitHub = gitHub;
@@ -60,6 +62,7 @@ public sealed class ReviewerDispatcher
         _projectId = projectId;
         _eventPublisher = eventPublisher;
         _qaEnabled = qaEnabled;
+        _worktrees = worktrees;
     }
 
     public sealed record ReviewOutcome(
@@ -85,7 +88,55 @@ public sealed class ReviewerDispatcher
             task = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
             return await ReviewCoreAsync(task, cancellationToken, headShaOverride);
         }
-        finally { gate.Release(); }
+        finally
+        {
+            try { await CleanupReviewSnapshotAsync(task.Id); }
+            finally { gate.Release(); }
+        }
+    }
+
+    private async Task CleanupReviewSnapshotAsync(string taskId)
+    {
+        if (_worktrees is null) return;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            var task = await _issues.GetAsync(taskId, timeout.Token);
+            var path = task?.GetMetadata("reviewSnapshotPath");
+            if (task is null || path is null) return;
+            var owner = task.GetMetadata("reviewSnapshotWorkerId");
+            if (_agentRunner is IReviewWorkerLifecycle lifecycle && owner is not null)
+            {
+                var worker = await lifecycle.InspectReviewWorkerAsync(AgentType.Reviewer, _projectId!, task.Id, owner, false, timeout.Token);
+                // A detached controller must retain both a live worker's checkout and an
+                // unconsumed terminal result's checkout until the next controller adopts it.
+                if (worker is { Terminal: false }
+                    || worker is not null && task.GetMetadata("reviewWorkerId") == owner
+                        && task.GetMetadata("reviewWorkerConsumed") != owner) return;
+            }
+            var retirement = task.GetMetadata("reviewSnapshotRetirement") is { } saved
+                ? JsonSerializer.Deserialize<Forge.AgentTools.ReviewSnapshotRetirement>(saved, ReviewFindings.Json)
+                    ?? throw new InvalidOperationException("Saved review retirement is invalid.")
+                : _worktrees.PrepareReviewSnapshotRetirement(path);
+            if (retirement is not null && task.GetMetadata("reviewSnapshotRetirement") is null)
+                await UpdateWatchMetadataAsync(task, m =>
+                {
+                    m["reviewSnapshotRetirement"] = JsonSerializer.Serialize(retirement, ReviewFindings.Json);
+                    return m;
+                }, timeout.Token);
+            await _worktrees.RemoveReviewSnapshotAsync(path, timeout.Token, retirement);
+            await UpdateWatchMetadataAsync(task, m =>
+            {
+                m["reviewSnapshotPath"] = null!;
+                m["reviewSnapshotWorkerId"] = null!;
+                m["reviewSnapshotRetirement"] = null!;
+                return m;
+            }, timeout.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Task {TaskId}: review snapshot cleanup deferred", taskId);
+        }
     }
 
     private async Task<ReviewOutcome?> ReviewCoreAsync(IssueRecord task, CancellationToken cancellationToken,
@@ -135,6 +186,41 @@ public sealed class ReviewerDispatcher
                 || bool.TryParse(task.GetMetadata("reviewPublishStarted"), out var uncertain) && uncertain
                 ? await CompleteDraftAsync(task, prNumber, pending, cancellationToken, headShaOverride) : null;
 
+        if (pending is not null)
+        {
+            try
+            {
+                // Reconcile a lost response for the old revision, but never publish it or resolve
+                // conversations using evidence that predates the current head.
+                var published = await _gitHub.FindPublishedReviewAsync(prNumber, pending, ReviewFindings.Marker(pending), cancellationToken);
+                await UpdateWatchMetadataAsync(task, m =>
+                {
+                    if (published is not null)
+                    {
+                        var history = m.TryGetValue("reviewHistory", out var raw)
+                            ? JsonSerializer.Deserialize<List<PublishedReview>>(raw.ToString()!, ReviewFindings.Json) ?? [] : [];
+                        if (!history.Any(r => r.HeadSha == published.HeadSha && r.Round == published.Round && r.Url == published.Url))
+                            history.Add(published);
+                        m["reviewHistory"] = JsonSerializer.Serialize(history, ReviewFindings.Json);
+                    }
+                    m["reviewSupersededDraft"] = JsonSerializer.Serialize(pending, ReviewFindings.Json);
+                    m["reviewSupersededPublication"] = published is not null ? "published" :
+                        bool.TryParse(task.GetMetadata("reviewPublishStarted"), out var started) && started ? "unconfirmed" : "not submitted";
+                    m["reviewDraft"] = null!;
+                    m["reviewPublishStarted"] = null!;
+                    m["reviewStartedAt"] = null!;
+                    return m;
+                }, cancellationToken);
+                task = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, "Superseded review reconciliation failed: " + ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, "", headSha, ex.Message);
+            }
+        }
+
         IReadOnlyList<ReviewConversation> conversations = [];
         if (_gitHub.RequireFormalReview)
         {
@@ -161,6 +247,8 @@ public sealed class ReviewerDispatcher
             && !string.IsNullOrEmpty(recordedVerdict)
             && recordedVerdict != nameof(ReviewerVerdict.Error)
             && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha)
+            && !(task.GetMetadata("reviewProtectionHead") == headSha
+                && bool.TryParse(task.GetMetadata("reviewAutomatedProvenancePending"), out var provenancePending) && provenancePending)
             && !(recordedVerdict == nameof(ReviewerVerdict.Approve)
                 && conversations.Any(t => GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin))
                 && ReviewFindings.ConversationCheckpoint(conversations, _gitHub.ReviewerLogin) != task.GetMetadata("reviewThreadCheckpoint"))
@@ -217,20 +305,65 @@ public sealed class ReviewerDispatcher
         // Error, retried next sweep; never a degraded paste-only
         // review.
         var worktreePath = task.GetMetadata("worktreePath");
-        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
-        {
-            _logger.LogWarning(
-                "PR #{Pr} (task {Id}): no usable worktree (path={Path}) — reviewer requires workspace access; retrying next sweep",
-                prNumber, task.Id, worktreePath ?? "<none>");
-            return new ReviewOutcome(ReviewerVerdict.Error, "", headSha, "worktree missing");
-        }
         // Fresh refs so `git show <sha>` / `git diff origin/<base>...<sha>`
         // resolve even when the checkout lags the head (external push).
         var prepared = await ReviewWorkerAttempt.BeginAsync(_agentRunner, _issues, task, AgentType.Reviewer,
             _projectId, headSha, cancellationToken);
         task = prepared.Task;
-        if (prepared.Existing is null) await TryFetchAsync(worktreePath, cancellationToken);
-        else worktreePath = prepared.Existing.WorktreePath;
+        if (prepared.Existing is not null)
+        {
+            worktreePath = prepared.Existing.WorktreePath;
+            // Adopt snapshots created before cleanup tracking was introduced, never the
+            // legacy engineering checkout that an older worker may still reference.
+            if (_worktrees?.IsReviewSnapshotPath(worktreePath) == true && task.GetMetadata("reviewSnapshotPath") is null)
+                await UpdateWatchMetadataAsync(task, m =>
+                {
+                    m["reviewSnapshotPath"] = worktreePath;
+                    m["reviewSnapshotWorkerId"] = task.GetMetadata("reviewWorkerId")!;
+                    return m;
+                }, cancellationToken);
+        }
+        else if (_worktrees is not null)
+        {
+            try
+            {
+                await CleanupReviewSnapshotAsync(task.Id);
+                var fresh = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+                if (fresh.GetMetadata("reviewSnapshotPath") is not null)
+                    throw new InvalidOperationException("Previous review snapshot has not been retired.");
+                worktreePath = await _worktrees.CreateReviewSnapshotAsync(task.Id,
+                    (task.GetMetadata("reviewWorkerId") ?? "in-process") + "-" + Guid.NewGuid().ToString("N"), headSha, cancellationToken);
+                try
+                {
+                    await UpdateWatchMetadataAsync(task, m =>
+                    {
+                        m["reviewSnapshotPath"] = worktreePath;
+                        m["reviewSnapshotWorkerId"] = task.GetMetadata("reviewWorkerId")!;
+                        return m;
+                    }, cancellationToken);
+                }
+                catch
+                {
+                    // No worker can have started before its snapshot pointer is durable.
+                    using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                    try { await _worktrees.RemoveReviewSnapshotAsync(worktreePath, cleanup.Token); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Unrecorded review snapshot cleanup failed at {Path}", worktreePath); }
+                    throw;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                await RecordIntegrationFailureAsync(task, headSha, "Review checkout preparation failed: " + ex.Message, false, cancellationToken);
+                return new(ReviewerVerdict.Error, "", headSha, ex.Message);
+            }
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+                return new ReviewOutcome(ReviewerVerdict.Error, "", headSha, "worktree missing");
+            await TryFetchAsync(worktreePath, cancellationToken);
+        }
 
         // Re-review resume: a prior verdict at an EARLIER head means
         // this round scopes to the incremental diff (what the rework
@@ -517,6 +650,7 @@ public sealed class ReviewerDispatcher
                 m["reviewSha"] = draft.HeadSha; m["reviewVerdict"] = draft.Verdict;
                 m["reviewNotes"] = draft.Summary; m["reviewRound"] = draft.Round;
                 m["reviewPublishedHead"] = draft.HeadSha; m["reviewDraft"] = null!;
+                m["reviewAutomatedProvenancePending"] = false;
                 m["reviewThreadCheckpoint"] = draft.ThreadCheckpoint!;
                 m["reviewHumanThreadCheckpoint"] = (humanVersions is null ? draft.HumanThreadCheckpoint : ReviewFindings.HumanCheckpoint(humanVersions))!;
                 m["reviewConversationInputLimited"] = draft.LimitedConversations?.Count ?? 0;

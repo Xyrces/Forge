@@ -1,0 +1,745 @@
+{
+  "collectedAt": "2026-11-19T02:18:02.546498+00:00",
+  "method": "Read-only HTTP GET on existing Linux Forge service; selected nonsecret fields only",
+  "records": [
+    {
+      "path": "/api/tasks/client-2?projectId=forge",
+      "data": {
+        "id": "client-2",
+        "status": "Completed",
+        "delivery": {
+          "criteria": [
+            {
+              "text": "Verify the reviewed Forge.UI wiring at the delivered revision: Production omits the Redux DevTools script and does not initialize integration that depends on it; Development with DevTools enabled retains the script and extension wiring. Normal Fluxor registration is preserved.",
+              "evidenceKind": "ImplementationVerified"
+            },
+            {
+              "text": "Operator verifies fresh, uncached real-browser loads on deployed Linux Production for /sprints at 1280 px and 390 px and /projects/forge/overview at 1280 px and 390 px. For every load the network log shows no DevTools request if omitted, or a successful response with the correct Redux DevTools JavaScript if retained; there are zero asset HTTP 404s, console errors, and uncaught page errors. Collate actual operator results in docs/ for all four rows, including request presence, HTTP result and asset-content confirmation if requested, and error counts.",
+              "evidenceKind": "OperatorObserved"
+            },
+            {
+              "text": "On the deployed dashboard, the operator verifies that a normal UI interaction produces an observable Fluxor state update, project and sprint navigation work, and the existing pilot sprint and completion evidence are intact, without modifying either.",
+              "evidenceKind": "OperatorObserved"
+            },
+            {
+              "text": "In a separate Development run with Redux DevTools enabled, the operator observes the extension connect and display a dispatched Fluxor action and its resulting state update.",
+              "evidenceKind": "OperatorObserved"
+            }
+          ],
+          "verifiedHead": "263bbfeb44a12565e3738b01ae08bbc92283ae63",
+          "verifiedAt": "2026-11-18T02:16:03.4094312+00:00",
+          "mergeCommit": "30a6ec9f8b740dd4bd2775b26edac0db7ee48997",
+          "mergeObservedAt": "2026-11-18T02:20:10.6854012+00:00",
+          "existingSource": null,
+          "existingVerifiedAt": null,
+          "existingReviewedAt": null
+        },
+        "sprint": {
+          "id": "sprint-6b1f419a15",
+          "name": "Sprint 3: Eliminate the published Forge dashboard\u2019s Production Redux D",
+          "status": "Completed"
+        },
+        "events": [
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:20:10.922",
+            "detail": "InProgress->Completed",
+            "actor": "orchestrator",
+            "id": 405
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:20:10.019",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 404
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:20:06.676",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 403
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:39.9",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 402
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:38.846",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 401
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:38.435",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 400
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:11.664",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 399
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:11.041",
+            "detail": "InProgress->InProgress err=Review worker invocation prepared",
+            "actor": "orchestrator",
+            "id": 398
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:08.875",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 397
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:08.457",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 396
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:07.591",
+            "detail": "Pending->InProgress",
+            "actor": "orchestrator",
+            "id": 395
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:05.578",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 394
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:16:05.176",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 393
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:12:35.558",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 392
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:08.281",
+            "detail": "InProgress->Pending",
+            "actor": "orchestrator",
+            "id": 391
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:07.683",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 390
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:07.246",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 389
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:06.116",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 388
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:05.463",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 387
+          },
+          {
+            "kind": "claimed",
+            "at": "2026-11-18T02:07:04.961",
+            "detail": "assignee=clientdev",
+            "actor": "orchestrator",
+            "id": 386
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:04.704",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 385
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:04.339",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 384
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:02.75",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 383
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:07:02.388",
+            "detail": "Blocked->Pending err=operator requeue from Failed (failure + rework bookkeeping cleared)",
+            "actor": "orchestrator",
+            "id": 382
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:05:56.122",
+            "detail": "Blocked->Blocked",
+            "actor": "orchestrator",
+            "id": 381
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:05:55.717",
+            "detail": "Blocked->Blocked",
+            "actor": "orchestrator",
+            "id": 380
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T02:02:17.95",
+            "detail": "Blocked->Blocked",
+            "actor": "orchestrator",
+            "id": 379
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:57:07.214",
+            "detail": "Pending->Blocked err=changes-requested (circuit breaker tripped after max rework attempts)",
+            "actor": "orchestrator",
+            "id": 378
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:57:06.907",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 377
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:57:06.502",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 376
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:56:07.453",
+            "detail": "InProgress->Pending",
+            "actor": "orchestrator",
+            "id": 375
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:56:07.106",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 374
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:56:06.636",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 373
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:29.52",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 372
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:28.273",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 371
+          },
+          {
+            "kind": "claimed",
+            "at": "2026-11-18T01:55:27.48",
+            "detail": "assignee=clientdev",
+            "actor": "orchestrator",
+            "id": 370
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:27.151",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 369
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:26.813",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 368
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:25.307",
+            "detail": "InProgress->Pending",
+            "actor": "orchestrator",
+            "id": 367
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:25.003",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 366
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:24.595",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 365
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:23.035",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 364
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:55:22.674",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 363
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:54:06.079",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 362
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:53:13.892",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 361
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:53:13.275",
+            "detail": "InProgress->InProgress err=Review worker invocation prepared",
+            "actor": "orchestrator",
+            "id": 360
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:53:11.577",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 359
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:53:11.197",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 358
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:53:10.368",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 357
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:53:08.193",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 356
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:53:07.684",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 355
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:49:20.316",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 354
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:36:11.552",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 353
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:36:10.899",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 352
+          },
+          {
+            "kind": "claimed",
+            "at": "2026-11-18T01:36:10.194",
+            "detail": "assignee=clientdev",
+            "actor": "orchestrator",
+            "id": 351
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:36:09.941",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 350
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:36:09.6",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 349
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:36:08.061",
+            "detail": "InProgress->Pending",
+            "actor": "orchestrator",
+            "id": 348
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:36:07.753",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 347
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:36:07.076",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 346
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:35:16.694",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 345
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:35:16.35",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 344
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:34:06.071",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 343
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:33:16.993",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 342
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:33:16.356",
+            "detail": "InProgress->InProgress err=Review worker invocation prepared",
+            "actor": "orchestrator",
+            "id": 341
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:33:14.843",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 340
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:33:14.465",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 339
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:33:12.454",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 338
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:33:10.613",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 337
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:33:10.204",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 336
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:28:14.395",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 335
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:24:31.632",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 328
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:24:30.972",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 327
+          },
+          {
+            "kind": "claimed",
+            "at": "2026-11-18T01:24:30.334",
+            "detail": "assignee=clientdev",
+            "actor": "orchestrator",
+            "id": 326
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:24:30.073",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 324
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T01:24:29.734",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 323
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:42:39.155",
+            "detail": "InProgress->Pending err=InvalidOperationException: Worker 998f6de8296f08e9b2836925380754c87a35bd07 failed: Plan rejected after 2 revisions: Plan critic requests revision:\nRemoving the obsolete script tag is a focused UI change, but it does not stop the two host compositions from registering DevTools in Production. Those registrations are outside clientdev\u2019s territory, and filing task-5 does not by itself resolve the assignment conflict; an authorized owner/operator must confirm the ownership split or reassign the blocked deliverable. Before deployment, the planned checks should exercise the actual host registration paths on the integrated revision and verify that Production has neither the script request nor the middleware, while Development retains the bridge and normal store behavior. The extension-enabled browser run should remain a separate operator handoff.",
+            "actor": "orchestrator",
+            "id": 274
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:42:38.819",
+            "detail": "InProgress->InProgress err=InvalidOperationException: Worker 998f6de8296f08e9b2836925380754c87a35bd07 failed: Plan rejected after 2 revisions: Plan critic requests revision:\nRemoving the obsolete script tag is a focused UI change, but it does not stop the two host compositions from registering DevTools in Production. Those registrations are outside clientdev\u2019s territory, and filing task-5 does not by itself resolve the assignment conflict; an authorized owner/operator must confirm the ownership split or reassign the blocked deliverable. Before deployment, the planned checks should exercise the actual host registration paths on the integrated revision and verify that Production has neither the script request nor the middleware, while Development retains the bridge and normal store behavior. The extension-enabled browser run should remain a separate operator handoff.",
+            "actor": "orchestrator",
+            "id": 273
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:42:38.444",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 272
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:42:38.053",
+            "detail": "InProgress->InProgress err=InvalidOperationException: Worker 998f6de8296f08e9b2836925380754c87a35bd07 failed: Plan rejected after 2 revisions: Plan critic requests revision:\nRemoving the obsolete script tag is a focused UI change, but it does not stop the two host compositions from registering DevTools in Production. Those registrations are outside clientdev\u2019s territory, and filing task-5 does not by itself resolve the assignment conflict; an authorized owner/operator must confirm the ownership split or reassign the blocked deliverable. Before deployment, the planned checks should exercise the actual host registration paths on the integrated revision and verify that Production has neither the script request nor the middleware, while Development retains the bridge and normal store behavior. The extension-enabled browser run should remain a separate operator handoff.",
+            "actor": "orchestrator",
+            "id": 271
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:42:34.493",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 270
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:41:25.579",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 269
+          },
+          {
+            "kind": "dep_added",
+            "at": "2026-11-18T00:41:24.79",
+            "detail": "blocks blocker=task-5",
+            "actor": "orchestrator",
+            "id": 267
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:40:11.508",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 264
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:40:10.456",
+            "detail": "InProgress->InProgress",
+            "actor": "orchestrator",
+            "id": 262
+          },
+          {
+            "kind": "claimed",
+            "at": "2026-11-18T00:40:09.663",
+            "detail": "assignee=clientdev",
+            "actor": "orchestrator",
+            "id": 259
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:40:09.401",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 257
+          },
+          {
+            "kind": "status_change",
+            "at": "2026-11-18T00:40:09.055",
+            "detail": "Pending->Pending",
+            "actor": "orchestrator",
+            "id": 256
+          },
+          {
+            "kind": "grooming_metadata",
+            "at": "2026-11-18T00:28:17.666",
+            "detail": "Updated pending grooming metadata",
+            "actor": "orchestrator",
+            "id": 254
+          },
+          {
+            "kind": "created",
+            "at": "2026-11-18T00:27:33.256",
+            "detail": "Own the Forge.UI/ script reference and Fluxor wiring. Use the approved omit-in-Production option: remove the Production script dependency and ensure no Production DevTools wiring expects the missing script. Preserve the script and extension integration when Redux DevTools is enabled in Development, without changing normal Fluxor behavior. Verify the environment-specific wiring before deployment and hand off the separate operator-led Development run with the extension enabled. Do not modify the pilot sprint, its evidence, or unrelated dashboard features.",
+            "actor": "orchestrator",
+            "id": 252
+          }
+        ],
+        "historyLimited": false
+      }
+    },
+    {
+      "path": "/api/sprints/sprint-6b1f419a15/completion?projectId=forge",
+      "data": {
+        "receipt": {
+          "id": "completion-sprint-6b1f419a15",
+          "projectId": "forge",
+          "sprintId": "sprint-6b1f419a15",
+          "outcome": "Satisfied",
+          "bookkeepingState": "Completed",
+          "readyForDeployment": true,
+          "sourceSha": "30a6ec9f8b740dd4bd2775b26edac0db7ee48997",
+          "deploymentCandidateId": "deploy-66e2d2abc074b9e62c185f12ed44c4be",
+          "deploymentStatus": "Deployed",
+          "deliveryNote": "Required deployment and explicit observation evidence recorded.",
+          "planHash": "39ac30c02e260b6d0732e13dfa2fd0a4b4426114b924ec5eadb984503ff229ba",
+          "sprintName": "Sprint 3: Eliminate the published Forge dashboard\u2019s Production Redux D",
+          "abandonmentReason": null,
+          "abandonedAt": null,
+          "deliveryRequired": true
+        },
+        "batches": [
+          {
+            "id": "triage-9e70525b812a825b7783f2971ffe905b5a5b7225ae17ee84f4bfe43dc46c0235",
+            "state": "Completed",
+            "error": null
+          }
+        ],
+        "nextCursor": null,
+        "criteria": [
+          {
+            "id": "development-extension",
+            "text": "In a separate Development run with Redux DevTools enabled, the operator observes the extension connect and display a dispatched Fluxor action and its resulting state update.",
+            "evidenceKind": "OperatorObserved",
+            "proofReference": "On Linux I verified Development with Redux DevTools enabled against the published application from immutable image ghcr.io/xyrces/forge@sha256:c9f936dca5e96e742a7ea14623974e7396bbcc1375af01b3f25d985f5c0c8b8f at source 30a6ec9f8b740dd4bd2775b26edac0db7ee48997. In Chrome 150 the installed Redux DevTools extension 3.2.12 connected and received INIT_INSTANCE, INIT and ACTION. Selecting dev-b in the Forge UI emitted SelectProjectAction with ProjectId=dev-b and changed the emitted AppShellState.CurrentProjectId to dev-b. There were zero uncaught page errors. The isolated Development browser did report resource messages, recorded separately in the verification report. Development receipt: redux-dev/check.IQYUbt/receipt.json. The published Production asset test also executed on this image; 14 of 14 cases passed, zero skipped.",
+            "operatorIdentity": "authenticated shared dashboard operator"
+          },
+          {
+            "id": "environment-wiring",
+            "text": "Verify the reviewed Forge.UI wiring at the delivered revision: Production omits the Redux DevTools script and does not initialize integration that depends on it; Development with DevTools enabled retains the script and extension wiring. Normal Fluxor registration is preserved.",
+            "evidenceKind": "ImplementationVerified",
+            "proofReference": null,
+            "operatorIdentity": null
+          },
+          {
+            "id": "production-browser-matrix",
+            "text": "Operator verifies fresh, uncached real-browser loads on deployed Linux Production for /sprints at 1280 px and 390 px and /projects/forge/overview at 1280 px and 390 px. For every load the network log shows no DevTools request if omitted, or a successful response with the correct Redux DevTools JavaScript if retained; there are zero asset HTTP 404s, console errors, and uncaught page errors. Collate actual operator results in docs/ for all four rows, including request presence, HTTP result and asset-content confirmation if requested, and error counts.",
+            "evidenceKind": "OperatorObserved",
+            "proofReference": "Verified deployed Linux Production revision 30a6ec9f8b740dd4bd2775b26edac0db7ee48997 in Chrome 150.0.7871.128 on 2026-11-18 at 02:29 UTC. Opened /sprints at 1280 and 390 CSS px and /projects/forge/overview at 1280 and 390 CSS px in four separate fresh browser contexts with HTTP cache disabled. The Redux DevTools script was absent from the page and network log for every load, so its HTTP result and JavaScript verification were not applicable. Each load had zero asset 404s, zero console errors, and zero uncaught page errors. The four rows and capture references are in docs/workflow-audit/redux-devtools-asset-verification-results.md. Production capture dashboard-forge-e2e.U9ubhK/browser/result.json.",
+            "operatorIdentity": "authenticated shared dashboard operator"
+          },
+          {
+            "id": "production-fluxor-and-pilot",
+            "text": "On the deployed dashboard, the operator verifies that a normal UI interaction produces an observable Fluxor state update, project and sprint navigation work, and the existing pilot sprint and completion evidence are intact, without modifying either.",
+            "evidenceKind": "OperatorObserved",
+            "proofReference": "Verified interactions on deployed revision 30a6ec9f8b740dd4bd2775b26edac0db7ee48997 at 1280 and 390 CSS px. Forge Overview Refresh produced a same-document render with counters still visible. The Fluxor-backed Specs filter visibly changed from All to Groomed and back to All. Navigated through Projects to Forge Overview and back to Sprints, where the project preference was forge and both sprint-6b1f419a15 and pilot sprint-7bf2555ec5 rendered as selected. The pilot's read-only board showed three task cards. Completion completion-sprint-7bf2555ec5 remained Satisfied and Deployed with the original operator-browser and running-image-comparison observations. The pilot receipt and criteria matched their preserved baseline before and after the checks, SHA-256 82c36390a2b03205e503284cd02b21d19ee487b468645aa830fd930481285112. Production capture dashboard-forge-e2e.U9ubhK/browser/result.json.",
+            "operatorIdentity": "authenticated shared dashboard operator"
+          },
+          {
+            "id": "published-regression",
+            "text": "A documented, repeatable automated check starts the published dashboard under Production configuration and fails if a rendered Redux DevTools script reference is not backed by the expected served JavaScript. Verify the negative case and allow a dashboard that omits the reference. Repository docs provide the run instructions and a place to collate actual operator observations without marking unobserved results as passed.",
+            "evidenceKind": "ImplementationVerified",
+            "proofReference": null,
+            "operatorIdentity": null
+          }
+        ]
+      }
+    }
+  ]
+}

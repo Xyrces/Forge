@@ -73,6 +73,60 @@ public sealed class GitWorktreeService
 
     }
 
+    /// <summary>A separate, immutable review checkout; never moves or cleans engineering work.</summary>
+    public async Task<string> CreateReviewSnapshotAsync(string taskId, string attemptId, string headSha, CancellationToken ct = default)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(headSha, "\\A[0-9a-f]{40}\\z"))
+            throw new InvalidOperationException("Review source must be an exact commit SHA.");
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(TimeSpan.FromMinutes(2));
+        ct = bounded.Token;
+        var identity = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes(taskId + "\n" + attemptId))).ToLowerInvariant();
+        var path = WorktreePathFor("review-" + identity);
+        if (Directory.Exists(path) || File.Exists(path))
+            throw new InvalidOperationException("Review snapshot already exists without an adopted worker; refusing to overwrite it.");
+        Directory.CreateDirectory(WorktreeRoot);
+        var fetched = await RunGitInAsync(WorkspaceRoot, "", ct,
+            ["fetch", "--no-tags", "--no-write-fetch-head", "origin", headSha]);
+        if (fetched.ExitCode != 0) throw new InvalidOperationException("Cannot fetch the exact review source.");
+        var created = await RunGitInAsync(WorkspaceRoot, "", ct, ["worktree", "add", "--detach", path, headSha]);
+        if (created.ExitCode != 0) throw new InvalidOperationException("Cannot create isolated review snapshot.");
+        if (await GetHeadShaAsync(path, ct) != headSha)
+            throw new InvalidOperationException("Review snapshot does not match its pinned source.");
+        return path;
+    }
+
+    /// <summary>Remove only a controller-created detached review checkout after its worker is retired.</summary>
+    public bool IsReviewSnapshotPath(string path) =>
+        Path.GetDirectoryName(Path.GetFullPath(path)) == Path.GetFullPath(WorktreeRoot).TrimEnd(Path.DirectorySeparatorChar)
+        && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path), "\\Areview-[0-9a-f]{64}\\z");
+
+    public ReviewSnapshotRetirement? PrepareReviewSnapshotRetirement(string path) =>
+        _publisherToken is not null || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+            ? IsolatedGitMetadata.PrepareReviewSnapshotRetirement(WorkspaceRoot, WorktreeRoot, path) : null;
+
+    public async Task RemoveReviewSnapshotAsync(string path, CancellationToken ct = default, ReviewSnapshotRetirement? retirement = null)
+    {
+        path = Path.GetFullPath(path);
+        if (!IsReviewSnapshotPath(path))
+            throw new InvalidOperationException("Review cleanup is outside the authorized snapshot root.");
+        if (_publisherToken is not null || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
+        {
+            ct.ThrowIfCancellationRequested();
+            IsolatedGitMetadata.RemoveDetachedReviewSnapshot(WorkspaceRoot, WorktreeRoot, path, retirement);
+            return;
+        }
+        if (!Directory.Exists(path)) return;
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("Review cleanup refuses a linked directory.");
+        var branch = await RunGitInAsync(path, "", ct, ["symbolic-ref", "-q", "HEAD"]);
+        if (branch.ExitCode != 1) throw new InvalidOperationException("Review cleanup requires detached HEAD.");
+        var removed = await RunGitInAsync(WorkspaceRoot, "", ct, ["worktree", "remove", "--force", path]);
+        if (removed.ExitCode != 0 || Directory.Exists(path))
+            throw new InvalidOperationException("Review snapshot cleanup failed.");
+    }
+
     public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null, bool preserveExistingBranch = false)
     {
         // The worktree branch must equal the branch the rest of the

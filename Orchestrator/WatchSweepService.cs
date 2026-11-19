@@ -383,7 +383,8 @@ public sealed class WatchSweepService
             events: _events,
             projectId: bundle.Project.Id,
             eventPublisher: bundle.IssueStore.Events,
-            qaEnabled: bundle.Project.QaEnabled);
+            qaEnabled: bundle.Project.QaEnabled,
+            worktrees: bundle.Worktrees);
         if (StartBackground(key, qa: false,
             async ct => { await reviewer.ReviewOnceAsync(task, ct); }, ReviewBackgroundBudget))
             _logger.LogInformation("Watch (task {Id}): review launched in background (project={Project})", task.Id, bundle.Project.Id);

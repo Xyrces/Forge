@@ -9,6 +9,8 @@ public sealed partial class MemoryStore
     internal async Task RememberAuditedAsync(string key, string body, string actor, string auditPrefix,
         CancellationToken ct)
     {
+        RequireMutableMemoryKey(key);
+        RequireMutableMemoryKey(auditPrefix);
         if (string.IsNullOrWhiteSpace(actor) || actor.Length > 256)
             throw new ArgumentException("An authenticated operator identity is required.", nameof(actor));
         await using var connection = await _db.OpenAsync(ct);

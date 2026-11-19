@@ -7,6 +7,8 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Forge.AgentTools;
 
+public sealed record ReviewSnapshotRetirement(string Path, string Nonce);
+
 /// <summary>Imports Git data, never repository configuration or executable integration, into a private process-local directory.</summary>
 internal sealed class IsolatedGitMetadata : IDisposable
 {
@@ -94,6 +96,88 @@ internal sealed class IsolatedGitMetadata : IDisposable
             Directory.Delete(_root, recursive: true);
             throw;
         }
+    }
+
+    // The receipt is persisted by the controller in protected review metadata before any
+    // rename/delete. Never load deletion authority from a worker-writable checkout file.
+    internal static ReviewSnapshotRetirement PrepareReviewSnapshotRetirement(string repositoryRoot, string worktreeRoot, string path)
+    {
+        var (common, registration) = ReviewRetirementPaths(repositoryRoot, worktreeRoot, path);
+        ValidateReviewRegistration(Path.GetFullPath(path), common, registration);
+        return new(Path.GetFullPath(path), Guid.NewGuid().ToString("N"));
+    }
+
+    internal static void RemoveDetachedReviewSnapshot(string repositoryRoot, string worktreeRoot, string path,
+        ReviewSnapshotRetirement? receipt = null)
+    {
+        receipt ??= PrepareReviewSnapshotRetirement(repositoryRoot, worktreeRoot, path);
+        if (receipt.Path != Path.GetFullPath(path) || !Regex.IsMatch(receipt.Nonce, "\\A[0-9a-f]{32}\\z"))
+            throw new InvalidOperationException("Review retirement does not match the controller-authorized snapshot.");
+        path = receipt.Path;
+        var (common, registration) = ReviewRetirementPaths(repositoryRoot, worktreeRoot, path);
+        var checkoutTrash = path + ".retiring-" + receipt.Nonce;
+        var registrationTrash = Path.Combine(common, "forge-review-retired", Path.GetFileName(path) + "-" + receipt.Nonce);
+        RejectLinkedAncestors(checkoutTrash);
+        RejectLinkedAncestors(registrationTrash);
+        // Only originals still present require complete proof. Quarantine names are bound by
+        // the durable receipt and may legitimately contain only remnants after interruption.
+        ValidateReviewRegistration(path, common, registration);
+        if (Directory.Exists(path))
+        {
+            if (Directory.Exists(checkoutTrash)) throw new InvalidOperationException("Review retirement checkout collision.");
+            Directory.Move(path, checkoutTrash);
+        }
+        if (Directory.Exists(registration))
+        {
+            if (Directory.Exists(registrationTrash)) throw new InvalidOperationException("Review retirement registration collision.");
+            Directory.CreateDirectory(Path.GetDirectoryName(registrationTrash)!);
+            Directory.Move(registration, registrationTrash);
+        }
+        // No recursive deletion touches an active checkout or registration. Both renames
+        // are same-filesystem; retries can finish either partially removed quarantine.
+        if (Directory.Exists(checkoutTrash)) Directory.Delete(checkoutTrash, recursive: true);
+        if (Directory.Exists(registrationTrash)) Directory.Delete(registrationTrash, recursive: true);
+    }
+
+    private static (string Common, string Registration) ReviewRetirementPaths(string repositoryRoot, string worktreeRoot, string path)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Private controller Git requires Linux isolation.");
+        repositoryRoot = Path.GetFullPath(repositoryRoot).TrimEnd('/');
+        worktreeRoot = Path.GetFullPath(worktreeRoot).TrimEnd('/');
+        path = Path.GetFullPath(path);
+        var name = Path.GetFileName(path);
+        var common = Path.Combine(repositoryRoot, ".git");
+        if (Path.GetDirectoryName(path) != worktreeRoot || !Regex.IsMatch(name, "\\Areview-[0-9a-f]{64}\\z")
+            || worktreeRoot == common || worktreeRoot.StartsWith(common + "/", StringComparison.Ordinal)
+            || common.StartsWith(worktreeRoot + "/", StringComparison.Ordinal))
+            throw new InvalidOperationException("Review cleanup is outside the authorized worktree root or overlaps repository administration.");
+        var registration = Path.Combine(common, "worktrees", name);
+        RejectLinkedAncestors(path);
+        RejectLinkedAncestors(registration);
+        return (common, registration);
+    }
+
+    private static void RejectLinkedAncestors(string candidate)
+    {
+        for (var current = candidate; current is not null; current = Path.GetDirectoryName(current))
+            if (Path.Exists(current)) RejectLink(current);
+    }
+
+    private static void ValidateReviewRegistration(string path, string common, string registration)
+    {
+        var checkoutExists = Directory.Exists(path);
+        if (!Directory.Exists(registration))
+        {
+            if (checkoutExists) throw new InvalidOperationException("Review checkout has no matching registration.");
+            return;
+        }
+        if (File.Exists(Path.Combine(registration, "locked"))
+            || Path.GetFullPath(ReadText(Path.Combine(registration, "gitdir")).Trim()) != Path.Combine(path, ".git")
+            || Path.GetFullPath(ReadText(Path.Combine(registration, "commondir")).Trim(), registration) != common
+            || !Regex.IsMatch(ReadText(Path.Combine(registration, "HEAD")).Trim(), "\\A[0-9a-f]{40}\\z"))
+            throw new InvalidOperationException("Review cleanup requires an unlocked, detached, exactly registered snapshot.");
+        if (checkoutExists && ResolveGitFile(Path.Combine(path, ".git")) != registration)
+            throw new InvalidOperationException("Review checkout points to another registration.");
     }
 
     public static void ValidateRepository(string url)
