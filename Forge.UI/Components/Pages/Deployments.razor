@@ -2,199 +2,137 @@
 @inject IState<Forge.Dashboard.Features.Deployments.DeploymentsState> DeployStore
 @inject IState<Forge.Dashboard.Features.Projects.ProjectsState> ProjectsStore
 @inject IDispatcher Dispatch
+@inject HttpClient Http
 @implements IDisposable
 @using Forge.Dashboard.Features.Deployments
 @using Forge.Dashboard.Features.Projects
 
 <PageTitle>Deployments</PageTitle>
 <div class="page">
-    <div class="page-header">
-        <h1>Deployments</h1>
-        <div class="page-header__meta">
-            @DeployStore.Value.Candidates.Count candidate(s)
-        </div>
-        <div class="page-header__actions">
-            <button class="btn btn--primary" @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.LoadDeploymentsAction()))">Refresh</button>
-        </div>
-    </div>
-
-    <div class="page-subtitle page-subtitle--meta">
-        Enabled routine delivery follows approved sprint outcomes, verified merged source and successful CI.
-        The deploy gate can hold automatic promotion. Manual deployment requests remain available separately.
-    </div>
-
+    <div class="page-header"><h1>Deployments</h1><div class="page-header__actions"><button class="btn" @onclick="RefreshAsync">Refresh</button></div></div>
+    <p class="page-subtitle">Sprints deliver to their configured completion environment. Promote a successful release below to deploy the same artifact to another environment.</p>
+    <label class="environment-field"><span>Project</span>
+        <select aria-label="Deployment project" @bind="_projectId" @bind:after="LoadPolicyAsync">
+            <option value="">All projects</option>
+            @foreach (var project in ProjectsStore.Value.Projects) { <option value="@project.Id">@project.Name</option> }
+        </select>
+    </label>
+    @if (_policyLoading) { <p role="status">Loading environment policy…</p> }
+    @if (_policyError is not null) { <p role="alert" class="banner banner--warn">@_policyError Promotion actions are unavailable until policy is loaded.</p> }
+    @if (_policy is { Environments.Count: > 0 })
+    {
+        <section class="card overview-section" aria-label="Delivery policy">
+            <p>Sprint completion: <strong>@(_policy.Environments.FirstOrDefault(e => e.Name == _policy.SprintEnvironment)?.DisplayName ?? "Not configured")</strong> · build, tests and deployment health checks required.</p>
+            <p>@(_policy.Environments.FirstOrDefault(e => e.Name == _policy.SprintEnvironment)?.RequireApproval == true ? "Explicit human deployment approval is required on the sprint." : "No human deployment approval gate on the sprint target.")</p>
+            <a href="@($"/projects/{Uri.EscapeDataString(_projectId)}/overview#project-environments-title")">Configure environments &amp; gates</a>
+        </section>
+    }
     @if (DeployStore.Value.Error is not null)
     {
-        <div class="banner banner--error">
-            Failed to load deployments: @DeployStore.Value.Error
-            @if (DeployStore.Value.LastFetchedAt is { } lastFetched)
-            {
-                <span>Showing the last successful update from @lastFetched.ToLocalTime().ToString("g").</span>
-            }
-        </div>
+        <p role="alert" class="banner banner--warn">Could not refresh release history. @DeployStore.Value.Error @if (DeployStore.Value.LastFetchedAt is { } fetched) { <span>Last updated @fetched.ToLocalTime().ToString("g").</span> }</p>
     }
-
-    @if (DeployStore.Value.ActionError is not null)
+    @if (DeployStore.Value.ActionError is not null) { <p role="alert" class="banner banner--warn">@DeployStore.Value.ActionError</p> }
+    @if (_policy is { Environments.Count: 0 } && _projectId.Length > 0)
     {
-        <div class="banner banner--error">
-            @DeployStore.Value.ActionError
-            <button class="btn" style="margin-left:8px" @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.ClearActionErrorAction()))">Dismiss</button>
-        </div>
+        <details class="card overview-section"><summary>Legacy deployment request</summary>
+            <p>This project has no named environments. Existing single-target deployment controls apply.</p>
+            <label class="environment-field"><span>Source commit</span><select @bind="_commitSha"><option value="">Choose a commit…</option>
+                @foreach (var commit in DeployStore.Value.Commits.Where(_ => DeployStore.Value.CommitsForProjectId == _projectId)) { <option value="@commit.Sha">@commit.ShortSha @commit.Subject</option> }
+            </select></label>
+            @if (DeployStore.Value.CommitsError is { } error) { <p role="alert">@error</p> }
+            <button class="btn" disabled="@string.IsNullOrEmpty(_commitSha)" @onclick="RequestLegacy">Request deployment</button>
+        </details>
     }
-
-    <div class="overview-section">
-        <h3>Request a deployment</h3>
-        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <select class="picker-bar__select" @bind="_selectedProjectId" @bind:after="OnProjectChangedAsync">
-                <option value="">Select a project…</option>
-                @foreach (var p in ProjectsStore.Value.Projects)
+    <h2>Release history</h2>
+    @if (DeployStore.Value.Loading && DeployStore.Value.LastFetchedAt is null) { <p role="status">Loading releases…</p> }
+    else if (!Rows.Any()) { <p>No releases recorded for this selection.</p> }
+    <div class="release-list">
+        @foreach (var release in Rows)
+        {
+            <article class="card release-card" @key="release.Id" id="@($"release-{release.Id}")">
+                <header class="release-header"><div><h3>@(release.CommitSummary ?? $"Release {Short(release.CommitSha)}")</h3>
+                    <p>@ProjectName(release.ProjectId) · <strong>@EnvironmentLabel(release)</strong> · <code title="@release.CommitSha">@Short(release.CommitSha)</code></p></div>
+                    <span class="dpill dpill--@release.Status.ToLowerInvariant()">@StatusLabel(release)</span>
+                </header>
+                <p class="muted">Requested @release.RequestedAt.ToLocalTime().ToString("g") @if (release.DeployedAt is { } deployed) { <span> · Deployed @deployed.ToLocalTime().ToString("g")</span> }</p>
+                @if (release.EnvironmentName is null) { <p class="muted">Historical or single-target release. No named environment was recorded.</p> }
+                @if (release.SourceCandidateId is { } source)
                 {
-                    <option value="@p.Id">@p.Name (@p.Id)</option>
+                    <p>Promotion of <a href="@($"#release-{source}")">@SourceLabel(source)</a>. The artifact is reused without rebuilding.</p>
                 }
-            </select>
-
-            @if (DeployStore.Value.CommitsLoading)
-            {
-                <span class="page-subtitle" style="margin:0;">Loading commits…</span>
-            }
-            else if (DeployStore.Value.CommitsForProjectId == _selectedProjectId && DeployStore.Value.Commits.Count > 0)
-            {
-                <select class="picker-bar__select" @bind="_selectedCommitSha">
-                    <option value="">Select a commit…</option>
-                    @foreach (var c in DeployStore.Value.Commits)
-                    {
-                        <option value="@c.Sha">@c.ShortSha @c.Subject</option>
-                    }
-                </select>
-            }
-            @if (DeployStore.Value.CommitsForProjectId == _selectedProjectId && DeployStore.Value.CommitsError is { } commitsError)
-            {
-                <span class="banner banner--error">Commit history could not be loaded: @commitsError</span>
-            }
-
-            <button class="btn btn--primary"
-                    disabled="@(string.IsNullOrEmpty(_selectedProjectId) || string.IsNullOrEmpty(_selectedCommitSha))"
-                    @onclick="RequestDeploymentAsync">
-                Request deployment
-            </button>
-            @if (_requestedSha is not null)
-            {
-                <span class="banner banner--ok" style="margin-left:8px">Deployment requested for @_requestedSha — watch it below.</span>
-            }
-        </div>
+                @if (release.CompletionId is not null && release.Status is "Pending" or "BuildPassed")
+                {
+                    <p>Automatic sprint delivery · <a href="/sprints">View sprint checks &amp; explicit gates</a></p>
+                }
+                <ReleasePromotion Release="release" Policy="@(release.ProjectId == _projectId && DeployStore.Value.Error is null ? _policy : null)" OnPromoted="RefreshAsync" />
+                @if (_projectId.Length == 0 && release.Status == "Deployed" && release.EnvironmentName is not null) { <button class="btn btn--small" @onclick="() => SelectProjectAsync(release.ProjectId)">Select project to promote</button> }
+                @if (!string.IsNullOrEmpty(release.BuildLog) || !string.IsNullOrEmpty(release.DeployLog))
+                {
+                    <details class="release-evidence"><summary>@(release.Status is "Failed" or "BuildFailed" or "DeployFailed" ? "Failure details" : "Deployment evidence & logs")</summary>
+                        @if (!string.IsNullOrEmpty(release.BuildLog)) { <h4>Build &amp; qualification</h4><pre class="release-log">@release.BuildLog</pre> }
+                        @if (!string.IsNullOrEmpty(release.DeployLog)) { <h4>Deployment</h4><pre class="release-log">@release.DeployLog</pre> }
+                    </details>
+                }
+                @if (_policy is { Environments.Count: 0 } && release.ProjectId == _projectId && release.CompletionId is null && release.Status is "Pending" or "BuildPassed")
+                {
+                    <button class="btn" @onclick="() => Dispatch.Dispatch(new DeploymentsActions.ApproveDeploymentAction(release.Id, release.ProjectId))">Approve legacy deployment</button>
+                    <button class="btn btn--danger" @onclick="() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(release.Id, release.ProjectId))">Reject</button>
+                }
+                @if (DeployStore.Value.PendingInFlightWarning is { } warning && warning.DeploymentId == release.Id) { <p role="alert" class="banner banner--warn">@warning.Message</p> }
+            </article>
+        }
     </div>
-
-    @if (DeployStore.Value.Loading && DeployStore.Value.LastFetchedAt is null)
-    {
-        <div class="page-subtitle">Loading…</div>
-    }
-    else if (DeployStore.Value.Candidates.Count == 0 && DeployStore.Value.Error is null && DeployStore.Value.LastFetchedAt is not null)
-    {
-        <div class="page-subtitle">No deployment candidates yet.</div>
-    }
-    else if (DeployStore.Value.Candidates.Count > 0)
-    {
-        <table class="data-grid">
-            <thead>
-                <tr>
-                    <th>Project</th>
-                    <th>Commit</th>
-                    <th>Status</th>
-                    <th>Requested</th>
-                    <th>Log</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var d in DeployStore.Value.Candidates)
-                {
-                    <tr>
-                        <td><span class="project-chip">@d.ProjectId</span></td>
-                        <td class="mono" title="@d.CommitSha">@d.CommitSha[..Math.Min(8, d.CommitSha.Length)] @d.CommitSummary</td>
-                        <td><span class="dpill dpill--@d.Status.ToLowerInvariant()">@(d.CompletionId is not null && d.Status == "Pending" ? "Awaiting CI" : d.Status)</span></td>
-                        <td class="mono">@d.RequestedAt.ToString("yyyy-MM-dd HH:mm")@(d.RequestedBy is null ? "" : $" ({d.RequestedBy})")</td>
-                        <td>
-                            @if (!string.IsNullOrWhiteSpace(d.BuildLog) || !string.IsNullOrWhiteSpace(d.DeployLog))
-                            {
-                                <details>
-                                    <summary>view</summary>
-                                    <pre style="max-width:480px; max-height:220px; overflow:auto; font-size:11px;">@(d.DeployLog ?? d.BuildLog)</pre>
-                                </details>
-                            }
-                        </td>
-                        <td>
-                            @if (d.CompletionId is not null && d.Status is "Pending" or "BuildPassed")
-                            {
-                                <span>Routine delivery · <a href="/sprints">deployment gate</a></span>
-                                <button class="btn btn--small btn--danger"
-                                        @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id, d.ProjectId)))">Reject unstarted release</button>
-                            }
-                            @if (d.CompletionId is null && d.Status is "Pending" or "BuildPassed")
-                            {
-                                <button class="btn btn--small btn--primary"
-                                        @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: false))">Approve</button>
-                                <button class="btn btn--small btn--danger"
-                                        @onclick="@(() => Dispatch.Dispatch(new DeploymentsActions.RejectDeploymentAction(d.Id, d.ProjectId)))">Reject</button>
-                            }
-                            @if (DeployStore.Value.PendingInFlightWarning is { } warn && warn.DeploymentId == d.Id)
-                            {
-                                <div style="margin-top:6px; color:var(--error); font-size:12px; max-width:260px;">
-                                    @warn.Message
-                                    <button class="btn btn--small btn--danger" style="margin-top:4px;"
-                                            @onclick="@(() => ApproveAsync(d.Id, d.ProjectId, force: true))">
-                                        Force deploy anyway
-                                    </button>
-                                </div>
-                            }
-                        </td>
-                    </tr>
-                }
-            </tbody>
-        </table>
-    }
 </div>
 
 @code {
-    private string _selectedProjectId = string.Empty;
-    private string _selectedCommitSha = string.Empty;
-
+    [SupplyParameterFromQuery(Name = "project")] public string? QueryProject { get; set; }
+    private string? _queryLoaded;
+    private string _projectId = "", _commitSha = "";
+    private EnvironmentPolicy? _policy;
+    private string? _policyError;
+    private bool _policyLoading;
+    private CancellationTokenSource _policyRequest = new();
+    private IEnumerable<DeploymentRow> Rows => DeployStore.Value.Candidates.Where(r => _projectId.Length == 0 || r.ProjectId == _projectId);
+    private static string Short(string sha) => sha[..Math.Min(8, sha.Length)];
+    private string ProjectName(string id) => ProjectsStore.Value.Projects.FirstOrDefault(p => p.Id == id)?.Name ?? id;
+    private string EnvironmentLabel(DeploymentRow row) => (row.ProjectId == _projectId ? _policy?.Environments.FirstOrDefault(e => e.Name == row.EnvironmentName)?.DisplayName : null) ?? row.EnvironmentName ?? "Environment unspecified";
+    private string SourceLabel(string id) => DeployStore.Value.Candidates.FirstOrDefault(r => r.Id == id) is { } row ? $"{EnvironmentLabel(row)} · {Short(row.CommitSha)}" : "source release (outside loaded history)";
+    private static string StatusLabel(DeploymentRow row) => row.Status switch { "Deployed" => "Deployment passed", "BuildPassed" => "Checks passed · awaiting delivery", "Pending" when row.CompletionId is not null => "Awaiting qualification / gate", "Deploying" => "Deploying · checks pending", _ => row.Status };
     protected override void OnInitialized()
     {
-        DeployStore.StateChanged += OnStateChanged;
-        ProjectsStore.StateChanged += OnStateChanged;
-        if (ProjectsStore.Value.LastFetchedAt is null)
-            Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction());
-        if (DeployStore.Value.LastFetchedAt is null)
-            Dispatch.Dispatch(new DeploymentsActions.LoadDeploymentsAction());
+        DeployStore.StateChanged += OnStateChanged; ProjectsStore.StateChanged += OnStateChanged;
+        Dispatch.Dispatch(new ProjectsActions.LoadProjectsAction()); Dispatch.Dispatch(new DeploymentsActions.LoadDeploymentsAction());
     }
-
-    private Task OnProjectChangedAsync()
+    protected override async Task OnParametersSetAsync()
     {
-        _selectedCommitSha = string.Empty;
-        if (!string.IsNullOrEmpty(_selectedProjectId))
-            Dispatch.Dispatch(new DeploymentsActions.LoadCommitsAction(_selectedProjectId));
-        return Task.CompletedTask;
+        if (_queryLoaded == QueryProject) return;
+        _queryLoaded = QueryProject; _projectId = QueryProject ?? "";
+        await LoadPolicyAsync();
     }
-
-    private void RequestDeploymentAsync()
+    private async Task SelectProjectAsync(string project) { _projectId = project; await LoadPolicyAsync(); }
+    private async Task LoadPolicyAsync()
     {
-        if (string.IsNullOrEmpty(_selectedProjectId) || string.IsNullOrEmpty(_selectedCommitSha)) return;
-        var sha = _selectedCommitSha;
-        _requestedSha = sha[..Math.Min(7, sha.Length)];
-        _selectedCommitSha = string.Empty;
-        Dispatch.Dispatch(new DeploymentsActions.RequestDeploymentAction(_selectedProjectId, sha, "operator"));
+        _policyRequest.Cancel(); _policyRequest.Dispose(); _policyRequest = new();
+        var ct = _policyRequest.Token; var project = _projectId;
+        _policy = null; _policyError = null; _commitSha = ""; _policyLoading = project.Length > 0;
+        if (project.Length == 0) return;
+        try
+        {
+            var policy = await EnvironmentPolicyClient.LoadAsync(Http, project, ct);
+            if (ct.IsCancellationRequested || project != _projectId) return;
+            _policy = policy;
+            if (policy.Environments.Count == 0) Dispatch.Dispatch(new DeploymentsActions.LoadCommitsAction(project));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) { if (!ct.IsCancellationRequested && project == _projectId) _policyError = ex.Message; }
+        finally { if (!ct.IsCancellationRequested && project == _projectId) _policyLoading = false; }
     }
-
-    private string? _requestedSha;
-
-    private void ApproveAsync(string id, string projectId, bool force) =>
-        Dispatch.Dispatch(new DeploymentsActions.ApproveDeploymentAction(id, projectId, force));
-
+    private async Task RefreshAsync() { Dispatch.Dispatch(new DeploymentsActions.LoadDeploymentsAction()); await LoadPolicyAsync(); }
+    private void RequestLegacy()
+    {
+        if (_policy?.Environments.Count != 0 || _projectId.Length == 0 || _commitSha.Length == 0) return;
+        Dispatch.Dispatch(new DeploymentsActions.RequestDeploymentAction(_projectId, _commitSha, "operator")); _commitSha = "";
+    }
     private void OnStateChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
-
-    public void Dispose()
-    {
-        DeployStore.StateChanged -= OnStateChanged;
-        ProjectsStore.StateChanged -= OnStateChanged;
-    }
+    public void Dispose() { _policyRequest.Cancel(); _policyRequest.Dispose(); DeployStore.StateChanged -= OnStateChanged; ProjectsStore.StateChanged -= OnStateChanged; }
 }

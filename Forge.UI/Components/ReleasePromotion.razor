@@ -1,0 +1,94 @@
+@using System.Net.Http.Json
+@using System.Text.Json
+@using Forge.Dashboard.Features.Deployments
+@inject HttpClient Http
+@implements IDisposable
+
+@if (Receipt is { } receipt)
+{
+    <details class="release-evidence">
+        <summary>Artifact &amp; checks</summary>
+        <dl class="release-facts">
+            <dt>Immutable image</dt><dd><code>@receipt.ImageDigest</code></dd>
+            <dt>Source revision</dt><dd><code>@receipt.SourceSha</code></dd>
+            <dt>Build</dt><dd>@(receipt.BuildPassed ? "Passed" : "Not passed")</dd>
+            <dt>Tests</dt><dd>@(receipt.TestPassed ? "Passed" : "Not passed")</dd>
+            <dt>Deployment health</dt><dd>@(Release.Status == "Deployed" ? "Passed at deployment" : "Not yet confirmed")</dd>
+        </dl>
+    </details>
+}
+else if (Release.Status == "Deployed")
+{
+    <p class="muted">No verified artifact receipt is recorded. This release cannot be promoted.</p>
+}
+@if (CanPromote)
+{
+    <div class="release-promotion">
+        <label class="environment-field"><span>Promote @ShortSha to</span>
+            <select @bind="_destination" disabled="@_busy">
+                <option value="">Choose destination…</option>
+                @foreach (var target in Destinations) { <option value="@target.Name">@target.DisplayName</option> }
+            </select>
+        </label>
+        @if (SelectedTarget is { } destination)
+        {
+            <p>Deploy this exact artifact from <strong>@SourceName</strong> to <strong>@destination.DisplayName</strong>. Build and test evidence is retained; target health checks must pass.</p>
+            <p class="muted">@(destination.RequireApproval ? "Your confirmation authorizes this release's human approval gate." : "This environment has no additional human approval gate.")</p>
+            <button class="btn btn--primary" disabled="@_busy" @onclick="PromoteAsync">@(_busy ? "Requesting promotion…" : $"Confirm promotion to {destination.DisplayName}")</button>
+        }
+    </div>
+}
+@if (_error is not null) { <p role="alert" class="banner banner--warn">@_error</p> }
+@if (_notice is not null) { <p role="status" class="banner banner--ok">@_notice</p> }
+
+@code {
+    [Parameter, EditorRequired] public DeploymentRow Release { get; set; } = default!;
+    [Parameter] public EnvironmentPolicy? Policy { get; set; }
+    [Parameter] public EventCallback OnPromoted { get; set; }
+    private string _destination = "";
+    private string? _error, _notice, _identity;
+    private bool _busy;
+    private CancellationTokenSource _lifetime = new();
+    private sealed record ImageReceipt(string SourceSha, string ImageDigest, bool BuildPassed, bool TestPassed);
+    private ImageReceipt? Receipt
+    {
+        get
+        {
+            try { return JsonSerializer.Deserialize<ImageReceipt>(Release.ReceiptJson ?? "null", new JsonSerializerOptions(JsonSerializerDefaults.Web)); }
+            catch (JsonException) { return null; }
+        }
+    }
+    private EnvironmentTarget? Source => Policy?.Environments.FirstOrDefault(e => e.Name == Release.EnvironmentName);
+    private string SourceName => Source?.DisplayName ?? Release.EnvironmentName ?? "Unspecified environment";
+    private IEnumerable<EnvironmentTarget> Destinations => Policy?.Environments.Where(e => e.Name != Release.EnvironmentName && Source?.PromoteTo.Contains(e.Name) == true) ?? Enumerable.Empty<EnvironmentTarget>();
+    private EnvironmentTarget? SelectedTarget => Destinations.FirstOrDefault(e => e.Name == _destination);
+    private string ShortSha => Release.CommitSha[..Math.Min(8, Release.CommitSha.Length)];
+    private bool CanPromote => Release.Status == "Deployed" && Receipt is { BuildPassed: true, TestPassed: true } receipt && receipt.SourceSha == Release.CommitSha && !string.IsNullOrEmpty(receipt.ImageDigest) && Destinations.Any();
+    protected override void OnParametersSet()
+    {
+        var identity = $"{Release.ProjectId}/{Release.Id}/{Policy?.Revision}/{Release.Status}";
+        if (_identity == identity) return;
+        _lifetime.Cancel(); _lifetime.Dispose(); _lifetime = new();
+        _identity = identity; _destination = ""; _busy = false; _error = null;
+    }
+    private async Task PromoteAsync()
+    {
+        if (_busy || !CanPromote || SelectedTarget is null || Receipt is not { } receipt) return;
+        var release = Release; var ct = _lifetime.Token; var destination = _destination;
+        _busy = true; _error = null; _notice = null;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync($"/api/deployments/{Uri.EscapeDataString(release.Id)}/promote?projectId={Uri.EscapeDataString(release.ProjectId)}",
+                new { targetEnvironment = destination, expectedSourceSha = release.CommitSha, expectedImage = receipt.ImageDigest }, ct);
+            await EnvironmentPolicyClient.EnsureSuccessAsync(response, ct);
+            if (ct.IsCancellationRequested) return;
+            _notice = "Promotion requested. Its deployment and health checks appear in release history.";
+            _destination = "";
+            await OnPromoted.InvokeAsync();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) { if (!ct.IsCancellationRequested) _error = ex.Message; }
+        finally { if (!ct.IsCancellationRequested) _busy = false; }
+    }
+    public void Dispose() { _lifetime.Cancel(); _lifetime.Dispose(); }
+}

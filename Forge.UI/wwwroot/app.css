@@ -1123,3 +1123,21 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .acceptance-repair { margin-bottom: 14px; overflow-wrap: anywhere; }
 .acceptance-repair details { margin-block: 12px; }
 .acceptance-repair__description { white-space: pre-wrap; }
+.environment-field { display: grid; gap: 6px; max-width: 460px; margin-block: 12px; }
+.environment-field input, .environment-field select { width: 100%; min-width: 0; padding: 8px; }
+.environment-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; margin-block: 18px; }
+.environment-card { border: 1px solid var(--outline-variant); border-radius: 12px; padding: 16px; min-width: 0; }
+.environment-card legend { padding-inline: 8px; font-weight: 600; }
+.environment-check { display: flex; align-items: flex-start; gap: 8px; margin-block: 10px; }
+.environment-check input { flex: 0 0 auto; margin-top: 4px; }
+.release-list { display: grid; gap: 16px; }
+.release-card { padding: 20px; min-width: 0; overflow-wrap: anywhere; }
+.release-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.release-header h3 { margin: 0; }
+.release-facts { display: grid; grid-template-columns: minmax(100px, 160px) minmax(0, 1fr); gap: 8px 16px; }
+.release-facts dt { color: var(--on-surface-variant); }
+.release-facts dd { margin: 0; overflow-wrap: anywhere; }
+.release-evidence { margin-block: 14px; }
+.release-log { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; font-size: 12px; }
+.release-promotion { border-top: 1px solid var(--outline-variant); margin-top: 16px; padding-top: 8px; }
+@media(max-width: 600px) { .release-facts { grid-template-columns: 1fr; } .release-card { padding: 14px; } }

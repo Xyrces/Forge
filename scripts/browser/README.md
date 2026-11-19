@@ -6,6 +6,11 @@ calls a model. Port5123 is the UI and5124 is the fixture API. Use an isolated
 source directory; do not replace a production server.
 
 Prerequisites: .NET10 SDK, Python3, Node.js and Playwright with Chromium installed.
+
+`node scripts/browser/environments.spec.mjs /tmp/forge-environments-ui` exercises
+environment policy editing, stale-policy rejection, exact-release promotion,
+visible failed requests, target selection and desktop/mobile release history.
+It uses only synthetic loopback fixtures and never changes a live environment.
 From a disposable checkout, `npm install --no-save playwright` and
 `npx playwright install chromium` provide the default browser dependency.
 Alternatively set `FORGE_BROWSER_NODE_PACKAGE` to the absolute path of an
