@@ -57,6 +57,7 @@ public static class DashboardEventKind
     // Sprint flow: emitted by SprintAssembler when a sprint's member
     // tasks all reach terminal states (sprint.completed) and when the
     // next sprint is assembled + activated (sprint.started).
+    public const string SprintDeliveryPending = "sprint.delivery-pending";
     public const string SprintCompleted = "sprint.completed";
     public const string SprintStarted = "sprint.started";
     // Inter-sprint build visibility (operator request 2026-08-06):

@@ -223,7 +223,7 @@ public interface IIssueStore
 /// </summary>
 public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 43;
+    public const int CurrentSchemaVersion = 44;
     public const string DateFormat = "yyyy-MM-dd HH:mm:ss.fff";
 
     private readonly IDbConnectionFactory _db;
@@ -1028,6 +1028,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         M041SprintCompletion.Create(conn, SqliteDialect.Instance);
         M042ImplementationEvidence.ApplySqlite(conn);
         M043OwnedArtifactHistory.Create(conn, SqliteDialect.Instance);
+        M044DeploymentEnvironments.Create(conn, SqliteDialect.Instance);
         using (var workers = conn.CreateCommand())
         {
             workers.CommandText = M038WorkerAttempts.SqliteDdl;
@@ -1650,6 +1651,7 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         M040InitiativeApproval.Create(conn, d);
         if (_db.Profile == ForgeSchemaProfile.Workload) M041SprintCompletion.Create(conn, d);
         if (_db.Profile == ForgeSchemaProfile.Workload) M043OwnedArtifactHistory.Create(conn, d);
+        if (_db.Profile == ForgeSchemaProfile.Workload) M044DeploymentEnvironments.Create(conn, d);
 
         // Ordered migrations for EXISTING databases (a schema just
         // fresh-created above is born at the current shape — the

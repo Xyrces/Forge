@@ -296,7 +296,7 @@ public static class ForgeComposition
         services.AddSingleton(sprintProposalAudit);
         var scorer = new DeterministicScorer();
         services.AddSingleton(scorer);
-        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates, planning: options.SprintPlanning, roleCaps: primary.Roles);
+        var sprintPropose = new SprintProposeService(issues, sprints, scorer, sprintProposalAudit, gates: stageGates, planning: options.SprintPlanning, roleCaps: primary.Roles, projectOptions: primary);
         services.AddSingleton(sprintPropose);
         var memoryExtractor = new MemoryExtractor(
             chatClientFactory, llmConfig, memoryStore,
@@ -790,6 +790,7 @@ public static class ForgeComposition
             budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
             initiativeApprovals: initiativeApprovals,
             mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null,
+            releaseSource: sp.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(),
             projectProvisioner: options.Controller.Enabled
                 ? new Control.KubernetesProjectProvisioner(() => sp.GetRequiredService<HttpClient>(), options) : null,
             workerHistory: options.Worker.Enabled ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)
@@ -839,6 +840,17 @@ public static class ForgeComposition
                     ? dispatchBundleFactory.VerifyCompletedHeadAsync(project, task, ct)
                     : Task.FromResult(false)
                 : null,
+            completionPolicyResolver: async (projectId, ct) =>
+            {
+                var context = projectFactory.Find(projectId);
+                if (context is null) return null;
+                var project = await new Forge.Deploy.DeploymentStore(((IssueStore)context.Issues).Db).GetEffectiveProjectAsync(context.Options, ct);
+                var deployment = project.Deployment;
+                if (deployment is null || deployment.Environments.Count == 0) return null;
+                if (deployment.SprintEnvironment is not { } environment) return new Core.Completion.CompletionPolicySnapshot(null, false, null);
+                var target = DeploymentEnvironmentResolver.Capture(project, environment);
+                return new Core.Completion.CompletionPolicySnapshot(target.Name, deployment.Environments[target.Name].RequireApproval, System.Text.Json.JsonSerializer.Serialize(target));
+            },
             routineDeploymentEnabled: projectId => projectFactory.Find(projectId)?.Options.Deployment
                 is { Kind: DeploymentKind.Kubernetes, RoutineEnabled: true }));
 

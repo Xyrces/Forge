@@ -74,9 +74,11 @@ public sealed class SprintAssembler
         InitiativeProposalStore? initiativeProposals = null,
         Func<string, bool>? routineDeploymentEnabled = null,
         Forge.Configuration.SprintPlanningOptions? planning = null,
-        Func<string, IssueRecord, CancellationToken, Task<bool>>? deliveryEvidenceReconciler = null)
+        Func<string, IssueRecord, CancellationToken, Task<bool>>? deliveryEvidenceReconciler = null,
+        Func<string, CancellationToken, Task<Core.Completion.CompletionPolicySnapshot?>>? completionPolicyResolver = null)
     {
         _routineDeploymentEnabled = routineDeploymentEnabled;
+        _completionPolicyResolver = completionPolicyResolver;
         _deliveryEvidenceReconciler = deliveryEvidenceReconciler;
         _initiativeProposals = initiativeProposals;
         _planning = planning ?? new();
@@ -91,6 +93,7 @@ public sealed class SprintAssembler
     }
 
     private readonly Func<string, bool>? _routineDeploymentEnabled;
+    private readonly Func<string, CancellationToken, Task<Core.Completion.CompletionPolicySnapshot?>>? _completionPolicyResolver;
     private readonly Func<string, IssueRecord, CancellationToken, Task<bool>>? _deliveryEvidenceReconciler;
     private readonly InitiativeProposalStore? _initiativeProposals;
     private readonly Forge.Configuration.SprintPlanningOptions _planning;
@@ -284,12 +287,18 @@ public sealed class SprintAssembler
                     ActiveTotal: total, ActiveTerminal: terminal, HeldWork: heldMembers), ct);
                 return;
             }
-            var receipt = await completion.CompleteAsync(active, sprints, ct, _routineDeploymentEnabled?.Invoke(projectId) ?? false);
+            var existingReceipt = await new Core.Completion.SprintCompletionStore((IssueStore)issues).GetAsync("completion-" + active.Id, ct);
+            var policy = existingReceipt?.CompletionPolicy ?? await new Core.Completion.SprintCompletionStore((IssueStore)issues).ReadSprintPolicyAsync(active.Id, ct);
+            var receipt = existingReceipt ?? await completion.CompleteAsync(active, sprints, ct, _routineDeploymentEnabled?.Invoke(projectId) ?? false, policy);
             completedSprintId = active.Id;
             completedSprintName = active.Name;
-            _logger.LogInformation("Sprint {SprintId} work terminal; outcome={Outcome}, durable bookkeeping pending", active.Id, receipt.EngineeringOutcome);
-            _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintCompleted,
-                null, $"Sprint '{active.Name}' work terminal; outcome: {receipt.EngineeringOutcome}"));
+            if (existingReceipt is null)
+            {
+                _logger.LogInformation("Sprint {SprintId} work terminal; outcome={Outcome}, durable bookkeeping pending", active.Id, receipt.EngineeringOutcome);
+                _events.Publish(new DashboardEvent(DateTime.UtcNow, receipt.EngineeringOutcome == Core.Completion.EngineeringOutcome.Satisfied || receipt.CompletionPolicy is null
+                    ? DashboardEventKind.SprintCompleted : DashboardEventKind.SprintDeliveryPending,
+                    null, $"Sprint '{active.Name}' work terminal; outcome: {receipt.EngineeringOutcome}"));
+            }
             await completion.ReconcileAsync(ct);
         }
 
@@ -318,9 +327,12 @@ public sealed class SprintAssembler
         if (blockers.Count > 0)
         {
             var blocker = blockers[0];
+            var delivery = blocker.CompletionPolicy?.EnvironmentName is { } target
+                ? $"await verified deployment to {target}"
+                : "await qualified deployment or the remaining recorded acceptance evidence";
             var reason = blocker.BookkeepingState != "Completed"
                 ? $"Sprint {blocker.SprintId} follow-up bookkeeping is unfinished; review triage status before starting another sprint"
-                : $"Sprint {blocker.SprintId} requires delivery evidence ({blocker.EngineeringOutcome}): {blocker.DeliveryNote ?? "await qualified deployment or explicit operator observation; abandon the outcome to interrupt"}";
+                : $"Sprint {blocker.SprintId} requires delivery evidence ({blocker.EngineeringOutcome}): {blocker.DeliveryNote ?? delivery}";
             await WriteBuildStateAsync(issues, EmptyState("awaiting-completion", reason, blocker.SprintId, completedSprintName), ct);
             return;
         }
@@ -731,8 +743,9 @@ public sealed class SprintAssembler
         }
         var plan = snapshot.Plan!;
         var start = DateTime.UtcNow;
+        var policy = _completionPolicyResolver is null ? null : await _completionPolicyResolver(projectId, ct);
         var sprint = await sprints.CreateWithIssuesAsync(new NewSprint(plan.Objective, plan.Objective,
-            start, start.Add(SprintDuration)), snapshot, ct);
+            start, start.Add(SprintDuration), CompletionPolicy: policy), snapshot, ct);
         _events.Publish(new DashboardEvent(DateTime.UtcNow, DashboardEventKind.SprintStarted,
             null, $"Sprint '{plan.Objective}' started with {snapshot.TaskIds.Count} task(s)",
             new Dictionary<string, object?> { ["sprintId"] = sprint.Id, ["taskCount"] = snapshot.TaskIds.Count }));

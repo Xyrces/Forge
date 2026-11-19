@@ -19,6 +19,39 @@ public sealed class KubernetesDeploymentExecutorTests
         "deploy-" + new string('c', 32), "forge", Sha, null, status, DateTime.UtcNow, null, null, null, null, null, null);
 
     [Fact]
+    public void NamedReleaseManifestUsesCapturedTargetAndRequiresRoutedVerification()
+    {
+        var target = new DeploymentTargetSnapshot("prod", "Production", "forge-prod", "99ff50b7-9ef3-474d-962b-716b1d4cf274");
+        var candidate = Candidate() with { EnvironmentName = "prod", TargetJson = JsonSerializer.Serialize(target) };
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(KubernetesDeploymentExecutor.BuildManifest(Project(), candidate)));
+        Assert.Equal("forge-prod", document.RootElement.GetProperty("metadata").GetProperty("namespace").GetString());
+        var args = document.RootElement.GetProperty("spec").GetProperty("template").GetProperty("spec").GetProperty("containers")[0]
+            .GetProperty("args").EnumerateArray().Select(x => x.GetString()).ToArray();
+        Assert.Contains("--environment", args);
+        Assert.Contains("prod", args);
+        Assert.Contains(target.KubernetesDatasetId, args);
+        Assert.Throws<InvalidOperationException>(() => KubernetesDeploymentExecutor.BuildManifest(Project(), candidate with { EnvironmentName = "uat" }));
+    }
+
+    [Fact]
+    public async Task NamedReleaseCannotFinishWithoutTargetSpecificVerification()
+    {
+        var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };
+        project.Deployment!.RoutineImageRepository = "registry/forge";
+        var target = new DeploymentTargetSnapshot("uat", "UAT", "forge", project.Deployment.KubernetesDatasetId!);
+        var receipt = new TrustedImageReceipt(Sha, Image, true, true, "controller-image.yml", "92", "Xyrces/Forge", "main",
+            "93", "sha256:" + new string('d', 64), Forge.Core.IssueStore.CurrentSchemaVersion, "ci.yml", "91");
+        var candidate = Candidate() with { EnvironmentName = "uat", TargetJson = JsonSerializer.Serialize(target), ReceiptJson = JsonSerializer.Serialize(receipt) };
+        var body = JsonSerializer.Serialize(new { data = new { image = Image, dataset = target.KubernetesDatasetId, phase = "committed" } });
+        var result = await new KubernetesDeploymentExecutor(Client(new FakeHandler(body))).ReadProgressAsync(project, candidate, default);
+        Assert.False(result.Success);
+        body = JsonSerializer.Serialize(new { data = new { image = Image, dataset = target.KubernetesDatasetId, phase = "committed",
+            targetVerified = "true", environment = "uat", sourceSha = Sha, @namespace = "forge" } });
+        result = await new KubernetesDeploymentExecutor(Client(new FakeHandler(body))).ReadProgressAsync(project, candidate, default);
+        Assert.True(result.Success);
+    }
+
+    [Fact]
     public async Task RoutinePinnedReceiptNeedsNoCatalogAndCannotFallBackWhenMissing()
     {
         var project = Project() with { RepoUrl = "https://github.com/Xyrces/Forge", DefaultBranch = "main" };

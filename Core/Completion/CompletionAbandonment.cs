@@ -40,6 +40,11 @@ public sealed partial class SprintCompletionStore
             $"UPDATE {T("sprint_completion")} SET abandonment_json=@json,ready_for_deployment=0,bookkeeping_state='Stopped',delivery_note='Outcome explicitly abandoned by operator; not delivered.',updated_at=@now WHERE id=@id",
             ("@json", JsonSerializer.Serialize(abandonment)), ("@now", Now()), ("@id", id));
         await update.ExecuteNonQueryAsync(ct);
+        if (receipt.CompletionPolicy is not null)
+        {
+            using var finish = Command(connection, tx, $"UPDATE {T("sprint")} SET status='Completed',updated_at=@now WHERE id=@sprint AND status='Active'", ("@now", Now()), ("@sprint", receipt.SprintId));
+            await finish.ExecuteNonQueryAsync(ct);
+        }
         await tx.CommitAsync(ct);
         await PublishOutcomeChangedAsync(receipt, "Abandoned", ct);
     }

@@ -9,9 +9,27 @@ namespace Forge.Deploy;
 // The release Job outlives this controller. Its ConfigMap journal is reconciled after replacement.
 public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependentDeploymentExecutor
 {
+    // Target dashboards receive no Kubernetes credentials. Redirects must not change the authority being probed.
+    private static readonly HttpClient DashboardProbe = new(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false, UseProxy = false, PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+    }) { Timeout = TimeSpan.FromSeconds(15) };
+
+    public async Task<string> ReadTargetRevisionAsync(DeploymentTargetSnapshot target, CancellationToken ct)
+    {
+        if (!Regex.IsMatch(target.KubernetesNamespace, "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"))
+            throw new InvalidOperationException("Invalid target namespace.");
+        var url = $"http://forge.{target.KubernetesNamespace}.svc:8080/api/meta/buildinfo";
+        using var build = await DashboardProbe.GetFromJsonAsync<JsonDocument>(url, ct);
+        var revision = build?.RootElement.GetProperty("sourceRevision").GetString();
+        return revision is not null && Regex.IsMatch(revision, "^[0-9a-f]{40}$") ? revision
+            : throw new InvalidOperationException($"Could not verify the serving source in {target.DisplayName}.");
+    }
+
     public async Task<ProjectOptions> ResolveProfileAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct)
     {
-        if (candidate.CompletionId is not null)
+        project = ApplyTarget(project, candidate);
+        if (candidate.CompletionId is not null || candidate.EnvironmentName is not null || candidate.SourceCandidateId is not null)
         {
             var pinnedReceipt = JsonSerializer.Deserialize<TrustedImageReceipt>(candidate.ReceiptJson ?? "null", new JsonSerializerOptions(JsonSerializerDefaults.Web))
                 ?? throw new InvalidOperationException("Routine release receipt is missing.");
@@ -63,9 +81,30 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
             throw new InvalidOperationException("Kubernetes deployment requires a build gate and a reviewed full source SHA to immutable image digest mapping.");
         if (!Guid.TryParse(options.KubernetesDatasetId, out _) ||
             !Regex.IsMatch(options.KubernetesNamespace, "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$") ||
-            !Regex.IsMatch(candidate.Id, "^deploy-[0-9a-f]{32}$"))
+            !Regex.IsMatch(candidate.Id, candidate is { Status: DeploymentStatus.Deployed, EnvironmentName: not null, CompletionId: null, SourceCandidateId: null }
+                ? "^[a-z0-9][-a-z0-9]{0,47}[a-z0-9]$" : "^deploy-[0-9a-f]{32}$"))
             throw new InvalidOperationException("Invalid Kubernetes dataset, namespace, or deployment operation ID.");
         return image;
+    }
+
+    public static ProjectOptions ApplyTarget(ProjectOptions project, DeploymentCandidate candidate)
+    {
+        if (candidate.EnvironmentName is null)
+        {
+            if (candidate.TargetJson is not null)
+                throw new InvalidOperationException("Deployment target has no environment identity.");
+            return project; // Pre-environment candidates retain the legacy target.
+        }
+        DeploymentTargetSnapshot snapshot;
+        try
+        {
+            snapshot = JsonSerializer.Deserialize<DeploymentTargetSnapshot>(candidate.TargetJson ?? "null", new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new InvalidOperationException("Deployment target snapshot is missing.");
+        }
+        catch (JsonException ex) { throw new InvalidOperationException("Deployment target snapshot is invalid.", ex); }
+        if (snapshot.Name != candidate.EnvironmentName)
+            throw new InvalidOperationException("Deployment environment does not match its captured target.");
+        return DeploymentEnvironmentResolver.Apply(project, snapshot);
     }
 
     public async Task<DeploymentExecutionResult> ExecuteAsync(ProjectOptions project, DeploymentCandidate candidate, CancellationToken ct = default)
@@ -120,6 +159,12 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
         if (data.GetProperty("image").GetString() != image || data.GetProperty("dataset").GetString() != project.Deployment.KubernetesDatasetId)
             throw new InvalidOperationException("Release journal identity does not match approved inputs.");
         var phase = data.GetProperty("phase").GetString();
+        if (phase == "committed" && candidate.EnvironmentName is not null &&
+            (!data.TryGetProperty("targetVerified", out var verified) || verified.GetString() != "true" ||
+             !data.TryGetProperty("environment", out var environment) || environment.GetString() != candidate.EnvironmentName ||
+             !data.TryGetProperty("sourceSha", out var source) || source.GetString() != candidate.CommitSha ||
+             !data.TryGetProperty("namespace", out var ns) || ns.GetString() != project.Deployment.KubernetesNamespace))
+            return new(false, "Release journal lacks the approved environment's routed dashboard and revision verification.");
         return phase switch
         {
             "committed" => new(true, "Release committed; new controller owns admission and the dashboard route."),
@@ -130,6 +175,7 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
 
     public static object BuildManifest(ProjectOptions project, DeploymentCandidate candidate)
     {
+        project = ApplyTarget(project, candidate);
         var image = ResolveImage(project, candidate);
         var options = project.Deployment!;
         return new {
@@ -145,7 +191,8 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
                     containers = new[] { new { name = "release", image,
                         command = new[] { "python3", "/app/deploy/k3s/release.py" },
                         args = new[] { "--namespace", options.KubernetesNamespace, "--image", image,
-                            "--dataset", options.KubernetesDatasetId!, "--operation", candidate.Id, "--source-sha", candidate.CommitSha },
+                            "--dataset", options.KubernetesDatasetId!, "--operation", candidate.Id, "--source-sha", candidate.CommitSha }
+                            .Concat(candidate.EnvironmentName is null ? [] : new[] { "--environment", candidate.EnvironmentName }).ToArray(),
                         env = new[] {
                             new { name = "POD_NAME", valueFrom = new { fieldRef = new { fieldPath = "metadata.name" } } },
                             new { name = "POD_UID", valueFrom = new { fieldRef = new { fieldPath = "metadata.uid" } } } },

@@ -47,6 +47,27 @@ class Controllers(FakeControllers):
 class Crash(BaseException): pass
 
 class SchemaReleaseTests(unittest.TestCase):
+    def test_named_schema_upgrade_checks_target_before_reporting_success(self):
+        release, kube, _ = self.make()
+        release.environment, release.source_sha = "staging", "c" * 40
+        kube.objects[("configmaps", "forge-dataset")] = {"data": {"id": DATASET}}
+        release.run()
+        journal = kube.get("configmaps", release.journal_name)["data"]
+        self.assertEqual("committed", journal["phase"])
+        self.assertEqual("true", journal["targetVerified"])
+        self.assertEqual("staging", journal["environment"])
+
+    def test_named_schema_upgrade_smoke_failure_uses_qualified_rollback(self):
+        release, kube, controllers = self.make()
+        release.environment, release.source_sha = "staging", "c" * 40
+        kube.objects[("configmaps", "forge-dataset")] = {"data": {"id": DATASET}}
+        controllers.fail_dashboard = True
+        with self.assertRaisesRegex(TimeoutError, "dashboard revision"):
+            release.run()
+        journal = kube.get("configmaps", release.journal_name)["data"]
+        self.assertEqual("rolled-back", journal["phase"])
+        self.assertEqual("true", journal["rollbackVerified"])
+
     def test_bundled_upgrade_policy_targets_the_workload_schema(self):
         root = Path(__file__).resolve().parents[2]
         policy = load_policy(root / "deploy/k3s/schema-upgrade.json")

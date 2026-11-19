@@ -23,7 +23,7 @@ public sealed class RoutineDeploymentTests : IDisposable
         _ => executor, Gates, NullLogger<RoutineDeploymentCoordinator>.Instance);
     public void Dispose() => issues.Dispose();
 
-    private async Task<SprintCompletionRecord> Complete(bool ready = true)
+    private async Task<SprintCompletionRecord> Complete(bool ready = true, CompletionPolicySnapshot? policy = null)
     {
         var task = await issues.CreateAsync(new NewIssue("task", "deliver", Metadata: new Dictionary<string, object> { ["prNumber"] = 1 }));
         var sprints = new SprintStore(issues);
@@ -47,7 +47,24 @@ public sealed class RoutineDeploymentTests : IDisposable
         command.AddParam("@sprint", sprint.Id);
         var audit = Convert.ToInt64(await command.ExecuteScalarAsync());
         return await Completions.BeginCompletionAsync(sprint.Id, [(await issues.GetAsync(task.Id))!],
-            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", ready, DeliveryRequired: true));
+            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", ready, DeliveryRequired: true, CompletionPolicy: policy));
+    }
+
+    [Fact]
+    public async Task SuccessfulNamedDeploymentAndSprintClosureShareOneCommit()
+    {
+        var snapshot = new DeploymentTargetSnapshot("uat", "UAT", "forge-uat", Guid.NewGuid().ToString());
+        var policy = new CompletionPolicySnapshot("uat", false, JsonSerializer.Serialize(snapshot, DeploymentStore.EnvironmentJson));
+        var completion = await Complete(policy: policy);
+        await Coordinator().ReconcileAsync(default);
+        var candidate = Assert.Single(await Deployments.ListAsync());
+        Assert.Equal(policy.TargetJson, candidate.TargetJson);
+        Assert.Equal("uat", candidate.EnvironmentName);
+        Assert.Equal(EngineeringOutcome.PendingEvidence, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        await Deployments.MarkIndependentProgressAsync(candidate, new(true, "verified target"), Completions, default);
+        Assert.Equal(DeploymentStatus.Deployed, (await Deployments.GetAsync(candidate.Id))!.Status);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Completions.GetAsync(completion.Id))!.EngineeringOutcome);
+        Assert.Equal(SprintStatus.Completed, (await new SprintStore(issues).GetAsync(completion.SprintId))!.Status);
     }
 
     [Fact]
@@ -223,6 +240,7 @@ public sealed class RoutineDeploymentTests : IDisposable
     }
     private sealed class FakeExecutor : IIndependentDeploymentExecutor
     {
+        public Task<string> ReadTargetRevisionAsync(DeploymentTargetSnapshot target, CancellationToken ct) => Task.FromResult(FakeSource.Sha);
         public int Calls;
         private bool started;
         public DeploymentExecutionResult Result = new(false, "running", true);

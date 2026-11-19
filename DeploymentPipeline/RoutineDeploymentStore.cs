@@ -1,6 +1,8 @@
 using System.Data;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using Forge.Core.Completion;
 using Forge.Core.Db;
 
 namespace Forge.Deploy;
@@ -13,11 +15,19 @@ public sealed partial class DeploymentStore
         var id = "deploy-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(projectId + "\0" + completionId)))[..32].ToLowerInvariant();
         await using var conn = await _db.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-        using (var fence = conn.CreateCommand())
+        await LockAdmissionAsync(conn, tx, ct);
+        CompletionPolicySnapshot? policy;
+        using (var authority = conn.CreateCommand())
         {
-            fence.Transaction = tx;
-            fence.CommandText = $"UPDATE {T("completion_lock")} SET value=value WHERE id=1";
-            if (await fence.ExecuteNonQueryAsync(ct) != 1) throw new InvalidOperationException("Completion lock unavailable.");
+            authority.Transaction = tx;
+            authority.CommandText = $"SELECT completion_policy_json,completion_gate_approval_json FROM {T("sprint_completion")} WHERE id=@completion AND project_id=@project";
+            authority.AddParam("@completion", completionId); authority.AddParam("@project", projectId);
+            await using var reader = await authority.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) throw new InvalidOperationException("Sprint delivery authority was not found.");
+            policy = reader.IsDBNull(0) ? null : JsonSerializer.Deserialize<CompletionPolicySnapshot>(reader.GetString(0));
+            if (policy is not null && (string.IsNullOrWhiteSpace(policy.EnvironmentName) || string.IsNullOrWhiteSpace(policy.TargetJson)
+                || policy.RequireApproval && reader.IsDBNull(1)))
+                throw new InvalidOperationException("Sprint deployment requires a target and all explicit approvals.");
         }
         using (var bind = conn.CreateCommand())
         {
@@ -52,9 +62,11 @@ public sealed partial class DeploymentStore
         using (var insert = conn.CreateCommand())
         {
             insert.Transaction = tx;
-            insert.CommandText = $"INSERT INTO {T("deployment")}(id,project_id,commit_sha,status,requested_at,requested_by,completion_id) VALUES(@id,@project,@sha,'Pending',@now,'approved initiative routine policy',@completion)";
+            insert.CommandText = $"INSERT INTO {T("deployment")}(id,project_id,commit_sha,status,requested_at,requested_by,completion_id,environment_name,target_json) VALUES(@id,@project,@sha,'Pending',@now,'approved initiative routine policy',@completion,@env,@target)";
             insert.AddParam("@id", id); insert.AddParam("@project", projectId); insert.AddParam("@sha", sourceSha);
             insert.AddParam("@now", DateTime.UtcNow.ToString(DateFormat)); insert.AddParam("@completion", completionId);
+            insert.AddParam("@env", (object?)policy?.EnvironmentName ?? DBNull.Value);
+            insert.AddParam("@target", (object?)policy?.TargetJson ?? DBNull.Value);
             await insert.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
@@ -90,11 +102,18 @@ public sealed partial class DeploymentStore
         ExecAsync($"UPDATE {T("deployment")} SET build_log=@note WHERE id=@id AND status='Pending'",
             cmd => { cmd.AddParam("@id", id); cmd.AddParam("@note", note); }, ct);
 
+    public Task MarkIndependentProgressAsync(DeploymentCandidate candidate, DeploymentExecutionResult progress,
+        SprintCompletionStore completions, CancellationToken ct)
+        => candidate.CompletionId is { } completion && candidate.EnvironmentName is not null
+            && progress.Success && !progress.StillInProgress && !progress.AdmissionHeld
+            ? completions.CommitVerifiedTargetAsync(completion, candidate.Id, progress.Log, ct)
+            : MarkIndependentProgressAsync(candidate.Id, progress, ct);
+
     public Task MarkIndependentProgressAsync(string id, DeploymentExecutionResult progress, CancellationToken ct = default) =>
         progress.AdmissionHeld ? Task.CompletedTask : progress.StillInProgress
             ? ExecAsync($"UPDATE {T("deployment")} SET status='Deploying' WHERE id=@id AND status='Approved'",
                 cmd => cmd.AddParam("@id", id), ct)
-            : ExecAsync($"UPDATE {T("deployment")} SET status=@status,deploy_log=@log,deployed_at=@at WHERE id=@id AND status IN ('Approved','Deploying')",
+            : ExecAsync($"UPDATE {T("deployment")} SET status=@status,deploy_log=@log,deployed_at=@at WHERE id=@id AND status IN ('Approved','Deploying') AND (@status <> 'Deployed' OR completion_id IS NULL OR environment_name IS NULL)",
                 cmd => { cmd.AddParam("@id", id); cmd.AddParam("@status", progress.Success ? "Deployed" : "DeployFailed");
                     cmd.AddParam("@log", progress.Log); cmd.AddParam("@at", progress.Success ? DateTime.UtcNow.ToString(DateFormat) : DBNull.Value); }, ct);
 }

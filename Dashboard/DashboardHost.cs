@@ -81,6 +81,7 @@ public sealed class DashboardHost : IAsyncDisposable
 
     private readonly Agents.InitiativeApprovalService? _initiativeApprovals;
     private readonly string? _mutationTokenFile;
+    private readonly Forge.Deploy.IRoutineReleaseSource? _releaseSource;
 
     public DashboardHost(
         DashboardOptions options,
@@ -141,9 +142,10 @@ public sealed class DashboardHost : IAsyncDisposable
         Agents.InitiativeApprovalService? initiativeApprovals = null,
         string? mutationTokenFile = null,
         Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null,
-        IProjectProvisioner? projectProvisioner = null)
+        IProjectProvisioner? projectProvisioner = null, Forge.Deploy.IRoutineReleaseSource? releaseSource = null)
     {
         _projectProvisioner = projectProvisioner;
+        _releaseSource = releaseSource;
         _mutationTokenFile = mutationTokenFile;
         _workerHistory = workerHistory;
         _initiativeApprovals = initiativeApprovals;
@@ -486,6 +488,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
             ProjectLookupEndpoints.MapProjectLookupEndpoints(_app);
             SecretsEndpoints.MapSecretsEndpoints(_app);
             DeploymentsEndpoints.MapDeploymentsEndpoints(_app);
+            if (_releaseSource is not null) DeploymentEnvironmentEndpoints.MapInstallation(_app, _releaseSource);
         }
 
         // Cert download — the install helper for first-time

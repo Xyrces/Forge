@@ -20,12 +20,12 @@
     {
         <form @onsubmit="SaveAsync" @onsubmit:preventDefault="true">
             <label class="environment-field"><span>Sprint completion environment</span>
-                <select @bind="_sprintEnvironment" disabled="@_saving">
-                    <option value="">No environment selected</option>
+                <select aria-label="Sprint completion environment" @bind="_sprintEnvironment" disabled="@_saving">
+                    <option value="">No deployment required</option>
                     @foreach (var target in _policy.Environments) { <option value="@target.Name">@target.DisplayName</option> }
                 </select>
             </label>
-            <p>Build, tests and target health checks are required. Human approval is required only where explicitly selected below. Existing releases retain their recorded target.</p>
+            <p>@(_sprintEnvironment.Length == 0 ? "Sprints close after required engineering verification. No deployment or human deployment approval is required." : "Build, tests and target health checks are required. Human approval is required only where explicitly selected below.") Existing sprints and releases retain their recorded policy and target.</p>
             <div class="environment-grid">
                 @foreach (var target in _policy.Environments)
                 {
@@ -46,7 +46,7 @@
                     </fieldset>
                 }
             </div>
-            <button class="btn btn--primary" type="submit" disabled="@(_saving || string.IsNullOrEmpty(_sprintEnvironment))">@(_saving ? "Saving…" : "Save environment policy")</button>
+            <button class="btn btn--primary" type="submit" disabled="@_saving">@(_saving ? "Saving…" : "Save environment policy")</button>
             <a class="btn" href="/deployments">View releases &amp; promote</a>
         </form>
         @if (_error is not null) { <p class="banner banner--warn" role="alert">@_error</p><button class="btn" disabled="@_saving" @onclick="LoadAsync">Reload saved policy</button> }
@@ -95,7 +95,7 @@
         _saving = true; _error = null; _notice = null;
         try
         {
-            using var response = await Http.PutAsJsonAsync($"/api/projects/{Uri.EscapeDataString(project)}/environments", _policy with { SprintEnvironment = _sprintEnvironment }, ct);
+            using var response = await Http.PutAsJsonAsync($"/api/projects/{Uri.EscapeDataString(project)}/environments", _policy with { SprintEnvironment = _sprintEnvironment.Length == 0 ? null : _sprintEnvironment }, ct);
             await EnvironmentPolicyClient.EnsureSuccessAsync(response, ct);
             var saved = await response.Content.ReadFromJsonAsync<EnvironmentPolicy>(ct) ?? throw new InvalidDataException("No policy was returned. Reload to confirm the saved policy.");
             if (ct.IsCancellationRequested || project != ProjectId) return;

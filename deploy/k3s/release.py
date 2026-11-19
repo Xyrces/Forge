@@ -86,6 +86,24 @@ class Controllers:
         except urllib.error.HTTPError as error:
             raise ApiError(error.code, "controller " + action) from None
 
+    def verify_dashboard(self, source_sha):
+        """Verify the routed target, including its served revision; not a browser test."""
+        base = f"http://forge.{self.namespace}.svc:8080"
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, request, response, code, message, headers, url):
+                return None
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        try:
+            with opener.open(base + "/", timeout=15) as response:
+                html = response.read(2 * 1024 * 1024).decode("utf-8")
+                if response.status != 200 or "<html" not in html.lower():
+                    return False
+            with opener.open(base + "/api/meta/buildinfo", timeout=15) as response:
+                revision = json.load(response).get("sourceRevision")
+                return bool(re.fullmatch(r"[0-9a-f]{40}", revision or "")) and (source_sha is None or revision == source_sha)
+        except (OSError, ValueError):
+            return False
+
 
 def validate_image(image):
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}", image):
@@ -137,7 +155,7 @@ def deployment(slot, image, dataset, operation, namespace="forge"):
 
 class Release:
     def __init__(self, kube, controllers, operation, image, dataset, pod_name, pod_uid,
-                 timeout=600, sleep=time.sleep, clock=time.monotonic):
+                 timeout=600, sleep=time.sleep, clock=time.monotonic, environment=None, source_sha=None):
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", operation):
             raise ValueError("invalid operation id")
         self.kube, self.controllers = kube, controllers
@@ -146,6 +164,28 @@ class Release:
         self.timeout, self.sleep, self.clock = timeout, sleep, clock
         self.journal_name = "forge-release-" + operation
         self.journal = None
+        self.environment, self.source_sha = environment, source_sha
+        if environment is not None and (not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", environment)
+                                        or not re.fullmatch(r"[0-9a-f]{40}", source_sha or "")):
+            raise ValueError("named release requires a valid environment and source SHA")
+
+    def verify_target(self):
+        if self.environment is None:
+            return
+        identity = self.kube.get("configmaps", "forge-dataset")
+        if not identity or identity.get("data", {}).get("id") != self.dataset:
+            raise RuntimeError("target namespace is not provisioned for the approved dataset")
+
+    def verify_route(self, slot, rollback=False):
+        if self.environment is None:
+            return
+        self.record("rolling-back" if rollback else "verifying-target")
+        self.wait(lambda: self.status(slot).get("datasetId") == self.dataset and
+                  self.controllers.verify_dashboard(None if rollback else self.source_sha),
+                  "routed target identity or dashboard revision check timed out")
+        self.journal["data"]["rollbackVerified" if rollback else "targetVerified"] = "true"
+        if not rollback:
+            self.journal["data"].update(environment=self.environment, sourceSha=self.source_sha, namespace=self.kube.namespace)
 
     def acquire(self):
         lock = self.kube.get("configmaps", "forge-release-lock")
@@ -245,11 +285,13 @@ class Release:
                 self.kube.patch("deployments", "forge-" + previous, {"spec": {"replicas": 1}})
                 self.activate(previous, rollback=True)
             self.route(previous)
+            self.verify_route(previous, rollback=True)
         else:
             self.route("none")
         self.record("rolled-back")
 
     def run(self):
+        self.verify_target()
         self.acquire()
         self.journal = self.kube.get("configmaps", self.journal_name)
         if self.journal:
@@ -258,6 +300,9 @@ class Release:
                 raise RuntimeError("schema-upgrade journal requires its schema supervisor; ordinary release is prohibited")
             if data["image"] != self.image or data["dataset"] != self.dataset:
                 raise RuntimeError("operation id already used for different immutable inputs")
+            if self.environment is not None and (data.get("environment") != self.environment or
+                                                data.get("sourceSha") != self.source_sha or data.get("namespace") != self.kube.namespace):
+                raise RuntimeError("operation id already used for another environment or source")
             if data["phase"] == "committed":
                 return
             if data["phase"] == "rollback-needs-merge-fence":
@@ -270,7 +315,9 @@ class Release:
             candidate = "green" if previous == "blue" else "blue"
             self.journal = self.kube.create("configmaps", {"apiVersion": "v1", "kind": "ConfigMap",
                 "metadata": {"name": self.journal_name}, "data": {"phase": "created", "image": self.image,
-                    "dataset": self.dataset, "previous": previous, "candidate": candidate}})
+                    "dataset": self.dataset, "previous": previous, "candidate": candidate,
+                    **({"environment": self.environment, "sourceSha": self.source_sha, "namespace": self.kube.namespace}
+                       if self.environment is not None else {})}})
         data = self.journal["data"]
         candidate, previous = data["candidate"], data["previous"]
         if data["phase"] == "rolling-back":
@@ -327,6 +374,7 @@ class Release:
             self.activate(candidate)
             self.record("activated")
             self.route(candidate)
+            self.verify_route(candidate)
             self.record("committed")
         except Exception:
             # If rollback itself fails, retain its phase; a replacement release Job resumes it.
@@ -340,6 +388,7 @@ def main():
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--source-sha")
+    parser.add_argument("--environment")
     args = parser.parse_args()
     if args.source_sha:
         with open("/app/source-revision", encoding="utf-8") as source:
@@ -352,6 +401,7 @@ def main():
         load_policy(os.path.join(os.path.dirname(__file__), "schema-upgrade.json")))
     release = kind(kube, controllers, args.operation, args.image, args.dataset,
                    os.environ["POD_NAME"], os.environ["POD_UID"], args.timeout,
+                   environment=args.environment, source_sha=args.source_sha,
                    **({"policy": policy} if policy is not None else {}))
     release.run()
 

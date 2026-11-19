@@ -55,7 +55,7 @@ public static class SprintProposeEndpoints
             {
                 if (planners.TryGetValue(projectId,out var cached) && cached.Roles==roles) return cached.Service;
                 var service = new SprintProposeService(ctx.Issues, ctx.Sprints, new Agents.DeterministicScorer(), auditStore,
-                    gates: proposer.Gates, specs: ctx.Specs, projectId: ctx.Options.Id, planning: proposer.Planning, roleCaps: ctx.Options.Roles);
+                    gates: proposer.Gates, specs: ctx.Specs, projectId: ctx.Options.Id, planning: proposer.Planning, roleCaps: ctx.Options.Roles, projectOptions: ctx.Options);
                 planners[projectId]=(roles,service);
                 return service;
             }

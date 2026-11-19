@@ -54,6 +54,7 @@ public static class SqlServerMigrations
         new M041SprintCompletion(),
         new M042ImplementationEvidence(),
         new M043OwnedArtifactHistory(),
+        new M044DeploymentEnvironments(),
     };
 
     public static int ExpectedVersion =>

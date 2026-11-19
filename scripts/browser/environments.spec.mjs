@@ -52,7 +52,14 @@ try {
  await settings.getByRole('button',{name:'Save environment policy',exact:true}).click();
  await settings.getByRole('alert').filter({hasText:'changed'}).waitFor();
  await capture(page,{path:output+'/environment-policy-mobile.png',fullPage:true});
+ await settings.getByRole('button',{name:'Reload saved policy',exact:true}).click();
+ await settings.getByLabel('Sprint completion environment',{exact:true}).selectOption('');
+ await settings.getByRole('button',{name:'Save environment policy',exact:true}).click();
+ await settings.getByRole('status').filter({hasText:'Environment policy saved'}).waitFor();
+ const noTarget=(await (await page.request.get(api+'/__writes')).json()).filter(w=>w.method==='PUT'&&w.path.endsWith('/environments')).at(-1);
+ assert.equal(noTarget.body.sprintEnvironment,null);
  await page.goto(base+'/deployments?project=forge');
+ await page.getByText('No deployment required for sprint completion.',{exact:false}).waitFor();
  await page.getByLabel('Deployment project',{exact:true}).selectOption('');
  await page.locator('.release-promotion select').waitFor({state:'hidden'});
  assert.equal(await page.getByRole('button',{name:'Confirm promotion',exact:false}).count(),0);
@@ -79,6 +86,10 @@ try {
  await page.getByText('Missed — recorded in the completion exception. This check was not passed.',{exact:true}).waitFor();
  assert.equal(await page.getByRole('button',{name:'Approve deployment to uat',exact:true}).count(),0);
  await capture(page,{path:output+'/sprint-explicit-exception.png',fullPage:true});
+ await put({'/api/sprints/environment-fixture/completion':{status:404,body:{}},'/api/sprints/environment-fixture/completion-policy':{policy:{environmentName:null,requireApproval:false,targetJson:null}}});
+ await page.reload();await page.locator('.sprint-acceptance__toggle').getByText('No deployment required',{exact:true}).waitFor();
+ await page.locator('.sprint-acceptance__toggle').click();
+ await page.getByText('No deployment required. This sprint closes after required engineering verification.',{exact:true}).waitFor();
  assert.deepEqual(errors,[]);
  receipt.result='passed';receipt.checks=['Exact source candidate, SHA and artifact sent on promotion','Direct UAT to production permitted by routes','Failed request visible without success notice, safe retry','Legacy/failed releases cannot promote','Named projects hide arbitrary commit request','Project policy saves revision, routes and gate settings with read-only target bindings','Concurrent policy update fails visibly','Clearing project removes promotion actions','Desktop/mobile rendered, mobile no horizontal overflow','Captured active-sprint target visible before receipt','Explicit approval posts exact bound plan','Optional observation does not say awaiting gate','Missed check displayed as exception, never passed'];
 } catch(e){receipt.result='failed';receipt.error=String(e.stack||e);process.exitCode=1;await page.screenshot({path:output+'/failure.png'}).catch(()=>{});}

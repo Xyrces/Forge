@@ -22,8 +22,12 @@
     @if (_policy is { Environments.Count: > 0 })
     {
         <section class="card overview-section" aria-label="Delivery policy">
-            <p>Sprint completion: <strong>@(_policy.Environments.FirstOrDefault(e => e.Name == _policy.SprintEnvironment)?.DisplayName ?? "Not configured")</strong> · build, tests and deployment health checks required.</p>
-            <p>@(_policy.Environments.FirstOrDefault(e => e.Name == _policy.SprintEnvironment)?.RequireApproval == true ? "Explicit human deployment approval is required on the sprint." : "No human deployment approval gate on the sprint target.")</p>
+            @if (_policy.SprintEnvironment is null) { <p>No deployment required for sprint completion. Sprints close after required engineering verification.</p> }
+            else
+            {
+                <p>Sprint completion: <strong>@(_policy.Environments.FirstOrDefault(e => e.Name == _policy.SprintEnvironment)?.DisplayName ?? "Not configured")</strong> · build, tests and deployment health checks required.</p>
+                <p>@(_policy.Environments.FirstOrDefault(e => e.Name == _policy.SprintEnvironment)?.RequireApproval == true ? "Explicit human deployment approval is required on the sprint." : "No human deployment approval gate on the sprint target.")</p>
+            }
             <a href="@($"/projects/{Uri.EscapeDataString(_projectId)}/overview#project-environments-title")">Configure environments &amp; gates</a>
         </section>
     }

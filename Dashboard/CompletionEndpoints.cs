@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http;
 namespace Forge.Dashboard;
 
 public sealed record CompletionBatchSummary(string Id, string State, string? Error);
+public sealed record CompletionDeploymentApproval(string PlanHash);
 public sealed record AbandonCompletionRequest(string PlanHash, string Reason);
 public sealed record CompletionDetail(CompletionOverview Receipt, IReadOnlyList<CompletionBatchSummary> Batches,
     string? NextCursor, IReadOnlyList<CompletionCriterionStatus> Criteria);
@@ -20,6 +21,12 @@ public static class CompletionEndpoints
             ? primary is IssueStore store && projectId == store.ProjectId ? store : null
             : projects.Find(projectId)?.Issues as IssueStore;
 
+        app.MapGet("/api/sprints/{sprintId}/completion-policy", async (string sprintId, string projectId, CancellationToken ct) =>
+        {
+            var issues = Resolve(projectId);
+            if (issues is null) return Results.NotFound();
+            return Results.Ok(new { policy = await new SprintCompletionStore(issues).ReadSprintPolicyAsync(sprintId, ct) });
+        });
         app.MapGet("/api/completions", async (string projectId, int? limit, string? cursor, bool? waitingOnly, CancellationToken ct) =>
         {
             var issues = Resolve(projectId);
@@ -68,6 +75,34 @@ public static class CompletionEndpoints
                 await store.RecordOperatorEvidenceAsync("completion-" + sprintId, evidence, identity, ct);
                 await store.RefreshDeploymentOutcomeAsync("completion-" + sprintId, ct);
                 return Results.Ok(new { message = "Explicit operator observation recorded for the exact deployed source." });
+            }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+        app.MapPost("/api/sprints/{sprintId}/completion/approve-deployment", async (string sprintId, string projectId,
+            CompletionDeploymentApproval request, HttpContext context, CancellationToken ct) =>
+        {
+            if (context.Items[DashboardMutationAuthentication.AuthenticatedOperatorItem] is not string identity) return Results.Unauthorized();
+            var issues = Resolve(projectId);
+            if (issues is null) return Results.NotFound();
+            try
+            {
+                await new SprintCompletionStore(issues).ApproveDeploymentAsync("completion-" + sprintId, request.PlanHash, identity, ct);
+                return Results.Ok(new { message = "Configured deployment gate approved for this exact completion." });
+            }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+            catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+        });
+        app.MapPost("/api/sprints/{sprintId}/completion/reconcile-delivered", async (string sprintId, string projectId,
+            ReconcileDeliveredCompletionRequest request, HttpContext context, CancellationToken ct) =>
+        {
+            if (context.Items[DashboardMutationAuthentication.AuthenticatedOperatorItem] is not string identity) return Results.Unauthorized();
+            var issues = Resolve(projectId);
+            if (issues is null) return Results.NotFound();
+            try
+            {
+                await new SprintCompletionStore(issues).ReconcileDeliveredAsync("completion-" + sprintId, request, identity, ct);
+                return Results.Ok(new { message = "Delivered completion closed with missed criteria recorded as an explicit exception; no observation fabricated." });
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }

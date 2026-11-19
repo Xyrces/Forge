@@ -24,7 +24,7 @@ def worker_network_policy():
                             {"ipBlock": {"cidr": "2000::/3", "except": ["2001:db8::/32"]}}]}]}}
 
 
-def foundation(namespace, storage="40Gi", pull_secret=None):
+def foundation(namespace, storage="40Gi", pull_secret=None, manager_namespace=None):
     items = [obj("Namespace", namespace),
              obj("PersistentVolumeClaim", "forge-state", spec={"accessModes": ["ReadWriteOnce"],
                  "resources": {"requests": {"storage": storage}}}), worker_network_policy()]
@@ -53,6 +53,18 @@ def foundation(namespace, storage="40Gi", pull_secret=None):
                    "metadata": {"name": "forge-" + account},
                    "subjects": [{"kind": "ServiceAccount", "name": "forge-" + account, "namespace": namespace}],
                    "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "forge-" + account}}]
+    if manager_namespace and manager_namespace != namespace:
+        # A management controller may submit/reconcile releases here, but cannot
+        # read target credentials, change RBAC, route services, or mutate workloads.
+        # The target-local independent release Job owns those operations.
+        items += [{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+                   "metadata": {"name": "forge-deployment-manager"}, "rules": [
+                       {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get"]},
+                       {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"]}]},
+                  {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+                   "metadata": {"name": "forge-deployment-manager"},
+                   "subjects": [{"kind": "ServiceAccount", "name": "forge-controller", "namespace": manager_namespace}],
+                   "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "forge-deployment-manager"}}]
     for slot in ("blue", "green"):
         items.append(obj("Service", "forge-" + slot, spec={"selector": {"app": "forge-controller", "slot": slot},
             "ports": [{"name": "control", "port": 9090, "targetPort": 9090}]}))
@@ -65,7 +77,7 @@ def foundation(namespace, storage="40Gi", pull_secret=None):
     return items
 
 
-def job(namespace, image, dataset, operation, name, initialize=False, migration=None):
+def job(namespace, image, dataset, operation, name, initialize=False, migration=None, environment=None, source_sha=None):
     if migration is not None and not initialize:
         raise ValueError("migration settings belong only to initializer Jobs")
     env = [{"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
@@ -80,8 +92,7 @@ def job(namespace, image, dataset, operation, name, initialize=False, migration=
             "Controller__DatasetId": dataset, "Controller__KeyringPath": "/var/lib/forge/keyring",
             "Controller__TokenFile": "/run/forge-control/controller-token", "Forgesystem__DataRoot": "/var/lib/forge",
             "Db__Provider": "sqlserver", "Db__AutoMigrate": "true", "HOME": "/var/lib/forge", "Bootstrap__ProjectId": "forge",
-            "Bootstrap__RepoUrl": "https://github.com/Xyrces/Forge.git",
-            "Bootstrap__WorkerPrincipal": "forge-k3s-worker"}.items():
+            "Bootstrap__RepoUrl": "https://github.com/Xyrces/Forge.git"}.items():
             env.append({"name": key, "value": value})
         if migration is not None:
             env += [{"name": "Bootstrap__MigrationFromVersion", "value": str(migration["fromVersion"])},
@@ -95,6 +106,10 @@ def job(namespace, image, dataset, operation, name, initialize=False, migration=
     else:
         container["command"] = ["python3", "/app/deploy/k3s/release.py"]
         container["args"] = ["--namespace", namespace, "--image", image, "--dataset", dataset, "--operation", operation]
+        if environment:
+            if not source_sha:
+                raise ValueError("named release requires the approved source SHA")
+            container["args"] += ["--environment", environment, "--source-sha", source_sha]
     return {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": name, "namespace": namespace,
         "labels": {"app": "forge-release", "operation": operation}}, "spec": {
             "backoffLimit": 0 if initialize else 3, "activeDeadlineSeconds": 3600,  # New supervisor pods resume the journal; DDL never retries implicitly.

@@ -38,7 +38,7 @@
                 {
                     @if (_activePolicy is { } activePolicy)
                     {
-                        <span>Target: @activePolicy.EnvironmentName</span>
+                        <span>@(activePolicy.EnvironmentName is null ? "No deployment required" : $"Target: {activePolicy.EnvironmentName}")</span>
                         <span>@(activePolicy.RequireApproval ? "Human deployment approval required" : "Automatic after required checks")</span>
                     }
                     else { <span>@(_loading ? "Loading evidence…" : "No completion evidence yet")</span> }
@@ -62,8 +62,12 @@
         <p class="page-subtitle">No completion evidence has been recorded for this sprint yet.</p>
         @if (_activePolicy is { } policy)
         {
-            <p>This sprint closes when deployment to <strong>@policy.EnvironmentName</strong> passes its required checks.</p>
-            <p>@(policy.RequireApproval ? "Explicit gate: human approval before deployment." : "Delivery is automatic after required checks. No human deployment approval gate.")</p>
+            @if (policy.EnvironmentName is null) { <p>No deployment required. This sprint closes after required engineering verification.</p> }
+            else
+            {
+                <p>This sprint closes when deployment to <strong>@policy.EnvironmentName</strong> passes its required checks.</p>
+                <p>@(policy.RequireApproval ? "Explicit gate: human approval before deployment." : "Delivery is automatic after required checks. No human deployment approval gate.")</p>
+            }
         }
     }
     else
@@ -81,13 +85,18 @@
         </dl>
         @if (_detail.Receipt.CompletionPolicy is { } policy)
         {
-            <p>Completion target: <strong>@(policy.EnvironmentName ?? "No environment")</strong>. Deployment checks must pass before this sprint closes.</p>
-            <p>@(policy.RequireApproval ? "Explicit gate: human approval before deployment." : "Automatic deployment after required checks. No human deployment approval gate.")</p>
+            @if (policy.EnvironmentName is null) { <p>No deployment required. This sprint closes after required engineering verification.</p> }
+            else
+            {
+                <p>Completion target: <strong>@policy.EnvironmentName</strong>. Deployment checks must pass before this sprint closes.</p>
+                <p>@(policy.RequireApproval ? "Explicit gate: human approval before deployment." : "Automatic deployment after required checks. No human deployment approval gate.")</p>
+            }
         }
         @if (_detail.Receipt.DeploymentApprovalRequired)
         {
             <div class="banner banner--warn"><p>Human deployment approval is required by this sprint's environment policy.</p>
-                <button class="btn btn--primary" disabled="@(_retrying || _loading || _error is not null)" @onclick="ApproveDeploymentAsync">Approve deployment to @_detail.Receipt.CompletionPolicy?.EnvironmentName</button>
+                @if (!receipt.ReadyForDeployment) { <p>Engineering verification must pass before deployment approval is available.</p> }
+                <button class="btn btn--primary" disabled="@(_retrying || _loading || _error is not null || !receipt.ReadyForDeployment)" @onclick="ApproveDeploymentAsync">Approve deployment to @_detail.Receipt.CompletionPolicy?.EnvironmentName</button>
             </div>
         }
         @if (_detail.Receipt.Reconciliation is { } exception)

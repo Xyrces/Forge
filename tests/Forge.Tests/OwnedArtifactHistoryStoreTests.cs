@@ -127,7 +127,7 @@ public sealed class OwnedArtifactHistoryStoreTests
         M043OwnedArtifactHistory.Create(check, SqliteDialect.Instance);
         await using var read = check.CreateCommand();
         read.CommandText = "SELECT MAX(version) FROM schema_version";
-        Assert.Equal(43L, Convert.ToInt64(await read.ExecuteScalarAsync()));
+        Assert.Equal((long)IssueStore.CurrentSchemaVersion, Convert.ToInt64(await read.ExecuteScalarAsync()));
         read.CommandText = "SELECT COUNT(*) FROM owned_artifact_history";
         Assert.Equal(0L, Convert.ToInt64(await read.ExecuteScalarAsync()));
         var migration = Assert.IsType<M043OwnedArtifactHistory>(SqlServerMigrations.All.Single(m => m.Version == 43));
