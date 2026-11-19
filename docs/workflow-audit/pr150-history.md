@@ -2,7 +2,9 @@
 
 This is a read-only reconstruction of [PR #150](https://github.com/Xyrces/Forge/pull/150), task `client-2`, Sprint 3 (`sprint-6b1f419a15`). It is not the live Sprint 4 protected-review qualification and does not authorize a replay, release, review, or recovery action. Codex assembled this report from GitHub, retained Forge state and Git objects; no Forge worker or paid model call was dispatched for it.
 
-The documentation base is `86bcec3`. Forge evidence was collected on **2026-11-19 at 02:18:02 UTC**, after the historical events. Event times below are November 18, UTC. Forge's event API emits timestamps without an offset; they are presented using the store's UTC convention, while the original strings remain in the snapshot.
+The original reconstruction used documentation base `86bcec3`; this report was rebased onto `e16ba9323e5c2b2434fe9efeb64eb6100f7234b0` without changing the collected source snapshots. Forge evidence was collected on **2026-11-19 at 02:18:02 UTC**, after the historical events. Event times below are November 18, UTC. Forge's event API emits timestamps without an offset; they are presented using the store's UTC convention, while the original strings remain in the snapshot.
+
+For the separate in-progress Sprint 4 qualification, use the [populated PR #159 operator receipt and current verdict](https://github.com/Xyrces/Forge/pull/159#issuecomment-6997942208). Its subsequent observations and final outcome belong in that ledger, not this historical report.
 
 ## Sources and verification
 
