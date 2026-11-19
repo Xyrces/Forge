@@ -51,6 +51,109 @@ public sealed class CompletionEvidenceTests : IDisposable
     }
 
     [Fact]
+    public async Task LateProofPromotesExactlyOncePreservingFrozenReceiptAndPendingOperatorAcceptance()
+    {
+        var (sprint, verified, plan, audit) = await Seed();
+        var task = await issues.TransitionAsync(verified.Id, IssueStatus.Completed, null,
+            new Dictionary<string, object> { ["trustedPublication"] = null! });
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{\"original\":true}", false, true));
+        Assert.False(await Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task]));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ReadDeliveryMembersAsync(receipt));
+        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null,
+            new Dictionary<string, object> { ["trustedPublication"] = verified.GetMetadata("trustedPublication")! });
+        var results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => new SprintCompletionStore(issues).ReconcileImplementationEvidenceAsync(receipt.Id, [task])));
+        Assert.Single(results.Where(r => r));
+        var updated = (await Store.GetAsync(receipt.Id))!;
+        Assert.True(updated.ReadyForDeployment);
+        Assert.Equal(receipt.MembersJson, updated.MembersJson);
+        Assert.Equal(EngineeringOutcome.PendingEvidence, updated.EngineeringOutcome);
+        Assert.Null(updated.SourceSha); Assert.Null(updated.DeploymentCandidateId);
+        using var evidence = JsonDocument.Parse(updated.EvidenceJson);
+        Assert.Equal(receipt.EvidenceJson, evidence.RootElement.GetProperty("deliveryReconciliation").GetProperty("OriginalEvidenceJson").GetString());
+        Assert.True(TaskDeliveryEvidence.IsImplementationVerified(Assert.Single(await Store.ReadDeliveryMembersAsync(updated)), plan));
+        Assert.False(await new SprintCompletionStore(issues).ReconcileImplementationEvidenceAsync(receipt.Id, [task]));
+        Assert.Null(Assert.Single(await Store.ReadCriteriaAsync(receipt.Id)).ProofReference);
+    }
+
+    [Fact]
+    public async Task NormalReconciliationAcquiresLateProofAndResumesAfterCoordinatorRestart()
+    {
+        var (sprint, verified, plan, audit) = await Seed();
+        var task = await issues.TransitionAsync(verified.Id, IssueStatus.Completed, null,
+            new Dictionary<string, object> { ["trustedPublication"] = null! });
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", false, true));
+        var calls = 0;
+        async Task<bool> Verify(IssueRecord member, CancellationToken ct)
+        {
+            calls++;
+            await issues.TransitionAsync(member.Id, member.Status, "Independent evidence arrived", new Dictionary<string, object>
+                { ["trustedPublication"] = verified.GetMetadata("trustedPublication")! }, ct);
+            return true;
+        }
+        await new Forge.Orchestrator.Sprint.CompletionCoordinator(issues, null, null,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, deliveryEvidenceReconciler: Verify).ReconcileAsync(default);
+        Assert.True((await Store.GetAsync(receipt.Id))!.ReadyForDeployment);
+        await new Forge.Orchestrator.Sprint.CompletionCoordinator(issues, null, null,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, deliveryEvidenceReconciler: Verify).ReconcileAsync(default);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task ReconciliationCannotReplaceOriginalPublicationOrReadAnotherPlansProof()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", false, true));
+        var original = task.GetMetadata("trustedPublication")!;
+        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+            { ["trustedPublication"] = original.Replace("attempt", "different-attempt") });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task]));
+        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object> { ["trustedPublication"] = original });
+        Assert.True(await Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task]));
+        var revised = (await Store.GetAsync(receipt.Id))!;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ReadDeliveryMembersAsync(revised with { EvidenceJson = revised.EvidenceJson.Replace(plan.Hash, "wrong-plan") }));
+    }
+
+    [Theory]
+    [InlineData("stale")]
+    [InlineData("membership")]
+    [InlineData("status")]
+    [InlineData("plan")]
+    public async Task ReconciliationRejectsChangedFrozenAuthority(string change)
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", false, true));
+        if (change == "stale") await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object> { ["note"] = "changed" });
+        if (change == "status") task = await issues.TransitionAsync(task.Id, IssueStatus.Closed, "changed disposition");
+        if (change == "membership")
+        {
+            var extra = await issues.CreateAsync(new NewIssue("task", "Extra"));
+            await new SprintStore(issues).AddIssueAsync(sprint.Id, extra.Id);
+        }
+        if (change == "plan")
+        {
+            await using var c = await issues.Db.OpenAsync(); using var q = c.CreateCommand();
+            q.CommandText = "INSERT INTO sprint_proposal_audit(ts,weights_json,candidates_json,selected_task_ids_json,committed_sprint_id) SELECT ts,weights_json,candidates_json,selected_task_ids_json,committed_sprint_id FROM sprint_proposal_audit WHERE id=@id";
+            q.AddParam("@id", audit); await q.ExecuteNonQueryAsync();
+        }
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task]));
+        Assert.False((await Store.GetAsync(receipt.Id))!.ReadyForDeployment);
+    }
+
+    [Theory]
+    [InlineData("abandoned")]
+    [InlineData("source")]
+    [InlineData("deployment")]
+    public async Task ReconciliationNeverReopensStoppedOrDispatchedCompletion(string state)
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", false, true));
+        if (state == "abandoned") await Store.AbandonAsync(receipt.Id, plan.Hash, "Stopped", "operator");
+        if (state == "source") await Store.RecordSourceAsync(receipt.Id, Source, "{}");
+        if (state == "deployment") await Store.BindDeploymentAsync(receipt.Id, "candidate");
+        Assert.False(await Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task]));
+    }
+
+    [Fact]
     public async Task ExactDeployedCriterionRequiresExplicitImmutableOperatorEvidence()
     {
         var (sprint, task, plan, audit) = await Seed();

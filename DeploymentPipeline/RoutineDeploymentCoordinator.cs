@@ -61,8 +61,7 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
                             var sha = receipt.SourceSha;
                             if (sha is null)
                             {
-                                var members = JsonSerializer.Deserialize<IssueRecord[]>(receipt.MembersJson, Json)
-                                    ?? throw new InvalidOperationException("Completion member evidence is missing.");
+                                var members = await project.Completions.ReadDeliveryMembersAsync(receipt, ct);
                                 var plan = await project.Completions.GetBoundPlanAsync(receipt, ct);
                                 var observed = await source.ObserveMergedFrontierAsync(project.Options, members, plan, ct);
                                 await project.Completions.RecordSourceAsync(receipt.Id, observed.Sha, observed.Evidence, ct);

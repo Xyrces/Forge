@@ -10,10 +10,12 @@ namespace Forge.Orchestrator.Sprint;
 
 /// <summary>Resumes durable completion work. The active sprint is not its retry queue.</summary>
 internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? triage,
-    InitiativeProposalStore? proposals, ILogger logger, IDashboardEventBus? events = null)
+    InitiativeProposalStore? proposals, ILogger logger, IDashboardEventBus? events = null,
+    Func<IssueRecord, CancellationToken, Task<bool>>? deliveryEvidenceReconciler = null)
 {
     private readonly SprintCompletionStore store = new(issues);
     private bool recovered;
+    private string? deliveryCursor;
     private readonly Dictionary<string, string> failureAcknowledgements = new();
 
     public async Task<SprintCompletionRecord> CompleteAsync(SprintRecord sprint, ISprintStore sprints, CancellationToken ct, bool routineDeploymentEnabled = false)
@@ -55,6 +57,31 @@ internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? 
     public async Task ReconcileAsync(CancellationToken ct)
     {
         if (!recovered) { await store.RecoverRunningAsync(ct); recovered = true; }
+        // One bounded page per sweep; old unresolved outcomes cannot starve newer ones.
+        var waiting = await store.ListAwaitingImplementationEvidenceAsync(afterId: deliveryCursor, ct: ct);
+        foreach (var receipt in waiting)
+        {
+            try
+            {
+                var plan = await store.GetBoundPlanAsync(receipt, ct);
+                var frozen = JsonSerializer.Deserialize<IssueRecord[]>(receipt.MembersJson) ?? [];
+                var members = new List<IssueRecord>();
+                foreach (var original in frozen)
+                {
+                    var current = await issues.GetAsync(original.Id, ct) ?? throw new InvalidOperationException("Frozen member missing.");
+                    if (!TaskDeliveryEvidence.IsImplementationVerified(current, plan) && deliveryEvidenceReconciler is not null)
+                    {
+                        await deliveryEvidenceReconciler(current, ct);
+                        current = await issues.GetAsync(original.Id, ct) ?? throw new InvalidOperationException("Verified member missing.");
+                    }
+                    members.Add(current);
+                }
+                await store.ReconcileImplementationEvidenceAsync(receipt.Id, members, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { logger.LogWarning(ex, "Completion {Completion} still awaits exact implementation evidence", receipt.Id); }
+        }
+        deliveryCursor = waiting.Count == 20 ? waiting[^1].Id : null;
         foreach (var (id, error) in failureAcknowledgements.ToArray())
         {
             await store.RecordTriageFailureAsync(id, error, ct);
