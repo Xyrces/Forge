@@ -1207,6 +1207,12 @@ public async Task<AgentRunResult> RunAsync(
         return sb.ToString().TrimEnd();
     }
 
+    // Internal audit receipts remain stored and retrievable, but are not project guidance.
+    // These literal prefixes contain no SQL LIKE metacharacters; apply exclusions in SQL
+    // to avoid loading archived issue snapshots into every model request.
+    private static readonly string[] GeneralMemoryExcludedPrefixes =
+        ["sprint/", "session/", "operator-acceptance-repair/", "breaker/", "review/origins/"];
+
     private async Task<string> BuildMemoryInstructionsAsync(
         IReadOnlyDictionary<string, object>? context, CancellationToken ct)
     {
@@ -1237,7 +1243,7 @@ public async Task<AgentRunResult> RunAsync(
             // are filtered out below anyway — reading them per run
             // strangled the Basic-tier DB under concurrency.
             memories = await _memory!.RecallAsync(keyPrefix: null,
-                excludePrefixes: new[] { "sprint/", "session/" }, ct);
+                excludePrefixes: GeneralMemoryExcludedPrefixes, ct);
         }
         catch (Exception ex)
         {
@@ -1251,8 +1257,7 @@ public async Task<AgentRunResult> RunAsync(
         // pause/resume), not prompt material. Keep the global block
         // free of both.
         var globalOnly = memories
-            .Where(m => !m.Key.StartsWith("sprint/", StringComparison.Ordinal)
-                && !m.Key.StartsWith("session/", StringComparison.Ordinal))
+            .Where(m => !GeneralMemoryExcludedPrefixes.Any(prefix => m.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
             .ToList();
         var globalRendered = MemoryStore.RenderForPrompt(globalOnly);
         if (!string.IsNullOrEmpty(globalRendered)) sections.Add(globalRendered);
