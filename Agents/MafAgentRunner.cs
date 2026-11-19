@@ -378,11 +378,8 @@ public async Task<AgentRunResult> RunAsync(
             tools: tools);
 
         var message = new ChatMessage(ChatRole.User, fullPrompt);
-        // Pause/resume: an explicit sessionId wins; otherwise the
-        // runner resumes the persisted session for this
-        // (project, task, role) when one exists — rework rounds AND
-        // plain retries come back warm instead of cold. Junk in the
-        // store degrades to a fresh session (logged).
+        // Engineering and QA reuse the task conversation across revisions.
+        // Reviewers resume only work on the revision they are assessing.
         var sessionKey = SessionKey(projectId, runTaskId, role, ResolveContextString(context, "sourceSha"));
         // Review history is evidence for one exact revision, never reusable task-wide context.
         // Raw/legacy explicit sessions have no authenticated source binding. Resume only the
