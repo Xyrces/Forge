@@ -297,7 +297,8 @@
                                 <p class="sprint-task__status">@(card.Label ?? card.Situation ?? "Status evidence unavailable")</p>
                                 @if (card.Situation is not null && card.Situation != card.Label) { <p>@card.Situation</p> }
                                 @if (card.NextActor is not null) { <p class="sprint-task__actor">Next: @card.NextActor</p> }
-                                @if (card.HumanReviewRequired) { <p class="sprint-task__requirement">@(card.NominatedHuman is null ? "Human review required before merge" : $"Review by @{card.NominatedHuman} required before merge")</p> }
+                                <TaskHumanReview Required="@card.HumanReviewRequired" Status="@card.Status" Nominee="@card.NominatedHuman"
+                                                 Summary="@card.HumanReviewSummary" Class="sprint-task__requirement" />
                                 @if (card.IsBlocked) { <p>Waiting for @card.BlockerCount prerequisite task(s). <a href="@TaskUrl(card.Id)">View dependencies</a></p> }
                                 @if (card.PrNumber is not null && PrUrl(card.PrNumber) is { } url)
                                 { <a href="@url" target="_blank" rel="noopener">@(card.AwaitingHumanReview ? "Review" : "Open") PR #@card.PrNumber ↗</a> }
@@ -445,7 +446,7 @@
         new("Completed / closed", c => Bucket(c) == "done"),
     };
 
-    private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts, IReadOnlyList<string>? BlockedBy, string? Situation, string? SituationTone, bool Active, string? Role, int Priority, bool IsBlocked, bool Boosted, long BlockerCount, string? Label, string? NextActor, bool HumanReviewRequired, bool AwaitingHumanReview, string? NominatedHuman, bool HumanReviewTaskHold);
+    private sealed record Card(string Id, string Title, string Status, string? State, string? Assignee, string? PrNumber, string? ReworkAttempts, IReadOnlyList<string>? BlockedBy, string? Situation, string? SituationTone, bool Active, string? Role, int Priority, bool IsBlocked, bool Boosted, long BlockerCount, string? Label, string? NextActor, bool HumanReviewRequired, bool AwaitingHumanReview, string? NominatedHuman, bool HumanReviewTaskHold, string? HumanReviewSummary);
 
     /// <summary>Task type → owning role. Mirrors
     /// Agents/RoleAgentRegistry.FromTaskType — duplicated client-side
@@ -616,7 +617,8 @@
         .Select(m => new Card(m.Id, m.Title, m.Status, m.State, m.Assignee, m.PrNumber, m.ReworkAttempts,
             m.BlockedBy, m.Situation, m.SituationTone,
             m.Status == "InProgress" && m.Assignee is not null && m.State is null or "Dispatching" or "AgentRunning" or "ReworkRunning",
-            RoleFor(m.Type), m.Priority, m.BlockerCount > 0, m.Boosted, m.BlockerCount, m.Label, m.NextActor, m.HumanReviewRequired, m.AwaitingHumanReview, m.NominatedHuman, m.HumanReviewTaskHold)).ToList();
+            RoleFor(m.Type), m.Priority, m.BlockerCount > 0, m.Boosted, m.BlockerCount, m.Label, m.NextActor, m.HumanReviewRequired,
+            m.Status is not ("Completed" or "Closed") && m.AwaitingHumanReview, m.NominatedHuman, m.HumanReviewTaskHold, m.HumanReviewSummary)).ToList();
 
     private string? PrUrl(string prNumber) =>
         RepositoryLinks.PullRequest(_repoUrl, prNumber);

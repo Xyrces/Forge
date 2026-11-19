@@ -51,7 +51,8 @@ public static class SprintReadEndpoints
         return new(issue.Id, issue.Title, issue.Type, issue.Status.ToString(), issue.GetMetadata("state"), issue.Priority,
             issue.Assignee, issue.GetMetadata("prNumber"), issue.GetMetadata("reworkAttempts"), row.Boosted,
             row.BlockerCount, row.BlockedBy, situation.Text, situation.Tone, situation.Label, situation.NextActor,
-            situation.HumanReviewRequired, bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting, nominee,
-            bool.TryParse(issue.GetMetadata("humanReviewTaskHold"), out var held) && held);
+            situation.HumanReviewRequired, issue.Status is not (IssueStatus.Completed or IssueStatus.Closed)
+                && bool.TryParse(issue.GetMetadata("awaitingHumanReview"), out var waiting) && waiting, situation.NominatedHuman,
+            bool.TryParse(issue.GetMetadata("humanReviewTaskHold"), out var held) && held, situation.HumanReviewSummary);
     }
 }

@@ -18,7 +18,18 @@
     @if (_error is not null) { <p class="banner banner--error" role="alert">Couldn’t load tasks: @_error</p> }
     @if (_loading) { <p role="status">Loading…</p> }
     <p class="meta-text">@_items.Count shown · @_total matching tasks</p>
-    <div class="task-run-list">@foreach (var task in _items) { <article><div><a href="@($"/tasks/{Uri.EscapeDataString(task.Id)}?project={Uri.EscapeDataString(_loadedProject ?? "")}")">@task.Title</a><strong>@task.Situation.Label</strong></div><p>@task.Situation.Text</p><p class="meta-text">@WorkPresentation.Role(task.Type)@(task.Situation.NextActor is { } actor ? $" · Next: {actor}" : "")@(task.PrNumber is { } pr ? $" · PR #{pr}" : "")</p>@if (task.Situation.HumanReviewRequired) { <p>Human review required before merge</p> }</article> }</div>
+    <div class="task-run-list">
+        @foreach (var task in _items)
+        {
+            <article>
+                <div><a href="@($"/tasks/{Uri.EscapeDataString(task.Id)}?project={Uri.EscapeDataString(_loadedProject ?? "")}")">@task.Title</a><strong>@task.Situation.Label</strong></div>
+                <p>@task.Situation.Text</p>
+                <p class="meta-text">@WorkPresentation.Role(task.Type)@(task.Situation.NextActor is { } actor ? $" · Next: {actor}" : "")@(task.PrNumber is { } pr ? $" · PR #{pr}" : "")</p>
+                <TaskHumanReview Required="@task.Situation.HumanReviewRequired" Status="@task.Status"
+                                 Nominee="@task.Situation.NominatedHuman" Summary="@task.Situation.HumanReviewSummary" />
+            </article>
+        }
+    </div>
     @if (!_loading && _error is null && _items.Count == 0) { <p>No matching tasks.</p> }
     @if (_cursor is not null) { <button class="btn" disabled="@_loading" @onclick="() => LoadFromUserAsync(true)">Load more tasks</button> }
 </div>
@@ -104,5 +115,6 @@
     }
     private sealed record TaskPage(List<TaskRow> Items, string? NextCursor, int Total);
     private sealed record TaskRow(string Id, string Title, string Type, string Status, string? PrNumber, SituationRow Situation);
-    private sealed record SituationRow(string Label, string Text, string? NextActor, bool HumanReviewRequired);
+    private sealed record SituationRow(string Label, string Text, string? NextActor, bool HumanReviewRequired,
+        string? NominatedHuman = null, string? HumanReviewSummary = null);
 }
