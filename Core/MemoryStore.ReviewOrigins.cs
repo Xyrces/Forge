@@ -26,7 +26,7 @@ public sealed partial class MemoryStore
             || observations.Count > 10000 || observations.Any(o => o.Id <= 0)
             || observations.Select(o => o.Id).Distinct().Count() != observations.Count)
             throw new ArgumentException("A bounded, unambiguous repository review observation is required.");
-        var key = $"review-origins/v1/{repository.ToLowerInvariant()}/{pr}";
+        var key = $"review/origins/v1/{repository.ToLowerInvariant()}/{pr}";
         await using var connection = await _db.OpenAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.Serializable, ct);
         string? json;

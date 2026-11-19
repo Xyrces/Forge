@@ -58,7 +58,9 @@ public sealed partial class MemoryStore : IAsyncDisposable
     private string T(string name) => _db.Dialect.Table(name);
 
     public static bool IsReservedReviewOriginKey(string key)
-        => key.TrimStart().StartsWith("review-origins/", StringComparison.OrdinalIgnoreCase);
+        => System.Globalization.CultureInfo.InvariantCulture.CompareInfo.IsPrefix(key.TrimStart(), "review/origins/",
+            System.Globalization.CompareOptions.IgnoreCase | System.Globalization.CompareOptions.IgnoreNonSpace
+            | System.Globalization.CompareOptions.IgnoreWidth | System.Globalization.CompareOptions.IgnoreKanaType);
 
     private static void RequireMutableMemoryKey(string key)
     {
@@ -263,7 +265,7 @@ public sealed partial class MemoryStore : IAsyncDisposable
         var now = DateTime.UtcNow;
         await using (var read = conn.CreateCommand())
         {
-            read.CommandText = $"SELECT id, ts, ttl_days FROM {T("memory")} WHERE ttl_days IS NOT NULL AND LOWER(LTRIM([key])) NOT LIKE 'review-origins/%'";
+            read.CommandText = $"SELECT id, ts, ttl_days FROM {T("memory")} WHERE ttl_days IS NOT NULL AND LOWER(LTRIM([key])) NOT LIKE 'review/origins/%'";
             await using var rd = await read.ExecuteReaderAsync(ct);
             while (await rd.ReadAsync(ct))
             {

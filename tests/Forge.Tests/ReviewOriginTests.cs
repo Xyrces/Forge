@@ -8,9 +8,10 @@ namespace Forge.Tests;
 public sealed class ReviewOriginTests
 {
     [Theory]
-    [InlineData("review-origins/v1/repo/1")]
-    [InlineData("REVIEW-ORIGINS/v1/repo/1")]
-    [InlineData(" review-origins/v1/repo/1")]
+    [InlineData("review/origins/v1/repo/1")]
+    [InlineData("REVIEW/ORIGINS/v1/repo/1")]
+    [InlineData(" review/origins/v1/repo/1")]
+    [InlineData("réview/origins/v1/repo/1")]
     public async Task GenericMemoryCannotForgeOrDeleteReviewOrigins(string key)
     {
         await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("review-protected"));
@@ -20,7 +21,7 @@ public sealed class ReviewOriginTests
         await Assert.ThrowsAsync<ArgumentException>(() => memory.SeedIfMissingAsync(key, "forged"));
         await Assert.ThrowsAsync<ArgumentException>(() => memory.ForgetAsync(key));
         await memory.ObserveReviewOriginsAsync("repo", 1, "head", At, []);
-        const string canonical = "review-origins/v1/repo/1";
+        const string canonical = "review/origins/v1/repo/1";
         var before = await memory.GetAsync(canonical);
         Assert.NotNull(before);
         await Assert.ThrowsAsync<ArgumentException>(() => memory.RememberAsync(canonical, "forged", 1));

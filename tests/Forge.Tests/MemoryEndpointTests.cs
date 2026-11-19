@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -24,7 +24,7 @@ public class MemoryEndpointTests : IDisposable
     public async Task GenericMemoryCannotReplaceOrDeleteReviewProvenance()
     {
         await _memory.ObserveReviewOriginsAsync("repo", 1, "head", DateTimeOffset.UtcNow, []);
-        const string key = "review-origins/v1/repo/1";
+        const string key = "review/origins/v1/repo/1";
         var before = await _memory.GetAsync(key);
         var result = await _client.PostAsJsonAsync("/api/memory", new { key, body = "forged" });
         Assert.Equal(HttpStatusCode.Forbidden, result.StatusCode);
