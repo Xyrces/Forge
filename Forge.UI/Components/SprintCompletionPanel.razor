@@ -7,8 +7,39 @@
 @implements IDisposable
 
 <section class="card sprint-acceptance" aria-label="Sprint evidence and delivery">
-    <h2>Acceptance and delivery</h2>
-    <p class="page-subtitle">Engineering proof, release status and operator observations are tracked separately.</p>
+    <h2>
+        <button type="button" class="sprint-acceptance__toggle" aria-expanded="@(Expanded ? "true" : "false")"
+                aria-controls="sprint-acceptance-details" @onclick="() => ExpandedChanged.InvokeAsync(!Expanded)">
+            <span>Acceptance and delivery</span>
+            <span class="sprint-acceptance__status">
+                @if (_error is not null)
+                {
+                    <span>@(_detail is null ? "Evidence unavailable" : "Update unavailable · showing last result")</span>
+                }
+                @if (_detail is { } detail)
+                {
+                    var receipt = detail.Receipt;
+                    var observations = detail.Criteria.Where(c => c.EvidenceKind == "OperatorObserved").ToList();
+                    <span>@(receipt.AbandonedAt is null ? CompletionPresentation.Outcome(receipt.Outcome) : "Stopped by operator")</span>
+                    <span>@DeploymentLabel(receipt)</span>
+                    @if (observations.Count > 0)
+                    {
+                        <span>@observations.Count(c => c.ProofReference is not null) of @observations.Count operator observations recorded</span>
+                    }
+                    @if (receipt.BookkeepingState == "NeedsReview")
+                    {
+                        <span>Follow-up review needed</span>
+                    }
+                }
+                else if (_error is null)
+                {
+                    <span>@(_loading ? "Loading evidence…" : "No completion evidence yet")</span>
+                }
+            </span>
+            <span class="sprint-acceptance__chevron" aria-hidden="true"></span>
+        </button>
+    </h2>
+    <div id="sprint-acceptance-details" class="sprint-acceptance__details" hidden="@(!Expanded)">
     @if (_loading && _detail is null)
     {
         <p role="status">Loading completion evidence…</p>
@@ -33,7 +64,7 @@
         <dl class="delivery-summary">
             <dt>Engineering evidence</dt><dd>@(receipt.AbandonedAt is null ? CompletionPresentation.Outcome(receipt.Outcome) : "Evidence incomplete — outcome stopped")</dd>
             <dt>Follow-up processing</dt><dd>@CompletionPresentation.Processing(receipt.BookkeepingState)</dd>
-            <dt>Deployment</dt><dd>@(receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus) : receipt.DeliveryRequired == false ? "Not required for this outcome" : (receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release"))</dd>
+            <dt>Deployment</dt><dd>@DeploymentLabel(receipt)</dd>
         </dl>
         @if (!string.IsNullOrWhiteSpace(receipt.DeliveryNote))
         {
@@ -120,12 +151,15 @@
             <button class="btn" disabled="@(_detail.NextCursor is null || _retrying)" @onclick="NextPageAsync">Next batch page</button>
         }
     }
+    </div>
 </section>
 
 @code {
     [Parameter] public string? ProjectId { get; set; }
     [Parameter] public string? SprintId { get; set; }
     [Parameter] public DateTime RefreshAt { get; set; }
+    [Parameter] public bool Expanded { get; set; }
+    [Parameter] public EventCallback<bool> ExpandedChanged { get; set; }
     [Parameter] public EventCallback<(string? ProjectId, string? SprintId)> OnLayoutReady { get; set; }
     private string? _identity, _cursor, _error, _actionError, _notice;
     private string _stopReason = "";
@@ -254,6 +288,10 @@
         string? DeploymentStatus, string? DeliveryNote, string? PlanHash, string? SprintName = null,
         string? AbandonmentReason = null, DateTimeOffset? AbandonedAt = null, bool? DeliveryRequired = null);
     private sealed record CompletionBatch(string Id, string State, string? Error);
+    private static string DeploymentLabel(CompletionSummary receipt) =>
+        receipt.DeploymentStatus is not null ? CompletionPresentation.Deployment(receipt.DeploymentStatus)
+        : receipt.DeliveryRequired == false ? "No deployment required"
+        : receipt.ReadyForDeployment ? "Awaiting qualified release" : "Not yet qualified for release";
     private sealed record CompletionCriterion(string Id, string Text, string EvidenceKind, string? ProofReference, string? OperatorIdentity);
     private sealed record CompletionDetail(CompletionSummary Receipt, IReadOnlyList<CompletionBatch> Batches, string? NextCursor, IReadOnlyList<CompletionCriterion> Criteria);
 }

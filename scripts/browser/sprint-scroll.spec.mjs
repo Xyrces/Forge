@@ -96,7 +96,7 @@ function sample() {
 
 function completionReady(status) {
   if (status === 200) {
-    return page.getByRole('heading', {name: 'Acceptance criterion 12', exact: true});
+    return page.getByRole('heading', {name: 'Acceptance criterion 12', exact: true, includeHidden: true});
   }
   const message = status === 404
     ? 'No completion evidence has been recorded for this sprint yet.'
@@ -176,6 +176,10 @@ try {
         },
       });
       await page.goto(base + '/sprints?project=forge');
+      await page.locator('.sprint-acceptance__toggle').waitFor();
+      if (await page.locator('.sprint-acceptance__toggle').getAttribute('aria-expanded') !== 'true') {
+        await page.locator('.sprint-acceptance__toggle').click();
+      }
       await completionReady(status).waitFor();
       if (width === 390) {
         await page.getByLabel('Task lane').selectOption('Completed / closed');
@@ -211,6 +215,8 @@ try {
           }).click();
         }
         await completionReady(status).waitFor();
+        assert.equal(await page.locator('.sprint-acceptance__toggle').getAttribute('aria-expanded'), 'true',
+          'Expanded evidence remains open on return so card geometry can be restored');
         await waitForRestoredPosition({...before, focusHref: '/tasks/scroll-task?project=forge'},
           `${width}/${status}/${route}`);
         const after = await sample();
@@ -244,7 +250,7 @@ try {
   await page.setViewportSize({width: 390, height: 900});
   for (const selection of ['lane', 'sprint']) {
     await page.evaluate(() => sessionStorage.setItem('forge:sprint-board:forge', JSON.stringify({
-      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0,
+      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0, completionExpanded: true,
     })));
     await page.goto(base + '/sprints?project=forge&sprint=scroll-fixture');
     await page.getByText('Loading completion evidence…', {exact: true}).waitFor();
@@ -254,7 +260,7 @@ try {
       await page.locator('#sprint-picker').selectOption(otherSprint.id);
     }
     await page.locator('.app-main').evaluate(element => { element.scrollTop = 0; });
-    await completionReady(200).waitFor();
+    await completionReady(200).waitFor({state:'attached'});
     await page.waitForTimeout(1200);
     assert.equal(await page.locator('.app-main').evaluate(element => element.scrollTop), 0,
       `${selection}: late completion cannot restore the old viewport`);
@@ -262,6 +268,8 @@ try {
       assert.equal(await page.getByLabel('Task lane').inputValue(), 'Queued');
     } else {
       assert.equal(await page.locator('#sprint-picker').inputValue(), otherSprint.id);
+      assert.equal(await page.locator('.sprint-acceptance__toggle').getAttribute('aria-expanded'), 'false',
+        'Selecting another sprint starts with compact acceptance');
     }
     await page.locator('.app-main').evaluate(element => { element.scrollTop = 120; });
     await page.waitForTimeout(100);
@@ -286,7 +294,7 @@ try {
   for (const gesture of ['wheel', 'keyboard', 'tab-entry', 'pointer', 'touch', 'pagination', 'task-link']) {
     await page.setViewportSize({width: gesture === 'touch' ? 390 : 1280, height: 900});
     await page.evaluate(gesture => sessionStorage.setItem('forge:sprint-board:forge', JSON.stringify({
-      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0,
+      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0, completionExpanded: true,
       focusHref: gesture === 'task-link' ? '/tasks/obsolete-task?project=forge' : '/tasks/scroll-task?project=forge',
     })), gesture);
     await page.goto(base + '/sprints?project=forge&sprint=scroll-fixture');
@@ -367,7 +375,7 @@ try {
   }
   for (const unrelated of ['modifier', 'sidebar']) {
     await page.evaluate(() => sessionStorage.setItem('forge:sprint-board:forge', JSON.stringify({
-      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0,
+      sprintId: 'scroll-fixture', lane: 'Completed / closed', scroll: 2500, windowScroll: 0, completionExpanded: true,
       focusHref: '/tasks/scroll-task?project=forge',
     })));
     await page.goto(base + '/sprints?project=forge&sprint=scroll-fixture');

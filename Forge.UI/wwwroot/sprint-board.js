@@ -9,9 +9,9 @@ export function read(p) {
     try { return JSON.parse(sessionStorage.getItem(key(p)) || 'null'); }
     catch { return null; }
 }
-export function remember(p, sprintId, lane, memberCursor, historyCursor, memberPages, historyPages) {
+export function remember(p, sprintId, lane, memberCursor, historyCursor, memberPages, historyPages, completionExpanded = false) {
     project = p;
-    try { sessionStorage.setItem(key(p), JSON.stringify({ ...read(p), sprintId, lane, memberCursor, historyCursor, memberPages, historyPages })); }
+    try { sessionStorage.setItem(key(p), JSON.stringify({ ...read(p), sprintId, lane, memberCursor, historyCursor, memberPages, historyPages, completionExpanded })); }
     catch { /* Storage can be disabled; board remains usable without saved navigation. */ }
 }
 function saveScroll(rememberFocus = true) {
