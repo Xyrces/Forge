@@ -55,8 +55,13 @@
       },
       {
         "id": "R3",
-        "steps": "Under Task actions, follow Open task history. On task detail, open History & runs and Review. Where original review sources exist, expand the inline discussion and follow the original review or exact discussion link without posting.",
-        "expected": "The matching task opens in the same project. History and review areas are reachable; available review and discussion links lead to their exact GitHub records."
+        "steps": [
+          "At 390 CSS px, use Task lane to select the non-Queued lane containing the qualification card. Use Next tasks if needed and record the page number from the first member page. Expand Task actions, Tab to Open task history and position the card in view. Use a starting scroll offset greater than 16 CSS px in the main panel or window so a reset to the top cannot pass.",
+          "Before pressing Enter, record the project and selected sprint, Task lane value, member page (page number, Showing count and first/last card links in this lane), and the originating card's title and task URL. Record .app-main.scrollTop (the main panel's scrollTop), window.scrollY, and getBoundingClientRect().top for the originating .sprint-task. Capture the board and focused link.",
+          "Press Enter on Open task history. On task detail, open History & runs and Review. Where original review sources exist, expand the inline discussion and follow the available original review or exact discussion link without posting; return to the task tab if a link opened a new tab.",
+          "Use browser Back from task detail in the original tab. Wait for the board and completion panel above it to finish loading. Without scrolling, tabbing or reselecting anything on the board, capture the restored state, record document.activeElement and repeat the same offset and card-position measurements. If the task or board data changed independently during the trip, record the obstruction rather than treating the comparison as a pass."
+        ],
+        "expected": "The matching task opens in the same project and its history, Review and any available source links are reachable. Browser Back restores the same project, sprint, lane, member page and originating card. Keyboard focus lands on that card's title link, matching its recorded task URL. The card is still in view; each scroll offset and the card's viewport-relative top differ from the baseline by no more than 16 CSS px. A reset to Queued or the top, wrong page, lost focus or out-of-tolerance shift fails R3."
       },
       {
         "id": "R4",
