@@ -88,7 +88,44 @@ public sealed class ReviewerDispatcher
             task = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
             return await ReviewCoreAsync(task, cancellationToken, headShaOverride);
         }
-        finally { gate.Release(); }
+        finally
+        {
+            try { await CleanupReviewSnapshotAsync(task.Id); }
+            finally { gate.Release(); }
+        }
+    }
+
+    private async Task CleanupReviewSnapshotAsync(string taskId)
+    {
+        if (_worktrees is null) return;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            var task = await _issues.GetAsync(taskId, timeout.Token);
+            var path = task?.GetMetadata("reviewSnapshotPath");
+            if (task is null || path is null) return;
+            var owner = task.GetMetadata("reviewSnapshotWorkerId");
+            if (_agentRunner is IReviewWorkerLifecycle lifecycle && owner is not null)
+            {
+                var worker = await lifecycle.InspectReviewWorkerAsync(AgentType.Reviewer, _projectId!, task.Id, owner, false, timeout.Token);
+                // A detached controller must retain both a live worker's checkout and an
+                // unconsumed terminal result's checkout until the next controller adopts it.
+                if (worker is { Terminal: false }
+                    || worker is not null && task.GetMetadata("reviewWorkerId") == owner
+                        && task.GetMetadata("reviewWorkerConsumed") != owner) return;
+            }
+            await _worktrees.RemoveReviewSnapshotAsync(path, timeout.Token);
+            await UpdateWatchMetadataAsync(task, m =>
+            {
+                m["reviewSnapshotPath"] = null!;
+                m["reviewSnapshotWorkerId"] = null!;
+                return m;
+            }, timeout.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Task {TaskId}: review snapshot cleanup deferred", taskId);
+        }
     }
 
     private async Task<ReviewOutcome?> ReviewCoreAsync(IssueRecord task, CancellationToken cancellationToken,
@@ -257,25 +294,51 @@ public sealed class ReviewerDispatcher
         // Error, retried next sweep; never a degraded paste-only
         // review.
         var worktreePath = task.GetMetadata("worktreePath");
-        if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
-        {
-            _logger.LogWarning(
-                "PR #{Pr} (task {Id}): no usable worktree (path={Path}) — reviewer requires workspace access; retrying next sweep",
-                prNumber, task.Id, worktreePath ?? "<none>");
-            return new ReviewOutcome(ReviewerVerdict.Error, "", headSha, "worktree missing");
-        }
         // Fresh refs so `git show <sha>` / `git diff origin/<base>...<sha>`
         // resolve even when the checkout lags the head (external push).
         var prepared = await ReviewWorkerAttempt.BeginAsync(_agentRunner, _issues, task, AgentType.Reviewer,
             _projectId, headSha, cancellationToken);
         task = prepared.Task;
-        if (prepared.Existing is not null) worktreePath = prepared.Existing.WorktreePath;
+        if (prepared.Existing is not null)
+        {
+            worktreePath = prepared.Existing.WorktreePath;
+            // Adopt snapshots created before cleanup tracking was introduced, never the
+            // legacy engineering checkout that an older worker may still reference.
+            if (_worktrees?.IsReviewSnapshotPath(worktreePath) == true && task.GetMetadata("reviewSnapshotPath") is null)
+                await UpdateWatchMetadataAsync(task, m =>
+                {
+                    m["reviewSnapshotPath"] = worktreePath;
+                    m["reviewSnapshotWorkerId"] = task.GetMetadata("reviewWorkerId")!;
+                    return m;
+                }, cancellationToken);
+        }
         else if (_worktrees is not null)
         {
             try
             {
+                await CleanupReviewSnapshotAsync(task.Id);
+                var fresh = await _issues.GetAsync(task.Id, cancellationToken) ?? task;
+                if (fresh.GetMetadata("reviewSnapshotPath") is not null)
+                    throw new InvalidOperationException("Previous review snapshot has not been retired.");
                 worktreePath = await _worktrees.CreateReviewSnapshotAsync(task.Id,
                     (task.GetMetadata("reviewWorkerId") ?? "in-process") + "-" + Guid.NewGuid().ToString("N"), headSha, cancellationToken);
+                try
+                {
+                    await UpdateWatchMetadataAsync(task, m =>
+                    {
+                        m["reviewSnapshotPath"] = worktreePath;
+                        m["reviewSnapshotWorkerId"] = task.GetMetadata("reviewWorkerId")!;
+                        return m;
+                    }, cancellationToken);
+                }
+                catch
+                {
+                    // No worker can have started before its snapshot pointer is durable.
+                    using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                    try { await _worktrees.RemoveReviewSnapshotAsync(worktreePath, cleanup.Token); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Unrecorded review snapshot cleanup failed at {Path}", worktreePath); }
+                    throw;
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception ex)
@@ -284,7 +347,12 @@ public sealed class ReviewerDispatcher
                 return new(ReviewerVerdict.Error, "", headSha, ex.Message);
             }
         }
-        else await TryFetchAsync(worktreePath, cancellationToken);
+        else
+        {
+            if (string.IsNullOrWhiteSpace(worktreePath) || !Directory.Exists(worktreePath))
+                return new ReviewOutcome(ReviewerVerdict.Error, "", headSha, "worktree missing");
+            await TryFetchAsync(worktreePath, cancellationToken);
+        }
 
         // Re-review resume: a prior verdict at an EARLIER head means
         // this round scopes to the incremental diff (what the rework

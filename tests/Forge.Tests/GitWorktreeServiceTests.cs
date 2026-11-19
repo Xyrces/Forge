@@ -112,6 +112,21 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReviewCleanupRemovesOnlyDetachedGeneratedSnapshot()
+    {
+        var engineering = await _service.CreateAsync("engineering", "main");
+        var head = await GetHeadShaAsync(engineering);
+        var snapshot = await _service.CreateReviewSnapshotAsync("engineering", "cleanup", head);
+        File.WriteAllText(Path.Combine(snapshot, "generated.txt"), "review build output");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.RemoveReviewSnapshotAsync(engineering));
+        await _service.RemoveReviewSnapshotAsync(snapshot);
+        await _service.RemoveReviewSnapshotAsync(snapshot); // retry after deletion is idempotent
+        Assert.False(Directory.Exists(snapshot));
+        Assert.True(Directory.Exists(engineering));
+        Assert.DoesNotContain(snapshot, RunGitForResult(_workDir, "worktree list --porcelain").Stdout);
+    }
+
+    [Fact]
     public async Task ConfiguredPublisherRefusesInvalidScopeBeforeMintingToken()
     {
         var tokenRequested = false;

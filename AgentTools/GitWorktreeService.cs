@@ -97,6 +97,26 @@ public sealed class GitWorktreeService
         return path;
     }
 
+    /// <summary>Remove only a controller-created detached review checkout after its worker is retired.</summary>
+    public bool IsReviewSnapshotPath(string path) =>
+        Path.GetDirectoryName(Path.GetFullPath(path)) == Path.GetFullPath(WorktreeRoot).TrimEnd(Path.DirectorySeparatorChar)
+        && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path), "\\Areview-[0-9a-f]{64}\\z");
+
+    public async Task RemoveReviewSnapshotAsync(string path, CancellationToken ct = default)
+    {
+        path = Path.GetFullPath(path);
+        if (!IsReviewSnapshotPath(path))
+            throw new InvalidOperationException("Review cleanup is outside the authorized snapshot root.");
+        if (!Directory.Exists(path)) return;
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("Review cleanup refuses a linked directory.");
+        var branch = await RunGitInAsync(path, "", ct, ["symbolic-ref", "-q", "HEAD"]);
+        if (branch.ExitCode != 1) throw new InvalidOperationException("Review cleanup requires detached HEAD.");
+        var removed = await RunGitInAsync(WorkspaceRoot, "", ct, ["worktree", "remove", "--force", path]);
+        if (removed.ExitCode != 0 || Directory.Exists(path))
+            throw new InvalidOperationException("Review snapshot cleanup failed.");
+    }
+
     public async Task<string> CreateAsync(string taskId, string baseBranch, CancellationToken cancellationToken = default, string? branchOverride = null, bool preserveExistingBranch = false)
     {
         // The worktree branch must equal the branch the rest of the

@@ -122,8 +122,12 @@ public class ReviewerDispatcherTests : IDisposable
         Assert.Single(jobs.Created);
     }
 
-    [Fact]
-    public async Task Distributed_ExternalHeadUsesSeparatePinnedCheckoutAndAdoptsItAfterControllerInterruption()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Distributed_ExternalHeadUsesSeparatePinnedCheckoutAndAdoptsItAfterControllerInterruption(bool missingEngineering, bool terminal)
     {
         async Task<string> Git(params string[] args)
         {
@@ -158,7 +162,8 @@ public class ReviewerDispatcherTests : IDisposable
         var head = await Git("rev-parse", "HEAD");
         await Git("remote", "add", "origin", _workDir);
         var task = await SeedWatchAsync();
-        await _issues.TransitionAsync(task.Id, task.Status, "engineering checkout", new Dictionary<string, object> { ["worktreePath"] = engineering });
+        await _issues.TransitionAsync(task.Id, task.Status, "engineering checkout", new Dictionary<string, object>
+        { ["worktreePath"] = missingEngineering ? Path.Combine(_workDir, "missing-engineering") : engineering });
         var store = new Forge.Core.Execution.WorkerAttemptStore(_issues.Db);
         var jobs = new ReviewTestJobs(store);
         jobs.OnCreate = async a =>
@@ -166,15 +171,24 @@ public class ReviewerDispatcherTests : IDisposable
             Assert.NotEqual(engineering, a.WorktreePath);
             Assert.Equal(head, a.SourceSha);
             Assert.Equal(head, await Forge.Orchestrator.Workers.KubernetesAgentRunner.ReadHeadAsync(a.WorktreePath, CancellationToken.None));
-            await jobs.Finish(a, "REVIEWER_VERDICT: APPROVE");
+            if (terminal) await jobs.Finish(a, "REVIEWER_VERDICT: APPROVE");
             throw new OperationCanceledException("controller detached after worker result");
         };
         ReviewerDispatcher Dispatcher() => new(_issues, new FakeGitHub(),
             new Forge.Orchestrator.Workers.KubernetesAgentRunner(store, jobs, "dataset"),
             NullLogger<ReviewerDispatcher>.Instance, projectId: "forge", worktrees: service);
         Assert.Null(await Dispatcher().ReviewOnceAsync(task, headShaOverride: _ => head));
+        var snapshot = jobs.Created.Single().WorktreePath;
+        Assert.True(Directory.Exists(snapshot)); // terminal result is not yet consumed; adoption still needs it
+        Assert.Equal(snapshot, (await _issues.GetAsync(task.Id))!.GetMetadata("reviewSnapshotPath"));
+        if (missingEngineering) // upgrade from a detached worker created before snapshot tracking
+            await _issues.PatchReviewMetadataAsync(task.Id, new Dictionary<string, object>
+            { ["reviewSnapshotPath"] = null!, ["reviewSnapshotWorkerId"] = null! }, null, CancellationToken.None);
+        jobs.OnObserve = _ => jobs.Finish(jobs.Created[0], "REVIEWER_VERDICT: APPROVE");
         Assert.Equal(ReviewerVerdict.Approve, (await Dispatcher().ReviewOnceAsync(task, headShaOverride: _ => head))!.Verdict);
         Assert.Single(jobs.Created);
+        Assert.False(Directory.Exists(snapshot));
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reviewSnapshotPath"));
         Assert.Equal(oldHead, await service.GetHeadShaAsync(engineering));
         Assert.Equal("uncommitted", await File.ReadAllTextAsync(Path.Combine(engineering, "code.txt")));
     }
