@@ -47,7 +47,8 @@ internal sealed class VerificationJobEvents(HttpClient cluster, string jobNamesp
                         { version = null; break; }
                         throw new IOException("Kubernetes could not continue the verification Job watch.");
                     }
-                    if (kind is "ADDED" or "MODIFIED" or "DELETED") await ObserveAsync(item, ct);
+                    if (kind is "ADDED" or "MODIFIED" or "DELETED")
+                        await ObserveAsync(item, ct, deleted: kind == "DELETED");
                     version = ResourceVersion(item);
                 }
             }
@@ -64,11 +65,12 @@ internal sealed class VerificationJobEvents(HttpClient cluster, string jobNamesp
         item.GetProperty("metadata").GetProperty("resourceVersion").GetString()
             ?? throw new InvalidDataException("Kubernetes response lacks a resource version.");
 
-    internal async Task ObserveAsync(JsonElement job, CancellationToken ct)
+    internal async Task ObserveAsync(JsonElement job, CancellationToken ct, bool deleted = false)
     {
-        if (!job.TryGetProperty("status", out var status) || !status.TryGetProperty("conditions", out var conditions)
+        // Deletion can race the final status update. The schedulers re-read the durable SQL result.
+        if (!deleted && (!job.TryGetProperty("status", out var status) || !status.TryGetProperty("conditions", out var conditions)
             || !conditions.EnumerateArray().Any(c => c.GetProperty("status").GetString() == "True"
-                && c.GetProperty("type").GetString() is "Complete" or "Failed")) return;
+                && c.GetProperty("type").GetString() is "Complete" or "Failed"))) return;
         var metadata = job.GetProperty("metadata");
         if (!metadata.TryGetProperty("labels", out var labels)
             || !labels.TryGetProperty("forge-attempt", out var rawId) || rawId.GetString() is not { Length: > 0 } id

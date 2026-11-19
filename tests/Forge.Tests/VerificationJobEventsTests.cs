@@ -42,6 +42,10 @@ public sealed class VerificationJobEventsTests
         Assert.Equal(first, publisher.Hints.Select(h => h.MessageId).ToArray());
 
         publisher.Hints.Clear();
+        await observer.ObserveAsync(Job("forge-agent-attempt", "False"), default, deleted: true);
+        Assert.Equal(first, publisher.Hints.Select(h => h.MessageId).ToArray());
+
+        publisher.Hints.Clear();
         assignment = assignment with { DatasetId = "different" };
         await observer.ObserveAsync(Job("forge-agent-attempt", "True"), default);
         Assert.Empty(publisher.Hints);
