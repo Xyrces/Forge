@@ -196,6 +196,12 @@ public static class ControllerHost
         return 0;
     }
 
+    public static async Task VerifyWritableSchemaAsync(IDbConnectionFactory factory, CancellationToken ct)
+    {
+        if (await VerifySchemaAsync(factory, ct) != IssueStore.CurrentSchemaVersion)
+            throw new InvalidOperationException("Recovery image cannot execute workers against the newer environment schema.");
+    }
+
     public static async Task<int> VerifySchemaAsync(IDbConnectionFactory factory, CancellationToken ct)
     {
         await using var connection = await factory.OpenAsync(ct);

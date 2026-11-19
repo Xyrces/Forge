@@ -80,8 +80,7 @@ public static class Program
             if (options.Controller.Mode.Equals("worker", StringComparison.OrdinalIgnoreCase))
             {
                 var workerRegistry = Core.Db.ForgeDb.SqlServer(options.Db.ConnectionString, Core.Db.ForgeDb.RegistrySchema, Core.Db.ForgeSchemaProfile.Core, initializeSchema: false);
-                if (await Orchestrator.Control.ControllerHost.VerifySchemaAsync(workerRegistry, CancellationToken.None) != Core.IssueStore.CurrentSchemaVersion)
-                    throw new InvalidOperationException("Recovery image cannot execute workers against the newer environment schema.");
+                await Orchestrator.Control.ControllerHost.VerifyWritableSchemaAsync(workerRegistry, CancellationToken.None);
                 return await RunWorkerWithSignalsAsync(options, loggerFactory);
             }
             if (!options.Controller.Mode.Equals("standby", StringComparison.OrdinalIgnoreCase))
