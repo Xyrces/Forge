@@ -1,11 +1,15 @@
 import copy
 import importlib.util
+import io
+import json
 from pathlib import Path
 import sys
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "deploy" / "k3s"))
-from release import Release, deployment, validate_image
+from release import Controllers, Release, deployment, validate_image
 from manifests import foundation, job
 
 IMAGE = "registry.example/forge@sha256:" + "a" * 64
@@ -125,6 +129,43 @@ class FakeControllers:
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_http_smoke_accepts_rendered_board_when_root_redirects(self):
+        source = "c" * 40
+        requested = []
+        class Response(io.BytesIO):
+            status = 200
+        class Dashboard:
+            def open(self, url, timeout):
+                requested.append(url)
+                if url == "http://forge.forge-uat.svc:8080/":
+                    raise urllib.error.HTTPError(url, 302, "Found", {"Location": "/now"}, None)
+                if url == "http://forge.forge-uat.svc:8080/sprints":
+                    return Response(b"<!DOCTYPE html><html><body>Forge sprint board</body></html>")
+                if url == "http://forge.forge-uat.svc:8080/api/meta/buildinfo":
+                    return Response(json.dumps({"sourceRevision": source}).encode())
+                raise AssertionError("Unexpected route")
+        with patch("urllib.request.build_opener", lambda *handlers: Dashboard()):
+            self.assertTrue(Controllers("forge-uat", "unused").verify_dashboard(source))
+            self.assertFalse(Controllers("forge-uat", "unused").verify_dashboard("d" * 40))
+        self.assertNotIn("http://forge.forge-uat.svc:8080/", requested)
+
+    def test_http_rollback_can_verify_recovery_root_without_accepting_it_as_candidate(self):
+        class Response(io.BytesIO):
+            status = 200
+        class RecoveryDashboard:
+            def open(self, url, timeout):
+                if url.endswith("/sprints"):
+                    raise urllib.error.HTTPError(url, 404, "Not found", {}, None)
+                if url.endswith("/api/recovery"):
+                    return Response(json.dumps({"mode": "read-only-recovery", "projects": []}).encode())
+                if url == "http://forge.forge-uat.svc:8080/":
+                    return Response(b"<html><body>Qualified recovery dashboard</body></html>")
+                raise AssertionError("Unexpected route")
+        with patch("urllib.request.build_opener", lambda *handlers: RecoveryDashboard()):
+            controller = Controllers("forge-uat", "unused")
+            self.assertTrue(controller.verify_dashboard(None, recovery=True))
+            self.assertFalse(controller.verify_dashboard("b" * 40))
+
     def named(self, previous="blue"):
         release, kube, controllers = self.make(previous)
         release.environment, release.source_sha = "uat", "c" * 40

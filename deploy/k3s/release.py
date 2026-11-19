@@ -94,7 +94,8 @@ class Controllers:
                 return None
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         try:
-            with opener.open(base + "/", timeout=15) as response:
+            # Normal Forge redirects its root; only the recovery dashboard serves HTML there.
+            with opener.open(base + ("/" if recovery else "/sprints"), timeout=15) as response:
                 html = response.read(2 * 1024 * 1024).decode("utf-8")
                 if response.status != 200 or "<html" not in html.lower():
                     return False
