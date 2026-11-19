@@ -161,6 +161,8 @@ Pages (grouped as in the nav):
 | Projects | `/projects`, `/projects/{id}/overview`, `/projects/{id}/secrets` |
 | Operations | `/deployments`, `/agents` (agent control surface), `/skills`, `/ops/gates`, `/ops/recovery`, `/ops/cost`, `/ops/memory` |
 
+Open **Vision Board** to explore the selected project's existing vision document as a mind map. Start a conversation about the whole project or select an idea to read its source. Forge highlights proposed changes on the map and shows the original and proposed wording. Apply saves the reviewed Markdown in the project's database and updates agent guidance. The checkout stays clean for sprint planning. Under **Source document**, you can edit the Markdown directly or preview a later repository version before saving it.
+
 The API surface includes `/api/state`, `/api/tasks/*`, `/api/sprints/*` (incl. propose/commit), `/api/gates*`, `/api/projects/*`, `/api/agents/*`, `/api/skills`, `/api/specs/*`, `/api/memory`, `/api/intake/*`, `/api/flow*`, `/api/workflow*` (draft/publish), `/api/agent-runs`, `/api/cost/*`, `/api/recovery/*`, `/api/events` (SSE), `/api/issues.jsonl`, plus health/meta endpoints. `GET /api/meta/endpoints` lists the live route table.
 
 ## How a task flows

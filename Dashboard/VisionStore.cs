@@ -24,6 +24,7 @@ public sealed class VisionStore
 
     public VisionStore(string workspaceRoot, string relativePath)
     {
+        WorkspaceRoot = Path.GetFullPath(workspaceRoot);
         RelativePath = relativePath;
         _filePath = Path.IsPathRooted(relativePath)
             ? relativePath
@@ -31,6 +32,7 @@ public sealed class VisionStore
     }
 
     public string AbsolutePath => _filePath;
+    internal string WorkspaceRoot { get; }
 
     /// <summary>The configured relative path (per-project vision
     /// resolution re-applies it against each project's root).</summary>

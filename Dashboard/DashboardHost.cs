@@ -33,6 +33,7 @@ public sealed class DashboardHost : IAsyncDisposable
     private readonly Orchestrator.MemoryExtractionStore? _extractions;
     private readonly string? _issuesJsonlPath;
     private readonly VisionStore? _vision;
+    private readonly IVisionConversation? _visionConversation;
     private readonly Orchestrator.DesignerAgentFactory? _designerFactory;
     private readonly DesignerRunStore? _designerRuns;
     private readonly DesignArtifactStore? _designArtifacts;
@@ -143,7 +144,8 @@ public sealed class DashboardHost : IAsyncDisposable
         Agents.InitiativeApprovalService? initiativeApprovals = null,
         string? mutationTokenFile = null,
         Func<string, string, CancellationToken, Task<IReadOnlyList<Core.Execution.WorkerAttemptStore.AttemptSummary>>>? workerHistory = null,
-        IProjectProvisioner? projectProvisioner = null, Forge.Deploy.IRoutineReleaseSource? releaseSource = null, Action? wakeDelivery = null)
+        IProjectProvisioner? projectProvisioner = null, Forge.Deploy.IRoutineReleaseSource? releaseSource = null, Action? wakeDelivery = null,
+        IVisionConversation? visionConversation = null)
     {
         _projectProvisioner = projectProvisioner;
         _releaseSource = releaseSource;
@@ -176,6 +178,7 @@ public sealed class DashboardHost : IAsyncDisposable
         _startupRecovery = startupRecovery;
         _costTracker = costTracker;
         _vision = vision;
+        _visionConversation = visionConversation;
         _extractorOverride = extractor;
         _codebaseBuilderOverride = codebaseBuilder;
         _codebaseCacheOverride = codebaseCache;
@@ -541,7 +544,7 @@ _app.MapGet("/api/state", async (string? projectId, CancellationToken ct) =>
 
         if (_vision is not null)
         {
-            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger, _memory, _issues, _projectFactory);
+            VisionEndpoints.MapVisionEndpoints(_app, _vision, _logger, _memory, _issues, _projectFactory, _visionConversation);
         }
 
         if (_memory is not null)

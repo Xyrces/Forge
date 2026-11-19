@@ -1140,4 +1140,59 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
 .release-evidence { margin-block: 14px; }
 .release-log { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; font-size: 12px; }
 .release-promotion { border-top: 1px solid var(--outline-variant); margin-top: 16px; padding-top: 8px; }
+
+/* Project vision — conversation, connected ideas, and reviewable source edits. */
+.vision-workspace { min-width: 0; }
+.vision-conversation-layout { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(0, 1.5fr); align-items: start; border: 1px solid var(--outline); border-radius: var(--radius-lg); background: var(--surface); overflow: clip; }
+.vision-conversation { min-width: 0; background: var(--surface-1); border-right: 1px solid var(--outline); padding: 20px; }
+.vision-conversation > .page-subtitle { margin: 8px 0 16px; }
+.vision-conversation-feed { max-height: 50vh; overflow-y: auto; overflow-wrap: anywhere; margin: 0 0 12px; }
+.vision-conversation .chat-msg { margin-bottom: 16px; }
+.vision-conversation .chat-msg__role { font-family: var(--font-sans); font-size: 12px; margin-bottom: 4px; color: var(--tertiary); }
+.vision-conversation .chat-msg--user { border-left: 2px solid var(--outline-variant); padding-left: 12px; }
+.vision-conversation label, .vision-source label { display: block; font-weight: 600; margin-bottom: 5px; }
+.vision-conversation textarea, .vision-source-text { width: 100%; resize: vertical; background: var(--surface); border: 1px solid var(--outline-variant); color: var(--on-surface); border-radius: var(--radius-md); padding: 10px; font: inherit; min-height: 100px; }
+.vision-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.vision-map-and-detail { min-width: 0; }
+.vision-map { min-width: 0; }
+.vision-map-toolbar, .vision-section-header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.vision-map-toolbar { padding: 12px 16px 0; color: var(--on-surface-variant); min-height: 45px; }
+.vision-map-toolbar .vision-actions { margin: 0; }
+.vision-map-canvas { position: relative; height: 300px; min-width: 0; isolation: isolate; }
+.vision-map-edges { position: absolute; width: 100%; height: 100%; inset: 0; pointer-events: none; }
+.vision-map-edges path { fill: none; stroke: var(--outline-variant); stroke-width: 1.5; }
+.vision-map-edges path.vision-map-edge--changed { stroke: var(--warn); stroke-width: 2; }
+.vision-map-node { position: absolute; transform: translate(-50%, -50%); padding: 9px 10px; color: var(--on-surface); font: 500 13px/1.35 var(--font-sans); background: var(--surface-1); border: 1px solid var(--outline-variant); border-radius: var(--radius-md); min-height: 44px; overflow-wrap: anywhere; text-align: center; cursor: pointer; }
+.vision-map-node--focus { background: var(--primary); color: var(--on-primary); border-color: var(--primary); font-weight: 600; }
+.vision-map-node small { display: block; font-size: 11px; font-weight: 400; margin-top: 4px; }
+.vision-map-node[data-change="Edited"], .vision-map-node[data-change="New"] { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); color: var(--on-surface); }
+.vision-map-node[data-change="New"] { border-style: dashed; }
+.vision-map-node[aria-pressed="true"] { outline: 2px solid var(--primary); outline-offset: 2px; }
+.vision-map-node:focus-visible { outline: 3px solid var(--tertiary); outline-offset: 3px; }
+.vision-draft, .vision-node-detail { border-top: 1px solid var(--outline); padding: 16px 20px; overflow-wrap: anywhere; }
+.vision-node-detail > .md { margin-top: 12px; max-height: 44vh; overflow: auto; }
+.vision-draft h2 { margin-bottom: 10px; }
+.vision-change { border-top: 1px solid var(--outline); padding-top: 10px; margin-top: 10px; }
+.vision-change summary { font-weight: 600; color: var(--on-surface); cursor: pointer; }
+.vision-change .pill { margin-left: 6px; }
+.vision-comparison { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; padding: 12px 0 4px; }
+.vision-comparison > div { min-width: 0; border-left: 2px solid var(--outline-variant); padding-left: 10px; }
+.vision-comparison > div + div { border-color: var(--warn); }
+.vision-comparison h3 { color: var(--on-surface-variant); font-size: 12px; margin-bottom: 8px; }
+.vision-comparison .md { max-height: 260px; overflow: auto; }
+.vision-source { margin-bottom: 16px; }
+.vision-source-text { min-height: 45vh; font-family: var(--font-mono); }
+.vision-original { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow: auto; margin-top: 12px; }
+.vision-empty { padding: 10px 20px 20px; }
+@media (max-width: 850px) {
+  .vision-conversation-layout { grid-template-columns: minmax(0, 1fr); }
+  .vision-conversation { border-right: 0; border-bottom: 1px solid var(--outline); padding: 16px; }
+  .vision-conversation-feed { max-height: 34vh; }
+  .vision-comparison { gap: 10px; }
+}
+@media (max-width: 480px) {
+  .vision-comparison { grid-template-columns: minmax(0, 1fr); }
+  .vision-conversation textarea, .vision-source-text { font-size: 16px; }
+  .vision-draft, .vision-node-detail { padding: 14px; }
+}
 @media(max-width: 600px) { .release-facts { grid-template-columns: 1fr; } .release-card { padding: 14px; } }

@@ -255,7 +255,8 @@ public static class WorkerHost
             projectRootLookup: id => id == project.Id ? project.LocalPath : null,
             projectTerritoryLookup: id => id == project.Id ? project.Territories : null,
             verifyCommandsLookup: id => id == project.Id ? project.VerifyCommands : null,
-            memory: memory, handoffs: new ContextHandoffStore(workload), designArtifacts: () => artifacts,
+            memory: memory, legacyVisionOwnerProjectId: project.Id,
+            handoffs: new ContextHandoffStore(workload), designArtifacts: () => artifacts,
             specs: () => new SpecStore(issues, designArtifacts: artifacts), artOutputs: () => new ArtOutputStore(workload),
             secrets: secrets, issues: issues, runs: new AgentRunStore(workload), modelOverrides: overrides, gates: options.Gates,
             artOutputRoot: id => id == project.Id ? ArtRoot(project) : null);

@@ -1,289 +1,182 @@
 @page "/vision"
+@using Forge.Dashboard.Components.Shared
+@using Forge.Dashboard.Services
 @inject HttpClient Http
-@inject NavigationManager Nav
-@inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
-@implements IDisposable
+@inject IHttpClientFactory HttpFactory
+@inject IJSRuntime JS
+@inject IState<AppShellState> ShellStore
+@implements IAsyncDisposable
 
 <PageTitle>Vision</PageTitle>
-<div class="page">
+<div class="page vision-workspace">
     <div class="page-header">
-        <h1>Vision</h1>
-        @if (_snapshot is not null)
-        {
-            <div class="page-header__meta">
-                Last revised @(_snapshot.LastModified?.ToString("yyyy-MM-dd HH:mm") ?? "—") ·
-                @_snapshot.Content?.Length.ToString("N0") chars
-            </div>
-        }
+        <h1>@ProjectName vision</h1>
         <div class="page-header__actions">
-            <button class="btn" @onclick="RefreshAsync" disabled="@(_refreshing || _editing)">Refresh</button>
-            @if (!_editing)
-            {
-                <button class="btn btn--primary" @onclick="StartEdit">@(_snapshot?.Exists == true ? "Edit" : "Create")</button>
-            }
+            <button class="btn" @onclick="RefreshAsync" disabled="@(_loading || Busy || _sourceEditing && !_session.MustRefresh)">Refresh</button>
+            <button class="btn" @onclick="ShowSource" disabled="@(_map is null || Busy)">Source document</button>
         </div>
     </div>
-
-    @if (_snapshot is null)
+    @if (_error is not null)
     {
-        <div class="page-subtitle">Loading…</div>
+        <div class="banner banner--error" role="alert">@_error</div>
     }
-    else if (_editing)
+    @if (_storageError is not null)
     {
-        <div style="display:flex;flex-direction:column;gap:10px">
-            <div class="page-subtitle">
-                Editing <span class="mono">@_snapshot.Path</span> — saved to the project root and
-                injected into every agent prompt as the <span class="mono">vision/master</span> memory key.
-            </div>
-            <textarea class="mono" style="min-height:55vh;resize:vertical"
-                      @bind="_editContent" placeholder="# Master Design&#10;&#10;The north-star design every agent run is anchored to."></textarea>
-            <div style="display:flex;gap:8px;align-items:center">
-                <button class="btn btn--primary" @onclick="SaveAsync" disabled="@_saving">@(_saving ? "Saving…" : "Save")</button>
-                <button class="btn" @onclick="CancelEdit" disabled="@_saving">Cancel</button>
-                @if (_saveError is not null)
+        <div class="banner banner--warning" role="status">@_storageError</div>
+    }
+    @if (_session.GuidancePending)
+    {
+        <div class="banner banner--warning" role="alert">The project vision was saved. Agent guidance still needs synchronization. Use Refresh to retry it.</div>
+    }
+    else if (_session.MustRefresh)
+    {
+        <div class="banner banner--warning" role="alert">Refresh the source before sending or applying another change.</div>
+    }
+    @if (_stale)
+    {
+        <div class="banner banner--warning" role="alert">
+            The source changed while this draft was open. Review the retained draft below, then discard it to continue from the latest source.
+        </div>
+    }
+    @if (_loading)
+    {
+        <p class="page-subtitle" role="status">Loading project vision…</p>
+    }
+    else if (_projectId is null)
+    {
+        <p class="page-subtitle">Choose a project in the top bar to open its vision.</p>
+    }
+    else if (_map is not null)
+    {
+        @if (_sourceOpen)
+        {
+            <section class="card vision-source">
+                <div class="vision-section-header">
+                    <h2>Source document</h2>
+                    <button class="btn" @onclick="CloseSource" disabled="@(Busy || _sourceEditing)">Close</button>
+                </div>
+                <p class="page-subtitle">The repository supplies the initial vision. Saved edits belong to this project in Forge and leave the repository unchanged.</p>
+                @if (string.IsNullOrWhiteSpace(_map.Source) && !_sourceEditing)
                 {
-                    <span class="text-danger">@_saveError</span>
+                    <p class="page-subtitle">Alternatively, ask Forge to analyze the codebase. This creates a backlog task that goes through grooming, a sprint, and review.</p>
+                    <button class="btn" @onclick="RequestDraftAsync" disabled="@(Busy || _draftTaskId is not null)">Draft from codebase</button>
+                    @if (_draftTaskId is not null)
+                    {
+                        <p role="status"><a href="@($"/tasks/{Uri.EscapeDataString(_draftTaskId)}?projectId={Uri.EscapeDataString(_projectId!)}")">View the vision draft task</a> · Waiting for grooming.</p>
+                    }
+                }
+                @if (_sourceEditing)
+                {
+                    <label for="vision-source-text">Markdown</label>
+                    <textarea id="vision-source-text" class="vision-source-text mono" maxlength="@VisionUiLimits.MaxSourceCharacters" @bind="_sourceText" @bind:event="oninput" @bind:after="PersistAsync" disabled="@Busy"></textarea>
+                    <div class="vision-actions">
+                        <button class="btn btn--primary" @onclick="SaveSourceAsync" disabled="@(Busy || _stale || _session.MustRefresh || _session.GuidancePending || _session.Pending.Count > 0 || _sourceRevision != _map.Revision)">Save source</button>
+                        <button class="btn" @onclick="CancelSourceAsync" disabled="@Busy">Cancel edit</button>
+                        @if (_repositorySource is not null)
+                        {
+                            <button class="btn" @onclick="LoadRepositorySourceAsync" disabled="@(Busy || _sourceText != _map.Source || _repositorySource.Length > VisionUiLimits.MaxSourceCharacters)">Load repository Markdown</button>
+                        }
+                    </div>
+                    @if (_repositoryChecked && _repositorySource is null)
+                    {
+                        <p class="page-subtitle">This repository has no vision document to import.</p>
+                    }
+                    @if (_sourceRevision != _map.Revision && !_session.MustRefresh)
+                    {
+                        <div class="banner banner--warning">The saved source changed. Your edit is retained above. Compare it with the latest source below and reconcile any differences before replacing it.</div>
+                        <details><summary>Latest saved source</summary><pre class="vision-original">@_map.Source</pre></details>
+                        <button class="btn" @onclick="UseLatestSourceBaselineAsync" disabled="@Busy">I have reconciled my edit with this version</button>
+                    }
+                }
+                else
+                {
+                    <div class="vision-actions">
+                        <button class="btn" @onclick="EditSource" disabled="@(Busy || _session.Pending.Count > 0 || _map.Source.Length > VisionUiLimits.MaxSourceCharacters)">Edit Markdown</button>
+                        <button class="btn" @onclick="CopySourceAsync">Copy Markdown</button>
+                    </div>
+                    @if (_map.Source.Length > VisionUiLimits.MaxSourceCharacters)
+                    {
+                        <p class="page-subtitle">This document exceeds the browser editor’s 256 Ki character limit. You can copy its complete source or refine it through the conversation.</p>
+                    }
+                    <pre class="vision-original">@_map.Source</pre>
+                }
+            </section>
+        }
+        <div class="vision-conversation-layout">
+            <section class="vision-conversation" aria-label="Project vision conversation">
+                <h2>Talk about the vision</h2>
+                <p class="page-subtitle">Describe what you have in mind. The editor will find the affected ideas across the project.</p>
+                <div class="vision-conversation-feed" role="log" aria-label="Vision conversation">
+                    @foreach (var message in _session.Messages)
+                    {
+                        <div class="chat-msg chat-msg--@message.Role">
+                            <div class="chat-msg__role">@(message.Role == "user" ? "You" : "Vision editor")</div>
+                            <div class="chat-msg__body md">@((MarkupString)MarkdownRenderer.ToHtml(message.Text))</div>
+                        </div>
+                    }
+                    @if (_sending)
+                    {
+                        <div class="chat-msg chat-msg--user">
+                            <div class="chat-msg__role">You</div>
+                            <div class="chat-msg__body">@_sentText</div>
+                        </div>
+                        <p class="page-subtitle" role="status">Considering your message and the project vision…</p>
+                    }
+                </div>
+                <label for="vision-message">Your message</label>
+                <textarea id="vision-message" rows="4" maxlength="16000" @bind="_session.Input" @bind:event="oninput" @bind:after="PersistAsync"
+                          placeholder="@(_map.Source.Length == 0 ? "Tell me what this project should be…" : "What would you like to refine?")" disabled="@Busy"></textarea>
+                <div class="vision-actions">
+                    <button class="btn btn--primary" @onclick="SendAsync" disabled="@(Busy || _stale || _session.MustRefresh || _session.GuidancePending || string.IsNullOrWhiteSpace(_session.Input) || _sourceEditing)">Send</button>
+                    @if (_sending)
+                    {
+                        <button class="btn" @onclick="CancelRequest">Cancel</button>
+                    }
+                    @if (_session.Pending.Count > 0)
+                    {
+                        <button class="btn" @onclick="ApplyAsync" disabled="@(Busy || _stale || _session.MustRefresh || _session.GuidancePending)">Apply draft</button>
+                        <button class="btn btn--link" @onclick="DiscardAsync" disabled="@Busy">Discard draft</button>
+                    }
+                </div>
+                @if (_status is not null)
+                {
+                    <p class="page-subtitle" role="status">@_status</p>
+                }
+            </section>
+            <div class="vision-map-and-detail">
+                <VisionMindMap Nodes="@VisibleNodes" RootTitle="@ProjectName" Pending="@_session.Pending" SelectedId="@_session.SelectedId"
+                               Selected="SelectNodeAsync" @key="_projectId" />
+                @if (_session.Pending.Count > 0)
+                {
+                    <section class="vision-draft" aria-label="Proposed changes">
+                        <h2>Proposed changes</h2>
+                        @foreach (var edit in _session.Pending)
+                        {
+                            <details class="vision-change" open>
+                                <summary>@EditTitle(edit) <span class="pill">@(edit.Operation == "add" ? "New idea" : "Edit")</span></summary>
+                                <div class="vision-comparison">
+                                    <div><h3>@(edit.Operation == "add" ? "Under" : edit.Operation == "append" ? "Add to" : "Current wording")</h3><div class="md">@((MarkupString)MarkdownRenderer.ToHtml(CurrentWording(edit)))</div></div>
+                                    <div><h3>Proposed wording</h3><div class="md">@((MarkupString)MarkdownRenderer.ToHtml(edit.After))</div></div>
+                                </div>
+                            </details>
+                        }
+                    </section>
+                }
+                @if (SelectedNode is { } node)
+                {
+                    <section class="vision-node-detail" aria-label="Selected idea">
+                        <div class="vision-section-header">
+                            <h2>@node.Title</h2>
+                            <button class="btn btn--link" @onclick="ClearSelectionAsync">Close details</button>
+                        </div>
+                        <div class="md">@((MarkupString)MarkdownRenderer.ToHtml(node.Id == "root" ? _map.Source : node.Text))</div>
+                    </section>
+                }
+                @if (_map.Source.Length == 0)
+                {
+                    <p class="page-subtitle vision-empty">Start with a conversation to grow this project’s vision.</p>
                 }
             </div>
-        </div>
-    }
-    else if (!_snapshot.Exists)
-    {
-        <div class="page-subtitle">
-            No vision file yet. Create one to give every agent run a north-star design anchor —
-            its content is injected into prompts as the <span class="mono">vision/master</span> memory key.
-        </div>
-        <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
-            <button class="btn btn--primary" @onclick="StartEdit">Write it now</button>
-            <button class="btn" @onclick="RequestDraftAsync" disabled="@_drafting">
-                @(_drafting ? "Filing…" : "Draft from codebase")
-            </button>
-            @if (_draftTaskId is not null)
-            {
-                <span class="page-subtitle">
-                    Task <a href="/tasks/@_draftTaskId" class="mono">@_draftTaskId</a> filed —
-                    it goes through grooming, then a sprint, then a PR. This page fills in when it merges.
-                </span>
-            }
-            @if (_draftError is not null)
-            {
-                <span class="text-danger">@_draftError</span>
-            }
-        </div>
-    }
-    else
-    {
-        <div class="vision-split">
-            <aside class="vision-toc">
-                <div class="vision-toc__title">Sections</div>
-                @foreach (var heading in _headings)
-                {
-                    <button class="vision-toc__item @(heading == _activeHeading ? "vision-toc__item--active" : "")"
-                            @onclick="@(() => ScrollTo(heading))">
-                        @heading
-                    </button>
-                }
-            </aside>
-
-            <article class="vision-body">
-                @foreach (var block in _blocks)
-                {
-                    @if (block.Kind == "h1")
-                    {
-                        <h1 class="vision-h1">@block.Text</h1>
-                        <div class="vision-meta mono">forge/MASTER_DESIGN.md · @_snapshot.Content?.Length.ToString("N0") chars · @(_snapshot.LastModified?.ToString("yyyy-MM-dd HH:mm") ?? "—")</div>
-                    }
-                    else if (block.Kind == "h2")
-                    {
-                        <h2 class="vision-h2" id="@AnchorId(block.Text)">@block.Text</h2>
-                    }
-                    else if (block.Kind == "h3")
-                    {
-                        <h3 class="vision-h3" id="@AnchorId(block.Text)">@block.Text</h3>
-                    }
-                    else if (block.Kind == "code")
-                    {
-                        <pre class="vision-code"><code>@block.Text</code></pre>
-                    }
-                    else if (block.Kind == "li")
-                    {
-                        <div class="vision-li">• @block.Text</div>
-                    }
-                    else
-                    {
-                        <p class="vision-p">@block.Text</p>
-                    }
-                }
-            </article>
         </div>
     }
 </div>
-
-@code {
-    private SnapshotDto? _snapshot;
-    private List<MarkdownBlock> _blocks = new();
-    private List<string> _headings = new();
-    private string? _activeHeading;
-    private bool _refreshing;
-    private bool _editing;
-    private bool _saving;
-    private string _editContent = "";
-    private string? _saveError;
-    private bool _drafting;
-    private string? _draftTaskId;
-    private string? _draftError;
-
-    public sealed record SnapshotDto(bool Exists, string Path, string? Content, DateTime? LastModified);
-
-    private sealed record MarkdownBlock(string Kind, string Text);
-
-    protected override async Task OnInitializedAsync()
-    {
-        await LoadAsync();
-    }
-
-    private string ProjectQs
-    {
-        get
-        {
-            var pid = ShellStore.Value.CurrentProjectId;
-            return string.IsNullOrEmpty(pid) ? "" : $"?projectId={Uri.EscapeDataString(pid)}";
-        }
-    }
-
-    private async Task LoadAsync()
-    {
-        try
-        {
-            _snapshot = await Http.GetFromJsonAsync<SnapshotDto>("/api/vision" + ProjectQs);
-            Parse();
-        }
-        catch { _snapshot = new(false, "", null, null); }
-        StateHasChanged();
-    }
-
-    private async Task RefreshAsync()
-    {
-        _refreshing = true;
-        try
-        {
-            await Http.PostAsync("/api/vision/refresh" + ProjectQs, null);
-            await LoadAsync();
-        }
-        finally { _refreshing = false; }
-    }
-
-    private void StartEdit()
-    {
-        _editContent = _snapshot?.Content ?? "";
-        _saveError = null;
-        _editing = true;
-    }
-
-    private void CancelEdit()
-    {
-        _editing = false;
-        _saveError = null;
-    }
-
-    private async Task SaveAsync()
-    {
-        _saving = true;
-        _saveError = null;
-        try
-        {
-            var resp = await Http.PutAsJsonAsync("/api/vision" + ProjectQs, new { content = _editContent });
-            if (!resp.IsSuccessStatusCode)
-            {
-                _saveError = $"save failed: {(int)resp.StatusCode}";
-                return;
-            }
-            _editing = false;
-            await LoadAsync();
-        }
-        catch (Exception ex)
-        {
-            _saveError = $"save failed: {ex.Message}";
-        }
-        finally { _saving = false; }
-    }
-
-    private async Task RequestDraftAsync()
-    {
-        _drafting = true;
-        _draftError = null;
-        try
-        {
-            var resp = await Http.PostAsync("/api/vision/draft-request" + ProjectQs, null);
-            if (resp.StatusCode == System.Net.HttpStatusCode.Conflict)
-            {
-                _draftError = "a vision draft task is already open";
-                return;
-            }
-            if (!resp.IsSuccessStatusCode)
-            {
-                _draftError = $"request failed: {(int)resp.StatusCode}";
-                return;
-            }
-            var payload = await resp.Content.ReadFromJsonAsync<DraftResponse>();
-            _draftTaskId = payload?.TaskId;
-        }
-        catch (Exception ex)
-        {
-            _draftError = $"request failed: {ex.Message}";
-        }
-        finally { _drafting = false; }
-    }
-
-    private sealed record DraftResponse(string TaskId, string Status);
-
-    private void Parse()
-    {
-        _blocks = new();
-        _headings = new();
-        if (_snapshot?.Content is null) return;
-
-        var lines = _snapshot.Content.Split('\n');
-        bool inCode = false;
-        var codeBuf = new List<string>();
-        foreach (var raw in lines)
-        {
-            var line = raw.TrimEnd('\r');
-            if (line.StartsWith("```"))
-            {
-                if (inCode)
-                {
-                    _blocks.Add(new("code", string.Join("\n", codeBuf)));
-                    codeBuf.Clear();
-                    inCode = false;
-                }
-                else inCode = true;
-                continue;
-            }
-            if (inCode) { codeBuf.Add(line); continue; }
-
-            if (line.StartsWith("# ")) { var t = line[2..].Trim(); _blocks.Add(new("h1", t)); _headings.Add(t); _activeHeading ??= t; }
-            else if (line.StartsWith("## ")) { var t = line[3..].Trim(); _blocks.Add(new("h2", t)); _headings.Add(t); }
-            else if (line.StartsWith("### ")) { var t = line[4..].Trim(); _blocks.Add(new("h3", t)); }
-            else if (line.StartsWith("- ")) _blocks.Add(new("li", line[2..].Trim()));
-            else if (!string.IsNullOrWhiteSpace(line)) _blocks.Add(new("p", line));
-        }
-    }
-
-    private void ScrollTo(string heading)
-    {
-        _activeHeading = heading;
-        // Fragment navigation scrolls the anchor into view (no JS
-        // interop needed); the highlight follows via _activeHeading.
-        Nav.NavigateTo($"/vision#{AnchorId(heading)}", forceLoad: false);
-        StateHasChanged();
-    }
-
-    private static string AnchorId(string heading) =>
-        "v-" + new string(heading.ToLowerInvariant()
-            .Select(c => char.IsLetterOrDigit(c) ? c : '-')
-            .ToArray())
-            .Replace("--", "-").Trim('-');
-
-    public void Dispose() { }
-}

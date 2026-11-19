@@ -226,16 +226,35 @@ public static class ForgeComposition
         services.AddSingleton(vision);
         var rolePromptsRoot = RolePromptRoot.Resolve(primary.Root);
         log.LogInformation("Role prompts root: {RolePromptsRoot}", rolePromptsRoot);
-        var visionSnapshot = vision.Reload();
+        vision.Reload();
+        // Operator edits belong to the project's durable database, never its Git checkout.
+        // Rebuild prompt projections from that authority rather than overwrite them from an
+        // older repository import when the controller restarts or a release is deployed.
+        var projectVisions = new ProjectVisionDocuments(vision, projectFactory, memoryStore);
+        var primaryVision = projectVisions.Find(primary.Id)
+            ?? throw new InvalidOperationException($"Unknown primary vision project {primary.Id} during bootstrap.");
+        var visionSnapshot = await projectVisions.RefreshAsync(primaryVision, ct);
         if (visionSnapshot.Exists)
         {
             log.LogInformation("Vision loaded from {Path} ({Len} chars)",
                 visionSnapshot.Path, visionSnapshot.Content.Length);
-            await memoryStore.RememberAsync("vision/master", visionSnapshot.Content, ttlDays: null, ct);
         }
         else
         {
             log.LogWarning("Vision file not found at {Path}; dashboard Vision tab will be empty", visionSnapshot.Path);
+        }
+        foreach (var project in knownProjects.Where(project => project.Id != primary.Id))
+        {
+            try
+            {
+                var document = projectVisions.Find(project.Id)
+                    ?? throw new InvalidOperationException($"Unknown vision project {project.Id} during bootstrap.");
+                await projectVisions.RefreshAsync(document, ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                log.LogError(ex, "Could not refresh vision guidance for project {ProjectId}; retry its Vision Refresh after repairing the project", project.Id);
+            }
         }
 
         var skillBootstrap = new SkillBootstrap(
@@ -318,6 +337,7 @@ public static class ForgeComposition
                 .FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase))
                 ?.VerifyCommands,
             memory: memoryStore,
+            legacyVisionOwnerProjectId: visionSnapshot.Exists ? primary.Id : null,
             handoffs: new ContextHandoffStore(primaryFactory),
             designArtifacts: () => designArtifacts,
             specs: () => specStoreRef.Value,
@@ -617,8 +637,11 @@ public static class ForgeComposition
                 // + vision the intake asks the operator about the tech
                 // stack — facts the codebase already answers.
                 projectRootLookup: ProjectRootLookup,
-                memory: memoryStore, initiatives: initiativeApprovals));
+                memory: memoryStore, initiatives: initiativeApprovals,
+                legacyVisionOwnerProjectId: visionSnapshot.Exists ? primary.Id : null));
         services.AddSingleton(intakeRegistry);
+        services.AddSingleton<IVisionConversation>(new VisionConversation(
+            chatClientFactory, llmConfig, loggerFactory.CreateLogger<VisionConversation>()));
 
         var specExtractionReader = new SpecExtractionReader(issues);
         services.AddSingleton<ISpecExtractionReader>(specExtractionReader);
@@ -646,6 +669,7 @@ public static class ForgeComposition
         var groomerFactory = new GroomerAgentFactory(
             issues, routingSpecStore, eventBus, chatClientFactory, llmConfig, loggerFactory,
             memory: memoryStore, projectRoot: primary.Root,
+            legacyVisionOwnerProjectId: visionSnapshot.Exists ? primary.Id : null,
             projectRootLookup: ProjectRootLookup,
             issueStoreLookup: id => projectFactory.Find(id)?.Issues,
             roleTerritoriesLookup: async (id, ct) =>
@@ -749,6 +773,7 @@ public static class ForgeComposition
             sprintPropose: sprintPropose,
             issuesJsonlPath: issuesJsonlPath,
             vision: vision,
+            visionConversation: sp.GetRequiredService<IVisionConversation>(),
             groomerRuns: groomerRuns,
             designerFactory: designerAgentFactory,
             designerRuns: designerRuns,

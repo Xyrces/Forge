@@ -52,6 +52,7 @@ public sealed class MafAgentRunner : IAgentRunner
     private readonly Func<string?, IIssueStore?>? _issueStoreLookup;
     private readonly RoleModelOverrides? _modelOverrides;
     private readonly Configuration.GateOptions _gateOptions;
+    private readonly string? _legacyVisionOwnerProjectId;
 
     /// <summary>
     /// Optional path for the per-run diagnostic side-channel log
@@ -114,7 +115,8 @@ public sealed class MafAgentRunner : IAgentRunner
         Func<string?, IIssueStore?>? issueStoreLookup = null,
         RoleModelOverrides? modelOverrides = null,
         Configuration.GateOptions? gates = null,
-        Func<string, string?>? artOutputRoot = null)
+        Func<string, string?>? artOutputRoot = null,
+        string? legacyVisionOwnerProjectId = null)
     {
         _chatClientFactory = chatClientFactory;
         _config = config;
@@ -126,6 +128,7 @@ public sealed class MafAgentRunner : IAgentRunner
         _projectTerritoryLookup = projectTerritoryLookup;
         _verifyCommandsLookup = verifyCommandsLookup;
         _memory = memory;
+        _legacyVisionOwnerProjectId = legacyVisionOwnerProjectId;
         _handoffs = handoffs;
         _designArtifactsFactory = designArtifacts;
         _specsFactory = specs;
@@ -1211,7 +1214,7 @@ public async Task<AgentRunResult> RunAsync(
     // These literal prefixes contain no SQL LIKE metacharacters; apply exclusions in SQL
     // to avoid loading archived issue snapshots into every model request.
     private static readonly string[] GeneralMemoryExcludedPrefixes =
-        ["sprint/", "session/", "operator-acceptance-repair/", "breaker/", "review/origins/"];
+        ["sprint/", "session/", "operator-acceptance-repair/", "breaker/", "review/origins/", "vision/"];
 
     private async Task<string> BuildMemoryInstructionsAsync(
         IReadOnlyDictionary<string, object>? context, CancellationToken ct)
@@ -1259,6 +1262,16 @@ public async Task<AgentRunResult> RunAsync(
         var globalOnly = memories
             .Where(m => !GeneralMemoryExcludedPrefixes.Any(prefix => m.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
             .ToList();
+        try
+        {
+            var projectId = ResolveContextString(context, "projectId");
+            var vision = await VisionMemory.ReadAsync(_memory!, projectId, _legacyVisionOwnerProjectId, ct);
+            if (vision is not null) globalOnly.Insert(0, vision);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to recall the owning project's vision; continuing without it");
+        }
         var globalRendered = MemoryStore.RenderForPrompt(globalOnly);
         if (!string.IsNullOrEmpty(globalRendered)) sections.Add(globalRendered);
         return string.Join("\n\n", sections);
