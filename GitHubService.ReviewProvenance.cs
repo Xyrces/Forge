@@ -19,7 +19,8 @@ public partial class GitHubService
         var response = await _client.Connection.Post<string>(new Uri("graphql", UriKind.Relative),
             new { query, variables = new { owner = _owner, name = _repo, number } },
             "application/json", "application/json", new Dictionary<string, string>(), ct);
-        using var json = JsonDocument.Parse(response.Body);
+        using var json = JsonDocument.Parse(response.HttpResponse.Body as string
+            ?? throw new InvalidOperationException("GitHub review provenance response is unavailable."));
         var hasErrors = json.RootElement.TryGetProperty("errors", out var errors) && errors.ValueKind != JsonValueKind.Null
             && (errors.ValueKind != JsonValueKind.Array || errors.GetArrayLength() != 0);
         var repository = json.RootElement.GetProperty("data").GetProperty("repository");

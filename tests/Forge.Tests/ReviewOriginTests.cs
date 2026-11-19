@@ -7,6 +7,31 @@ namespace Forge.Tests;
 
 public sealed class ReviewOriginTests
 {
+    [Theory]
+    [InlineData("review-origins/v1/repo/1")]
+    [InlineData("REVIEW-ORIGINS/v1/repo/1")]
+    [InlineData(" review-origins/v1/repo/1")]
+    public async Task GenericMemoryCannotForgeOrDeleteReviewOrigins(string key)
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("review-protected"));
+        var memory = new MemoryStore(issues.Db);
+        Assert.True(AuthorityMemoryKeys.IsProtected(key));
+        await Assert.ThrowsAsync<ArgumentException>(() => memory.RememberAsync(key, "forged"));
+        await Assert.ThrowsAsync<ArgumentException>(() => memory.SeedIfMissingAsync(key, "forged"));
+        await Assert.ThrowsAsync<ArgumentException>(() => memory.ForgetAsync(key));
+        await memory.ObserveReviewOriginsAsync("repo", 1, "head", At, []);
+        const string canonical = "review-origins/v1/repo/1";
+        var before = await memory.GetAsync(canonical);
+        Assert.NotNull(before);
+        await Assert.ThrowsAsync<ArgumentException>(() => memory.RememberAsync(canonical, "forged", 1));
+        await Assert.ThrowsAsync<ArgumentException>(() => memory.SeedIfMissingAsync(canonical, "forged"));
+        await Assert.ThrowsAsync<ArgumentException>(() => memory.ForgetAsync(canonical));
+        await memory.PurgeExpiredAsync();
+        Assert.Equal(before, await memory.GetAsync(canonical));
+        await memory.RememberAsync("ordinary", "ok");
+        Assert.True(await memory.ForgetAsync("ordinary"));
+    }
+
     private static readonly DateTimeOffset At = new(2026, 11, 19, 2, 27, 59, TimeSpan.Zero);
     private static ReviewOriginObservation Review(long id, string head, DateTimeOffset? at = null) => new(id, "Xyrces", head, at ?? At);
 
