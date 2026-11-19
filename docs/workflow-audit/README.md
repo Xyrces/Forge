@@ -13,6 +13,11 @@ The reports below preserve the original source audit, offline reproductions,
 measured performance and dated intermediate outcomes. Historical findings are
 not a list of defects still present in the qualified release.
 
+Operator handoff (live observations pending):
+
+- [Deployed sprint board and protected PR runbook](sprint-board-protected-pr-runbook.md)
+- [Evidence index and pending verdict](sprint-board-protected-pr-evidence.md)
+
 Reports:
 
 - [Final UI-originated live qualification](unattended-live-qualification.md#final-qualification-2026-11-17)
