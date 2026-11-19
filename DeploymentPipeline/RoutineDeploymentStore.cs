@@ -20,7 +20,7 @@ public sealed partial class DeploymentStore
         using (var authority = conn.CreateCommand())
         {
             authority.Transaction = tx;
-            authority.CommandText = $"SELECT completion_policy_json,completion_gate_approval_json FROM {T("sprint_completion")} WHERE id=@completion AND project_id=@project";
+            authority.CommandText = $"SELECT completion_policy_json,completion_gate_approval_json FROM {T("sprint_completion")} WHERE id=@completion AND project_id=@project AND (completion_policy_json IS NULL OR deployment_candidate_id IS NOT NULL OR {Forge.Core.CompletionPlanningBarrier.BookkeepingReadyPredicate(_db.Dialect)})";
             authority.AddParam("@completion", completionId); authority.AddParam("@project", projectId);
             await using var reader = await authority.ExecuteReaderAsync(ct);
             if (!await reader.ReadAsync(ct)) throw new InvalidOperationException("Sprint delivery authority was not found.");
@@ -110,8 +110,11 @@ public sealed partial class DeploymentStore
             : MarkIndependentProgressAsync(candidate.Id, progress, ct);
 
     public Task MarkIndependentProgressAsync(string id, DeploymentExecutionResult progress, CancellationToken ct = default) =>
-        progress.AdmissionHeld ? Task.CompletedTask : progress.StillInProgress
-            ? ExecAsync($"UPDATE {T("deployment")} SET status='Deploying' WHERE id=@id AND status='Approved'",
+        progress.AdmissionHeld
+            ? ExecAsync($"UPDATE {T("deployment")} SET deploy_log=@log WHERE id=@id AND status='Approved' AND (deploy_log IS NULL OR deploy_log<>@log)",
+                cmd => { cmd.AddParam("@id", id); cmd.AddParam("@log", progress.Log); }, ct)
+            : progress.StillInProgress
+            ? ExecAsync($"UPDATE {T("deployment")} SET status='Deploying',deploy_log=NULL WHERE id=@id AND status='Approved'",
                 cmd => cmd.AddParam("@id", id), ct)
             : ExecAsync($"UPDATE {T("deployment")} SET status=@status,deploy_log=@log,deployed_at=@at WHERE id=@id AND status IN ('Approved','Deploying') AND (@status <> 'Deployed' OR completion_id IS NULL OR environment_name IS NULL)",
                 cmd => { cmd.AddParam("@id", id); cmd.AddParam("@status", progress.Success ? "Deployed" : "DeployFailed");

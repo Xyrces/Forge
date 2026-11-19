@@ -20,10 +20,10 @@ namespace Forge.Dashboard;
 // docs/deployment-pipeline.md for the full flow.
 public static class DeploymentsEndpoints
 {
-    public static IEndpointRouteBuilder MapDeploymentsEndpoints(this IEndpointRouteBuilder endpoints)
+    public static IEndpointRouteBuilder MapDeploymentsEndpoints(this IEndpointRouteBuilder endpoints, Action? wakeDelivery = null)
     {
         var group = endpoints.MapGroup("/api/deployments");
-        DeploymentEnvironmentEndpoints.Map(endpoints, group);
+        DeploymentEnvironmentEndpoints.Map(endpoints, group, wakeDelivery);
 
         group.MapGet("/", ListAsync)
              .WithName("ListDeployments")
@@ -56,7 +56,7 @@ public static class DeploymentsEndpoints
             var ctx = factory.Find(projectId);
             if (ctx is null) return Results.NotFound(new { error = "project not found", projectId });
             await ReconcileKubernetesAsync(ctx, executors, loggerFactory, ct);
-            return Results.Ok(await ctx.Deployments.ListAsync(projectId, ct: ct));
+            return Results.Ok((await ctx.Deployments.ListAsync(projectId, ct: ct)).Select(row => KubernetesDeploymentExecutor.WithPromotionEligibility(ctx.Options, row)));
         }
 
         var all = new List<DeploymentCandidate>();
@@ -65,7 +65,7 @@ public static class DeploymentsEndpoints
             var ctx = factory.Find(p.Id);
             if (ctx is null) continue;
             await ReconcileKubernetesAsync(ctx, executors, loggerFactory, ct);
-            all.AddRange(await ctx.Deployments.ListAsync(p.Id, ct: ct));
+            all.AddRange((await ctx.Deployments.ListAsync(p.Id, ct: ct)).Select(row => KubernetesDeploymentExecutor.WithPromotionEligibility(ctx.Options, row)));
         }
         return Results.Ok(all.OrderByDescending(d => d.RequestedAt).ToList());
     }
@@ -81,6 +81,7 @@ public static class DeploymentsEndpoints
             {
                 if (candidate.Status is not (DeploymentStatus.Approved or DeploymentStatus.Deploying)) continue;
                 var progress = await executor.ReadProgressAsync(ctx.Options, candidate, ct);
+                if (progress.AdmissionHeld) continue; // Observational reads cannot determine a live admission hold.
                 await ctx.Deployments.MarkIndependentProgressAsync(candidate, progress, new Core.Completion.SprintCompletionStore((Core.IssueStore)ctx.Issues), ct);
             }
         }

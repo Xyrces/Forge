@@ -53,11 +53,11 @@ public sealed partial class SprintCompletionStore(IssueStore issues)
         => ListAsync(CompletionPlanningBarrier.Predicate(issues.Db.Dialect), limit, afterId, ct);
 
     public async Task<IReadOnlyList<SprintCompletionRecord>> ListAwaitingDeploymentAsync(int limit = 50, string? afterId = null, CancellationToken ct = default)
-        => await ListAsync("ready_for_deployment=1 AND delivery_required=1 AND deployment_candidate_id IS NULL AND " + DeploymentApprovalPredicate, limit, afterId, ct);
+        => await ListAsync("ready_for_deployment=1 AND delivery_required=1 AND deployment_candidate_id IS NULL AND " + DeploymentApprovalPredicate + " AND (completion_policy_json IS NULL OR " + CompletionPlanningBarrier.BookkeepingReadyPredicate(issues.Db.Dialect) + ")", limit, afterId, ct);
     public async Task<IReadOnlyList<SprintCompletionRecord>> ListAwaitingDeliveryOutcomeAsync(int limit = 50, string? afterId = null, CancellationToken ct = default)
         => await ListAsync("ready_for_deployment=1 AND deployment_candidate_id IS NOT NULL AND outcome='PendingEvidence'", limit, afterId, ct);
     public async Task<IReadOnlyList<SprintCompletionRecord>> ListPendingBookkeepingAsync(int limit = 50, string? afterId = null, CancellationToken ct = default)
-        => await ListAsync($"abandonment_json IS NULL AND (bookkeeping_state <> 'Completed' OR EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id))))", limit, afterId, ct);
+        => await ListAsync($"abandonment_json IS NULL AND (bookkeeping_state <> 'Completed' OR EXISTS(SELECT 1 FROM {T("completion_triage")} pending WHERE pending.completion_id={T("sprint_completion")}.id AND pending.state IN ('Pending','Running','Decided')) OR EXISTS(SELECT 1 FROM {T("followup_draft")} d WHERE d.consumed_at IS NULL AND NOT EXISTS(SELECT 1 FROM {T("completion_draft_claim")} c WHERE c.draft_id=d.id) AND (d.sprint_id={T("sprint_completion")}.sprint_id OR EXISTS(SELECT 1 FROM {T("sprint_issue")} m WHERE m.sprint_id={T("sprint_completion")}.sprint_id AND m.issue_id=d.source_issue_id))))", limit, afterId, ct);
     private async Task<IReadOnlyList<SprintCompletionRecord>> ListAsync(string predicate, int limit, string? afterId, CancellationToken ct)
     {
         var d = issues.Db.Dialect;

@@ -31,23 +31,7 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
         project = ApplyTarget(project, candidate);
         if (candidate.CompletionId is not null || candidate.EnvironmentName is not null || candidate.SourceCandidateId is not null)
         {
-            var pinnedReceipt = JsonSerializer.Deserialize<TrustedImageReceipt>(candidate.ReceiptJson ?? "null", new JsonSerializerOptions(JsonSerializerDefaults.Web))
-                ?? throw new InvalidOperationException("Routine release receipt is missing.");
-            var options = project.Deployment ?? throw new InvalidOperationException("Deployment configuration missing.");
-            if (pinnedReceipt.SourceSha != candidate.CommitSha || !pinnedReceipt.BuildPassed || !pinnedReceipt.TestPassed ||
-                !string.Equals(pinnedReceipt.Repository, TrustedGitHubReleaseSource.Repository(project), StringComparison.OrdinalIgnoreCase) ||
-                pinnedReceipt.Branch != project.DefaultBranch || pinnedReceipt.Workflow != options.RoutineWorkflow ||
-                pinnedReceipt.ValidationWorkflow != options.RoutineValidationWorkflow ||
-                !long.TryParse(pinnedReceipt.WorkflowRunId, out var run) || run <= 0 ||
-                !long.TryParse(pinnedReceipt.ValidationRunId, out var validationRun) || validationRun <= 0 ||
-                !long.TryParse(pinnedReceipt.ArtifactId, out var artifact) || artifact <= 0 ||
-                pinnedReceipt.SchemaVersion != Forge.Core.IssueStore.CurrentSchemaVersion ||
-                !Regex.IsMatch(pinnedReceipt.ArtifactDigest, "^sha256:[0-9a-f]{64}$") ||
-                !Regex.IsMatch(pinnedReceipt.ImageDigest, "^" + Regex.Escape(options.RoutineImageRepository) + "@sha256:[0-9a-f]{64}$"))
-                throw new InvalidOperationException("Pinned routine receipt does not match configured release authority.");
-            var pinnedProject = project with { Deployment = options with { KubernetesImages = new() { [candidate.CommitSha] = pinnedReceipt.ImageDigest } } };
-            ResolveImage(pinnedProject, candidate);
-            return pinnedProject;
+            return ResolveTrustedProfile(project, candidate);
         }
         var catalog = project.Deployment?.KubernetesImageCatalog;
         if (string.IsNullOrEmpty(catalog)) throw new InvalidOperationException("Kubernetes deployment requires a reviewed CI image catalog.");
@@ -70,6 +54,36 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
             KubernetesImages = new() { [candidate.CommitSha] = record.GetProperty("imageDigest").GetString() ?? "" } } };
         ResolveImage(resolved, candidate);
         return resolved;
+    }
+
+    internal static ProjectOptions ResolveTrustedProfile(ProjectOptions project, DeploymentCandidate candidate)
+    {
+        var pinnedReceipt = JsonSerializer.Deserialize<TrustedImageReceipt>(candidate.ReceiptJson ?? "null", new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            ?? throw new InvalidOperationException("Routine release receipt is missing.");
+        var options = project.Deployment ?? throw new InvalidOperationException("Deployment configuration missing.");
+        if (pinnedReceipt.SchemaVersion != Core.IssueStore.CurrentSchemaVersion)
+            throw new InvalidOperationException($"This release uses schema {pinnedReceipt.SchemaVersion}. The current controller requires schema {Core.IssueStore.CurrentSchemaVersion} for promotion.");
+        if (pinnedReceipt.SourceSha != candidate.CommitSha || !pinnedReceipt.BuildPassed || !pinnedReceipt.TestPassed ||
+            !string.Equals(pinnedReceipt.Repository, TrustedGitHubReleaseSource.Repository(project), StringComparison.OrdinalIgnoreCase) ||
+            pinnedReceipt.Branch != project.DefaultBranch || pinnedReceipt.Workflow != options.RoutineWorkflow ||
+            pinnedReceipt.ValidationWorkflow != options.RoutineValidationWorkflow ||
+            !long.TryParse(pinnedReceipt.WorkflowRunId, out var run) || run <= 0 ||
+            !long.TryParse(pinnedReceipt.ValidationRunId, out var validationRun) || validationRun <= 0 ||
+            !long.TryParse(pinnedReceipt.ArtifactId, out var artifact) || artifact <= 0 ||
+            !Regex.IsMatch(pinnedReceipt.ArtifactDigest, "^sha256:[0-9a-f]{64}$") ||
+            !Regex.IsMatch(pinnedReceipt.ImageDigest, "^" + Regex.Escape(options.RoutineImageRepository) + "@sha256:[0-9a-f]{64}$"))
+            throw new InvalidOperationException("Pinned routine receipt does not match configured release authority.");
+        var pinnedProject = project with { Deployment = options with { KubernetesImages = new() { [candidate.CommitSha] = pinnedReceipt.ImageDigest } } };
+        ResolveImage(pinnedProject, candidate);
+        return pinnedProject;
+    }
+
+    internal static DeploymentCandidate WithPromotionEligibility(ProjectOptions project, DeploymentCandidate candidate)
+    {
+        if (candidate.EnvironmentName is null || candidate.Status != DeploymentStatus.Deployed) return candidate;
+        try { ResolveTrustedProfile(ApplyTarget(project, candidate), candidate); return candidate; }
+        catch (Exception ex) when (ex is InvalidOperationException or JsonException or ArgumentException)
+        { return candidate with { PromotionUnavailableReason = ex.Message }; }
     }
 
     public static string ResolveImage(ProjectOptions project, DeploymentCandidate candidate)
@@ -141,8 +155,10 @@ public sealed class KubernetesDeploymentExecutor(HttpClient http) : IIndependent
             using var jobResponse = await http.GetAsync($"apis/batch/v1/namespaces/{project.Deployment.KubernetesNamespace}/jobs/forge-release-{candidate.Id}", ct);
             if (jobResponse.StatusCode == HttpStatusCode.NotFound)
             {
-                if (canStart is null || !await canStart(ct))
-                    return new(false, "Release has not started; awaiting deployment admission.", true, AdmissionHeld: true);
+                if (canStart is null)
+                    return new(false, "Waiting for deployment admission.", true, AdmissionHeld: true);
+                if (!await canStart(ct))
+                    return new(false, "The operator deployment gate is held. Release it to start this deployment.", true, AdmissionHeld: true);
                 // The SQL approval may have committed just before its controller stopped. Deterministic Job name makes retry safe.
                 return await ExecuteAsync(project, candidate with { Status = DeploymentStatus.BuildPassed }, ct);
             }

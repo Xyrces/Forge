@@ -202,6 +202,24 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual("rolled-back", kube.get("configmaps", release.journal_name)["data"]["phase"])
         self.assertEqual("blue", kube.get("services", "forge")["spec"]["selector"]["slot"])
 
+    def test_lost_commit_acknowledgement_does_not_roll_back_an_accepted_release(self):
+        release, kube, _ = self.named()
+        patch = kube.patch
+        def lose_response(kind, name, body):
+            result = patch(kind, name, body)
+            if body.get("data", {}).get("phase") == "committed":
+                raise OSError("response lost after server committed")
+            return result
+        kube.patch = lose_response
+        with self.assertRaisesRegex(OSError, "response lost"):
+            release.run()
+        self.assertEqual("green", kube.get("services", "forge")["spec"]["selector"]["slot"])
+        self.assertEqual("committed", kube.get("configmaps", release.journal_name)["data"]["phase"])
+        kube.patch = patch
+        release.pod_uid = "replacement"
+        release.run()
+        self.assertEqual("green", kube.get("services", "forge")["spec"]["selector"]["slot"])
+
     def make(self, previous="blue"):
         kube = FakeKube(previous)
         controllers = FakeControllers(kube)

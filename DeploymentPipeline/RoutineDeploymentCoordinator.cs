@@ -30,7 +30,7 @@ public sealed record RoutineDeploymentProject(ProjectOptions Options, SprintComp
 /// <summary>Durable completion is the trigger; dashboard reads are not a scheduler.</summary>
 public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeploymentProject>> projects,
     IRoutineReleaseSource source, Func<ProjectOptions, IIndependentDeploymentExecutor> executor,
-    StageGates gates, ILogger<RoutineDeploymentCoordinator> logger)
+    StageGates gates, ILogger<RoutineDeploymentCoordinator> logger, Orchestrator.WakeupSignal? wakeup = null)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -41,8 +41,15 @@ public sealed class RoutineDeploymentCoordinator(Func<IReadOnlyList<RoutineDeplo
             try { await ReconcileAsync(ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch (Exception ex) { logger.LogError(ex, "Routine deployment reconciliation will retry from durable state"); }
-            try { await Task.Delay(TimeSpan.FromSeconds(15), ct); }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+            using var next = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            next.CancelAfter(TimeSpan.FromSeconds(15));
+            try
+            {
+                if (wakeup is null) await Task.Delay(Timeout.InfiniteTimeSpan, next.Token);
+                else await wakeup.WaitAsync(next.Token);
+            }
+            catch (OperationCanceledException) when (next.IsCancellationRequested) { }
+
         }
     }
 

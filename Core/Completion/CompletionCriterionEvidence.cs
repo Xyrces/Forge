@@ -124,7 +124,8 @@ public sealed partial class SprintCompletionStore
     {
         var receipt = await GetAsync(connection, tx, id, ct);
         if (receipt is null || receipt.EngineeringOutcome != EngineeringOutcome.PendingEvidence
-            || !receipt.ReadyForDeployment || !await IsQualifiedDeploymentAsync(connection, tx, receipt, ct)) return false;
+            || !receipt.ReadyForDeployment || receipt.CompletionPolicy is not null && receipt.BookkeepingState != "Completed"
+            || !await IsQualifiedDeploymentAsync(connection, tx, receipt, ct)) return false;
         var plan = await ReadBoundPlanAsync(connection, tx, receipt, ct);
         foreach (var criterion in plan.Criteria.Where(c => receipt.CompletionPolicy is null && c.EvidenceKind == SprintEvidenceKind.OperatorObserved))
         {

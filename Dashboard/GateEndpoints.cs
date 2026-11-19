@@ -20,7 +20,7 @@ public static class GateEndpoints
         StageGates gates,
         ILogger logger,
         IEventPublisher? publisher = null,
-        IProjectStore? projects = null)
+        IProjectStore? projects = null, Action? wakeDelivery = null)
     {
         app.MapGet("/api/gates", async (CancellationToken ct) =>
         {
@@ -46,6 +46,7 @@ public static class GateEndpoints
             // wait for its 15-minute recovery backstop. Consumers re-read gates
             // and eligibility; this notification never dispatches work directly.
             // Deployment has its own 15-second durable reconciler, not a workflow sweep.
+            if (stage == StageGates.Deploy) wakeDelivery?.Invoke();
             if (stage != StageGates.Deploy && publisher is not null && projects is not null)
             {
                 try

@@ -202,7 +202,7 @@ public static class ForgeComposition
                     context!.Options, new Core.Completion.SprintCompletionStore((IssueStore)context.Issues), context.Deployments)).ToArray(),
             provider.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(),
             project => (Forge.Deploy.IIndependentDeploymentExecutor)provider.GetRequiredService<Forge.Deploy.DeploymentExecutorFactory>().Create(project)!,
-            stageGates, loggerFactory.CreateLogger<Forge.Deploy.RoutineDeploymentCoordinator>()));
+            stageGates, loggerFactory.CreateLogger<Forge.Deploy.RoutineDeploymentCoordinator>(), wakeups.Deploy));
 
         var issuesJsonlPath = Path.Combine(primaryStateDir, "issues.jsonl");
         var jsonlMirror = new IssuesJsonlMirror(issues, issuesJsonlPath,
@@ -790,7 +790,7 @@ public static class ForgeComposition
             budgetDatasetId: options.Controller.Enabled ? options.Controller.DatasetId : null,
             initiativeApprovals: initiativeApprovals,
             mutationTokenFile: options.Controller.Enabled ? options.Controller.TokenFile : null,
-            releaseSource: sp.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(),
+            releaseSource: sp.GetRequiredService<Forge.Deploy.IRoutineReleaseSource>(), wakeDelivery: wakeups.Deploy.Signal,
             projectProvisioner: options.Controller.Enabled
                 ? new Control.KubernetesProjectProvisioner(() => sp.GetRequiredService<HttpClient>(), options) : null,
             workerHistory: options.Worker.Enabled ? (projectId, taskId, ct) => new Core.Execution.WorkerAttemptStore(registryIssues.Db)

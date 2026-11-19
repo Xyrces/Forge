@@ -153,6 +153,8 @@ public sealed partial class DeploymentStore
             || receipt is null || !receipt.BuildPassed || !receipt.TestPassed || receipt.SourceSha != source.CommitSha
             || receipt.SourceSha != request.ExpectedSourceSha || receipt.ImageDigest != request.ExpectedImage)
             throw new InvalidOperationException("Only the selected, verified environment release can be promoted. Refresh its details.");
+        if (KubernetesDeploymentExecutor.WithPromotionEligibility(effective, source).PromotionUnavailableReason is { } reason)
+            throw new InvalidOperationException(reason);
         if (!effective.Deployment!.Environments.TryGetValue(source.EnvironmentName, out var origin)
             || !origin.PromoteTo.Contains(request.TargetEnvironment, StringComparer.Ordinal))
             throw new InvalidOperationException("This promotion route is not enabled for the source environment.");

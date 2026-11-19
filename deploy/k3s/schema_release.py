@@ -223,7 +223,7 @@ class SchemaRelease(Release):
             self.record("activated")
             self.route(candidate)
             self.verify_route(candidate)
-            self.record("committed")
         except Exception:
             self.safe_rollback(candidate, previous)
             raise
+        self.record("committed")

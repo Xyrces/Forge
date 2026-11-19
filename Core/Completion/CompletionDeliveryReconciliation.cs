@@ -149,15 +149,15 @@ public sealed partial class SprintCompletionStore
             new DeliveryReconciliation(plan.Hash, DateTimeOffset.UtcNow, receipt.EvidenceJson, additions));
         var envelope = originalEvidence.ToJsonString();
         using var update = Command(connection, tx, $"UPDATE {T("sprint_completion")} SET ready_for_deployment=1,evidence_json=@evidence,outcome=@outcome,delivery_note=NULL,updated_at=@now WHERE id=@id",
-            ("@evidence", envelope), ("@now", Now()), ("@id", id), ("@outcome", receipt.CompletionPolicy is not null && !receipt.DeliveryRequired ? "Satisfied" : "PendingEvidence"));
+            ("@evidence", envelope), ("@now", Now()), ("@id", id), ("@outcome", receipt.CompletionPolicy is not null && !receipt.DeliveryRequired && receipt.BookkeepingState == "Completed" ? "Satisfied" : "PendingEvidence"));
         await update.ExecuteNonQueryAsync(ct);
-        if (receipt.CompletionPolicy is not null && !receipt.DeliveryRequired)
+        if (receipt.CompletionPolicy is not null && !receipt.DeliveryRequired && receipt.BookkeepingState == "Completed")
         {
             using var finish = Command(connection, tx, $"UPDATE {T("sprint")} SET status='Completed',updated_at=@now WHERE id=@sprint AND status='Active'", ("@now", Now()), ("@sprint", receipt.SprintId));
             await finish.ExecuteNonQueryAsync(ct);
         }
         await tx.CommitAsync(ct);
-        if (receipt.CompletionPolicy is not null && !receipt.DeliveryRequired) await PublishOutcomeChangedAsync(receipt, "Satisfied", ct);
+        if (receipt.CompletionPolicy is not null && !receipt.DeliveryRequired && receipt.BookkeepingState == "Completed") await PublishOutcomeChangedAsync(receipt, "Satisfied", ct);
         return true;
     }
 }

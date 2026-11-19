@@ -39,7 +39,7 @@ internal static class DeploymentEnvironmentEndpoints
         });
     }
 
-    internal static void Map(IEndpointRouteBuilder endpoints, RouteGroupBuilder deployments)
+    internal static void Map(IEndpointRouteBuilder endpoints, RouteGroupBuilder deployments, Action? wakeDelivery)
     {
         var settings = endpoints.MapGroup("/api/projects/{id}/environments");
         settings.MapGet("", async (string id, ProjectContextFactory projects, CancellationToken ct) =>
@@ -61,7 +61,12 @@ internal static class DeploymentEnvironmentEndpoints
             if (http.Items[DashboardMutationAuthentication.AuthenticatedOperatorItem] is not string actor) return Results.Unauthorized();
             var project = projects.Find(projectId);
             if (project is null) return Results.NotFound();
-            try { return Results.Ok(await project.Deployments.PromoteAsync(project.Options, id, request, actor, ct)); }
+            try
+            {
+                var promotion = await project.Deployments.PromoteAsync(project.Options, id, request, actor, ct);
+                wakeDelivery?.Invoke();
+                return Results.Ok(promotion);
+            }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
         });

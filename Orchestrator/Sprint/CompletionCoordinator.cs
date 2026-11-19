@@ -50,7 +50,7 @@ internal sealed class CompletionCoordinator(IssueStore issues, IFollowUpTriage? 
             : completionPolicy.EnvironmentName is not null;
         var outcome = incomplete ? EngineeringOutcome.Incomplete
             : plan is null ? EngineeringOutcome.LegacyTerminalOnly
-            : !verified || deliveryRequired
+            : !verified || deliveryRequired || completionPolicy is not null
                 ? EngineeringOutcome.PendingEvidence : EngineeringOutcome.Satisfied;
         return await store.BeginCompletionAsync(sprint.Id, members, new(auditId, plan?.Hash, outcome,
             JsonSerializer.Serialize(new { verifiedTasks,

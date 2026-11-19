@@ -332,8 +332,10 @@ public sealed class CompletionEvidenceTests : IDisposable
     public async Task ExplicitNoDeliveryPolicyDoesNotTurnAgentObservationIntoDeploymentRequirement()
     {
         var (sprint, task, plan, audit) = await Seed();
-        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.Satisfied, "{}", true, false, new(null, false, null)));
-        Assert.Equal(EngineeringOutcome.Satisfied, receipt.EngineeringOutcome);
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, false, new(null, false, null)));
+        Assert.Equal(EngineeringOutcome.PendingEvidence, receipt.EngineeringOutcome);
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
         Assert.False(receipt.DeliveryRequired);
         Assert.Empty(await Store.ListAwaitingDeploymentAsync());
         Assert.Null(await new SprintStore(issues).GetActiveAsync());
@@ -346,6 +348,8 @@ public sealed class CompletionEvidenceTests : IDisposable
         var policy = new CompletionPolicySnapshot("uat", false, "{\"Name\":\"uat\"}");
         var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, true, policy));
         Assert.NotNull(await new SprintStore(issues).GetActiveAsync());
+        Assert.False(await Store.CanAdmitDeploymentAsync(receipt.Id));
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
         Assert.True(await Store.CanAdmitDeploymentAsync(receipt.Id));
         Assert.False(Assert.Single(await Store.ReadCriteriaAsync(receipt.Id)).Blocking);
         await SeedDeploymentAsync(receipt.Id, "uat", policy.TargetJson);
@@ -376,9 +380,38 @@ public sealed class CompletionEvidenceTests : IDisposable
         Assert.True(Assert.Single(await Store.ListOverviewAsync(waitingOnly: false)).DeploymentApprovalRequired);
         await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ApproveDeploymentAsync(receipt.Id, "wrong-plan", "operator"));
         await Store.ApproveDeploymentAsync(receipt.Id, plan.Hash, "operator");
+        Assert.False(await Store.CanAdmitDeploymentAsync(receipt.Id));
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
         Assert.True(await Store.CanAdmitDeploymentAsync(receipt.Id));
         Assert.Single(await Store.ListAwaitingDeploymentAsync());
         Assert.False(Assert.Single(await Store.ListOverviewAsync(waitingOnly: false)).DeploymentApprovalRequired);
+    }
+
+    [Fact]
+    public async Task LateFollowupsBecomeBacklogWithoutReopeningDeliveredSprint()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var policy = new CompletionPolicySnapshot("uat", false, "{}");
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, true, policy));
+        Assert.Empty(await Store.ListAwaitingDeploymentAsync());
+        await Store.MarkBookkeepingCompleteAsync(receipt.Id);
+        Assert.Single(await Store.ListAwaitingDeploymentAsync());
+        await SeedDeploymentAsync(receipt.Id, "uat", "{}");
+        Assert.True(await Store.RefreshDeploymentOutcomeAsync(receipt.Id));
+        var drafts = new FollowUpDraftStore(issues);
+        var id = await drafts.FileAsync(new(0, sprint.Id, task.Id, "reviewer", "Late finding", "Detail", 2, null, DateTime.UtcNow, null));
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        var batch = await Store.ClaimBatchAsync(receipt.Id, [(await drafts.GetAsync(id))!]);
+        Assert.Equal("Completed", (await Store.GetAsync(receipt.Id))!.BookkeepingState);
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        Assert.Single(await Store.ListPendingBookkeepingAsync());
+        await Store.TryBeginTriageAsync(batch.Id);
+        await Store.SaveDecisionAsync(batch.Id, new([new("create", [id])]));
+        var result = await Store.MaterializeItemWithResultAsync(batch.Id, 0);
+        Assert.NotNull(result.TargetId);
+        Assert.Equal(IssueStatus.Pending, (await issues.GetAsync(result.TargetId!))!.Status);
+        Assert.Empty(await Store.ListPlanningBlockersAsync());
+        Assert.Equal(EngineeringOutcome.Satisfied, (await Store.GetAsync(receipt.Id))!.EngineeringOutcome);
     }
 
     [Fact]

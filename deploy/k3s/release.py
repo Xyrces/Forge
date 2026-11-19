@@ -375,11 +375,14 @@ class Release:
             self.record("activated")
             self.route(candidate)
             self.verify_route(candidate)
-            self.record("committed")
         except Exception:
             # If rollback itself fails, retain its phase; a replacement release Job resumes it.
             self.rollback(candidate, previous)
             raise
+        # A lost PATCH response may mean committed was already persisted and
+        # observed. Retry the journal; never roll an accepted release back merely
+        # because its commit acknowledgement was lost.
+        self.record("committed")
 
 
 def main():

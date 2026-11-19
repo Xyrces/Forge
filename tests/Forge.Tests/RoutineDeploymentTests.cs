@@ -56,6 +56,7 @@ public sealed class RoutineDeploymentTests : IDisposable
         var snapshot = new DeploymentTargetSnapshot("uat", "UAT", "forge-uat", Guid.NewGuid().ToString());
         var policy = new CompletionPolicySnapshot("uat", false, JsonSerializer.Serialize(snapshot, DeploymentStore.EnvironmentJson));
         var completion = await Complete(policy: policy);
+        await Completions.MarkBookkeepingCompleteAsync(completion.Id);
         await Coordinator().ReconcileAsync(default);
         var candidate = Assert.Single(await Deployments.ListAsync());
         Assert.Equal(policy.TargetJson, candidate.TargetJson);

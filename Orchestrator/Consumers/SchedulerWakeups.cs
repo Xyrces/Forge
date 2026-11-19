@@ -14,6 +14,8 @@ public sealed record SchedulerWakeups(
     WakeupSignal Artist,
     WakeupSignal Assemble)
 {
+    public WakeupSignal Deploy { get; } = new();
+
     public static SchedulerWakeups Create() => new(
         new WakeupSignal(), new WakeupSignal(), new WakeupSignal(), new WakeupSignal(), new WakeupSignal());
 

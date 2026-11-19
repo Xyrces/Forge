@@ -19,7 +19,7 @@ public sealed partial class SprintCompletionStore
     {
         await using var connection = await issues.Db.OpenAsync(ct);
         using var command = Command(connection, null,
-            $"SELECT completion_policy_json,completion_gate_approval_json FROM {T("sprint_completion")} WHERE id=@id AND ready_for_deployment=1 AND delivery_required=1 AND abandonment_json IS NULL", ("@id", id));
+            $"SELECT completion_policy_json,completion_gate_approval_json FROM {T("sprint_completion")} WHERE id=@id AND ready_for_deployment=1 AND delivery_required=1 AND abandonment_json IS NULL AND (completion_policy_json IS NULL OR deployment_candidate_id IS NOT NULL OR {CompletionPlanningBarrier.BookkeepingReadyPredicate(issues.Db.Dialect)})", ("@id", id));
         await using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) return false;
         var policy = reader.IsDBNull(0) ? null : JsonSerializer.Deserialize<CompletionPolicySnapshot>(reader.GetString(0));

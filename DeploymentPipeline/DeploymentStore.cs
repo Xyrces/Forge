@@ -275,4 +275,7 @@ public sealed record DeploymentCandidate(
     string? ReceiptJson = null,
     string? EnvironmentName = null,
     string? TargetJson = null,
-    string? SourceCandidateId = null);
+    string? SourceCandidateId = null)
+{
+    public string? PromotionUnavailableReason { get; init; }
+}
