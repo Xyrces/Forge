@@ -55,16 +55,64 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
     return route.fulfill({json:{required:true}});
   });
   }
-  await page.setViewportSize({width:1280,height:900});
+  // Long recorded evidence must not push the board below the initial viewport.
+  completion.criteria.push(...Array.from({length: 6}, (_, i) => ({
+    id: `recorded-${i}`, text: `Recorded browser observation ${i + 1}`,
+    evidenceKind: 'OperatorObserved', proofReference: 'Verified operator observation. '.repeat(70),
+    operatorIdentity: 'Synthetic rehearsal operator',
+  })));
+  if (fixtureApi) {
+    await page.request.put(`${fixtureApi}/__fixtures`, {data:{'/api/sprints/ux-fixture/completion':completion}});
+  }
+  await page.setViewportSize({width:2560,height:1274});
   await page.goto(`${baseUrl}/sprints`);
   await page.locator('.sprint-task').first().waitFor();
-  await page.getByText('Awaiting required evidence',{exact:true}).waitFor();
+  const acceptanceToggle = page.locator('.sprint-acceptance__toggle');
+  await acceptanceToggle.waitFor();
+  assert.equal(await acceptanceToggle.getAttribute('aria-expanded'), 'false');
+  await page.locator('.sprint-acceptance__details').waitFor({state:'hidden'});
+  await page.locator('.app-main').evaluate(element => { element.scrollTop = 0; });
+  await page.waitForFunction(() => !document.querySelector('.sprint-acceptance')?.textContent.includes('Loading completion evidence'));
+  const glance = await page.evaluate(() => {
+    const box = selector => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return {top:rect.top,bottom:rect.bottom,left:rect.left,right:rect.right};
+    };
+    return {
+      main:box('.app-main'), header:box('.sprint-hero'), acceptance:box('.sprint-acceptance'),
+      board:box('.sprint-board'), cards:[...document.querySelectorAll('.sprint-task')].map(element => {
+        const rect = element.getBoundingClientRect();
+        return {top:rect.top,bottom:rect.bottom,left:rect.left,right:rect.right};
+      }),
+    };
+  });
+  for (const [label, box] of Object.entries(glance).filter(([key]) => key !== 'cards')) {
+    assert.ok(box.top >= 0 && box.bottom <= 1274, `${label} is visible without scrolling`);
+  }
+  for (const box of glance.cards) assert.ok(box.bottom <= 1274, 'Whole card visible at a glance');
+  assert.ok(glance.header.bottom <= glance.acceptance.top && glance.acceptance.bottom <= glance.board.top);
+  assert.ok(await page.locator('.app-nav').isVisible(), 'Desktop sidebar open at 2560');
+  if(screenshotDir) await capture(page,{path:`${screenshotDir}/board-glance-2560.png`,fullPage:false});
+  await acceptanceToggle.focus();
+  await page.keyboard.press('Enter');
+  await page.locator('.sprint-acceptance__details').waitFor({state:'visible'});
+  assert.equal(await acceptanceToggle.getAttribute('aria-expanded'), 'true');
   await page.getByRole('heading',{name:'Keep production free of development-tool requests',exact:true}).waitFor();
   await page.getByText('Awaiting explicit operator observation of the exact deployed version.',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Refresh',exact:true}).click();
+  await page.waitForFunction(() => !document.querySelector('.page-header__meta')?.textContent.includes('updating'));
+  assert.equal(await acceptanceToggle.getAttribute('aria-expanded'), 'true', 'Refresh keeps disclosure open');
+  await acceptanceToggle.focus();
+  await page.keyboard.press('Space');
+  await page.locator('.sprint-acceptance__details').waitFor({state:'hidden'});
+  assert.equal(await acceptanceToggle.getAttribute('aria-expanded'), 'false');
+  await page.setViewportSize({width:1280,height:900});
   assert.equal(await page.getByRole('heading',{name:'Goal',exact:true}).count(),0);
   if(screenshotDir) await capture(page,{path:`${screenshotDir}/board-acceptance-1280.png`,fullPage:true});
   await page.locator('.sprint-acceptance').scrollIntoViewIfNeeded();
+  await acceptanceToggle.click();
   if(screenshotDir) await capture(page,{path:`${screenshotDir}/board-criteria-1280.png`,fullPage:true});
+  await acceptanceToggle.click();
   const lanes=page.locator('.sprint-lane');
   assert.equal(await lanes.count(),5);
   for(let i=0;i<5;i++) {
