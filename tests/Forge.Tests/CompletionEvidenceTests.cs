@@ -123,6 +123,27 @@ public sealed class CompletionEvidenceTests : IDisposable
     }
 
     [Fact]
+    public async Task NoOpVerifierLeavesUsefulStableWaitAndNormalSweepFindsLaterEvidence()
+    {
+        var (sprint, verified, plan, audit) = await Seed();
+        var task = await issues.TransitionAsync(verified.Id, IssueStatus.Completed, null,
+            new Dictionary<string, object> { ["trustedPublication"] = null!, ["reviewIntegrationVerificationError"] = "verification command failed" });
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", false, true));
+        var coordinator = new Forge.Orchestrator.Sprint.CompletionCoordinator(issues, null, null,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, deliveryEvidenceReconciler: (_, _) => Task.FromResult(false));
+        await coordinator.ReconcileAsync(default);
+        var waiting = (await Store.GetAsync(receipt.Id))!;
+        Assert.Contains("verification command failed", waiting.DeliveryNote);
+        await coordinator.ReconcileAsync(default);
+        Assert.Equal(waiting.UpdatedAt, (await Store.GetAsync(receipt.Id))!.UpdatedAt);
+        await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+            { ["trustedPublication"] = verified.GetMetadata("trustedPublication")!, ["reviewIntegrationVerificationError"] = null! });
+        await coordinator.ReconcileAsync(default);
+        Assert.True((await Store.GetAsync(receipt.Id))!.ReadyForDeployment);
+        Assert.Null((await Store.GetAsync(receipt.Id))!.DeliveryNote);
+    }
+
+    [Fact]
     public async Task ReconciliationCannotReplaceOriginalPublicationOrReadAnotherPlansProof()
     {
         var (sprint, task, plan, audit) = await Seed();
@@ -175,6 +196,103 @@ public sealed class CompletionEvidenceTests : IDisposable
         if (state == "source") await Store.RecordSourceAsync(receipt.Id, Source, "{}");
         if (state == "deployment") await Store.BindDeploymentAsync(receipt.Id, "candidate");
         Assert.False(await Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task]));
+    }
+
+    [Fact]
+    public async Task InitialReadyCompletionRejectsWorkerProjectedIntegrationAuthority()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var h3 = new string('e', 40);
+        var proof = new IntegratedHeadVerificationEvidence(task.Id, "project", "https://github.com/owner/repo", 10,
+            Head, h3, "attempt", Source, new("new-attempt", new string('f', 40), new string('d', 64), DateTimeOffset.UtcNow));
+        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+        {
+            ["trustedIntegrationVerification"] = JsonSerializer.Serialize(proof),
+            ["observedMerge"] = JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 10, h3, Source, DateTimeOffset.UtcNow))
+        });
+        Assert.True(TaskDeliveryEvidence.IsImplementationVerified(task, plan));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Store.BeginCompletionAsync(sprint.Id, [task],
+            new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{}", true, true)));
+        var receipt = await new Forge.Orchestrator.Sprint.CompletionCoordinator(issues, null, null,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance).CompleteAsync(sprint, new SprintStore(issues), default, true);
+        Assert.False(receipt.ReadyForDeployment);
+        using var evidence = JsonDocument.Parse(receipt.EvidenceJson);
+        Assert.Empty(evidence.RootElement.GetProperty("verifiedTasks").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task TwoMemberH3RecoveryPreservesOriginalPublicationAndBecomesSourceEligible()
+    {
+        var (sprint, task, plan, audit) = await Seed();
+        var second = await issues.CreateAsync(new NewIssue("task", "Second independently verified member"));
+        second = await issues.TransitionAsync(second.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+        {
+            ["prNumber"] = 11, ["branchSha"] = Head,
+            ["trustedPublication"] = JsonSerializer.Serialize(new TrustedPublicationEvidence(second.Id, Head,
+                new("second-attempt", new string('c', 40), new string('d', 64), DateTimeOffset.UtcNow))),
+            ["observedMerge"] = JsonSerializer.Serialize(new ObservedMergeEvidence(second.Id, 11, Head, Source, DateTimeOffset.UtcNow))
+        });
+        await new SprintStore(issues).AddIssueAsync(sprint.Id, second.Id);
+        plan = plan with { Members = [.. plan.Members, new(second.Id, ["visual"], SprintMemberReason.Delivers)] };
+        plan = plan with { Hash = SprintPlan.ComputeHash(plan) };
+        await using (var c = await issues.Db.OpenAsync())
+        {
+            using var q = c.CreateCommand(); q.CommandText = "UPDATE sprint_proposal_audit SET weights_json=@plan WHERE id=@id";
+            q.AddParam("@plan", SprintPlanJson.Serialize(new { plan })); q.AddParam("@id", audit); await q.ExecuteNonQueryAsync();
+        }
+        var h3 = new string('e', 40);
+        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+            { ["observedMerge"] = JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 10, h3, Source, DateTimeOffset.UtcNow)) });
+        var originalPublication = task.GetMetadata("trustedPublication");
+        var receipt = await Store.BeginCompletionAsync(sprint.Id, [task, second], new(audit, plan.Hash, EngineeringOutcome.PendingEvidence, "{\"verifiedTasks\":[]}", false, true));
+        Assert.False(await Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task, second]));
+        await Store.RecordImplementationWaitAsync(receipt.Id, "Awaiting exact head");
+        var before = (await Store.GetAsync(receipt.Id))!;
+        await Store.RecordImplementationWaitAsync(receipt.Id, "Awaiting exact head");
+        Assert.Equal(before.UpdatedAt, (await Store.GetAsync(receipt.Id))!.UpdatedAt);
+        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+        {
+            ["trustedIntegrationVerification"] = JsonSerializer.Serialize(new
+            {
+                TaskId = task.Id, ProjectId = "project", Repository = "https://github.com/owner/repo",
+                PullRequestNumber = 10, OriginalHeadSha = Head, VerifiedHeadSha = h3, OriginalAttemptId = "attempt",
+                BaseParentSha = Source, Verification = new VerificationReceipt("integrated-attempt", new string('f', 40), new string('d', 64), DateTimeOffset.UtcNow)
+            })
+        });
+        Assert.False(await Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task, second]));
+        await using (var c = await issues.Db.OpenAsync())
+        {
+            using var q = c.CreateCommand();
+            q.CommandText = "INSERT INTO memory([key],body,ts,ttl_days) VALUES(@key,@body,'now',NULL)";
+            q.AddParam("@key", TaskDeliveryEvidence.IntegrationAuthorityKey("project", task.Id, h3));
+            q.AddParam("@body", task.GetMetadata("trustedIntegrationVerification")!);
+            await q.ExecuteNonQueryAsync();
+        }
+        Assert.True(await Store.ReconcileImplementationEvidenceAsync(receipt.Id, [task, second]));
+        var ready = (await Store.GetAsync(receipt.Id))!;
+        Assert.Null(ready.DeliveryNote);
+        await Store.RecordImplementationWaitAsync(receipt.Id, "stale wait");
+        Assert.Null((await Store.GetAsync(receipt.Id))!.DeliveryNote);
+        var members = await Store.ReadDeliveryMembersAsync(ready);
+        Assert.Equal(2, members.Count);
+        await using (var c = await issues.Db.OpenAsync())
+        {
+            using var q = c.CreateCommand(); q.CommandText = "UPDATE memory SET body=@body WHERE [key]=@key";
+            q.AddParam("@body", "{}"); q.AddParam("@key", TaskDeliveryEvidence.IntegrationAuthorityKey("project", task.Id, h3));
+            await q.ExecuteNonQueryAsync();
+            await Assert.ThrowsAsync<InvalidOperationException>(() => Store.ReadDeliveryMembersAsync(ready));
+            q.Parameters.Clear(); q.AddParam("@body", task.GetMetadata("trustedIntegrationVerification")!);
+            q.AddParam("@key", TaskDeliveryEvidence.IntegrationAuthorityKey("project", task.Id, h3)); await q.ExecuteNonQueryAsync();
+        }
+        Assert.All(members, m => Assert.True(TaskDeliveryEvidence.IsImplementationVerified(m, plan)));
+        Assert.Equal(originalPublication, members.Single(m => m.Id == task.Id).GetMetadata("trustedPublication"));
+        Assert.Equal(Head, members.Single(m => m.Id == task.Id).GetMetadata("branchSha"));
+        using var envelope = JsonDocument.Parse(ready.EvidenceJson);
+        Assert.True(envelope.RootElement.TryGetProperty("verifiedTasks", out _));
+        Assert.Single(await Store.ListAwaitingDeploymentAsync());
+        await Store.RecordSourceAsync(ready.Id, Source, "{\"qualification\":true}");
+        Assert.Equal(Source, (await Store.GetAsync(ready.Id))!.SourceSha);
+        Assert.Equal(EngineeringOutcome.PendingEvidence, ready.EngineeringOutcome);
     }
 
     [Fact]

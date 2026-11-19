@@ -15,9 +15,20 @@ public sealed partial class SprintCompletionStore
         string? afterId = null, CancellationToken ct = default) => ListAsync(
         "ready_for_deployment=0 AND outcome='PendingEvidence' AND plan_audit_id IS NOT NULL AND abandonment_json IS NULL AND source_sha IS NULL AND deployment_candidate_id IS NULL", limit, afterId, ct);
 
+    public async Task RecordImplementationWaitAsync(string id, string note, CancellationToken ct = default)
+    {
+        await using var connection = await issues.Db.OpenAsync(ct);
+        using var command = Command(connection, null,
+            $"UPDATE {T("sprint_completion")} SET delivery_note=@note,updated_at=@now WHERE id=@id AND ready_for_deployment=0 AND outcome='PendingEvidence' AND abandonment_json IS NULL AND source_sha IS NULL AND deployment_candidate_id IS NULL AND (delivery_note IS NULL OR delivery_note<>@note)",
+            ("@id", id), ("@note", note), ("@now", Now()));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<IReadOnlyList<IssueRecord>> ReadDeliveryMembersAsync(SprintCompletionRecord receipt, CancellationToken ct = default)
     {
-        var plan = await GetBoundPlanAsync(receipt, ct);
+        await using var connection = await issues.Db.OpenAsync(ct);
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        var plan = await ReadBoundPlanAsync(connection, tx, receipt, ct);
         var members = JsonSerializer.Deserialize<IssueRecord[]>(receipt.MembersJson)
             ?? throw new InvalidOperationException("Frozen completion members are missing.");
         using var evidence = JsonDocument.Parse(receipt.EvidenceJson);
@@ -33,7 +44,37 @@ public sealed partial class SprintCompletionStore
             || !members.Select(m => m.Id).ToHashSet(StringComparer.Ordinal).SetEquals(plan.Members.Select(m => m.TaskId))
             || members.Any(m => !TaskDeliveryEvidence.IsImplementationVerified(m, plan)))
             throw new InvalidOperationException("Completion delivery proofs do not qualify its exact members.");
+        if (!await HasCanonicalIntegrationProofsAsync(connection, tx, members, plan, ct))
+            throw new InvalidOperationException("Controller-owned integration verification is missing or mismatched.");
+        await tx.CommitAsync(ct);
         return members;
+    }
+
+    public async Task<bool> HasRecordedIntegrationProofAsync(IssueRecord member, SprintPlan plan, CancellationToken ct = default)
+    {
+        if (member.GetMetadata("trustedIntegrationVerification") is null) return false;
+        await using var connection = await issues.Db.OpenAsync(ct);
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        var present = await HasCanonicalIntegrationProofsAsync(connection, tx, [member], plan, ct);
+        await tx.CommitAsync(ct);
+        return present;
+    }
+
+    private async Task<bool> HasCanonicalIntegrationProofsAsync(System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction tx, IReadOnlyList<IssueRecord> members, SprintPlan plan, CancellationToken ct)
+    {
+        foreach (var member in members)
+        {
+            var projected = member.GetMetadata("trustedIntegrationVerification");
+            if (projected is null) continue;
+            using var proof = JsonDocument.Parse(projected);
+            if (!proof.RootElement.TryGetProperty("ProjectId", out var project) || project.GetString() != issues.ProjectId
+                || project.GetString() != plan.ProjectId || !proof.RootElement.TryGetProperty("VerifiedHeadSha", out var head)) return false;
+            var key = TaskDeliveryEvidence.IntegrationAuthorityKey(issues.ProjectId, member.Id, head.GetString()!);
+            using var read = Command(connection, tx, $"SELECT body FROM {T("memory")} WHERE [key]=@key AND ttl_days IS NULL", ("@key", key));
+            if (await read.ExecuteScalarAsync(ct) as string != projected) return false;
+        }
+        return true;
     }
 
     private static IssueRecord ApplyDeliveryProofs(IssueRecord member, Dictionary<string, JsonElement>? proofs)
@@ -98,8 +139,16 @@ public sealed partial class SprintCompletionStore
             if (!TaskDeliveryEvidence.IsImplementationVerified(revised, plan)) return false;
             if (proofs.Count > 0) additions.Add(original.Id, proofs);
         }
-        var envelope = JsonSerializer.Serialize(new { deliveryReconciliation = new DeliveryReconciliation(plan.Hash, DateTimeOffset.UtcNow, receipt.EvidenceJson, additions) });
-        using var update = Command(connection, tx, $"UPDATE {T("sprint_completion")} SET ready_for_deployment=1,evidence_json=@evidence,updated_at=@now WHERE id=@id",
+        var derived = frozen.Select(m => ApplyDeliveryProofs(m, additions.GetValueOrDefault(m.Id))).ToArray();
+        if (!await HasCanonicalIntegrationProofsAsync(connection, tx, derived, plan, ct)) return false;
+        var originalEvidence = JsonNode.Parse(receipt.EvidenceJson) as JsonObject
+            ?? throw new InvalidOperationException("Completion evidence must retain its original object fields.");
+        if (originalEvidence.ContainsKey("deliveryReconciliation"))
+            throw new InvalidOperationException("Completion delivery reconciliation is already recorded.");
+        originalEvidence["deliveryReconciliation"] = JsonSerializer.SerializeToNode(
+            new DeliveryReconciliation(plan.Hash, DateTimeOffset.UtcNow, receipt.EvidenceJson, additions));
+        var envelope = originalEvidence.ToJsonString();
+        using var update = Command(connection, tx, $"UPDATE {T("sprint_completion")} SET ready_for_deployment=1,evidence_json=@evidence,delivery_note=NULL,updated_at=@now WHERE id=@id",
             ("@evidence", envelope), ("@now", Now()), ("@id", id));
         await update.ExecuteNonQueryAsync(ct);
         await tx.CommitAsync(ct);
