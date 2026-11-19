@@ -94,7 +94,7 @@
                 @foreach (var sp in sprints)
                 {
                     <option value="@sp.Id" selected="@(selected?.Id == sp.Id)">
-                        @(sp.Status == "Active" ? "● " : "")@SprintHeading.Picker(sp) — @sp.Status.ToLowerInvariant()@Dates(sp)
+                        @(sp.Status == "Active" ? "● " : "")@SprintHeading.Picker(selected is not null && selected.Id == sp.Id ? selected : sp) — @sp.Status.ToLowerInvariant()@Dates(sp)
                     </option>
                 }
             </select>
