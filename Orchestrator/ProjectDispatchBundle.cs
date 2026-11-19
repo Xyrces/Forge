@@ -232,7 +232,7 @@ public sealed class ProjectDispatchBundleFactory : IProjectDispatchBundleFactory
         IIssueStore issues, GitHubService gitHub, GitWorktreeService worktrees)
         => _runner is Workers.KubernetesAgentRunner workers
             ? new Workers.IntegratedHeadVerifier(issues, worktrees, gitHub, workers, project.Id,
-                project.VerifyCommands ?? [], _loggerFactory.CreateLogger<Workers.IntegratedHeadVerifier>())
+                project.VerifyCommands, _loggerFactory.CreateLogger<Workers.IntegratedHeadVerifier>())
             : null;
 
     internal Task<bool> VerifyCompletedHeadAsync(ProjectContext project, IssueRecord task, CancellationToken ct)

@@ -77,10 +77,14 @@ internal sealed class VerificationJobEvents(HttpClient cluster, string jobNamesp
         if (attempt is null || attempt.DatasetId != datasetId || attempt.Role != "QA"
             || !attempt.DispatchId.StartsWith("integration-verify-", StringComparison.Ordinal)) return;
 
-        foreach (var kind in new[] { SweepKind.Watch, SweepKind.Assemble })
-            await events.PublishAsync(new SweepTick
-            {
-                MessageId = $"verification-job:{id}:{kind}", ProjectId = attempt.ProjectId, Kind = kind,
-            }, ct);
+        await events.PublishAsync(new PrWatchRequested
+        {
+            MessageId = $"verification-job:{id}:watch", ProjectId = attempt.ProjectId,
+            TaskId = attempt.TaskId, HeadSha = attempt.SourceSha, Reason = "integration-verification-ended",
+        }, ct);
+        await events.PublishAsync(new SweepTick
+        {
+            MessageId = $"verification-job:{id}:assemble", ProjectId = attempt.ProjectId, Kind = SweepKind.Assemble,
+        }, ct);
     }
 }
