@@ -58,6 +58,13 @@ public static class TaskSituation
             _ => "",
         };
         var alsoThreads = openThreads > 0 ? " " + threadSummary : "";
+        if (protection != "ChangesRequested" && bool.TryParse(issue.GetMetadata("reviewHumanProvenancePending"), out var unverifiedHuman) && unverifiedHuman)
+            return Result("Fresh approval required",
+                "Forge could not verify which revision the earlier approval covered. Review the current revision on GitHub and submit a fresh approval." + alsoThreads,
+                humanActor, "action");
+        if (protection != "ChangesRequested" && bool.TryParse(issue.GetMetadata("reviewAutomatedProvenancePending"), out var unverifiedAutomated) && unverifiedAutomated)
+            return Result("Fresh automated review required",
+                "Forge is waiting for its reviewer to verify the current revision." + alsoThreads, "Forge reviewer");
         if (openThreads > 0 && int.TryParse(issue.GetMetadata("reviewConversationInputLimited"), out var limited) && limited > 0)
             return Result("Review discussion needs a participant",
                 "A complete discussion exceeded Forge's review input limit. Review the conversation on GitHub and resolve it when satisfied.",
