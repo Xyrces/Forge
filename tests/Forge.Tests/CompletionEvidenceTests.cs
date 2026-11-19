@@ -20,6 +20,19 @@ public sealed class CompletionEvidenceTests : IDisposable
             return Task.CompletedTask;
         }
     }
+    // Fixture-only injection represents persisted legacy/corrupt projections. Generic writes correctly reject these keys.
+    private async Task<IssueRecord> ProjectLegacyMetadataAsync(IssueRecord task, Dictionary<string, object> fields)
+    {
+        var metadata = System.Text.Json.Nodes.JsonNode.Parse(task.MetadataJson)!.AsObject();
+        foreach (var (key, value) in fields) metadata[key] = JsonSerializer.SerializeToNode(value);
+        await using var connection = await issues.Db.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"UPDATE {issues.Db.Dialect.Table("issue")} SET metadata_json=@json WHERE id=@id";
+        command.AddParam("@json", metadata.ToJsonString()); command.AddParam("@id", task.Id);
+        await command.ExecuteNonQueryAsync();
+        return (await issues.GetAsync(task.Id))!;
+    }
+
     private SprintCompletionStore Store => new(issues);
     private static readonly string Head = new('a', 40);
     private static readonly string Source = new('b', 40);
@@ -205,7 +218,7 @@ public sealed class CompletionEvidenceTests : IDisposable
         var h3 = new string('e', 40);
         var proof = new IntegratedHeadVerificationEvidence(task.Id, "project", "https://github.com/owner/repo", 10,
             Head, h3, "attempt", Source, new("new-attempt", new string('f', 40), new string('d', 64), DateTimeOffset.UtcNow));
-        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+        task = await ProjectLegacyMetadataAsync(task, new Dictionary<string, object>
         {
             ["trustedIntegrationVerification"] = JsonSerializer.Serialize(proof),
             ["observedMerge"] = JsonSerializer.Serialize(new ObservedMergeEvidence(task.Id, 10, h3, Source, DateTimeOffset.UtcNow))
@@ -250,7 +263,7 @@ public sealed class CompletionEvidenceTests : IDisposable
         var before = (await Store.GetAsync(receipt.Id))!;
         await Store.RecordImplementationWaitAsync(receipt.Id, "Awaiting exact head");
         Assert.Equal(before.UpdatedAt, (await Store.GetAsync(receipt.Id))!.UpdatedAt);
-        task = await issues.TransitionAsync(task.Id, IssueStatus.Completed, null, new Dictionary<string, object>
+        task = await ProjectLegacyMetadataAsync(task, new Dictionary<string, object>
         {
             ["trustedIntegrationVerification"] = JsonSerializer.Serialize(new
             {
