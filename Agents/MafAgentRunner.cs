@@ -383,7 +383,11 @@ public async Task<AgentRunResult> RunAsync(
         // (project, task, role) when one exists — rework rounds AND
         // plain retries come back warm instead of cold. Junk in the
         // store degrades to a fresh session (logged).
-        var sessionKey = SessionKey(projectId, runTaskId, role);
+        var sessionKey = SessionKey(projectId, runTaskId, role, ResolveContextString(context, "sourceSha"));
+        // Review history is evidence for one exact revision, never reusable task-wide context.
+        // Raw/legacy explicit sessions have no authenticated source binding. Resume only the
+        // current revision's own stored session; leave older transcripts untouched for audit.
+        if (role == AgentType.Reviewer) sessionId = null;
         var resumedSession = false;
         var session = await DeserializeSessionAsync(agent, sessionId, ct);
         if (session is null && sessionId is null && sessionKey is not null)
@@ -1363,10 +1367,14 @@ public async Task<AgentRunResult> RunAsync(
     /// Null when there's no task id — untasked runs (groomer,
     /// designer, intake) don't persist sessions.
     /// </summary>
-    internal static string? SessionKey(string? projectId, string? taskId, AgentType role)
-        => string.IsNullOrWhiteSpace(taskId)
-            ? null
-            : $"session/{(string.IsNullOrWhiteSpace(projectId) ? "_" : projectId)}/{taskId}/{role}";
+    internal static string? SessionKey(string? projectId, string? taskId, AgentType role, string? sourceSha = null)
+    {
+        if (string.IsNullOrWhiteSpace(taskId)) return null;
+        var key = $"session/{(string.IsNullOrWhiteSpace(projectId) ? "_" : projectId)}/{taskId}/{role}";
+        if (role != AgentType.Reviewer) return key;
+        return sourceSha is not null && System.Text.RegularExpressions.Regex.IsMatch(sourceSha, "\\A[0-9a-f]{40}\\z")
+            ? key + "/" + sourceSha : null;
+    }
 
     /// <summary>
     /// Serialize the run's MAF session and persist it under the

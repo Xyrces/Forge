@@ -258,11 +258,45 @@ public class MafAgentRunnerSessionTests : IDisposable
     {
         Assert.Equal("session/porthorizon/task-1/CoreDev",
             MafAgentRunner.SessionKey("porthorizon", "task-1", AgentType.CoreDev));
-        Assert.Equal("session/_/task-1/Reviewer",
-            MafAgentRunner.SessionKey(null, "task-1", AgentType.Reviewer));
-        Assert.Equal("session/_/task-1/Reviewer",
-            MafAgentRunner.SessionKey("  ", "task-1", AgentType.Reviewer));
+        Assert.Null(MafAgentRunner.SessionKey(null, "task-1", AgentType.Reviewer));
+        Assert.Null(MafAgentRunner.SessionKey("  ", "task-1", AgentType.Reviewer));
+        Assert.Equal("session/_/task-1/Reviewer/" + new string('a', 40),
+            MafAgentRunner.SessionKey(null, "task-1", AgentType.Reviewer, new string('a', 40)));
         Assert.Null(MafAgentRunner.SessionKey("porthorizon", null, AgentType.CoreDev));
+    }
+
+    [Fact]
+    public async Task ReviewerResumesOnlyExactHeadAndPreservesOlderHistory()
+    {
+        var context = ContextFor("review-task");
+        var h2 = new string('a', 40);
+        var h3 = new string('b', 40);
+        context["sourceSha"] = h2;
+        var first = await NewRunner(new EchoClient()).RunAsync(AgentType.Reviewer,
+            "H2_ONLY_OLD_EVIDENCE", null, context, CancellationToken.None);
+        var h2Stored = await _memory.GetAsync(first.SessionId!);
+        Assert.NotNull(h2Stored);
+        // A legacy task-wide blob is retained, but never imported into a newly pinned review.
+        var legacyKey = first.SessionId![..^(h2.Length + 1)];
+        await _memory.RememberAsync(legacyKey, h2Stored!.Body);
+        context["sourceSha"] = h3;
+        var fresh = new EchoClient();
+        var h3Result = await NewRunner(fresh).RunAsync(AgentType.Reviewer,
+            "H3_CURRENT_EVIDENCE", h2Stored.Body, context, CancellationToken.None);
+        Assert.False(fresh.SawText("H2_ONLY_OLD_EVIDENCE"));
+        Assert.NotEqual(first.SessionId, h3Result.SessionId);
+        var retry = new EchoClient();
+        await NewRunner(retry).RunAsync(AgentType.Reviewer, "H3_RETRY", null, context, CancellationToken.None);
+        Assert.True(retry.SawText("H3_CURRENT_EVIDENCE"));
+        Assert.False(retry.SawText("H2_ONLY_OLD_EVIDENCE"));
+        Assert.Equal(h2Stored, await _memory.GetAsync(first.SessionId));
+        Assert.Equal(h2Stored.Body, (await _memory.GetAsync(legacyKey))!.Body);
+        context.Remove("sourceSha");
+        var unpinned = new EchoClient();
+        var unpinnedResult = await NewRunner(unpinned).RunAsync(AgentType.Reviewer,
+            "UNPINNED", h2Stored.Body, context, CancellationToken.None);
+        Assert.False(unpinned.SawText("H2_ONLY_OLD_EVIDENCE"));
+        Assert.Null(unpinnedResult.SessionId);
     }
 
     private sealed class SingleFactory : IChatClientFactory

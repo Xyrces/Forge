@@ -454,6 +454,7 @@ public sealed class ReviewerDispatcher
             var runnerContext = new Dictionary<string, object>
             {
                 ["issueId"] = task.Id,
+                ["sourceSha"] = headSha,
             };
             if (!string.IsNullOrWhiteSpace(_projectId))
             {
