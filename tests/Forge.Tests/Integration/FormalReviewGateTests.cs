@@ -49,6 +49,10 @@ public sealed class FormalReviewGateTests : IDisposable
         public GitHub() : base("owner", "repo") { }
         public override string? ReviewerLogin => "reviewer[bot]";
         public int Reads, Merges;
+        public MergeRequirements Requirements = new("CLEAN", []);
+        public bool MergeRequirementsUnavailable;
+        public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
+            => MergeRequirementsUnavailable ? Task.FromException<MergeRequirements>(new IOException("unavailable")) : Task.FromResult(Requirements);
         public ProtectionReviewDecision Protection = ProtectionReviewDecision.NotRequired;
         public bool ProtectionUnavailable;
         public Action? OnMerge;
@@ -72,9 +76,15 @@ public sealed class FormalReviewGateTests : IDisposable
         public override Task<string> GetReviewReworkContextAsync(int number, IReadOnlyList<FormalDecision> requests, CancellationToken ct = default) => Task.FromResult("original human finding");
         public override Task<IReadOnlyList<FormalDecision>> GetAuthorizedDecisionsAsync(int number, string? author, CancellationToken ct = default) => Task.FromResult(Decisions(++Reads));
         public override Task<CommitState> GetCommitStatusAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult(sha == "base" ? CommitState.Success : Ci);
+        public override Task<int> GetCiSignalCountAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult(1);
         public override Task<string> GetBranchHeadShaAsync(string branch, CancellationToken cancellationToken = default) => Task.FromResult("base");
         public override Task<IReadOnlyList<string>> GetFailedCheckRunSummariesAsync(string sha, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>(["test failure"]);
-        public override Task<bool> MergePullRequestAsync(int number, CancellationToken cancellationToken = default, string? expectedHeadSha = null) { Merges++; OnMerge?.Invoke(); return Task.FromResult(false); }
+        public override Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int number, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        {
+            Merges++;
+            OnMerge?.Invoke();
+            return Task.FromResult(new PullRequestMergeAttempt(false, "Merge queue is required."));
+        }
         public override Task<IReadOnlyList<PullRequestReview>> GetReviewsAsync(int number, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<PullRequestReview>>([]);
     }
     private static FormalDecision Decision(string user, bool bot, PullRequestReviewState state, string head = "head", long id = 1) => new(user, head, state, bot, id, "finding", "url");
@@ -87,6 +97,79 @@ public sealed class FormalReviewGateTests : IDisposable
         var task = await _issues.CreateAsync(new NewIssue(Type: "task", Title: "review", Metadata: new Dictionary<string, object>
         { ["prNumber"] = "42", ["branch"] = "branch", ["reviewVerdict"] = "Approve", ["reviewSha"] = "head" }));
         return await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null);
+    }
+
+    [Theory]
+    [InlineData("BLOCKED")] [InlineData("UNKNOWN")] [InlineData("DRAFT")]
+    public async Task ExternalRequirementsWaitWithoutMergingOrConsumingEngineeringAttempts(string state)
+    {
+        var github = new GitHub { Requirements = new(state, []) };
+        var task = await Seed();
+        for (var i = 0; i < 4; i++)
+            Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        Assert.Equal(0, github.Merges);
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.Null(current.GetMetadata("reworkAttempts"));
+        Assert.Equal(state, current.GetMetadata("reviewMergeState"));
+        Assert.Equal("False", current.GetMetadata("awaitingHumanReview"));
+    }
+
+    [Fact]
+    public async Task UnresolvedThreadsHoldMergeAndResumeWhenResolved()
+    {
+        var github = new GitHub { Requirements = new("CLEAN",
+            [new("thread", false, true, "File.cs", "human", "comment", false, "Please verify")]) };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(0, github.Merges);
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("1", current.GetMetadata("reviewUnresolvedThreads"));
+        Assert.Equal("1", current.GetMetadata("reviewHumanThreads"));
+        Assert.Null(current.GetMetadata("reworkAttempts"));
+        github.Requirements = new("CLEAN", []);
+        await Watch(github).PollWatchedTaskAsync(current);
+        Assert.Equal(1, github.Merges);
+        Assert.Equal("0", (await _issues.GetAsync(task.Id))!.GetMetadata("reviewUnresolvedThreads"));
+    }
+
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public async Task RequiredBranchUpdateUsesExistingReworkOnce(bool humanHold)
+    {
+        var github = new GitHub { Requirements = new("BEHIND", []), Label = humanHold, Ci = humanHold ? CommitState.Pending : CommitState.Success };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Reworking, await Watch(github).PollWatchedTaskAsync(task));
+        var changed = (await _issues.GetAsync(task.Id))!;
+        Assert.Contains("up-to-date", changed.GetMetadata("reworkReason"));
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(changed));
+        Assert.Equal("0", (await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+        Assert.Equal(0, github.Merges);
+    }
+
+    [Fact]
+    public async Task FailedMergeRefreshesNewThreadGateWithoutAnotherEngineeringStrike()
+    {
+        var github = new GitHub();
+        github.OnMerge = () => github.Requirements = new("BLOCKED",
+            [new("thread", false, true, "File.cs", "human", "comment", false, "New comment")]);
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(1, github.Merges);
+        var changed = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal("1", changed.GetMetadata("reviewUnresolvedThreads"));
+        Assert.Null(changed.GetMetadata("reworkAttempts"));
+        await Watch(github).PollWatchedTaskAsync(changed);
+        Assert.Equal(1, github.Merges);
+    }
+
+    [Fact]
+    public async Task UnavailableMergeRequirementReadRetainsWatchWithoutMerging()
+    {
+        var github = new GitHub { MergeRequirementsUnavailable = true };
+        var task = await Seed();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Equal(0, github.Merges);
+        Assert.Equal("Unavailable", (await _issues.GetAsync(task.Id))!.GetMetadata("reviewMergeState"));
     }
 
     [Fact]
@@ -377,6 +460,72 @@ public sealed class FormalReviewGateTests : IDisposable
         Assert.Null(await Watch(github).TryResumeMergeableBlockedAsync(task));
         Assert.Equal(IssueStatus.Blocked, (await _issues.GetAsync(task.Id))!.Status);
         Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("autoResumeAttempts"));
+    }
+
+    [Fact]
+    public async Task CleanSnapshotWithMergeRefusalShowsReasonAndBacksOffOnlyTheWrite()
+    {
+        var github = new GitHub();
+        var watcher = Watch(github);
+        var task = await Seed();
+        await watcher.PollWatchedTaskAsync(task);
+        var refused = (await _issues.GetAsync(task.Id))!;
+        var situation = TaskSituation.Describe(refused);
+        Assert.Equal("GitHub declined the merge", situation.Label);
+        Assert.Equal("Merge queue is required.", situation.Text);
+        var reads = github.Reads;
+        await watcher.PollWatchedTaskAsync(refused);
+        Assert.Equal(1, github.Merges);
+        Assert.True(github.Reads > reads);
+        await _issues.PatchReviewMetadataAsync(task.Id, new Dictionary<string, object>
+        { ["reviewMergeRetryAfter"] = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("O") }, null);
+        await watcher.PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!);
+        Assert.Equal(2, github.Merges);
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reworkAttempts"));
+    }
+
+    [Fact]
+    public async Task ReleasingLongExternalGateKeepsWatchLiveAndDoesNotChargeHumanWait()
+    {
+        var task = await Seed();
+        var before = DateTimeOffset.UtcNow.AddDays(-2);
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object>
+        {
+            ["prOpenedAt"] = before.ToString("O"),
+            ["reviewExternalWaitStartedAt"] = before.AddMinutes(2).ToString("O")
+        });
+        var github = new GitHub();
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.Equal(1, github.Merges);
+        Assert.True(ReviewWaitTiming.ExternalSeconds(current) > 86400);
+        Assert.Equal(0, ReviewWaitTiming.CompletedSeconds(current));
+    }
+
+    [Theory]
+    [InlineData(true)] [InlineData(false)]
+    public async Task ExternalGateWaitStopsWhileWorkerOrCiStillHasWork(bool workerActive)
+    {
+        var task = await Seed();
+        var github = new GitHub { Requirements = new("BLOCKED", []), Ci = workerActive ? CommitState.Success : CommitState.Pending };
+        await _issues.TransitionAsync(task.Id, IssueStatus.InProgress, null, new Dictionary<string, object>
+        { ["reviewExternalWaitStartedAt"] = DateTimeOffset.UtcNow.AddMinutes(-5).ToString("O") });
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github, workerActive).PollWatchedTaskAsync((await _issues.GetAsync(task.Id))!));
+        var current = (await _issues.GetAsync(task.Id))!;
+        Assert.NotNull(current.GetMetadata("reviewExternalWaitEndedAt"));
+        var measured = ReviewWaitTiming.ExternalSeconds(current);
+        await Watch(github, workerActive).PollWatchedTaskAsync(current);
+        Assert.Equal(measured, ReviewWaitTiming.ExternalSeconds((await _issues.GetAsync(task.Id))!));
+    }
+
+    [Fact]
+    public async Task AutomatedThreadReconciliationDoesNotStartExternalGateTimer()
+    {
+        var task = await Seed();
+        var github = new GitHub { Requirements = new("BLOCKED",
+            [new("thread", false, true, "File.cs", "reviewer[bot]", "comment", false, "Review concern")]) };
+        Assert.Equal(PRWatcher.WatchPollOutcome.Pending, await Watch(github).PollWatchedTaskAsync(task));
+        Assert.Null((await _issues.GetAsync(task.Id))!.GetMetadata("reviewExternalWaitStartedAt"));
     }
 
     [Fact]

@@ -2,9 +2,34 @@ import { capture } from './capture.mjs';
 // Import into the Linux browser runner after opening an authenticated Forge UI.
 // Routes are fixtures only; no service state is changed by this qualification.
 import assert from 'node:assert/strict';
+async function verifyActiveSprintLabel(page, width) {
+  const label = page.locator('.app-active-sprint');
+  await label.waitFor({state:'visible'});
+  const text = await label.innerText();
+  assert.equal(await label.getAttribute('title'), 'Active sprint: ' + text);
+  const geometry = await label.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    return {
+      left: bounds.left, right: bounds.right,
+      top: bounds.top, bottom: bounds.bottom,
+      lines: [...range.getClientRects()].map(line => ({
+        left: line.left, right: line.right, top: line.top, bottom: line.bottom,
+      })),
+      clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+    };
+  });
+  assert.ok(geometry.left >= 0 && geometry.right <= width, 'Active sprint label fits viewport');
+  assert.ok(geometry.scrollHeight <= geometry.clientHeight + 1, 'Active sprint text is not vertically clipped');
+  for (const line of geometry.lines) {
+    assert.ok(line.left >= geometry.left && line.right <= geometry.right + 1, 'Sprint text fits horizontally');
+    assert.ok(line.top >= geometry.top && line.bottom <= geometry.bottom + 1, 'Each sprint name line fits vertically');
+  }
+}
 export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, screenshotDir = null, nominatedHuman = null } = {}) {
   const projectId = 'forge';
-  const sprint = { id:'ux-fixture', name:'Review the dashboard change', goal:'## Goal\nKeep production clean.\n\n- Preserve development tooling.', status:'Active', startDate:'2026-11-17T00:00:00Z' };
+  const sprint = { id:'ux-fixture', name:'Review the dashboard change and qualify the protected pull request workflow across desktop and mobile', goal:'## Goal\nKeep production clean.\n\n- Preserve development tooling.', status:'Active', startDate:'2026-11-17T00:00:00Z' };
   const states = ['Pending','AgentRunning','PROpen','PROpen','Merged'];
   const members = states.map((state,i) => ({ id:`fixture-${i}`, title:`Task ${i+1}: verify a long title remains readable inside its lane without clipping`, type:'ui', status:i===4?'Completed':i===0?'Pending':'InProgress', state, priority:2, assignee:i===1?'worker':null, prNumber:null, reworkAttempts:i===4?'2':null, boosted:false, blockerCount:0, blockedBy:[], situation:i===1?'Responding to a recorded review finding.':'Fixture evidence', situationTone:'muted', label:['Ready for work','Making a requested change','Review in progress','Waiting for human review','Merged'][i], nextActor:i===3?(nominatedHuman?'@'+nominatedHuman:'Human reviewer'):'Forge', nominatedHuman, humanReviewTaskHold:i===3, humanReviewRequired:i===3, awaitingHumanReview:i===3 }));
   const completion={receipt:{id:'synthetic-completion',projectId,sprintId:sprint.id,outcome:'PendingEvidence',bookkeepingState:'Completed',readyForDeployment:false,deploymentStatus:'Pending',deliveryNote:'Synthetic active-sprint fixture: one change merged; deployment and browser observation remain pending.'},batches:[],criteria:[{id:'code',text:'Keep production free of development-tool requests',evidenceKind:'MergedAndVerified'},{id:'browser',text:'Confirm the deployed dashboard opens without missing-script requests',evidenceKind:'OperatorObserved',proofReference:null}],nextCursor:null};
@@ -12,12 +37,14 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
   const previousWrites = fixtureApi ? (await (await page.request.get(`${fixtureApi}/__writes`)).json()).length : 0;
   if (fixtureApi) {
     await page.request.put(`${fixtureApi}/__fixtures`, {data:{
+      '/api/sprints/active':sprint,
       '/api/sprints/summary':{projectId,generatedAt:new Date().toISOString(),active:sprint,total:1,history:[],nextCursor:null},
       '/api/sprints/board':{projectId,generatedAt:new Date().toISOString(),sprint,total:5,done:1,members,nextCursor:null},
       '/api/sprints/ux-fixture/completion':completion,
       '/api/tasks/fixture-1/human-review':{required:false,syncPending:false,mode:'Automated'}
     }});
   } else {
+  await page.route('**/api/sprints/active**', route => route.fulfill({json:sprint}));
   await page.route('**/api/sprints/summary?**', route => route.fulfill({json:{projectId,generatedAt:new Date().toISOString(),active:sprint,total:1,history:[],nextCursor:null}}));
   await page.route('**/api/sprints/board?**', route => route.fulfill({json:{projectId,generatedAt:new Date().toISOString(),sprint,total:5,done:1,members,nextCursor:null}}));
   await page.route('**/api/sprints/ux-fixture/completion?**', route => route.fulfill({json:completion}));
@@ -48,6 +75,7 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
     assert.ok(card.x>=bounds.x && card.x+card.width<=bounds.x+bounds.width+1,'Card fits lane');
   }
   assert.ok(await page.locator('.app-nav').isVisible(),'Desktop sidebar is open during bounds check');
+  await verifyActiveSprintLabel(page, 1280);
   await lanes.first().scrollIntoViewIfNeeded();
   const tops=await lanes.evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().top));
   assert.ok(Math.max(...tops)-Math.min(...tops)<2,'All desktop lanes share a row');
@@ -63,6 +91,7 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
   assert.equal(holdWrites,1);
   assert.ok(await page.getByRole('region',{name:'Running',exact:true}).getByText('Task 2:',{exact:false}).isVisible());
   await page.setViewportSize({width:390,height:844});
+  await verifyActiveSprintLabel(page, 390);
   const picker=page.getByLabel('Task lane');
   for(const lane of ['Queued','Running','Review','Needs you','Completed / closed']) {
     await picker.selectOption({label:`${lane} (1)`});
@@ -75,8 +104,33 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
     assert.ok(card.x>=0 && card.x+card.width<=390,'Phone card fits');
     if(screenshotDir) await capture(page,{path:`${screenshotDir}/board-390-${lane.replace(/[^a-z]/gi,'-')}.png`,fullPage:true});
   }
-  await page.reload();
-  await picker.waitFor();
-  assert.equal(await picker.inputValue(),'Completed / closed');
-  assert.equal(await page.locator('.sprint-lane:visible .sprint-task__status').innerText(),'Merged');
+  // Delay restoration interop to expose background refresh overwriting saved state.
+  const scrollBeforeReload = await page.locator('.app-main').evaluate(e => e.scrollTop);
+  await page.waitForFunction(expected => {
+    const saved = JSON.parse(sessionStorage.getItem('forge:sprint-board:forge') || 'null');
+    return saved?.lane === 'Completed / closed' && Math.abs(saved.scroll - expected) < 2;
+  }, scrollBeforeReload);
+  const delayRestore = async route => {
+    const response = await route.fetch();
+    const original = await response.text();
+    assert.ok(original.includes('export function begin(p) {'), 'Delay targets actual restoration entry point');
+    await route.fulfill({response, body:original.replace('export function begin(p) {',
+      'export async function begin(p) { await new Promise(resolve => setTimeout(resolve, 500));')});
+  };
+  await page.route('**/sprint-board.js', delayRestore);
+  try {
+    await page.reload();
+    await picker.waitFor();
+    await page.waitForFunction(() => document.querySelector('#sprint-lane')?.value === 'Completed / closed');
+    assert.equal(await picker.inputValue(),'Completed / closed');
+    assert.equal(await page.locator('.sprint-lane:visible').count(),1);
+    assert.equal(await page.locator('.sprint-lane:visible .sprint-task__status').innerText(),'Merged');
+    await page.waitForFunction(expected => {
+      const main = document.querySelector('.app-main');
+      return main && Math.abs(main.scrollTop - Math.min(expected, main.scrollHeight - main.clientHeight)) < 2;
+    }, scrollBeforeReload);
+    const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('forge:sprint-board:forge')));
+    assert.equal(saved.lane,'Completed / closed');
+    assert.ok(Math.abs(saved.scroll - scrollBeforeReload) < 2, 'Reload preserves saved inner scroll');
+  } finally { await page.unroute('**/sprint-board.js', delayRestore); }
 }

@@ -64,6 +64,16 @@ public sealed class LocalGitHubService : GitHubService
     public override Task<ProtectionReviewDecision> GetProtectionReviewDecisionAsync(int number, string head, CancellationToken ct = default)
         => Task.FromResult(ProtectionReviewDecision.NotRequired);
 
+    public override Task<MergeRequirements> GetMergeRequirementsAsync(int number, string head, CancellationToken ct = default)
+        => Task.FromResult(new MergeRequirements("CLEAN", []));
+
+    public override Task<IReadOnlyList<ReviewConversation>> GetReviewConversationInputsAsync(
+        IReadOnlyList<ReviewConversation> observations, string head, CancellationToken ct = default)
+        => Task.FromResult(observations);
+
+    public override Task<IReadOnlyDictionary<string, string>> ResolveReviewedConversationsAsync(int number, ReviewDraft draft, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
+
     public override Task<bool> HasHumanReviewLabelAsync(int number, CancellationToken ct = default)
         => Task.FromResult(_prStore.HumanReviewLabels.ContainsKey(number));
 
@@ -135,7 +145,10 @@ public sealed class LocalGitHubService : GitHubService
         return _prStore.CreatePr(title, body, headBranch, baseBranch, sha);
     }
 
-    public override Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+    public override async Task<bool> MergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
+        => (await TryMergePullRequestAsync(prNumber, cancellationToken, expectedHeadSha)).Merged;
+
+    public override Task<PullRequestMergeAttempt> TryMergePullRequestAsync(int prNumber, CancellationToken cancellationToken = default, string? expectedHeadSha = null)
     {
         // P4 e2e-harness C2: when the PRWatcher reaches the
         // GreenAndApproved verdict, the orchestrator's
@@ -144,9 +157,9 @@ public sealed class LocalGitHubService : GitHubService
         if (expectedHeadSha is not null
             && (!_prStore.PrInfo.TryGetValue(prNumber, out var info)
                 || _prStore.GetBranchSha(info.HeadBranch) != expectedHeadSha))
-            return Task.FromResult(false);
+            return Task.FromResult(new PullRequestMergeAttempt(false, "The PR head changed."));
         _prStore.MarkMerged(prNumber);
-        return Task.FromResult(true);
+        return Task.FromResult(new PullRequestMergeAttempt(true));
     }
 
     public override Task<PullRequest> ClosePullRequestAsync(int prNumber, CancellationToken cancellationToken = default)

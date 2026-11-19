@@ -1,4 +1,6 @@
 let project = null;
+let workspace = null;
+const currentWorkspace = () => document.querySelector('.sprint-workspace, .task-list-workspace');
 let restoring = false;
 let restoreGeneration = 0;
 let tabFocusPending = false;
@@ -13,7 +15,9 @@ export function remember(p, sprintId, lane, memberCursor, historyCursor, memberP
     catch { /* Storage can be disabled; board remains usable without saved navigation. */ }
 }
 function saveScroll(rememberFocus = true) {
-    if (restoring || !project || !document.querySelector('.sprint-workspace, .task-list-workspace')) return;
+    // A newly mounted route can emit layout scrolls before its begin() interop.
+    // It must not overwrite the previous route's saved position.
+    if (restoring || !project || !workspace || currentWorkspace() !== workspace) return;
     const main = document.querySelector('.app-main');
     const focusHref = rememberFocus && document.activeElement?.closest('.sprint-workspace a, .task-list-workspace a')?.getAttribute('href');
     try { sessionStorage.setItem(key(project), JSON.stringify({ ...read(project), ...(!rememberFocus ? {focusHref: null} : focusHref ? {focusHref} : {}), scroll: main?.scrollTop || 0, windowScroll: window.scrollY })); }
@@ -37,7 +41,7 @@ export function restoreScroll(p) {
     });
 }
 export function cancelRestore() { ++restoreGeneration; restoring = false; saveScroll(false); }
-export function begin(p) { ++restoreGeneration; project = p; restoring = true; return read(p); }
+export function begin(p) { ++restoreGeneration; workspace = currentWorkspace(); project = p; restoring = true; return read(p); }
 export function rememberList(p, view, search, pages) {
     project = p;
     try { sessionStorage.setItem(key(p), JSON.stringify({ ...read(p), view, search, pages })); }

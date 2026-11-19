@@ -435,43 +435,54 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var loop = orch.ExecuteAsync(cts.Token);
-        await WaitForAsync(() => Task.FromResult(runner.Escalated429d), TimeSpan.FromSeconds(15));
-        await WaitForAsync(async () =>
-            (await _issues.GetAsync(esc.Id))!.Status == IssueStatus.Pending, TimeSpan.FromSeconds(10));
-
-        // A normal dev task enters mid-cooldown for the escalated
-        // model — it claims immediately on the normal model.
-        var normal = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "normal", Description: "x",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        await AddApprovedMemberAsync(sprintId, normal.Id);
-        await WaitForAsync(async () =>
+        try
         {
-            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            // Amendment snapshots include current members. Wait for the normal run's
-            // final metadata writes and slot release instead of racing its InProgress row.
-            var normalAfter = (await _issues.GetAsync(normal.Id))!;
-            // The scripted no-op has no independent acceptance proof. Its bounded
-            // no-progress outcome still proves the normal model was not cooled.
-            return normalAfter.Status != IssueStatus.InProgress && normalAfter.GetMetadata("noProgressAttempts") is not null
-                && normalAfter.GetMetadata("modelResponse") is not null && slots.InFlight("test", "coredev") == 0;
-        }, TimeSpan.FromSeconds(15));
+            await WaitForAsync(() => Task.FromResult(runner.Escalated429d), TimeSpan.FromSeconds(15));
+            await WaitForAsync(async () =>
+                (await _issues.GetAsync(esc.Id))!.Status == IssueStatus.Pending, TimeSpan.FromSeconds(10));
 
-        // Keep this test about model cooldown, not subsequent no-progress retries.
-        await _issues.TransitionAsync(normal.Id, IssueStatus.Blocked, "fixture operator parks unverified no-op");
+            // A normal dev task enters mid-cooldown for the escalated
+            // model — it claims immediately on the normal model.
+            var normal = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "normal", Description: "x",
+                Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+            await AddApprovedMemberAsync(sprintId, normal.Id);
+            await WaitForAsync(async () =>
+            {
+                if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
+                // Amendment snapshots include current members. Wait for the normal run's
+                // final metadata writes and slot release instead of racing its InProgress row.
+                var normalAfter = (await _issues.GetAsync(normal.Id))!;
+                // The scripted no-op has no independent acceptance proof. Its bounded
+                // no-progress outcome still proves the normal model was not cooled.
+                return normalAfter.Status != IssueStatus.InProgress && normalAfter.GetMetadata("noProgressAttempts") is not null
+                    && normalAfter.GetMetadata("modelResponse") is not null && slots.InFlight("test", "coredev") == 0;
+            }, TimeSpan.FromSeconds(15), async () =>
+            {
+                var current = (await _issues.GetAsync(normal.Id))!;
+                return $"normal status={current.Status}, noProgressAttempts={current.GetMetadata("noProgressAttempts")}, "
+                    + $"modelResponsePresent={current.GetMetadata("modelResponse") is not null}, "
+                    + $"lastError={current.GetMetadata("lastError")}, coredevSlots={slots.InFlight("test", "coredev")}, loop={loop.Status}";
+            });
 
-        // A SECOND escalated task is held by the escalated-model
-        // cooldown (the marker is still unconsumed, so its cooldown
-        // key is the escalated model).
-        var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-waits", Description: "x",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        // Install the routing marker before membership admission can wake dispatch.
-        await markers.WriteAsync("test", esc2.Id, "escalate 2");
-        await AddApprovedMemberAsync(sprintId, esc2.Id);
-        await Task.Delay(2500);
-        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
+            // Keep this test about model cooldown, not subsequent no-progress retries.
+            await _issues.TransitionAsync(normal.Id, IssueStatus.Blocked, "fixture operator parks unverified no-op");
 
-        cts.Cancel();
-        try { await loop; } catch (OperationCanceledException) { }
+            // A SECOND escalated task is held by the escalated-model
+            // cooldown (the marker is still unconsumed, so its cooldown
+            // key is the escalated model).
+            var esc2 = await _issues.CreateAsync(new NewIssue(Type: DevTaskType, Title: "esc-waits", Description: "x",
+                Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+            // Install the routing marker before membership admission can wake dispatch.
+            await markers.WriteAsync("test", esc2.Id, "escalate 2");
+            await AddApprovedMemberAsync(sprintId, esc2.Id);
+            await Task.Delay(2500);
+            Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(esc2.Id))!.Status);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await loop; } catch (OperationCanceledException) { }
+        }
     }
 
     private sealed class ContextCapturingRunner : IAgentRunner
@@ -521,41 +532,52 @@ public sealed class OrchestratorAgentTests : IDisposable
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var loop = orch.ExecuteAsync(cts.Token);
-        await WaitForAsync(() => Task.FromResult(runner.CoreDev429d), TimeSpan.FromSeconds(15));
-        await WaitForAsync(async () =>
-            (await _issues.GetAsync(dev.Id))!.Status == IssueStatus.Pending, TimeSpan.FromSeconds(10));
-
-        // NOW a kimi-k3 task enters the sprint — mid-cooldown for
-        // minimax. A global cooldown would hold it for 3 minutes;
-        // per-model lets it claim immediately.
-        var ui = await _issues.CreateAsync(new NewIssue(Type: "ui", Title: "ui task", Description: "x",
-            Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
-        await AddApprovedMemberAsync(sprintId, ui.Id);
-
-        await WaitForAsync(async () =>
+        try
         {
-            if (loop.IsFaulted) Assert.Fail($"dispatch loop faulted: {loop.Exception?.GetBaseException()}");
-            return (await _issues.GetAsync(ui.Id))!.Status is IssueStatus.InProgress or IssueStatus.Completed;
-        }, TimeSpan.FromSeconds(15));
-        // The minimax task must NOT have been reclaimed in the meantime.
-        Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(dev.Id))!.Status);
+            await WaitForAsync(() => Task.FromResult(runner.CoreDev429d), TimeSpan.FromSeconds(15));
+            await WaitForAsync(async () =>
+                (await _issues.GetAsync(dev.Id))!.Status == IssueStatus.Pending, TimeSpan.FromSeconds(10));
 
-        cts.Cancel();
-        try { await loop; } catch (OperationCanceledException) { }
+            // NOW a kimi-k3 task enters the sprint — mid-cooldown for
+            // minimax. A global cooldown would hold it for 3 minutes;
+            // per-model lets it claim immediately.
+            var ui = await _issues.CreateAsync(new NewIssue(Type: "ui", Title: "ui task", Description: "x",
+                Metadata: new Dictionary<string, object> { ["groomed"] = "true" }));
+            await AddApprovedMemberAsync(sprintId, ui.Id);
+
+            // Observe actual runner entry, holding the role in flight so polling cannot
+            // miss a short InProgress state before the unverified no-op requeues.
+            Assert.Equal(AgentType.ClientDev, await runner.OtherRoleEntered.Task.WaitAsync(TimeSpan.FromSeconds(15)));
+            Assert.Equal(IssueStatus.InProgress, (await _issues.GetAsync(ui.Id))!.Status);
+            Assert.Equal(IssueStatus.Pending, (await _issues.GetAsync(dev.Id))!.Status);
+            Assert.Equal(1, runner.CoreDevCalls); // The cooled model was not invoked again.
+        }
+        finally
+        {
+            cts.Cancel();
+            runner.ReleaseOtherRole.TrySetResult();
+            try { await loop; } catch (OperationCanceledException) { }
+        }
     }
 
     private sealed class CoreDevRateLimitedRunner : IAgentRunner
     {
         public volatile bool CoreDev429d;
-        public Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
-            => role == AgentType.CoreDev
-                ? Throw429()
-                : Task.FromResult(new AgentRunResult("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1)));
-        private Task<AgentRunResult> Throw429()
+        private int _coreDevCalls;
+        public int CoreDevCalls => Volatile.Read(ref _coreDevCalls);
+        public TaskCompletionSource<AgentType> OtherRoleEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseOtherRole { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<AgentRunResult> RunAsync(AgentType role, string prompt, string? sessionId, IReadOnlyDictionary<string, object>? context, CancellationToken ct)
         {
-            CoreDev429d = true;
-            return Task.FromException<AgentRunResult>(
-                new HttpRequestException("Error 429 Too Many Requests: rate limit reached"));
+            if (role == AgentType.CoreDev)
+            {
+                Interlocked.Increment(ref _coreDevCalls);
+                CoreDev429d = true;
+                throw new HttpRequestException("Error 429 Too Many Requests: rate limit reached");
+            }
+            OtherRoleEntered.TrySetResult(role);
+            await ReleaseOtherRole.Task.WaitAsync(ct);
+            return new AgentRunResult("done. NO_CHANGES_NEEDED", null, 1, 1, TimeSpan.FromMilliseconds(1));
         }
     }
 
@@ -1021,7 +1043,7 @@ public sealed class OrchestratorAgentTests : IDisposable
         try { await loop; } catch (OperationCanceledException) { }
     }
 
-    private static async Task WaitForAsync(Func<Task<bool>> cond, TimeSpan timeout)
+    private static async Task WaitForAsync(Func<Task<bool>> cond, TimeSpan timeout, Func<Task<string>>? diagnostics = null)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
@@ -1029,7 +1051,7 @@ public sealed class OrchestratorAgentTests : IDisposable
             if (await cond()) return;
             await Task.Delay(100);
         }
-        Assert.Fail("condition not met within timeout");
+        Assert.Fail("condition not met within timeout" + (diagnostics is null ? "" : ": " + await diagnostics()));
     }
 
     [Fact]

@@ -81,10 +81,12 @@ public class LocalGitHubServiceOverrideTests
             "GetCompareDiffAsync",
             "GetFailedCheckRunSummariesAsync",
             "GetIssueCommentsAsync",
+            "GetMergeRequirementsAsync",
             "GetOpenPullRequestForBranchAsync",
             "GetProtectionReviewDecisionAsync",
             "GetPullRequestAsync",
             "GetPullRequestDiffAsync",
+            "GetReviewConversationInputsAsync",
             "GetReviewReworkContextAsync",
             "GetReviewsAsync",
             "HasHumanReviewLabelAsync",
@@ -93,8 +95,10 @@ public class LocalGitHubServiceOverrideTests
             "ReadLegacyReviewHistoryAsync",
             "ReadReviewExcerptAsync",
             "ReadReviewHistoryAsync",
+            "ResolveReviewedConversationsAsync",
             "SetHumanReviewLabelAsync",
             "SubmitReviewAsync",
+            "TryMergePullRequestAsync",
         };
 
         Assert.Equal(expected, virtualMethods);

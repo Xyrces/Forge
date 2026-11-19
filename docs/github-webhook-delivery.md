@@ -9,8 +9,9 @@ project registry or publishing any event. Requests larger than 1 MiB are
 rejected. Repository URLs must match registered GitHub.com projects.
 
 Select repository webhook events for pull requests, pull request reviews,
-review comments, pushes, check runs, check suites and statuses. Label edits,
-review dismissal and new commits then wake the same watcher that periodically
+review comments, review threads, pushes, check runs, check suites and statuses.
+Resolving or reopening a thread, editing a label, dismissing a review, or pushing
+a commit then wakes the same watcher that periodically
 reconciles GitHub. Neither the payload's verdict nor its old head is applied to
 task state. Current GitHub facts, worker ownership and merge policy still decide.
 See [GitHub signature validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries).
