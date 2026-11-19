@@ -102,7 +102,11 @@ public sealed class GitWorktreeService
         Path.GetDirectoryName(Path.GetFullPath(path)) == Path.GetFullPath(WorktreeRoot).TrimEnd(Path.DirectorySeparatorChar)
         && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path), "\\Areview-[0-9a-f]{64}\\z");
 
-    public async Task RemoveReviewSnapshotAsync(string path, CancellationToken ct = default)
+    public ReviewSnapshotRetirement? PrepareReviewSnapshotRetirement(string path) =>
+        _publisherToken is not null || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE"))
+            ? IsolatedGitMetadata.PrepareReviewSnapshotRetirement(WorkspaceRoot, WorktreeRoot, path) : null;
+
+    public async Task RemoveReviewSnapshotAsync(string path, CancellationToken ct = default, ReviewSnapshotRetirement? retirement = null)
     {
         path = Path.GetFullPath(path);
         if (!IsReviewSnapshotPath(path))
@@ -110,7 +114,7 @@ public sealed class GitWorktreeService
         if (_publisherToken is not null || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FORGE_GITHUB_APPS_FILE")))
         {
             ct.ThrowIfCancellationRequested();
-            IsolatedGitMetadata.RemoveDetachedReviewSnapshot(WorkspaceRoot, WorktreeRoot, path);
+            IsolatedGitMetadata.RemoveDetachedReviewSnapshot(WorkspaceRoot, WorktreeRoot, path, retirement);
             return;
         }
         if (!Directory.Exists(path)) return;

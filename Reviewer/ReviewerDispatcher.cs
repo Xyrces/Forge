@@ -114,11 +114,22 @@ public sealed class ReviewerDispatcher
                     || worker is not null && task.GetMetadata("reviewWorkerId") == owner
                         && task.GetMetadata("reviewWorkerConsumed") != owner) return;
             }
-            await _worktrees.RemoveReviewSnapshotAsync(path, timeout.Token);
+            var retirement = task.GetMetadata("reviewSnapshotRetirement") is { } saved
+                ? JsonSerializer.Deserialize<Forge.AgentTools.ReviewSnapshotRetirement>(saved, ReviewFindings.Json)
+                    ?? throw new InvalidOperationException("Saved review retirement is invalid.")
+                : _worktrees.PrepareReviewSnapshotRetirement(path);
+            if (retirement is not null && task.GetMetadata("reviewSnapshotRetirement") is null)
+                await UpdateWatchMetadataAsync(task, m =>
+                {
+                    m["reviewSnapshotRetirement"] = JsonSerializer.Serialize(retirement, ReviewFindings.Json);
+                    return m;
+                }, timeout.Token);
+            await _worktrees.RemoveReviewSnapshotAsync(path, timeout.Token, retirement);
             await UpdateWatchMetadataAsync(task, m =>
             {
                 m["reviewSnapshotPath"] = null!;
                 m["reviewSnapshotWorkerId"] = null!;
+                m["reviewSnapshotRetirement"] = null!;
                 return m;
             }, timeout.Token);
         }

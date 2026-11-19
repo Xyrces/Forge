@@ -167,6 +167,50 @@ public class GitWorktreeServiceTests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => isolated.RemoveReviewSnapshotAsync(engineering));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AppIsolatedCleanupResumesPartiallyDeletedQuarantinesAcrossRounds(bool partialRegistration)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var engineering = await _service.CreateAsync("engineering", "main");
+        var head = await GetHeadShaAsync(engineering);
+        var isolated = new GitWorktreeService(
+            new WorkspaceOptions { Root = _workDir, WorktreeRoot = ".wt", DefaultBranch = "main" },
+            NullLogger<GitWorktreeService>.Instance,
+            publisherToken: () => throw new InvalidOperationException("Cleanup must not request credentials"),
+            publisherRepository: "https://github.com/Xyrces/Forge");
+        for (var round = 0; round < 2; round++)
+        {
+            var snapshot = await _service.CreateReviewSnapshotAsync("engineering", "partial-" + round, head);
+            var receipt = isolated.PrepareReviewSnapshotRetirement(snapshot)!;
+            var savedReceipt = System.Text.Json.JsonSerializer.Serialize(receipt);
+            var registration = Path.Combine(_workDir, ".git", "worktrees", Path.GetFileName(snapshot));
+            var checkoutTrash = snapshot + ".retiring-" + receipt.Nonce;
+            var registrationTrash = Path.Combine(_workDir, ".git", "forge-review-retired", Path.GetFileName(snapshot) + "-" + receipt.Nonce);
+            Directory.Move(snapshot, checkoutTrash);
+            Directory.CreateDirectory(Path.GetDirectoryName(registrationTrash)!);
+            Directory.Move(registration, registrationTrash);
+            if (partialRegistration)
+            {
+                Directory.Delete(checkoutTrash, recursive: true);
+                File.Delete(Path.Combine(registrationTrash, "gitdir"));
+                File.Delete(Path.Combine(registrationTrash, "HEAD"));
+            }
+            else File.Delete(Path.Combine(checkoutTrash, ".git"));
+            // A fresh service/controller resumes solely from its previously persisted receipt,
+            // not from proof files already removed by the interrupted recursive deletion.
+            var recovered = System.Text.Json.JsonSerializer.Deserialize<ReviewSnapshotRetirement>(savedReceipt)!;
+            await isolated.RemoveReviewSnapshotAsync(snapshot, retirement: recovered);
+            await isolated.RemoveReviewSnapshotAsync(snapshot, retirement: recovered);
+            Assert.False(Directory.Exists(checkoutTrash));
+            Assert.False(Directory.Exists(registrationTrash));
+            Assert.False(Directory.Exists(registration));
+            Assert.Equal(head, await GetHeadShaAsync(engineering));
+            Assert.Contains(engineering, RunGitForResult(_workDir, "worktree list --porcelain").Stdout);
+        }
+    }
+
     [Fact]
     public async Task AppIsolatedReviewCleanupSupportsExplicitSiblingRoot()
     {
