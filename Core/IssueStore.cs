@@ -1062,6 +1062,13 @@ public sealed partial class IssueStore : IIssueStore, IAsyncDisposable
         var d = (SqlServerDialect)_db.Dialect;
         var q = d.Qualifier;
         using var conn = _db.Open();
+        using (var version = conn.CreateCommand())
+        {
+            version.CommandText = $"IF OBJECT_ID(N'{d.Table("schema_version")}',N'U') IS NOT NULL SELECT MAX(version) FROM {d.Table("schema_version")}; ELSE SELECT 0;";
+            var actual = Convert.ToInt32(version.ExecuteScalar());
+            if (actual > CurrentSchemaVersion)
+                throw new InvalidOperationException("This recovery image cannot initialize a newer schema.");
+        }
         // Fresh-create runs ~26 tables + indexes of DDL; under Azure
         // SQL DTU pressure a single batch can exceed the 30s default
         // (observed live 2026-08-09: a new project's store init timed
