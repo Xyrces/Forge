@@ -222,17 +222,20 @@ public sealed class KubernetesWorkerJobs(HttpClient http, WorkerOptions options)
             && (digestIndex < 1 || options.Image.Length - digestIndex != 72
                 || options.Image[(digestIndex + 8)..].Any(c => !Uri.IsHexDigit(c))))
             throw new InvalidOperationException("Worker image must be pinned by immutable sha256 digest.");
+        var labels = new Dictionary<string, string> { ["app.kubernetes.io/name"] = "forge-worker", ["forge-attempt"] = assignment.Id };
+        if (assignment.Role == "QA" && assignment.DispatchId.StartsWith("integration-verify-", StringComparison.Ordinal))
+            labels[VerificationJobEvents.Label] = "true";
         return new
         {
             apiVersion = "batch/v1", kind = "Job",
             metadata = new { name = "forge-agent-" + assignment.Id, @namespace = options.Namespace,
-                labels = new Dictionary<string, string> { ["app.kubernetes.io/name"] = "forge-worker", ["forge-attempt"] = assignment.Id } },
+                labels },
             spec = new
             {
                 backoffLimit = 0, activeDeadlineSeconds = options.DeadlineSeconds, ttlSecondsAfterFinished = 86400,
                 template = new
                 {
-                    metadata = new { labels = new Dictionary<string, string> { ["app.kubernetes.io/name"] = "forge-worker", ["forge-attempt"] = assignment.Id } },
+                    metadata = new { labels },
                     spec = new
                     {
                         restartPolicy = "Never", serviceAccountName = "forge-worker", automountServiceAccountToken = false,

@@ -349,8 +349,12 @@ public static class ForgeComposition
                 throw new InvalidOperationException("Kubernetes workers require the SQL-backed controller admission guard.");
             var kubeClient = Workers.KubernetesWorkerJobs.CreateInClusterClient();
             services.AddSingleton(kubeClient);
+            var workerAttempts = new Core.Execution.WorkerAttemptStore(registryIssues.Db);
+            services.AddSingleton(new Workers.VerificationJobEvents(kubeClient, options.Worker.Namespace,
+                options.Controller.DatasetId, workerAttempts.GetAsync, eventPublisher,
+                loggerFactory.CreateLogger<Workers.VerificationJobEvents>()));
             agentRunner = new Workers.KubernetesAgentRunner(
-                new Core.Execution.WorkerAttemptStore(registryIssues.Db),
+                workerAttempts,
                 new Workers.KubernetesWorkerJobs(kubeClient, options.Worker), options.Controller.DatasetId, admission);
         }
         services.AddSingleton(localAgentRunner);
