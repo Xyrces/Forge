@@ -104,8 +104,33 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
     assert.ok(card.x>=0 && card.x+card.width<=390,'Phone card fits');
     if(screenshotDir) await capture(page,{path:`${screenshotDir}/board-390-${lane.replace(/[^a-z]/gi,'-')}.png`,fullPage:true});
   }
-  await page.reload();
-  await picker.waitFor();
-  assert.equal(await picker.inputValue(),'Completed / closed');
-  assert.equal(await page.locator('.sprint-lane:visible .sprint-task__status').innerText(),'Merged');
+  // Delay restoration interop to expose background refresh overwriting saved state.
+  const scrollBeforeReload = await page.locator('.app-main').evaluate(e => e.scrollTop);
+  await page.waitForFunction(expected => {
+    const saved = JSON.parse(sessionStorage.getItem('forge:sprint-board:forge') || 'null');
+    return saved?.lane === 'Completed / closed' && Math.abs(saved.scroll - expected) < 2;
+  }, scrollBeforeReload);
+  const delayRestore = async route => {
+    const response = await route.fetch();
+    const original = await response.text();
+    assert.ok(original.includes('export function begin(p) {'), 'Delay targets actual restoration entry point');
+    await route.fulfill({response, body:original.replace('export function begin(p) {',
+      'export async function begin(p) { await new Promise(resolve => setTimeout(resolve, 500));')});
+  };
+  await page.route('**/sprint-board.js', delayRestore);
+  try {
+    await page.reload();
+    await picker.waitFor();
+    await page.waitForFunction(() => document.querySelector('#sprint-lane')?.value === 'Completed / closed');
+    assert.equal(await picker.inputValue(),'Completed / closed');
+    assert.equal(await page.locator('.sprint-lane:visible').count(),1);
+    assert.equal(await page.locator('.sprint-lane:visible .sprint-task__status').innerText(),'Merged');
+    await page.waitForFunction(expected => {
+      const main = document.querySelector('.app-main');
+      return main && Math.abs(main.scrollTop - Math.min(expected, main.scrollHeight - main.clientHeight)) < 2;
+    }, scrollBeforeReload);
+    const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('forge:sprint-board:forge')));
+    assert.equal(saved.lane,'Completed / closed');
+    assert.ok(Math.abs(saved.scroll - scrollBeforeReload) < 2, 'Reload preserves saved inner scroll');
+  } finally { await page.unroute('**/sprint-board.js', delayRestore); }
 }

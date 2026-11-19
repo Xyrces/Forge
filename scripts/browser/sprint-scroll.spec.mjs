@@ -14,6 +14,15 @@ const browser = await chromium.launch({
   args: ['--no-sandbox'],
 });
 const page = await browser.newPage({hasTouch: true});
+// A new route can emit a layout scroll before its restoration interop arrives.
+// Exercise that boundary deterministically instead of relying on host scheduling.
+await page.route('**/sprint-board.js', async route => {
+  const response = await route.fetch();
+  const source = await response.text();
+  assert.ok(source.includes('export function begin(p) {'));
+  await route.fulfill({response, body:source.replace('export function begin(p) {',
+    'export async function begin(p) { document.dispatchEvent(new Event("scroll")); await new Promise(resolve => setTimeout(resolve, 500));')});
+});
 const base = 'http://127.0.0.1:5123';
 const api = 'http://127.0.0.1:5124';
 const errors = [];

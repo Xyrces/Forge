@@ -322,7 +322,7 @@
     [Parameter][SupplyParameterFromQuery(Name = "project")] public string? Project { get; set; }
     [Parameter][SupplyParameterFromQuery(Name = "sprint")] public string? Sprint { get; set; }
     private IJSObjectReference? _boardBrowser;
-    private bool _restoreBoard, _chooseLane;
+    private bool _restoreBoard, _chooseLane, _restoringLocation, _locationReadFailed;
     private bool _completionLayoutReady;
     private int _restoreGeneration;
     private string? _holdBusy, _holdError, _holdNotice;
@@ -360,11 +360,13 @@
     }
     private async Task SaveBoardLocationAsync()
     {
-        if (_boardBrowser is not null && _loadedProject is not null)
+        if (!_restoringLocation && !_locationReadFailed && _boardBrowser is not null && _loadedProject is not null)
             await _boardBrowser.InvokeVoidAsync("remember", _loadedProject, _selectedSprintId ?? _board?.Sprint?.Id, _lane, _memberCursor, _historyCursor, _memberPages.ToArray(), _historyPages.ToArray());
     }
     private async Task CancelBoardRestoreAsync()
     {
+        _restoringLocation = false;
+        _locationReadFailed = false;
         _restoreBoard = false;
         if (_boardBrowser is not null) await _boardBrowser.InvokeVoidAsync("cancelRestore");
     }
@@ -691,7 +693,8 @@
 
     private async Task RefreshAsync()
     {
-        if (_disposed) return;
+        if (_disposed || _boardBrowser is null || _restoringLocation) return;
+        if (_locationReadFailed) { await ChangeProjectAsync(); return; }
         if (_refreshing) { _refreshRequested = true; return; }
         if (_selection.ProjectId is null) { _loading = false; return; }
         _refreshing = true;
@@ -699,6 +702,7 @@
         {
             do
             {
+                if (_restoringLocation || _locationReadFailed) break;
                 _refreshRequested = false;
                 var generation = _selection.Generation;
                 var projectId = _selection.ProjectId;
@@ -748,6 +752,9 @@
     }
     private async Task ChangeProjectAsync()
     {
+        // Shell selection can precede JS initialization. Wait until browser
+        // navigation state is available before loading or saving a default lane.
+        if (_boardBrowser is null) return;
         if (!await RestoreProjectLocationAsync()) return;
         StateHasChanged();
         var generation = _restoreGeneration;
@@ -759,6 +766,8 @@
     {
         if (_disposed) return false;
         var generation = ++_restoreGeneration;
+        _restoringLocation = true;
+        _locationReadFailed = false;
         var project = ShellStore.Value.CurrentProjectId;
         _loading = true;
         _loadedProject = project;
@@ -770,8 +779,21 @@
         _selection.Select(project, null);
         _summary = null; _board = null; _repoUrl = null;
         _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null;
-        var remembered = _boardBrowser is null || _loadedProject is null ? null
-            : await _boardBrowser.InvokeAsync<BoardLocation?>("begin", project);
+        BoardLocation? remembered;
+        try
+        {
+            remembered = _boardBrowser is null || _loadedProject is null ? null
+                : await _boardBrowser.InvokeAsync<BoardLocation?>("begin", project);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not read saved sprint navigation");
+            if (_disposed || generation != _restoreGeneration || project != ShellStore.Value.CurrentProjectId) return false;
+            _restoringLocation = false; _locationReadFailed = true; _loading = false;
+            _error = "Saved sprint navigation could not be loaded. Retry with Refresh.";
+            StateHasChanged();
+            return false;
+        }
         if (_disposed || generation != _restoreGeneration || project != ShellStore.Value.CurrentProjectId)
             return false;
         _selectedSprintId = Project == _loadedProject && !string.IsNullOrEmpty(Sprint) ? Sprint : remembered?.SprintId;
@@ -783,6 +805,7 @@
         foreach (var cursor in (remembered?.HistoryPages ?? []).Reverse()) _historyPages.Push(cursor);
         foreach (var cursor in (remembered?.MemberPages ?? []).Reverse()) _memberPages.Push(cursor); _summary = null; _board = null; _repoUrl = null;
         _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null; _queueTotal = 0; _error = null; _queueError = null;
+        _restoringLocation = false;
         return true;
     }
     private void OnShellChanged(object? sender, EventArgs e)
