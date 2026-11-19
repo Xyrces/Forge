@@ -74,6 +74,14 @@
         }
         else if (_section == "Review")
         {
+            @if (IsTerminal && Meta("reviewGateError") is { Length: > 0 } earlierGateError)
+            {
+                <details><summary>Earlier review gate error</summary><p>@earlierGateError</p></details>
+            }
+            @if (IsTerminal && Meta("reviewIntegrationError") is { Length: > 0 } earlierPublicationError)
+            {
+                <details><summary>Earlier review publication error</summary><p>@earlierPublicationError</p></details>
+            }
             @if (_legacyLoading) { <p role="status">Loading original review sources…</p> }
             @if (_legacyError is not null) { <p class="banner banner--warn">@_legacyError <button class="btn" @onclick="LoadLegacyReviewsAsync">Retry source history</button></p> }
             @if (_nativeReviews.Count > 0)
