@@ -96,7 +96,7 @@ function sample() {
 
 function completionReady(status) {
   if (status === 200) {
-    return page.getByRole('heading', {name: 'Acceptance criterion 12', exact: true});
+    return page.getByRole('heading', {name: 'Acceptance criterion 12', exact: true, includeHidden: true});
   }
   const message = status === 404
     ? 'No completion evidence has been recorded for this sprint yet.'

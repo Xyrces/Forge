@@ -106,6 +106,21 @@ export async function verifySprintBoard(page, baseUrl, { fixtureApi = null, scre
   await page.keyboard.press('Space');
   await page.locator('.sprint-acceptance__details').waitFor({state:'hidden'});
   assert.equal(await acceptanceToggle.getAttribute('aria-expanded'), 'false');
+  if (fixtureApi) {
+    await page.request.put(`${fixtureApi}/__fixtures`, {data:{
+      '/api/completions':{items:[{...completion.receipt,sprintName:sprint.name}],nextCursor:null},
+      '/api/sprints/board':{projectId,generatedAt:new Date().toISOString(),sprint,total:5,done:1,members,nextCursor:null},
+    }});
+    await page.getByRole('button',{name:'Refresh',exact:true}).click();
+    await page.locator('summary').filter({hasText:'Outstanding sprint outcomes'}).click();
+    await page.getByRole('button',{name:'Review '+sprint.name,exact:true}).click();
+    await page.locator('.sprint-acceptance__details').waitFor({state:'visible'});
+    assert.equal(await acceptanceToggle.getAttribute('aria-expanded'),'true',
+      'Reviewing an outstanding outcome opens its acceptance evidence');
+    await acceptanceToggle.click();
+    await page.request.put(`${fixtureApi}/__fixtures`, {data:{'/api/completions':{items:[],nextCursor:null}}});
+    await page.locator('summary').filter({hasText:'Outstanding sprint outcomes'}).click();
+  }
   await page.setViewportSize({width:1280,height:900});
   assert.equal(await page.getByRole('heading',{name:'Goal',exact:true}).count(),0);
   if(screenshotDir) await capture(page,{path:`${screenshotDir}/board-acceptance-1280.png`,fullPage:true});
