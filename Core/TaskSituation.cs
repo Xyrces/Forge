@@ -19,13 +19,19 @@ public static class TaskSituation
         public string? NextActor { get; init; }
         public bool HumanReviewRequired { get; init; }
         public string? NominatedHuman { get; init; }
+        public string? HumanReviewSummary { get; init; }
     }
 
     public static Situation Describe(IssueRecord issue, SprintPlan? plan = null, string? nominatedHuman = null)
     {
         var held = bool.TryParse(issue.GetMetadata("humanReviewRequired"), out var required) && required;
+        var finished = issue.Status is IssueStatus.Completed or IssueStatus.Closed;
+        var reviewer = finished ? issue.GetMetadata("humanReviewNominee") : nominatedHuman;
+        var merge = issue.Status == IssueStatus.Completed ? ObservedMerge(issue) : null;
+        var reviewSummary = finished && held ? CompletedHumanReview(issue, merge, reviewer) : null;
         Situation Result(string label, string reason, string? actor = null, string tone = "info") =>
-            new(reason, tone) { Label = label, NextActor = actor, HumanReviewRequired = held, NominatedHuman = nominatedHuman };
+            new(reason, tone) { Label = label, NextActor = actor, HumanReviewRequired = held, NominatedHuman = reviewer,
+                HumanReviewSummary = reviewSummary };
         if (ReviewIntegrationState.IsBlocked(issue) && ReviewIntegrationState.IsBudgetDenied(issue, issue.GetMetadata("reviewSha")))
             return Result("Review paused for budget", issue.GetMetadata("reviewIntegrationError")
                 ?? "Choose Retry review when the request fits the available budget.", "Operator", "action");
@@ -34,7 +40,7 @@ public static class TaskSituation
         if (issue.Status == IssueStatus.Completed)
             return plan is not null && Completion.ExistingImplementationEvidence.TryGet(issue, plan, out _)
                 ? Result("Existing implementation verified", "Independent verification and review established the approved behavior at a recorded revision.")
-                : HasObservedMerge(issue)
+                : merge is not null
                 ? Result("Merged", "Merge observed. Release and acceptance are tracked with the sprint.")
                 : Result("Completion recorded", issue.GetMetadata("prNumber") is not null
                     ? "Merge evidence unavailable." : "See the task evidence for the recorded outcome.");
@@ -119,7 +125,33 @@ public static class TaskSituation
             NextActor = legacy.Tone == "action" ? "Operator" : "Forge", HumanReviewRequired = held, NominatedHuman = nominatedHuman };
     }
 
-    public static bool HasObservedMerge(IssueRecord issue)
+    private static string CompletedHumanReview(IssueRecord issue, Completion.ObservedMergeEvidence? merge, string? reviewer)
+    {
+        const string noAction = "No further review action.";
+        if (merge is null) return noAction;
+        // A valid merge receipt already establishes that the immutable row contains
+        // a JSON object. Read its review snapshot once, including legacy string values.
+        using var snapshot = System.Text.Json.JsonDocument.Parse(issue.MetadataJson);
+        string? Field(string key) => snapshot.RootElement.TryGetProperty(key, out var value)
+            && value.ValueKind != System.Text.Json.JsonValueKind.Null ? value.ToString() : null;
+        bool RecordedFalse(string key) => bool.TryParse(Field(key), out var value) && !value;
+        // The last observed gate is a pre-merge decision. An external merge, an
+        // unsynchronized hold edit, or a different revision cannot prove approval.
+        if (Field("lastEvent") != "Merged" || Field("reviewProtectionHead") != merge.HeadSha
+            || Field("reviewProtectionDecision") is not ("Approved" or "NotRequired")
+            || !RecordedFalse("reviewHumanPending") || !RecordedFalse("reviewHumanProvenancePending")
+            || !RecordedFalse("humanReviewSyncPending") || !RecordedFalse("awaitingHumanReview")
+            || !int.TryParse(Field("reviewUnresolvedThreads"), out var threads) || threads != 0
+            || !string.IsNullOrEmpty(Field("reviewGateError")))
+            return noAction;
+        return string.IsNullOrWhiteSpace(reviewer)
+            ? "Human review approved. " + noAction
+            : $"Approved by @{reviewer}. " + noAction;
+    }
+
+    public static bool HasObservedMerge(IssueRecord issue) => ObservedMerge(issue) is not null;
+
+    private static Completion.ObservedMergeEvidence? ObservedMerge(IssueRecord issue)
     {
         try
         {
@@ -127,9 +159,10 @@ public static class TaskSituation
             return evidence is not null && evidence.TaskId == issue.Id
                 && int.TryParse(issue.GetMetadata("prNumber"), out var pr) && evidence.PullRequestNumber == pr
                 && System.Text.RegularExpressions.Regex.IsMatch(evidence.MergeSha ?? "", "^[a-fA-F0-9]{40}$")
-                && System.Text.RegularExpressions.Regex.IsMatch(evidence.HeadSha ?? "", "^[a-fA-F0-9]{40}$");
+                && System.Text.RegularExpressions.Regex.IsMatch(evidence.HeadSha ?? "", "^[a-fA-F0-9]{40}$")
+                ? evidence : null;
         }
-        catch (System.Text.Json.JsonException) { return false; }
+        catch (System.Text.Json.JsonException) { return null; }
     }
 
     private static Situation DescribeLegacy(IssueRecord issue)

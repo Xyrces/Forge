@@ -28,9 +28,10 @@
         <div class="task-outcome"><strong>@Situation("label")</strong><span>@Situation("text")</span>
             @if (Situation("nextActor") is { Length: > 0 } actor) { <span>Next: @actor</span> }
         </div>
-        @if (HumanReviewRequired) { <p class="banner banner--info">@(NominatedHuman is null ? "Human review required before merge." : $"Review by @{NominatedHuman} required before merge.")@(Meta("humanReviewSyncPending")?.Equals("true", StringComparison.OrdinalIgnoreCase) == true ? " Synchronizing with GitHub; merge remains held." : "")</p> }
-        @if (Meta("reviewGateError") is { Length: > 0 } gateError) { <p class="banner banner--error" role="alert"><strong>Review gate unavailable.</strong> @gateError</p> }
-        @if (Meta("reviewIntegrationError") is { Length: > 0 } publicationError && (Meta("reviewBudgetDeniedHead") is not { Length: > 0 } budgetHead || budgetHead != Meta("reviewSha")))
+        <TaskHumanReview Required="@HumanReviewRequired" Status="@Prop(_task, "status")" Nominee="@NominatedHuman"
+                         Summary="@Situation("humanReviewSummary")" SyncPending="@(Meta("humanReviewSyncPending")?.Equals("true", StringComparison.OrdinalIgnoreCase) == true)" Class="banner banner--info" />
+        @if (!IsTerminal && Meta("reviewGateError") is { Length: > 0 } gateError) { <p class="banner banner--error" role="alert"><strong>Review gate unavailable.</strong> @gateError</p> }
+        @if (!IsTerminal && Meta("reviewIntegrationError") is { Length: > 0 } publicationError && (Meta("reviewBudgetDeniedHead") is not { Length: > 0 } budgetHead || budgetHead != Meta("reviewSha")))
         {
             <p class="banner banner--error" role="alert"><strong>Review publication needs attention.</strong> @publicationError</p>
         }
@@ -81,7 +82,7 @@
                 @foreach (var native in _nativeReviews)
                 {
                     <article class="task-finding"><h3>@NativeDecisionLabel(native.Verdict) · @native.Reviewer</h3>
-                        <p class="meta-text">@native.Role · @FmtDate(native.SubmittedAt) · revision <RevisionLink Sha="@native.HeadSha" Repository="@_repoUrl" />@(native.HeadSha != Meta("branchSha") ? " · Earlier or unconfirmed revision" : " · Current recorded revision")</p>
+                        <p class="meta-text">@native.Role · @FmtDate(native.SubmittedAt) · GitHub-reported revision <RevisionLink Sha="@native.HeadSha" Repository="@_repoUrl" />@if (!IsTerminal) { <text>@(native.HeadSha is not null && native.HeadSha == Meta("branchSha") ? " · Current recorded revision" : " · Earlier or unconfirmed revision")</text> }</p>
                         <RecordedMarkdown Text="@ReviewProse.Format(native.Summary, native.Role == "Forge reviewer App")" />
                         @foreach (var comment in native.Comments)
                         {
@@ -141,7 +142,7 @@
             {
             <section class="card"><div class="task-review-heading"><h2>@ReviewLabel</h2><span class="meta-text">Forge reviewer · @(Meta("reviewRound") is { } round ? $"Review {round}" : "Review number not recorded")</span></div>
                 <dl class="task-facts"><dt>Revision</dt><dd><RevisionLink Sha="@Meta("reviewSha")" Repository="@_repoUrl" /></dd><dt>Source</dt><dd>Forge’s recorded verdict. See the PR for formal GitHub decisions and inline discussions.</dd></dl>
-                @if (Meta("reviewSha") is { } reviewed && Meta("branchSha") is { } head && reviewed != head) { <p class="banner banner--warn">This decision applies to an earlier revision. The current revision needs its own review.</p> }
+                @if (!IsTerminal && Meta("reviewSha") is { } reviewed && Meta("branchSha") is { } head && reviewed != head) { <p class="banner banner--warn">This decision applies to an earlier revision. The current revision needs its own review.</p> }
                 @if (Meta("reviewNotes") is { Length: > 0 } notes) { <RecordedMarkdown Text="@ReviewProse.Format(notes, true)" /> }
                 else { <p class="meta-text">No reviewer notes recorded.</p> }
                 @if (Meta("reworkContext") is { Length: > 0 } feedback) { <details><summary>Requested change and worker context</summary><RecordedMarkdown Text="@feedback" /></details> }
@@ -370,6 +371,7 @@
     private string SprintLink => SprintLinkFor(Prop(_sprint, "id"));
     private string SprintLinkFor(string? sprintId) => "/sprints?project=" + Uri.EscapeDataString(EffectiveProject ?? "") + "&sprint=" + Uri.EscapeDataString(sprintId ?? "");
     private string? NominatedHuman => Situation("nominatedHuman");
+    private bool IsTerminal => Prop(_task, "status") is "Completed" or "Closed";
     private bool HumanReviewRequired => bool.TryParse(Meta("humanReviewRequired"), out var held) && held;
     private string? Situation(string key) => _task is { } task && task.TryGetProperty("situation", out var situation) ? Prop(situation, key) : key == "label" ? Prop(_task, "status") : null;
     private string ReviewLabel => Meta("reviewVerdict") switch { "Approve" => "Approved", "RequestChanges" => "Changes requested", null => "Review not recorded", var verdict => verdict };

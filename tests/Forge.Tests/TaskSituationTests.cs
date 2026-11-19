@@ -193,4 +193,119 @@ public class TaskSituationTests
     {
         Assert.Equal("Completion recorded", TaskSituation.Describe(Task(IssueStatus.Completed)).Label);
     }
+
+    [Fact]
+    public void MergedHumanReviewUsesTheMergedRevisionAndRecordedReviewer()
+    {
+        var situation = TaskSituation.Describe(MergedHumanReview(), nominatedHuman: "new-reviewer");
+        Assert.Equal("Merged", situation.Label);
+        Assert.Equal("Approved by @original-reviewer. No further review action.", situation.HumanReviewSummary);
+        Assert.Equal("original-reviewer", situation.NominatedHuman);
+        Assert.Null(situation.NextActor);
+        Assert.True(situation.HumanReviewRequired);
+    }
+
+    [Fact]
+    public void UnnominatedCompletedReviewDoesNotInventAnApprover()
+    {
+        var situation = TaskSituation.Describe(MergedHumanReview("humanReviewNominee", ""),
+            nominatedHuman: "new-reviewer");
+        Assert.Equal("Human review approved. No further review action.", situation.HumanReviewSummary);
+        Assert.DoesNotContain("new-reviewer", situation.HumanReviewSummary);
+    }
+
+    [Theory]
+    [InlineData("reviewHumanPending", null)]
+    [InlineData("reviewHumanPending", "true")]
+    [InlineData("reviewHumanPending", "invalid")]
+    [InlineData("reviewHumanProvenancePending", null)]
+    [InlineData("reviewHumanProvenancePending", "true")]
+    [InlineData("humanReviewSyncPending", "true")]
+    [InlineData("humanReviewSyncPending", null)]
+    [InlineData("awaitingHumanReview", "true")]
+    [InlineData("reviewProtectionHead", "old-head")]
+    [InlineData("reviewProtectionDecision", "ChangesRequested")]
+    [InlineData("reviewProtectionDecision", "Unavailable")]
+    [InlineData("reviewUnresolvedThreads", "1")]
+    [InlineData("reviewUnresolvedThreads", null)]
+    [InlineData("reviewGateError", "GitHub unavailable")]
+    [InlineData("lastEvent", "ExternallyMerged")]
+    [InlineData("lastEvent", null)]
+    [InlineData("observedMerge", "invalid-json")]
+    [InlineData("observedMerge", null)]
+    [InlineData("prNumber", "99")]
+    public void UnprovenTerminalReviewDoesNotClaimApproval(string key, string? value)
+    {
+        var situation = TaskSituation.Describe(MergedHumanReview(key, value));
+        Assert.Equal("No further review action.", situation.HumanReviewSummary);
+        Assert.Null(situation.NextActor);
+    }
+
+    [Fact]
+    public void MergeEvidenceForAnotherTaskCannotEstablishApproval()
+    {
+        var issue = MergedHumanReview() with { Id = "other-task" };
+        Assert.False(TaskSituation.HasObservedMerge(issue));
+        Assert.Equal("No further review action.", TaskSituation.Describe(issue).HumanReviewSummary);
+    }
+
+    [Fact]
+    public void ClosedTaskDoesNotClaimTheRecordedPreMergeApproval()
+    {
+        var situation = TaskSituation.Describe(MergedHumanReview() with { Status = IssueStatus.Closed });
+        Assert.Equal("Closed", situation.Label);
+        Assert.Equal("No further review action.", situation.HumanReviewSummary);
+        Assert.Null(situation.NextActor);
+    }
+
+    [Fact]
+    public void ActiveHumanReviewKeepsTheRequiredAction()
+    {
+        var issue = Task(IssueStatus.InProgress, ("humanReviewRequired", "true"),
+            ("awaitingHumanReview", "true"), ("reviewHumanPending", "true"));
+        var situation = TaskSituation.Describe(issue, nominatedHuman: "reviewer");
+        Assert.Equal("Waiting for human review", situation.Label);
+        Assert.Equal("@reviewer", situation.NextActor);
+        Assert.True(situation.HumanReviewRequired);
+        Assert.Null(situation.HumanReviewSummary);
+    }
+
+    [Fact]
+    public void TerminalTaskWithoutHumanRequirementDoesNotAddAReviewSummary()
+    {
+        Assert.Null(TaskSituation.Describe(MergedHumanReview("humanReviewRequired", "false")).HumanReviewSummary);
+    }
+
+    private static IssueRecord MergedHumanReview(string? field = null, string? value = null)
+    {
+        var head = new string('a', 40);
+        var metadata = new Dictionary<string, object>
+        {
+            ["humanReviewRequired"] = true,
+            ["humanReviewNominee"] = "original-reviewer",
+            ["humanReviewSyncPending"] = false,
+            ["reviewHumanPending"] = false,
+            ["reviewHumanProvenancePending"] = false,
+            ["awaitingHumanReview"] = false,
+            ["reviewProtectionHead"] = head,
+            ["reviewProtectionDecision"] = "Approved",
+            ["reviewUnresolvedThreads"] = 0,
+            ["lastEvent"] = "Merged",
+            ["prNumber"] = 42,
+            // GitHub may update the branch after worker verification.
+            ["branchSha"] = new string('b', 40),
+            ["observedMerge"] = System.Text.Json.JsonSerializer.Serialize(
+                new Forge.Core.Completion.ObservedMergeEvidence("task-1", 42, head,
+                    new string('c', 40), DateTimeOffset.UtcNow)),
+        };
+        if (field is not null)
+        {
+            if (value is null) metadata.Remove(field);
+            else metadata[field] = value;
+        }
+        return Task(IssueStatus.Completed) with
+        {
+            MetadataJson = System.Text.Json.JsonSerializer.Serialize(metadata),
+        };
+    }
 }
