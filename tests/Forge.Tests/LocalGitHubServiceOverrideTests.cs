@@ -87,6 +87,7 @@ public class LocalGitHubServiceOverrideTests
             "GetPullRequestAsync",
             "GetPullRequestDiffAsync",
             "GetReviewConversationInputsAsync",
+            "GetReviewObservationTimeAsync",
             "GetReviewReworkContextAsync",
             "GetReviewsAsync",
             "HasHumanReviewLabelAsync",

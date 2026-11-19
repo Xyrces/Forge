@@ -46,7 +46,7 @@ public partial class GitHubService
                 }
                 if (!allowed) continue;
             }
-            result.Add(new(login, review.CommitId, review.State.Value, automated, review.Id, review.Body ?? "", review.HtmlUrl ?? ""));
+            result.Add(new(login, review.CommitId, review.State.Value, automated, review.Id, review.Body ?? "", review.HtmlUrl ?? "", review.SubmittedAt));
         }
         return result;
     }

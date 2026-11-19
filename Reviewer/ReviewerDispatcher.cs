@@ -161,6 +161,8 @@ public sealed class ReviewerDispatcher
             && !string.IsNullOrEmpty(recordedVerdict)
             && recordedVerdict != nameof(ReviewerVerdict.Error)
             && (!_gitHub.RequireFormalReview || task.GetMetadata("reviewPublishedHead") == headSha)
+            && !(task.GetMetadata("reviewProtectionHead") == headSha
+                && bool.TryParse(task.GetMetadata("reviewAutomatedProvenancePending"), out var provenancePending) && provenancePending)
             && !(recordedVerdict == nameof(ReviewerVerdict.Approve)
                 && conversations.Any(t => GitHubService.CanResolveConversation(t, _gitHub.ReviewerLogin))
                 && ReviewFindings.ConversationCheckpoint(conversations, _gitHub.ReviewerLogin) != task.GetMetadata("reviewThreadCheckpoint"))
@@ -517,6 +519,7 @@ public sealed class ReviewerDispatcher
                 m["reviewSha"] = draft.HeadSha; m["reviewVerdict"] = draft.Verdict;
                 m["reviewNotes"] = draft.Summary; m["reviewRound"] = draft.Round;
                 m["reviewPublishedHead"] = draft.HeadSha; m["reviewDraft"] = null!;
+                m["reviewAutomatedProvenancePending"] = false;
                 m["reviewThreadCheckpoint"] = draft.ThreadCheckpoint!;
                 m["reviewHumanThreadCheckpoint"] = (humanVersions is null ? draft.HumanThreadCheckpoint : ReviewFindings.HumanCheckpoint(humanVersions))!;
                 m["reviewConversationInputLimited"] = draft.LimitedConversations?.Count ?? 0;

@@ -18,13 +18,15 @@ public sealed record ReviewDraft(int Round, string HeadSha, string Verdict, stri
 public sealed record PublishedReview(int Round, string HeadSha, string Verdict, string Summary, string Reviewer, string Url,
     DateTimeOffset? SubmittedAt, List<ReviewFinding> Findings);
 public sealed record FormalDecision(string Login, string Head, PullRequestReviewState State, bool Automated,
-    long Id, string Body, string Url);
+    long Id, string Body, string Url, DateTimeOffset? SubmittedAt = null);
 public sealed record EffectiveReview(bool AutomatedApproved, bool HumanApproved, bool OutstandingHumanObjection,
     IReadOnlyList<FormalDecision> CurrentRequests)
 {
     public static EffectiveReview Evaluate(IEnumerable<FormalDecision> all, string head, string? nominatedHuman = null, string? author = null)
     {
-        var active = all.Where(r => !string.Equals(r.Login, author, StringComparison.OrdinalIgnoreCase) && (r.Automated || !r.Login.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase))).Where(r => r.State is PullRequestReviewState.Approved or PullRequestReviewState.ChangesRequested or PullRequestReviewState.Dismissed)
+        var active = all.Where(r => !string.Equals(r.Login, author, StringComparison.OrdinalIgnoreCase) && (r.Automated || !r.Login.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase)))
+            .Where(r => r.State is PullRequestReviewState.ChangesRequested or PullRequestReviewState.Dismissed
+                || r.State == PullRequestReviewState.Approved && !string.IsNullOrEmpty(r.Head))
             .GroupBy(r => r.Login, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.MaxBy(r => r.Id)!).Where(r => r.State != PullRequestReviewState.Dismissed).ToArray();
         var current = active.Where(r => r.Head == head).ToArray();
