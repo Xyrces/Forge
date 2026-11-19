@@ -83,7 +83,10 @@ public static class Program
                 throw new InvalidOperationException("Controller.Mode must be initialize, standby, or worker.");
             return await Orchestrator.Control.ControllerHost.RunAsync(options, loggerFactory, async (ready, admission, ct) =>
             {
-                var code = await RunOrchestratorAsync(options, loggerFactory, logger, ct, ready, admission);
+                var registry = Core.Db.ForgeDb.SqlServer(options.Db.ConnectionString, Core.Db.ForgeDb.RegistrySchema,
+                    Core.Db.ForgeSchemaProfile.Core, initializeSchema: false);
+                var schema = await Orchestrator.Control.ControllerHost.VerifySchemaAsync(registry, ct);
+                var code = await RunOrchestratorAsync(options, loggerFactory, logger, ct, ready, admission, maintenance: schema == 44);
                 if (code != 0) throw new InvalidOperationException($"Forge runtime stopped with exit code {code}.");
             });
         }
@@ -1106,7 +1109,7 @@ Console.Error.WriteLine(ex.ToString());
     private static async Task<int> RunOrchestratorAsync(
         AgentOptions options, ILoggerFactory loggerFactory, ILogger logger,
         CancellationToken externalStop = default, Action? ready = null,
-        Func<CancellationToken, Task>? admission = null)
+        Func<CancellationToken, Task>? admission = null, bool maintenance = false)
     {
         ServiceProvider provider;
         try
@@ -1149,7 +1152,14 @@ Console.Error.WriteLine(ex.ToString());
             try
             {
                 logger.LogInformation("Starting dashboard");
-                await dashboard.StartAsync(shutdownCts.Token);
+                await dashboard.StartAsync(shutdownCts.Token, maintenance);
+                if (maintenance)
+                {
+                    logger.LogWarning("Schema 44 recovery dashboard is read-only. Restore the environment-aware release to resume scheduling.");
+                    ready?.Invoke();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, shutdownCts.Token);
+                    return 0;
+                }
 
                 // P4 Stage A — StartupRecovery. Runs ONCE before the
                 // dispatch loop starts. Multi-project: one recovery

@@ -206,7 +206,7 @@ public sealed class DashboardHost : IAsyncDisposable
 
     public string BaseUrl => ResolveBaseUrl();
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken, bool maintenance = false)
     {
         if (!_options.Enabled)
         {
@@ -315,6 +315,21 @@ public sealed class DashboardHost : IAsyncDisposable
         }
 
  _app = builder.Build();
+        if (maintenance)
+        {
+            _app.Use(async (context, next) =>
+            {
+                // Legacy deployment GETs reconcile candidates against the old single target.
+                if (DashboardMutationAuthentication.RequiresAuthentication(context.Request.Method, context.Request.Path)
+                    || context.Request.Path.StartsWithSegments("/api/deployments"))
+                {
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    await context.Response.WriteAsync("Read-only rollback dashboard. Restore the environment-aware release to resume.");
+                    return;
+                }
+                await next();
+            });
+        }
         mutationAuthentication?.Protect(_app);
         _app.Urls.Clear();
         if (_options.Kestrel is not { Endpoints.Count: > 0 })

@@ -4,5 +4,5 @@ namespace Forge.Core.Db;
 public static class RuntimeSchemaCompatibility
 {
     // Strict target: the maintenance bridge's older-version allowance ends here.
-    public static bool CanRead(int version) => version == 43;
+    public static bool CanRead(int version) => version is 43 or 44;
 }
