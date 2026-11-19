@@ -168,6 +168,31 @@ public class GitWorktreeServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task AppIsolatedReviewCleanupSupportsExplicitSiblingRoot()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var sibling = _workDir + "-reviews";
+        var options = new WorkspaceOptions { Root = _workDir, WorktreeRoot = sibling, DefaultBranch = "main" };
+        var creator = new GitWorktreeService(options, NullLogger<GitWorktreeService>.Instance);
+        var isolated = new GitWorktreeService(options, NullLogger<GitWorktreeService>.Instance,
+            publisherToken: () => throw new InvalidOperationException("Cleanup must not request credentials"),
+            publisherRepository: "https://github.com/Xyrces/Forge");
+        try
+        {
+            var head = await GetHeadShaAsync(_workDir);
+            var snapshot = await creator.CreateReviewSnapshotAsync("task", "sibling", head);
+            await isolated.RemoveReviewSnapshotAsync(snapshot);
+            await isolated.RemoveReviewSnapshotAsync(snapshot);
+            Assert.False(Directory.Exists(snapshot));
+            Assert.False(Directory.Exists(Path.Combine(_workDir, ".git", "worktrees", Path.GetFileName(snapshot))));
+            Assert.Equal(head, await GetHeadShaAsync(_workDir));
+            Assert.Throws<InvalidOperationException>(() => IsolatedGitMetadata.RemoveDetachedReviewSnapshot(
+                _workDir, Path.Combine(_workDir, ".git"), Path.Combine(_workDir, ".git", "review-" + new string('a', 64))));
+        }
+        finally { if (Directory.Exists(sibling)) Directory.Delete(sibling, recursive: true); }
+    }
+
+    [Fact]
     public async Task AppIsolatedReviewCleanupRejectsChangedBacklinkAndLinkedParent()
     {
         if (!OperatingSystem.IsLinux()) return;

@@ -106,10 +106,11 @@ internal sealed class IsolatedGitMetadata : IDisposable
         worktreeRoot = Path.GetFullPath(worktreeRoot).TrimEnd('/');
         path = Path.GetFullPath(path);
         var name = Path.GetFileName(path);
-        if (Path.GetDirectoryName(path) != worktreeRoot || !Regex.IsMatch(name, "\\Areview-[0-9a-f]{64}\\z")
-            || !worktreeRoot.StartsWith(repositoryRoot + "/", StringComparison.Ordinal))
-            throw new InvalidOperationException("Review cleanup is outside the authorized repository.");
         var common = Path.Combine(repositoryRoot, ".git");
+        if (Path.GetDirectoryName(path) != worktreeRoot || !Regex.IsMatch(name, "\\Areview-[0-9a-f]{64}\\z")
+            || worktreeRoot == common || worktreeRoot.StartsWith(common + "/", StringComparison.Ordinal)
+            || common.StartsWith(worktreeRoot + "/", StringComparison.Ordinal))
+            throw new InvalidOperationException("Review cleanup is outside the authorized worktree root or overlaps repository administration.");
         var registration = Path.Combine(common, "worktrees", name);
         static void RejectLinkedAncestors(string candidate)
         {
