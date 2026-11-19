@@ -68,7 +68,8 @@ public static class WorkerHost
             observed = observed with { Phases = observed.Phases! with
                 { WorkerCompletedAt = DateTimeOffset.UtcNow, WorkerOutcome = ex is OperationCanceledException ? "cancelled" : "failed" } };
             await attempts.CompleteAsync(assignment.Id, worker.PodUid, assignment.AttemptToken, JsonSerializer.Serialize(observed),
-                ex is OperationCanceledException ? "cancelled" : ex.Message, finalize.Token);
+                ex is OperationCanceledException ? "cancelled" :
+                    ex is Forge.Core.Control.BudgetAdmissionDeniedException denied ? denied.ToWorkerError() : ex.Message, finalize.Token);
             return 1;
         }
         finally

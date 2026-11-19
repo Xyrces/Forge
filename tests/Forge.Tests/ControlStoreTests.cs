@@ -187,6 +187,11 @@ public sealed class ControlStoreTests : IDisposable
         await Leases.InitializeDatasetAsync("dataset", 5m);
         var results = await Task.WhenAll(Enumerable.Range(0, 20).Select(i => Task.Run(() => Budget.ReserveAsync(Request($"r{i}")))));
         Assert.Equal(5, results.Count(r => r.Admitted && r.IsNew));
+        Assert.All(results.Where(r => !r.Admitted), r =>
+        {
+            Assert.Equal(1m, r.RequestedUsd);
+            Assert.Equal(0m, r.AvailableUsd);
+        });
         var snapshot = (await Budget.ReadAsync("dataset"))!;
         Assert.Equal(5m, snapshot.OutstandingUsd);
         Assert.Equal(0m, snapshot.SpentUsd);

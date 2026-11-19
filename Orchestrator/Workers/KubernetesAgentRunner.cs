@@ -85,6 +85,9 @@ public sealed class KubernetesAgentRunner(WorkerAttemptStore store, IWorkerJobs 
             if (assignment.State == "succeeded")
                 return JsonSerializer.Deserialize<AgentRunResult>(assignment.ResultJson!)
                     ?? throw new InvalidOperationException("Worker result was empty.");
+            if (assignment.State == "failed"
+                && Forge.Core.Control.BudgetAdmissionDeniedException.FromWorkerError(assignment.Error) is { } denied)
+                throw denied;
             if (assignment.State is "failed" or "cancelled")
                 throw new InvalidOperationException($"Worker {id} {assignment.State}: {assignment.Error}");
             try
