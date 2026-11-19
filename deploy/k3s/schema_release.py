@@ -117,6 +117,14 @@ class SchemaRelease(Release):
             return False
         self.wait(terminal, "initializer still running; resume this schema operation, never restart writers")
 
+    def routed_dashboard_ready(self, slot, rollback):
+        if super().routed_dashboard_ready(slot, rollback):
+            return True
+        # safe_rollback already verified the exact bridge digest. After migration the
+        # bridge exposes /api/recovery and deliberately refuses /api/meta/buildinfo.
+        return (rollback and self.status(slot).get("schemaVersion") == self.policy["toVersion"]
+                and self.controllers.verify_dashboard(None, recovery=True))
+
     def safe_rollback(self, candidate, previous):
         existing = self.kube.get("jobs", self.migration_name)
         if existing is not None:

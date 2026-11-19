@@ -86,7 +86,7 @@ class Controllers:
         except urllib.error.HTTPError as error:
             raise ApiError(error.code, "controller " + action) from None
 
-    def verify_dashboard(self, source_sha):
+    def verify_dashboard(self, source_sha, *, recovery=False):
         """Verify the routed target, including its served revision; not a browser test."""
         base = f"http://forge.{self.namespace}.svc:8080"
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -98,6 +98,11 @@ class Controllers:
                 html = response.read(2 * 1024 * 1024).decode("utf-8")
                 if response.status != 200 or "<html" not in html.lower():
                     return False
+            if recovery:
+                # The schema recovery image deliberately serves only a read-only snapshot.
+                with opener.open(base + "/api/recovery", timeout=15) as response:
+                    state = json.load(response)
+                    return state.get("mode") == "read-only-recovery" and isinstance(state.get("projects"), list)
             with opener.open(base + "/api/meta/buildinfo", timeout=15) as response:
                 revision = json.load(response).get("sourceRevision")
                 return bool(re.fullmatch(r"[0-9a-f]{40}", revision or "")) and (source_sha is None or revision == source_sha)
@@ -176,12 +181,15 @@ class Release:
         if not identity or identity.get("data", {}).get("id") != self.dataset:
             raise RuntimeError("target namespace is not provisioned for the approved dataset")
 
+    def routed_dashboard_ready(self, slot, rollback):
+        return self.controllers.verify_dashboard(None if rollback else self.source_sha)
+
     def verify_route(self, slot, rollback=False):
         if self.environment is None:
             return
         self.record("rolling-back" if rollback else "verifying-target")
         self.wait(lambda: self.status(slot).get("datasetId") == self.dataset and
-                  self.controllers.verify_dashboard(None if rollback else self.source_sha),
+                  self.routed_dashboard_ready(slot, rollback),
                   "routed target identity or dashboard revision check timed out")
         self.journal["data"]["rollbackVerified" if rollback else "targetVerified"] = "true"
         if not rollback:

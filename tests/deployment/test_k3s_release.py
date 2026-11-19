@@ -93,7 +93,9 @@ class FakeControllers:
         self.merge_held = False
         self.fail_dashboard = False
 
-    def verify_dashboard(self, source_sha):
+    def verify_dashboard(self, source_sha, *, recovery=False):
+        if recovery:
+            return False
         self.kube.events.append(("verify-dashboard", source_sha))
         return not self.fail_dashboard or source_sha is None
 

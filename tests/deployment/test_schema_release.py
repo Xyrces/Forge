@@ -68,6 +68,23 @@ class SchemaReleaseTests(unittest.TestCase):
         self.assertEqual("rolled-back", journal["phase"])
         self.assertEqual("true", journal["rollbackVerified"])
 
+    def test_postmigration_rollback_verifies_read_only_bridge_after_normal_routes_close(self):
+        release, kube, controllers = self.make()
+        release.environment, release.source_sha = "uat", "c" * 40
+        kube.objects[("configmaps", "forge-dataset")] = {"data": {"id": DATASET}}
+        probes = []
+        def verify(source, *, recovery=False):
+            probes.append((source, recovery))
+            return recovery and source is None
+        controllers.verify_dashboard = verify
+        with self.assertRaisesRegex(TimeoutError, "dashboard revision"):
+            release.run()
+        data = kube.get("configmaps", release.journal_name)["data"]
+        self.assertEqual("rolled-back", data["phase"])
+        self.assertEqual("true", data["rollbackVerified"])
+        self.assertEqual((None, True), probes[-1])
+        self.assertNotIn((release.source_sha, True), probes)
+
     def test_bundled_upgrade_policy_targets_the_workload_schema(self):
         root = Path(__file__).resolve().parents[2]
         policy = load_policy(root / "deploy/k3s/schema-upgrade.json")
