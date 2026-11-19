@@ -94,7 +94,7 @@
                 @foreach (var sp in sprints)
                 {
                     <option value="@sp.Id" selected="@(selected?.Id == sp.Id)">
-                        @(sp.Status == "Active" ? "● " : "")@sp.Name — @sp.Status.ToLowerInvariant()@Dates(sp)
+                        @(sp.Status == "Active" ? "● " : "")@SprintHeading.Picker(sp) — @sp.Status.ToLowerInvariant()@Dates(sp)
                     </option>
                 }
             </select>
@@ -171,7 +171,7 @@
             <div class="sprint-hero">
                 <div class="sprint-hero__top">
                     <span class="pill pill--@selected.Status.ToLowerInvariant()">@selected.Status</span>
-                    <strong class="sprint-hero__name">@selected.Name</strong>
+                    <strong class="sprint-hero__name">@SprintHeading.Title(selected)</strong>
                     <span class="mono sprint-hero__dates">
                         @(selected.StartDate?.ToString("MMM d") ?? "")
                         @(selected.EndDate is not null ? $" → {selected.EndDate.Value:MMM d}" : "")
@@ -185,7 +185,7 @@
             <div class="sprint-progress"><div class="sprint-progress__fill" style="width:@pct%"></div></div>
         </div>
 
-        <SprintCompletionPanel ProjectId="@_loadedProject" SprintId="@selected.Id" RefreshAt="@(_board?.GeneratedAt ?? DateTime.MinValue)" OnLayoutReady="CompletionLayoutReady" />
+        <SprintCompletionPanel ProjectId="@_loadedProject" SprintId="@selected.Id" RefreshAt="@(_board?.GeneratedAt ?? DateTime.MinValue)" OnLayoutReady="CompletionLayoutReady" Expanded="@_completionExpanded" ExpandedChanged="SetCompletionExpandedAsync" />
         <div class="picker-bar">
             <span>Showing @members.Count of @total tasks. Column counts cover this page.</span>
             <button class="btn" disabled="@(_memberPages.Count == 0 || _refreshing)" @onclick="PreviousMembersAsync">Previous tasks</button>
@@ -323,10 +323,11 @@
     [Parameter][SupplyParameterFromQuery(Name = "sprint")] public string? Sprint { get; set; }
     private IJSObjectReference? _boardBrowser;
     private bool _restoreBoard, _chooseLane, _restoringLocation, _locationReadFailed;
-    private bool _completionLayoutReady;
+    private bool _completionLayoutReady, _completionExpanded;
+    private string? _completionSprintId;
     private int _restoreGeneration;
     private string? _holdBusy, _holdError, _holdNotice;
-    private sealed record BoardLocation(string? SprintId, string? Lane, string? MemberCursor, string? HistoryCursor, string?[]? MemberPages, string?[]? HistoryPages);
+    private sealed record BoardLocation(string? SprintId, string? Lane, string? MemberCursor, string? HistoryCursor, string?[]? MemberPages, string?[]? HistoryPages, bool CompletionExpanded = false);
     private string TaskUrl(string id) => $"/tasks/{Uri.EscapeDataString(id)}?project={Uri.EscapeDataString(_loadedProject ?? "")}";
     private async Task SetReviewHoldAsync(Card card)
     {
@@ -361,7 +362,14 @@
     private async Task SaveBoardLocationAsync()
     {
         if (!_restoringLocation && !_locationReadFailed && _boardBrowser is not null && _loadedProject is not null)
-            await _boardBrowser.InvokeVoidAsync("remember", _loadedProject, _selectedSprintId ?? _board?.Sprint?.Id, _lane, _memberCursor, _historyCursor, _memberPages.ToArray(), _historyPages.ToArray());
+            await _boardBrowser.InvokeVoidAsync("remember", _loadedProject, _selectedSprintId ?? _board?.Sprint?.Id, _lane, _memberCursor, _historyCursor, _memberPages.ToArray(), _historyPages.ToArray(), _completionExpanded);
+    }
+    private async Task SetCompletionExpandedAsync(bool expanded)
+    {
+        await CancelBoardRestoreAsync();
+        _completionExpanded = expanded;
+        _completionSprintId = _selectedSprintId ?? _board?.Sprint?.Id;
+        await SaveBoardLocationAsync();
     }
     private async Task CancelBoardRestoreAsync()
     {
@@ -721,6 +729,11 @@
                     var board = await client.BoardAsync(projectId, sprintId, memberCursor, token);
                     if (!_selection.IsCurrent(generation)) continue;
                     _summary = history; _board = board; _error = null;
+                    if (_completionSprintId != board.Sprint?.Id)
+                    {
+                        _completionExpanded = false;
+                        _completionSprintId = board.Sprint?.Id;
+                    }
                     if (_chooseLane && board.Sprint is not null)
                     {
                         var cards = EnrichMembers(board.Sprint);
@@ -776,6 +789,7 @@
         _historyPages.Clear(); _memberPages.Clear();
         _restoreBoard = false;
         _completionLayoutReady = false;
+        _completionExpanded = false; _completionSprintId = null;
         _selection.Select(project, null);
         _summary = null; _board = null; _repoUrl = null;
         _queue.Clear(); _blocked.Clear(); _drafts.Clear(); _build = null;
@@ -797,6 +811,8 @@
         if (_disposed || generation != _restoreGeneration || project != ShellStore.Value.CurrentProjectId)
             return false;
         _selectedSprintId = Project == _loadedProject && !string.IsNullOrEmpty(Sprint) ? Sprint : remembered?.SprintId;
+        _completionExpanded = remembered?.SprintId == _selectedSprintId && remembered?.CompletionExpanded == true;
+        _completionSprintId = _selectedSprintId;
         _lane = Columns.Any(c => c.Title == remembered?.Lane) ? remembered!.Lane! : "Queued";
         _restoreBoard = true; _chooseLane = remembered is null;
         _holdError = null; _holdNotice = null;
@@ -820,12 +836,18 @@
         ++_restoreGeneration;
         await CancelBoardRestoreAsync();
         _selectedSprintId = e.Value?.ToString(); _memberCursor = null; _memberPages.Clear();
+        _completionExpanded = false; _completionSprintId = _selectedSprintId;
         _selection.Select(_loadedProject, _selectedSprintId); _board = null; _drafts.Clear();
         await SaveBoardLocationAsync();
         await RefreshAsync();
     }
     private Task ShowActiveAsync() => SelectSprintAsync(new ChangeEventArgs { Value = null });
-    private Task ReviewCompletionAsync(string sprintId) => SelectSprintAsync(new ChangeEventArgs { Value = sprintId });
+    private async Task ReviewCompletionAsync(string sprintId)
+    {
+        await SelectSprintAsync(new ChangeEventArgs { Value = sprintId });
+        if (_disposed || _selectedSprintId != sprintId) return;
+        await SetCompletionExpandedAsync(true);
+    }
 
     private async Task NextHistoryAsync() { _historyPages.Push(_historyCursor); _historyCursor = _summary?.NextCursor; await RefreshSelectionAsync(); }
     private async Task PreviousHistoryAsync() { _historyCursor = _historyPages.Pop(); await RefreshSelectionAsync(); }

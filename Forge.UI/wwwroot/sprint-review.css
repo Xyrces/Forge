@@ -37,8 +37,24 @@
 .sprint-objective table { display:block; max-width:100%; overflow:auto; }
 .sprint-objective h1,.sprint-objective h2,.sprint-objective h3 { font-size:16px; margin:16px 0 6px; }
 
-.sprint-acceptance { margin-bottom:20px; min-width:0; overflow-wrap:anywhere; }
+.sprint-acceptance.card { margin-bottom:14px; padding:0; min-width:0; overflow-wrap:anywhere; }
 .sprint-acceptance h2 { font-size:18px; margin:0; }
+.sprint-acceptance__toggle {
+    display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:12px 24px;
+    width:100%; min-height:48px; padding:10px 16px; border:0; border-radius:inherit;
+    background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer;
+}
+.sprint-acceptance__toggle:hover { background:var(--surface-1); }
+.sprint-acceptance__toggle:focus-visible { outline:2px solid var(--primary); outline-offset:-2px; }
+.sprint-acceptance__status { display:flex; flex-wrap:wrap; gap:4px 16px; font-size:13px; font-weight:500; color:var(--on-surface-variant); }
+.sprint-acceptance__status > span { border-inline-start:1px solid var(--outline); padding-inline-start:12px; }
+.sprint-acceptance__chevron {
+    width:9px; height:9px; margin-inline:4px;
+    border-right:2px solid var(--on-surface-variant); border-bottom:2px solid var(--on-surface-variant);
+    transform:rotate(45deg);
+}
+.sprint-acceptance__toggle[aria-expanded="true"] .sprint-acceptance__chevron { transform:rotate(225deg); }
+.sprint-acceptance__details { padding:0 16px 16px; border-top:1px solid var(--outline); }
 .sprint-acceptance h3 { font-size:15px; margin:20px 0 12px; }
 .sprint-acceptance h4 { font-size:14px; line-height:1.5; margin:0; }
 .delivery-summary { display:grid; grid-template-columns:minmax(120px,1fr) minmax(0,3fr); gap:10px 20px; padding:16px; background:var(--surface-1); border-radius:10px; }
@@ -50,6 +66,10 @@
 .release-reference { font-size:12px; margin:12px 0; }
 .release-reference summary { cursor:pointer; padding:8px 0; }
 @media(max-width:700px) {
+ .sprint-acceptance__toggle { grid-template-columns:minmax(0,1fr) auto; gap:4px 12px; }
+ .sprint-acceptance__status { grid-column:1; gap:4px 12px; }
+ .sprint-acceptance__status > span { border:0; padding:0; }
+ .sprint-acceptance__chevron { grid-column:2; grid-row:1; }
  .delivery-summary { grid-template-columns:1fr; gap:6px; }
  .delivery-summary dd { margin-bottom:10px; }
  .acceptance-criterion dl { grid-template-columns:1fr; }
