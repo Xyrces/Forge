@@ -82,4 +82,50 @@ public sealed class ReviewOriginTests
             .ObserveReviewOriginsAsync("repo", 1, "head", At, [Review(1, "head")])));
         Assert.All(results, result => Assert.Null(result[1]));
     }
+
+    [Fact]
+    public async Task UnobservedHeadReversionChangesResetMarkerAndCannotAdoptReboundApproval()
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("review-reversion"));
+        var memory = new MemoryStore(issues.Db);
+        await memory.ObserveReviewOriginsAsync("repo", 1, "A", At, [], resetMarker: "reset-1");
+        // B and its approval happened between polls; GitHub now reports A again.
+        var rebound = await memory.ObserveReviewOriginsAsync("repo", 1, "A", At.AddMinutes(2),
+            [Review(2, "A", At.AddMinutes(1))], resetMarker: "reset-2");
+        Assert.Null(rebound[2]);
+        Assert.Equal("A", (await memory.ObserveReviewOriginsAsync("repo", 1, "A", At.AddMinutes(3),
+            [Review(3, "A", At.AddMinutes(3))], resetMarker: "reset-2"))[3]);
+    }
+
+    [Fact]
+    public void LatestUnknownApprovalDoesNotResurrectOlderApprovalOnHeadReversion()
+    {
+        var effective = EffectiveReview.Evaluate([
+            new("Xyrces", "A", PullRequestReviewState.Approved, false, 10, "", ""),
+            new("Xyrces", "", PullRequestReviewState.Approved, false, 11, "", "")], "A");
+        Assert.False(effective.HumanApproved);
+    }
+
+    [Fact]
+    public void LaterSubmittedOldDraftObjectionSupersedesNewerCreatedApproval()
+    {
+        var effective = EffectiveReview.Evaluate([
+            new("Xyrces", "A", PullRequestReviewState.Approved, false, 11, "", "", At),
+            new("Xyrces", "A", PullRequestReviewState.ChangesRequested, false, 10, "", "", At.AddMinutes(1))], "A");
+        Assert.False(effective.HumanApproved);
+        Assert.True(effective.OutstandingHumanObjection);
+    }
+
+    [Fact]
+    public async Task UnavailableResetMarkerCannotAuthorizeUnseenApprovalButLocalProofWorks()
+    {
+        await using var issues = new IssueStore(TempRoot.Instance.NewDbPath("review-marker"));
+        var memory = new MemoryStore(issues.Db);
+        await memory.ObserveReviewOriginsAsync("repo", 1, "A", At, [], resetMarker: null);
+        Assert.Null((await memory.ObserveReviewOriginsAsync("repo", 1, "A", At.AddMinutes(1),
+            [Review(1, "A", At.AddMinutes(1))], resetMarker: null))[1]);
+        var proof = new VerifiedReviewOrigin(2, "reviewer[bot]", "A", At);
+        Assert.Equal("A", (await memory.ObserveReviewOriginsAsync("repo", 1, "A", At.AddMinutes(1),
+            [new(2, proof.Author, "A", At)], [proof], resetMarker: null))[2]);
+    }
 }

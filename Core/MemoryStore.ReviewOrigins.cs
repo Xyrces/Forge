@@ -11,7 +11,7 @@ public sealed partial class MemoryStore
 {
     private sealed record ReviewOrigin(string Author, DateTimeOffset? SubmittedAt, string? Head);
     private sealed record ReviewOriginLedger(string Head, DateTimeOffset ObservedAt, long PriorReviewId,
-        Dictionary<long, ReviewOrigin> Reviews);
+        Dictionary<long, ReviewOrigin> Reviews, string? ResetMarker = null);
 
     /// <summary>
     /// Pin authoring revisions, not GitHub's mutable review commit_id. The first observation
@@ -20,7 +20,7 @@ public sealed partial class MemoryStore
     /// </summary>
     public async Task<IReadOnlyDictionary<long, string?>> ObserveReviewOriginsAsync(string repository, int pr,
         string head, DateTimeOffset serverTime, IReadOnlyList<ReviewOriginObservation> observations,
-        IReadOnlyList<VerifiedReviewOrigin>? authored = null, CancellationToken ct = default)
+        IReadOnlyList<VerifiedReviewOrigin>? authored = null, CancellationToken ct = default, string? resetMarker = "none")
     {
         if (string.IsNullOrWhiteSpace(repository) || pr <= 0 || string.IsNullOrWhiteSpace(head)
             || observations.Count > 10000 || observations.Any(o => o.Id <= 0)
@@ -40,9 +40,9 @@ public sealed partial class MemoryStore
         }
         var ledger = json is null ? null : JsonSerializer.Deserialize<ReviewOriginLedger>(json)
             ?? throw new InvalidOperationException("Review provenance ledger is unreadable.");
-        var isNewHead = ledger is null || ledger.Head != head;
+        var isNewHead = ledger is null || ledger.Head != head || ledger.ResetMarker != resetMarker;
         if (isNewHead)
-            ledger = new(head, serverTime, observations.Select(o => o.Id).DefaultIfEmpty(0).Max(), ledger?.Reviews ?? []);
+            ledger = new(head, serverTime, observations.Select(o => o.Id).DefaultIfEmpty(0).Max(), ledger?.Reviews ?? [], resetMarker);
         var current = ledger!;
         if (current.Reviews.Count + observations.Count(o => !current.Reviews.ContainsKey(o.Id)) > 10000)
             throw new InvalidOperationException("Review provenance exceeds its safe bound; operator investigation required.");
@@ -55,7 +55,7 @@ public sealed partial class MemoryStore
             if (!current.Reviews.TryGetValue(observation.Id, out var origin))
             {
                 var originalHead = proof?.Head;
-                if (originalHead is null && !isNewHead && observation.Id > current.PriorReviewId
+                if (originalHead is null && resetMarker is not null && !isNewHead && observation.Id > current.PriorReviewId
                     && observation.ReportedHead == head && observation.SubmittedAt is { } submitted
                     && submitted >= current.ObservedAt && submitted <= serverTime)
                     originalHead = head;
@@ -71,7 +71,8 @@ public sealed partial class MemoryStore
             result[observation.Id] = string.Equals(origin.Author, observation.Author, StringComparison.OrdinalIgnoreCase)
                 && origin.SubmittedAt == observation.SubmittedAt ? origin.Head : null;
         }
-        await UpsertAsync(connection, transaction, key, JsonSerializer.Serialize(current), null, DateTime.UtcNow, ct);
+        var after = JsonSerializer.Serialize(current);
+        if (after != json) await UpsertAsync(connection, transaction, key, after, null, DateTime.UtcNow, ct);
         await transaction.CommitAsync(ct);
         return result;
     }

@@ -62,10 +62,10 @@ public sealed partial class PRWatcher
                     authored.Add(new(id, review.Reviewer, review.HeadSha, review.SubmittedAt));
         }
         var origins = await new MemoryStore(store.Db).ObserveReviewOriginsAsync($"{_gitHub.Owner}/{_gitHub.Repo}/{observedAt.RepositoryId}/{observedAt.PullRequestId}", pr.Number,
-            head, observedAt.ServerTime, observedDecisions.Select(d => new ReviewOriginObservation(d.Id, d.Login, d.Head, d.SubmittedAt)).ToArray(), authored, ct);
+            head, observedAt.ServerTime, observedDecisions.Select(d => new ReviewOriginObservation(d.Id, d.Login, d.Head, d.SubmittedAt)).ToArray(), authored, ct, observedAt.ResetMarker);
         var decisions = observedDecisions.Select(d => d with { Head = origins[d.Id] ?? "" }).ToArray();
         var effective = EffectiveReview.Evaluate(decisions, head, settings.NominatedHuman, pr.User?.Login);
-        var latest = observedDecisions.GroupBy(d => d.Login, StringComparer.OrdinalIgnoreCase).Select(g => g.MaxBy(d => d.Id)!);
+        var latest = observedDecisions.GroupBy(d => d.Login, StringComparer.OrdinalIgnoreCase).Select(EffectiveReview.Latest);
         var humanProvenancePending = human && !effective.HumanApproved && latest.Any(d => !d.Automated
             && d.State == PullRequestReviewState.Approved && d.Head == head && origins[d.Id] != head
             && (string.IsNullOrWhiteSpace(settings.NominatedHuman) || string.Equals(d.Login, settings.NominatedHuman, StringComparison.OrdinalIgnoreCase)));

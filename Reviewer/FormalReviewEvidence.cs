@@ -22,19 +22,25 @@ public sealed record FormalDecision(string Login, string Head, PullRequestReview
 public sealed record EffectiveReview(bool AutomatedApproved, bool HumanApproved, bool OutstandingHumanObjection,
     IReadOnlyList<FormalDecision> CurrentRequests)
 {
+    internal static FormalDecision Latest(IEnumerable<FormalDecision> decisions) => decisions
+        .OrderBy(r => r.SubmittedAt ?? DateTimeOffset.MinValue).ThenBy(r => r.Id).Last();
     public static EffectiveReview Evaluate(IEnumerable<FormalDecision> all, string head, string? nominatedHuman = null, string? author = null)
     {
-        var active = all.Where(r => !string.Equals(r.Login, author, StringComparison.OrdinalIgnoreCase) && (r.Automated || !r.Login.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase)))
-            .Where(r => r.State is PullRequestReviewState.ChangesRequested or PullRequestReviewState.Dismissed
-                || r.State == PullRequestReviewState.Approved && !string.IsNullOrEmpty(r.Head))
+        var eligible = all.Where(r => !string.Equals(r.Login, author, StringComparison.OrdinalIgnoreCase) && (r.Automated || !r.Login.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase)))
+            .Where(r => r.State is PullRequestReviewState.Approved or PullRequestReviewState.ChangesRequested or PullRequestReviewState.Dismissed).ToArray();
+        var active = eligible
             .GroupBy(r => r.Login, StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.MaxBy(r => r.Id)!).Where(r => r.State != PullRequestReviewState.Dismissed).ToArray();
+            .Select(Latest).Where(r => r.State != PullRequestReviewState.Dismissed).ToArray();
+        // Unknown approvals suppress older approvals but cannot clear an existing objection.
+        var objections = eligible.Where(r => r.State != PullRequestReviewState.Approved || !string.IsNullOrEmpty(r.Head))
+            .GroupBy(r => r.Login, StringComparer.OrdinalIgnoreCase).Select(Latest)
+            .Where(r => r.State == PullRequestReviewState.ChangesRequested).ToArray();
         var current = active.Where(r => r.Head == head).ToArray();
         return new(current.Any(r => r.Automated && r.State == PullRequestReviewState.Approved),
             current.Any(r => !r.Automated && r.State == PullRequestReviewState.Approved
                 && (string.IsNullOrWhiteSpace(nominatedHuman) || string.Equals(r.Login, nominatedHuman, StringComparison.OrdinalIgnoreCase))),
-            active.Any(r => !r.Automated && r.State == PullRequestReviewState.ChangesRequested),
-            current.Where(r => r.State == PullRequestReviewState.ChangesRequested).ToArray());
+            objections.Any(r => !r.Automated),
+            objections.Where(r => r.Head == head).ToArray());
     }
 }
 
