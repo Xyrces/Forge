@@ -34,3 +34,12 @@ For a single command with automatic host cleanup, set DOTNET and NODE_PATH as
 needed and run `bash tools/intake-rehearsal/run.sh /new/evidence/path`.
 The read-only `smoke-readonly.cjs URL evidence-directory` checks the deployed
 inbox at desktop/mobile widths and blocks all browser API writes.
+
+For visual inspection of real long-form content, pass `--replay /private/export.json`
+to the disposable host. The export contains `session`, `previous` (revision 1),
+`proposal` (the detail endpoint's revision 2 response), and optionally `spec`.
+The host copies these into its fresh fixture database using domain stores.
+This mode preserves source wording for screenshots. Its timestamps and record IDs
+belong to the disposable replay, and its refinement is seeded, not model-produced.
+Keep exports outside source control. Run the ordinary approval rehearsal without
+`--replay`, because its zero-work assertions assume the default empty workload.

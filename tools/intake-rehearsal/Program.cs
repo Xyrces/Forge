@@ -36,6 +36,43 @@ var sibling = await proposals.CreateAsync(new("forge", "qualification-sibling", 
 var suggestion = await proposals.CreateAsync(new("forge", "qualification-suggestion", "forge", "Explain blocked releases", "## Outcome\nShow what needs attention."));
 var otherSession = await intake.CreateAsync("other", "Other project conversation");
 var other = await proposals.CreateAsync(new("other", "qualification-other", "user", "Other project private brief", "## Outcome\nIndependent project scope.", SessionId: otherSession.Id));
+// An operator-supplied read-only export may be replayed in this fresh disposable
+// store for visual checks. The source file is never included in the repository.
+InitiativeProposal? replay = null;
+if (builder.Configuration["replay"] is { } replayPath)
+{
+    using var document = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(replayPath));
+    var source = document.RootElement;
+    var prior = source.GetProperty("previous");
+    var current = source.GetProperty("proposal").GetProperty("proposal");
+    var replaySession = await intake.CreateAsync("forge", source.GetProperty("session").GetProperty("title").GetString());
+    foreach (var message in source.GetProperty("session").GetProperty("messages").EnumerateArray())
+        await intake.AppendMessageAsync(replaySession.Id, new(
+            Enum.Parse<IntakeMessageRole>(message.GetProperty("role").GetString()!, true),
+            message.GetProperty("content").GetString()!));
+    replay = await proposals.CreateAsync(new("forge", "visual-replay", "user",
+        prior.GetProperty("title").GetString()!, prior.GetProperty("body").GetString()!,
+        prior.GetProperty("priority").GetInt32(), SessionId: replaySession.Id));
+    replay = await proposals.ReviseAsync("forge", replay.Id, 1,
+        current.GetProperty("title").GetString()!, current.GetProperty("body").GetString()!,
+        current.GetProperty("priority").GetInt32());
+    if (current.GetProperty("approvedAt").ValueKind != System.Text.Json.JsonValueKind.Null)
+    {
+        var receipt = await approvals.ApproveAsync("forge", replay.Id, replay.Revision, replay.Hash);
+        await Ingestion("forge").TryBeginRefinementAsync(replay.Id, replay.Revision);
+        await Ingestion("forge").CompleteRefinementAsync(replay.Id, replay.Revision);
+        if (source.TryGetProperty("spec", out var spec) && Enum.TryParse<SpecStatus>(spec.GetProperty("status").GetString(), out var status))
+        {
+            if (status == SpecStatus.Groomed)
+            {
+                await contexts.Find("forge")!.Specs.SetStatusAsync(receipt.SpecId, SpecStatus.Approved);
+                await contexts.Find("forge")!.Specs.SetStatusAsync(receipt.SpecId, SpecStatus.Grooming);
+            }
+            await contexts.Find("forge")!.Specs.SetStatusAsync(receipt.SpecId, status);
+        }
+        replay = await proposals.GetAsync("forge", replay.Id);
+    }
+}
 var address = new Uri("http://127.0.0.1:" + (builder.Configuration["port"] ?? "5127"));
 builder.WebHost.UseUrls(address.ToString());
 builder.Services.AddForgeUI(builder.Environment, address, address);
@@ -61,6 +98,7 @@ app.MapGet("/api/meta/buildinfo", () => new { informationalVersion = "intake-qua
 app.MapGet("/api/health/heartbeat", () => new { status = "running", at = DateTimeOffset.UtcNow });
 app.MapGet("/api/sprints/active", () => Results.Text("null", "application/json"));
 app.MapGet("/__qualification/seed", () => new { session, initial, revised, sibling, suggestion, otherSession, other });
+app.MapGet("/__qualification/replay", () => replay);
 app.MapGet("/__qualification/evidence", async () => new {
     calls = provider.Calls, approvalRequests = approvalRequests.ToArray(),
     forgeIssues = await primary.ListAsync(new IssueFilter()),

@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Forge.Dashboard.Components.Shared;
 using Forge.Dashboard.Features.AppShell;
+using Forge.Dashboard.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.JSInterop;
@@ -17,6 +18,67 @@ public partial class Intake
     private string _sessionTitle = "New idea", _draft = "", _liveText = "";
     private int _proposalVersion;
     private IntakeBrief? _workingBrief;
+    private IntakeProposalDetail? _shownBrief;
+    private long? _expandedExchange;
+    private bool _followLatest;
+    private string? _mobilePane;
+    private bool IsApproved => _shownBrief?.Proposal.ApprovedAt is not null;
+    private string MobilePane => _mobilePane ?? (IsApproved ? "brief" : "conversation");
+    private string WorkspaceTitle => _shownBrief?.Proposal.Title ?? _sessionTitle;
+
+    private void OnBriefLoaded(IntakeProposalDetail? detail)
+    {
+        if (detail is not null && (!Current(detail.Proposal.ProjectId, detail.Proposal.SessionId)
+            || (_selectedProposalId is not null && detail.Proposal.Id != _selectedProposalId))) return;
+        _shownBrief = detail;
+    }
+
+    private sealed record Exchange(int Start, int End, string Label, string Excerpt);
+
+    private IEnumerable<Exchange> Exchanges(IReadOnlyList<MessageDto> messages)
+    {
+        if (!IsApproved)
+        {
+            yield return new(0, messages.Count, "", "");
+            yield break;
+        }
+        for (var start = 0; start < messages.Count;)
+        {
+            var end = start + 1;
+            while (end < messages.Count && messages[end].Role != "User") end++;
+            var opener = messages[start];
+            var isUser = opener.Role == "User";
+            var label = isUser ? (start == 0 ? "Opening request" : "Follow-up") : "Conversation opened";
+            var excerpt = isUser ? Preview(opener.Content) : opener.ProposedEpicTitle ?? "Forge opened this discussion.";
+            yield return new(start, end, label, excerpt);
+            start = end;
+        }
+    }
+
+    private static string Preview(string text)
+    {
+        var plain = Markdig.Markdown.ToPlainText(text).Trim();
+        var end = plain.IndexOfAny(['.', '!', '?', '\n']);
+        // Some older operator messages lead with a routing instruction and a machine ID.
+        // Prefer the following complete sentence for the preview. The transcript stays verbatim.
+        if (end > 0 && plain[..end].Contains("proposal-", StringComparison.OrdinalIgnoreCase) && end < plain.Length - 1)
+        {
+            plain = plain[(end + 1)..].TrimStart();
+            end = plain.IndexOfAny(['.', '!', '?', '\n']);
+        }
+        if (end > 0) plain = plain[..(end + 1)].TrimEnd();
+        return Truncate(plain, 180);
+    }
+
+    private bool ExchangeOpen(Exchange exchange) => !IsApproved
+        || (_followLatest && exchange.End == _messages?.Count)
+        || (!_followLatest && _expandedExchange == _messages?[exchange.Start].Id);
+
+    private void ToggleExchange(Exchange exchange)
+    {
+        _expandedExchange = ExchangeOpen(exchange) ? null : _messages?[exchange.Start].Id;
+        _followLatest = false;
+    }
     private IntakeInbox? _inbox;
     private Task RefreshInbox() => _inbox?.RefreshAsync() ?? Task.CompletedTask;
     private bool _creating, _opening, _accepting, _liveActive, _mermaidDirty, _applyingLocation, _disposed;
@@ -190,7 +252,12 @@ public partial class Intake
             _selectedProposalId = QueryProposal;
             if (project is not null && QuerySession is not null) await ReloadActive();
         }
-        else _selectedProposalId = QueryProposal;
+        else if (_selectedProposalId != QueryProposal)
+        {
+            _selectedProposalId = QueryProposal;
+            if (QueryProposal is not null && _shownBrief?.Proposal.Id != QueryProposal)
+                _shownBrief = null;
+        }
     }
     private void ResetContext(string? project, string? session)
     {
@@ -203,6 +270,10 @@ public partial class Intake
         _activeSessionId = session;
         _actionError = null;
         _messages = null;
+        _shownBrief = null;
+        _expandedExchange = null;
+        _followLatest = false;
+        _mobilePane = null;
         _selectedProposalId = null;
         _sessionTitle = "New idea";
         _draft = _drafts.GetValueOrDefault(ContextKey, "");
@@ -357,6 +428,7 @@ public partial class Intake
         var reference = _workingBrief?.DisplayedRevision;
         if (project is null || session is null || !_pending.Add(key)) return;
         _actionError = null;
+        _followLatest = true;
         _liveActive = true;
         _liveText = "";
         _liveTools.Clear();

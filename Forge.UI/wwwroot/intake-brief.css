@@ -1,0 +1,112 @@
+/* The brief is a reading surface. Its review state and changes share one hierarchy. */
+.intake-brief__previous pre { max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap; }
+.intake-brief--reading {
+  height: auto;
+  min-width: 0;
+  border: 1px solid var(--outline);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.intake-brief--reading .intake-brief__header {
+  padding: 20px 26px 13px;
+  border: 0;
+  min-height: 52px;
+}
+.intake-brief--reading .intake-brief__header h2 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -.015em;
+  color: var(--on-surface);
+}
+.intake-brief__state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 0;
+  flex: 1;
+  margin-left: 12px;
+  color: var(--on-surface-variant);
+  font-size: 13px;
+}
+.intake-brief__approval-state { color: var(--on-surface); font-weight: 600; }
+.intake-brief__approval-state--approved { color: var(--success); }
+.intake-brief__approval-state > span { margin-right: 5px; }
+.intake-brief__primary-link { margin-left: auto; font-weight: 600; }
+.intake-brief__handoff-details { margin: 0 26px 17px; color: var(--on-surface-variant); font-size: 12px; }
+.intake-brief__handoff-details > summary { cursor: pointer; }
+.intake-brief__handoff-details > summary > span { color: var(--on-surface-variant); margin-left: 12px; font-size: 11px; }
+.intake-brief__handoff-content { padding: 12px 0 0 14px; line-height: 1.6; }
+.intake-brief__handoff-content p { color: var(--on-surface-variant); }
+.intake-brief__attention { margin: 0 26px 18px; padding: 14px; background: color-mix(in srgb, var(--warn) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--outline)); border-radius: 8px; }
+.intake-brief__attention strong { display: block; color: var(--warn); margin-bottom: 6px; }
+.intake-brief__attention > span { display: block; font-size: 11px; margin-top: 6px; color: var(--on-surface-variant); }
+.intake-brief__navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; border-top: 1px solid var(--outline); border-bottom: 1px solid var(--outline); padding: 0 26px; }
+.intake-brief--reading .intake-brief__tabs { display: flex; gap: 24px; padding: 0; border: 0; }
+.intake-brief__tab { appearance: none; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--on-surface-variant); padding: 13px 0 11px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.intake-brief__tab:hover { color: var(--on-surface); }
+.intake-brief__tab--active { color: var(--primary); border-bottom-color: var(--primary); }
+.intake-brief__tab:focus-visible, .intake-brief--reading summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.intake-brief__revision { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--on-surface-variant); font-size: 11px; }
+.intake-brief__revision select { max-width: 160px; padding: 5px 8px; font-size: 11px; border-color: var(--outline); }
+.intake-brief--reading .intake-brief__document { padding: 24px 26px 26px; overflow: visible; flex: initial; }
+.intake-brief--reading .intake-brief__document .md { font-size: 13px; line-height: 1.75; }
+.intake-brief--reading .intake-brief__document .md h2 { font-size: 16px; margin-top: 26px; margin-bottom: 12px; }
+.intake-brief--reading .intake-brief__document .md h3 { font-size: 14px; }
+.intake-brief--reading .intake-brief__document .md p { margin-bottom: 12px; }
+.intake-brief__change-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 25px; }
+.intake-brief__change-summary h3 { font-size: 21px; font-weight: 600; letter-spacing: -.025em; margin: 0 0 4px; }
+.intake-brief__change-summary p { font-size: 12px; color: var(--on-surface-variant); margin: 0; }
+.intake-brief__change-summary .intake-brief__change-meta { display: flex; flex-wrap: wrap; gap: 4px 9px; }
+.intake-brief__change-summary .intake-brief__change-count { color: var(--on-surface); }
+.intake-brief__legend { display: flex; gap: 10px; font-size: 10px; white-space: nowrap; }
+.intake-brief--reading ins { text-decoration: none; background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); border-radius: 3px; padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.intake-brief--reading del { color: color-mix(in srgb, var(--error) 85%, var(--on-surface)); background: color-mix(in srgb, var(--error) 8%, transparent); text-decoration-color: color-mix(in srgb, var(--error) 60%, transparent); border-radius: 3px; padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.intake-brief__change-group { margin: 0 0 22px; }
+.intake-brief__change-group > h3 { color: var(--on-surface-variant); font-size: 12px; font-weight: 600; margin: 0 0 9px; }
+.intake-brief__edit { min-width: 0; padding: 18px 20px; border: 1px solid var(--outline); border-left: 2px solid var(--primary); border-radius: 8px; margin-bottom: 12px; background: color-mix(in srgb, var(--primary) 2%, var(--surface)); }
+.intake-brief__edit > h4 { margin: 0 0 11px; font-size: 16px; font-weight: 600; letter-spacing: -.015em; }
+.intake-brief__criterion-number { color: var(--on-surface-variant); margin-right: 4px; }
+.intake-brief__edit p { font-size: 13px; line-height: 1.8; margin: 0 0 10px; overflow-wrap: anywhere; }
+.intake-brief__edit p:last-child { margin-bottom: 0; }
+.intake-brief__movement { color: var(--on-surface-variant); font-size: 11px !important; }
+.intake-brief__edit-label { display: inline-block; color: var(--success); font-size: 10px; font-weight: 600; margin-bottom: 5px; }
+.intake-brief__block-add { padding-left: 12px; border-left: 2px solid var(--success); }
+.intake-brief__block-remove { padding-left: 12px; border-left: 2px solid var(--error); }
+.intake-brief__block-remove .intake-brief__edit-label { color: var(--error); }
+.intake-brief__block-add .md > :last-child, .intake-brief__block-remove .md > :last-child { margin-bottom: 0; }
+.intake-brief--reading .intake-brief__unchanged { margin: 22px 0 0; border-top: 1px solid var(--outline); padding-top: 16px; }
+.intake-brief--reading .intake-brief__unchanged > summary { margin: 0; font-size: 12px; color: var(--on-surface-variant); cursor: pointer; }
+.intake-brief__unchanged summary > span { margin-left: 10px; font-size: 11px; color: var(--primary); }
+.intake-brief__context { padding-top: 16px; }
+.intake-brief__context > h3 { font-size: 13px; margin-bottom: 10px; }
+.intake-brief__context > h4 { font-size: 12px; margin: 16px 0 8px; }
+.intake-brief__source { padding-top: 15px; }
+.intake-brief__source > summary, .intake-brief__previous > summary { font-size: 11px; color: var(--on-surface-variant); cursor: pointer; }
+.intake-brief__source > .md { margin-top: 18px; }
+.intake-brief__previous { margin-top: 12px; }
+.intake-brief__previous > .md { margin-top: 12px; }
+.intake-brief__edit .intake-brief__excerpt-label { font-size: 11px; color: var(--on-surface-variant); margin: 0 0 7px; }
+.intake-brief__excerpt-label span { opacity: .8; }
+.intake-brief__edit .intake-brief__excerpt { font-size: 15px; line-height: 1.7; margin-bottom: 14px; max-width: 78ch; }
+.intake-brief__complete-change > summary { cursor: pointer; color: var(--primary); font-size: 12px; }
+.intake-brief__source-caption { margin-top: 12px; color: var(--on-surface-variant); font-size: 12px; }
+.intake-brief__complete-change[open] > summary { margin-bottom: 14px; }
+.intake-brief__complete-change > .intake-brief__inline-diff { margin-top: 12px; }
+.intake-brief--reading .intake-brief__approval { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 20px 26px; }
+.intake-brief__approval > div { flex: 1; min-width: 180px; }
+.intake-brief__approval strong { display: block; font-size: 13px; margin-bottom: 4px; }
+.intake-brief--reading .intake-brief__approval p { font-size: 12px; color: var(--on-surface-variant); margin: 0; }
+@media (max-width: 600px) {
+  .intake-brief--reading .intake-brief__header { padding: 16px 18px 10px; }
+  .intake-brief__state { padding: 0; margin-left: 0; flex-basis: 100%; gap: 6px 10px; }
+  .intake-brief__primary-link { margin-left: 0; }
+  .intake-brief__handoff-details { margin: 0 18px 16px; }
+  .intake-brief__navigation { padding: 0 18px; }
+  .intake-brief__revision { margin: 0 0 10px; }
+  .intake-brief--reading .intake-brief__document { padding: 20px 18px; }
+  .intake-brief__change-summary { flex-wrap: wrap; margin-bottom: 20px; }
+  .intake-brief__edit { padding: 15px; }
+  .intake-brief--reading .intake-brief__approval { padding: 18px; }
+}

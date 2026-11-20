@@ -14,6 +14,7 @@ public partial class IntakeBrief
     [Parameter] public string? SelectedProposalId { get; set; }
     [Parameter] public EventCallback<string> ProposalSelected { get; set; }
     [Parameter] public EventCallback Changed { get; set; }
+    [Parameter] public EventCallback<IntakeProposalDetail?> DetailLoaded { get; set; }
     [Parameter] public int RefreshVersion { get; set; }
     private readonly string _selectId = "intake-brief-" + Guid.NewGuid().ToString("N");
     private readonly List<IntakeProposal> _proposals = [];
@@ -29,6 +30,7 @@ public partial class IntakeBrief
     private long _generation, _comparisonGeneration;
     private CancellationTokenSource _requests = new();
     private System.Threading.Timer? _refreshTimer;
+    private string? _openedProposalId;
     public (string Id, int Revision)? DisplayedRevision =>
         !_loading && !_stale && _detail?.Proposal is { } proposal
         && proposal.Id == _selectedId && proposal.ProjectId == ProjectId && proposal.SessionId == SessionId
@@ -36,6 +38,9 @@ public partial class IntakeBrief
 
     private string Query => "projectId=" + Uri.EscapeDataString(ProjectId ?? "");
     private static MarkupString Html(string? content) => new(MarkdownRenderer.ToHtml(content));
+    private static bool IsLongChange(IntakeBriefChange change) =>
+        change.InlineEdits.Count > 0 && (change.Before?.Length ?? 0) + (change.After?.Length ?? 0) > 700;
+
     private string ProposalUrl(string id) => "/api/intake/proposals/" + Uri.EscapeDataString(id);
 
     protected override void OnInitialized()
@@ -71,12 +76,15 @@ public partial class IntakeBrief
             _showChanges = false;
             _stale = false;
             _proposals.Clear();
+            _openedProposalId = null;
+            await DetailLoaded.InvokeAsync(null);
         }
         if (SelectedProposalId is not null && _selectedId != SelectedProposalId)
         {
             _selectedId = SelectedProposalId;
             _detail = null;
             _previous = null;
+            await DetailLoaded.InvokeAsync(null);
         }
         await RefreshAsync();
     }
@@ -91,7 +99,7 @@ public partial class IntakeBrief
         return ++_generation;
     }
 
-    private async Task RefreshAsync()
+    public async Task RefreshAsync()
     {
         var generation = BeginRequest();
         var token = _requests.Token;
@@ -126,6 +134,11 @@ public partial class IntakeBrief
         var changed = _detail is null || _detail.Proposal.Id != detail.Proposal.Id || _detail.Proposal.Hash != detail.Proposal.Hash;
         _detail = detail;
         _stale = false;
+        if (_openedProposalId != detail.Proposal.Id)
+        {
+            _openedProposalId = detail.Proposal.Id;
+            _showChanges = detail.Proposal.ApprovedAt is not null && detail.Proposal.Revision > 1;
+        }
         if (_proposals.All(proposal => proposal.Id != id)) _proposals.Add(detail.Proposal);
         if (changed)
         {
@@ -135,6 +148,8 @@ public partial class IntakeBrief
             _changes = [];
         }
         await ReadSpecAsync(generation, token);
+        if (generation != _generation) return;
+        await DetailLoaded.InvokeAsync(detail);
         if (generation != _generation) return;
         if (_showChanges) await ShowChangesAsync();
     }
@@ -148,6 +163,7 @@ public partial class IntakeBrief
         _previous = null;
         _loading = true;
         _error = null;
+        await DetailLoaded.InvokeAsync(null);
         try
         {
             await ReadDetailAsync(id, generation, _requests.Token);
@@ -262,6 +278,7 @@ public partial class IntakeBrief
             }
             _detail = detail;
             await ReadSpecAsync(generation, _requests.Token);
+            if (generation == _generation) await DetailLoaded.InvokeAsync(detail);
         }
         catch (OperationCanceledException) when (_disposed || generation != _generation) { }
         catch (Exception ex)
