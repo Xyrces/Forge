@@ -58,7 +58,7 @@ Fresh small feature (candidate: `GET /api/meta/sprint` — returns active sprint
 5. **Work → PR**: agent runs (sprint block + sprint memory visible in agent.log on the second task), PR opens, watch attaches.
 6. **Rework**: if CI fails → task requeues with `ciFailure`, agent reworks, same PR updates (R1 path). If CI passes first try, validate rework separately by enqueuing a task whose change intentionally breaks a test (then watch it recover; close that PR unmerged after).
 7. **Merge**: operator merges → sweep completes task → when all sprint tasks terminal, `sprint.completed` + next sprint assembles (or gate closes if nothing eligible).
-8. Spec → **Ship**; epic → Closed. Screenshots at each stage into `/home/jtn5016/e2e/`.
+8. Spec → **Ship**; epic → Closed. Screenshots at each stage into `/home/forge-operator/e2e/`.
 
 ## Out of scope
 

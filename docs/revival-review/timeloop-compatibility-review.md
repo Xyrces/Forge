@@ -1,13 +1,15 @@
 # TimeLoop compatibility review
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 Reviewed 2026-11-16. This is a source review, not a claim of fresh gameplay verification. The user's clarified scope is review and planning first; all pilot steps below are future proposals, not actions taken or queued.
 
 Subsequent planning update: Forge is the first restart project and TimeLoop follows second; Azure SQL is mandatory. The TimeLoop pilot below is therefore a second-stage qualification plan. See `worker-platform-review.md` for Kubernetes/Docker placement and the isolated Linux display correction.
 
 ## Sources and scope
 
-- TimeLoop default branch `main`, pinned at `d3365cfdb900820d31842cd5d888eb2b81a5fdbe`. Read snapshot: `C:/Users/jtn50/repos/Forge/.portHorizon/review-sources/TimeLoop`. GitHub connector returned 404; authenticated local `gh` and a filtered, sparse Git clone supplied the accessible source. The tree response was not truncated. The sparse checkout includes `.agents`, `docs`, `tools`, `src/TimeLoop.Core`, `src/TimeLoop.Game` and root files. Git tree inspection covered other paths without downloading their entire history/assets.
-- Current Forge comparison: `4ac44895c05122ff5705a32b4ceb93e60a6e72e5`, snapshot `C:/Users/jtn50/repos/Forge/.portHorizon/review-sources/Forge-main`. This is materially newer than the original working checkout. Findings below refer to this newer version unless stated otherwise.
+- TimeLoop default branch `main`, pinned at `d3365cfdb900820d31842cd5d888eb2b81a5fdbe`. Read snapshot: `C:/work/review/TimeLoop`. GitHub connector returned 404; authenticated local `gh` and a filtered, sparse Git clone supplied the accessible source. The tree response was not truncated. The sparse checkout includes `.agents`, `docs`, `tools`, `src/TimeLoop.Core`, `src/TimeLoop.Game` and root files. Git tree inspection covered other paths without downloading their entire history/assets.
+- Current Forge comparison: `4ac44895c05122ff5705a32b4ceb93e60a6e72e5`, snapshot `C:/work/review/Forge`. This is materially newer than the original working checkout. Findings below refer to this newer version unless stated otherwise.
 - All six TimeLoop SKILL.md files were read, together with AGENTS.md, current status, relevant amendments, development/architecture/verification instructions and representative authoring/test helpers. Current Forge AGENTS.md and CONTRIBUTING.md were also read.
 - No live game, exported package, Meshy job, paid model request, PR, remote mutation or production service was started. Reported TimeLoop test results below are repository receipts, not reruns.
 - During synthesis, the coordinator reported a new user-supplied screenshot identifying a newer Mara story notebook and a cabling-idea chat outside the tracked repository. Their underlying content was not inspected in this source review. Reconcile that current design context before selecting implementation scope; the pinned repository must not be presented as the complete latest design authority.

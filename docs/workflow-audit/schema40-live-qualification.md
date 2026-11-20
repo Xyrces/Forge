@@ -1,5 +1,7 @@
 # Schema40 supervisor restart and automatic rollback qualification
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 The real K3s/Azure SQL installation completed the additive schema39-to40
 migration on November 17, 2026. This rehearsal used no paid model calls and
 kept design, grooming, sprint assembly and merge gates held.
@@ -33,8 +35,8 @@ record was manually patched to obtain success.
   the observer deleted exactly one release supervisor pod, without force.
 - At 15:19:55 UTC a replacement supervisor from the same release Job owned the
   release lock while the same initializer was still Running. Initializer Job
-  UID `3e596dcb-5deb-40e6-99ec-1c8a8407c581` and pod UID
-  `b8e57b0a-c681-4a5c-a948-bd8943687b94` were unchanged. No second initializer
+  UID `00000000-0000-4000-8000-000000000018` and pod UID
+  `00000000-0000-4000-8000-000000000019` were unchanged. No second initializer
   was created. One early supervisor replacement failed ownership acquisition
   while the deleted pod was terminating; bounded Job retry recovered.
 - The initializer finished at 15:20:27 UTC with exit0 and a Complete Job. The
@@ -43,10 +45,10 @@ record was manually patched to obtain success.
 - After the normal 600-second readiness timeout, the coordinator automatically
   recorded `rolled-back`, removed candidate pods, and activated the exact
   bridge on schema40. At 15:32:49 UTC blue was ready/active, sole lease owner
-  `9c6f363f-c247-42ca-a8a2-382fe3a4752c`, epoch21. The failed release Job's
+  `00000000-0000-4000-8000-000000000020`, epoch21. The failed release Job's
   final Failed status is the expected fault-test result, not a successful
   deployment claim.
-- Dataset `f610a39c-50e1-4aab-8d5a-e18e10aeede9` was unchanged. Budget remained
+- Dataset `00000000-0000-4000-8000-000000000003` was unchanged. Budget remained
   $1.01 operator-reported and $23.99 available, with no outstanding or uncertain
   requests. All four workflow gates remained held.
 
@@ -62,7 +64,7 @@ The normal reviewed image then deployed through operation
 `9bd125844f0b43f164fce71f30bee403b36c495c71503d687a4f88b469569b04`.
 Observed schema40 selected the ordinary release protocol rather than repeating
 initialization. Its journal committed, route switched to green, and controller
-`ec67c8c1-44e9-4f7d-9e32-edb795585679` became healthy/active at epoch22.
+`00000000-0000-4000-8000-000000000021` became healthy/active at epoch22.
 
 ## Evidence and limits
 

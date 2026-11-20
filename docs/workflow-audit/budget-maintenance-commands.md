@@ -1,5 +1,7 @@
 # Budget39 maintenance command plan
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 The supervised execution subsequently completed; see [live qualification](budget-live-qualification.md). This document preserves the reviewed command plan and its unattended-upgrade limitations.
 
 **Prepared only; none of these live commands were executed by this task.** Root/operator owns execution after both immutable image receipts and release approval. This plan restores the bridge on SQL39 first, then uses the normal deployment API to release the budget39 image. It preserves the existing release journal and slot-selection protocol.
@@ -12,7 +14,7 @@ Use the exact qualified bridge and budget source/image receipts, existing namesp
 set -euo pipefail
 umask 077
 NS=forge
-BOOT=/home/jtn5016/.config/forge-bootstrap
+BOOT=/home/forge-operator/.config/forge-bootstrap
 # BRIDGE_IMAGE, BRIDGE_SOURCE, BUDGET_IMAGE, BUDGET_SOURCE and OP must be
 # populated from reviewed source-bound receipts before running any mutation.
 : "${BRIDGE_IMAGE:?}" "${BRIDGE_SOURCE:?}" "${BUDGET_IMAGE:?}" "${BUDGET_SOURCE:?}" "${OP:?}"
@@ -21,7 +23,7 @@ K=(sudo /usr/local/bin/k3s kubectl -n "$NS")
 "${K[@]}" get configmap forge-release-lock -o json
 "${K[@]}" get pods -l app=forge-controller -o json
 "${K[@]}" get pods -l app.kubernetes.io/name=forge-worker -o json
-/home/jtn5016/.dotnet/dotnet run --project /tmp/forge-sql-proof/SqlProof.csproj --no-build
+/home/forge-operator/.dotnet/dotnet run --project /tmp/forge-sql-proof/SqlProof.csproj --no-build
 ```
 
 The helper must parse/assert, not merely display, these observations: active route is blue or green and its Deployment uses the qualified bridge digest; no other release operation is active; dataset and ceiling match the expected immutable values; schema38 is present before migration; runtime admission/owner belong to that bridge; all work is idle or explicitly drained. Retain worker-attempt snapshots. Do not delete/reset a release lock or journal to force progress. A stale lock is resolved by the existing release ownership rules, not this checklist.

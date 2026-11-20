@@ -8,10 +8,13 @@ dictionary. Each entry has `displayName`, its own `kubernetesNamespace` and
 `kubernetesDatasetId`, an explicit `requireApproval` gate, and allowed `promoteTo`
 destinations. `sprintEnvironment` selects the destination that completes a sprint.
 
+Example dataset IDs below stand in for deployment-specific values. Configure a
+unique real dataset ID for each environment in private deployment configuration.
+
 For Forge, UAT is `forge-uat` with dataset
-`53f5d6e0-283e-4208-bed3-f96450aca77e`; staging is `forge-staging` with dataset
-`5f2b9954-31cb-40c1-b8a4-a2c6b7ba03b0`; production remains `forge` with dataset
-`f610a39c-50e1-4aab-8d5a-e18e10aeede9`. UAT can be automatic; higher environments
+`00000000-0000-4000-8000-000000000001`; staging is `forge-staging` with dataset
+`00000000-0000-4000-8000-000000000002`; production remains `forge` with dataset
+`00000000-0000-4000-8000-000000000003`. UAT can be automatic; higher environments
 have an explicit approval gate and are selected from Deployments.
 
 The dashboard edits policy within the host's physical target allowlist. It cannot

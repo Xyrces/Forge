@@ -31,6 +31,7 @@ ExecStart=/usr/bin/dotnet /opt/forge/current/Forge.Core.dll --config /etc/forge/
 # Note the timer keeps the rule fresh while running; this ExecStartPre
 # covers boot. In Azure (ACA/AKS) managed identity replaces this — no
 # firewall script needed (private endpoint or AllowAllWindowsAzureIps).
+# EnvironmentFile=-/etc/forge/sql-firewall.env
 # ExecStartPre=-/opt/forge/scripts/refresh-sql-firewall.sh
 
 # StateDirectory=auto creates /var/lib/forge owned by User=forge at

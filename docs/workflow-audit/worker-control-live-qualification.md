@@ -1,5 +1,7 @@
 # Worker control boundary: live qualification
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 On November 17, 2026, source
 `6b8a78796b70a7a283e7b965390949be62534a04` deployed through the normal
 release API as operation `deploy-c62bff8fd51142eb88f8fe2908def03e`.
@@ -7,7 +9,7 @@ Image workflow `44117314808` produced immutable image
 `ghcr.io/xyrces/forge@sha256:abc1dbe29c09e60485875e47f66b8f65f8d872308c98991763fe33f201e570a6`.
 The independent release Job completed and its journal committed. Blue became
 the active controller at epoch23, instance/pod UID
-`00efe5d4-8ada-4278-880d-0a04a17ca74e`, on the unchanged schema40 dataset.
+`00000000-0000-4000-8000-000000000028`, on the unchanged schema40 dataset.
 Design, grooming, sprint and merge gates remained held.
 
 An unauthenticated POST to a nonexistent dashboard API route returned401.
@@ -28,14 +30,14 @@ state volume or controller credential. The selected pod additionally carried
 the actual `app.kubernetes.io/name=forge-worker` label.
 
 Both probes used run identity `b1fb240f3e0c`. The baseline pod UID was
-`8dfdb22b-78bf-4014-ae8f-75e7406c0a9e`; the selected pod UID was
-`db57fdbe-f634-404c-8a30-adac2ccf6064`. The live controller retained the same
+`00000000-0000-4000-8000-000000000029`; the selected pod UID was
+`00000000-0000-4000-8000-000000000030`. The live controller retained the same
 UID and address throughout both runs.
 
 | Check | Baseline | Worker policy selected |
 | --- | --- | --- |
-| Dashboard Service `10.43.3.17:8080` | Connected | Blocked |
-| Active controller `10.42.0.73:8080` | Connected | Blocked |
+| Dashboard Service `192.0.2.30:8080` | Connected | Blocked |
+| Active controller `192.0.2.31:8080` | Connected | Blocked |
 | GitHub and OpenAI DNS/TCP443 | Connected | Connected |
 | Actual worker SQL, read-only schema query | Version40 | Version40 |
 | Node API6443, observation only | Connected | Blocked |

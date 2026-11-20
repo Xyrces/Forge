@@ -34,7 +34,7 @@ scripts/
 
 The target project (e.g. `PortHorizon/`) is **not** under
 `/opt/forge` — it lives wherever your `workspace.root` says
-(`/home/jtn5016/repos/gamedev/PortHorizon` in the example
+(`/home/forge-operator/projects/PortHorizon` in the example
 `appsettings.multi-project.example.json`). The unit only owns the
 orchestrator + its state dir.
 
@@ -180,14 +180,23 @@ steps, failure modes). Deployment-specific notes:
 - Auth is Entra-only; the connection string uses
   `Authentication=Active Directory Default` — on a self-hosted machine
   this resolves via the Azure CLI login of the service user; in Azure
-  it resolves via managed identity (`forge-mi`, already provisioned as
+  it resolves via managed identity (`<managed-identity>`, already provisioned as
   db_owner).
 - `scripts/refresh-sql-firewall.sh` keeps the server's
-  `forge-dev-machine` firewall rule aligned with a dynamic egress IP
+  `<firewall-rule>` firewall rule aligned with a dynamic egress IP
   and refreshes the az token. Wire it as an ExecStartPre (commented
   example in `deploy/systemd/forge.service`) and install
   `deploy/systemd/forge-sql-firewall.{service,timer}` for the 15-min
-  refresh.
+  refresh. This helper and timer apply to legacy systemd installs; the K3s
+  red/green deployment does not require them. Configure `FORGE_SQL_SERVER`, `FORGE_SQL_RESOURCE_GROUP`, and
+  `FORGE_SQL_FIREWALL_RULE` in the private file
+  `/etc/forge/sql-firewall.env`. The dedicated firewall unit loads this
+  optional `EnvironmentFile`. To enable refresh before the main Forge service
+  starts, uncomment both `EnvironmentFile` and `ExecStartPre` in its unit template.
+  The helper requires all three values when invoked. Restrict file access to the service account and
+  administrators, including read access for the user account when using a user
+  unit. Keep it outside Git. For standalone invocations, export
+  the same variables in the shell. See the [configuration example](azure-sql-cutover.md#firewall-refresh-configuration).
 - Backup becomes Azure-side (automatic backups + PITR on the Basic
   tier). The SQLite guidance below applies only to the default
   `sqlite` provider.

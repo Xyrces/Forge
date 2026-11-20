@@ -1,5 +1,7 @@
 # Live K3s qualification — 17 November 2026
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 **The controlled Forge-first pilot is complete.** Forge produced and independently
 verified a code change, automatically opened PR #124, obtained current-head CI and
 reviewer approval, merged through its normal watcher, and deployed the resulting
@@ -27,7 +29,7 @@ remain recorded below.
   digest `sha256:16f098e4e0eb48db1c35aed96d2b2a5e69ab06cf003791e5b5f8876bc97a7d2e`.
 - Initial/rollback proof source: `e0d144a55d2a387a7e14a607a999110d9f7cc08e`,
   image `sha256:6261013203a15f01a28190dcf5c04f7e0491a3f637e31bf98673a802245998f2`.
-- Dataset: `f610a39c-50e1-4aab-8d5a-e18e10aeede9`.
+- Dataset: `00000000-0000-4000-8000-000000000003`.
 - Forge branch: `codex/forge-first-k3s`, **not main**. TimeLoop is not onboarded.
 - Application state: Azure SQL; cluster state: K3s embedded etcd.
 - Controller, initializer and worker use distinct SQL identities. The operator's
@@ -53,7 +55,7 @@ with 1,651 C# tests, 25 Python tests and the fake end-to-end harness passing.
 Deployment `deploy-ddb45cf7e0324595ad339ae3496f5c39` reached `Deployed` at
 **03:35:04.561 UTC**. Its persisted log says the new controller owns admission and
 the dashboard route. The operating agent observed active blue pod
-`6ff248e0-2b9b-49ef-b240-877a9d06b033`, SQL epoch 6. The retained record is
+`00000000-0000-4000-8000-000000000004`, SQL epoch 6. The retained record is
 `.portHorizon/validation/live/guard-deployment.json`, SHA-256
 `b413ffed275fc2673d8c418bc41d98a7d4f5dae344456f6c74a99a2d340e87e1`.
 This establishes a different-source upgrade using a trusted build receipt; the
@@ -69,7 +71,7 @@ coordination defect was repaired; it was not deferred as an unrelated follow-up.
 Normal API deployment `deploy-664673f03cf0484d9b83517266595ff7` installed the
 gate wake-up repair (`7b05ece`) and recorded `Deployed` at **03:53:46.835 UTC** in
 `.portHorizon/validation/live/wakeup-deployment.json`. The operating agent observed
-green pod `a69515fe-1980-468f-b980-2bfa36f6658d`, epoch 7. After groom/sprint release
+green pod `00000000-0000-4000-8000-000000000005`, epoch 7. After groom/sprint release
 at 03:53:47 UTC, `dev-1` was groomed at 03:53:58 UTC and automatically entered solo
 sprint `sprint-4535844dd5`.
 
@@ -151,7 +153,7 @@ and [image workflow 44019242029](https://github.com/Xyrces/Forge/actions/runs/44
 the operating agent reported 1,691 C# tests, 25 Python tests and the fake end-to-end
 harness passing. API deployment `deploy-94001d925e0d4b0c9ca7f004f0c09a2c` recorded
 `Deployed` at **04:50:46.558 UTC**, with green controller
-`0dbaa75b-73a6-48bd-9e23-c8d445ce6e9c`, epoch 9. This successful runtime replacement
+`00000000-0000-4000-8000-000000000006`, epoch 9. This successful runtime replacement
 did not resolve the existing task's recovery state.
 
 Startup recovery ran before the watcher repair could adopt the published work.
@@ -192,7 +194,7 @@ binds the source to image `c02b35ed…e8e349` (full digest above).
 
 API deployment `deploy-e0975776ef57474ea4a34d47b6f8d18f` reached `Deployed` at
 **05:13:58.750 UTC**, with blue controller
-`bc415563-6dda-42b6-bc58-5b5b1af1095c`, epoch 10. The operator then used the normal
+`00000000-0000-4000-8000-000000000007`, epoch 10. The operator then used the normal
 `adopt-pr` API, which validated PR #124 and exact head `548af659…22d5d1`, restored
 `PROpen`, retained the exact-head review and historical violations, and recorded
 the explicit `OperatorAdoptPr` audit event. This was authorized operator adoption,
@@ -201,7 +203,7 @@ not an automatic reset of Failed work or a manual Git merge.
 A second same-image API deployment,
 `deploy-feda478c50d5430b8f78488d0010d02c`, reached `Deployed` at
 **05:16:07.449 UTC**, with green controller
-`3974e739-23f3-418c-9bf2-da4714b5012f`, epoch 11. The existing PR watch survived and
+`00000000-0000-4000-8000-000000000008`, epoch 11. The existing PR watch survived and
 reached `MergeReady`/`CiGreen`. All six worker-attempt records and the ledger were
 byte-identical before and after replacement: 43 completed requests, $24.809140
 conservative settled cost, no uncertain requests. The two retained JSONL files
@@ -239,7 +241,7 @@ receipt and approved deployment through the existing API.
 
 Deployment `deploy-feda0d2a9cd943c2971caabd05fa5256` reached **Deployed at
 05:22:49.150 UTC**. The only controller pod is blue
-`9479d581-9edf-46ed-aa44-d36def5604c6`, active/ready/admitting with SQL epoch 12.
+`00000000-0000-4000-8000-000000000009`, active/ready/admitting with SQL epoch 12.
 The old green controller is absent. The operating agent verified that
 `/app/source-revision` equals the exact merged source; the retained pod record's
 image and imageID match its immutable digest.
@@ -267,7 +269,7 @@ Retained final evidence under `.portHorizon/validation/live/`:
 
 The browser dashboard was observed healthy through the local
 `127.0.0.1:4097` SSH tunnel. Host SSH configuration restricts this user's local
-forwarding to cluster Service `10.43.3.17:8080`, with `PermitListen none`; no LAN
+forwarding to cluster Service `192.0.2.30:8080`, with `PermitListen none`; no LAN
 dashboard listener was added. The observed hidden SSH process was PID 64944,
 which is session-specific rather than a persistent service identity.
 
@@ -283,15 +285,15 @@ readiness check was used.
 
 | UTC event | Recorded evidence |
 |---|---|
-| 03:14:58.544 | Previous controller active, ready and admitting; pod/owner `cfc2a8de-b995-4a76-8c64-94f5d6eed086`, epoch 3. |
-| 03:15:03.983 | Injected candidate `21409709-0a0f-4f63-86c8-e0e4ebc16957` is standby/ready, admission closed, active runs zero; old owner remains epoch 3. |
+| 03:14:58.544 | Previous controller active, ready and admitting; pod/owner `00000000-0000-4000-8000-000000000010`, epoch 3. |
+| 03:15:03.983 | Injected candidate `00000000-0000-4000-8000-000000000011` is standby/ready, admission closed, active runs zero; old owner remains epoch 3. |
 | 03:15:32.020 | Release journal reaches `qualified`. |
 | 03:15:32.874 | Observer records previous-controller pods absent. |
 | 03:15:34.352 | Release journal records `old-stopped`. |
 | 03:15:34.895 | Candidate log records `FileNotFoundException` for `/proc/forge-proof-readonly` during `BuildProjectBootstrap`; runtime reports activation failure with admission closed. |
 | 03:15:35.630 | Journal reaches `rolling-back`. |
 | 03:16:46.611 | Journal reaches `rolled-back`. |
-| 03:16:47.246 | Previous green slot restored as new pod/owner `90dcf3b2-63c9-4c78-8ed3-70449b423de3`, epoch 5, active/ready/admitting. Deployment record is `DeployFailed`, with explicit completed-rollback log. |
+| 03:16:47.246 | Previous green slot restored as new pod/owner `00000000-0000-4000-8000-000000000012`, epoch 5, active/ready/admitting. Deployment record is `DeployFailed`, with explicit completed-rollback log. |
 | 03:16:47.262 | Dormant candidate configuration restored. |
 
 `ControllerStatus.activeRuns=1` in active-controller evidence denotes the owned

@@ -41,7 +41,7 @@ public static class UIExtensions
         });
         // publicBaseAddress is what the Blazor ForgeUI component
         // sees (so the rendered HTML links to e.g.
-        // https://192.168.68.78:443/...). localBaseAddress is what
+        // https://dashboard.example.org:443/...). localBaseAddress is what
         // the server-side HttpClient uses for its API calls — it
         // must be a real hostname (not 0.0.0.0 / *), and loopback is
         // always reachable regardless of which network interface

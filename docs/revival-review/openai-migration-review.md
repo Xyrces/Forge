@@ -1,6 +1,8 @@
 # Forge → OpenAI: runtime and migration review
 
-Reviewed 2026-11-16. **Source baseline: current remote main `4ac44895c05122ff5705a32b4ceb93e60a6e72e5`**, inspected at `C:/Users/jtn50/repos/Forge/.portHorizon/review-sources/Forge-main`. All code references below refer to this baseline, not the older working checkout. Initial investigation of `6d0219f` was superseded; notably, current main already adds per-run token accounting, optional compaction, independent pipeline model roles, project overrides, and model escalation. No paid model calls, production changes, or secret reads were performed. Build/test validation belongs to the coordinating review.
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
+Reviewed 2026-11-16. **Source baseline: current remote main `4ac44895c05122ff5705a32b4ceb93e60a6e72e5`**, inspected at `C:/work/review/Forge`. All code references below refer to this baseline, not the older working checkout. Initial investigation of `6d0219f` was superseded; notably, current main already adds per-run token accounting, optional compaction, independent pipeline model roles, project overrides, and model escalation. No paid model calls, production changes, or secret reads were performed. Build/test validation belongs to the coordinating review.
 
 ## Decision
 

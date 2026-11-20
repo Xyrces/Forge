@@ -21,7 +21,7 @@ class WorkerNetworkTests(unittest.TestCase):
         def permitted(address):
             ip=ipaddress.ip_address(address)
             return any(ip in ipaddress.ip_network(b['cidr']) and not any(ip in ipaddress.ip_network(e) for e in b.get('except',[])) for b in blocks)
-        for address in ['10.43.3.17','10.42.0.4','192.168.68.78','172.16.0.1','169.254.169.254','127.0.0.1','100.64.1.1','0.0.0.1','224.0.0.1','fd00::1','fe80::1','::1','::ffff:192.168.68.78']:
+        for address in ['10.43.3.17','10.42.0.4','192.168.0.42','172.16.0.1','169.254.169.254','127.0.0.1','100.64.1.1','0.0.0.1','224.0.0.1','fd00::1','fe80::1','::1','::ffff:192.168.0.42']:
             with self.subTest(address=address):self.assertFalse(permitted(address))
         for address in ['1.1.1.1','20.1.2.3','140.82.112.3','2606:4700::1111']:
             with self.subTest(address=address):self.assertTrue(permitted(address))

@@ -1,5 +1,7 @@
 # Isolated Azure SQL budget rehearsal
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 Completed 2026-11-17 after explicit authorization for one disposable schema and temporary contained test users. **This qualifies scoped store queries, migration and permissions on actual Azure SQL. It is not full image activation, production migration, or live reconciliation.**
 
 Only schema `audit_budget_af24b748350546dab00a4acd7b21471e` was created. A strict `^audit_budget_[a-f0-9]{32}$` guard rejected other schema names, the schema was proved absent before creation, and every store received its explicit qualifier with `ForgeSchemaProfile.Core` and `initializeSchema:false`. `ControlDb.ValidateFactory` checks Core profile, not a literal `core` name, so no production-seam relaxation was needed. No new cloud resource was created.
@@ -26,7 +28,7 @@ Temporary principal names were `audit_rt_b00a4acd7b21471e` and `audit_wk_b00a4ac
 The existing read-only SQL proof helper ran before and after. Both observed:
 
 - `core` and `proj_forge` version38.
-- Dataset `f610a39c-50e1-4aab-8d5a-e18e10aeede9`, ceiling25,000,000 microUSD, owner `9479d581-9edf-46ed-aa44-d36def5604c6`, epoch12.
+- Dataset `00000000-0000-4000-8000-000000000003`, ceiling25,000,000 microUSD, owner `00000000-0000-4000-8000-000000000009`, epoch12.
 - 43 request rows totaling24,809,140 microUSD liability.
 - The same runtime/worker/initializer permission probe results.
 
