@@ -1,6 +1,6 @@
-# Forge administrator guide
+# Administrator guide for the earlier in-process service
 
-For the person who installs, configures, secures, and keeps the Forge orchestrator running. For day-to-day operation see [`user-guide.md`](user-guide.md); for scenario recipes see [`operator-cookbook.md`](operator-cookbook.md).
+This guide documents the earlier systemd service and its configuration. For a current installation, use the [K3s runbook](../deploy/k3s/README.md). For current settings and commands, see the [runtime reference](runtime-reference.md).
 
 ## 1. Installation
 
@@ -11,7 +11,7 @@ For the person who installs, configures, secures, and keeps the Forge orchestrat
 3. Fill in at least one LLM provider key and a GitHub PAT (see §3).
 4. `dotnet run --project Forge -- --check` — pre-flight must pass before anything else.
 
-### Linux service (production)
+### Linux systemd service
 
 Forge runs as a single systemd unit (`Type=notify`). The full install/upgrade/ops runbook is [`linux-deployment.md`](linux-deployment.md):
 

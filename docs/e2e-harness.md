@@ -1,26 +1,29 @@
 # P4 E2E harness — `tools/e2e-harness`
 
-An end-to-end smoke test that proves the orchestrator can take
-a spec, run the engineering dispatch workflow against a fresh
-local repo, and open a PR with the right code. No GitHub token,
-no real network calls. Runs in seconds.
+An end-to-end smoke test for engineering dispatch, PR creation,
+review, and task completion against a fresh local repository.
+The default fake-agent mode uses a local GitHub service and makes
+no model calls. For build prerequisites, start with
+[Getting started](getting-started.md#build-and-test-the-code).
 
 ## What it verifies
 
-The harness (default fake-runner mode):
-1. Creates a fresh local repo (bare `remote.git` + clone)
-2. Writes a stub scaffold (`MyApp.csproj` + `.gitignore`)
-3. Wires up the orchestrator's components in-process with a
-   `LocalGitHubService` (the harness's fake GitHub)
-4. Calls `OrchestratorAgent.DispatchSingleTaskAsync` directly
-5. The workflow's `EnqueueWatchExecutor` creates a `pr-watch`
-   task; the harness finds it
-6. Verifies the `LocalGitHubService` recorded a PR
-7. Marks the head SHA green + uses an `Approved` review override
-8. Drives `PRWatcher.ProcessWatchTaskAsync` to a merge + Completed
-9. Reads the agent's branch in the worktree + asserts the
-   diff contains the expected files (`Calculator.cs` +
-   `CalculatorTests.cs`) with the expected symbols
+The default fake-runner mode performs these steps.
+
+1. Creates a bare `remote.git`, a local clone, and a `MyApp.csproj` scaffold.
+2. Wires the orchestrator to `LocalGitHubService` and a fake agent runner.
+3. Creates and approves a synthetic initiative through the stores, binds a
+   groomed task to its accepted outcome, and commits a sprint through
+   `SprintProposeService`.
+4. Calls `OrchestratorAgent.DispatchSingleTaskAsync` for that sprint task.
+5. Checks that the local service recorded a PR and that the original task
+   carries its `prNumber` metadata.
+6. Reads the task worktree and checks for `Calculator.cs`, `CalculatorTests.cs`,
+   the `Add` method, and the expected regression-test name.
+7. Marks the head's simulated CI green and supplies an approved review override.
+8. Calls `PRWatcher.ProcessWatchedTaskAsync` on the original task.
+9. Verifies the simulated merge, the task's Completed status, and recorded merge
+   evidence matching the task, PR, and accepted head SHA.
 
 The harness scope is **closed-loop**: from task dispatch through
 PR opened + merged + task Completed. CI verifies the wiring; the
@@ -29,21 +32,24 @@ exercise the model-driven path.
 
 ## What it does NOT verify
 
-- The intake path (`POST /api/intake/...`). Covered by
-  `IntakeAgentTests` separately.
+- The Intake conversation or approval UI. The harness supplies synthetic
+  approval directly through the stores. Intake has separate endpoint and
+  browser checks.
 - The Designer / Artist / Groomer schedulers. The harness
   bypasses them by passing a pre-built task directly to
   `DispatchSingleTaskAsync`. They're covered by their own
   integration tests.
 - Stage B (DTS). Requires Docker / Podman; covered by the
   `deploy/docker-compose.yml` flow + the live verify.
+- Real GitHub branch protections, Kubernetes worker isolation, deployment,
+  or browser behavior. These need their own integration and acceptance checks.
 
 ## Run it
 
 ```bash
 # From the repo root.
 dotnet run --project tools/e2e-harness -- \
-    --repo-root=$(pwd)
+    --repo-root="$(pwd)"
 ```
 
 Expected output (last lines):
@@ -66,7 +72,7 @@ to a log aggregator.
 
 The harness's `FakeAgentRunner` writes the expected files
 into the worktree when the workflow's RunAgentExecutor invokes
-it. This bypasses the M3 LLM call and keeps the test fast
+it. This bypasses model calls and keeps the test fast
 (seconds) and deterministic.
 
 ## LLM-driven mode (slow, real cost)
@@ -106,9 +112,11 @@ calls are intercepted by the subclass overrides:
   called by `PushBridge` (a small thread that tails the bare
   repo's `refs/heads/` and records the SHA).
 - `GetPullRequestAsync` — returns the recorded PR.
-- `MergePullRequestAsync` / `GetReviewsAsync` /
-  `GetCommitStatusAsync` — return safe defaults; the harness
-  doesn't exercise the PRWatcher merge loop.
+- `GetCommitStatusAsync` returns the CI state recorded in the local PR store.
+- `GetReviewsAsync` returns an empty list. The harness passes an approved
+  review override when it drives the watcher.
+- `TryMergePullRequestAsync` checks the expected head and records a simulated
+  merge. The harness asserts this observation and the resulting task completion.
 
 `GitHubOptions.Mode = "Local"` switches `Program.cs`'s
 `BuildGitHubService` to construct `LocalGitHubService`
@@ -145,11 +153,12 @@ deterministic (no LLM).
 
 ## Where to plug this in CI
 
-Add a job step after the unit-test job:
+The repository's [CI workflow](../.github/workflows/ci.yml) already runs the
+harness after the build, C# tests, and release protocol tests.
 
 ```yaml
 - name: E2E harness
-  run: dotnet run --project tools/e2e-harness -- --repo-root=$(pwd)
+  run: dotnet run --project tools/e2e-harness --no-build --configuration Release -- --repo-root="$(pwd)"
 ```
 
 Total runtime: 3-5 seconds on a developer laptop, dominated by
