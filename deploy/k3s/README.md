@@ -146,8 +146,9 @@ internal slot-control services and a cluster-private dashboard Service. Control 
 requires the mounted bearer token at `/run/forge-control/controller-token` for
 status/drain/activate; only `/healthz` is
 unauthenticated. The dashboard has no authentication and must not be exposed as a
-LAN NodePort. Use `sudo k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080`
-on the host and an SSH tunnel to that loopback port from the operator workstation.
+LAN NodePort. From a workstation, use the [quickstart SSH tunnel](../../README.md#3-install-and-open-the-dashboard)
+to the service's ClusterIP on port 8080. For a browser on the Linux host itself,
+run `sudo /usr/local/bin/k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080`.
 No ingress or TLS identity is silently provisioned.
 
 Initial deployment runs `Controller__Mode=initialize` in a separate Job, which must

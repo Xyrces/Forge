@@ -74,20 +74,22 @@ Look for `"mode": "plan"`, namespace `forge`, and the source revision you chose.
 
 ### 3. Install and open the dashboard
 
-On the Linux host, apply the plan. Once you see **Release completed**, start the port forward and leave it running.
+On the Linux host, apply the plan. After **Release completed**, the second command prints the private address of the Forge service.
 
 ```bash
 forge_install --apply &&
-  sudo /usr/local/bin/k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080
+  sudo /usr/local/bin/k3s kubectl -n forge get svc forge -o jsonpath='{.spec.clusterIP}{"\n"}'
 ```
 
-On **your workstation**, open a second terminal and replace `your-user@your-linux-host` with your SSH login. Keep this connection open too.
+On **your workstation**, replace `FORGE_SERVICE_IP` with that address and `your-user@your-linux-host` with your SSH login. Your SSH account needs permission to forward to that service on port 8080. Leave this terminal open while you use the dashboard.
 
 ```sh
-ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:4097:127.0.0.1:8080 your-user@your-linux-host
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:4097:FORGE_SERVICE_IP:8080 your-user@your-linux-host
 ```
 
 Open `http://127.0.0.1:4097` in your browser. You should see **Forge** in the project selector. At `http://127.0.0.1:4097/api/meta/buildinfo`, compare `sourceRevision` with `sourceSha` in your receipt. When they match, you’re looking at the release you installed.
+
+If you’re using a browser **on the Linux host itself**, run `sudo /usr/local/bin/k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080` and open `http://127.0.0.1:8080` there.
 
 The starter lets you explore the dashboard with the workflow gates held. Intake uses canned replies until a controller starts with a configured model key. To run real work, prepare the provider credentials, spending policy, and repository access, then restart the controller with the updated configuration before opening the gates. [Configuration and credential setup](deploy/k3s/README.md#prepare-the-private-install-files)
 

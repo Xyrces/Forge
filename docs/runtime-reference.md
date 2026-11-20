@@ -118,7 +118,7 @@ Start with the task's history, **Runs**, and **Flow** when work appears stuck. T
 | Agent diagnostics | `<dataRoot>/logs/agent.log` for agents running in the controller process. With the K3s manifest this is `/var/lib/forge/logs/agent.log`. For worker attempts, use the run transcript and worker Pod logs. |
 | Recovery history | `GET /api/recovery/reports?limit=50`, then `GET /api/recovery/reports/{id}` for an individual report. |
 
-The K3s dashboard is cluster-private and has no application authentication. Use a loopback port-forward on the host and an SSH tunnel from your workstation. The runbook includes the command and the release-journal checks. [K3s access and operations](../deploy/k3s/README.md)
+The K3s dashboard is cluster-private and has no application authentication. On a workstation, use a loopback-bound SSH tunnel to the service address. For a browser on the Linux host, forward the service to the host’s loopback interface. [Dashboard connection commands](../README.md#3-install-and-open-the-dashboard) · [Release operations](../deploy/k3s/README.md)
 
 ## Gates, recovery, and secrets
 
