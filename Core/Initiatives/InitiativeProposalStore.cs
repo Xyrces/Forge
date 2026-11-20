@@ -5,7 +5,7 @@ using static Forge.Core.Initiatives.InitiativeDb;
 
 namespace Forge.Core.Initiatives;
 
-public sealed class InitiativeProposalStore(IssueStore issues)
+public sealed partial class InitiativeProposalStore(IssueStore issues)
 {
     private string T(string name) => issues.Db.Dialect.Table(name);
     private const string Columns = "p.id,p.project_id,r.revision,r.content_hash,r.title,r.body,r.priority,p.origin,p.source_key,p.source_json,p.session_id,p.created_at,r.approved_at,r.approved_by,r.epic_id,r.spec_id";

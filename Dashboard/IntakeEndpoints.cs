@@ -55,16 +55,16 @@ public static class IntakeEndpoints
         });
 
         // Get a single session (with messages).
-        app.MapGet("/api/intake/sessions/{id}", async (string id, CancellationToken ct) =>
+        app.MapGet("/api/intake/sessions/{id}", async (string id, string? projectId, CancellationToken ct) =>
         {
             var session = await intakeStore.GetAsync(id, ct);
-            return session is null
+            return session is null || !MatchesProject(session, projectId)
                 ? Results.NotFound()
                 : Results.Json(ToSessionView(session), DashboardJson.Options);
         });
 
         // Send a user message; runs the LLM, returns the updated session.
-        app.MapPost("/api/intake/sessions/{id}/messages", async (string id, HttpContext ctx) =>
+        app.MapPost("/api/intake/sessions/{id}/messages", async (string id, string? projectId, HttpContext ctx) =>
         {
             var body = await JsonSerializer.DeserializeAsync<SendMessageRequest>(
                 ctx.Request.Body, DashboardJson.Options, ctx.RequestAborted);
@@ -74,12 +74,23 @@ public static class IntakeEndpoints
                     error = "text required"
                 });
             var session = await intakeStore.GetAsync(id, ctx.RequestAborted);
-            if (session is null)
+            if (session is null || !MatchesProject(session, projectId))
                 return Results.NotFound();
+            if ((body.ProposalId is null) != (body.Revision is null) || body.Revision is <= 0)
+                return Results.BadRequest(new { error = "The working brief requires a proposal and revision." });
+            Forge.Core.Initiatives.InitiativeProposal? brief = null;
+            if (body.ProposalId is not null)
+            {
+                if (initiatives is null) return Results.StatusCode(503);
+                brief = await initiatives.Proposals.GetAsync(session.ProjectId, body.ProposalId, ctx.RequestAborted);
+                if (brief is null || brief.SessionId != id) return Results.NotFound();
+                if (brief.Revision != body.Revision)
+                    return Results.Conflict(new { error = "The working brief changed. Refresh it before sending your message." });
+            }
             var agent = intakeRegistry.ForProject(session.ProjectId);
             try
             {
-                var updated = await agent.SendUserMessageAsync(id, body.Text, ctx.RequestAborted);
+                var updated = await agent.SendUserMessageAsync(id, body.Text, ctx.RequestAborted, brief);
                 return Results.Json(ToSessionView(updated), DashboardJson.Options);
             }
             catch (Exception ex)
@@ -96,10 +107,10 @@ public static class IntakeEndpoints
 
         // Accept a proposed epic from a specific assistant message.
         app.MapPost("/api/intake/sessions/{id}/accept-epic/{messageId:long}", async (
-            string id, long messageId, CancellationToken ct) =>
+            string id, long messageId, string? projectId, CancellationToken ct) =>
         {
             var session = await intakeStore.GetAsync(id, ct);
-            if (session is null)
+            if (session is null || !MatchesProject(session, projectId))
                 return Results.NotFound();
             var agent = intakeRegistry.ForProject(session.ProjectId);
             try
@@ -117,10 +128,10 @@ public static class IntakeEndpoints
         });
 
         app.MapPost("/api/intake/sessions/{id}/review-draft/{messageId:long}", async (
-            string id, long messageId, CancellationToken ct) =>
+            string id, long messageId, string? projectId, CancellationToken ct) =>
         {
             var session = await intakeStore.GetAsync(id, ct);
-            if (session is null)
+            if (session is null || !MatchesProject(session, projectId))
                 return Results.NotFound();
             try
             {
@@ -129,6 +140,19 @@ public static class IntakeEndpoints
             catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
         });
 
+        app.MapGet("/api/intake/inbox", async (string projectId, string? cursor, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            try { return Results.Json(await initiatives.Proposals.ReadInboxAsync(projectId, cursor, ct), DashboardJson.Options); }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+        });
+        app.MapGet("/api/intake/proposals/{id}/revisions/{revision:int:min(1)}", async (string id, int revision,
+            string projectId, CancellationToken ct) =>
+        {
+            if (initiatives is null) return Results.StatusCode(503);
+            var snapshot = await initiatives.Proposals.ReadRevisionAsync(projectId, id, revision, ct);
+            return snapshot is null ? Results.NotFound() : Results.Json(snapshot, DashboardJson.Options);
+        });
         app.MapGet("/api/intake/proposals", async (string projectId, string? sessionId, string? cursor, CancellationToken ct) =>
         {
             if (initiatives is null)
@@ -212,6 +236,9 @@ public static class IntakeEndpoints
         });
     }
 
+    private static bool MatchesProject(IntakeSessionRecord session, string? projectId) =>
+        projectId is null || string.Equals(session.ProjectId, projectId, StringComparison.OrdinalIgnoreCase);
+
     private static object ToSessionView(IntakeSessionRecord s) => new
     {
         id = s.Id,
@@ -256,6 +283,6 @@ public static class IntakeEndpoints
     };
 
     private sealed record NewIntakeSessionRequest(string ProjectId, string? Title);
-    private sealed record SendMessageRequest(string Text);
+    private sealed record SendMessageRequest(string Text, string? ProposalId = null, int? Revision = null);
     private sealed record ApprovalRequest(int Revision, string Hash);
 }
