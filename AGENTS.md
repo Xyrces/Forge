@@ -89,29 +89,27 @@ If a class needs to read `IOptions<X>` AND write `IssueStore` AND make HTTP call
 
 ## CLI quick reference
 
-`dotnet run --project Forge -- <flag>`:
+From the checkout root, use `dotnet run --project Forge.Core/Forge.Core.csproj -- <flag>`. The commands below describe the in-process runtime. The distributed controller also supports `--check`.
 
 - `--check` — pre-flight: config + DB schemas + GitHub + kilo gateway auth. No dispatch. Non-zero on any failure. Use for CI smoke and as the first step when stuck.
 - `--status` — print queue summary and exit.
-- `--once` — one dispatch cycle, then exit. Good for cron / trigger-driven dispatch.
+- `--once` currently enters the continuous loop. See the [command-line reference](docs/runtime-reference.md#command-line) before automating dispatch.
 - `--dashboard-only` — host the dashboard, do not dispatch. Do not add similar flags without sign-off.
 - `--recover` — dry-run recovery: see what `StartupRecovery` would do. No side-effects.
-- `--recover-and-start` — replay unfinished side-effects, then start dispatch.
+- `--recover-and-start` — replay unfinished side-effects and exit. Start the service separately afterward.
 - `--enqueue-task "<title>" --task-type <type> --task-desc "<desc>" --branch "<branch>"` — enqueue a task.
 - `--migrate-db --target sqlserver [--connection-string "..."] [--include-open-work] [--reset]` — one-shot SQLite → Azure SQL state migration (registry + secrets ciphertext + memory keys; open work only with the flag). Idempotent. Stop the service first. See `docs/azure-sql-cutover.md`.
 - `--init-azure-sql [--connection-string "..."] [--mi-name forge-mi]` — provision the contained DB user for the managed identity (db_owner) as the Entra admin. Idempotent.
 
-Full flag list: `README.md` § "CLI".
+See the [command-line reference](docs/runtime-reference.md#command-line) for supported modes and their actual behavior.
 
 ## State files
 
-All persisted state lives under `.portHorizon/`. Do not sprinkle app data outside that root. See `README.md` § "State files" for the layout; `docs/system-flow.md` § "Where state lives" for the storage-concern table.
-
-In production (systemd), this maps to `/var/lib/forge/state/` via `StateDirectory=forge`. See `docs/linux-deployment.md`.
+Keep local app data under the configured Forge data root. K3s uses Azure SQL for durable records and a persistent volume for local files. See [State and files](docs/runtime-reference.md#state-and-files) for current and legacy paths.
 
 ## When stuck
 
-1. `dotnet run --project Forge -- --check`. If it passes, the bug is in the dispatch path. If it fails, the failure message names the subsystem to investigate.
+1. `dotnet run --project Forge.Core/Forge.Core.csproj -- --check`. If it passes, the bug is in the dispatch path. If it fails, the failure message names the subsystem to investigate.
 2. The **Flow page** (`/flow`) shows the live pipeline DAG — planning lane (specs/ad-hoc) vs implementation lane (tasks), per-node counts, and a per-issue journey view (`/flow?issue={id}`) derived from the `issue_event` timeline. First stop for "where is my work stuck?". **Edit mode** (`/flow?mode=edit`) is the workflow control surface: the pipeline is a `WorkflowDefinition` (`Core/Workflow/`, built-in default = the previously hardcoded DAG) edited as draft → validated publish → memory-key override (`workflow/live`, snapshots under `workflow/versions/`). Wiring & policy edits only — the transition table stays code-owned; gates/policies/step-toggles/branch options resolve per evaluation, no restart.
 2. `tail -f` `.portHorizon/state/issues.jsonl` for live queue state (or `sudo journalctl -u forge -f` on the host).
 3. `<dataRoot>/logs/agent.log` — per-run diagnostic: message roles, text lengths, tool-call names per agent run. First stop when a run "completes" with no diff. (minimax-m3 quirk: it can emit a tool call as literal text markup `]<]minimax[><tool_call>...`; `MafAgentRunner` detects the leak and nudges the model to continue, bounded at 3.)

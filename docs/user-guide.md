@@ -1,121 +1,53 @@
-# Forge user guide
+# Using Forge
 
-For the operator who uses Forge day-to-day: feeding it work, steering sprints, watching the review loop, and unblocking the pipeline. For installation and service administration see [`administrator-guide.md`](administrator-guide.md); for copy-paste recipes see [`operator-cookbook.md`](operator-cookbook.md).
+Choose your project in the top bar. Open **Intake** when you have something you want to build, or **Sprints** when you want to see what’s happening to work you’ve already approved.
 
-## 1. The mental model
+[Project vision](#set-the-project-direction) · [Intake](#start-an-initiative) · [Sprints](#follow-a-sprint) · [Pull requests](#review-a-pull-request) · [Deployments](#promote-a-release) · [When work stops](#find-out-why-work-stopped)
 
-Work flows through two lanes:
+## Set the project direction
 
-```
-Planning lane:   intake → spec → design → groom → backlog (stories/tasks)
-Implementation:  backlog → sprint → dispatch (agent run) → PR → review/CI → merge
-```
+The **Vision Board** holds the ideas you expect to outlast a sprint. Describe who the project is for, how it should feel to use, and which engineering or design choices matter to you.
 
-Four things to internalize:
+Open a node on the map to read its wording, or start typing about the project as a whole. Forge highlights the nodes it proposes to change. Compare the wording and choose **Apply draft** when it says what you mean. **Source document** lets you read or edit the complete Markdown. Forge saves your edits with the selected project and uses them to guide future work.
 
-1. **All engineering work happens inside a sprint.** There is no "just run this task" button — the SprintAssembler completes the Active sprint when its tasks are terminal and assembles + activates the next one from groomed, eligible work. Sprints are themed, coherent, independently deployable units: assembly packs all eligible work sharing a theme (a groomed spec, or a follow-up chain's root task) into one sprint, choosing the highest-priority theme first. Only truly unrelated operator-enqueued tasks each get their own solo sprint.
-2. **Nothing enters a sprint ungroomed.** Ad-hoc tasks (operator-enqueued, agent-filed follow-ups) sit in the backlog until the ScheduledGroomer marks them `groomed=true` (or closes them with a reason).
-3. **The task IS the watch.** Once a PR exists, the task row carries `prNumber`/`branch` metadata and the 15-minute sweep drives review, rework, and merge. No manual PR babysitting.
-4. **The operator steers, the system executes.** Your levers: intake, requeues, stage gates, role model overrides, slot caps, and the editable workflow — not hand-merges or hand-pushes.
+## Start an initiative
 
-## 2. Getting work in
+1. Open **Intake** and choose **New idea**, or pick up a conversation from the project inbox. A useful opening tells Forge what someone should be able to do and how you’ll know it works.
+2. Read the **Working brief** alongside the conversation. If a requirement is missing, say so in the chat. Once there’s another revision, **Changes** shows which passages changed. Open an individual change for the full wording.
+3. Choose **Approve revision** when the scope and acceptance criteria are right. Approval sends that revision to planning. **Open specification** takes you from the approved brief to the resulting spec.
 
-### New work (epics) — Intake
+A suggestion from Forge can also become an initiative. Open it from Intake, discuss it, and approve it the same way. For a small, concrete follow-up that already has a clear scope, **Backlog → New task** sends it for technical grooming.
 
-Open `/intake` and chat with the Intake agent. Describe the feature; the agent proposes an epic (title, description, stories). Accept it and the epic enters the planning lane: design → grooming → stories/tasks → backlog.
+## Follow a sprint
 
-### Ad-hoc tasks — three ways
+Forge prepares the design and breaks the work into tasks. It checks prerequisites before selecting a sprint, so independent work can run together and dependent tasks wait their turn. An unrelated priority normally waits for the current sprint to finish. A newly discovered prerequisite can join the sprint after grooming if it blocks work already there.
 
-- **Dashboard:** Tasks page → enqueue form.
-- **CLI:** `dotnet run --project Forge -- --enqueue-task "Title" --task-type ecs --task-desc "..." --branch "agent/thing"`.
-- **API:** `POST /api/state/issues`.
+Open **Sprints** to see the goal and task cards. Expand **Acceptance and delivery** for the checks on that sprint and the environment it will deploy to, when one is configured. Open a card for its current situation and next action. **History & runs** shows what happened between attempts. You can follow a new run on the same task when a reviewer asks for a correction.
 
-Ad-hoc tasks land in the backlog as ungroomed. The groomer pass verifies them against the project vision and current repo state, sets their priority relative to the rest of the open work, then marks them groomed or closes them. Groomed ad-hoc work is either injected into the Active sprint (only when it genuinely belongs there: it blocks a sprint member, is operator-P1, or was requeued by you) or assembled into a themed sprint — follow-ups pack with the rest of their chain's work, so related fixes ship together.
+## Review a pull request
 
-### Agent-filed follow-ups
+Set a project’s usual approval policy in **Projects → Project overview → Pull request approvals**. You can choose Forge review, human review, or both, and name a particular human reviewer.
 
-Dev/QA/Reviewer runs can file follow-ups via their `file_followup` tool. These are deliberately parentless — they re-enter through grooming like everything else. `followUpOf` metadata is the audit trail. Follow-ups are tracked during a sprint but only created once the sprint completes.
+To review one task yourself during a sprint, use the human review action on its card or in **Task actions**. You can also add the `needs-human-review` label to the pull request. Engineering and tests continue while the hold is in place. When the PR is ready, submit your review on GitHub. If you request changes, Forge can send the task back for correction on the same PR. The corrected revision needs the required approvals before merge.
 
-## 3. Steering the pipeline
+The task’s **Review** section shows the decision and the revision it covers. A green build can still be waiting on a person, an open review conversation, or a repository rule. The project’s approval policy and GitHub’s branch rules both apply. [GitHub review identities and approval rules](github-app-identities.md)
 
-### Stage gates
+## Promote a release
 
-`/ops/gates` (or `GET/POST /api/gates*`) holds/releases the four automatic transitions:
+Each project sets its sprint target and promotion routes under **Projects → Project overview → Deployment environments**. For Forge itself, successful verification in the UAT environment records the deployment and closes the sprint.
 
-| Gate | What holding it does |
-|---|---|
-| `design` | Designer scheduler skips its tick |
-| `groom` | Groomer scheduler skips its tick |
-| `sprint` | Sprint assembly pauses (completing a finished sprint still happens — that's bookkeeping) |
-| `merge` | PR watches stay live but nothing merges; external merges are still detected |
+When you’re ready to ship further, open **Deployments**, select the successful release you want, choose an allowed destination, and confirm the commit and image. Staging or production receives that same tested build, even if more changes have since landed on the branch. [Deployment environments and rollback](deployment-environments.md)
 
-Use holds when you need to review a batch before it flows onward (e.g. hold `sprint` to groom follow-ups before the next sprint starts).
+## Find out why work stopped
 
-### The Flow page
+| When you see… | Where to look |
+| --- | --- |
+| A task waiting on another task | Open the card, then **Flow** for its dependencies and history. A failed prerequisite stays open until someone resolves it. |
+| A PR waiting to merge | Open the task’s **Review** section and the linked PR. Check the required reviewer, open threads, and CI on the latest revision. |
+| A worker or reviewer that failed | Open **History & runs**, inspect the latest attempt, and use the task’s retry action after addressing the cause. **Triage** groups recurring failures. |
+| A whole stage on hold | Open **Flow → Edit** to inspect workflow pauses. A hold on sprint assembly leaves work in the active sprint running. |
+| A spending limit | Open **Now** for the spending ceiling and outstanding reservations. |
 
-`/flow` is the live pipeline DAG: planning lane vs implementation lane, per-node counts. `/flow?issue={id}` shows one issue's full journey from the event timeline — **the first stop for "where is my work stuck?"**.
+Use **Agents** for model selection and **Projects** for worker limits. **Skills** shows the instructions available to each role. Edit a repository-owned skill in the project’s `.kilo/skills/` directory, or a dashboard-owned skill on that page. The [runtime reference](runtime-reference.md) covers configuration, logs, recovery, and secrets.
 
-`/flow?mode=edit` is the workflow control surface: edit the pipeline definition as a draft, validate, publish. Wiring and policy changes (auto-merge on/off, rework limits, step toggles, gate attachment) apply without restart. The state transition table itself is code-owned.
-
-### Models and prompts
-
-`/agents` is the agent control surface. Per role: identity, territory, tools, the full role prompt (and whether it comes from a project override or the built-in), the effective provider+model, live slot usage, and the current/last run with heartbeat.
-
-- **Change a role's model live:** `PUT /api/agents/roles/{name}/model` (or the UI). Overrides are project-scoped, DB-backed, and apply to the next run — no restart. `DELETE` removes the override. Resolution: override → `llm.roles` config → provider default.
-- **Role prompts** come from `<projectRoot>/agents/<role>.md` when the project ships one, else the built-in copy. Edit the file in the project repo to change behavior.
-
-### Slot caps
-
-Per-project role concurrency lives on the project drill-down (`/projects/{id}/overview`) — `PUT /api/projects/{id}/roles`. Defaults: coredev/clientdev/reviewer=2, everything else=1.
-
-## 4. The review loop
-
-Once a dev run pushes a branch, the orchestrator opens the PR and the 15-minute watch sweep takes over:
-
-1. **Reviewer agent review** — every watched PR gets one; verdict recorded on the task (`reviewVerdict`/`reviewSha`/`reviewRound`) with a GitHub comment as the audit.
-2. **Merge gate** — merge requires green check runs AND an approval at the current head SHA (formal review or reviewer-agent verdict).
-3. **Rework rounds** — red CI or changes-requested requeues the task on the same branch/PR with the failure context in the prompt. The task shows Pending + a PR number and an R1/R2/R3 pill in the UI.
-4. **Circuit breaker** — 3 strikes (CI failures + changes-requested share one counter) and the task goes Blocked/Failed with a breaker snapshot. It's yours at that point: inspect the failure, then close the task or requeue it (`POST /api/tasks/{id}/requeue`).
-5. **Merge** — green + approved → merge, branch deleted, worktree removed, task Completed. Externally-merged PRs are detected and handled.
-
-Non-blocking reviewer findings are NOT requested-changes — the reviewer approves and files them as follow-ups, which re-enter through grooming.
-
-Special states you'll see:
-
-- **Parked (infra)** — the base branch's own CI was failing; the task parks without a strike and gets one no-strike refresh round when base CI recovers.
-- **Blocked (reviewer-unavailable)** — auto-resumes up to 3 times before needing you.
-- **Conflict sync** — a merge conflict triggers a dedicated sync rework round; only one sync runs per store at a time.
-
-## 5. Projects, secrets, skills
-
-- **Projects** (`/projects`): register repos, sync default branches, tune role caps. Everything except `/now` is per-project-scoped — `/now` + the alert inbox is your unified cross-project admin view.
-- **Secrets** (`/projects/{id}/secrets`): per-project encrypted credentials (git tokens, provider keys, custom kinds). Agents consume them by reference as env vars; values never appear in prompts, transcripts, or logs.
-- **Skills** (`/skills`): knowledge injected into agent prompts. Global skills apply to every project; project-scoped skills only to that project's runs. Skills with `source=repo` are imported from the project's `.kilo/skills/<name>/SKILL.md` at startup — **edit the file, not the dashboard** (the dashboard returns 409 on repo-owned edits). UI-owned skills (`source=forge`) are edited in place.
-
-## 6. Memory
-
-`/ops/memory` (or `GET/POST /api/memory`) manages the persistent project memory injected into every agent prompt under "## Project memory". Use it for durable facts: coding conventions, architecture decisions, incident learnings. Sprint-scoped shared context lives under `sprint/{id}/` keys; the project vision under `vision/<projectId>`.
-
-## 7. Operator rules of engagement
-
-1. **No manual out-of-loop fixes.** Don't hand-merge, hand-push, or hand-patch around a stuck pipeline — fix the system or surface it. Manual steps leave dangling state the loop can't see.
-2. **Don't auto-clear Failed blockers.** A `Failed` issue blocking others is intentionally open. Close it explicitly or remove the `blocks` edge.
-3. **Everything through the UI/API.** Task state goes through `IssueStore` (dashboard, API, CLI) — never direct DB writes.
-4. **The dashboard updates in place.** Pages use Fluxor state; if you find yourself hard-refreshing to see changes, that's a bug worth filing.
-5. **Use the gates, not the kill switch.** Prefer holding a stage over stopping the service when you want the pipeline to pause.
-
-## 8. Quick reference
-
-| You want to… | Go to |
-|---|---|
-| See what's happening right now | `/now` |
-| Trace one piece of work | `/flow?issue={id}` |
-| Add new feature work | `/intake` |
-| Pause a pipeline stage | `/ops/gates` |
-| Change which model a role uses | `/agents` |
-| Inspect a stuck/failed run | `/runs` → run detail; `<dataRoot>/logs/agent.log` |
-| Unblock a failed task | `/tasks` → task → requeue or close |
-| See cost/token usage | `/ops/cost` |
-| Inspect recovery audit | `/ops/recovery` |
-| Register a repo / rotate a token | `/projects`, `/projects/{id}/secrets` |
-| Pre-flight the service | `dotnet run --project Forge -- --check` |
+[Back to the documentation index](README.md)

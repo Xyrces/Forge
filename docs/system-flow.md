@@ -1,6 +1,6 @@
 ﻿# Forge — system flow
 
-End-to-end view of what runs when a task is dispatched.
+This guide traces a task through the in-process runtime. For the deployed controller and worker Jobs, see the [K3s runbook](../deploy/k3s/README.md). For the same journey from the dashboard, see [Using Forge](user-guide.md).
 
 ## Component map
 
