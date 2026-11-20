@@ -9,7 +9,7 @@ async function main() {
   fs.mkdirSync(out, { recursive: true });
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_EXECUTABLE_PATH });
   try {
-    const page = await browser.newPage({ viewport: { width: 2560, height: 1274 } });
+    const page = await browser.newPage({ viewport: { width: 2560, height: 1274 }, colorScheme: 'dark' });
     const errors = [];
     const writes = [];
     page.on('pageerror', error => errors.push(String(error)));
@@ -41,7 +41,7 @@ async function main() {
       const query = new URLSearchParams({ project: 'forge', session: sample.sessionId, proposal: sample.id });
       await page.goto(base + '/intake?' + query);
       const brief = page.getByRole('region', { name: 'Working brief', exact: true });
-      await brief.getByRole('heading', { name: sample.title, exact: true }).waitFor();
+      await page.getByRole('heading', { name: sample.title, exact: true }).waitFor();
       if (sample.revision > 1) {
         await brief.getByRole('button', { name: 'Changes', exact: true }).click();
         await brief.getByText(`Revision ${sample.revision-1} compared with revision ${sample.revision}`, { exact: true }).waitFor();

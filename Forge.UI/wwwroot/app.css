@@ -1299,3 +1299,73 @@ input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--primary)
   .intake-inbox__toolbar { align-items: start; }
 }
 /* End Intake conversation workspace */
+
+.intake-reader {
+  width: 100%; max-width: 1580px; margin-inline: auto;
+  container: intake-reader / inline-size;
+}
+.intake-reader .intake-workspace__header {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  margin: 0 0 26px; gap: 14px 20px;
+}
+.intake-reader .intake-workspace__header > div:first-child { display: contents; }
+.intake-reader .intake-workspace__header .page-header__actions { grid-area: 1 / 2; align-items: center; gap: 14px; }
+.intake-reader__back {
+  justify-self: start; display: inline-flex; align-items: center; gap: 8px; padding: 2px 0;
+  border: 0; background: none; color: var(--on-surface-variant); font: inherit; cursor: pointer;
+}
+.intake-reader__back:hover { color: var(--primary); }
+.intake-reader .intake-workspace__header h1 {
+  grid-column: 1 / -1; max-width: 56ch; margin: 0; font-size: clamp(25px, 2.3cqi, 36px);
+  line-height: 1.16; letter-spacing: -.035em; text-wrap: balance; overflow-wrap: anywhere;
+}
+.intake-reader__utility { padding: 5px 0; border: 0; background: none; color: var(--on-surface-variant); font: inherit; cursor: pointer; }
+.intake-reader__utility:hover { color: var(--primary); }
+.intake-reader .intake-workspace__columns {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, 31%);
+  gap: clamp(18px, 2cqi, 32px); align-items: start;
+}
+.intake-reader .intake-workspace__columns--writing { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+.intake-workspace__columns--writing .intake-conversation { grid-area: 1 / 1; }
+.intake-workspace__columns--writing .intake-working-brief { grid-area: 1 / 2; }
+.intake-reader .intake-conversation { min-width: 0; border-radius: 14px; box-shadow: none; }
+.intake-reader .intake-conversation__heading { padding: 18px 20px; gap: 8px; }
+.intake-reader .intake-conversation__heading h2 { font-size: 16px; letter-spacing: -.02em; }
+.intake-conversation__count { font-size: 12px; color: var(--on-surface-variant); }
+.intake-reader .intake-conversation__feed {
+  padding: 0 20px; min-height: 0; max-height: min(58dvh, 740px);
+  scrollbar-gutter: auto;
+}
+.intake-conversation__feed > p { padding-block: 22px; margin: 0; }
+.intake-exchange {
+  position: relative; width: 100%; padding: 19px 20px 19px 0;
+  display: grid; gap: 7px; text-align: left; cursor: pointer; border: 0;
+  border-bottom: 1px solid var(--outline); color: var(--on-surface); background: transparent; font: inherit;
+}
+.intake-exchange:last-child { border-bottom: 0; }
+.intake-exchange__meta { display: flex; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; }
+.intake-exchange__meta strong { color: var(--on-surface); font-size: 13px; }
+.intake-exchange__meta time { color: var(--on-surface-variant); font-size: 11px; }
+.intake-exchange__text { color: var(--on-surface-variant); line-height: 1.55; overflow-wrap: anywhere; }
+.intake-exchange__chevron {
+  position: absolute; right: 3px; top: 24px; width: 7px; height: 7px;
+  border: solid var(--on-surface-variant); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg);
+}
+.intake-exchange[aria-expanded=true] .intake-exchange__chevron { transform: rotate(45deg); }
+.intake-exchange:hover .intake-exchange__meta strong { color: var(--primary); }
+.intake-exchange:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.intake-reader .intake-message .md { font-size: 13px; line-height: 1.65; }
+.intake-reader .intake-composer { padding: 16px 20px; }
+.intake-reader .intake-composer textarea { min-height: 66px; display: block; }
+.intake-reader__switch { display: none; }
+@container intake-reader (max-width: 740px) {
+  .intake-reader .intake-workspace__header { gap: 8px; margin-bottom: 18px; }
+  .intake-reader .intake-workspace__header h1 { font-size: 24px; }
+  .intake-reader__switch { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--outline); border-radius: 10px; margin: 0 0 14px; }
+  .intake-reader__switch button { flex: 1; padding: 8px 4px; font: inherit; color: var(--on-surface-variant); background: transparent; border: 0; border-radius: 6px; cursor: pointer; }
+  .intake-reader__switch button[aria-pressed=true] { color: var(--on-surface); background: var(--surface-2); font-weight: 600; }
+  .intake-reader .intake-workspace__columns { display: block; }
+  [data-mobile-pane=brief] > .intake-conversation,
+  [data-mobile-pane=conversation] > .intake-working-brief { display: none; }
+  .intake-reader .intake-conversation__feed { max-height: 56dvh; }
+}

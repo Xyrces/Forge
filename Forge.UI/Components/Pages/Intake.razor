@@ -8,15 +8,15 @@
 @inject IState<Forge.Dashboard.Features.AppShell.AppShellState> ShellStore
 @inject ILogger<Intake> Logger
 @implements IAsyncDisposable
-<PageTitle>Intake</PageTitle>
-<div class="page intake-workspace">
+<PageTitle>@(_activeSessionId is null ? "Intake" : $"{WorkspaceTitle} · Intake")</PageTitle>
+<div class="page intake-workspace @(_activeSessionId is null ? "" : "intake-reader")">
     <div class="page-header intake-workspace__header @(_activeSessionId is null ? "intake-workspace__header--inbox" : "")">
         <div>
             @if (_activeSessionId is not null)
             {
-                <button class="btn btn--link" @onclick="BackToInbox">← Back to Intake</button>
+                <button class="intake-reader__back" @onclick="BackToInbox"><span aria-hidden="true">←</span> Back to Intake</button>
             }
-            <h1>@(_activeSessionId is null ? "Intake" : _sessionTitle)</h1>
+            <h1>@(_activeSessionId is null ? "Intake" : WorkspaceTitle)</h1>
             @if (_activeSessionId is null)
             {
                 <p>Shape an idea with Forge, review its brief, then approve it for planning.</p>
@@ -26,8 +26,13 @@
             @if (_activeSessionId is null)
             {
                 <button class="btn" @onclick="RefreshInbox" disabled="@(_loadedProject is null)">Refresh</button>
+                <button class="btn btn--primary" disabled="@(_creating || _loadedProject is null)" @onclick="StartNewSession">New idea</button>
             }
-            <button class="btn btn--primary" disabled="@(_creating || _loadedProject is null)" @onclick="StartNewSession">New idea</button>
+            else
+            {
+                <button class="intake-reader__utility" disabled="@_sending" @onclick="ReloadActive">Refresh</button>
+                <button class="btn" disabled="@(_creating || _loadedProject is null)" @onclick="StartNewSession">New idea</button>
+            }
         </div>
     </div>
     @if (_actionError is not null)
@@ -43,169 +48,13 @@
     }
     else
     {
-        <div class="intake-workspace__columns">
-            <section class="intake-conversation card" aria-label="Conversation">
-                <div class="intake-conversation__heading">
-                    <h2>Conversation</h2>
-                    <button class="btn btn--link" @onclick="ReloadActive" disabled="@_sending">Refresh conversation</button>
-                </div>
-                <div class="intake-conversation__feed" id="intake-thread-scroll" role="log" aria-live="polite">
-                    @if (_messages is null)
-                    {
-                        <p>Loading conversation…</p>
-                    }
-                    else if (_messages.Count == 0)
-                    {
-                        <p>Tell Forge what you have in mind. You can start rough and work through the details together.</p>
-                    }
-                    else
-                    {
-                        @for (var i = 0; i < _messages.Count; i++)
-                        {
-                            var m = _messages[i];
-                            @if (m.Role.Equals("System", StringComparison.OrdinalIgnoreCase))
-                            {
-                                <details class="intake-conversation__record" @key="m.Id">
-                                    <summary>Conversation record · @m.Timestamp.ToLocalTime().ToString("MMM d, h:mm tt")</summary>
-                                    <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
-                                </details>
-                            }
-                            else
-                            {
-                                <article class="intake-message @(m.Role.Equals("User", StringComparison.OrdinalIgnoreCase) ? "intake-message--user" : "intake-message--forge")" @key="m.Id">
-                                    <div class="intake-message__byline">
-                                        <strong>@(m.Role.Equals("User", StringComparison.OrdinalIgnoreCase) ? "You" : "Forge")</strong>
-                                        <time>@m.Timestamp.ToLocalTime().ToString("MMM d, h:mm tt")</time>
-                                    </div>
-                                    <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
-                                    @if (m.Questions is { Count: > 0 } qs)
-                                    {
-                                        @if (IsQuestionCardActive(i))
-                                        {
-                                            <div class="question-card">
-                                                @for (var qi = 0; qi < qs.Count; qi++)
-                                                {
-                                                    var q = qs[qi];
-                                                    var qKey = $"{m.Id}:{qi}";
-                                                    <div class="question-card__q">
-                                                        <div class="question-card__qhead">
-                                                            <span class="question-card__header mono">@(q.Header ?? $"Question {qi + 1}")</span>
-                                                            @if (q.Multiple)
-                                                            {
-                                                                <span class="question-card__multi mono">select all that apply</span>
-                                                            }
-                                                        </div>
-                                                        <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
-                                                        @if (q.Options.Count > 0)
-                                                        {
-                                                            <div class="question-card__options">
-                                                                @foreach (var opt in q.Options)
-                                                                {
-                                                                    var (label, desc, recommended) = SplitOption(opt);
-                                                                    var selected = _answers.TryGetValue(qKey, out var sel) && sel.Contains(label);
-                                                                    <button class="option-row @(q.Multiple ? "option-row--multi" : "option-row--single") @(selected ? "option-row--selected" : "")"
-                                                                        @onclick="@(() => ToggleAnswer(qKey, label, q.Multiple))">
-                                                                        <span class="option-row__mark">
-                                                                        </span>
-                                                                        <span class="option-row__body">
-                                                                            <span class="option-row__label">
-                                                                                @label
-                                                                                @if (recommended)
-                                                                                {
-                                                                                    <span class="pill pill--primary">Recommended</span>
-                                                                                }
-                                                                            </span>
-                                                                            @if (desc is not null)
-                                                                            {
-                                                                                <span class="option-row__desc">@desc</span>
-                                                                            }
-                                                                        </span>
-                                                                    </button>
-                                                                }
-                                                                @if (_otherOpen.Contains(qKey))
-                                                                {
-                                                                    <input class="option-row__other-input" placeholder="Your answer…"
-                                                                    value="@GetOther(qKey)"
-                                                                    @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
-                                                                }
-                                                                else
-                                                                {
-                                                                    <button class="option-row option-row--other" @onclick="@(() => _otherOpen.Add(qKey))">
-                                                                        <span class="option-row__mark">
-                                                                        </span>
-                                                                        <span class="option-row__body">
-                                                                            <span class="option-row__label">Other…</span>
-                                                                        </span>
-                                                                    </button>
-                                                                }
-                                                            </div>
-                                                        }
-                                                        else
-                                                        {
-                                                            <input class="option-row__other-input" placeholder="Your answer…"
-                                                            value="@GetOther(qKey)"
-                                                            @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
-                                                        }
-                                                    </div>
-                                                }
-                                                <div class="question-card__actions">
-                                                    <button class="btn btn--primary" @onclick="@(() => SendAnswers(m, qs))" disabled="@(AnsweredCount(m, qs) == 0 || _sending)">
-                                                        @(_sending ? "Sending…" : $"Send answers ({AnsweredCount(m, qs)}/{qs.Count})")
-                                                    </button>
-                                                    <button class="btn btn--link" @onclick="@(() => DismissQuestionCard(m))">Answer in text instead</button>
-                                                </div>
-                                            </div>
-                                        }
-                                        else
-                                        {
-                                            <div class="question-card question-card--done">
-                                                @foreach (var q in qs)
-                                                {
-                                                    <div class="question-card__qhead">
-                                                        <span class="question-card__header mono">@(q.Header ?? "Question")</span>
-                                                    </div>
-                                                    <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
-                                                }
-                                            </div>
-                                        }
-                                    }
-                                </article>
-                            }
-                        }
-                    }
-                    @if (_liveActive)
-                    {
-                        <article class="intake-message intake-message--forge">
-                            <div class="intake-message__byline">
-                                <strong>Forge</strong>
-                                <span>Working through your request…</span>
-                            </div>
-                            <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(_liveText))</div>
-                            @if (_liveTools.Count>0)
-                            {
-                                <details>
-                                    <summary>Activity details</summary>
-                                    @foreach(var tool in _liveTools)
-                                    {
-                                        <div>@tool</div>
-                                    }
-                                </details>
-                            }
-                        </article>
-                    }
-                </div>
-                <div class="intake-composer">
-                    <label for="intake-message">Your message</label>
-                    <textarea id="intake-message" rows="4" maxlength="16000" placeholder="Describe an idea, answer a question, or ask for a change…" @bind="_draft" @bind:event="oninput" @onkeydown="ComposerKeyDown" disabled="@(_sending || _messages is null)">
-                    </textarea>
-                    <div class="intake-composer__actions">
-                        <span>Ctrl+Enter to send · Enter for a new line</span>
-                        <button class="btn btn--primary" @onclick="Send" disabled="@(_sending || _messages is null || string.IsNullOrWhiteSpace(_draft))">@(_sending ? "Sending…" : "Send")</button>
-                    </div>
-                </div>
-            </section>
-            <aside class="intake-working-brief">
-                <IntakeBrief @ref="_workingBrief" ProjectId="@_loadedProject" SessionId="@_activeSessionId" SelectedProposalId="@_selectedProposalId" ProposalSelected="SelectProposal" Changed="BriefChanged" RefreshVersion="@_proposalVersion" />
+        <nav class="intake-reader__switch" aria-label="Intake workspace">
+            <button aria-controls="intake-document" aria-pressed='@(MobilePane == "brief" ? "true" : "false")' @onclick='() => _mobilePane = "brief"'>Working brief</button>
+            <button aria-controls="intake-discussion" aria-pressed='@(MobilePane == "conversation" ? "true" : "false")' @onclick='() => _mobilePane = "conversation"'>Conversation</button>
+        </nav>
+        <div class="intake-workspace__columns @(_shownBrief is null ? "intake-workspace__columns--writing" : "")" data-mobile-pane="@MobilePane">
+            <div class="intake-working-brief" id="intake-document">
+                <IntakeBrief @ref="_workingBrief" ProjectId="@_loadedProject" SessionId="@_activeSessionId" SelectedProposalId="@_selectedProposalId" ProposalSelected="SelectProposal" Changed="BriefChanged" DetailLoaded="OnBriefLoaded" RefreshVersion="@_proposalVersion" />
                 @if (_diagrams.Count>0)
                 {
                     <details class="intake-supporting card">
@@ -239,7 +88,186 @@
                         }
                     </details>
                 }
-            </aside>
+            </div>
+            <section class="intake-conversation card" id="intake-discussion" aria-label="Conversation">
+                <div class="intake-conversation__heading">
+                    <h2>Conversation</h2>
+                    @if (_messages is { Count: > 0 })
+                    {
+                        var count = _messages.Count(m => m.Role == "User" || m.Role == "Assistant");
+                        <span class="intake-conversation__count">@count @(count == 1 ? "message" : "messages")</span>
+                    }
+                </div>
+                <div class="intake-conversation__feed" id="intake-thread-scroll" role="log" aria-live="polite">
+                    @if (_messages is null)
+                    {
+                        <p>Loading conversation…</p>
+                    }
+                    else if (_messages.Count == 0)
+                    {
+                        <p>Tell Forge what you have in mind. You can start rough and work through the details together.</p>
+                    }
+                    else
+                    {
+                        @foreach (var exchange in Exchanges(_messages))
+                        {
+                            @if (IsApproved)
+                            {
+                                var first = _messages[exchange.Start];
+                                <button type="button" class="intake-exchange" aria-expanded='@(ExchangeOpen(exchange) ? "true" : "false")' @onclick="() => ToggleExchange(exchange)" @key="(first.Id, true)">
+                                    <span class="intake-exchange__meta"><strong>@exchange.Label</strong><time>@first.Timestamp.ToLocalTime().ToString("MMM d · h:mm tt")</time></span>
+                                    <span class="intake-exchange__text">@exchange.Excerpt</span>
+                                    <span class="intake-exchange__chevron" aria-hidden="true"></span>
+                                </button>
+                            }
+                            @if (ExchangeOpen(exchange))
+                            {
+                                @for (var i = exchange.Start; i < exchange.End; i++)
+                                {
+                                    var m = _messages[i];
+                                    @if (m.Role.Equals("System", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <details class="intake-conversation__record" @key="m.Id">
+                                            <summary>Conversation record · @m.Timestamp.ToLocalTime().ToString("MMM d, h:mm tt")</summary>
+                                            <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
+                                        </details>
+                                    }
+                                    else
+                                    {
+                                        <article class="intake-message @(m.Role.Equals("User", StringComparison.OrdinalIgnoreCase) ? "intake-message--user" : "intake-message--forge")" @key="m.Id">
+                                            <div class="intake-message__byline">
+                                                <strong>@(m.Role.Equals("User", StringComparison.OrdinalIgnoreCase) ? "You" : "Forge")</strong>
+                                                <time>@m.Timestamp.ToLocalTime().ToString("MMM d, h:mm tt")</time>
+                                            </div>
+                                            <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(m.Content))</div>
+                                            @if (m.Questions is { Count: > 0 } qs)
+                                            {
+                                                @if (IsQuestionCardActive(i))
+                                                {
+                                                    <div class="question-card">
+                                                        @for (var qi = 0; qi < qs.Count; qi++)
+                                                        {
+                                                            var q = qs[qi];
+                                                            var qKey = $"{m.Id}:{qi}";
+                                                            <div class="question-card__q">
+                                                                <div class="question-card__qhead">
+                                                                    <span class="question-card__header mono">@(q.Header ?? $"Question {qi + 1}")</span>
+                                                                    @if (q.Multiple)
+                                                                    {
+                                                                        <span class="question-card__multi mono">select all that apply</span>
+                                                                    }
+                                                                </div>
+                                                                <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
+                                                                @if (q.Options.Count > 0)
+                                                                {
+                                                                    <div class="question-card__options">
+                                                                        @foreach (var opt in q.Options)
+                                                                        {
+                                                                            var (label, desc, recommended) = SplitOption(opt);
+                                                                            var selected = _answers.TryGetValue(qKey, out var sel) && sel.Contains(label);
+                                                                            <button class="option-row @(q.Multiple ? "option-row--multi" : "option-row--single") @(selected ? "option-row--selected" : "")"
+                                                                                @onclick="@(() => ToggleAnswer(qKey, label, q.Multiple))">
+                                                                                <span class="option-row__mark">
+                                                                                </span>
+                                                                                <span class="option-row__body">
+                                                                                    <span class="option-row__label">
+                                                                                        @label
+                                                                                        @if (recommended)
+                                                                                        {
+                                                                                            <span class="pill pill--primary">Recommended</span>
+                                                                                        }
+                                                                                    </span>
+                                                                                    @if (desc is not null)
+                                                                                    {
+                                                                                        <span class="option-row__desc">@desc</span>
+                                                                                    }
+                                                                                </span>
+                                                                            </button>
+                                                                        }
+                                                                        @if (_otherOpen.Contains(qKey))
+                                                                        {
+                                                                            <input class="option-row__other-input" placeholder="Your answer…"
+                                                                            value="@GetOther(qKey)"
+                                                                            @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
+                                                                        }
+                                                                        else
+                                                                        {
+                                                                            <button class="option-row option-row--other" @onclick="@(() => _otherOpen.Add(qKey))">
+                                                                                <span class="option-row__mark">
+                                                                                </span>
+                                                                                <span class="option-row__body">
+                                                                                    <span class="option-row__label">Other…</span>
+                                                                                </span>
+                                                                            </button>
+                                                                        }
+                                                                    </div>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <input class="option-row__other-input" placeholder="Your answer…"
+                                                                    value="@GetOther(qKey)"
+                                                                    @oninput="@(e => SetOther(qKey, e.Value?.ToString()))" />
+                                                                }
+                                                            </div>
+                                                        }
+                                                        <div class="question-card__actions">
+                                                            <button class="btn btn--primary" @onclick="@(() => SendAnswers(m, qs))" disabled="@(AnsweredCount(m, qs) == 0 || _sending)">
+                                                                @(_sending ? "Sending…" : $"Send answers ({AnsweredCount(m, qs)}/{qs.Count})")
+                                                            </button>
+                                                            <button class="btn btn--link" @onclick="@(() => DismissQuestionCard(m))">Answer in text instead</button>
+                                                        </div>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <div class="question-card question-card--done">
+                                                        @foreach (var q in qs)
+                                                        {
+                                                            <div class="question-card__qhead">
+                                                                <span class="question-card__header mono">@(q.Header ?? "Question")</span>
+                                                            </div>
+                                                            <div class="question-card__text md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(q.Question))</div>
+                                                        }
+                                                    </div>
+                                                }
+                                            }
+                                        </article>
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    @if (_liveActive)
+                    {
+                        <article class="intake-message intake-message--forge">
+                            <div class="intake-message__byline">
+                                <strong>Forge</strong>
+                                <span>Working through your request…</span>
+                            </div>
+                            <div class="md">@((MarkupString)Forge.Dashboard.Services.MarkdownRenderer.ToHtml(_liveText))</div>
+                            @if (_liveTools.Count>0)
+                            {
+                                <details>
+                                    <summary>Activity details</summary>
+                                    @foreach(var tool in _liveTools)
+                                    {
+                                        <div>@tool</div>
+                                    }
+                                </details>
+                            }
+                        </article>
+                    }
+                </div>
+                <div class="intake-composer">
+                    <label for="intake-message">@(IsApproved ? "Continue the conversation" : "Your message")</label>
+                    <textarea id="intake-message" rows="2" maxlength="16000" placeholder="Message Forge…" @bind="_draft" @bind:event="oninput" @onkeydown="ComposerKeyDown" disabled="@(_sending || _messages is null)">
+                    </textarea>
+                    <div class="intake-composer__actions">
+                        <span>Ctrl+Enter to send</span>
+                        <button class="btn btn--primary" @onclick="Send" disabled="@(_sending || _messages is null || string.IsNullOrWhiteSpace(_draft))">@(_sending ? "Sending…" : "Send")</button>
+                    </div>
+                </div>
+            </section>
         </div>
     }
 </div>
