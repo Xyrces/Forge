@@ -23,7 +23,7 @@ For the rest of the dashboard, see the [user guide](user-guide.md). Project regi
 
 The current installation path uses a Linux host running K3s, Azure SQL for application state, and OpenAI Responses for model calls. The installer takes a verified image digest and private configuration files. It prints a plan before you apply it.
 
-Start with the [K3s installation and release runbook](../deploy/k3s/README.md). It covers the host requirements, SQL permissions, private package and image access, configuration, installation, and rollback. Keep the dashboard private and connect through its documented port-forward and SSH tunnel.
+For a fresh Linux host, follow the [installation quickstart](../README.md#installation-quickstart) from a clean checkout through your first dashboard connection. For upgrades and rollback, use the [K3s installation and release runbook](../deploy/k3s/README.md).
 
 The bootstrap registers Forge itself as the first project. For another project, register its repository through **Projects**. Before approving work, configure the project's roles, credentials, and delivery environments, and review the spending authorization shared by all projects in the dataset. The [project environment guide](deployment-environments.md) explains how sprint delivery and later release promotions fit together.
 

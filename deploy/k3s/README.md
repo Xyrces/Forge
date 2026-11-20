@@ -6,9 +6,11 @@ does not require a Docker daemon on the host, and does not configure TimeLoop.
 
 ## Build an immutable image
 
-The manual `controller-image.yml` workflow accepts a reviewed source ref and a
-digest-pinned .NET 10 SDK base image. It builds the same source branch that can later
-improve Forge, passes private NuGet credentials as a BuildKit secret, and reports a
+The `controller-image.yml` workflow runs on pushes to `main` and
+`codex/forge-first-k3s`, and also accepts a reviewed source ref and a
+digest-pinned .NET 10 SDK base image through manual dispatch. It builds the
+source branch that can later improve Forge, passes private NuGet credentials
+as a BuildKit secret, and reports a
 GHCR `@sha256:...` digest. Before publication, the image build runs the complete
 solution build and offline C# suite, excluding the three explicitly live provider/
 media test classes; the workflow also runs the Python release tests. The source
@@ -36,6 +38,68 @@ first installation; the file contains credentials and must stay outside the repo
 The service accounts can use that pull Secret without gaining
 API permission to read all Secrets.
 
+## Prepare the private install files
+
+Keep these files in a directory outside the checkout, readable only by the
+installing user. The root [installation quickstart](../../README.md#installation-quickstart) shows how
+to supply them to the installer.
+
+Prepare a dedicated Azure SQL database and allow connections from the Linux
+host. A database administrator must create three distinct database users and
+authorize their access before installation.
+
+| File | Identity and required access |
+| --- | --- |
+| `sql-controller.txt` | The controller user, such as `forge-k3s-runtime`, with application read/write permissions on Forge's registry and workload schemas. |
+| `sql-initialize.txt` | The initializer user, with authority to create and migrate Forge schemas, create objects, and grant or deny the runtime permissions. |
+| `sql-worker.txt` | The worker user, such as `forge-k3s-worker`. The initializer installs its scoped schema, task, attempt, and budget permissions. |
+
+Each file contains one connection string targeting the same database. For SQL
+password authentication, the shape is
+
+```text
+Server=tcp:<server>.database.windows.net,1433;Initial Catalog=<database>;User ID=<user>;Password=<password>;Encrypt=True;TrustServerCertificate=False;
+```
+
+Use the connection-string escaping required by your credentials. The installer
+creates the application schemas through the initializer connection. Database
+creation, user creation, firewall rules, and the controller's baseline grants
+are administrator setup. The controller and worker must have runtime privileges
+without DDL authority. See [SQL identity separation](#sql-identity-separation-and-trust-boundary)
+for the enforced permissions and credential boundaries.
+
+Copy [appsettings.first-install.json](appsettings.first-install.json) to the
+private directory as `appsettings.json`. Set `bootstrap.controllerPrincipal`
+and `bootstrap.workerPrincipal` to the exact database user names above.
+The template starts with paid model calls disabled. Keep SQL connection strings
+in the three separate files.
+
+Create `worker-packages.json` with a GitHub account and token that can read
+the private Talaria packages. The account needs package access and the token
+needs `read:packages` permission.
+
+```json
+{"username":"<github-user>","token":"<package-read-token>"}
+```
+
+For a private controller image, create `registry.json` using the Docker auth
+format. The `auth` value is the base64 encoding of the registry username,
+a colon, and its package-read token. The account must have access to the chosen
+GHCR image. A machine-local credential-helper entry cannot be used by the installer.
+
+```json
+{"auths":{"ghcr.io":{"auth":"<base64-encoded-username-and-token>"}}}
+```
+
+Review the private configuration before the first apply. The ordinary release
+path requires the same configuration and credential bytes on later installs.
+Changing them requires an intentional configuration-maintenance operation.
+For autonomous work, configure the provider and spending authorization, the
+project's publishing and review identities, and its deployment targets before
+releasing the initial holds. [Runtime configuration](../../docs/runtime-reference.md)
+· [GitHub App identities](../../docs/github-app-identities.md)
+· [Deployment environments](../../docs/deployment-environments.md)
+
 ## One installation/release entrypoint
 
 Run as the existing Linux desktop/service user (not a root login), with Python 3
@@ -46,7 +110,7 @@ credentials in command arguments or checked-in examples. The SQL connection must
 target the separately prepared fresh Forge-owned database/state, not an unrelated
 service's schemas. The installer never drops data or resets an existing dataset.
 Set `State.WriteAuthority=true` in the private appsettings file so lifecycle
-violations are reported in authority mode. Keep the four operator stage gates
+violations are reported in authority mode. Keep all five operator stage gates
 held until the intended pilot is ready; holding sprint assembly does not pause
 engineering tasks already assigned to the active sprint.
 
@@ -56,7 +120,7 @@ python3 deploy/k3s/install.py \
   --source-sha '<full-reviewed-40-character-commit-sha>' \
   --image-receipt '/private/path/forge-image-receipt.json' \
   --dataset '<fresh-UUID>' --operation 'initial-forge' \
-  --sql-file '/private/path/sql-runtime.txt' \
+  --sql-file '/private/path/sql-controller.txt' \
   --initialize-sql-file '/private/path/sql-initialize.txt' \
   --worker-sql-file '/private/path/sql-worker.txt' \
   --worker-packages-file '/private/path/worker-packages.json' \
@@ -82,8 +146,9 @@ internal slot-control services and a cluster-private dashboard Service. Control 
 requires the mounted bearer token at `/run/forge-control/controller-token` for
 status/drain/activate; only `/healthz` is
 unauthenticated. The dashboard has no authentication and must not be exposed as a
-LAN NodePort. Use `sudo k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080`
-on the host and an SSH tunnel to that loopback port from the operator workstation.
+LAN NodePort. From a workstation, use the [quickstart SSH tunnel](../../README.md#3-install-and-open-the-dashboard)
+to the service's ClusterIP on port 8080. For a browser on the Linux host itself,
+run `sudo /usr/local/bin/k3s kubectl -n forge port-forward --address 127.0.0.1 svc/forge 8080:8080`.
 No ingress or TLS identity is silently provisioned.
 
 Initial deployment runs `Controller__Mode=initialize` in a separate Job, which must
@@ -174,8 +239,7 @@ before initialization. API release Jobs check it before touching the release
 journal. This binds the selected digest to the approved source under the trusted
 builder; it is not a signature or a substitute for CI/review.
 
-The workflow also runs on pushes to `codex/forge-first-k3s`, allowing the initial
-unmerged branch to package itself. That trigger requires repository variable
+Push-triggered builds use the repository variable
 `FORGE_SDK_IMAGE` set to a reviewed SDK digest, plus `PACKAGES_PAT` for private
 NuGet dependencies. No push or workflow execution is performed by these files.
 
