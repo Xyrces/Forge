@@ -22,9 +22,15 @@
 
 set -euo pipefail
 
-DOTNET="${DOTNET_BIN:-/home/jtn5016/.dotnet/dotnet}"
+DOTNET="${DOTNET_BIN:-$HOME/.dotnet/dotnet}"
+SERVICE_USER="$(id -un)"
+# These values are embedded as literal fields in a sudoers rule.
+if ! [[ "$SERVICE_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ && "$DOTNET" =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
+    echo "Use a simple service account name and an absolute dotnet path without spaces or sudoers metacharacters." >&2
+    exit 1
+fi
 SUDOERS_FILE="/etc/sudoers.d/forge-setcap"
-SUDOERS_RULE="jtn5016 ALL=(ALL) NOPASSWD: /sbin/setcap cap_net_bind_service=+ep ${DOTNET}"
+SUDOERS_RULE="$SERVICE_USER ALL=(ALL) NOPASSWD: /sbin/setcap cap_net_bind_service=+ep ${DOTNET}"
 
 if [[ "${1:-}" == "--check" ]]; then
     if [[ ! -f "$SUDOERS_FILE" ]]; then

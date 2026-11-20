@@ -3,4 +3,5 @@ Description=Refresh Azure SQL firewall rule for this machine's egress IP + az to
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/forge/sql-firewall.env
 ExecStart=%h/Documents/forge/scripts/refresh-sql-firewall.sh

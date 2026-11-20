@@ -468,7 +468,7 @@ if (mode == CliMode.DashboardOnly)
     }
 
     /// <summary>
-    /// <c>--init-azure-sql [--connection-string "..."] [--mi-name forge-mi]</c>:
+    /// <c>--init-azure-sql [--connection-string "..."] --mi-name NAME</c>:
     /// one-shot Azure SQL provisioning, run as the Entra admin. Creates the
     /// contained database user for the user-assigned managed identity
     /// (db_owner — the app does DDL at startup) so the future ACA/AKS
@@ -482,18 +482,24 @@ if (mode == CliMode.DashboardOnly)
             Console.Error.WriteLine("No target connection string. Pass --connection-string or set db.connectionString in config.");
             return 1;
         }
-        var miName = ParseArg(args, "--mi-name") ?? "forge-mi";
+        var miName = ParseArg(args, "--mi-name");
+        if (string.IsNullOrWhiteSpace(miName) || miName.Length > 128)
+        {
+            Console.Error.WriteLine("Pass --mi-name with the managed identity's database user name (1 to 128 characters).");
+            return 1;
+        }
+        var quotedMiName = "[" + miName.Replace("]", "]]") + "]";
         var factory = Core.Db.ForgeDb.SqlServer(connectionString, "dbo");
         await using var conn = await factory.OpenAsync();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"""
             IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @mi)
-                CREATE USER [{miName}] FROM EXTERNAL PROVIDER;
+                CREATE USER {quotedMiName} FROM EXTERNAL PROVIDER;
             IF NOT EXISTS (SELECT 1 FROM sys.database_role_members rm
                            JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id
                            JOIN sys.database_principals m ON rm.member_principal_id = m.principal_id
                            WHERE r.name = 'db_owner' AND m.name = @mi)
-                ALTER ROLE db_owner ADD MEMBER [{miName}];
+                ALTER ROLE db_owner ADD MEMBER {quotedMiName};
             SELECT name, type_desc FROM sys.database_principals WHERE name = @mi;
             """;
         cmd.AddParam("@mi", miName);
