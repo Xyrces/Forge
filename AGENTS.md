@@ -99,7 +99,7 @@ From the checkout root, use `dotnet run --project Forge.Core/Forge.Core.csproj -
 - `--recover-and-start` — replay unfinished side-effects and exit. Start the service separately afterward.
 - `--enqueue-task "<title>" --task-type <type> --task-desc "<desc>" --branch "<branch>"` — enqueue a task.
 - `--migrate-db --target sqlserver [--connection-string "..."] [--include-open-work] [--reset]` — one-shot SQLite → Azure SQL state migration (registry + secrets ciphertext + memory keys; open work only with the flag). Idempotent. Stop the service first. See `docs/azure-sql-cutover.md`.
-- `--init-azure-sql [--connection-string "..."] [--mi-name forge-mi]` — provision the contained DB user for the managed identity (db_owner) as the Entra admin. Idempotent.
+- `--init-azure-sql [--connection-string "..."] --mi-name <managed-identity>` — provision the contained DB user for the managed identity (db_owner) as the Entra admin. Idempotent.
 
 See the [command-line reference](docs/runtime-reference.md#command-line) for supported modes and their actual behavior.
 

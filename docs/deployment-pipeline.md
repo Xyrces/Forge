@@ -169,7 +169,7 @@ file pickup on next startup, no `DeploymentResultReconciler`.
 ```
 
 The dev repo (wherever `projects[].root` points, e.g.
-`/home/jtn5016/repos/gamedev/Forge`) is completely separate from
+`/home/forge-operator/projects/Forge`) is completely separate from
 this. Agents commit and open PRs there; nothing under `/opt/forge`
 or `/var/lib/forge` is ever git-tracked.
 

@@ -67,7 +67,7 @@ Projects are DB rows, not config. The `appsettings.json` `projects[]` array is *
 ## 5. Database
 
 - **SQLite (default):** `issues.db` + `memory.db` per project state dir. Automatic migration chain on startup; schema is currently **v31**.
-- **Azure SQL / SQL Server:** `db.provider=sqlserver` + `db.connectionString`. The provider fresh-creates at the current schema with `IF NOT EXISTS` guards. Cutover runbook: [`azure-sql-cutover.md`](azure-sql-cutover.md) (`--migrate-db --target sqlserver [--include-open-work] [--reset]`, service stopped). Managed-identity provisioning: `--init-azure-sql [--mi-name forge-mi]` (run once as Entra admin, idempotent).
+- **Azure SQL / SQL Server:** `db.provider=sqlserver` + `db.connectionString`. The provider fresh-creates at the current schema with `IF NOT EXISTS` guards. Cutover runbook: [`azure-sql-cutover.md`](azure-sql-cutover.md) (`--migrate-db --target sqlserver [--include-open-work] [--reset]`, service stopped). Managed-identity provisioning: `--init-azure-sql --mi-name <managed-identity>` (run once as Entra admin, idempotent).
 - **Schema changes** (developers): bump `CurrentSchemaVersion` in `Core/IssueStore.cs`, update BOTH DDL paths (SQLite migration chain + SQL Server fresh-create), then run `--check`. `CONTRIBUTING.md` § "Schema migrations" is authoritative.
 - **Backups:** SQLite — back up the state dir (`issues.db`, `memory.db`, `orchestrator-state.json`) while the service is stopped or use the SQLite backup API. Azure SQL — rely on service-tier backups. The JSONL mirror is a viewer artifact, not a backup.
 

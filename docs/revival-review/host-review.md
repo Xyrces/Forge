@@ -1,18 +1,20 @@
 # Linux host and restart observations
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 Inspected November 16, 2026, Eastern time. These are read-only observations of the existing host, apart from the separately authorized SSH setup and plugged-in availability settings described below. No Forge deployment, restart, queue edit, gate change, model request, or game run was performed.
 
 ## Actual host
 
 | Item | Observed |
 |---|---|
-| Host | `192.168.68.78`, `jtn5016-ThinkPad-P16s-Gen-4-AMD` |
+| Host | `192.0.2.10`, `forge-host` |
 | CPU | AMD Ryzen AI 9 HX PRO 370, 12 cores / 24 logical CPUs |
 | GPU | AMD Strix Radeon 880M/890M PCI device; CPU identifies Radeon 890M |
 | Memory | Approximately 53 GiB total, 41 GiB available during inspection |
 | Disk | Root filesystem 937 GiB, 531 GiB used, 359 GiB available |
 | Kernel | Linux 7.0.0-34-generic |
-| Desktop user's installed SDK | `/home/jtn5016/.dotnet/dotnet --version`: 10.0.302 |
+| Desktop user's installed SDK | `/home/forge-operator/.dotnet/dotnet --version`: 10.0.302 |
 | Noninteractive SSH environment | `dotnet` absent from default PATH, even for the desktop user |
 | GPU device nodes | `/dev/dri/card1`, `/dev/dri/renderD128`; access depends on worker identity/session ACLs |
 
@@ -20,19 +22,19 @@ This is a plausible single native-test host. It is not a measured guarantee of p
 
 ## The service is already running
 
-The **user** unit `/home/jtn5016/.config/systemd/user/forge.service` is active/running, started October 3, with PID 7388 during inspection. The system-level `forge` unit is absent/inactive. The user unit reports:
+The **user** unit `/home/forge-operator/.config/systemd/user/forge.service` is active/running, started October 3, with PID 7388 during inspection. The system-level `forge` unit is absent/inactive. The user unit reports:
 
-- Working directory `/home/jtn5016/.local/state/forge`.
+- Working directory `/home/forge-operator/.local/state/forge`.
 - Approximately 409 MiB cgroup memory in use; `MemoryMax=infinity`.
 - `PrivateDevices=no`, `ProtectHome=no`.
-- Executable `/home/jtn5016/.dotnet/dotnet`, assembly `/home/jtn5016/.local/share/forge/current/Forge.Core.dll`.
-- Current release link resolves to `/home/jtn5016/.local/share/forge/releases/qa-evidence-hardening-56`.
+- Executable `/home/forge-operator/.dotnet/dotnet`, assembly `/home/forge-operator/.local/share/forge/current/Forge.Core.dll`.
+- Current release link resolves to `/home/forge-operator/.local/share/forge/releases/qa-evidence-hardening-56`.
 - HTTPS `GET /api/meta/buildinfo` reports `1.0.0+4ac44895c05122ff5705a32b4ceb93e60a6e72e5`, runtime `.NET 10.0.10`. This matches the reviewed current GitHub source.
 - The dashboard is listening on ports 80/443, not the documented development default 4097. HTTPS requests to `https://localhost` succeeded using normal certificate validation.
 
 The packaged system service's `MemoryMax=8G`, `PrivateDevices=true`, `ProtectHome=true` restrictions are therefore **not the effective settings of this deployment**. They remain relevant if reinstalling from the template, but must not be reported as a current GPU blocker. Desktop/display availability, isolated saves, renderer/export ownership, and native process cleanup still require qualification.
 
-Whitelisted fields from `/home/jtn5016/.config/forge/appsettings.json` show SQL Server storage, InProcess execution, and Kilo/Kimi/MiniMax provider configuration. Secret values and database connection strings were not printed. Effective DB-backed model overrides were not inventoried, so configured defaults are not proof of the actual model for every run. A Headroom process was listening locally on 8787; that observation alone does not prove Forge routes requests through it.
+Whitelisted fields from `/home/forge-operator/.config/forge/appsettings.json` show SQL Server storage, InProcess execution, and Kilo/Kimi/MiniMax provider configuration. Secret values and database connection strings were not printed. Effective DB-backed model overrides were not inventoried, so configured defaults are not proof of the actual model for every run. A Headroom process was listening locally on 8787; that observation alone does not prove Forge routes requests through it.
 
 ## Existing work is still registered
 
@@ -52,14 +54,14 @@ The user explicitly wants old service data discarded and the existing Azure SQL 
 
 The Windows saved host identity was stale. The current ED25519 fingerprint was independently verified through the connected Linux desktop, then the known-host entry was replaced with that verified key. The previous file was retained under the review's ignored `.portHorizon/review-ssh` directory. Host verification remains enabled.
 
-The existing `timeloop-handoff` SSH account worked but lacked access to the desktop user's files and user service. With explicit user approval, this PC's existing public key was added to `/home/jtn5016/.ssh/authorized_keys` with restrictive permissions. The server's AllowUsers policy initially still restricted access to the handoff account.
+The existing `handoff-user` SSH account worked but lacked access to the desktop user's files and user service. With explicit user approval, this PC's existing public key was added to `/home/forge-operator/.ssh/authorized_keys` with restrictive permissions. The server's AllowUsers policy initially still restricted access to the handoff account.
 
-At the user's request, the approved administrator command was entered in the Linux console. The user supplied the sudo password directly. The command backed up `/etc/ssh/sshd_config.d/00-timeloop-handoff.conf` as `.before-forge-review`, added `jtn5016@192.168.68.70` alongside the existing handoff entry, validated with `sshd -t`, and reloaded SSH. Password authentication, root login, and forwarding restrictions were retained. Successful subsequent SSH login as `jtn5016` and service/API reads establish the resulting access. No administrator password was requested or received in chat.
+At the user's request, the approved administrator command was entered in the Linux console. The user supplied the sudo password directly. The command backed up `/etc/ssh/sshd_config.d/00-handoff-user.conf` as `.before-forge-review`, added `forge-operator@192.0.2.20` alongside the existing handoff entry, validated with `sshd -t`, and reloaded SSH. Password authentication, root login, and forwarding restrictions were retained. Successful subsequent SSH login as `forge-operator` and service/API reads establish the resulting access. No administrator password was requested or received in chat.
 
 RDP control was stopped by the user; subsequent inspection used SSH only. The normal connection from this Windows PC is:
 
 ```text
-ssh jtn5016@192.168.68.78
+ssh forge-operator@192.0.2.10
 ```
 
 ## Remaining host acceptance work

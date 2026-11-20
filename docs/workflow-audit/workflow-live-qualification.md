@@ -1,5 +1,7 @@
 # Live workflow repair qualification
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 The dashboard performance, activation guards, and workflow presentation repairs
 from PR #127 are deployed. This is targeted qualification of those changes;
 the UI-originated Intake-to-delivery journey remains outstanding.
@@ -14,7 +16,7 @@ the UI-originated Intake-to-delivery journey remains outstanding.
   and the fake closed-loop check passed. Image run `44097803275` succeeded.
 - Normal deployment `deploy-8d8108851a274467839542f8edb58a4c` committed
   through its independent release Job; public routing selected blue.
-- Controller instance/pod UID `c2faa45a-1b59-4672-884c-35538d6c3f95`
+- Controller instance/pod UID `00000000-0000-4000-8000-000000000031`
   owned epoch 18 and reported ready, active, and admission open.
 - Both Azure SQL schemas remained at 39. The previous strict-39 budget image
   remained the same-schema rollback target.
@@ -62,7 +64,7 @@ image workflow `44102089119` also passed.
 Image `ghcr.io/xyrces/forge@sha256:8d5a595d2482593cbb1395e3c52f41233c6c26848b21776e44697eb48d29cd01`
 was deployed through normal operation `deploy-4c3c69372ebd4a7ebea49ae5fc256af6`.
 Its journal committed, the green controller
-`17596e47-3f9c-45b0-90bc-87926531993a` reported active/ready with admission open,
+`00000000-0000-4000-8000-000000000032` reported active/ready with admission open,
 and SQL ownership advanced to epoch19. Schema remained39.
 
 Failed work now retains its status regardless of age. Automatic active-sprint

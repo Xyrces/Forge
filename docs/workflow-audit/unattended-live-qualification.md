@@ -1,5 +1,7 @@
 # Unattended workflow live qualification
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 Latest result: the approved pilot reached **Satisfied**, with automatic deployment and explicit operator acceptance on 2026-11-17. See [the final qualification](#final-qualification-2026-11-17). Earlier blocked checkpoints below remain chronological evidence, not current status.
 
 ## Version 41 release
@@ -19,12 +21,12 @@ requirements were not weakened to make the harness pass.
 Normal candidate/approval operation `deploy-138538c4cbb84ec7923c6a5624072754`
 ran the coordinated 40→41 upgrade. Its initializer completed, the release
 journal committed, and the independent release Job completed in 86 seconds.
-The blue controller `df67563f-c04e-4423-ba1a-955b6d100674` became active and
+The blue controller `00000000-0000-4000-8000-000000000022` became active and
 ready at epoch25. Its `/app/source-revision` matched the qualified receipt.
 The read-only application check passed at schema41 without model generation.
 
 Both `core` and `proj_forge` advanced to41. Dataset
-`f610a39c-50e1-4aab-8d5a-e18e10aeede9`, the $25 authorization, all four
+`00000000-0000-4000-8000-000000000003`, the $25 authorization, all four
 existing stage holds, and full canonical snapshots of the three budget tables
 were preserved. The actual worker credential passed 28 permission checks:
 SELECT remained available and INSERT/UPDATE/DELETE were denied on the five
@@ -82,7 +84,7 @@ The earlier run's missing-remote fixture failures were corrected with
 disposable local remotes, preserving the production fresh-fetch requirement.
 
 Normal release `deploy-3d96410462074df797d83fc475197196` committed in 80
-seconds. Green controller `e528ac64-9672-4b89-aa0b-fc1592ee62eb` became
+seconds. Green controller `00000000-0000-4000-8000-000000000023` became
 active and ready at epoch 26, schema 41. Its image source matched the receipt.
 On activation the managed checkout advanced from
 `1b733cb32fcfa97b70d4ab00736f3f985bf23986` to the exact PR132 merge above.
@@ -138,7 +140,7 @@ qualification, plus the separate Azure SQL recovery checks described in
 `ghcr.io/xyrces/forge@sha256:20eab8d5d1355aad2c0e74f8f6fd5e879ff1d433f8280623536e24a432cc5d2a`.
 
 Normal operation `deploy-d3dc023bb77c4db481f86b158069aa02` committed.
-Blue controller `281623ef-21e3-4833-8190-232324a3cc61` became active and
+Blue controller `00000000-0000-4000-8000-000000000024` became active and
 ready at epoch 27, retaining schema 41 and the dataset. The running artifact
 matched the image receipt; the managed checkout automatically advanced to
 the PR #133 merge. Read-only preflight passed, spending-table hashes were
@@ -193,7 +195,7 @@ and image run `44160701942`. Its immutable image is
 `ghcr.io/xyrces/forge@sha256:cb2ae1436d7a4920df83b967027e0d9ef3adda99f6bfa6f50f4db41d7d32607b`.
 
 Normal release `deploy-ef05cac8e2484c078ed01d05e837be60` committed in
-51 seconds. Green controller `5fd25361-27ab-47b4-8186-5631bf1bb952`
+51 seconds. Green controller `00000000-0000-4000-8000-000000000025`
 became active at epoch 28 on the same schema-41 dataset. The running artifact
 matched the receipt; read-only deployed preflight passed and all three
 spending-table snapshot hashes were unchanged. The managed checkout advanced
@@ -266,7 +268,7 @@ Source `6b5c4be89d6b28240e373367e0e16c7c163b4d8f` passed CI
 end-to-end harness) and image workflow `44166660364`. Normal release
 `deploy-4cff7b6092074c448b8f44e0f8fb14ad` committed image
 `ghcr.io/xyrces/forge@sha256:98189b35495274e04d920235cd93dc0b5c32977978a298553846bd16b4ab88eb`.
-Blue owner `e8e36555-906e-48b1-b93a-a02f4eb59d12` became active at epoch 29.
+Blue owner `00000000-0000-4000-8000-000000000026` became active at epoch 29.
 The running artifact matched; deployed read-only preflight passed. Schema 41,
 the dataset, pilot rows and all three budget-table snapshot hashes were retained.
 
@@ -568,10 +570,10 @@ release. Completion and candidate share exact source Y and committed plan hash
 `2a810274d95a46fd588228968cfa70771c3876ba518809aca3003536c217e042`.
 
 The final serving controller was green pod `forge-green-55f4cf7c6-q52gc`, UID
-`5ee7fb4a-3251-42f2-a827-c3860388b480`, container `forge`, epoch **32**.
+`00000000-0000-4000-8000-000000000027`, container `forge`, epoch **32**.
 Its configured image and actual image ID matched the receipt. Core and Forge
 workload schemas remained **41**, with the same dataset
-`f610a39c-50e1-4aab-8d5a-e18e10aeede9`.
+`00000000-0000-4000-8000-000000000003`.
 
 ### Actual operator acceptance and its limits
 

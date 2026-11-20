@@ -1,5 +1,7 @@
 # Current-main validation evidence review
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 Reviewed 2026-11-16 against Forge `4ac44895c05122ff5705a32b4ceb93e60a6e72e5`. This independent review reads the existing Windows build/test/harness receipts and relevant source. It did not rerun tests, change source, change configuration, contact production, or start a service. Linux-host inspection is separate.
 
 ## Result
@@ -10,7 +12,7 @@ The deterministic engineering harness also failed before opening a local simulat
 
 ## Receipts
 
-All paths below are relative to the current-source snapshot at `C:/Users/jtn50/repos/Forge/.portHorizon/review-sources/Forge-main/`:
+All paths below are relative to the current-source snapshot at `C:/work/review/Forge`:
 
 | Receipt | Observed result |
 |---|---|

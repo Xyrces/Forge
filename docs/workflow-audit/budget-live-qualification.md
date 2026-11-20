@@ -1,5 +1,7 @@
 # Live budget schema and release qualification
 
+Host, account, network, and deployment identifiers in this archived record use example values. Commit hashes and PR references retain their original meaning.
+
 Status as of 2026-11-17: schema 39 migration, bridge restoration, budget release, controlled return to the bridge, forward deployment, and the operator-reported **$1.01** correction all completed. The live dashboard shows **$23.99 available** under the unchanged **$25** allowance. PR #126 merged as `ce322597424bb79ffc87b5c83ea52bc21c566afc`; the running image retains the exact tested source `567473d` below. Transitional bridge PR #125 was closed without merging its temporary 38/39 acceptance policy into the strict-39 runtime. Its source branch and immutable image remain available for rollback.
 
 This was supervised maintenance followed by an explicitly requested previous-image rollout. It is **not** evidence of a fault-triggered automatic rollback or a fully unattended schema upgrade. No paid model call was required for these checks.
@@ -19,11 +21,11 @@ Both image references use `ghcr.io/xyrces/forge`. Sources were bound to the revi
 
 ## Completed observations
 
-1. **Bridge on38:** normal API deployment `deploy-79656777ef514c9b895e8aeb86b20ea2` committed. Public routing selected green; controller instance/pod UID `87f27f37-eee0-4394-8394-3930f92dec5c` owned epoch13, with the prior blue pod absent.
+1. **Bridge on38:** normal API deployment `deploy-79656777ef514c9b895e8aeb86b20ea2` committed. Public routing selected green; controller instance/pod UID `00000000-0000-4000-8000-000000000013` owned epoch13, with the prior blue pod absent.
 2. **Writer stop before migration:** the supervised drain and stop proved SQL owner null, zero controller pods, zero worker pods, and zero active durable worker attempts. Public routing retained its existing slot rather than being reset to an installation sentinel. This proof was required separately from a successful drain request.
 3. **Schema39 initialization:** completed at `2026-11-17T13:25:24Z`. Both `core` and `proj_forge` reported39. The post-migration stopped-writer receipt still showed owner null and no controller/worker pods or active worker attempts. The original43 budget rows retained raw total **$24.809140**; migration did not apply the proposed $1.01 correction or rewrite those rows.
-4. **Bridge restored on39:** independent release Job operation `budget39-20261117-restore` committed through the existing release journal. Blue instance/pod UID `ea45653d-e9f8-4c21-a628-09d4f6899700` became active at epoch14. This restored the dashboard/API before requesting the new image. It was an independent release Job during the maintenance outage, not an API-recorded deployment candidate.
-5. **Budget39 first activation:** normal API deployment `deploy-59de2fc56b9d46dd800c0aa33fa38360` committed. Green instance/pod UID `6a7bd7ca-e68a-4948-8256-484f48557576` became active at epoch15, using the budget digest above.
+4. **Bridge restored on39:** independent release Job operation `budget39-20261117-restore` committed through the existing release journal. Blue instance/pod UID `00000000-0000-4000-8000-000000000014` became active at epoch14. This restored the dashboard/API before requesting the new image. It was an independent release Job during the maintenance outage, not an API-recorded deployment candidate.
+5. **Budget39 first activation:** normal API deployment `deploy-59de2fc56b9d46dd800c0aa33fa38360` committed. Green instance/pod UID `00000000-0000-4000-8000-000000000015` became active at epoch15, using the budget digest above.
 
 ## Live permission verification
 
@@ -39,8 +41,8 @@ The privileged initializer remains capable of administration; append-only runtim
 
 ## Controlled return, forward release and correction
 
-- Previous-image deployment `deploy-a288ae6677d5459ea2729b34a59ecd5a` committed through the normal API. Blue instance `59432f40-e925-4e64-ae68-22282ba0a849` owned epoch 16. Both schemas remained 39; original 43 rows and raw total were unchanged; no worker pods or queued/running attempts existed.
-- Forward deployment `deploy-09f94c065c92487b98de7be84383922d` committed through the normal API. Green instance `1e174da2-f22f-4c28-b904-427ac706c44c` owned epoch 17, with admission open and the qualified budget image active. This is the final runtime for this qualification.
+- Previous-image deployment `deploy-a288ae6677d5459ea2729b34a59ecd5a` committed through the normal API. Blue instance `00000000-0000-4000-8000-000000000016` owned epoch 16. Both schemas remained 39; original 43 rows and raw total were unchanged; no worker pods or queued/running attempts existed.
+- Forward deployment `deploy-09f94c065c92487b98de7be84383922d` committed through the normal API. Green instance `00000000-0000-4000-8000-000000000017` owned epoch 17, with admission open and the qualified budget image active. This is the final runtime for this qualification.
 - The operator helper first performed a read-only dry run, matching all 43 completed request IDs and original amounts against manifest SHA256 `54a97d1f234dbf2e5c7fe60acae6e7bd9e1dc68ac759afde63be848d37f4c484`. It then appended reconciliation `pilot-2026-11-17` using the initializer identity. The recorded source is **operator-reported**, not independently retrieved OpenAI billing. Original rows were not rewritten; the immutable covered amount is $24.809140 and the reported replacement aggregate is $1.01.
 - Live API readback showed limit $25, operator-reported cost $1.01, usage estimate $0, conservative uncovered amounts $0, outstanding holds $0, uncertain requests 0, and available $23.99. No paid calls were made during this qualification.
 - Actual browser inspection of `/now` showed the same balance and attribution. Clicking **Refresh spending** advanced the timestamp and preserved the values. `/deployments` rendered all 13 historical candidates without the prior enum-deserialization error, including both requested transitions as Deployed. This is targeted UI qualification, not a UI-originated intake-to-delivery test.

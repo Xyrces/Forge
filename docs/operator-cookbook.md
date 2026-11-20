@@ -279,7 +279,7 @@ Output:
 
 ```
 P4 StartupRecovery: DRY-RUN
-  workspace: C:\Users\jtn50\repos\gamedev\PortHorizon
+  workspace: C:\Users\forge-operator\projects\PortHorizon
   state dir: C:\...\portHorizon\state
 
   scanned: 2
@@ -523,9 +523,9 @@ For the full guide see `docs/multi-project.md`. The key flows:
 { "workspace": { "root": "" }, "forgesystem": { "dataRoot": "" } }
 
 dotnet run --project Forge -- --check
-# => Forgesystem data root: C:\Users\jtn50\AppData\Local\Forge
-# => Project 'default' root=C:\Users\jtn50\AppData\Local\Forge\projects\default
-# => state=C:\Users\jtn50\AppData\Local\Forge\projects\default\.forge\state
+# => Forgesystem data root: C:\Users\forge-operator\AppData\Local\Forge
+# => Project 'default' root=C:\Users\forge-operator\AppData\Local\Forge\projects\default
+# => state=C:\Users\forge-operator\AppData\Local\Forge\projects\default\.forge\state
 # => created=True gitInit=True
 
 dotnet run --project Forge -- --dashboard-only
