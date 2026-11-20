@@ -167,7 +167,7 @@ The API surface includes `/api/state`, `/api/tasks/*`, `/api/sprints/*` (incl. p
 
 ## How a task flows
 
-1. **Intake.** New work enters as an epic via the Intake agent (operator chat at `/intake`) or as an ad-hoc task (CLI / dashboard / agent-filed follow-up).
+1. **Intake.** Open `/intake` to return to the selected project's inbox. Start or resume a conversation to shape an initiative alongside its working brief. Compare the current brief with an earlier revision before approving it. Approval sends that exact revision to planning and links the resulting epic and spec. Ad-hoc tasks can still enter through the CLI, dashboard, or an agent-filed follow-up.
 2. **Grooming.** The pipeline schedulers (designer → groomer) refine specs into stories/tasks, kicked by spec/follow-up events with a 15-min backstop tick. Ad-hoc tasks must be marked `groomed=true` by the ScheduledGroomer before they are sprint-eligible.
 3. **Sprint.** ALL engineering work happens inside a sprint. The `SprintAssembler` (kicked by task/sprint events, 15-min backstop) completes the Active sprint when its tasks are terminal and assembles + activates the next from eligible Pending tasks. There is deliberately no UI button to create sprints.
 4. **Dispatch.** The orchestrator claims a ready sprint task (`IssueStore.ClaimAsync` is atomic), acquires a per-(project, role) slot from `SlotTable`, and hands it to the 5-stage MAF workflow: **Claim → Worktree → RunAgent → CommitPushPr → EnqueueWatch**.

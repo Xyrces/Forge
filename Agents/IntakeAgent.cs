@@ -121,7 +121,7 @@ public sealed class IntakeAgent
     /// the intake session.
     /// </summary>
     public async Task<IntakeSessionRecord> SendUserMessageAsync(
-        string sessionId, string userText, CancellationToken ct = default)
+        string sessionId, string userText, CancellationToken ct = default, InitiativeProposal? workingBrief = null)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
             throw new ArgumentException("sessionId is required", nameof(sessionId));
@@ -132,6 +132,8 @@ public sealed class IntakeAgent
             ?? throw new InvalidOperationException("Intake session not found.");
         if (ownedSession.ProjectId != _projectId)
             throw new InvalidOperationException("Intake session belongs to another project.");
+        if (workingBrief is not null && (workingBrief.SessionId != sessionId || workingBrief.ProjectId != _projectId))
+            throw new InvalidOperationException("Working brief belongs to another conversation.");
 
         // Append the user message first so the message is durable even
         // if the LLM call throws. The agent response is appended after.
@@ -167,7 +169,7 @@ public sealed class IntakeAgent
             name: "create_epic",
             description: "Propose a new epic for the operator to review. " +
                          "Use this for an operator's new initiative, including a small, clearly scoped change. " +
-                         "The proposal is a durable unapproved DRAFT in Proposals, linked to this conversation — " +
+                         "The proposal is a durable unapproved draft in the working brief, linked to this conversation — " +
                          "no issue is created and nothing appears on the project board " +
                          "until the operator approves its exact revision. Returns a stable proposal ID " +
                          "and revision, not an issue ID. For changes, pass proposalId and expectedRevision.");
@@ -222,9 +224,16 @@ public sealed class IntakeAgent
         // must not silently change previously approved scope through tool calls.
         var tools = new List<AITool> { createEpicTool, askQuestionsTool };
 
+        var instructions = await BuildIntakeInstructionsAsync(ct);
+        if (workingBrief is not null)
+        {
+            var approvalState = workingBrief.ApprovedAt is null ? "draft" : "already approved";
+            instructions += $"\n\nThe working brief shown with this message is proposal {workingBrief.Id}, "
+                + $"revision {workingBrief.Revision} ({approvalState}). Resolve references like 'this brief' to that proposal.";
+        }
         var agent = new ChatClientAgent(
             chatClient,
-            instructions: await BuildIntakeInstructionsAsync(ct),
+            instructions: instructions,
             name: "intake",
             description: $"Intake agent for project {_projectId}",
             tools: tools);
@@ -471,9 +480,9 @@ public sealed class IntakeAgent
             already answers (tech stack, layout, existing modules). Read
             it first; ask only about intent and scope.
 
-            ## Visual canvas
+            ## Conversation diagrams
 
-            The operator watches a visual canvas beside this chat. When
+            Diagrams can be opened alongside the working brief. When
             the discussion turns to structure — modules, flows, data
             flow, component relationships, user journeys — include ONE
             small mermaid diagram in your reply as a fenced block:

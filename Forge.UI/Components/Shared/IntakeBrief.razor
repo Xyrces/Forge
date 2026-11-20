@@ -1,0 +1,169 @@
+@using Forge.Dashboard.Services
+@implements IDisposable
+
+<section class="intake-brief" aria-label="Working brief">
+    <header class="intake-brief__header">
+        <h2>Working brief</h2>
+        <button class="btn btn--link" disabled="@(_busy || _loading || SessionId is null)" @onclick="RefreshAsync">Refresh brief</button>
+    </header>
+    @if (_error is not null)
+    {
+        <p class="banner banner--error" role="alert">@_error</p>
+    }
+    @if (_loading && _detail is null)
+    {
+        <p class="page-subtitle" role="status">Loading the brief…</p>
+    }
+    else if (_detail is null)
+    {
+        <div class="intake-brief__empty">
+            <h3>The brief takes shape here</h3>
+            <p>Discuss the outcome, scope and acceptance criteria. Forge will draft a brief for your review.</p>
+        </div>
+    }
+    @if (_proposals.Count > 1 || _nextCursor is not null)
+    {
+        <div class="intake-brief__chooser">
+            <label for="@_selectId">Brief in this conversation</label>
+            <select id="@_selectId" value="@_selectedId" @onchange="ChooseAsync" disabled="@(_busy || _loading)">
+                @foreach (var proposal in _proposals)
+                {
+                    <option value="@proposal.Id">@proposal.Title · @(proposal.ApprovedAt is null ? "Draft" : "Approved")</option>
+                }
+            </select>
+            @if (_nextCursor is not null)
+            {
+                <button class="btn btn--link" disabled="@(_busy || _loading)" @onclick="LoadMoreAsync">More briefs</button>
+            }
+        </div>
+    }
+    @if (_detail is { } detail)
+    {
+        var proposal = detail.Proposal;
+        <div class="intake-brief__identity">
+            <div class="intake-brief__meta">
+                <span class="pill pill--@(proposal.ApprovedAt is null ? "draft" : "approved")">@(proposal.ApprovedAt is null ? "Draft" : "Approved")</span>
+                <span>Revision @proposal.Revision</span>
+                <span>@(proposal.Origin == "forge" ? "Suggested by Forge" : "From this conversation")</span>
+            </div>
+            <h3>@proposal.Title</h3>
+            <p class="page-subtitle">Priority @proposal.Priority</p>
+        </div>
+        @if (_stale)
+        {
+            <p class="banner banner--warning" role="alert">The brief changed while you were reviewing it. Refresh the brief and review the latest revision before approving.</p>
+        }
+        <div class="intake-brief__tabs" role="group" aria-label="Brief view">
+            <button class="chip @(!_showChanges ? "chip--active" : "")" aria-pressed="@(!_showChanges)" @onclick="() => _showChanges = false">Current brief</button>
+            <button class="chip @(_showChanges ? "chip--active" : "")" aria-pressed="@_showChanges" @onclick="ShowChangesAsync">Changes</button>
+        </div>
+        @if (_showChanges && proposal.Revision > 2)
+        {
+            <div class="intake-brief__chooser">
+                <label for="@(_selectId + "-revision")">Compare current brief with</label>
+                <select id="@(_selectId + "-revision")" value="@_compareRevision" @onchange="CompareRevisionAsync">
+                    @for (var revision = proposal.Revision - 1; revision >= 1; revision--)
+                    {
+                        <option value="@revision">Revision @revision</option>
+                    }
+                </select>
+            </div>
+        }
+        <div class="intake-brief__document">
+            @if (!_showChanges)
+            {
+                <div class="md">@Html(proposal.Body)</div>
+            }
+            else if (proposal.Revision == 1)
+            {
+                <p class="page-subtitle">This is the first revision. Review the complete brief below.</p>
+                <div class="md">@Html(proposal.Body)</div>
+            }
+            else if (_comparing)
+            {
+                <p role="status">Loading revision @_compareRevision…</p>
+            }
+            else if (_comparisonError is not null)
+            {
+                <p class="banner banner--warning" role="alert">@_comparisonError</p>
+                <button class="btn" @onclick="ShowChangesAsync">Retry comparison</button>
+            }
+            else if (_previous is { } previous)
+            {
+                <p class="page-subtitle">Revision @previous.Revision compared with revision @proposal.Revision</p>
+                @if (previous.Title != proposal.Title)
+                {
+                    <section class="intake-brief__change" aria-label="Title change">
+                        <h4>Title</h4>
+                        <div class="intake-brief__comparison"><div><h5>Before</h5><p>@previous.Title</p></div><div><h5>Now</h5><p>@proposal.Title</p></div></div>
+                    </section>
+                }
+                @if (previous.Priority != proposal.Priority)
+                {
+                    <section class="intake-brief__change" aria-label="Priority change">
+                        <h4>Priority</h4>
+                        <div class="intake-brief__comparison"><div><h5>Before</h5><p>Priority @previous.Priority</p></div><div><h5>Now</h5><p>Priority @proposal.Priority</p></div></div>
+                    </section>
+                }
+                @foreach (var change in _changes.Where(change => change.Changed))
+                {
+                    <section class="intake-brief__change">
+                        <h4>@change.Heading</h4>
+                        @if (change.Moved) { <p class="page-subtitle">Position changed within the brief</p> }
+                        <div class="intake-brief__comparison">
+                            <div><h5>Before</h5>@if (change.Before is null) { <p class="page-subtitle">Added in this revision</p> } else { <div class="md">@Html(change.Before)</div> }</div>
+                            <div><h5>Now</h5>@if (change.After is null) { <p class="page-subtitle">Removed in this revision</p> } else { <div class="md">@Html(change.After)</div> }</div>
+                        </div>
+                    </section>
+                }
+                @if (_changes.Any(change => !change.Changed))
+                {
+                    <details class="intake-brief__unchanged">
+                        <summary>@_changes.Count(change => !change.Changed) unchanged @(_changes.Count(change => !change.Changed) == 1 ? "section" : "sections")</summary>
+                        @foreach (var change in _changes.Where(change => !change.Changed))
+                        {
+                            <div class="md">@Html(change.After)</div>
+                        }
+                    </details>
+                }
+                @if (previous.Title == proposal.Title && previous.Priority == proposal.Priority && _changes.All(change => !change.Changed))
+                {
+                    <p>No wording or priority changes in this revision.</p>
+                }
+            }
+        </div>
+        @if (proposal.ApprovedAt is null)
+        {
+            <footer class="intake-brief__approval">
+                <p>Approve revision @proposal.Revision to start specification, design and technical planning. Forge schedules the resulting work after the current sprint.</p>
+                <button class="btn btn--primary" disabled="@(_busy || _loading || _stale || proposal.SessionId != SessionId)" @onclick="ApproveAsync">Approve revision @proposal.Revision</button>
+                <p class="page-subtitle">Continue the conversation to refine the brief.</p>
+            </footer>
+        }
+        else
+        {
+            <footer class="intake-brief__handoff" aria-label="Planning handoff">
+                <div class="intake-brief__meta"><strong>@HandoffTitle</strong><span>Approved @proposal.ApprovedAt?.ToLocalTime().ToString("g")</span></div>
+                <p>@HandoffDescription</p>
+                @if (detail.Ingestion is { } ingestion)
+                {
+                    <div class="intake-brief__links">
+                        <a href="@($"/specs/{Uri.EscapeDataString(ingestion.SpecId)}?project={Uri.EscapeDataString(ProjectId!)}")">Open specification</a>
+                        <a href="@($"/tasks/{Uri.EscapeDataString(ingestion.EpicId)}?project={Uri.EscapeDataString(ProjectId!)}")">View initiative</a>
+                        <a href="@($"/flow?project={Uri.EscapeDataString(ProjectId!)}&issue={Uri.EscapeDataString(ingestion.EpicId)}")">Follow progress</a>
+                    </div>
+                    @if (ingestion.RefinementState == "Failed")
+                    {
+                        <p class="banner banner--warning">@ingestion.LastError</p>
+                        <p class="page-subtitle">Retrying may make another paid model request.</p>
+                        <button class="btn" disabled="@(_busy || _loading || _stale)" @onclick="RetryAsync">Retry refinement</button>
+                    }
+                }
+                @if (_handoffError is not null)
+                {
+                    <p class="banner banner--warning">@_handoffError</p>
+                }
+            </footer>
+        }
+    }
+</section>

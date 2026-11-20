@@ -106,6 +106,39 @@ public class IntakeDashboardTests : IDisposable
     }
 
     [Fact]
+    public async Task ScopedSessionRequestsCannotReadOrChangeAnotherProjectsConversation()
+    {
+        var session = await _intake.CreateAsync("P", "A private brief");
+        var path = $"/api/intake/sessions/{session.Id}";
+        const string wrongProject = "?projectId=other";
+        using var read = await _client.GetAsync(path + wrongProject);
+        using var send = await _client.PostAsJsonAsync(path + "/messages" + wrongProject, new { text = "Wrong project" });
+        using var import = await _client.PostAsync(path + "/review-draft/1" + wrongProject, null);
+        Assert.Equal(HttpStatusCode.NotFound, read.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, send.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, import.StatusCode);
+        var original = await _client.GetFromJsonAsync<JsonElement>(path + "?projectId=P");
+        Assert.Empty(original.GetProperty("messages").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task DiscussingTheDisplayedBriefRequiresItsOwnConversationAndCurrentRevision()
+    {
+        var first = await _intake.CreateAsync("P", "One conversation");
+        var second = await _intake.CreateAsync("P", "Another conversation");
+        var proposal = await _initiatives.Proposals.CreateAsync(new("P", "focused", "user", "Scope", "First draft", SessionId: first.Id));
+        var updated = await _initiatives.Proposals.ReviseAsync("P", proposal.Id, 1, "Scope", "Second draft", 2);
+        var message = new { text = "Refine this scope", proposalId = proposal.Id, revision = 1 };
+        using var stale = await _client.PostAsJsonAsync($"/api/intake/sessions/{first.Id}/messages?projectId=P", message);
+        using var unrelated = await _client.PostAsJsonAsync($"/api/intake/sessions/{second.Id}/messages?projectId=P",
+            message with { revision = updated.Revision });
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, unrelated.StatusCode);
+        Assert.Empty((await _intake.GetAsync(first.Id))!.Messages);
+        Assert.Empty((await _intake.GetAsync(second.Id))!.Messages);
+    }
+
+    [Fact]
     public async Task IngestedSpecCannotSkipPendingRunningOrFailedRefinement()
     {
         var proposal = await _initiatives.Proposals.CreateAsync(new("P", "guard", "user", "Outcome", "Approved scope"));
