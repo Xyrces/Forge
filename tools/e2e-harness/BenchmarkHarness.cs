@@ -5,6 +5,7 @@ using Forge.AgentTools;
 using Forge.Agents;
 using Forge.Configuration;
 using Forge.Core;
+using Forge.Core.Initiatives;
 using Forge.Dashboard;
 using Forge.Orchestrator;
 using Forge.Projects;
@@ -204,7 +205,7 @@ internal static class BenchmarkHarness
 
         var dbPath = Path.Combine(workspaceRoot, "state", "issues.db");
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        var issues = new IssueStore(dbPath);
+        var issues = new IssueStore(dbPath, "benchmark");
         using var agentRuns = new AgentRunStore(issues.Db);
         var designArtifacts = new DesignArtifactStore(dbPath);
         var artOutputs = new ArtOutputStore(dbPath);
@@ -275,10 +276,37 @@ internal static class BenchmarkHarness
             projectStore, bundleFactory, runner, roleRegistry, messageBus, dispatcher,
             eventBus, NullLogger<OrchestratorAgent>.Instance);
 
+        // Supply synthetic approval through the same stores and planner as the smoke
+        // harness. The acceptance scope contains only the public task prompt.
+        var title = externalCase?.Title ?? fixture!.Title;
+        var prompt = externalCase?.Prompt ?? fixture!.Prompt;
+        var proposals = new InitiativeProposalStore(issues);
+        var proposal = await proposals.CreateAsync(
+            new("benchmark", caseId, "forge", title, prompt, 2), cancellationToken);
+        await proposals.ExpandInIntakeAsync("benchmark", proposal.Id, cancellationToken);
+        proposal = await proposals.ApproveAsync("benchmark", proposal.Id, proposal.Revision,
+            proposal.Hash, "offline benchmark operator", cancellationToken);
+        var ingestion = new InitiativeIngestionStore(issues);
+        var approved = await ingestion.IngestAsync(proposal, cancellationToken);
+        if (!await ingestion.TryBeginRefinementAsync(proposal.Id, proposal.Revision, cancellationToken))
+            throw new InvalidOperationException("Could not begin synthetic benchmark refinement.");
+        await ingestion.CompleteRefinementAsync(proposal.Id, proposal.Revision, cancellationToken);
+        // External repository requests can exceed the scope excerpt limit. The
+        // proposal hash and task retain the full prompt.
+        var scope = new SprintScopeReference(approved.SpecId, proposal.Id, proposal.Revision,
+            proposal.Hash, prompt[..Math.Min(prompt.Length, 4000)]);
         var task = await issues.CreateAsync(new NewIssue(
-            "task", externalCase?.Title ?? fixture!.Title,
-            externalCase?.Prompt ?? fixture!.Prompt, Priority: 2), cancellationToken);
-        await issues.TransitionAsync(task.Id, IssueStatus.Pending, error: null, ct: cancellationToken);
+            "task", title, prompt, Priority: 2,
+            Metadata: new Dictionary<string, object> { ["groomed"] = true }), cancellationToken);
+        await new SprintOutcomeAuthority(issues).BindAsync(task.Id, new(1, "benchmark-task", title,
+            [new("task-acceptance", "Fulfil the approved benchmark request within its permitted files and pass the independent acceptance checks.",
+                SprintEvidenceKind.MergedAndVerified, scope)],
+            [task.Id], ["task-acceptance"], SprintMemberReason.Delivers, scope), cancellationToken);
+        var planner = new SprintProposeService(
+            issues, sprints, new DeterministicScorer(), new SprintProposalAuditStore(issues.Db));
+        var plan = await planner.ProposeAsync(null, null, ct: cancellationToken);
+        await planner.CommitAsync(
+            plan.AuditId, plan.SelectedTaskIds, null, null, "offline benchmark operator", cancellationToken);
         if (policyRuntime is not null && policy is not null)
         {
             await ExecutePolicyWorkflowAsync(

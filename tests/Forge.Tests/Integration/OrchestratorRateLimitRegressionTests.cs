@@ -17,6 +17,7 @@ namespace Forge.Tests.Integration;
 /// </summary>
 public sealed class OrchestratorRateLimitRegressionTests : IDisposable
 {
+    private const string ProjectId = "rate-limit-test";
     private readonly string _root = TempRoot.Instance.NewDirectory("orch-429");
     private readonly string _dbPath;
     private readonly IssueStore _issues;
@@ -26,7 +27,7 @@ public sealed class OrchestratorRateLimitRegressionTests : IDisposable
     public OrchestratorRateLimitRegressionTests()
     {
         _dbPath = Path.Combine(_root, "issues.db");
-        _issues = new IssueStore(_dbPath);
+        _issues = new IssueStore(_dbPath, ProjectId);
         _projects = new ProjectStore(_issues);
         var events = new InMemoryDashboardEventBus();
         var worktrees = new GitWorktreeService(
@@ -38,7 +39,7 @@ public sealed class OrchestratorRateLimitRegressionTests : IDisposable
             events, NullLogger<PRWatcher>.Instance);
 
         _bundle = new ProjectDispatchBundle(
-            new ProjectOptions { Id = "rate-limit-test", Name = "Rate limit test", Root = _root, DefaultBranch = "main" },
+            new ProjectOptions { Id = ProjectId, Name = "Rate limit test", Root = _root, DefaultBranch = "main" },
             _issues,
             new AgentStore(_issues),
             new SprintStore(_issues),
@@ -95,8 +96,19 @@ public sealed class OrchestratorRateLimitRegressionTests : IDisposable
         await AssertPendingWithoutStrikeAsync(issue.Id);
     }
 
-    private Task<IssueRecord> CreateTaskAsync()
-        => _issues.CreateAsync(new NewIssue(Type: "dev", Title: "provider throttled", Description: "test"));
+    private async Task<IssueRecord> CreateTaskAsync()
+    {
+        await using var memory = new MemoryStore(_issues.Db);
+        await new PullRequestReviewPolicy(memory).SetModeAsync(RequiredReview.Human, "test operator", CancellationToken.None);
+        var scope = await ApprovedSprintFixture.Scope(_issues);
+        var task = await ApprovedSprintFixture.Task(_issues);
+        await ApprovedSprintFixture.Bind(_issues, scope, [task]);
+        var validator = new SprintActivationValidator(_issues, _bundle.Sprints, new SpecStore(_issues), ProjectId, null);
+        var snapshot = await validator.ValidateAsync([task.Id], CancellationToken.None);
+        var start = DateTime.UtcNow;
+        await _bundle.Sprints.CreateWithIssuesAsync(new("Rate limit regression", "Verify throttled dispatch", start, start.AddDays(1)), snapshot);
+        return (await _issues.GetAsync(task.Id))!;
+    }
 
     private async Task AssertPendingWithoutStrikeAsync(string id)
     {
