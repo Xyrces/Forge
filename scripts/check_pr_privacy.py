@@ -134,8 +134,8 @@ def scan(base, head, terms, metadata=None):
             raise ScanError("Could not read the PR title and description.") from None
         if not isinstance(fields, dict) or not isinstance(fields.get("title"), str) or "body" not in fields:
             raise ScanError("Invalid PR title or description.")
-        for key, label in (("title", "title"), ("body", "description")):
-            value = fields[key]
+        for key, label in (("branch", "branch"), ("title", "title"), ("body", "description")):
+            value = fields.get(key, "")
             if key == "body" and value is None:
                 continue
             if not isinstance(value, str):

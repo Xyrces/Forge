@@ -11,7 +11,7 @@ _PLACEHOLDERS = {
     "myserver", "my-server", "sqlserver", "database", "mydatabase", "my-database",
     "resource-group", "my-resource-group", "managed-identity", "my-identity",
 }
-_PROFILE = re.compile(r"(?i)(?:\b[a-z]:|/mnt/[a-z])?/users/([\w.-]+)|/home/([\w.-]+)")
+_PROFILE = re.compile(r"(?i)(?<![\w.-])(?:(?:[a-z]:|/mnt/[a-z])?/users/([\w.-]+)|/home/([\w.-]+))")
 _CHECKOUT = re.compile(r"(?i)\b[a-z]:/(?:repos?|projects?|code|dev|work|workspace|source|src)/([^/\s\"'`;,]+)")
 _UNC = re.compile(r"(?:\\\\|//)([a-zA-Z0-9][a-zA-Z0-9_.-]*)[/\\]+([^/\\\s\"'`;,]+)")
 _AZURE_HOST = re.compile(
@@ -31,7 +31,7 @@ _AZURE_ASSIGNMENT = re.compile(
     rf"(?i)(?<![\w])(?:{_AZURE_KEY})[\"']?\s*([:=])\s*([\"']?)([^\s\"'`;,)]+)"
 )
 _USERNAME_ASSIGNMENT = re.compile(
-    rf"(?i)(?<![\w])(?:{_USERNAME_KEY})[\"']?\s*([:=])\s*([\"']?)([^\s\"'`;,)]+)"
+    rf"(?i)(?<![\w/])(?:{_USERNAME_KEY})[\"']?\s*([:=])\s*([\"']?)([^\s\"'`;,)]+)"
 )
 _AZURE_FLAG = re.compile(
     r"(?i)--(?:resource-group|subscription|tenant|mi-name|identity-name|account-name|vault-name|server)"
@@ -115,7 +115,9 @@ class PrivacyPatterns:
             labels.append("machine account name")
         if not _ATTRIBUTION.search(line) and any(
             not (match.group(2).lower() in {"example.com", "example.net", "example.org", "localhost"}
-                 or match.group(2).lower().endswith((".example", ".invalid", ".test", "noreply.github.com")))
+                 or match.group(2).lower().endswith((".example", ".invalid", ".test", ".noreply.github.com"))
+                 or (match.group(1) == "git" and match.group(2).lower() in {"github.com", "gitlab.com", "bitbucket.org"}
+                     and line[match.end():].startswith(":")))
             for match in _EMAIL.finditer(line)
         ):
             labels.append("personal email address")

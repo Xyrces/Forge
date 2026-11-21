@@ -38,6 +38,18 @@ class PrivacyPatternTests(unittest.TestCase):
         self.assertIn("machine account name", detector.findings('ssh ' + 'harboroperator' + '@' + 'workstation'))
         self.assertIn("personal email address", detector.findings('harboroperator' + '@' + 'mail.example-provider.com'))
 
+    def test_repository_ssh_urls_and_api_routes_are_not_local_accounts(self):
+        detector = patterns.PrivacyPatterns()
+        for value in [
+            "git@github.com:Xyrces/Forge.git", "https://api.github.com/users/octocat",
+            "https://api.github.com/v1/users/octocat", "https://user:example-password@example.com/repo",
+            r"C:\\Users\\example\\Forge",
+        ]:
+            with self.subTest(example=value):
+                self.assertEqual((), detector.findings(value))
+        local = "file:///" + "home/" + "harboroperator" + "/repo"
+        self.assertIn("personal home directory", detector.findings(local))
+
     def test_private_terms_use_token_boundaries_and_override_examples(self):
         detector = patterns.PrivacyPatterns(["harbor" + "operator", "example" + "-server"])
         self.assertEqual(("configured private identifier",), detector.findings("account " + "harboroperator"))

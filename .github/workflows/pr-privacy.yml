@@ -29,7 +29,7 @@ jobs:
       checks: write
     env:
       PR_NUMBER: ${{ inputs.pull_request || github.event.pull_request.number }}
-      PR_FIELDS: '{head: .head.sha, base: .base.ref, state, title, body}'
+      PR_FIELDS: '{head: .head.sha, branch: .head.ref, base: .base.ref, state, title, body}'
     steps:
       - name: Start the check on the proposed commit
         id: check
